@@ -18,6 +18,26 @@ _bridge_lock = threading.Lock()
 _desktop_state = {}
 _desktop_seen = 0.0
 _desktop_request = None
+# The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
+# desktop/src/main/updater.ts) and at once on a phase change. One missed
+# report means about 60 s of silence, so presence spans two intervals plus
+# slack; a queued request outlives presence, so an accepted request is never
+# dropped while the updater still counts as present.
+DESKTOP_PRESENCE_SECONDS = 75
+DESKTOP_REQUEST_SECONDS = 90
+# The container supervisor, unlike the desktop shell, polls request.json about
+# once a second (watch() in docker/container_runtime.py starts a service pass
+# each second while the app is ready and no pass is running), so 10 s covers
+# idle polling several times over. It is deliberately not widened to the
+# desktop's 90 s: a request that lands while a check or download is running,
+# or while the readiness probe is failing, should expire rather than replay
+# minutes later (docker/application_updates.py service() never replays old
+# requests); the UI then shows the finished pass and the owner can retry.
+CONTAINER_REQUEST_SECONDS = 10
+
+
+def _desktop_present():
+    return bool(_desktop_seen) and time.monotonic() - _desktop_seen < DESKTOP_PRESENCE_SECONDS
 
 
 def all_workers():
@@ -31,7 +51,8 @@ def desktop_exchange(state):
         _desktop_state = dict(state)
         _desktop_seen = time.monotonic()
         request, _desktop_request = _desktop_request, None
-    if not allowed() or not request or request["expires_at"] < time.time():
+    # Most reports carry nothing back: answer those without the settings read.
+    if not request or request["expires_at"] < time.time() or not allowed():
         return {}
     return request
 
@@ -82,14 +103,15 @@ def status():
     if root:
         try:
             saved = json.loads((root / "status.json").read_text())
-            result.update({key: saved.get(key) for key in ("phase", "version", "error", "message")})
+            result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
+                                                           "release", "notes", "channel")})
         except FileNotFoundError:
             result["message"] = "Starting application updater…"
         except (ValueError, TypeError, AttributeError, OSError):
             result.update(phase="error", error="Cannot read application updater status. Check the container logs.")
     else:
         with _bridge_lock:
-            if _desktop_seen and time.monotonic() - _desktop_seen < 10:
+            if _desktop_present():
                 result.update(_desktop_state)
                 result["supported"] = _desktop_state.get("phase") != "unsupported"
                 result["kind"] = "desktop"
@@ -103,12 +125,12 @@ def enqueue(action):
     if not allowed():
         raise ValueError("Application updates are disabled in Account settings")
     root = control_root()
-    request = {"action": action, "expires_at": time.time() + 10}
     if root:
-        atomic_json(root / "request.json", request)
+        atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + CONTAINER_REQUEST_SECONDS})
         return
+    request = {"action": action, "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
     with _bridge_lock:
-        if not _desktop_seen or time.monotonic() - _desktop_seen >= 10 or _desktop_state.get("phase") == "unsupported":
+        if not _desktop_present() or _desktop_state.get("phase") == "unsupported":
             raise ValueError("This worker's application updater is unavailable")
         if _desktop_request and _desktop_request["expires_at"] >= time.time():
             raise ValueError("An update request is already queued")

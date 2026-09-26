@@ -1,11 +1,11 @@
 """
 JSONL History Parser
 
-Parses Claude SDK session history files (*.jsonl) to reconstruct chat messages
+Parses Claude Code session history files (*.jsonl) to reconstruct chat messages
 in the same format as live streaming, ensuring visual consistency between
 resumed and live sessions.
 
-JSONL Format (from Claude SDK ~/.claude/projects/[project]/[session_id].jsonl):
+JSONL Format (from Claude Code ~/.claude/projects/[project]/[session_id].jsonl):
 - User messages: {"type":"user", "message":{"role":"user","content":"..."}, "uuid":"...", "timestamp":"..."}
 - Assistant messages: {"type":"assistant", "message":{"role":"assistant","content":[blocks]}, "uuid":"...", "timestamp":"..."}
 - Tool results: {"type":"user", "message":{"role":"user","content":[{"tool_use_id":"...","type":"tool_result","content":"..."}]}, "toolUseResult":{...}}
@@ -42,16 +42,10 @@ logger = logging.getLogger(__name__)
 # Cache parsed JSONL results to avoid re-reading files on every poll/load.
 # Validated by file mtime + size - if file changes, cache entry is invalidated.
 #
-# Two things about these caches used to be wrong (finding B5):
-#   * entries were stored as JSON STRINGS, so every cache HIT paid a full
-#     ``json.loads`` of the whole transcript — megabytes, per request;
-#   * the only bound was a COUNT of 50 sessions, and a transcript entry is
-#     unbounded in size (inline base64 screenshots, untruncated tool inputs),
-#     so 50 entries could be hundreds of megabytes on a machine that is
-#     supposed to run in a small footprint.
-# Both caches are now :class:`ByteBoundedLRU`: they hold the transformed
-# message list itself (a hit costs one shallow copy, no deserialization) and
-# are bounded by ESTIMATED BYTES as well as by count.
+# Both caches are :class:`ByteBoundedLRU`: they hold the transformed message
+# list itself (a hit costs one shallow copy, no deserialization) and are bounded
+# by ESTIMATED BYTES as well as by count, since a transcript entry is unbounded
+# in size (inline base64 screenshots, untruncated tool inputs).
 _PARSE_CACHE_MAX_SIZE = 50
 
 #: Byte budget per cache namespace. Screenshot-heavy transcripts are what make
@@ -262,7 +256,7 @@ _agent_paths_cache_lock = threading.Lock()
 # all (the transcript lives in Postgres, and the CLI writes to a tmpfs config
 # dir), and pg_session_store's lazy backfill probes this on every store miss —
 # i.e. on every open/poll of such a session. Without a negative memo that is a
-# full directory scan per request (finding B9). Mirrors the ``_empty_memo``
+# full directory scan per request. Mirrors the ``_empty_memo``
 # pattern in app/core/history_backfill.py.
 _JSONL_MISS_TTL_SECONDS = 30.0
 #: (sdk_session_id, working_dir, projects_root) -> monotonic time of the miss.
@@ -539,13 +533,13 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     Get the path to a session's JSONL history file.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory used when the session was created
 
     Returns:
         Path to the JSONL file, or None if not found
     """
-    # A recent miss short-circuits the whole probe (finding B9): the fallback
+    # A recent miss short-circuits the whole probe: the fallback
     # below stats EVERY project directory, and this is called on every store
     # miss — i.e. on every open/poll of a session whose transcript lives only in
     # Postgres. The memo is negative-only and TTL'd, so a transcript that
@@ -596,54 +590,22 @@ def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
     in the main session JSONL.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory for the project
 
     Returns:
-        Path to the hooks JSONL file (may not exist yet)
+        Path to the hooks JSONL file (may not exist)
+
+    Pure path computation. It used to ``mkdir`` the project directory, and its
+    only caller is the READ path (every history parse) — so reading a session
+    whose transcript was found in a different project dir created an empty
+    "ghost" project dir for the computed name (see get_agent_jsonl_paths).
     """
     claude_projects_dir = settings.get_claude_projects_dir
     project_dir_name = get_project_dir_name(working_dir)
     project_dir = claude_projects_dir / project_dir_name
 
-    # Ensure directory exists
-    project_dir.mkdir(parents=True, exist_ok=True)
-
     return project_dir / f"{sdk_session_id}.hooks.jsonl"
-
-
-def write_hook_message(
-    sdk_session_id: str,
-    working_dir: str,
-    plugin: str,
-    message: str,
-    severity: str
-) -> None:
-    """
-    Append a plugin hook message to the session's main JSONL file.
-
-    This is a wrapper around write_system_message() that writes plugin warnings
-    to the main session JSONL instead of a separate hooks file. This ensures
-    hook messages are part of the chat history and persist with the session.
-
-    Args:
-        sdk_session_id: The Claude SDK session ID
-        working_dir: The working directory for the project
-        plugin: Name of the plugin that generated the message
-        message: The stderr output from the hook
-        severity: Severity level (warning, error, info)
-    """
-    write_system_message(
-        sdk_session_id=sdk_session_id,
-        working_dir=working_dir,
-        subtype="plugin_warning",
-        content=message,
-        data={
-            "plugin": plugin,
-            "message": message,
-            "severity": severity
-        }
-    )
 
 
 def write_system_message(
@@ -656,11 +618,11 @@ def write_system_message(
     """
     Append a system message to the session's main JSONL file.
 
-    This writes messages in the Claude SDK's JSONL format for system entries.
+    This writes messages in Claude Code's JSONL format for system entries.
     These messages are displayed in chat history and persist across session loads.
 
     Args:
-        sdk_session_id: The Claude SDK session ID (UUID)
+        sdk_session_id: The Claude session ID (UUID)
         working_dir: The working directory for the project
         subtype: Message subtype (e.g., 'worktree_context', 'plugin_warning')
         content: Human-readable message content
@@ -683,8 +645,16 @@ def write_system_message(
         entry["data"] = data
 
     try:
+        # A transcript whose last line was torn (writer died mid-line, no
+        # trailing newline) would otherwise swallow this entry into that
+        # invalid line, and both would be skipped on every read.
+        needs_newline = False
+        with open(jsonl_path, 'rb') as rf:
+            if rf.seek(0, 2) > 0:
+                rf.seek(-1, 2)
+                needs_newline = rf.read(1) != b'\n'
         with open(jsonl_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(entry) + '\n')
+            f.write(('\n' if needs_newline else '') + json.dumps(entry) + '\n')
         logger.debug(f"Wrote system message ({subtype}) to {jsonl_path}")
     except Exception as e:
         logger.error(f"Failed to write system message to {jsonl_path}: {e}")
@@ -813,7 +783,7 @@ def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, A
     Parse a session's hooks JSONL file and return plugin warning messages.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         working_dir: The working directory for the project
 
     Returns:
@@ -860,19 +830,33 @@ def parse_jsonl_file(jsonl_path: Path) -> Generator[Dict[str, Any], None, None]:
     """
     Parse a JSONL file line by line.
 
-    Yields each parsed JSON object.
+    Yields each parsed JSON object. A line that is not valid JSON, or is valid
+    JSON but not an object (``null``, a bare number, an array — what a torn or
+    interleaved write leaves behind), is skipped with a warning; parsing
+    continues with the next line.
+
+    Bytes that are not valid UTF-8 are decoded as U+FFFD instead of raising:
+    with a strict decoder ONE bad byte raised out of the read loop and dropped
+    every line from that point — for a small transcript the whole history.
     """
     try:
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
+        with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    entry = json.loads(line)
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse line {line_num} in {jsonl_path}: {e}")
                     continue
+                if not isinstance(entry, dict):
+                    logger.warning(
+                        f"Skipping non-object line {line_num} in {jsonl_path} "
+                        f"({type(entry).__name__})"
+                    )
+                    continue
+                yield entry
     except Exception as e:
         logger.error(f"Failed to read JSONL file {jsonl_path}: {e}")
 
@@ -912,7 +896,7 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
     """
     Parse slash command XML tags into structured data.
 
-    Slash commands from Claude SDK have this format:
+    Slash commands from Claude Code have this format:
     <command-message>plugin:command</command-message>
     <command-name>/plugin:command</command-name>
     <command-args>arguments here</command-args>
@@ -951,10 +935,10 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
 
 def _is_task_notification(content: str) -> bool:
     """
-    Check if content is a Claude SDK task-notification message.
+    Check if content is a Claude Code task-notification message.
 
     These are internal async completion callbacks from the Task/subagent system.
-    The SDK injects them as user-role messages when a background agent finishes,
+    The CLI injects them as user-role messages when a background agent finishes,
     but they're only meant for Claude's internal context — the subagent's work
     is already displayed via the tool_use/tool_result pair in SubagentMessage.
     """
@@ -1231,7 +1215,7 @@ def parse_session_history(
         return [], {}
 
     # Check cache. A hit returns a shallow copy of the cached message list —
-    # no deserialization at all (finding B5).
+    # no deserialization at all.
     cached = _parse_cache.get(sdk_session_id)
     if cached is not None:
         c_mtime, c_size, c_messages, c_usage = cached
@@ -1301,7 +1285,7 @@ def invalidate_parse_cache(sdk_session_id: str = None) -> None:
         sdk_session_id: If provided, invalidate only this session. If None, clear all.
     """
     # A transcript that just changed may also have just APPEARED on disk, so
-    # the negative JSONL memo has to go with it (finding B9).
+    # the negative JSONL memo has to go with it.
     _forget_jsonl_miss(sdk_session_id or None)
 
     with _parse_cache_lock:
@@ -1351,7 +1335,7 @@ def pre_seed_parse_cache(
     the cache will be re-populated normally.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         messages: Final messages for the completed turn
         usage_data: Usage data dict
         working_dir: Working directory for finding the JSONL file
@@ -1433,7 +1417,7 @@ def pre_seed_parse_cache(
     try:
         # Turn end is exactly when a transcript can have APPEARED on disk for a
         # session that had none, so re-probe instead of trusting the negative
-        # memo (finding B9). Once per turn, not once per poll.
+        # memo. Once per turn, not once per poll.
         _forget_jsonl_miss(sdk_session_id)
         jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
         if not jsonl_path:
@@ -1501,7 +1485,7 @@ def _transform_entries(
 
     Args:
         entries: Iterable of raw transcript dicts (JSONL lines or store rows).
-        sdk_session_id: The Claude SDK session ID (used for ids/logging).
+        sdk_session_id: The Claude session ID (used for ids/logging).
         working_dir: The working directory (passed through for context).
         agent_children_loader: Optional ``callable(agent_id) -> list[dict] | None``
             returning the parsed child messages for a subagent. Returns ``None``
@@ -1545,6 +1529,8 @@ def _transform_entries(
     total_output_tokens = 0
     usage_model = None
     last_usage = {}
+    # API message id -> the usage last counted for it (see _count_usage_once).
+    usage_by_message_id: Dict[str, Dict[str, Any]] = {}
 
     for entry in entries:
         entry_type = entry.get("type")
@@ -1555,12 +1541,15 @@ def _transform_entries(
 
         # Accumulate usage data from all assistant entries
         if entry_type == "assistant":
-            message_data_for_usage = entry.get("message", {})
-            usage = message_data_for_usage.get("usage", {})
+            message_data_for_usage = entry.get("message") or {}
+            usage = message_data_for_usage.get("usage") or {}
             if not usage_model:
                 usage_model = message_data_for_usage.get("model")
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
+            d_in, d_out = _count_usage_once(
+                message_data_for_usage.get("id"), usage, usage_by_message_id
+            )
+            total_input_tokens += d_in
+            total_output_tokens += d_out
             # Only track last_usage from main conversation turns (not subagents/sidechain).
             # last_usage represents the current context window size, so it must come from
             # the main conversation — subagent usage reflects a different context window.
@@ -1579,7 +1568,9 @@ def _transform_entries(
         role = message_data.get("role")
         content = message_data.get("content")
         timestamp = entry.get("timestamp")
-        uuid = entry.get("uuid", f"msg-{msg_counter}")
+        # ``or`` rather than a .get default: an explicit ``"uuid": null`` must
+        # fall back too, or every such entry gets the SAME id (None).
+        uuid = entry.get("uuid") or f"msg-{msg_counter}"
 
         # Handle system messages (e.g., compact_boundary, worktree_context, plugin_warning)
         if entry_type == "system":
@@ -1590,7 +1581,7 @@ def _transform_entries(
             if is_hidden_system_subtype(subtype):
                 continue
             system_content = entry.get("content", "")
-            # SDK system messages store fields at the top level of the entry,
+            # Claude system messages store fields at the top level of the entry,
             # not under a nested "data" key. Pass the entire entry as systemData
             # so the frontend has access to all fields (e.g., compactMetadata,
             # durationMs, permissionMode, etc.)
@@ -1902,7 +1893,7 @@ def _transform_entries(
                     })
 
         elif entry_type == "assistant" and role == "assistant":
-            # Check for API error messages (synthetic messages from SDK)
+            # Check for API error messages (synthetic messages from the CLI)
             # These have isApiErrorMessage: true and model: "<synthetic>"
             if entry.get("isApiErrorMessage"):
                 # Extract the error text from the content
@@ -2163,6 +2154,31 @@ def _transform_entries(
     return messages, usage_data
 
 
+def _count_usage_once(
+    message_id: Any,
+    usage: Dict[str, Any],
+    seen: Dict[str, Dict[str, Any]],
+) -> Tuple[int, int]:
+    """``(input, output)`` token deltas to add for one assistant entry.
+
+    The CLI writes ONE line per content block of an API response (thinking,
+    text, each tool_use), and every one of those lines repeats the response's
+    full ``usage`` under the same ``message.id``. Summing per line counted a
+    response once per block. Count each ``message.id`` once: a repeat replaces
+    the previously counted usage (so a later, larger streaming snapshot wins)
+    instead of adding to it. Entries with no id are counted as they come.
+    """
+    d_in = usage.get("input_tokens", 0) or 0
+    d_out = usage.get("output_tokens", 0) or 0
+    if isinstance(message_id, str) and message_id and usage:
+        prev = seen.get(message_id)
+        if prev is not None:
+            d_in -= prev.get("input_tokens", 0) or 0
+            d_out -= prev.get("output_tokens", 0) or 0
+        seen[message_id] = usage
+    return d_in, d_out
+
+
 def _merge_hook_messages(
     messages: List[Dict[str, Any]],
     sdk_session_id: str,
@@ -2234,7 +2250,7 @@ def _parse_session_history_uncached(
     refactored core.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
+        sdk_session_id: The Claude session ID
         working_dir: The working directory for finding the project
         jsonl_path: Path to the JSONL file (caller is responsible for resolving this)
 
@@ -2313,7 +2329,7 @@ def parse_session_history_from_store(
     (a known, accepted parity gap; see PR C.1).
 
     Args:
-        sdk_session_id: The Claude SDK session ID.
+        sdk_session_id: The Claude session ID.
         working_dir: The working directory (passed through for context only;
             NOT used to reconstruct a project_key — the store reads match on
             session_id alone).
@@ -2362,7 +2378,7 @@ def parse_session_history_from_store(
                     _store_parse_cache.move_to_end(sdk_session_id)
                     c_messages, c_usage, _ = cached
                     # Legacy JSON-string entries (older build, or a test
-                    # planting the pre-B5 shape) are re-parsed rather than
+                    # planting the old shape) are re-parsed rather than
                     # served: the value shape is part of the cache contract.
                     if isinstance(c_messages, str) or isinstance(c_usage, str):
                         _store_parse_cache.pop(sdk_session_id, None)
@@ -2483,6 +2499,11 @@ def _window_pagination(
     }
 
 
+#: Entry types whose output messages carry the entry's uuid (or, without one,
+#: the counter fallback) as their identity. See :func:`_entries_are_window_safe`.
+_WINDOW_ID_ENTRY_TYPES = frozenset({"user", "assistant", "system", "hook_event"})
+
+
 def _entries_are_window_safe(entries) -> bool:
     """True when a windowed parse of ``entries`` yields trustworthy identities.
 
@@ -2491,12 +2512,19 @@ def _entries_are_window_safe(entries) -> bool:
     BEFORE it. In a full parse the fallback is stable; in a windowed parse the
     same entry would be labelled differently, and ``uuid`` is the anchor a
     REWIND resolves against — a mislabelled one could truncate a session at the
-    wrong point. Real SDK entries always carry a uuid; the pre-cutover and
+    wrong point. Real CLI entries always carry a uuid; the pre-cutover and
     hand-built ones that do not are rare and are worth the slower, whole-
     transcript path.
     """
     for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("uuid"):
+        if not isinstance(entry, dict):
+            return False
+        # Only entries that can PRODUCE a message take an identity from the
+        # counter. Bookkeeping lines the CLI writes without a uuid
+        # (queue-operation, last-prompt, custom-title, file-history-*) render
+        # nothing, so they cannot mislabel anything — refusing on them sent
+        # nearly every real transcript down the whole-transcript path.
+        if entry.get("type") in _WINDOW_ID_ENTRY_TYPES and not entry.get("uuid"):
             return False
     return True
 
@@ -2555,7 +2583,7 @@ def parse_session_window_from_store(
     small constant merge context) are transformed.
 
     Args:
-        sdk_session_id: The Claude SDK session ID.
+        sdk_session_id: The Claude session ID.
         working_dir: Passed through for context (never used to rebuild a
             project_key — store reads match on session_id alone).
         window_loader: ``loader(session_id, subpath=None, *, limit, before_seq)``
@@ -2754,19 +2782,24 @@ def get_session_cost_from_jsonl(
 
     # Track the last usage data - for cache tokens we want the final state
     last_usage = {}
+    usage_by_message_id: Dict[str, Dict[str, Any]] = {}
 
     for entry in parse_jsonl_file(jsonl_path):
         if entry.get("type") == "assistant":
-            message_data = entry.get("message", {})
-            usage = message_data.get("usage", {})
+            message_data = entry.get("message") or {}
+            usage = message_data.get("usage") or {}
 
             # Get model
             if not model:
                 model = message_data.get("model")
 
-            # Sum up input/output tokens (these are incremental per turn)
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
+            # Sum up input/output tokens (these are incremental per turn),
+            # counting each API response once across its per-block lines.
+            d_in, d_out = _count_usage_once(
+                message_data.get("id"), usage, usage_by_message_id
+            )
+            total_input_tokens += d_in
+            total_output_tokens += d_out
 
             # Keep track of latest usage for cache tokens
             if usage:
@@ -2785,36 +2818,6 @@ def get_session_cost_from_jsonl(
         "last_input_tokens": last_usage.get("input_tokens", 0),
         "model": model
     }
-
-
-def list_available_sessions(working_dir: str = "/workspace") -> List[Dict[str, Any]]:
-    """
-    List all available session files for a project directory.
-
-    Returns list of dicts with: sdk_session_id, path, modified_at
-    """
-    claude_projects_dir = settings.get_claude_projects_dir
-    project_dir_name = get_project_dir_name(working_dir)
-    project_dir = claude_projects_dir / project_dir_name
-
-    sessions = []
-
-    if project_dir.exists():
-        for jsonl_file in project_dir.glob("*.jsonl"):
-            try:
-                stat = jsonl_file.stat()
-                sessions.append({
-                    "sdk_session_id": jsonl_file.stem,
-                    "path": str(jsonl_file),
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "size_bytes": stat.st_size
-                })
-            except Exception as e:
-                logger.warning(f"Failed to stat {jsonl_file}: {e}")
-
-    # Sort by modified time, newest first
-    sessions.sort(key=lambda x: x["modified_at"], reverse=True)
-    return sessions
 
 
 def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Optional[str], int]:
@@ -2909,13 +2912,30 @@ def list_chat_history_sessions(
     if not project_dir.exists():
         return sessions
 
+    # Stat every candidate (cheap), order newest first, and only then parse —
+    # stopping once ``limit`` sessions are collected. Parsing is a full read of
+    # each transcript, so parsing every file just to keep the newest ``limit``
+    # cost O(total history size) per @-mention lookup. The sort key and the
+    # stable sort are exactly the ones the listing was always ordered by, and
+    # the search filter is per-file, so the result is unchanged.
+    candidates = []
     for jsonl_file in project_dir.glob("*.jsonl"):
+        # Skip agent files (subagent logs) and ``<sid>.hooks.jsonl``
+        # sidecars (plugin warnings, not a session of their own).
+        if jsonl_file.name.startswith("agent-") or jsonl_file.name.endswith(".hooks.jsonl"):
+            continue
         try:
-            # Skip agent files (subagent logs)
-            if jsonl_file.name.startswith("agent-"):
-                continue
-
             stat = jsonl_file.stat()
+        except Exception as e:
+            logger.warning(f"Failed to process {jsonl_file}: {e}")
+            continue
+        candidates.append((datetime.fromtimestamp(stat.st_mtime).isoformat(), stat, jsonl_file))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    for modified_at, stat, jsonl_file in candidates:
+        if len(sessions) >= limit:
+            break
+        try:
             title, preview, message_count = _get_session_title_and_preview(jsonl_file)
 
             # Apply search filter
@@ -2936,15 +2956,11 @@ def list_chat_history_sessions(
                 "title": title,
                 "preview": preview,
                 "message_count": message_count,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "modified_at": modified_at,
                 "size_bytes": stat.st_size
             })
 
         except Exception as e:
             logger.warning(f"Failed to process {jsonl_file}: {e}")
 
-    # Sort by modified time, newest first
-    sessions.sort(key=lambda x: x["modified_at"], reverse=True)
-
-    # Apply limit
-    return sessions[:limit]
+    return sessions

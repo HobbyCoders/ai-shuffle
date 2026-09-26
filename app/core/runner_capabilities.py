@@ -10,7 +10,7 @@ Design contract (OD-8):
     lookups only, never a subprocess that could hang.
   * Any failure degrades to the safe default (``False`` / ``[]``) and NEVER
     raises: a detection miss must never block placement onto the local runner.
-  * ``account_ids`` are ids ONLY — never tokens/secrets.
+  * No credential or account identity is ever advertised.
 
 Shape::
 
@@ -19,15 +19,13 @@ Shape::
         "has_display": bool,
         "has_chrome": bool,
         "docker": bool,
-        "account_ids": [str, ...],
+        "claude_cli_signed_in": bool,
     }
 
-Note on ``account_ids``: Claude accounts are shared-DB (the ``claude_accounts``
-table holds the credentials blob and any install can read/use any account — see
-``app/db/claude_accounts.py``), so the SAME id set is reported by every runner.
-The ids are advertised for symmetry with OD-8; because availability is not
-install-scoped, the placement account filter is a no-op (documented in
-``app/core/placement.py``).
+``claude_cli_signed_in`` is whether this runner's own Claude Code CLI reports
+a login, from the last ``claude auth status`` probe (no subprocess here). Each
+worker signs in to its CLI separately, so placement can require it with a
+``{"claude_cli_signed_in": True}`` constraint.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ import logging
 import os
 import shutil
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -116,18 +114,15 @@ def _detect_docker() -> bool:
         return False
 
 
-def _detect_account_ids() -> List[str]:
-    """Ids of the Claude accounts visible to this runner (ids only, no secrets).
-
-    Shared-DB, so this is the same set on every install (see module docstring).
-    Best-effort — a registry/DB hiccup degrades to an empty list.
-    """
+def _detect_claude_cli_signed_in() -> bool:
+    """Whether the last CLI probe reported a login (cached; never spawns)."""
     try:
-        from app.db.claude_accounts import get_all_claude_accounts
+        from app.core import claude_cli_status
 
-        return [a["id"] for a in get_all_claude_accounts() if a.get("id")]
+        status = claude_cli_status.peek()
+        return bool(status and status.signed_in)
     except Exception:  # noqa: BLE001 — detection must never raise
-        return []
+        return False
 
 
 def detect_capabilities() -> Dict[str, Any]:
@@ -141,5 +136,5 @@ def detect_capabilities() -> Dict[str, Any]:
         "has_display": _detect_has_display(),
         "has_chrome": _detect_has_chrome(),
         "docker": _detect_docker(),
-        "account_ids": _detect_account_ids(),
+        "claude_cli_signed_in": _detect_claude_cli_signed_in(),
     }

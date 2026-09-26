@@ -18,63 +18,6 @@ export interface ProviderCredentials {
   [key: string]: string;
 }
 
-// ============================================================================
-// API KEY VALIDATION HELPERS
-// ============================================================================
-
-/**
- * API key format patterns for different providers
- * Used for basic format validation before making API calls
- */
-export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: number; description: string }> = {
-  fal: { minLength: 10, description: 'fal.ai API keys are alphanumeric strings' },
-  'fal-ai': { minLength: 10, description: 'fal.ai API keys are alphanumeric strings' },
-};
-
-/**
- * Validate API key format for a given provider
- * Returns true if the key appears to be in a valid format
- */
-export function validateApiKeyFormat(key: string | undefined, providerId: string): { valid: boolean; error?: string } {
-  if (!key || key.trim().length === 0) {
-    return { valid: false, error: `API key for ${providerId} is missing or empty` };
-  }
-
-  const trimmedKey = key.trim();
-  const pattern = API_KEY_PATTERNS[providerId.toLowerCase()];
-
-  if (!pattern) {
-    // Unknown provider - just check it's not empty
-    return trimmedKey.length > 0 ? { valid: true } : { valid: false, error: 'API key is empty' };
-  }
-
-  if (trimmedKey.length < pattern.minLength) {
-    return { valid: false, error: `API key too short (expected at least ${pattern.minLength} characters). ${pattern.description}` };
-  }
-
-  if (pattern.prefix && !trimmedKey.startsWith(pattern.prefix)) {
-    return { valid: false, error: `Invalid API key format. ${pattern.description}` };
-  }
-
-  return { valid: true };
-}
-
-/**
- * Create validated credentials for a provider
- * Returns null if validation fails, with error logged
- */
-export function createValidatedCredentials(
-  apiKey: string | undefined,
-  providerId: string
-): ProviderCredentials | null {
-  const validation = validateApiKeyFormat(apiKey, providerId);
-  if (!validation.valid) {
-    console.warn(`[${providerId}] ${validation.error}`);
-    return null;
-  }
-  return { apiKey: apiKey!.trim() };
-}
-
 /**
  * Information about a specific model
  */
@@ -406,46 +349,6 @@ export interface VideoProvider {
 }
 
 // ============================================================================
-// PROVIDER CONFIGURATION
-// ============================================================================
-
-/**
- * Configuration for a provider stored in settings
- */
-export interface ProviderConfig {
-  /** Provider identifier */
-  providerId: string;
-  /** API key for this provider */
-  apiKey: string;
-  /** Default model to use */
-  defaultModel: string;
-  /** Additional provider-specific settings */
-  settings?: Record<string, any>;
-}
-
-/**
- * Environment variables used by tools
- */
-export interface ToolEnvironment {
-  // fal.ai (single key covers all modalities)
-  FAL_KEY?: string;
-  // Default model selections
-  IMAGE_PROVIDER?: string;
-  IMAGE_MODEL?: string;
-  VIDEO_PROVIDER?: string;
-  VIDEO_MODEL?: string;
-  MODEL3D_PROVIDER?: string;
-  MODEL3D_MODEL?: string;
-  TTS_MODEL?: string;
-  STT_MODEL?: string;
-  // Output directories
-  GENERATED_IMAGES_DIR?: string;
-  GENERATED_VIDEOS_DIR?: string;
-  GENERATED_AUDIO_DIR?: string;
-  GENERATED_MODELS_DIR?: string;
-}
-
-// ============================================================================
 // AUDIO PROVIDER TYPES
 // ============================================================================
 
@@ -560,75 +463,6 @@ export interface AudioProvider {
     credentials: ProviderCredentials,
     model: string
   ): Promise<STTResult>;
-
-  /**
-   * Validate provider credentials
-   */
-  validateCredentials(
-    credentials: ProviderCredentials
-  ): Promise<{ valid: boolean; error?: string }>;
-}
-
-// ============================================================================
-// VIDEO ANALYSIS PROVIDER TYPES
-// ============================================================================
-
-/**
- * Input for video understanding/analysis
- */
-export interface UnifiedVideoAnalysisInput {
-  /** Path to the video file or URL */
-  video_path: string;
-  /** Question or prompt about the video */
-  prompt: string;
-  /** Timestamp to start analysis (in seconds) */
-  start_time?: number;
-  /** Timestamp to end analysis (in seconds) */
-  end_time?: number;
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Result from video analysis
- */
-export interface VideoAnalysisResult {
-  success: boolean;
-  /** Analysis response/answer */
-  response?: string;
-  /** Detected scenes or segments */
-  scenes?: Array<{
-    start_time: number;
-    end_time: number;
-    description: string;
-  }>;
-  /** Extracted transcription (if audio present) */
-  transcript?: string;
-  /** Video duration */
-  duration_seconds?: number;
-  /** Error message if failed */
-  error?: string;
-}
-
-/**
- * Video analysis provider interface
- */
-export interface VideoAnalysisProvider {
-  /** Unique provider identifier */
-  readonly id: string;
-  /** Human-readable provider name */
-  readonly name: string;
-  /** Available models for this provider */
-  readonly models: ModelInfo[];
-
-  /**
-   * Analyze video content and answer questions
-   */
-  analyzeVideo(
-    input: UnifiedVideoAnalysisInput,
-    credentials: ProviderCredentials,
-    model: string
-  ): Promise<VideoAnalysisResult>;
 
   /**
    * Validate provider credentials

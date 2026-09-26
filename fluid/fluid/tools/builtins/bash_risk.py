@@ -465,8 +465,13 @@ _SENSITIVE_EXAMPLE_NAMES = (
     ".env", ".env.local", "x.pem", "x.p12", "x.pfx",
     "id_rsa", "id_rsa.pub", "id_ed25519", "id_ed25519.pub", "id_ecdsa", "id_ecdsa.pub",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
+    "managed-postgres.json",
 )
-_SENSITIVE_EXAMPLE_PATHS = (".aws/credentials", ".ssh/config")
+_SENSITIVE_EXAMPLE_PATHS = (
+    ".aws/credentials", ".ssh/config",
+    ".claude/.credentials.json", ".config/gh/hosts.yml",
+    ".credential-keys/server.key", "chrome-profile/Default/Cookies",
+)
 _GLOB_CHARS = frozenset("*?[{")
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
 

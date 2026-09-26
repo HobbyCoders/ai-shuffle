@@ -19,6 +19,11 @@ Knobs:
 
 If the CDP port is already answered by something else, we do NOT spawn (an
 external browser owns the port); its detail is surfaced via ``get_detail()``.
+
+The browser is started behind the egress proxy (``app.core.browser_egress``):
+``node egress-launch.js --watch-stdin -- <chrome> <flags>``. Closing the
+launcher's stdin stops the browser, which also works on Windows, where a
+terminate cannot be forwarded. Without the launcher the browser is not started.
 """
 
 from __future__ import annotations
@@ -198,24 +203,6 @@ async def cdp_get(path: str, port: Optional[int] = None) -> Optional[object]:
         return None
 
 
-def unreachable_detail() -> str:
-    """Best explanation for why no browser answers on the CDP port.
-
-    Supervisor's own last detail (crash-loop, no executable, external owner…)
-    → the browser-mcp build being absent → a generic "nothing answering" note.
-    """
-    if get_detail():
-        return get_detail()
-
-    from app.core.builtin_mcp_servers import _browser_mcp_entry
-
-    entry = _browser_mcp_entry()
-    if not os.path.exists(entry):
-        return f"browser-mcp not built: {entry} missing"
-
-    return f"no browser answering CDP on 127.0.0.1:{_cdp_port()}"
-
-
 def _launch_args(port: int) -> List[str]:
     """CDP-headless launch flags. No ``--no-sandbox`` / ``--disable-dev-shm-usage``
     (those are Linux/docker-only concerns)."""
@@ -231,6 +218,75 @@ def _launch_args(port: int) -> List[str]:
     ]
 
 
+def _egress_command(exe: str, args: List[str]) -> List[str]:
+    """``exe args`` wrapped in the egress-proxy launcher (raises if unavailable)."""
+    from app.core.browser_egress import launch_command
+
+    return launch_command(exe, args)
+
+
+def _egress_env() -> dict:
+    """Process env plus the app's base SSRF policy for the proxy."""
+    from app.core.browser_egress import egress_env
+
+    return {**os.environ, **egress_env()}
+
+
+# Seconds between relaunches, and a run shorter than this counts as a rapid
+# exit whose launcher output is surfaced in the detail.
+_RELAUNCH_BACKOFF_S = 1.0
+_RAPID_EXIT_S = 10.0
+_LAUNCHER_LOG_MAX_BYTES = 1024 * 1024
+_TAIL_LINES = 5
+
+
+def _launcher_log_path(port: int) -> Path:
+    """Where the egress launcher's stderr goes (``<data_dir>/logs/<instance>``).
+
+    The launcher reports its own failures (``[browser-egress] could not
+    start: ...``, the policy line) only on stderr.
+    """
+    try:
+        from app.core.file_logging import get_log_dir
+
+        log_dir = get_log_dir()
+    except Exception:
+        log_dir = _profile_dir().parent / "logs"
+    return log_dir / f"chrome-launcher-{port}.log"
+
+
+def _open_launcher_log(port: int):
+    """Open the launcher log for appending (reset past 1 MiB), or None."""
+    try:
+        path = _launcher_log_path(port)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "ab"
+        try:
+            if path.stat().st_size > _LAUNCHER_LOG_MAX_BYTES:
+                mode = "wb"
+        except OSError:
+            pass
+        return open(path, mode)
+    except Exception as e:
+        logger.debug("native chrome supervisor: no launcher log: %s", e)
+        return None
+
+
+def _launcher_log_tail(log, start: int) -> str:
+    """The last non-empty lines the launcher wrote since offset *start*."""
+    if log is None:
+        return ""
+    try:
+        log.flush()
+        with open(log.name, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return " | ".join(lines[-_TAIL_LINES:])[-500:]
+
+
 async def _supervise(exe: str, port: int) -> None:
     """Background loop: (re)launch the browser; give up after crash-looping."""
     global _proc, _last_detail
@@ -239,14 +295,20 @@ async def _supervise(exe: str, port: int) -> None:
     loop = asyncio.get_event_loop()
 
     while not _stopping:
+        log = _open_launcher_log(port)
+        log_start = log.tell() if log is not None else 0
+        started = loop.time()
         try:
             _proc = await asyncio.create_subprocess_exec(
-                exe,
-                *_launch_args(port),
+                *_egress_command(exe, _launch_args(port)),
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=log if log is not None else asyncio.subprocess.DEVNULL,
+                env=_egress_env(),
             )
         except Exception as e:
+            if log is not None:
+                log.close()
             _last_detail = f"failed to launch native chrome: {e}"
             logger.warning("native chrome supervisor: launch failed: %s", e)
             return
@@ -262,22 +324,35 @@ async def _supervise(exe: str, port: int) -> None:
         try:
             returncode = await _proc.wait()
         except asyncio.CancelledError:
+            if log is not None:
+                log.close()
             raise
 
+        tail = ""
+        now = loop.time()
+        if now - started < _RAPID_EXIT_S:
+            tail = _launcher_log_tail(log, log_start)
+        if log is not None:
+            log.close()
+
         logger.info(
-            "native chrome supervisor: process exited (returncode=%s)", returncode
+            "native chrome supervisor: process exited (returncode=%s)%s",
+            returncode,
+            f": {tail}" if tail else "",
         )
 
         if _stopping:
             break
 
-        now = loop.time()
+        if tail:
+            _last_detail = f"browser launcher exited ({returncode}): {tail}"
         exits.append(now)
         # Keep only exits within the trailing 60s window.
         exits = [t for t in exits if now - t <= 60]
         if len(exits) >= 5:
             _last_detail = (
                 f"Chrome crash-looped (5 exits in 60s): {returncode}"
+                + (f"; last output: {tail}" if tail else "")
             )
             logger.warning(
                 "native chrome supervisor: %s — giving up", _last_detail
@@ -285,7 +360,7 @@ async def _supervise(exe: str, port: int) -> None:
             return
 
         # Brief backoff before relaunch.
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(_RELAUNCH_BACKOFF_S)
 
 
 async def ensure_started() -> None:
@@ -325,6 +400,14 @@ async def ensure_started() -> None:
         return
 
     try:
+        _egress_command(exe, [])
+    except Exception as e:
+        # Fail closed: never run the browser without its egress proxy.
+        _last_detail = f"browser not started: {e}"
+        logger.warning("native chrome supervisor: %s", _last_detail)
+        return
+
+    try:
         _profile_dir().mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _last_detail = f"could not create chrome profile dir: {e}"
@@ -353,6 +436,20 @@ async def stop() -> None:
 
     proc = _proc
     _proc = None
+    if proc is not None and proc.returncode is None:
+        # End of stdin tells the egress launcher to stop the browser. On
+        # Windows terminate() would kill only the launcher, so give it a moment.
+        stdin = getattr(proc, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.close()
+            except Exception:
+                pass
+            if sys.platform == "win32":
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
     if proc is not None and proc.returncode is None:
         try:
             proc.terminate()

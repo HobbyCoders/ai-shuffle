@@ -50,6 +50,9 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     "callback_id":...,"input":{...},"tool_use_id":...}}`` — one of the hooks
     the loop registered in its ``initialize`` request fired; surfaced as a
     ``HookCallbackRequest`` the loop answers through its HookBus. No event.
+  * ``{"type":"control_cancel_request","request_id":...}`` — the CLI withdrew
+    a request it sent. Not mapped here: the loop watches for it while it is
+    parked on that request (``parse_control_cancel``).
   * ``{"type":"control_response","response":{...}}`` — the CLI's reply to a
     control_request the LOOP sent (``get_context_usage``, ``mcp_status``, …),
     surfaced as a ``ControlReply`` the loop correlates by request_id. Two
@@ -124,6 +127,13 @@ def result_error_message(frame: dict[str, Any]) -> str:
     return f"claude reported {subtype}: {detail}" if detail else f"claude reported {subtype}"
 
 
+def _dict_field(frame: dict[str, Any], key: str) -> dict[str, Any]:
+    """``frame[key]`` when it is an object, else ``{}``: a frame whose body
+    has the wrong shape maps to nothing instead of raising into the turn."""
+    value = frame.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def flatten_tool_content(content: Any) -> str:
     """Reduce a tool_result ``content`` (str | list[block] | any) to model text."""
     if content is None:
@@ -185,6 +195,20 @@ def parse_hook_callback(frame: dict[str, Any]) -> HookCallbackRequest | None:
     )
 
 
+def parse_control_cancel(frame: Any) -> str | None:
+    """The request_id a ``control_cancel_request`` withdraws, or None.
+
+    The CLI sends ``{"type":"control_cancel_request","request_id":...}`` when
+    it stops waiting on a request it sent (a ``can_use_tool`` another answer
+    beat, such as a ``PermissionRequest`` hook in its own settings, or an
+    aborted turn). No reply is expected.
+    """
+    if not isinstance(frame, dict) or frame.get("type") != "control_cancel_request":
+        return None
+    request_id = frame.get("request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
+
+
 def per_call_usage(
     usage: dict[str, Any], *, model: str | None, index: int,
     cost_usd: float | None = None,
@@ -197,8 +221,10 @@ def per_call_usage(
     ``model_call_index`` (hosts count and dedupe calls by it), the
     provider-reported ``cache_read_report`` and a ``cost_usd``. The CLI
     prices only the whole turn, so a call's cost is estimated from the
-    pricing table, flagged ``cost_estimated``, unless the caller has the
-    CLI's own figure. A model nobody can price leaves the cost out.
+    pricing table, flagged ``cost_from_table`` (the dollars came from a
+    price list, not the provider's bill; the token counts themselves are
+    the CLI's own), unless the caller has the CLI's own figure. A model
+    nobody can price leaves the cost out.
     """
     from fluid.context.cache_probe import cache_read_report
     from fluid.providers.pricing import estimate_cost
@@ -217,7 +243,7 @@ def per_call_usage(
         cost = estimate_cost(model, usage)
         if cost is not None:
             raw["cost_usd"] = cost
-            raw["cost_estimated"] = True
+            raw["cost_from_table"] = True
     return raw
 
 
@@ -251,7 +277,6 @@ class PermissionBridge:
     tool_name: str
     tool_use_id: str
     input: dict[str, Any]
-    risk: str = "safe"
     # The CLI's own ``permission_suggestions``: the rules it would add for an
     # "always allow" answer, echoed back as ``updatedPermissions``.
     suggestions: tuple[dict[str, Any], ...] = ()
@@ -295,6 +320,9 @@ class Mapped:
     permission: PermissionBridge | None = None
     control_reply: ControlReply | None = None
     hook_request: HookCallbackRequest | None = None
+    # A control_request the loop has no handler for: (request_id, subtype).
+    # The CLI blocks on every control_request, so it still gets an answer.
+    unsupported_request: tuple[str, str] | None = None
     is_result: bool = False
     # Set with ``is_result`` when the CLI reported the turn as failed.
     error: str | None = None
@@ -362,6 +390,12 @@ class StreamJsonMapper:
     def produced_nodes(self) -> bool:
         """True once an assistant or tool-result frame was mapped this turn."""
         return self._last_node_id != self.user_node_id
+
+    @property
+    def last_node_id(self) -> str:
+        """The node the turn's terminal event points at: the last one mapped,
+        else the user's."""
+        return self._last_node_id
 
     # ─── frame dispatch ──────────────────────────────────────────────────
 
@@ -450,11 +484,9 @@ class StreamJsonMapper:
     def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:
         """The CLI compacted its own context — report it the way the native leg does.
 
-        Without this the delegated leg emitted nothing at all when the prompt
-        collapsed mid-turn (166k → 35k tokens behind a 74-second stall in one
-        audited session), so a host asking for the latest compaction boundary
-        concluded a Claude-lane session had never compacted and the model
-        re-ran work whose results had just left the context.
+        Without it the delegated leg would emit nothing when the prompt
+        collapses mid-turn, and a host asking for the latest compaction
+        boundary would conclude a Claude-lane session had never compacted.
 
         The CLI owns the compaction, so the event carries what it reports and
         nothing invented: its trigger as the reason, its own before/after token
@@ -480,7 +512,9 @@ class StreamJsonMapper:
         )])
 
     def _on_assistant(self, frame: dict[str, Any]) -> Mapped:
-        msg = frame.get("message", {})
+        msg = _dict_field(frame, "message")
+        if not msg:
+            return Mapped()  # no message body: nothing to show or store
         blocks = msg.get("content", []) or []
         events: list[Event] = []
         content: list[Any] = []
@@ -545,7 +579,7 @@ class StreamJsonMapper:
         return Mapped(events=events, message=Message(role="assistant", content=content), node_id=node_id)
 
     def _on_user(self, frame: dict[str, Any]) -> Mapped:
-        msg = frame.get("message", {})
+        msg = _dict_field(frame, "message")
         raw_blocks = msg.get("content", [])
         events: list[Event] = []
         content: list[Any] = []
@@ -677,19 +711,28 @@ class StreamJsonMapper:
 
     def _on_rate_limit(self, frame: dict[str, Any]) -> Mapped:
         info = frame.get("rate_limit_info", {}) or {}
+        # Without a window type there is nothing to key the reading on.
+        if not info.get("rateLimitType"):
+            return Mapped()
+        status = info.get("status")
         return Mapped(events=[RateLimit(
             session_id=self.session_id, turn_id=self.turn_id,
-            kind=info.get("rateLimitType") or info.get("status") or "unknown",
+            kind=info["rateLimitType"],
             resets_at=info.get("resetsAt"),
             utilization=info.get("utilization"),
+            # ``rejected`` marks the window exhausted even when the CLI sends
+            # no utilization with it, so the verdict has to reach the host.
+            status=status if isinstance(status, str) and status else None,
         )])
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:
-        req = frame.get("request", {}) or {}
+        req = _dict_field(frame, "request")
         if req.get("subtype") == "hook_callback":
             return Mapped(hook_request=parse_hook_callback(frame))
         if req.get("subtype") != "can_use_tool":
-            return Mapped()  # mcp_message / etc. are loop-internal
+            return Mapped(unsupported_request=(
+                str(frame.get("request_id", "")), str(req.get("subtype") or ""),
+            ))
         fluid_rid = new_id("perm")
         tool_name = req.get("tool_name", "")
         tid = req.get("tool_use_id") or ""
@@ -701,7 +744,7 @@ class StreamJsonMapper:
         ) if isinstance(raw_suggestions, list) else ()
         bridge = PermissionBridge(
             cli_request_id=frame.get("request_id", ""), fluid_request_id=fluid_rid,
-            tool_name=tool_name, tool_use_id=tid, input=inp, risk=risk,
+            tool_name=tool_name, tool_use_id=tid, input=inp,
             suggestions=suggestions,
         )
         event = PermissionRequest(

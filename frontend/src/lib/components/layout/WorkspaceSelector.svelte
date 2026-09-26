@@ -108,10 +108,15 @@
 	const selectedId = $derived(
 		selectedPickerId(selectedProject, selectedProjectV2Id, pickerItems)
 	);
-	const selectedProjectName = $derived(
+	const resolvedProjectName = $derived(
 		pickerItemName(pickerItems, selectedId) ||
 			$projects.find((p) => p.id === selectedProject)?.name ||
-			'your project'
+			''
+	);
+	const selectedProjectName = $derived(resolvedProjectName || 'your project');
+	// The visible text is only the project name; say what the button does.
+	const triggerLabel = $derived(
+		resolvedProjectName ? `Switch project, current: ${resolvedProjectName}` : 'Choose a project'
 	);
 
 	// Close dropdown on outside click
@@ -166,6 +171,7 @@
 		<button
 			type="button"
 			class="picker-trigger"
+			aria-label={triggerLabel}
 			aria-expanded={showDropdown}
 			aria-controls={pickerId}
 			onclick={toggleDropdown}

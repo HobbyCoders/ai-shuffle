@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import uuid
+import weakref
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -23,9 +24,7 @@ from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import sync_engine
-# W2: the origin socket reuses the SAME bounded-queue + writer-task mechanism
-# the device fan-out uses, rather than a second copy of it. Private only by
-# name — promoting it to a public export belongs to sync_engine's owner.
+# The origin socket reuses sync_engine's bounded-queue writer.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
 from app.db import database
@@ -37,7 +36,7 @@ from app.api.ws_utils import WSPayloadEncodeError
 logger = logging.getLogger(__name__)
 
 
-# v2 core (Phase 2 A6b): the command layer + durable turns table the WS handlers
+# v2 core: the command layer + durable turns table the WS handlers
 # delegate to. The v2 turns path is now unconditional (the legacy pipeline and
 # its gating flag are gone). Lightweight modules (no import cycle: turn_manager
 # imports only app.db.turns).
@@ -46,15 +45,14 @@ from app.db import turns as turns_db  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Origin-socket outbound queue (W2)
+# Origin-socket outbound queue
 # ---------------------------------------------------------------------------
 # The device fan-out in ``sync_engine`` gives every connection a bounded queue
 # and a dedicated writer task, so no producer ever awaits a socket. The ORIGIN
-# socket — the one this handler owns — was the last unqueued send path: every
-# ``send_json`` awaited the wire inline, so a half-open client (locked phone,
-# wifi switch) blocked whoever was producing the frame for up to the send
-# timeout. It now goes through the same writer, which means ``send_json`` is a
-# synchronous enqueue and the single bounded ``send_text`` await lives on the
+# socket — the one this handler owns — goes through the same writer: awaiting
+# the wire inline would let a half-open client (locked phone, wifi switch)
+# block whoever was producing the frame for up to the send timeout. So
+# ``send_json`` is a synchronous enqueue and the single bounded ``send_text`` await lives on the
 # writer task, where a dead peer costs exactly one stalled task — its own.
 #
 # Overflow is two-tier, matching sync_engine's policy:
@@ -116,18 +114,13 @@ def _encode_frame(data: Dict[str, Any]) -> str:
         raise WSPayloadEncodeError(str(e)) from e
 
 
-# Terminal background-task statuses that should wake the parent (mirror the SDK's
-# TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
-_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
-
-
-# Queue sources that render as user-visible queue chips (B3). Internal
+# Queue sources that render as user-visible queue chips. Internal
 # failover/auto_continue/unpark turns never appear in the queue UI.
 _V2_QUEUE_SOURCES = ("user", "queue")
 
 
 def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
-    """B3 — the user-visible queue for a session, re-sourced from the durable
+    """The user-visible queue for a session, re-sourced from the durable
     ``turns`` table (v2 path).
 
     Only ``source in ('user','queue')`` queued turns render as chips; the server
@@ -161,7 +154,7 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
 
 # How long the two-phase ``interrupt_for_query`` waits for the interrupted
 # streaming task to drain naturally before force-cancelling it. The frontend's
-# interrupt-confirm window must exceed this plus the SDK interrupt timeout
+# interrupt-confirm window must exceed this plus the adapter interrupt timeout
 # (see message-sender.ts).
 _INTERRUPT_DRAIN_TIMEOUT_SECONDS = 8.0
 
@@ -210,10 +203,8 @@ def _terminal_chip_text(task: Dict[str, Any], wire_status: str) -> str:
        what the user needs to recognise the row;
     3. a bare statement of the outcome, so the bubble still says something.
 
-    This is the fix for the audited empty bubbles: ``content=summary or ""``
-    persisted fifteen blank ``role=system`` rows in a single session because
-    shell tasks never populate ``summary``. The text existed the whole time on
-    the SubagentEvent the model received; only the user-facing copy was dropped.
+    Shell tasks never populate ``summary``, so ``content=summary or ""`` alone
+    would persist blank ``role=system`` rows.
     """
     summary = (task.get("summary") or "").strip()
     if summary:
@@ -237,18 +228,17 @@ def _terminal_chip_text(task: Dict[str, Any], wire_status: str) -> str:
 
 
 async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) -> None:
-    """Guaranteed terminal surface for an error/killed background task (4b).
+    """Guaranteed terminal surface for an error/killed background task.
 
-    1. LIVE chip: synthesize the same ``task_updated`` system chip the drain
-       pump renders, once per task lifetime (shared ``mark_chipped`` latch, so
-       a pump-rendered chip is never duplicated).
+    1. LIVE chip: emit the terminal ``task_updated`` system chip via
+       ``record_task_settle_frame``, once per task lifetime (the shared
+       ``mark_chipped`` latch, so no other settle path duplicates it).
     2. DURABLE row: persist the chip via ``database.add_session_message`` so
        the kill survives a reload (the live buffer may already be reaped — the
        force-eviction case — or be reset by the restart that caused the kill).
 
-    The legacy step 3 (the ``HeadlessChatHandler`` unpark handoff) is GONE (V2
-    A7, B5): the v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal)
-    is the sole unpark producer, so this surface only records; it never spawns.
+    The v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal) is the
+    sole unpark producer, so this surface only records; it never spawns.
 
     Two things the chip says are derived rather than copied straight off the
     record:
@@ -256,9 +246,8 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     * **Its text.** ``summary`` is populated for agent-kind tasks but not for
       shell ones — a Monitor shell settles through ``complete_task(...,
       "killed")`` with no summary at all — so ``content=summary or ""`` wrote a
-      BLANK system bubble into the transcript. One audited session had fifteen
-      of them; the user saw "a task errored" with no reason while the model's
-      own steer for the same event carried the full text.
+      BLANK system bubble into the transcript while the model's own steer for
+      the same event carried the full text.
       :func:`_terminal_chip_text` fills the gap from what the record does have.
     * **Its status.** ``killed`` is the registry vocabulary and stays on the row
       (``/live``, ``TaskGet``, retention all keep reading it), but a DELIBERATE
@@ -284,7 +273,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     }
     if reason:
         data["reason"] = reason
-    # The card join key (mirror of the #540 enrichment): the frontend settles a
+    # The card join key: the frontend settles a
     # subagent card only when the terminal chip carries the launch tool_use_id
     # (the card's toolId). This SAME data dict feeds both the live chip
     # (record_drained_event) and the durable row, so both carry it.
@@ -292,7 +281,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     if tool_use_id:
         data["tool_use_id"] = tool_use_id
 
-    # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
+    # 1) LIVE chip (once per task lifetime — latch shared with the other settle paths).
     # V2: append the chip to the session event log so the SSE feed renders it.
     if task_registry.mark_chipped(session_id, task_id, "terminal"):
         task_registry.mark_chipped(session_id, task_id, "start")
@@ -309,7 +298,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
                 session_id, task_id, exc_info=True,
             )
 
-    # 2) DURABLE row — survives reload / restart (mirrors _row_for_system).
+    # 2) DURABLE row — survives reload / restart.
     try:
         await run_sync(
             database.add_session_message,
@@ -340,6 +329,23 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     })
 
 
+# A frame that is not a JSON object is answered with an ``error`` frame and the
+# socket stays open. Past this many on one connection the client is not
+# speaking the protocol, and the socket is closed with 1007 (invalid payload).
+MAX_MALFORMED_FRAMES = 10
+MALFORMED_FRAME_CLOSE_CODE = 1007
+# An API key disabled, deleted or rotated, or a paired device unpaired (or its
+# session token replaced), while its socket is open.
+REVOKED_PRINCIPAL_CLOSE_CODE = 4001
+# An API-user or paired-device socket re-validates its principal this often even
+# when the client sends nothing (no pong, idle tab), and at once when the key's
+# admin routes or the device's unpair routes signal it.
+PRINCIPAL_RECHECK_SECONDS = 30.0
+RATE_LIMITED_MESSAGE = "Rate limited: too many messages. Please slow down."
+# The refusal for a session an API key may not act on, known or not.
+SESSION_ACCESS_DENIED = "Access denied to this session"
+
+
 class WebSocketRateLimiter:
     """Sliding-window rate limiter for WebSocket messages per connection.
 
@@ -365,6 +371,40 @@ class WebSocketRateLimiter:
         return True
 
 
+# Open API-user and paired-device sockets by ``ws_key_watch.watch_key`` (the
+# api_user_id, or ``"paired:<client id>"``), so the key's disable/rotate/delete
+# routes and the device's unpair routes can make them re-check at once. Weak: a
+# handler that never ran, or one whose teardown was skipped, is not kept alive
+# by the registry.
+_api_user_sockets: Dict[str, "weakref.WeakSet[ChatWebSocketHandler]"] = {}
+
+
+def recheck_api_user_sockets(api_user_id: str) -> int:
+    """Make every open chat socket of ``api_user_id`` re-validate its key now.
+
+    Called after the key is disabled, rotated or deleted. The sockets decide for
+    themselves (a PATCH that leaves the key live closes nothing). Safe from any
+    thread; returns how many sockets were signalled.
+    """
+    handlers = list(_api_user_sockets.get(api_user_id, ()))
+    for handler in handlers:
+        handler._request_principal_recheck()
+    return len(handlers)
+
+
+def recheck_paired_client_sockets(client_id: str) -> int:
+    """Make every open chat socket of paired device ``client_id`` re-validate now.
+
+    Called after the device is unpaired; a revoked device's sockets close with 4001.
+    """
+    from app.api.ws_key_watch import PAIRED_WATCH_PREFIX
+    return recheck_api_user_sockets(PAIRED_WATCH_PREFIX + client_id)
+
+
+class _Revoked:
+    """Sentinel from ``_receive_frame``: the watchdog found the key revoked."""
+
+
 class ChatWebSocketHandler:
     """Handles a single WebSocket chat connection lifecycle."""
 
@@ -384,7 +424,6 @@ class ChatWebSocketHandler:
 
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
-        self.query_task: Optional[asyncio.Task] = None
         self.connection_healthy: bool = True
 
         # (interrupt_pending_sessions and stopped_sessions are now module-level
@@ -396,9 +435,9 @@ class ChatWebSocketHandler:
             window_seconds=settings.ws_rate_limit_window_seconds,
         )
 
-        # Outbound queue + writer task for THIS socket (W2). Created lazily on
+        # Outbound queue + writer task for THIS socket. Created lazily on
         # the first send so a handler built outside a running loop costs
-        # nothing, and never created at all on the headless path (no socket).
+        # nothing.
         # ``send_json`` is a synchronous enqueue, so sends from ping_loop, the
         # turn pump and the message handler are ordered by call order alone —
         # no send lock is needed (or possible to race), and no producer ever
@@ -410,6 +449,29 @@ class ChatWebSocketHandler:
         # (polling recovers the data, but this gives us observability).
         self._ws_seq: int = 0
         self._ws_drops: int = 0
+
+        # Frames on this connection that were not a JSON object; bounded by
+        # MAX_MALFORMED_FRAMES. ``_close_code`` is set when ``run`` ends the
+        # connection itself and closes the socket with that code on the way out.
+        self._malformed_frames: int = 0
+        self._close_code: Optional[int] = None
+        self._close_reason: str = ""
+
+        # API-user and paired-device sockets only: a watchdog re-validates the
+        # principal every PRINCIPAL_RECHECK_SECONDS and on ``_recheck`` (set by
+        # the key's admin routes or the device's unpair routes), and sets
+        # ``_revoked`` so ``run`` stops waiting for a frame that an idle client
+        # may never send.
+        self._recheck: Optional[asyncio.Event] = None
+        self._revoked: Optional[asyncio.Event] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        from app.api.ws_key_watch import watch_key
+        self._watch_key: Optional[str] = watch_key(trusted_principal)
+        if self._watch_key is not None and (
+                trusted_principal.get("kind") != "api_user" or api_user_id):
+            self._recheck = asyncio.Event()
+            self._revoked = asyncio.Event()
+            _api_user_sockets.setdefault(self._watch_key, weakref.WeakSet()).add(self)
 
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
@@ -435,15 +497,14 @@ class ChatWebSocketHandler:
     # send_json — non-blocking enqueue onto this socket's writer
     # ------------------------------------------------------------------
 
-    def _ensure_writer(self) -> Optional[ConnectionWriter]:
+    def _ensure_writer(self) -> ConnectionWriter:
         """This socket's writer, created on first use (``send_json`` starts it).
 
-        ``None`` on the headless path, where there is no socket to write to.
         Lazy so a handler constructed outside a running loop never leaves a task
         behind, and so ``run``'s teardown has nothing to close when nothing was
         ever sent.
         """
-        if self._writer is None and self.websocket is not None:
+        if self._writer is None:
             writer = ConnectionWriter(
                 self.websocket, label=f"chat device={self.device_id}"
             )
@@ -467,7 +528,7 @@ class ChatWebSocketHandler:
         connection's bounded queue, and the single bounded ``send_text`` await
         happens later on the writer task. That is what keeps one half-open
         client from stalling the turn pump, the recorder, or any other producer
-        (W2) — a dead peer now costs exactly one stalled task, its own.
+        — a dead peer costs exactly one stalled task, its own.
 
         Returns True when the frame was ACCEPTED. False means one of:
 
@@ -492,20 +553,13 @@ class ChatWebSocketHandler:
         if not self.connection_healthy:
             return False
 
-        # Headless path: no websocket attached (e.g. a server-side query kicked
-        # off by the /sessions/with-worktree REST endpoint). Silently "succeed"
-        # so run_query doesn't early-exit; state propagates via sync_engine
-        # broadcasts to any registered devices instead.
-        if self.websocket is None:
-            return True
-
         if self.websocket.client_state != WebSocketState.CONNECTED:
             self.connection_healthy = False
             logger.debug(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
             return False
 
         writer = self._ensure_writer()
-        if writer is None or not writer.alive:
+        if not writer.alive:
             self.connection_healthy = False
             return False
 
@@ -552,6 +606,7 @@ class ChatWebSocketHandler:
         """Main connection loop — replaces the body of chat_websocket."""
         from app.api.websocket import ping_loop
 
+        self._loop = asyncio.get_running_loop()
         # Register user device for tab sync
         await sync_engine.register_user_device(self.user_id, self.device_id, self.websocket)
 
@@ -573,17 +628,33 @@ class ChatWebSocketHandler:
 
         try:
             # Start ping task
-            ping_task = asyncio.create_task(ping_loop(self.websocket, "chat", send_fn=self.send_json))
+            ping_task = asyncio.create_task(ping_loop(self.websocket, send_fn=self.send_json))
+            watchdog_task = (asyncio.create_task(self._principal_watchdog())
+                             if self._revoked is not None else None)
 
             try:
                 while True:
                     try:
-                        data = await asyncio.wait_for(
-                            self.websocket.receive_json(),
-                            timeout=60.0
-                        )
+                        try:
+                            data = await self._receive_frame(timeout=60.0)
+                        except (ValueError, KeyError, TypeError):
+                            # The frame was consumed but is not JSON text: bad
+                            # JSON or UTF-8 (ValueError), or a binary frame.
+                            data = None
+                        if data is _Revoked:
+                            break
+                        if not isinstance(data, dict):
+                            if not await self._refuse_malformed_frame():
+                                break
+                            continue
 
                         msg_type = data.get("type")
+
+                        # Every frame (including the 30 s pong) re-checks an
+                        # API key: disabling, deleting or rotating it ends
+                        # this socket before the frame is acted on.
+                        if not await self._principal_still_valid():
+                            break
 
                         # Rate-limit user-initiated messages (skip keepalive pongs)
                         if msg_type != "pong" and not self.rate_limiter.check():
@@ -593,13 +664,25 @@ class ChatWebSocketHandler:
                             )
                             await self.send_json({
                                 "type": "error",
-                                "error": "Rate limited: too many messages. Please slow down.",
+                                "message": RATE_LIMITED_MESSAGE,
                             })
                             continue
 
-                        handler = self._handlers.get(msg_type)
+                        handler = (
+                            self._handlers.get(msg_type)
+                            if isinstance(msg_type, str) else None
+                        )
                         if handler is not None:
                             await handler(data)
+                        else:
+                            await self.send_json({
+                                "type": "error",
+                                "message": (
+                                    f"Unknown message type: {msg_type}"
+                                    if isinstance(msg_type, str) and msg_type
+                                    else "Missing message type"
+                                ),
+                            })
 
                     except asyncio.TimeoutError:
                         if self.websocket.client_state != WebSocketState.CONNECTED:
@@ -613,19 +696,14 @@ class ChatWebSocketHandler:
                         continue
 
             finally:
-                ping_task.cancel()
-                try:
-                    await ping_task
-                except asyncio.CancelledError:
-                    pass
-
-                # NOTE: We intentionally do NOT cancel the query task when the websocket closes.
-                # This allows streaming to continue for other devices even if the originating
-                # device disconnects (e.g., page refresh, phone locked, network issue).
-                # The query will complete naturally and broadcast stream_end to all devices.
-                # If the user wants to stop the query, they should use the "stop" message explicitly.
-                if self.query_task and not self.query_task.done():
-                    logger.debug("WebSocket closed but query task still running for session - letting it continue for other devices")
+                for task in (ping_task, watchdog_task):
+                    if task is None:
+                        continue
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
                 # Unregister user device from tab sync
                 await sync_engine.unregister_user_device(self.user_id, self.device_id, self.websocket)
@@ -637,30 +715,14 @@ class ChatWebSocketHandler:
                     await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
                     logger.debug(f"Cleanup: unregister device {self.device_id} from session {self.current_session_id}")
 
-                    # Check if this was the last device for this session
-                    # If so, and no active query is running, cleanup the session resources
-                    from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-
                     remaining_devices = sync_engine.get_device_count(self.current_session_id)
 
-                    async with _active_sessions_lock:
-                        active_task = _active_chat_sessions.get(self.current_session_id)
-                        is_task_done = active_task is None or active_task.done()
-
-                        if remaining_devices == 0 and is_task_done:
-                            # Remove from active chat sessions tracking
-                            _active_chat_sessions.pop(self.current_session_id, None)
-
-                    if remaining_devices == 0 and is_task_done:
-                        # No more devices watching and no active query — nothing
-                        # to tear down here (V2: busy truth lives in the runs
-                        # table; sessions age out via pool eviction).
+                    if remaining_devices == 0:
+                        # Nothing to tear down here (V2: busy truth lives in the
+                        # runs table; sessions age out via pool eviction).
                         logger.debug(f"Last device disconnected from session {self.current_session_id}")
-
-                    elif remaining_devices > 0:
+                    else:
                         logger.debug(f"Session {self.current_session_id} still has {remaining_devices} device(s) connected")
-                    elif not is_task_done:
-                        logger.debug(f"Session {self.current_session_id} has active query, deferring cleanup")
 
         except WebSocketDisconnect as exc:
             # Keep the close code in normal desktop/worker logs so a dropped
@@ -679,7 +741,7 @@ class ChatWebSocketHandler:
             logger.error(f"Chat WebSocket error: {e}")
 
         finally:
-            # W2: a writer task must never outlive its connection. ``aclose``
+            # A writer task must never outlive its connection. ``aclose``
             # cancels AND awaits it, so nothing is left pending on a socket that
             # is going away. Frames still queued at this point are dropped —
             # the peer is gone, and a reconnecting client resyncs from durable
@@ -687,9 +749,136 @@ class ChatWebSocketHandler:
             # The connection is poisoned first so a late send from the still
             # running query task fast-fails instead of resurrecting a writer.
             self.connection_healthy = False
+            if self._revoked is not None:
+                sockets = _api_user_sockets.get(self._watch_key)
+                if sockets is not None:
+                    sockets.discard(self)
+                    if not sockets:
+                        _api_user_sockets.pop(self._watch_key, None)
             writer = self._writer
             if writer is not None:
                 await writer.aclose()
+            if self._close_code is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.close(code=self._close_code, reason=self._close_reason),
+                        timeout=2.5,
+                    )
+                except Exception:  # the peer may already be gone
+                    logger.debug("Chat WebSocket close failed", exc_info=True)
+
+    async def _principal_still_valid(self) -> bool:
+        """Per inbound frame: re-validate an API-user principal; False (and a 4001 close) once revoked.
+
+        Authentication runs at connect only, so without this a key disabled or
+        rotated after connecting keeps its socket. A paired device is
+        re-validated by the watchdog (its live checks may ask the account hub,
+        too slow for every frame) and where it binds a session.
+        """
+        principal = self.trusted_principal
+        if not isinstance(principal, dict) or principal.get("kind") != "api_user":
+            return True
+        return await self._revalidate_principal()
+
+    async def _revalidate_principal(self) -> bool:
+        """Re-validate a watched principal; False (and a 4001 close) once it is revoked.
+
+        A hub outage raises (the watchdog retries); only a refusal closes.
+        """
+        principal = self.trusted_principal
+        if self._watch_key is None or not isinstance(principal, dict):
+            return True
+        from app.core.mobile_tool_identity import revalidate
+        try:
+            await run_sync(revalidate, principal)
+        except PermissionError as exc:
+            logger.info("Closing chat WebSocket of %s: %s", self._watch_key, exc)
+            self._close_code = REVOKED_PRINCIPAL_CLOSE_CODE
+            self._close_reason = str(exc)[:120]
+            return False
+        return True
+
+    def _request_principal_recheck(self) -> None:
+        """Wake the watchdog now (thread-safe: routes may call from a worker thread)."""
+        if self._recheck is None:
+            return
+        loop = self._loop
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is None or loop is running:
+            self._recheck.set()
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(self._recheck.set)
+
+    async def _principal_watchdog(self) -> None:
+        """Re-validate the principal without waiting for a client frame; set ``_revoked`` once it fails."""
+        assert self._recheck is not None and self._revoked is not None
+        while True:
+            try:
+                await asyncio.wait_for(self._recheck.wait(), timeout=PRINCIPAL_RECHECK_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            self._recheck.clear()
+            try:
+                valid = await self._revalidate_principal()
+            except Exception:  # noqa: BLE001 — a DB or hub hiccup must not end a live socket
+                logger.warning("Socket principal re-check failed; retrying", exc_info=True)
+                continue
+            if not valid:
+                self._revoked.set()
+                return
+
+    async def _receive_frame(self, timeout: float) -> Any:
+        """The next inbound JSON frame, or ``_Revoked`` once the watchdog revokes the key.
+
+        Raises ``asyncio.TimeoutError`` after ``timeout`` seconds without a
+        frame, like ``wait_for`` on the receive alone.
+        """
+        if self._revoked is None:
+            return await asyncio.wait_for(self.websocket.receive_json(), timeout=timeout)
+        if self._revoked.is_set():
+            return _Revoked
+        receive = asyncio.ensure_future(self.websocket.receive_json())
+        revoked = asyncio.ensure_future(self._revoked.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {receive, revoked}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (revoked, receive):
+                if not task.done():
+                    task.cancel()
+        if revoked in done:
+            # Any frame that raced in is never acted on: the key is gone.
+            if receive.done() and not receive.cancelled():
+                receive.exception()  # retrieved, so asyncio does not log it
+            return _Revoked
+        if receive in done:
+            return receive.result()
+        raise asyncio.TimeoutError
+
+    async def _refuse_malformed_frame(self) -> bool:
+        """Answer a frame that is not a JSON object.
+
+        Sends an ``error`` frame and returns True so the loop keeps serving.
+        Past :data:`MAX_MALFORMED_FRAMES` on this connection returns False
+        instead, and ``run`` ends the connection with close code
+        :data:`MALFORMED_FRAME_CLOSE_CODE`.
+        """
+        self._malformed_frames += 1
+        if self._malformed_frames > MAX_MALFORMED_FRAMES:
+            logger.warning(
+                f"Closing chat WebSocket after {MAX_MALFORMED_FRAMES} malformed "
+                f"frames: device={self.device_id}"
+            )
+            self._close_code = MALFORMED_FRAME_CLOSE_CODE
+            return False
+        await self.send_json({
+            "type": "error",
+            "message": "Invalid message: expected a JSON object",
+        })
+        return True
 
     # ------------------------------------------------------------------
     # handle_query
@@ -701,8 +890,8 @@ class ChatWebSocketHandler:
         """Take ownership of a remotely-owned session so THIS send runs locally.
 
         Sending from a second device is the user saying "continue here", so a
-        session that merely INHERITED its owner (raw ``placement`` NULL — the
-        A11 implicit pin) follows them. Guards, all required:
+        session that merely INHERITED its owner (raw ``placement`` NULL — an
+        implicit pin) follows them. Guards, all required:
 
           * raw ``placement`` is NULL/blank — an explicit ``{"where": …}`` is a
             deliberate placement (composer device pick, /move, /adopt, a claim
@@ -809,16 +998,9 @@ class ChatWebSocketHandler:
     ) -> bool:
         """Preflight the composer's device pick for a NEW session.
 
-        Mirrors the ``POST /sessions/{id}/move`` preflight — the target must be
-        a registered install that is online, and (when the session carries a
-        project) must have an ACTIVE BASE checkout of that project
-        (``has_active_base_checkout``, not ``capable_runners``: the latter
-        also matches branch-only worktrees, and Phase 3 never clones). The
-        caller passes the already-resolved ``project_v2_id`` (legacy
-        ``project_id`` is resolved upstream). The checkout half fails OPEN on
-        lookup trouble, exactly like /move: a preflight bug must not make a
-        usable device unpickable. Sends the refusal frame itself and returns
-        False when the pick cannot be honored.
+        The target must be registered, approved, online and
+        ``network_git.eligible`` for the project. Fails closed. Sends the
+        refusal frame itself and returns False when the pick cannot be honored.
         """
         async def _refuse(message: str) -> bool:
             await self.send_json({"type": "error", "message": message})
@@ -838,7 +1020,6 @@ class ChatWebSocketHandler:
             )
 
         if project_v2_id:
-            from app.db import checkouts as checkouts_db
 
             try:
                 from app.network import git as network_git
@@ -861,7 +1042,7 @@ class ChatWebSocketHandler:
         project_id: Optional[str],
         session_id: str,
     ) -> List[str]:
-        """Lift this send's staged uploads into durable blobs (D8).
+        """Lift this send's staged uploads into durable blobs.
 
         Raises ``UploadLiftError`` (or anything the DB layer raises) so the
         caller can refuse the send — never returns partial results.
@@ -909,15 +1090,99 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "Session authorization denied"})
             return False
 
+    async def _restrict_profile(self, requested, default):
+        """Apply an API user's assigned agents to a WS-supplied profile.
+
+        Returns ``(True, profile)``; on refusal sends the error frame and
+        returns ``(False, None)``. The owner and API users with no assigned
+        agents get ``default`` back unchanged.
+        """
+        if not self.api_user_id:
+            return True, default
+        user = await run_sync(database.get_api_user, self.api_user_id)
+        if not (user or {}).get("profile_ids"):
+            return True, default
+        from app.api.sessions_helpers import resolve_api_user_profile
+        try:
+            return True, resolve_api_user_profile(user, requested)
+        except HTTPException as exc:
+            await self.send_json({"type": "error", "message": exc.detail})
+            return False, None
+
+    async def _session_refusal(self, session_id) -> Optional[str]:
+        """Why this socket may not act on ``session_id``, or None when it may.
+
+        The owner's socket (no ``api_user_id``) is unrestricted. An API-user
+        socket may act only on a session it owns that is inside its project
+        and agent scope: :func:`check_session_access_for_api_user`, the rule
+        the REST session routes apply (its agent check is what keeps a key's
+        turn out of a session whose agent it may not use). A missing or
+        unknown id gets the same :data:`SESSION_ACCESS_DENIED` as another
+        principal's session, so this socket's answer never tells whether that
+        session exists. That holds for the WebSocket only: the REST session
+        routes (``require_session``) and the voice routes still answer 404 for
+        an unknown id and 403 for another principal's session. Only for the
+        key's OWN session outside its agents is the agent named, which reveals
+        nothing.
+        """
+        if not self.api_user_id:
+            return None
+        message = SESSION_ACCESS_DENIED
+        if session_id:
+            from app.api.sessions_helpers import (
+                api_user_may_use_profile,
+                api_user_owns_session,
+                check_session_access_for_api_user,
+            )
+
+            user = await run_sync(database.get_api_user, self.api_user_id)
+            session = await run_sync(database.get_session, session_id)
+            if user and session:
+                try:
+                    await run_sync(check_session_access_for_api_user, user, session)
+                    return None
+                except HTTPException:
+                    agent = session.get("profile_id")
+                    if (not api_user_may_use_profile(user, agent)
+                            and await run_sync(api_user_owns_session, user, session)):
+                        # Its own session: naming the agent reveals nothing.
+                        message = f"This API key is not allowed to use agent '{agent}'."
+        return message
+
+    async def _may_act_on_session(self, session_id, *, refusal_type="error") -> bool:
+        """The shared gate for every frame that names a session.
+
+        Applies :meth:`_session_refusal`. On refusal this sends one
+        ``refusal_type`` frame (``session_id`` + ``message``) and returns
+        False; the caller then returns without touching any state or sending
+        any session data. ``load_session`` answers a refusal differently (see
+        :meth:`handle_load_session`).
+        """
+        message = await self._session_refusal(session_id)
+        if message is None:
+            return True
+        await self.send_json({
+            "type": refusal_type,
+            "session_id": session_id,
+            "message": message,
+        })
+        return False
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
+        if session_id and not await self._may_act_on_session(session_id):
+            return
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
             return
-        profile_id = data.get("profile", "claude-code")
+        # An existing session's own agent was checked by the gate above.
+        allowed, profile_id = await self._restrict_profile(
+            data.get("profile"), data.get("profile", "claude-code"))
+        if not allowed:
+            return
         project_id = data.get("project") or None
         if isinstance(project_id, str):
             project_id = project_id.strip() or None
@@ -938,7 +1203,7 @@ class ChatWebSocketHandler:
         target_instance_id = (data.get("target_instance_id") or "").strip() or None
         if session_id or target_instance_id == settings.effective_instance_id:
             target_instance_id = None
-        # Staged upload paths referenced by this prompt (D8). They are absolute
+        # Staged upload paths referenced by this prompt. They are absolute
         # paths on THIS install's disk, so they only need carrying when the turn
         # ends up running somewhere else; a local turn ignores them entirely.
         upload_paths = [
@@ -985,10 +1250,9 @@ class ChatWebSocketHandler:
         # queued turn (submitted with ``no_kick``) IS the whole hand-off; the
         # owning runner's turn_claim loop picks it up via the NOTIFY wake (or
         # its 5s poll) and rendering rides the shared SSE feed exactly like a
-        # local turn. No HTTP dispatch (OD-1). Headless handlers do neither
-        # (websocket is None) — a headless query always runs locally.
+        # local turn. No HTTP dispatch.
         placed_remote = False
-        if session_id and self.websocket is not None:
+        if session_id:
             cloud_sess = await run_sync(database.get_session, session_id)
             # V2 placement: resolve via sessions.placement. A session placed on
             # ANOTHER runner still takes the LOCAL enqueue path below — the
@@ -1103,8 +1367,8 @@ class ChatWebSocketHandler:
                         is_active=True,
                         target_instance_id=target_instance_id,
                         project_v2_id=resolved_pv2_id,
-                        # The composer's pick IS the session's binding (v79) —
-                        # agents no longer pin a model, so stamp it at birth.
+                        # The composer's pick IS the session's binding —
+                        # agents do not pin a model, so stamp it at birth.
                         # A ``prov:`` composite also settles provider_id here,
                         # before anything reads the row.
                         model=(overrides or {}).get("model"),
@@ -1262,7 +1526,7 @@ class ChatWebSocketHandler:
         # a busy-session query queues durably, no cancel-and-requery). Rendering
         # rides SOLELY the SSE typed-event feed; new-session adoption is
         # authenticated by the ``session_created`` request_id echo already sent
-        # above (B4) — no origin-socket passthrough, no start-frame token.
+        # above — no origin-socket passthrough, no start-frame token.
         #
         # A turn already live for the session means this query queues behind
         # it (busy-write guard implicit). Checked BEFORE submit — submit's
@@ -1272,7 +1536,7 @@ class ChatWebSocketHandler:
             await run_sync(turns_db.get_live_turn, session_id) is not None
         )
 
-        # Persist + broadcast the user message (P3 session_messages dual-write
+        # Persist + broadcast the user message (the session_messages dual-write
         # survives — the recorder also logs ``message.user`` to the event
         # feed). New sessions persisted their first message atomically at
         # creation; existing sessions persist here. Ordered before submit is
@@ -1342,7 +1606,7 @@ class ChatWebSocketHandler:
         if placed_remote and submit_profile_id == "claude-code":
             submit_profile_id = None
 
-        # Uploads travel as durable blobs (D8) — but ONLY when the turn is
+        # Uploads travel as durable blobs — but ONLY when the turn is
         # actually leaving this install. A local turn's files are already on the
         # disk the agent will read, so lifting them would just duplicate bytes.
         # A lift failure FAILS THE SEND: submitting a turn whose prompt points at
@@ -1402,7 +1666,7 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "query_queued", "session_id": session_id})
             return
 
-        # W6: ``submit`` performs up to three DB writes (run binding, wakeup
+        # ``submit`` performs up to three DB writes (run binding, wakeup
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
         # three and still fires the kick on this loop, so the send path never
         # blocks the worker's other sockets.
@@ -1433,7 +1697,7 @@ class ChatWebSocketHandler:
 
         if had_live:
             # Queued behind the live turn: surface the pending bubble
-            # (re-sourced from turns) and send the F5 query_queued ack so the
+            # (re-sourced from turns) and send the query_queued ack so the
             # client leaves its optimistic streaming state instead of spinning
             # forever.
             await self._v2_broadcast_queue(session_id)
@@ -1456,6 +1720,8 @@ class ChatWebSocketHandler:
         """Handle 'stop' message type."""
 
         session_id = data.get("session_id") or self.current_session_id
+        if session_id and not await self._may_act_on_session(session_id):
+            return
         if session_id:
             # V2 placement drops any relay entirely: the durable
             # running->interrupting flip below is visible to whichever runner
@@ -1464,42 +1730,12 @@ class ChatWebSocketHandler:
             # Stop now means STOP, not "interrupt so I can send another message":
             # mid-stream messages have their own steering path.
             #
-            # STOP SEMANTICS (round 7). Stop ends EVERYTHING this session is
-            # doing and lets NOTHING restart it until the user's next message.
-            # That is the whole button, and it is a deliberate reversal of the
-            # audit-item-5 rule that used to spare a healthy Monitor shell ("a
-            # dev server the user asked to keep up is not part of the turn").
-            # Living with that produced the complaint this change answers —
-            # stopped sessions came back to life, because the spared shell (or
-            # a CI watcher, or a nested worker, or an armed wakeup, or a turn
-            # queued behind the stopped one) still had a road back into the
-            # scheduler. So ``stop_all_background_tasks(user_stop=True)`` now:
-            #   * kills every background task — sub-agents and their
-            #     descendants, provider-lane workers including nested ones,
-            #     Monitor shells including serving tasks and watchers;
-            #   * latches the session stopped, so every wake producer no-ops
-            #     until the user speaks;
-            #   * drops armed wakeups, aborts queued turns and settles stale
-            #     parked rows;
-            #   * gives every killed task a terminal registry row, a terminal
-            #     chip and an engine retirement, so nothing sits "running"
-            #     forever and the model is never left waiting on a corpse.
-            # The old keep-the-server-up behaviour survives as an explicit
-            # opt-in that defaults to OFF: ``STOP_KEEPS_MONITOR_SHELLS=true``.
-            # Typing mid-stream is UNCHANGED: it goes through
-            # ``interrupt_for_query``, which sets no stop_background bit and
-            # never reaches this path — a steer is not a Stop.
-
-            # v2 turns cutover: the ONE interrupt implementation. Flip the live
-            # turn running->interrupting (durable intent) and fire the executor,
-            # which drives the live runtime's SDK interrupt + evict/drain
-            # escalation (the safety-timeout/eviction choreography now lives in
-            # SessionRuntime, not here). A user stop settles the turn ``aborted``;
-            # the settle path then drains queued turns like any other outcome (F4
-            # preserve-on-stop retired, PR #694) — no _stopped_sessions latch.
-            # ``stop_background`` records the user intent durably; the explicit
-            # lifecycle call below performs the transport-specific task teardown.
-            # #585: bind the stop to the turn the FE believed was live (optional
+            # Stop = durable running->interrupting flip, then
+            # ``stop_all_background_tasks(user_stop=True)``, which latches the
+            # session stopped, kills all background work and aborts queued turns
+            # (see query_session_lifecycle.enter_user_stop). Typing mid-stream
+            # uses ``interrupt_for_query``, not this path.
+            # Bind the stop to the turn the FE believed was live (optional
             # — older clients omit it). turn_manager threads it to the DB flip
             # (id=turn_id guard) and the runtime signal so a stop that arrives
             # after its target settled cannot interrupt the successor turn.
@@ -1537,7 +1773,7 @@ class ChatWebSocketHandler:
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor
-                # already fired; the observe pass is a guarded no-op (O4).
+                # already fired; the observe pass is a guarded no-op.
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
             return
@@ -1559,6 +1795,8 @@ class ChatWebSocketHandler:
         if not session_id:
             await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": "No active session"})
             return
+        if not await self._may_act_on_session(session_id, refusal_type="interrupt_failed"):
+            return
 
         # V2 placement drops any relay: the durable interrupt flip + the
         # drain-wait below both act on the SHARED turns row, so they are
@@ -1566,13 +1804,13 @@ class ChatWebSocketHandler:
         # runtime; our poll sees the row settle/drain).
         #
         # v2 turns cutover (two-phase send-now). Flip the live turn
-        # running->interrupting with mode=send_now and fire the executor (SDK
+        # running->interrupting with mode=send_now and fire the executor (adapter
         # interrupt + escalation in the runtime), then wait — with today's drain
         # timeout — until the live turn either SETTLES (clean stop) or ESCALATES
         # to ``draining`` (wedged CLI kept alive). Either outcome is safe to send
         # the replacement query after: the follow-up queued turn is held out of
-        # the live slot by the unique live index until the draining turn settles
-        # (F6), so it can never cross a mid-turn CLI. Confirm unconditionally so
+        # the live slot by the unique live index until the draining turn
+        # settles, so it can never cross a mid-turn CLI. Confirm unconditionally so
         # the frontend's replacement query is unblocked.
         try:
             owner_device = await self._network_owner(session_id)
@@ -1629,11 +1867,10 @@ class ChatWebSocketHandler:
 
     async def handle_load_session(self, data: dict) -> None:
         """Handle 'load_session' message type."""
-        from app.api.websocket import _active_chat_sessions
-
         session_id = data.get("session_id")
         if not session_id:
             return
+        requested_id = session_id
 
         # Try direct lookup by AI Shuffle session ID first (non-blocking)
         session = await run_sync(database.get_session, session_id)
@@ -1651,6 +1888,18 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "session_not_found", "session_id": session_id})
             return
 
+        refusal = await self._session_refusal(session_id)
+        if refusal == SESSION_ACCESS_DENIED:
+            # Another principal's session is answered exactly like an unknown
+            # id (the REST 404 artifact access gives a foreign session), so
+            # load_session cannot be used to probe which session ids exist.
+            # This covers the socket only; REST require_session and the voice
+            # routes still distinguish 404 (unknown) from 403 (foreign).
+            await self.send_json({"type": "session_not_found", "session_id": requested_id})
+            return
+        if refusal is not None:
+            await self.send_json({"type": "error", "session_id": session_id, "message": refusal})
+            return
         if not await self._authorize_mobile_session(session_id):
             return
 
@@ -1664,11 +1913,10 @@ class ChatWebSocketHandler:
 
         # Unified message resolution: DB -> JSONL -> SDK (V2: no live tier).
         sdk_session_id = session.get("sdk_session_id")
-        working_dir = resolve_working_dir(dict(session))
         worktree_id = session.get("worktree_id")
 
         def _resolve_history_blocking() -> Dict[str, Any]:
-            """Every BLOCKING step of a session open, in ONE thread hop (W6).
+            """Every BLOCKING step of a session open, in ONE thread hop.
 
             Opening a session parses the whole JSONL transcript (sync file I/O
             + a JSON parse of potentially megabytes) and then makes three more
@@ -1680,6 +1928,9 @@ class ChatWebSocketHandler:
             coroutine, not yet published) or returns a value — no loop-bound
             work, so it is safe on a worker thread.
             """
+            # The cwd resolution self-heals the session's project_v2 binding
+            # (DB reads, possibly a write) — blocking, so it belongs in this hop.
+            working_dir = resolve_working_dir(dict(session))
             resolved = message_resolver.resolve(
                 session_id, sdk_session_id, working_dir
             )
@@ -1741,16 +1992,6 @@ class ChatWebSocketHandler:
                 session["total_tokens_out"] = resolved.usage.get("total_tokens_out", 0)
 
             logger.debug(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
-
-        # Also check for queries that are about to stream but haven't
-        # started yet (gap between session creation and first stream_start
-        # from the SDK). This ensures late-joining devices see the session
-        # as streaming even during the SDK initialization delay.
-        if not is_streaming:
-            pending_task = _active_chat_sessions.get(session_id)
-            if pending_task and not pending_task.done():
-                is_streaming = True
-                logger.debug(f"Session {session_id} has pending query task, marking as streaming")
 
         # V2: no live-buffer override for streaming sessions — the persistent
         # chain above is the history, and a late joiner picks up the live tail
@@ -1814,12 +2055,9 @@ class ChatWebSocketHandler:
         logger.debug(f"[watch_session] device={self.device_id} session_id={session_id}")
         if not session_id:
             return
-
-        # Headless guard (plan step 6): a handler with no websocket must never
-        # register itself as a watcher — sync_engine registration keys on
-        # (device_id, websocket) and a None socket would pollute the watcher
-        # table with an unsendable connection.
-        if self.websocket is None:
+        # Refuse BEFORE registering: ``current_session_id`` is what
+        # get_pending_permissions / get_pending_questions read.
+        if not await self._may_act_on_session(session_id):
             return
 
         # Unregister from old session if switching
@@ -1862,8 +2100,14 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_close_session(self, data: dict) -> None:
-        """Handle 'close_session' message type."""
+        """Handle 'close_session' message type.
+
+        Always replies ``session_closed``; with no session selected there is
+        nothing to close and ``session_id`` is null.
+        """
         old_session_id = self.current_session_id
+        if old_session_id and not await self._may_act_on_session(old_session_id):
+            return
         if old_session_id:
             await sync_engine.unregister_device(self.device_id, old_session_id, self.websocket)
             # Broadcast to other devices that this session was closed
@@ -1874,9 +2118,9 @@ class ChatWebSocketHandler:
 
             self.current_session_id = None
             logger.debug(f"Device {self.device_id} closed session {old_session_id}")
-            # Try to send confirmation, but don't worry if WebSocket is already closed
-            # (common when frontend sends close_session right before disconnecting)
-            await self.send_json({"type": "session_closed", "session_id": old_session_id})
+        # Try to send confirmation, but don't worry if WebSocket is already closed
+        # (common when frontend sends close_session right before disconnecting)
+        await self.send_json({"type": "session_closed", "session_id": old_session_id})
 
     # ------------------------------------------------------------------
     # handle_permission_response
@@ -1891,9 +2135,17 @@ class ChatWebSocketHandler:
         remember = data.get("remember")  # "none", "session", or "profile"
         pattern = data.get("pattern")  # Optional pattern for the rule
 
+        if response_session_id and not await self._may_act_on_session(response_session_id):
+            return
+
         if request_id and decision and response_session_id:
             eff_remember = remember if decision != "defer" else None
             eff_pattern = pattern if decision != "defer" else None
+            if self.api_user_id and eff_remember == "profile":
+                # An agent-wide rule is stored per agent and applies to every
+                # session on it, the owner's and other keys' included. An API
+                # key's remembered answer is kept to its own session instead.
+                eff_remember = "session"
 
             owner_device = await self._network_owner(response_session_id)
             if owner_device:
@@ -1912,8 +2164,8 @@ class ChatWebSocketHandler:
                 return
             # The prompt is a shared ``pending_interactions`` row — ANY install
             # answers it directly against the table, no cloud_relay. The owning
-            # runner's awaiting SDK callback wakes via NOTIFY (or in-process fast
-            # path when we ARE the owner). Stamp the answering device (Q4-6).
+            # runner's awaiting callback wakes via NOTIFY (or in-process fast
+            # path when we ARE the owner). Stamp the answering device.
             result = await permission_handler.respond(
                 request_id=request_id,
                 session_id=response_session_id,
@@ -1941,17 +2193,28 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_get_pending_permissions(self, data: dict) -> None:
-        """Handle 'get_pending_permissions' message type."""
-        if self.current_session_id:
-            # Pending/deferred are read straight from the shared
-            # ``pending_interactions`` table, which every install sees — no
-            # relay, so the reply is always authoritative (never `stale`).
+        """Handle 'get_pending_permissions' message type.
+
+        With no session selected on this socket the reply is empty and its
+        ``session_id`` is null.
+        """
+        if self.current_session_id and not await self._may_act_on_session(self.current_session_id):
+            return
+        if not self.current_session_id:
             await self.send_json({
-                "type": "pending_permissions",
-                "session_id": self.current_session_id,
-                "pending": permission_handler.get_pending_requests(self.current_session_id),
-                "deferred": permission_handler.get_deferred_requests(self.current_session_id),
+                "type": "pending_permissions", "session_id": None,
+                "pending": [], "deferred": [],
             })
+            return
+        # Pending/deferred are read straight from the shared
+        # ``pending_interactions`` table, which every install sees — no
+        # relay, so the reply is always authoritative (never `stale`).
+        await self.send_json({
+            "type": "pending_permissions",
+            "session_id": self.current_session_id,
+            "pending": permission_handler.get_pending_requests(self.current_session_id),
+            "deferred": permission_handler.get_deferred_requests(self.current_session_id),
+        })
 
     # ------------------------------------------------------------------
     # handle_requeue_deferred_permissions
@@ -1962,6 +2225,8 @@ class ChatWebSocketHandler:
         session_id = data.get("session_id") or self.current_session_id
         if not session_id:
             await self.send_json({"type": "error", "message": "No session_id for requeue"})
+            return
+        if not await self._may_act_on_session(session_id):
             return
 
         requeued_ids = await permission_handler.requeue_deferred(
@@ -1986,6 +2251,8 @@ class ChatWebSocketHandler:
         """Handle 'user_question_response' message type."""
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
+        if response_session_id and not await self._may_act_on_session(response_session_id):
+            return
         if response_session_id and not await self._authorize_mobile_session(response_session_id):
             return
         answers = data.get("answers", {})
@@ -2007,8 +2274,7 @@ class ChatWebSocketHandler:
         if response_session_id and request_id and (answers or dismissed or skipped):
             # The question is a shared ``pending_interactions`` row — answer it
             # directly against the table (no cloud_relay); the owning runner's
-            # awaiting SDK callback wakes via NOTIFY. Stamp the answering device
-            # (Q4-6).
+            # awaiting callback wakes via NOTIFY. Stamp the answering device.
             owner_device = await self._network_owner(response_session_id)
             if owner_device:
                 from app.network import control
@@ -2050,18 +2316,26 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_get_pending_questions(self, data: dict) -> None:
-        """Handle 'get_pending_questions' message type."""
-        if self.current_session_id and not await self._authorize_mobile_session(self.current_session_id):
+        """Handle 'get_pending_questions' message type.
+
+        With no session selected on this socket the reply is empty and its
+        ``session_id`` is null.
+        """
+        if not self.current_session_id:
+            await self.send_json({"type": "pending_questions", "session_id": None, "questions": []})
             return
-        if self.current_session_id:
-            # Pending questions are read straight from the shared
-            # ``pending_interactions`` table, which every install sees — no
-            # relay, so the reply is always authoritative (never `stale`).
-            await self.send_json({
-                "type": "pending_questions",
-                "session_id": self.current_session_id,
-                "questions": user_question_handler.get_pending_questions(self.current_session_id),
-            })
+        if not await self._may_act_on_session(self.current_session_id):
+            return
+        if not await self._authorize_mobile_session(self.current_session_id):
+            return
+        # Pending questions are read straight from the shared
+        # ``pending_interactions`` table, which every install sees — no
+        # relay, so the reply is always authoritative (never `stale`).
+        await self.send_json({
+            "type": "pending_questions",
+            "session_id": self.current_session_id,
+            "questions": user_question_handler.get_pending_questions(self.current_session_id),
+        })
 
     # ------------------------------------------------------------------
     # handle_tabs_update
@@ -2089,7 +2363,7 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def _v2_broadcast_queue(self, session_id: str) -> None:
-        """Build the B3 queue view from the durable turns table and emit the
+        """Build the queue view from the durable turns table and emit the
         ``queue_updated`` frame both to the other devices (via the sync engine)
         and directly to THIS socket (which is unregistered from the sync engine
         while streaming, so the broadcast alone would not reach it). Same wire
@@ -2123,50 +2397,56 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "No session for queue"})
             return
 
+        if not await self._may_act_on_session(session_id):
+            return
         if not await self._authorize_mobile_session(session_id):
             return
+        # An omitted profile keeps the session's own agent; a named one must
+        # be among an API user's assigned agents. The session's own agent was
+        # checked by the gate above.
+        if profile_id:
+            allowed, profile_id = await self._restrict_profile(profile_id, profile_id)
+            if not allowed:
+                return
 
         # V2 placement: the durable queued turn IS the hand-off (see
-        # handle_message) — enqueue locally with no kick and wake the owner's
-        # claim loop. A session placed on ANOTHER runner still takes the LOCAL
-        # enqueue path below (PR-B collapsed the legacy cloud-relay dispatch
-        # unconditionally). Headless handlers never place remotely.
+        # handle_query) — enqueue locally with no kick and wake the owner's
+        # claim loop.
         placed_remote = False
-        if self.websocket is not None:
-            cloud_sess = await run_sync(database.get_session, session_id)
-            if cloud_sess:
-                from app.core import placement as placement_mod
-                decision = None
-                try:
-                    decision = await run_sync(
-                        placement_mod.resolve_placement, cloud_sess
-                    )
-                except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
-                    logger.warning(
-                        f"Placement resolution failed for {session_id} — "
-                        f"treating as local", exc_info=True,
-                    )
-                if decision is not None and decision.kind == "none":
-                    await self.send_json({
-                        "type": "error",
-                        "message": "No capable device online for this session "
-                                   "— its runner is offline or lacks the "
-                                   "required capabilities.",
-                    })
-                    return
-                if (
-                    decision is not None
-                    and decision.kind == "runner"
-                    and decision.runner_id != settings.effective_instance_id
-                ):
-                    placed_remote = True
+        cloud_sess = await run_sync(database.get_session, session_id)
+        if cloud_sess:
+            from app.core import placement as placement_mod
+            decision = None
+            try:
+                decision = await run_sync(
+                    placement_mod.resolve_placement, cloud_sess
+                )
+            except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
+                logger.warning(
+                    f"Placement resolution failed for {session_id} — "
+                    f"treating as local", exc_info=True,
+                )
+            if decision is not None and decision.kind == "none":
+                await self.send_json({
+                    "type": "error",
+                    "message": "No capable device online for this session "
+                               "— its runner is offline or lacks the "
+                               "required capabilities.",
+                })
+                return
+            if (
+                decision is not None
+                and decision.kind == "runner"
+                and decision.runner_id != settings.effective_instance_id
+            ):
+                placed_remote = True
 
         # v2 turns cutover: enqueue a durable ``source=queue`` turn instead of a
         # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it
         # immediately when the session is idle, or leaves it queued behind the
         # live turn (busy-write guard implicit — the unique live index prevents a
         # double-start). The queue_updated frame is re-sourced from the turns
-        # table (B3). W6: the enqueue writes run in ONE worker-thread hop
+        # table. The enqueue writes run in ONE worker-thread hop
         # (``submit_async``) while the kick still fires on this loop, so it can
         # schedule.
         # Remote-placed: no kick (the owner's claim loop starts it) and the
@@ -2174,7 +2454,7 @@ class ChatWebSocketHandler:
         queue_profile_id = profile_id
         if placed_remote and queue_profile_id == "claude-code":
             queue_profile_id = None
-        # Transport context, at parity with handle_message: without it a drained
+        # Transport context, at parity with handle_query: without it a drained
         # queue turn runs with user_id/api_user_id None, so session_runtime skips
         # the attention bump and the AskUserQuestion fanout.
         payload: Dict[str, Any] = {}
@@ -2224,6 +2504,19 @@ class ChatWebSocketHandler:
 
         if not message_id:
             return
+        if self.api_user_id:
+            # The owner may name any queued turn; an API user only one of its
+            # own session's (the turn id alone would reach any session).
+            if not await self._may_act_on_session(session_id):
+                return
+            turn = await run_sync(turns_db.get_turn, message_id)
+            if turn is not None and turn.get("session_id") != session_id:
+                await self.send_json({
+                    "type": "error",
+                    "session_id": session_id,
+                    "message": SESSION_ACCESS_DENIED,
+                })
+                return
 
         # A pending message sent into a busy session is handed to the running
         # turn as a fluid steer straight away, so × has to un-send that steer
@@ -2265,15 +2558,25 @@ class ChatWebSocketHandler:
 
         if not session_id:
             return
+        if not await self._may_act_on_session(session_id):
+            return
 
         # v2 turns cutover: abort every user-visible queued turn (kept as
         # history); the queue view then re-sources to empty. Internal
         # failover/auto_continue/unpark turns are never user queue chips, so they
         # are left untouched.
-        def _clear_v2_queue():
-            for turn in turns_db.get_queued_turns(session_id):
-                if turn.get("source") in _V2_QUEUE_SOURCES:
-                    turn_manager.remove_queued(turn["id"])
-        await run_sync(_clear_v2_queue)
+        #
+        # Clearing is × on every chip, so it obeys the same steering rule as
+        # ``handle_remove_queued_message``: recall a submitted steer before its
+        # row goes (or the model still reads the text), and leave a row the
+        # running turn already read for its delivery receipt to absorb.
+        from app.core.session_runtime import try_cancel_steer
+
+        for turn in await run_sync(turns_db.get_queued_turns, session_id):
+            if turn.get("source") not in _V2_QUEUE_SOURCES:
+                continue
+            if await try_cancel_steer(session_id, turn["id"]) == "delivered":
+                continue
+            await run_sync(turn_manager.remove_queued, turn["id"])
         await self._v2_broadcast_queue(session_id)
         return

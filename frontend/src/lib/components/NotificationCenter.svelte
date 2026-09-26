@@ -40,12 +40,21 @@
 	const showPanel = $derived($openHeaderDropdown === 'notifications');
 
 	let rootRef = $state<HTMLDivElement | null>(null);
+	let bellRef = $state<HTMLButtonElement | null>(null);
 
 	const ICONS: Record<NotificationSeverity, typeof Info> = {
 		error: AlertOctagon,
 		warning: AlertTriangle,
 		success: CheckCircle2,
 		info: Info
+	};
+
+	// Severity is otherwise carried only by icon shape and colour.
+	const SEVERITY_LABELS: Record<NotificationSeverity, string> = {
+		error: 'Error',
+		warning: 'Warning',
+		success: 'Success',
+		info: 'Info'
 	};
 
 	function togglePanel() {
@@ -60,7 +69,11 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && showPanel) closeDropdown('notifications');
+		if (e.key !== 'Escape' || !showPanel) return;
+		// Hand focus back to the bell rather than dropping it on <body>.
+		const focusWasInside = !!rootRef?.contains(document.activeElement);
+		closeDropdown('notifications');
+		if (focusWasInside) bellRef?.focus();
 	}
 
 	onDestroy(() => closeDropdown('notifications'));
@@ -96,6 +109,7 @@
 
 <div class="notif-center" bind:this={rootRef}>
 	<button
+		bind:this={bellRef}
 		class="notif-btn"
 		class:open={showPanel}
 		class:has-unread={unread > 0}
@@ -140,7 +154,7 @@
 						{@const Icon = ICONS[n.severity]}
 						<div class="notif-item sev-{n.severity}" class:unread={!n.read}>
 							<button type="button" class="item-main" onclick={() => onItemClick(n)}>
-								<span class="item-icon" aria-hidden="true"><Icon size={15} strokeWidth={1.75} /></span>
+								<span class="item-icon" role="img" aria-label={SEVERITY_LABELS[n.severity]}><Icon size={15} strokeWidth={1.75} aria-hidden="true" /></span>
 								<span class="item-body">
 									{#if n.title}<span class="item-title">{n.title}</span>{/if}
 									<span class="item-message">{n.message}</span>

@@ -6,8 +6,7 @@ editing the rule once updates every carrier and the copies cannot drift. This
 module is fluid's version of that seam: descriptions in
 ``fluid/tools/builtins`` and the base prompt in ``fluid/cli/prompt.py``
 compose these constants verbatim, and a regression test asserts each fragment
-appears byte-identical everywhere it is used (the drift class of the Bash
-"Git discipline" incident, PR #5).
+appears byte-identical everywhere it is used.
 
 Import-light on purpose: this module imports nothing, so ``cli/prompt.py``
 can use it without pulling the whole builtins package into a prompt

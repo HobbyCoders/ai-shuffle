@@ -16,7 +16,7 @@ This guide describes AI Shuffle's integration, not a guarantee that a model is a
 2. **Turn on voice mode** under Settings → Voice. Choose a voice, set **Max call minutes**, and adjust **Conversation prompts** if needed. The play button beside each voice generates a GPT Live sample using your OpenAI API account.
 3. **Choose the chat model for tasks** in the voice session's composer controls, along with its effort and permissions. GPT Live uses these selections for client delegation. You do not need to assign a per-agent Voice model for this path.
 
-Settings → Voice currently configures GPT Live for new calls; it does not offer an engine or provider dropdown. The separate **Voice input** settings control dictation into the composer, not the voice call engine. Existing sessions keep their saved voice configuration when settings change.
+Settings → Voice currently configures GPT Live for new calls; it does not offer an engine or provider dropdown. The separate **Voice transcription** settings (same page) and the **Voice input hotkey** (Settings → Chat & Input) control dictation into the composer, not the voice call engine. Existing sessions keep their saved voice configuration when settings change.
 
 ## Starting a call
 
@@ -82,3 +82,5 @@ The Realtime cost display is an **estimate based on reported token usage**, incl
 - `GET /api/v1/voice/sessions/{id}/config` — the session's saved voice binding.
 - `POST /api/v1/voice/sessions/{id}/secret`, `/call`, `/hangup`, `GET .../state` — the call lifecycle. Only Realtime needs a short-lived provider credential for the browser.
 - `WS /api/v1/voice/sessions/{id}/audio` — server-owned GPT Live and PersonaPlex audio transport.
+
+The session routes above and the audio socket apply the same access check as other session requests: an API key can use only the voice sessions it started (and only within its project and agents), while the owner can use any. Workers the call hands work to run as the same key, on the key's agents only.

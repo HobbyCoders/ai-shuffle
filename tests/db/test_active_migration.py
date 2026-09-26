@@ -12,18 +12,9 @@ Modeled on tests/db/test_placement_migration.py — it exercises the FULL
 `_run_column_migrations` pipeline against a shim-wrapped SQLite connection.
 """
 
-import pytest
 
 from app.db import database
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 def _revert_to_pre_v63(shim):

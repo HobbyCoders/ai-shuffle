@@ -33,7 +33,8 @@ from app.db import database
 from app.db import runs as runs_db
 from app.db import session_events as se
 from app.db import turns as turns_db
-from tests.core.test_native_usage_settlement_paths import _StubPool, _engine_patches
+from tests.core.engine_harness import StubPool
+from tests.core.test_native_usage_settlement_paths import _engine_patches
 
 ENGINE = "ses_luna_worker"
 
@@ -69,7 +70,7 @@ async def _run_worker_turn(tmp_path, fluid_events):
 
     frames = []
     with ExitStack() as stack:
-        _engine_patches(stack, _StubPool(state), str(tmp_path))
+        _engine_patches(stack, StubPool(state), str(tmp_path))
         run = runs_db.claim_run(sid, "runner-test", 60)
         turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="go")
         turn = turns_db.start_turn(turn["id"], run["id"], "runner-test")
@@ -77,6 +78,7 @@ async def _run_worker_turn(tmp_path, fluid_events):
             sid, run_id=run["id"], fence_token=run["fence_token"],
             turn_id=turn["id"], runner_id="runner-test",
         )
+        assert type(recorder) is TurnRecorder, "worker path must use the real recorder"
         await recorder.start("go", profile_id="default")
         try:
             async for frame in qe._stream_to_websocket_impl(
@@ -107,7 +109,7 @@ async def test_provider_alive_lands_in_the_worker_log_and_holds_the_feed(mock_db
 
     rows = se.get_events(sid)
     alive_rows = [r for r in rows if r["event_type"] == "turn.provider_alive"]
-    assert [r["payload"]["signal"] for r in alive_rows] == ["accepted"]
+    assert [r["payload"]["signal"] for r in alive_rows] == ["accepted"], rows
     # Nothing content-shaped came of it.
     assert [(r["event_type"], r["payload"]) for r in rows if r["event_type"] in (
         "assistant.text_delta", "assistant.thinking_delta",

@@ -3,7 +3,6 @@
 LIVE_MODEL = "gpt-live-1"
 PERSONAPLEX_MODEL = "fal-ai/personaplex/realtime"
 FAL_PROVIDER_ID = "__fal_voice__"
-VOICE_MODELS = (LIVE_MODEL, "gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime", PERSONAPLEX_MODEL)
 REALTIME_VOICES = ("marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
 LIVE_VOICES = REALTIME_VOICES + ("quartz", "ripple", "vesper", "willow", "stone", "gleam", "meridian", "bossa", "tempo", "beacon", "delta", "cinder")
 FAL_VOICES = tuple(f"{prefix}{i}" for prefix, count in (("NATF", 4), ("NATM", 4), ("VARF", 5), ("VARM", 5)) for i in range(count))

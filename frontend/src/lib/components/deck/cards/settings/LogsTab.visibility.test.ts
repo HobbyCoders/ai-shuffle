@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import LogsTab from './LogsTab.svelte';
@@ -32,4 +32,10 @@ it('stops the retained Logs panel polling when another feature is active', async
 	view.set({ type: 'settings' });
 	await tick();
 	expect(api.get).toHaveBeenCalledTimes(2);
+});
+
+it('names the log level filter for assistive tech', async () => {
+	render(LogsTab);
+	await tick();
+	expect(screen.getByRole('combobox', { name: 'Log level' })).toBeTruthy();
 });

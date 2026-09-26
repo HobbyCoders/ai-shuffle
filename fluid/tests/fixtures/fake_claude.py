@@ -58,6 +58,12 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             ``permissionDecision: deny`` answer becomes an
                             error tool_result carrying the reason, anything
                             else runs the command.
+  v  withdrawn permission:  a Bash tool_use and its ``can_use_tool``, then
+                            (without reading stdin, after a short pause) a
+                            rate_limit_event and a ``control_cancel_request``
+                            for that request, as when a PermissionRequest hook
+                            in the CLI's own settings answered first; the call
+                            then runs and the turn finishes.
 
 Every scenario answers an ``initialize`` control_request with success and
 remembers the hook callback ids it registered (``HOOK_CALLBACKS``).
@@ -71,6 +77,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 
 def emit(obj: dict) -> None:
@@ -356,6 +363,29 @@ def turn_hooked_tool(sid: str) -> None:
     emit(result_frame(sid))
 
 
+def turn_withdrawn_permission(sid: str) -> None:
+    """The CLI stops waiting on its own prompt and carries on streaming."""
+    tid = "toolu_withdrawn_1"
+    args = {"command": "make clean"}
+    emit(assistant_frame(
+        sid, [{"type": "tool_use", "id": tid, "name": "Bash", "input": args}], "tool_use",
+    ))
+    emit({"type": "control_request", "request_id": "cli_req_withdrawn", "request": {
+        "subtype": "can_use_tool", "tool_name": "Bash", "input": args, "tool_use_id": tid,
+    }})
+    time.sleep(0.3)  # the host's prompt is open by now
+    emit({"type": "rate_limit_event", "session_id": sid, "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "utilization": 0.25,
+    }})
+    emit({"type": "control_cancel_request", "request_id": "cli_req_withdrawn"})
+    emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": tid,
+        "content": [{"type": "text", "text": "cleaned"}], "is_error": False,
+    }]}})
+    emit(assistant_frame(sid, [{"type": "text", "text": "Cleaned up."}], "end_turn"))
+    emit(result_frame(sid))
+
+
 def turn_oversize(sid: str) -> None:
     """A tool result the CLI echoes whole: 300 KB in one user frame."""
     tid = "toolu_fake_big"
@@ -506,6 +536,8 @@ def main() -> int:
             turn_long_stream(session_id)
         elif scenario == "u":
             turn_hooked_tool(session_id)
+        elif scenario == "v":
+            turn_withdrawn_permission(session_id)
         elif scenario == "e":
             turn_simple(session_id)
             if not wake_emitted:

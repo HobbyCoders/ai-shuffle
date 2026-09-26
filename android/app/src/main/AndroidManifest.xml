@@ -6,8 +6,6 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
@@ -36,8 +34,6 @@
         <activity android:name=".ui.ChatActivity" android:exported="false" />
         <activity android:name=".ui.OfflineDemoActivity" android:exported="false" />
         <activity android:name=".ui.WorkerRepairActivity" android:exported="false" />
-        <activity android:name=".voice.VoiceCallActivity" android:exported="false" android:launchMode="singleTask" />
-        <service android:name=".voice.VoiceCallService" android:exported="false" android:foregroundServiceType="microphone" />
         <service android:name=".tools.ShuffleAccessibilityService" android:exported="true"
             android:label="@string/accessibility_label" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>

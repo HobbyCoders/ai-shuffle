@@ -10,7 +10,6 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
 
 from app.db.base import get_db
 from app.network import engine

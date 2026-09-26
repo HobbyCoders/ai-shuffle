@@ -17,6 +17,7 @@ from app.core import (
 )
 from app.core.codex_rate_limit_resets import CODEX_USER_AGENT
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 ROOT = "/api/v1/model-providers"
@@ -35,10 +36,6 @@ def _async_client_shutdown_compat(monkeypatch):
         monkeypatch.setattr(
             httpx.AsyncClient, "close", httpx.AsyncClient.aclose, raising=False
         )
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _seed_provider(
@@ -117,12 +114,12 @@ class TestAdminAndProviderValidation:
         assert response.status_code in (401, 403)
 
     def test_missing_provider_is_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         response = authenticated_client.get(GET_PATH)
         assert response.status_code == 404
 
     def test_wrong_provider_kind_is_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.create_model_provider(
             provider_id=PROVIDER_ID,
             name="OpenRouter",
@@ -148,7 +145,7 @@ class TestAdminAndProviderValidation:
         provider_type,
         auth_mode,
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(provider_type=provider_type, auth_mode=auth_mode)
         _install_transport(monkeypatch, _success_handler)
 
@@ -160,7 +157,7 @@ class TestAdminAndProviderValidation:
     def test_encryption_locked_is_400_before_network(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         encryption.clear_encryption_key()
 
@@ -174,7 +171,7 @@ class TestAdminAndProviderValidation:
     def test_missing_access_token_is_reconnect_conflict(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(access_token=None)
 
         def _must_not_call(request):
@@ -188,7 +185,7 @@ class TestAdminAndProviderValidation:
     def test_needs_reauth_is_reconnect_conflict(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(needs_reauth=True)
 
         def _must_not_call(request):
@@ -204,7 +201,7 @@ class TestRequestContract:
     def test_get_uses_fixed_url_headers_and_five_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         captured = {}
 
@@ -233,7 +230,7 @@ class TestRequestContract:
     def test_get_omits_empty_account_header(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(account_id="")
         captured = {}
 
@@ -249,7 +246,7 @@ class TestRequestContract:
     def test_post_uses_fixed_url_exact_body_headers_and_ten_second_timeout(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         captured = {}
 
@@ -309,7 +306,7 @@ class TestInventoryNormalization:
     def test_normalizes_subset_order_unknowns_optionals_and_timestamps(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         payload = {
             "available_count": 3,
@@ -469,7 +466,7 @@ class TestInventoryNormalization:
     def test_invalid_inventory_contract_is_sanitized_502(
         self, authenticated_client, mock_db, monkeypatch, payload
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch, lambda request: httpx.Response(200, json=payload)
@@ -488,7 +485,7 @@ class TestConsumeOutcomes:
     def test_normalizes_all_four_outcomes(
         self, authenticated_client, mock_db, monkeypatch, outcome
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch,
@@ -506,7 +503,7 @@ class TestConsumeOutcomes:
     def test_windows_reset_defaults_to_zero(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch,
@@ -532,7 +529,7 @@ class TestConsumeOutcomes:
     def test_invalid_consume_contract_is_sanitized_502(
         self, authenticated_client, mock_db, monkeypatch, payload
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch, lambda request: httpx.Response(200, json=payload)
@@ -554,7 +551,7 @@ class TestUpstreamFailureSanitization:
         caplog,
         failure,
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         raw_body = "RAW-UPSTREAM-SECRET-BODY"
 
@@ -586,7 +583,7 @@ class TestRefreshOnUnauthorized:
     def test_first_401_refreshes_reloads_rotated_token_and_retries_once(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         requests = []
         refresh_calls = []
@@ -628,7 +625,7 @@ class TestRefreshOnUnauthorized:
     def test_second_401_returns_reconnect_without_second_refresh(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         request_count = 0
         refresh_count = 0
@@ -666,7 +663,7 @@ class TestRefreshOnUnauthorized:
         monkeypatch,
         refresh_result,
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider()
         _install_transport(
             monkeypatch,

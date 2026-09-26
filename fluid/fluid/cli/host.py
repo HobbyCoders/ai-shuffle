@@ -509,8 +509,7 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
-        # The Task tool derives an addressable name from the description
-        # (round 9: every worker used to be named after its agent type).
+        # The Task tool derives an addressable name from the description.
         name = str(input.get("name") or label)
         from fluid.swarm import current_launch
         launch = current_launch.get()
@@ -528,9 +527,7 @@ class CliHost:
 
         if input.get("mode", "sync") == "background":
             worker.task = asyncio.create_task(
-                self._run_child_detached(
-                    worker, child, worker.worker_session_id, UserTurn(content=prompt),
-                ),
+                self._run_child_detached(worker, child, UserTurn(content=prompt)),
                 name=f"fluid-task-{worker.task_id}",
             )
             return BackgroundTaskReceipt(
@@ -711,7 +708,7 @@ class CliHost:
         resumed.engine = child
         self.workers[resumed.task_id] = resumed
         resumed.task = asyncio.create_task(
-            self._run_child_detached(resumed, child, session_id, message),
+            self._run_child_detached(resumed, child, message),
             name=f"fluid-task-{resumed.task_id}",
         )
         # Register the run with the parent engine the way Task's background
@@ -865,11 +862,11 @@ class CliHost:
             list(parent_allowed) if parent_allowed is not None else None
         )
         if definition is not None and definition.tools:
-            from fluid.engine.native import _matches_tool_pattern
+            from fluid.engine.base import matches_tool_pattern
 
             wanted = list(definition.tools)
             if allowed is not None:
-                kept = [t for t in wanted if _matches_tool_pattern(t, allowed)]
+                kept = [t for t in wanted if matches_tool_pattern(t, allowed)]
                 if len(kept) < len(wanted):
                     log.info(
                         "subagent %s: %s outside the parent's tool allowlist, dropped",
@@ -981,16 +978,15 @@ class CliHost:
         if isinstance(host, CliHost):
             await host.wait_idle()
             await child.wait_turn()
-        text = await _final_assistant_text(child, session_id)
+        text = await final_assistant_text(child.store, session_id)
         if error and not text:
             text = f"subagent error: {error}"
         return status, text or "(the subagent returned no text)"
 
-    async def _run_child_detached(
-        self, worker: Worker, child: Any, session_id: str, op: Any
-    ) -> None:
+    async def _run_child_detached(self, worker: Worker, child: Any, op: Any) -> None:
+        # ``_build_child`` bound ``worker.worker_session_id`` to the child's session.
         try:
-            status, text = await self._run_child(child, session_id, op)
+            status, text = await self._run_child(child, worker.worker_session_id, op)
         except asyncio.CancelledError:
             worker.summary = "subagent cancelled"
             raise
@@ -1088,9 +1084,10 @@ def _monitor_summary(worker: Worker, code: int | None, *, cancelled: bool = Fals
     return f"`{worker.description}` — {head}\n{out}" if out else f"`{worker.description}` — {head}"
 
 
-async def _final_assistant_text(child: Any, session_id: str) -> str:
+async def final_assistant_text(store: Any, session_id: str) -> str:
+    """The last non-empty assistant text on the session's path, or ""."""
     try:
-        nodes = await child.store.load_path(session_id)
+        nodes = await store.load_path(session_id)
     except Exception:  # noqa: BLE001
         return ""
     for node in reversed(nodes):

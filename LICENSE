@@ -1,21 +1,22 @@
-MIT License
+AI Shuffle and Fluid
+Copyright (c) 2026 HobbyCoders. All rights reserved.
 
-Copyright (c) 2025 Claude Code SDK Contributors
+This software and its source code are proprietary and confidential.
+They are licensed, not sold. Use is permitted only under the AI Shuffle
+End User License Agreement (EULA) that accompanies a paid license or an
+authorized beta program. You may not copy, modify, distribute, sublicense,
+reverse engineer, or create derivative works from this software except as
+the EULA expressly allows.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+AI Shuffle can run third-party command-line tools, including Claude Code,
+that you install and sign in to yourself. Those tools bill through your own
+vendor accounts under those vendors' terms. HobbyCoders is not a party to
+that spend. "Claude" and "Anthropic" are trademarks of Anthropic, PBC and
+are used here only to identify those tools; no affiliation or endorsement
+is implied.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Third-party components redistributed with this software are listed, with
+their licenses, in THIRD_PARTY_NOTICES.md.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Copies of earlier versions that were published under the MIT License remain
+under that license for those copies only.

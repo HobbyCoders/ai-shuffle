@@ -52,6 +52,34 @@ async def test_validation_errors(tmp_path) -> None:
     assert out.is_error
 
 
+async def test_write_goes_through_temp_file_and_rename(tmp_path, monkeypatch) -> None:
+    """A failed rename leaves the previous ledger intact and no temp file."""
+    import os
+
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    await ledger_handler(
+        {"action": "add", "section": "decisions", "text": "keep this"}, ctx)
+    before = read_ledger(ctx)
+    ledger_dir = tmp_path / ".fluid" / "ledger"
+    files_before = sorted(p.name for p in ledger_dir.iterdir())
+
+    renames: list[tuple[str, str]] = []
+
+    def failing_replace(src, dst) -> None:
+        renames.append((str(src), str(dst)))
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    out = await ledger_handler(
+        {"action": "add", "section": "decisions", "text": "lost"}, ctx)
+    assert out.is_error and "failed to write ledger" in out.text
+    assert len(renames) == 1 and renames[0][0].endswith(".tmp")
+    monkeypatch.undo()
+    assert read_ledger(ctx) == before
+    assert "lost" not in read_ledger(ctx)
+    assert sorted(p.name for p in ledger_dir.iterdir()) == files_before
+
+
 async def test_read_ledger_survives_resume(tmp_path) -> None:
     ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
     await ledger_handler(

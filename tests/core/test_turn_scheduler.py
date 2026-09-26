@@ -21,9 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core import idle_reader, session_runtime, turn_manager, turn_scheduler
+from app.core import session_runtime, turn_manager, turn_scheduler
 from app.core.task_registry import task_registry
-from app.core.account_failover import FailoverDecision
 from app.core.compact_continue import AUTO_CONTINUE_PROMPT
 from app.db import session_events as se_db
 from app.db import turns as turns_db
@@ -33,19 +32,11 @@ from app.db import turns as turns_db
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
+@pytest.fixture(autouse=True)
+def _short_terminal_batch_window(monkeypatch):
+    """The real 2s terminal-batch window made every on_task_terminal test wait
+    it out; keep a short (non-zero, so batching still happens) window."""
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
 
 
 @pytest.fixture(autouse=True)
@@ -53,12 +44,10 @@ def _clean_module_state():
     from app.core import provider_agent_supervisor
     provider_agent_supervisor.reset()
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     yield
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
 
@@ -226,7 +215,6 @@ async def test_continuations_keep_order_and_dedupe_each_completion(mock_db):
     with patch.object(turn_scheduler, "kick"), patch.object(turn_scheduler, "_kick_after_batch_window"):
         await turn_scheduler.on_task_terminal("owner", {
             "task_id": "child", "status": "completed", "summary": "original report",
-            "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
         })
         for report in ("first continuation", "second continuation"):
             turn_id = await turn_scheduler.on_agent_message("child", "owner", report, reply_to="owner")
@@ -427,114 +415,48 @@ async def test_aborted_empty_queue_no_spurious_turn(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# (1) FAILOVER — order, attempts accumulation, cap, no re-append
+# (1) FAILOVER — rate-limited state only, no retry, drain still runs
 # ---------------------------------------------------------------------------
 
-async def test_failover_runs_before_queue_drain(mock_db):
-    # A 429 settlement with a non-empty queue must STILL enqueue the failover
-    # retry — if drain ran first it would return before the failover check —
-    # AND the retry must sort AHEAD of the previously-queued user turn (the
-    # retry continues the settled turn; it is not preempted by work a user
-    # queued during the failed turn).
+async def test_failover_surfaces_then_queue_drains(mock_db):
+    # A 429 settlement goes through attempt_failover (the rate-limited
+    # notification) but enqueues no retry (OC-1), so the queued user turn is
+    # the one the drain starts.
     settled = _settled_turn(
         "f1", prompt="retry me", api_error_status=429,
         payload={"api_user_id": "u1"},
-        profile_id="p1", project_id="proj-1", worktree_id="wt-1",
     )
     queued = turns_db.enqueue_turn("f1", "queue", prompt="queued behind")
 
-    async def fake_failover(session_id, api_user_id, attempted):
-        assert session_id == "f1"
-        assert api_user_id == "u1"
-        assert attempted == set()
-        attempted.update({"acc-1", "acc-2"})  # mutated like the real one
-        return FailoverDecision(retry=True, account_id="acc-2", switched=True)
-
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover", new=fake_failover,
+        attempt = stack.enter_context(patch(
+            "app.core.account_failover.attempt_failover",
+            new=AsyncMock(return_value=None),
         ))
         await turn_scheduler.on_turn_settled("f1", settled["id"], "completed")
         await _drain_kicks()
 
-    retries = _by_source("f1", "failover")
-    assert len(retries) == 1
-    retry = retries[0]
-    assert retry["prompt"] == "retry me"
-    assert retry["parent_turn_id"] == settled["id"]
-    assert retry["payload"]["failover_attempted"] == ["acc-1", "acc-2"]
-    assert retry["payload"]["api_user_id"] == "u1"
-    assert retry["profile_id"] == "p1"
-    assert retry["project_id"] == "proj-1"
-    assert retry["worktree_id"] == "wt-1"
-    # Front-of-queue: the retry sorts strictly before the user turn queued
-    # during the failed turn, so the kick STARTS the retry, not that turn.
-    assert retry["position"] < queued["position"]
+    attempt.assert_awaited_once_with("f1", "u1")
+    assert _by_source("f1", "failover") == []
     execute.assert_awaited_once()
-    assert execute.await_args.args[0]["id"] == retry["id"]
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
-    # No re-append: the retry adds NO message.user / no new events — the log
-    # still holds only the seeded terminal event.
+    # No re-append: the log still holds only the seeded terminal event.
     types = [r["event_type"] for r in se_db.get_events("f1")]
     assert types == ["turn.completed"]
 
 
-async def test_failover_attempts_accumulate_across_retries(mock_db):
-    settled = _settled_turn(
-        "f2", source="failover", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1"], "api_user_id": "u2"},
-    )
-
-    async def fake_failover(session_id, api_user_id, attempted):
-        assert attempted == {"acc-1"}  # prior attempts derived from payload
-        attempted.add("acc-2")
-        return FailoverDecision(retry=True, account_id="acc-2", switched=True)
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover", new=fake_failover,
-        ))
-        await turn_scheduler.on_turn_settled("f2", settled["id"], "completed")
-        await _drain_kicks()
-
-    (retry,) = _by_source("f2", "failover")
-    assert retry["payload"]["failover_attempted"] == ["acc-1", "acc-2"]
-
-
-async def test_failover_cap_exhausted_no_retry(mock_db):
-    settled = _settled_turn(
-        "f3", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1", "acc-2"]},
-    )
-
-    with ExitStack() as stack:
-        execute = stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.account_failover.attempt_failover",
-            new=AsyncMock(return_value=FailoverDecision(retry=False)),
-        ))
-        await turn_scheduler.on_turn_settled("f3", settled["id"], "completed")
-        await _drain_kicks()
-
-    assert _by_source("f3", "failover") == []
-    execute.assert_not_awaited()  # nothing queued, nothing started
-
-
 async def test_chained_failover_exhaustion_terminates(mock_db):
-    # A source=failover RETRY turn itself settles with a 429; its accumulated
-    # payload.failover_attempted leaves attempt_failover no candidate
-    # (retry=False) → NO new enqueue, no crash — the chain terminates cleanly.
+    # A legacy source=failover turn itself settles with a 429: the
+    # rate-limited notification fires and NO new turn is enqueued.
     settled = _settled_turn(
         "f6", source="failover", prompt="retry me", api_error_status=429,
-        payload={"failover_attempted": ["acc-1", "acc-2"], "api_user_id": "u6"},
+        payload={"api_user_id": "u6"},
     )
 
-    async def fake_failover(session_id, api_user_id, attempted):
-        # Prior attempts derive from the retry turn's own payload.
-        assert attempted == {"acc-1", "acc-2"}
-        return FailoverDecision(retry=False)
+    async def fake_failover(session_id, api_user_id):
+        assert api_user_id == "u6"
 
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
@@ -677,12 +599,7 @@ async def test_unpark_synthesizes_notification_turn(mock_db):
     )
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["task-7"])
-    # task-7 is the parent's OWN background work (ownership gate admits it). It
-    # terminates KILLED: the app still owns a kill wake (there is no CLI at-rest
-    # resume for a kill, so the app enqueue is the sole delivery), whereas a
-    # *completed* top-level agent while parked is CLI-owned and suppressed
-    # (A-1). This test is the sole coverage of the wake PAYLOAD shape, so it is
-    # repointed to the terminal the app still owns.
+    # task-7 is the parent's OWN background work (ownership gate admits it).
     task_registry.start_task("u1", "task-7", "agent", "bg", tool_use_id="tu-7")
     task_registry.mark_background_launch("u1", "tu-7")
 
@@ -1204,14 +1121,14 @@ async def test_content_bearing_frame_not_dropped_by_guard(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# (4) UNPARK — A-1 CLI-owned at-rest suppression (bug 1: duplicate/empty wakes)
+# (4) UNPARK — the app owns every at-rest wake
 # ---------------------------------------------------------------------------
 
-async def test_completed_top_level_agent_no_app_unpark_cli_owns(mock_db):
-    # A top-level backgrounded AGENT completes while its parent turn is PARKED:
-    # the CLI itself injects the rich <task-notification> follow-up turn, so the
-    # app's own content-poor wake would be a SECOND, empty delivery. A-1 suppresses
-    # the app enqueue entirely. (Fails before A-1: one empty unpark row.)
+async def test_completed_top_level_agent_while_parked_gets_the_app_wake(mock_db):
+    # A top-level backgrounded AGENT completes while its parent turn is PARKED.
+    # No leg has a CLI-authored follow-up turn any more (the delegated CLI's own
+    # Task/Agent are banned and its background tasks disabled), so the app's
+    # unpark is the only delivery, with or without the worker ``origin`` marker.
     parked = turns_db.enqueue_turn("ca1", "user", prompt="kick off bg")
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["agent-1"])
@@ -1228,19 +1145,16 @@ async def test_completed_top_level_agent_no_app_unpark_cli_owns(mock_db):
         await turn_scheduler.on_task_terminal("ca1", bare)
         await _drain_kicks()
 
-    assert _by_source("ca1", "unpark") == []  # CLI owns the wake; app adds nothing
-    execute.assert_not_awaited()
+    (wake,) = _by_source("ca1", "unpark")
+    assert "<task-id>agent-1</task-id>" in wake["prompt"]
+    assert wake["parent_turn_id"] == parked["id"]
+    execute.assert_awaited_once()
 
 
-async def test_completed_provider_agent_worker_is_never_cli_owned(mock_db):
+async def test_completed_provider_agent_worker_wakes_parked_parent(mock_db):
     """A ProviderAgent worker is registered ``kind == "agent"`` (load-bearing —
-    it pins the parent in the session pool), so a COMPLETED worker resting under
-    a PARKED parent matches every other condition of the A-1 suppression. But
-    there is no CLI task behind it at all: the worker is a separate session
-    dispatched from an MCP tool handler, so no CLI follow-up turn is ever coming
-    and suppressing the app wake would strand the parent parked forever. The
-    ``origin`` marker on the frame is what keeps A-1 scoped to genuine CLI-native
-    sub-agents."""
+    it pins the parent in the session pool) and has no CLI task behind it, so a
+    COMPLETED worker resting under a PARKED parent must get the app's wake."""
     parked = turns_db.enqueue_turn("pw1", "user", prompt="dispatch a worker")
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["worker-1"])
@@ -1249,7 +1163,6 @@ async def test_completed_provider_agent_worker_is_never_cli_owned(mock_db):
     frame = {
         "task_id": "worker-1", "status": "completed", "tool_use_id": "tu-pw1",
         "summary": "the worker's report",
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     }
 
     with ExitStack() as stack:
@@ -1260,7 +1173,7 @@ async def test_completed_provider_agent_worker_is_never_cli_owned(mock_db):
         signal = await turn_scheduler.on_task_terminal("pw1", frame)
         await _drain_kicks()
 
-    assert signal is None  # never the cli-owned-wake grace signal
+    assert signal is None
     (wake,) = _by_source("pw1", "unpark")
     assert "<task-id>worker-1</task-id>" in wake["prompt"]
     assert "<summary>the worker's report</summary>" in wake["prompt"]
@@ -1280,7 +1193,6 @@ async def test_second_provider_agent_frame_does_not_double_wake(mock_db):
     frame = {
         "task_id": "worker-2", "status": "error", "tool_use_id": "tu-pw2",
         "summary": "worker failed: provider blew up",
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     }
 
     with ExitStack() as stack:
@@ -1298,32 +1210,9 @@ async def test_second_provider_agent_frame_does_not_double_wake(mock_db):
     assert len(_by_source("pw2", "unpark")) == len(first)
 
 
-async def test_origin_marker_leaves_cli_native_suppression_intact(mock_db):
-    """Guard the scope of the marker: an ordinary CLI-native frame (no
-    ``origin``) still takes the A-1 suppression branch."""
-    parked = turns_db.enqueue_turn("pw3", "user", prompt="kick off bg")
-    turns_db.start_turn(parked["id"], None, "runner")
-    turns_db.park_turn(parked["id"], ["agent-3"])
-    task_registry.start_task("pw3", "agent-3", "agent", "bg", tool_use_id="tu-pw3")
-    task_registry.mark_background_launch("pw3", "tu-pw3")
-    frame = {"task_id": "agent-3", "status": "completed", "tool_use_id": "tu-pw3"}
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.query_engine._read_task_output_file", return_value="",
-        ))
-        signal = await turn_scheduler.on_task_terminal("pw3", frame)
-        await _drain_kicks()
-
-    assert signal == "cli-owned-wake"
-    assert _by_source("pw3", "unpark") == []
-
-
 async def test_own_shell_completion_still_enqueues_unpark(mock_db):
-    # A-1 conservatism: a backgrounded SHELL (kind "shell") completing while parked
-    # is NOT a CLI-owned agent at-rest wake — the CLI does not own a shell's resume,
-    # so the app MUST still deliver its completion.
+    # A backgrounded SHELL (kind "shell") completing while parked: the app
+    # delivers its completion.
     parked = turns_db.enqueue_turn("sh1", "user", prompt="run bg shell")
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["shell-1"])
@@ -1383,9 +1272,8 @@ async def test_monitor_shell_is_not_pool_pinning_background_work(mock_db):
 
 
 async def test_completed_agent_not_parked_still_enqueues_unpark(mock_db):
-    # A-1 fires ONLY when the parent is parked (the CLI's rich follow-up exists
-    # only in the parked state). A completed own agent with NO parked turn keeps
-    # the app wake — otherwise the completion is lost.
+    # A completed own agent with NO parked turn gets the app wake too —
+    # otherwise the completion is lost.
     live = turns_db.enqueue_turn("np1", "user", prompt="working")
     turns_db.start_turn(live["id"], None, "runner")  # live, NOT parked
     task_registry.start_task("np1", "agent-1", "agent", "bg", tool_use_id="tu-np1")
@@ -1404,47 +1292,12 @@ async def test_completed_agent_not_parked_still_enqueues_unpark(mock_db):
     assert "<task-id>agent-1</task-id>" in wake["prompt"]
 
 
-async def test_late_frame_after_cli_owned_suppression_does_not_wake(mock_db):
-    # F1: a completed top-level agent frame while PARKED is CLI-owned → the app
-    # suppresses its enqueue AND latches the woken mark (the CLI emits a rest-
-    # notification each rest; latching lets the A-3 guard drop later duplicate
-    # frames instead of enqueueing an empty wake). A SECOND frame for the same
-    # task, now with NO parked turn (A-1 no longer fires), must find the latch set
-    # and NOT enqueue a fresh wake.
-    parked = turns_db.enqueue_turn("clf1", "user", prompt="kick off bg")
-    turns_db.start_turn(parked["id"], None, "runner")
-    turns_db.park_turn(parked["id"], ["agent-1"])
-    task_registry.start_task("clf1", "agent-1", "agent", "bg", tool_use_id="tu-clf1")
-    task_registry.mark_background_launch("clf1", "tu-clf1")
-    frame = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-clf1"}
-
-    with ExitStack() as stack:
-        execute = stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.query_engine._read_task_output_file", return_value="",
-        ))
-        await turn_scheduler.on_task_terminal("clf1", frame)
-        await _drain_kicks()
-        assert _by_source("clf1", "unpark") == []  # CLI owns the wake; app suppressed
-        assert task_registry.is_woken("clf1", "agent-1")  # F1: latched on suppression
-
-        # The parent unparks (the CLI's follow-up ran); the SECOND late frame for
-        # the same task no longer sees a parked turn, so A-1 stays dormant — the
-        # F1 latch is what blocks the (c) fresh enqueue.
-        turns_db.settle_turn(parked["id"], "completed")
-        await turn_scheduler.on_task_terminal("clf1", frame)
-        await _drain_kicks()
-
-    assert _by_source("clf1", "unpark") == []
-    execute.assert_not_awaited()
-
-
 # ---------------------------------------------------------------------------
 # (4) UNPARK — A-2 frame upgrading (bare TaskUpdated then rich TaskNotification)
 # ---------------------------------------------------------------------------
 
 async def test_bare_then_rich_frame_upgrades_prompt(mock_db):
-    # NOT parked (A-1 dormant) so the app owns the wake. A bare TaskUpdated frame
+    # NOT parked. A bare TaskUpdated frame
     # enqueues the wake first; the rich TaskNotification frame for the SAME task
     # then upgrades the stored frame + prompt in place (no second row, no dup task).
     live = turns_db.enqueue_turn("bt1", "user", prompt="working")
@@ -1771,10 +1624,9 @@ async def test_unpark_enqueue_survives_shutdown_kick_suppression(mock_db):
 # Wiring
 # ---------------------------------------------------------------------------
 
-async def test_install_registers_all_three_seams(mock_db):
+async def test_install_registers_both_seams(mock_db):
     turn_scheduler.install()
     assert session_runtime._on_turn_settled is turn_scheduler.on_turn_settled
-    assert idle_reader._on_task_terminal is turn_scheduler.on_task_terminal
     assert turn_manager._kick_hook is turn_scheduler.kick
 
 
@@ -2144,34 +1996,6 @@ async def test_failed_delivery_can_retry_and_concurrent_terminals_consume_once(m
 
 
 
-
-
-async def test_a_cli_owned_wake_is_never_steered(mock_db):
-    """A-1 keeps precedence: a top-level backgrounded agent completing while the
-    parent is parked is the CLI's wake to deliver, so the app neither steers nor
-    enqueues. (A parked parent has no live runtime in practice — this pins the
-    order of the two decisions.)"""
-    parked = turns_db.enqueue_turn("mt6", "user", prompt="kick off bg")
-    turns_db.start_turn(parked["id"], None, "runner")
-    turns_db.park_turn(parked["id"], ["agent-mt6"])
-    _own_agent_task("mt6", "agent-mt6")
-    frame = {
-        "task_id": "agent-mt6", "status": "completed",
-        "tool_use_id": "tu-agent-mt6",
-    }
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        stack.enter_context(patch(
-            "app.core.query_engine._read_task_output_file", return_value="",
-        ))
-        runtime = stack.enter_context(_live_runtime("mt6"))
-        signal = await turn_scheduler.on_task_terminal("mt6", frame)
-        await _drain_kicks()
-
-    assert signal == "cli-owned-wake"
-    assert runtime.steers == []
-    assert _by_source("mt6", "unpark") == []
 
 
 async def test_delivery_latches_terminal_notified(mock_db):

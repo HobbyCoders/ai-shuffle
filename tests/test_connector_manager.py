@@ -4,7 +4,7 @@ Tests for ConnectorManager — lifecycle, public accessors, encryption helpers.
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.core.connectors.manager import ConnectorManager
 from app.core.connectors.base import BaseConnector, ConnectorStatus
@@ -271,48 +271,23 @@ class TestShutdown:
 
 
 class TestPermissionResponse:
+    """Tool approvals are answered in the owner's app; chat answers are dropped."""
+
     @pytest.mark.asyncio
-    async def test_approved_forwards_allow(self, manager):
-        """A connector approval calls permission_handler.respond with decision=allow."""
+    @pytest.mark.parametrize("approved", [True, False])
+    async def test_chat_answers_never_reach_the_permission_handler(self, manager, approved):
         with patch(
             "app.core.permission_handler.permission_handler.respond",
             new=AsyncMock(return_value={"resolved": True}),
         ) as mock_respond:
-            await manager.handle_permission_response("req-1", "sess-1", True)
-
-        mock_respond.assert_awaited_once()
-        kwargs = mock_respond.await_args.kwargs
-        assert kwargs["request_id"] == "req-1"
-        assert kwargs["session_id"] == "sess-1"
-        assert kwargs["decision"] == "allow"
-        assert kwargs["broadcast_func"] is None
-
-    @pytest.mark.asyncio
-    async def test_denied_forwards_deny(self, manager):
-        with patch(
-            "app.core.permission_handler.permission_handler.respond",
-            new=AsyncMock(return_value={"resolved": True}),
-        ) as mock_respond:
-            await manager.handle_permission_response("req-2", "sess-2", False)
-
-        assert mock_respond.await_args.kwargs["decision"] == "deny"
-
-    @pytest.mark.asyncio
-    async def test_missing_ids_are_ignored(self, manager):
-        """No respond() call when request_id or session_id is missing."""
-        with patch(
-            "app.core.permission_handler.permission_handler.respond",
-            new=AsyncMock(),
-        ) as mock_respond:
-            await manager.handle_permission_response("", "sess-3", True)
-            await manager.handle_permission_response("req-3", "", True)
+            await manager.handle_permission_response("req-1", "sess-1", approved)
 
         mock_respond.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_resolves_real_pending_request(self, manager):
-        """End-to-end: a queued request unblocks when the connector approves."""
-        from app.core.permission_handler import permission_handler, PermissionResultAllow
+    async def test_chat_approval_leaves_the_request_pending(self, manager):
+        """End-to-end: a chat approval does not unblock the waiting tool call."""
+        from app.core.permission_handler import permission_handler
 
         permission_handler.reset_all()
 
@@ -329,11 +304,15 @@ class TestPermissionResponse:
                 broadcast_func=_broadcast,
             )
         )
-        # Let the request register in the pending queue
         await asyncio.sleep(0.05)
 
         await manager.handle_permission_response("req-e2e", "sess-e2e", True)
+        await asyncio.sleep(0.05)
 
-        result = await asyncio.wait_for(request_task, timeout=2.0)
-        assert isinstance(result, PermissionResultAllow)
+        assert not request_task.done()
+        request_task.cancel()
+        try:
+            await request_task
+        except (asyncio.CancelledError, Exception):
+            pass
         permission_handler.reset_all()

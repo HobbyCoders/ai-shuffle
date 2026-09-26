@@ -5,7 +5,7 @@
  * - init() / destroy() lifecycle
  * - Session-restore guards (sessionStorage-based)
  *
- * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
+ * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
 import type { ActiveSessionState } from '../active-session';
@@ -105,7 +105,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 		const initGen = bumpInitGeneration();
 
 		const skipRestore = getSkipRestore();
-		console.debug(`[ActiveSession] init(): skipRestore=${skipRestore}, initGen=${initGen}, currentSessionId=${getState().sessionId}, messages=${getState().messages.length}`);
 
 		try {
 			// Boot waterfall (finding S5): these two preference reads are
@@ -122,7 +121,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 			]);
 
 			if (initGen !== getInitGeneration()) {
-				console.debug(`[ActiveSession] init(): stale (gen ${initGen} < ${getInitGeneration()}), bailing`);
 				return;
 			}
 
@@ -130,7 +128,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 			const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
 			if (skipRestore) {
-				console.debug('[ActiveSession] init(): skipRestore=true, keeping cleared state');
 				update(s => ({
 					...s,
 					profile: s.profile || defaultProfile,
@@ -140,8 +137,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 					),
 				}));
 			} else {
-				console.debug(`[ActiveSession] init(): persisted sessionId=${persisted?.sessionId ?? 'null'}`);
-
 				if (persisted) {
 					update(s => ({
 						...s,

@@ -12,10 +12,13 @@
 	 * - LOCAL scope (.claude/.mcp.json) — edit
 	 * - PROJECT scope (.mcp.json) — edit
 	 */
-	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp.svelte';
+	import { untrack } from 'svelte';
+	import { mcp, projectMcpServers, mcpLoading, mcpError } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
 	import './project-tabs.css';
 
@@ -51,11 +54,45 @@
 		if (e.key === 'Escape') actionsOpenKey = null;
 	}
 
-	// Load MCP servers when project changes
+	// The project whose servers the store holds, as far as this tab knows: set
+	// when this tab's newest load for the current project resolves. Until then
+	// (right after a switch, or when that load fails) the list is empty and no
+	// row can act, so the previous project's names are never shown or sent
+	// with the new project's id. A slower load for a project already left is
+	// ignored (the store also drops its late response).
+	let listedProjectId = $state<string | null>(null);
+	const listed = $derived(listedProjectId !== null && listedProjectId === projectId);
+	let loadSeq = 0;
+	async function reload(id: string): Promise<void> {
+		const seq = ++loadSeq;
+		await mcp.loadProjectServers(id);
+		if (seq === loadSeq && id === projectId) listedProjectId = id;
+	}
+	/** After an action for ``id`` finished: if the user switched meanwhile, the
+	 *  action's own reload (or optimistic update) left ``id``'s servers in the
+	 *  store, so fetch the current project's again. */
+	function resyncIfSwitched(id: string) {
+		if (id !== projectId) reload(projectId).catch(() => {});
+	}
+
+	// Load MCP servers when project changes. An open editor, a pending removal,
+	// an open row tray and the search belong to the previous project, so drop them.
+	let loadedProjectId: string | null = null;
 	$effect(() => {
-		if (projectId) {
-			mcp.loadProjectServers(projectId);
-		}
+		const id = projectId;
+		if (!id) return;
+		untrack(() => {
+			if (loadedProjectId !== null && loadedProjectId !== id) {
+				showMcpServerForm = false;
+				editingMcpServer = null;
+				pendingRemove = null;
+				actionsOpenKey = null;
+				searchQuery = '';
+			}
+			loadedProjectId = id;
+			// A failed load is shown through $mcpError.
+			reload(id).catch(() => {});
+		});
 	});
 
 	// Filter servers by search
@@ -70,34 +107,49 @@
 		);
 	}
 
-	const filteredUserServers = $derived(() => filterServers($projectMcpServers.user || []));
-	const filteredInstalledServers = $derived(() => filterServers($projectMcpServers.installed || []));
-	const filteredLocalServers = $derived(() => filterServers($projectMcpServers.local || []));
-	const filteredProjectServers = $derived(() => filterServers($projectMcpServers.project || []));
+	const EMPTY: McpServerInfo[] = [];
+	const shown = $derived(
+		listed ? $projectMcpServers : { user: EMPTY, installed: EMPTY, local: EMPTY, project: EMPTY }
+	);
+	const filteredUserServers = $derived(() => filterServers(shown.user || []));
+	const filteredInstalledServers = $derived(() => filterServers(shown.installed || []));
+	const filteredLocalServers = $derived(() => filterServers(shown.local || []));
+	const filteredProjectServers = $derived(() => filterServers(shown.project || []));
 
 	const totalServers = $derived(
-		($projectMcpServers.user?.length || 0) +
-		($projectMcpServers.installed?.length || 0) +
-		($projectMcpServers.local?.length || 0) +
-		($projectMcpServers.project?.length || 0)
+		(shown.user?.length || 0) +
+		(shown.installed?.length || 0) +
+		(shown.local?.length || 0) +
+		(shown.project?.length || 0)
 	);
 
 	// Toggle server enabled/disabled for this project
 	async function handleToggle(server: McpServerInfo) {
+		if (!listed) return;
+		const id = projectId;
 		try {
-			await mcp.toggleProjectServer(projectId, server.name, !server.enabled);
+			await mcp.toggleProjectServer(id, server.name, !server.enabled);
 		} catch (e) {
 			console.error('Failed to toggle MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
-	// Remove server
+	// Remove server (after confirmation: a global server is deleted everywhere)
+	let pendingRemove = $state<McpServerInfo | null>(null);
+	async function confirmRemove() {
+		const server = pendingRemove;
+		pendingRemove = null;
+		if (server && listed) await handleRemoveServer(server);
+	}
 	async function handleRemoveServer(server: McpServerInfo) {
+		const id = projectId;
 		try {
-			await mcp.removeProjectServer(projectId, server.name, server.scope as 'user' | 'installed' | 'local' | 'project');
+			await mcp.removeProjectServer(id, server.name, server.scope as 'user' | 'installed' | 'local' | 'project');
 		} catch (e) {
 			console.error('Failed to remove MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
 	// Add new local/project server
@@ -109,6 +161,7 @@
 
 	// Edit local/project/installed server
 	function handleEditServer(server: McpServerInfo) {
+		if (!listed) return;
 		editingMcpServer = server;
 		mcpSelectedScope = server.scope as 'installed' | 'local' | 'project';
 		showMcpServerForm = true;
@@ -125,26 +178,30 @@
 		description?: string;
 		scope?: 'installed' | 'local' | 'project';
 	}) {
+		const id = projectId;
 		try {
 			const scope = config.scope || mcpSelectedScope;
 			if (editingMcpServer) {
 				await mcp.updateProjectServer(
-					projectId,
+					id,
 					editingMcpServer.name,
 					config,
 					scope
 				);
 			} else {
-				await mcp.addProjectServer(projectId, {
+				await mcp.addProjectServer(id, {
 					...config,
 					scope: scope as 'installed' | 'local' | 'project'
 				});
 			}
-			showMcpServerForm = false;
-			editingMcpServer = null;
+			if (id === projectId) {
+				showMcpServerForm = false;
+				editingMcpServer = null;
+			}
 		} catch (e) {
 			console.error('Failed to save MCP server:', e);
 		}
+		resyncIfSwitched(id);
 	}
 
 	// Server type label helper
@@ -160,7 +217,7 @@
 	watchResources(['mcp'], async () => {
 		const selected = editingMcpServer;
 		const id = projectId;
-		await mcp.loadProjectServers(id);
+		await reload(id);
 		if (id !== projectId || !selected || editingMcpServer !== selected || !showMcpServerForm) return;
 		const fresh = Object.values($projectMcpServers).flat().find((server) => server.name === selected.name && server.scope === selected.scope);
 		if (remoteForm?.canRefreshRemote(!fresh)) {
@@ -197,7 +254,7 @@
 				class:on={server.enabled}
 				role="switch"
 				aria-checked={server.enabled}
-				aria-label={server.enabled ? 'Disable server' : 'Enable server'}
+				aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`}
 				title={server.enabled ? 'Disable server' : 'Enable server'}
 				onclick={() => handleToggle(server)}
 			><i></i></button>
@@ -207,7 +264,7 @@
 					onToggle={(e) => toggleRowActions(e, rowKey(server))}
 					label="Server actions"
 				>
-					<button type="button" class="icon-btn danger" title="Remove server" onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; handleRemoveServer(server); }}>
+					<button type="button" class="icon-btn danger" title="Remove server" aria-label={`Remove ${server.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; pendingRemove = server; }}>
 						<Trash2 size={15} />
 					</button>
 				</RowActionMenu>
@@ -223,7 +280,7 @@
 			{@render serverMeta(server)}
 		</div>
 		<div class="ctl">
-			<button type="button" class="icon-btn" title="Edit server" onclick={() => handleEditServer(server)}>
+			<button type="button" class="icon-btn" title="Edit server" aria-label={`Edit ${server.name}`} onclick={() => handleEditServer(server)}>
 				<Pencil size={15} />
 			</button>
 		</div>
@@ -237,6 +294,10 @@
 			<Search />
 			<input type="text" bind:value={searchQuery} placeholder="Search MCP servers…" class="inp" />
 		</div>
+	{/if}
+
+	{#if $mcpError}
+		<Banner severity="error" message={$mcpError} dismissible onDismiss={() => mcp.clearError()} />
 	{/if}
 
 	<!-- Global (User) MCP Servers -->
@@ -292,13 +353,25 @@
 	{/if}
 
 	<!-- Empty state -->
-	{#if totalServers === 0}
+	{#if listed && totalServers === 0 && !$mcpError}
 		<div class="empty-state">
 			<Server />
 			<p class="es-title">No MCP servers available</p>
 			<p class="es-desc">Add MCP servers from the MCP Servers card to see them here.</p>
 		</div>
 	{/if}
+
+	<ConfirmDialog
+		open={!!pendingRemove}
+		title="Remove MCP server"
+		message={pendingRemove?.scope === 'user'
+			? `Remove "${pendingRemove?.name}"? It is a global server, so every project loses it.`
+			: `Remove "${pendingRemove?.name}" from this project?`}
+		confirmLabel="Remove"
+		danger
+		onConfirm={confirmRemove}
+		onCancel={() => (pendingRemove = null)}
+	/>
 
 	<!-- MCP Server Form Modal -->
 	<McpServerForm bind:this={remoteForm}

@@ -5,7 +5,7 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import auth, mobile
+from app.api import auth
 from app.core import account_hub, pairing
 from app.db import database, pairing as store
 from tests.api.test_managed_owner_admin import owner_app, bind_and_enroll, web_session, DEVICE

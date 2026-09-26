@@ -22,6 +22,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.providers._transport import billing_summary, provider_error_summary
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
 from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
@@ -203,10 +204,33 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
         # has been delivered yet. Everything else names a fault in the
         # request and stays fatal.
         err.setdefault("retriable", err.get("type") in _RETRIABLE_STREAM_ERRORS)
+        # The status the same failure carries as an HTTP response, so a host
+        # reads an in-stream rate limit exactly like a 429.
+        status = _STREAM_ERROR_STATUS.get(str(err.get("type") or ""))
+        if status is not None:
+            err.setdefault("status", status)
+        summary = provider_error_summary(err.get("message"))
+        if err.get("type") == "billing_error":
+            summary = billing_summary("billing_error", summary)
+        err.setdefault("provider_message", summary)
         return StreamChunk("error", err)
     return None
 
 
 _RETRIABLE_STREAM_ERRORS = frozenset(
-    ("overloaded_error", "api_error", "rate_limit_error")
+    ("overloaded_error", "api_error", "rate_limit_error", "timeout_error")
 )
+
+# Anthropic's documented error type → HTTP status pairs.
+_STREAM_ERROR_STATUS = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "billing_error": 402,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "timeout_error": 504,
+    "overloaded_error": 529,
+}

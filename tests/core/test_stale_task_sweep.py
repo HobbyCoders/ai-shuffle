@@ -16,7 +16,6 @@ genuinely live work (e.g. a Monitor surviving an eviction deferral).
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
 from app.core.startup_reconcile import settle_stale_background_task_rows
 from app.core.task_registry import task_registry
@@ -26,16 +25,10 @@ from app.db.background_tasks import (
     upsert_background_task,
 )
 from app.db.base import get_db
+from tests.shared_fixtures import clean_task_registry  # noqa: F401  (autouse fixture)
 
 # Old enough to clear any grace window.
 _OLD_TS = "2000-01-01T00:00:00+00:00"
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    task_registry.reset_all()
-    yield
-    task_registry.reset_all()
 
 
 def _seed(session_id, task_id, status, *, updated_at=_OLD_TS, tool_use_id=None,

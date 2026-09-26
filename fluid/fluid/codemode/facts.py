@@ -189,10 +189,7 @@ class FactStore:
             return self._prepare()
 
     def entries(self, archived=False):
-        from fluid.codemode.skills import MemoryEntry
-        allowed = {f.name for f in fields(MemoryEntry)}
-        return [MemoryEntry(**{k: v for k, v in e.items() if k in allowed})
-                for e in self.snapshot()["archived" if archived else "entries"]]
+        return [self._entry(e) for e in self.snapshot()["archived" if archived else "entries"]]
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              key=None, expected_revision=None, source_session=None, restore=False):
@@ -387,7 +384,7 @@ class FactStore:
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                     old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
                     old["alternatives"] = sorted(set(old.get("alternatives", []) + [old["text"], entry["text"]]))[:2]
-            for key, t in tombstones.items():
+            for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.
                 entries.pop(key, None)

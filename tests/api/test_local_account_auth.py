@@ -3,7 +3,7 @@ import secrets
 import sqlite3
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI, Depends, Request, WebSocket
@@ -37,13 +37,13 @@ def app(monkeypatch):
     monkeypatch.setattr(settings, 'instance_id', 'local-auth-test')
     monkeypatch.setattr(settings, 'cookie_secure', False)
     monkeypatch.setattr(owner_auth.settings, 'shuffle_local_access', True)
+    # These tests cover the LAN owner, which now needs "trusted LAN, no login";
+    # tests/api/test_owner_login.py covers the default (off) and passwords.
+    monkeypatch.setattr(owner_auth, 'trusted_lan', lambda: True)
     monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', 'https://hub.example.com')
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
-    monkeypatch.setattr(auth.direct_oauth, 'ensure_fresh_credentials', AsyncMock())
-    monkeypatch.setattr(auth, '_sync_back_active_account_safe', lambda: None)
     monkeypatch.setattr(auth, 'is_github_authenticated_cached', lambda *args: False)
     monkeypatch.setattr(auth.auth_service, 'is_claude_authenticated', lambda: False)
-    monkeypatch.setattr(auth.auth_service, 'get_claude_token_status', lambda: {'token_valid': False})
     from app.api.mobile_hub import _limiter
     _limiter.reset()
     result = FastAPI()
@@ -160,6 +160,7 @@ def paired_browser(app, monkeypatch):
                       owner_auth.digest(secrets.token_hex(32)), owner_auth.now() + timedelta(days=7),
                       ['controller', 'web:session'], session_token_hash=pairing.hash_controller_session(token),
                       scoped=True)
+    mobile_hub.confirm_device(mobile_hub.ownership(mobile_hub.local_device_id(SERVER, DEVICE)), True)
     c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
     c.cookies.set('session', token)
     return c
@@ -288,11 +289,10 @@ def test_passwords_legacy_sessions_and_login_endpoints_are_gone(app):
     c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
     c.cookies.set('session', 'legacy-token')
     assert c.get('/owner').status_code == 403
-    # Shuffle never asks its owner to sign in: no password, account or recovery login route exists.
+    # The retired /api/v1/auth/ login routes stay gone; the owner password lives under /api/v1/owner.
     for path in ('login', 'change-password', 'account/start', 'account/poll', 'recovery'):
         assert c.post('/api/v1/auth/' + path, json={}).status_code == 404
     assert database.get_auth_session('legacy-token') is None
-    assert auth.auth_service.login('old-owner', 'anything') is None
 
 
 def test_preference_identity_preserves_legacy_history_and_is_stable(app):
@@ -374,6 +374,8 @@ def test_owner_browser_can_authorize_only_same_account_native_targets(app, monke
     monkeypatch.setattr(account_hub, 'call', lambda binding, method, suffix, body=None:
                         {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]})
     phone = mobile_hub.local_device_id(SERVER, OTHER)
+    assert identity.authorized_device_ids('browser-chat') == []
+    mobile_hub.confirm_device(mobile_hub.ownership(phone), True)
     assert identity.authorized_device_ids('browser-chat') == [phone]
     # Browser never becomes a native target itself.
     assert browser['device_id'] not in identity.authorized_device_ids('browser-chat')

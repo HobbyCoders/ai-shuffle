@@ -26,6 +26,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from app.core.config import settings
 from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
+from app.core.scrub import strip_url_userinfo
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
     get_worktree_working_dir_as_path
@@ -45,7 +46,7 @@ class WorktreeError(Exception):
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
     """
-    Branch name to store when importing an external worktree (issue #568).
+    Branch name to store when importing an external worktree.
 
     A detached-HEAD worktree has no branch — git's porcelain output carries only
     the HEAD SHA, and list_worktrees fills ``branch`` with None (not a missing
@@ -61,7 +62,7 @@ def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cross-device rebind fetch de-duplication (PR #493 follow-up #1)
+# Cross-device rebind fetch de-duplication
 #
 # A rebind that must recover a branch surviving only on origin needs fresh
 # remote-tracking refs, which means a ``git fetch`` — a slow, network-bound
@@ -148,7 +149,7 @@ def resolve_rebound_branch_plan(
         return False, None
 
     # Reuse a fetch primed at adopt time when it's still fresh, so this decision
-    # doesn't block the send path on another network fetch (PR #493 follow-up #1).
+    # doesn't block the send path on another network fetch.
     fetched = fetch_repo_cached(git_service_obj, main_dir)
     remote_names = [
         b["name"]
@@ -162,7 +163,7 @@ def resolve_rebound_branch_plan(
     # the cache and warns the user to "push it from the other device", so the very
     # next send — within the 60s TTL — would otherwise see stale refs and raise in
     # the exact remediation flow we recommended. Force one fresh fetch and re-list
-    # before concluding the branch is unrecoverable (PR #493 follow-up #1).
+    # before concluding the branch is unrecoverable.
     if not fetched:
         fetch_repo_cached(git_service_obj, main_dir, force=True)
         remote_names = [
@@ -337,17 +338,35 @@ class WorktreeManager:
             {project_dir}/.fluid/worktrees/feature-auth
         """
         sanitized = self._sanitize_branch_name(branch)
+        if sanitized in ("", ".", ".."):
+            raise WorktreeError(f"Invalid branch name for a worktree: '{branch}'")
 
         # Place worktrees inside the project's own .fluid/worktrees/ folder.
         main_dir = get_project_working_dir(project_path)
         worktrees_dir = Path(main_dir) / ".fluid" / "worktrees"
+        # A checked-out repository can carry a symlinked ``.fluid`` (or
+        # ``.fluid/worktrees``). Refuse to follow it out of the checkout before
+        # creating anything, so git never materializes files elsewhere.
+        self._require_inside_checkout(main_dir, worktrees_dir)
         worktrees_dir.mkdir(parents=True, exist_ok=True)
 
         # Ensure the nested worktree dir is ignored by the main repo so the
         # git worktrees we create here don't show up as untracked files.
         self._ensure_worktrees_ignored(main_dir)
 
-        return worktrees_dir / sanitized
+        worktree_path = worktrees_dir / sanitized
+        self._require_inside_checkout(main_dir, worktree_path)
+        return worktree_path
+
+    @staticmethod
+    def _require_inside_checkout(main_dir: str, path: Path) -> None:
+        """Raise WorktreeError unless *path* resolves strictly inside *main_dir*."""
+        root = Path(main_dir).resolve()
+        resolved = path.resolve()
+        if resolved == root or root not in resolved.parents:
+            raise WorktreeError(
+                f"Refusing worktree path outside the project checkout: {path}"
+            )
 
     def _ensure_worktrees_ignored(self, main_dir: str) -> None:
         """
@@ -441,7 +460,7 @@ class WorktreeManager:
 
         # Create a new record
         repo_id = f"repo-{uuid.uuid4().hex[:12]}"
-        remote_url = self.git_service.get_remote_url(working_dir)
+        remote_url = strip_url_userinfo(self.git_service.get_remote_url(working_dir))
         default_branch = self.git_service.get_default_branch(working_dir)
 
         # Try to extract GitHub repo name from URL
@@ -839,10 +858,10 @@ class WorktreeManager:
 
     async def terminate_worktree_sessions(self, worktree_id: str) -> list[str]:
         """
-        Terminate all SDK sessions associated with a worktree.
+        Terminate all pooled sessions associated with a worktree.
 
         Finds all sessions linked to the worktree via DB, removes them from
-        the session pool (which gracefully kills the SDK subprocess), and
+        the session pool (which gracefully disconnects the pooled adapter), and
         tears down their task-registry/Monitor-shell state.
 
         This MUST be called before `git worktree remove` — otherwise the
@@ -870,8 +889,8 @@ class WorktreeManager:
         for session in sessions:
             session_id = session["id"]
 
-            # Remove from session pool — this gracefully disconnects the SDK
-            # subprocess (SIGTERM → wait → SIGKILL)
+            # Remove from session pool — this gracefully disconnects the
+            # pooled adapter and its subprocess
             state = await pool.remove(session_id)
             if state:
                 logger.info(
@@ -889,7 +908,7 @@ class WorktreeManager:
                     f"Ended streaming for session {session_id} (worktree cleanup)"
                 )
 
-            # Reap the session's background work: the SDK client is gone, so
+            # Reap the session's background work: the pooled adapter is gone, so
             # tracked tasks can never complete — flip them to killed (surfaced
             # on the taskbar), drop the registry bucket, and reap any Monitor
             # shells the session spawned.
@@ -919,7 +938,7 @@ class WorktreeManager:
         """
         Remove a worktree and optionally delete its branch.
 
-        Terminates any SDK sessions whose subprocess is running inside the
+        Terminates any pooled sessions whose subprocess is running inside the
         worktree directory before removing it, ensuring no CWD locks block
         the git worktree removal.
 
@@ -969,7 +988,7 @@ class WorktreeManager:
         if early is not None:
             return early
 
-        # Terminate SDK sessions BEFORE removing the worktree folder.
+        # Terminate pooled sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
         # them first, `git worktree remove` fails (Windows CWD lock) or
         # leaves a zombie subprocess (Linux).
@@ -1084,8 +1103,7 @@ class WorktreeManager:
         only on the cross-device rebind path: the worktree row is re-pointed at
         this install's clone of the repo, and ONLY the resumed session
         (``rebind_session_id``) is moved onto the local project row — never its
-        sibling forks, which stay bound to their home device (PR #493 follow-up
-        #2).
+        sibling forks, which stay bound to their home device.
         """
         adopt_path = Path(adopted["path"])
         stored_path = self._get_relative_worktree_path_from_full(
@@ -1113,12 +1131,12 @@ class WorktreeManager:
 
         A cross-device rebind physically relocates the worktree onto this
         install's clone, but the shared DB is authoritative for every install:
-        re-pointing *all* sessions on the worktree (as the original #493 code did)
-        would corrupt sibling forks the user isn't resuming here — flipping their
-        project id to a row that is foreign on THEIR home device. So we scope the
+        re-pointing *all* sessions on the worktree would corrupt sibling forks
+        the user isn't resuming here — flipping their project id to a row that
+        is foreign on THEIR home device. So we scope the
         move to the single session being resumed. When no session id is known
         (e.g. the manual ``reopen`` endpoint), we re-point nothing rather than
-        clobber siblings (PR #493 follow-up #2).
+        clobber siblings.
         """
         if session_id and project_id:
             database.set_session_project(session_id, project_id)
@@ -1325,177 +1343,13 @@ class WorktreeManager:
 
         # NOTE: sdk_session_id is intentionally preserved on reopen.
         # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),
-        # so the SDK can resume the conversation with full history intact.
+        # so the CLI can resume the conversation with full history intact.
 
         logger.info(
             f"Recreated worktree {worktree_id} at {worktree_path} "
             f"for branch {branch_name} (prior status was {worktree['status']})"
         )
         return updated
-
-    def sync_worktrees(self, project_id: str) -> Dict[str, Any]:
-        """
-        Sync database worktrees with actual git worktrees.
-        Marks orphaned worktrees and cleans up stale records.
-
-        Returns:
-            Dict with sync results
-        """
-        result = {
-            "synced": 0,
-            "orphaned": 0,
-            "cleaned_up": 0,
-            "errors": []
-        }
-
-        # Get project and repository
-        project = database.get_project(project_id)
-        if not project:
-            result["errors"].append(f"Project not found: {project_id}")
-            return result
-
-        repo = database.get_git_repository_by_project(project_id)
-        if not repo:
-            result["errors"].append(f"No git repository for project: {project_id}")
-            return result
-
-        main_dir = get_project_working_dir(project)
-
-        # Prune stale git worktree entries first — this removes git's internal
-        # tracking for worktrees whose directories no longer exist on disk.
-        self.git_service.prune_worktrees(main_dir)
-
-        # Get actual worktrees from git (after pruning)
-        git_worktrees = self.git_service.list_worktrees(main_dir)
-        # Normalize paths for comparison (git uses forward slashes,
-        # Python Path uses backslashes on Windows)
-        git_worktree_paths = set()
-        # Also index real git worktrees by their basename (folder name) so we can
-        # tolerate older DB rows. See the FIX 3 note in the orphan check below.
-        git_worktree_basenames = set()
-        for wt in git_worktrees:
-            if not wt.get("is_main"):
-                normalized = os.path.normpath(wt.get("path", ""))
-                git_worktree_paths.add(normalized)
-                git_worktree_basenames.add(os.path.basename(normalized))
-
-        # Get database worktrees
-        db_worktrees = database.get_worktrees_for_repository(repo["id"])
-
-        for db_wt in db_worktrees:
-            worktree_abs_path = os.path.normpath(get_worktree_working_dir(db_wt))
-
-            if worktree_abs_path in git_worktree_paths:
-                # Worktree exists in both git and database
-                result["synced"] += 1
-            elif (
-                db_wt["status"] == WorktreeStatus.ACTIVE
-                and os.path.basename(os.path.normpath(db_wt.get("worktree_path") or ""))
-                in git_worktree_basenames
-            ):
-                # Edge case (pre-existing latent inconsistency): older worktree
-                # rows for absolute-path projects were stored as a *bare folder
-                # name* but physically created in the project's PARENT dir. Such a
-                # row now resolves to ``workspace_dir/<name>`` (nonexistent), so a
-                # naive check would mark a VALID active worktree as ORPHANED and
-                # re-import it on every sync. If a real git worktree with the same
-                # folder name still exists, treat the row as synced rather than
-                # aggressively orphaning it. This is self-healing and avoids churn;
-                # we intentionally do NOT attempt a risky path migration here.
-                result["synced"] += 1
-            elif db_wt["status"] == WorktreeStatus.ACTIVE:
-                # Worktree is in database but not on filesystem - mark as orphaned
-                logger.warning(f"Worktree {db_wt['id']} is orphaned (path doesn't exist)")
-                database.update_worktree(db_wt["id"], status=WorktreeStatus.ORPHANED)
-                result["orphaned"] += 1
-            elif db_wt["status"] == WorktreeStatus.COMPLETED:
-                # Completed worktrees are preserved for session reopen — skip
-                result["synced"] += 1
-            elif db_wt["status"] in [WorktreeStatus.DELETED, WorktreeStatus.ORPHANED]:
-                # Clean up stale records
-                database.delete_worktree(db_wt["id"])
-                result["cleaned_up"] += 1
-
-        # Import external worktrees (created outside the app) into our database
-        db_paths = {
-            os.path.normpath(get_worktree_working_dir(wt))
-            for wt in db_worktrees
-        }
-        # Also dedup by bare folder name so older rows (stored as a bare name and
-        # resolving to a nonexistent ``workspace_dir/<name>``) don't get
-        # re-imported as duplicates every sync. See the FIX 3 note above.
-        db_basenames = {
-            os.path.basename(os.path.normpath(wt.get("worktree_path") or ""))
-            for wt in db_worktrees
-            if wt.get("worktree_path")
-        }
-        # V2 placement checkouts are tracked in the ``checkouts`` table and must
-        # never be imported as legacy ``worktrees`` rows. Build the set of active
-        # checkout paths + this runner's checkout root once.
-        v2_paths = {
-            os.path.normpath(p) for p in checkouts_db.list_all_active_checkout_paths()
-        }
-        v2_checkout_root = os.path.normpath(
-            str(Path(settings.effective_workspace_dir) / "checkouts")
-        )
-        fluid_marker = os.path.join(".fluid", "worktrees")
-        for git_wt in git_worktrees:
-            if git_wt.get("is_main"):
-                continue  # Skip main worktree
-
-            git_path = git_wt.get("path", "")
-            if not git_path:
-                continue
-            # Only import worktrees that actually exist on disk
-            if not Path(git_path).exists():
-                continue
-            normalized_git_path = os.path.normpath(git_path)
-            # Skip V2 placement checkouts: they are owned by the ``checkouts``
-            # table and must never become legacy ``worktrees`` rows. The
-            # root-prefix check also covers the mid-materialization race where the
-            # dir exists before its checkouts row commits.
-            if (
-                normalized_git_path in v2_paths
-                or normalized_git_path == v2_checkout_root
-                or normalized_git_path.startswith(v2_checkout_root + os.sep)
-                or fluid_marker in normalized_git_path + os.sep
-            ):
-                continue
-            if (
-                normalized_git_path not in db_paths
-                and os.path.basename(normalized_git_path) not in db_basenames
-            ):
-                # External worktree found - import it
-                try:
-                    # Store the absolute path so it resolves consistently
-                    # regardless of where the worktree lives on disk (e.g.
-                    # nested under .fluid/worktrees/, not workspace_dir). A
-                    # bare folder name would resolve against workspace_dir and
-                    # never match the real git path, causing duplicate
-                    # re-imports and false ORPHANED markings. Mirrors the import
-                    # logic in sync_worktrees_for_project().
-                    stored_path = os.path.abspath(git_path)
-                    branch_name = _external_worktree_branch_name(git_wt)
-
-                    # Create database record for this external worktree
-                    worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
-                    database.create_worktree(
-                        worktree_id=worktree_id,
-                        repository_id=repo["id"],
-                        branch_name=branch_name,
-                        worktree_path=stored_path,
-                        session_id=None,
-                        base_branch=None,
-                        status=WorktreeStatus.ACTIVE
-                    )
-                    logger.debug(f"Imported external worktree: {stored_path} (branch: {branch_name})")
-                    result["imported"] = result.get("imported", 0) + 1
-                except Exception as e:
-                    logger.warning(f"Failed to import external worktree {git_path}: {e}")
-                    result["errors"].append(f"Failed to import worktree at {git_path}: {str(e)}")
-
-        logger.debug(f"Sync complete for project {project_id}: {result}")
-        return result
 
 
 # Singleton instance

@@ -5,7 +5,6 @@ Tests the domain detection, template matching, clarification logic,
 and prompt building functionality.
 """
 
-import pytest
 
 
 class TestToolMapping:
@@ -328,6 +327,10 @@ class TestPrompts:
         assert "setting_sources" not in prompt
         assert "max_buffer_size" not in prompt
         assert "enable_file_checkpointing" not in prompt
+
+        # Bypass is never recommended: a generated automation profile would
+        # otherwise run every tool unguarded (SEC-13).
+        assert "bypassPermissions" not in prompt
 
         # Should contain examples
         assert "Example" in prompt

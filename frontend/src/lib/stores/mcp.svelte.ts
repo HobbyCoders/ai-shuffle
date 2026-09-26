@@ -84,6 +84,10 @@ function extractError(e: unknown, fallback: string): string {
 
 let _state = $state<McpState>({ ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } });
 
+/** Latest loadProjectServers call; an older (slower) response is discarded so
+ *  a project the user already left cannot overwrite the current lists. */
+let _projectLoadSeq = 0;
+
 // ============================================================================
 // Subscribe Shim (centralized via store-utils)
 // ============================================================================
@@ -160,25 +164,6 @@ export const mcp = {
 		}, (e) => extractError(e, 'Failed to remove MCP server'));
 	},
 
-	/**
-	 * Toggle a global MCP server enabled/disabled
-	 */
-	async toggleGlobalServer(serverName: string, enabled: boolean): Promise<void> {
-		try {
-			const updated = await mcpApi.toggleGlobalMcpServer(serverName, enabled);
-			_update((state) => ({
-				...state,
-				globalServers: state.globalServers.map((s) =>
-					s.name === serverName ? updated : s
-				)
-			}));
-		} catch (e) {
-			const error = extractError(e, 'Failed to toggle MCP server');
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
-
 	// ========================================================================
 	// Project Server Operations
 	// ========================================================================
@@ -187,11 +172,17 @@ export const mcp = {
 	 * Load all MCP servers for a project
 	 */
 	async loadProjectServers(projectId: string): Promise<void> {
-		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
+		// Not withLoading: a load for a project already left must write
+		// nothing, neither its lists nor its error nor the loading flag (the
+		// newer load still owns that).
+		const seq = ++_projectLoadSeq;
+		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
+		try {
 			const response = await mcpApi.getProjectMcpServers(projectId);
+			if (seq !== _projectLoadSeq) return;
 			_update((state) => ({
 				...state,
+				loading: false,
 				projectServers: {
 					user: response.user,
 					installed: response.installed || [],
@@ -199,7 +190,12 @@ export const mcp = {
 					project: response.project
 				}
 			}));
-		}, (e) => extractError(e, 'Failed to load project MCP servers'));
+		} catch (e) {
+			if (seq !== _projectLoadSeq) return;
+			const error = extractError(e, 'Failed to load project MCP servers');
+			_update((state) => ({ ...state, error, loading: false }));
+			throw e;
+		}
 	},
 
 	/**
@@ -280,7 +276,7 @@ export const mcp = {
 				}));
 			}
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to remove MCP server';
+			const error = extractError(e, 'Failed to remove MCP server');
 			_update((state) => ({ ...state, error, loading: false }));
 			throw e;
 		}
@@ -310,29 +306,6 @@ export const mcp = {
 	// MCP Tools Discovery
 	// ========================================================================
 
-	/**
-	 * Load discovered MCP tools
-	 */
-	async loadTools(refresh: boolean = false): Promise<void> {
-		return withLoading(_update, async () => {
-			const tools = await mcpApi.getMcpTools(refresh);
-			_update((state) => ({ ...state, tools }));
-		}, (e) => extractError(e, 'Failed to load MCP tools'));
-	},
-
-	/**
-	 * Load MCP stats
-	 */
-	async loadStats(): Promise<void> {
-		try {
-			const stats = await mcpApi.getMcpStats();
-			_update((state) => ({ ...state, stats }));
-		} catch (e) {
-			// Non-critical, don't throw
-			console.error('Failed to load MCP stats:', e);
-		}
-	},
-
 	// ========================================================================
 	// Utility
 	// ========================================================================
@@ -348,20 +321,11 @@ export const mcp = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
+		_projectLoadSeq++;
 		_state = { ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } };
 		_notifySubscribers();
 	},
 
-	/**
-	 * Get all servers combined (for stats)
-	 */
-	getAllServers(): McpServerInfo[] {
-		return [
-			..._state.globalServers,
-			..._state.projectServers.local,
-			..._state.projectServers.project
-		];
-	}
 };
 
 // ============================================================================

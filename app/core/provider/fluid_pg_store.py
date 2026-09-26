@@ -2,10 +2,9 @@
 
 Persists fluid's branching session node-tree and durable event log in the app's
 PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
-``fluid_session_events``, schema v70), giving flag-on sessions the same
-cross-restart durability the SDK path gets from PgSessionStore — resume, fork,
-and event replay all survive a process restart and work from any app instance
-sharing the database.
+``fluid_session_events``), giving native fluid sessions cross-restart
+durability — resume, fork, and event replay all survive a process restart and
+work from any app instance sharing the database.
 
 Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
 memory cache, then write-through on every mutation. The cache makes the hot
@@ -29,16 +28,17 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from psycopg2.extras import Json
 
+from app.core import api_user_scope
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
-# Same Postgres-illegal code-point scrub the SDK session store applies at its
+# Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
 # why NUL and lone surrogates have to go before an INSERT sees them.
 from app.core.pg_session_store import _scrub_pg_illegal
 
-# Issue R12: a model pasted a live DATABASE_URL (password included) into a
-# code-mode cell and it was persisted verbatim. Every string on its way into
+# A model can paste a live DATABASE_URL (password included) into a code-mode
+# cell (see app.core.scrub). Every string on its way into
 # these two jsonb columns gets its URL-embedded passwords replaced with ``***``
 # first. New rows only — existing rows are untouched by design.
 from app.core.scrub import scrub_url_credentials
@@ -211,8 +211,8 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
 #
 # Two arms, because a session's text lives in one of two places depending on
 # which leg wrote it: ``fluid_session_nodes`` holds the native node tree this
-# store owns, ``session_store_entries`` holds the SDK/delegated transcript
-# mirror. Both are swept in one connection and merged into one per-session
+# store owns, ``session_store_entries`` holds the Claude-format (delegated)
+# transcript. Both are swept in one connection and merged into one per-session
 # accumulator.
 #
 # The SQL is only a PREFILTER — cheap ILIKE over the raw JSON to cut the rows
@@ -285,7 +285,7 @@ def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
     """Session titles from the app's ``sessions`` table, keyed by store id.
 
     ``sessions.sdk_session_id`` holds the store-side id for BOTH legs: the
-    fluid ``ses_…`` id on native sessions and the SDK uuid on delegated ones,
+    fluid ``ses_…`` id on native sessions and the Claude uuid on delegated ones,
     so one lookup serves every recall arm.
     """
     ids = [sid for sid in session_ids if sid]
@@ -307,7 +307,7 @@ def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
 def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
     """Recorded project roots from ``fluid_sessions``, keyed by session id.
 
-    Only native fluid sessions have a row here; SDK-mirror sessions come back
+    Only native fluid sessions have a row here; Claude-transcript sessions come back
     absent, which SessionSearch reads as "unknown project" — never excluded.
     """
     ids = [sid for sid in session_ids if sid]
@@ -357,7 +357,7 @@ def _search_sync(
                 terms,
             )
 
-        # Arm B — the SDK transcript mirror (subpath IS NULL = the main
+        # Arm B — the Claude-format transcript (subpath IS NULL = the main
         # transcript; sidechain files live under a subpath and are not recall).
         where = " OR ".join(["entry::text ILIKE %s"] * len(patterns))
         params = list(patterns)
@@ -380,6 +380,11 @@ def _search_sync(
                 terms,
             )
 
+    # An API key's session recalls only its own sessions; the owner, all.
+    api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
+    if api_user_id:
+        visible = api_user_scope.visible_store_ids(acc, api_user_id)
+        acc = {sid: slot for sid, slot in acc.items() if sid in visible}
     hits = [
         SessionSearchHit(
             session_id=sid,
@@ -425,9 +430,9 @@ def _clip(text: str, cap: int) -> str:
 
 
 def _sse_recall_message(entry: Dict[str, Any], ts: float) -> Optional[RecallMessage]:
-    """One SDK transcript entry as a RecallMessage, or None for non-messages.
+    """One Claude transcript entry as a RecallMessage, or None for non-messages.
 
-    The SDK arm's twin of ``fluid.store.base.recall_message``: user/assistant
+    The Claude arm's twin of ``fluid.store.base.recall_message``: user/assistant
     entries only, sidechain and meta rows invisible, tool_use/tool_result
     blocks compacted to one line each.
     """
@@ -503,7 +508,7 @@ def _fluid_recall_rows(cur, session_id: str) -> Optional[List[RecallMessage]]:
 
 
 def _sse_recall_rows(cur, session_id: str) -> Optional[List[RecallMessage]]:
-    """The session's SDK transcript as RecallMessages, or None when absent."""
+    """The session's Claude transcript as RecallMessages, or None when absent."""
     cur.execute(
         "SELECT entry, created_at FROM session_store_entries "
         "WHERE session_id = %s AND subpath IS NULL ORDER BY id",
@@ -576,6 +581,7 @@ def _recent_sync(
     limit: int, exclude_session_id: Optional[str], project_id: Optional[str]
 ) -> List[SessionSummary]:
     limit = max(1, min(int(limit), _RECENT_LIMIT_CAP))
+    api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
     with get_db() as conn:
         cur = conn.cursor()
         sql = (
@@ -588,6 +594,10 @@ def _recent_sync(
         if project_id is not None:
             sql += " AND project_id = %s"
             params.append(project_id)
+        if api_user_id:
+            # (Workers are hidden, so the column alone is the key's listing.)
+            sql += " AND api_user_id = %s"
+            params.append(api_user_id)
         if exclude_session_id:
             sql += " AND sdk_session_id != %s"
             params.append(exclude_session_id)
@@ -609,7 +619,14 @@ def _recent_sync(
     return out
 
 
-def _slice_sync(session_id: str, start: int, count: int) -> Optional[SessionSlice]:
+def _slice_sync(
+    session_id: str, start: int, count: int, viewer_session_id: Optional[str] = None,
+) -> Optional[SessionSlice]:
+    api_user_id = api_user_scope.viewer_api_user_id(viewer_session_id)
+    if api_user_id and session_id not in api_user_scope.visible_store_ids(
+        [session_id], api_user_id
+    ):
+        return None  # another principal's session reads as unknown
     with get_db() as conn:
         cur = conn.cursor()
         messages = _fluid_recall_rows(cur, session_id)
@@ -851,7 +868,7 @@ class PgFluidStore:
     ) -> List[SessionSearchHit]:
         """fluid's optional SessionStore recall hook (see
         ``fluid/fluid/store/base.py``) — backs the SessionSearch builtin
-        over both the native fluid node tree and the SDK transcript mirror.
+        over both the native fluid node tree and the Claude transcript store.
         """
         return await run_sync(_search_sync, list(terms), int(limit), exclude_session_id)
 
@@ -874,7 +891,13 @@ class PgFluidStore:
         *,
         start: int = -10,
         count: int = 10,
+        viewer_session_id: Optional[str] = None,
     ) -> Optional[SessionSlice]:
         """SessionView's backend — a message window from whichever transcript
-        store the session wrote (fluid node path, else SDK mirror)."""
-        return await run_sync(_slice_sync, session_id, int(start), int(count))
+        store the session wrote (fluid node path, else Claude transcript).
+
+        ``viewer_session_id`` is the calling session: an API key's session
+        may open only its own sessions (the owner's opens any)."""
+        return await run_sync(
+            _slice_sync, session_id, int(start), int(count), viewer_session_id
+        )

@@ -6,63 +6,14 @@ gateway listener thread is stubbed (no real PostgreSQL).
 """
 
 import asyncio
-import json
 
-import pytest
 
 import app.api.events as events_mod
 import app.core.history_backfill as hb
 from app.api.events import event_stream
-from app.core.event_gateway import EventGateway
 from app.db import session_events as se
-
-
-@pytest.fixture(autouse=True)
-def _reset_memo():
-    hb._reset_memo()
-    yield
-    hb._reset_memo()
-
-
-@pytest.fixture
-def gw(monkeypatch):
-    """Fresh gateway with the PG listener stubbed, wired into the events module."""
-    g = EventGateway()
-    monkeypatch.setattr(g, "_ensure_listener", lambda: None)
-    monkeypatch.setattr(events_mod, "get_gateway", lambda: g)
-    return g
-
-
-def _parse(frame: str) -> dict:
-    parsed = {}
-    for line in frame.splitlines():
-        if line.startswith("id: "):
-            parsed["id"] = int(line[4:])
-        elif line.startswith("event: "):
-            parsed["event"] = line[len("event: "):]
-        elif line.startswith("data: "):
-            parsed["data"] = json.loads(line[len("data: "):])
-    return parsed
-
-
-async def _collect(agen, n, timeout=5.0):
-    """Read ``n`` event frames (skipping keepalive comments and the ``caught_up``
-    history/live boundary sentinel) from the stream."""
-    frames = []
-
-    async def _pump():
-        async for chunk in agen:
-            if chunk.startswith(":"):
-                continue
-            parsed = _parse(chunk)
-            if parsed.get("event") == "caught_up":
-                continue
-            frames.append(parsed)
-            if len(frames) >= n:
-                return
-
-    await asyncio.wait_for(_pump(), timeout=timeout)
-    return frames
+from tests.api.sse_helpers import collect_frames, parse_frame
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 
 LEGACY = [
@@ -77,7 +28,7 @@ async def test_stream_backfills_legacy_history_first(mock_db, gw, monkeypatch):
 
     agen = event_stream("sess-bf-a", 0)
     try:
-        frames = await _collect(agen, 2)
+        frames = await collect_frames(agen, 2)
     finally:
         await agen.aclose()
 
@@ -103,7 +54,7 @@ async def test_caught_up_sentinel_follows_legacy_backfill(mock_db, gw, monkeypat
         async for chunk in agen:
             if chunk.startswith(":"):
                 continue
-            raw.append(_parse(chunk))
+            raw.append(parse_frame(chunk))
             if len(raw) >= 3:
                 return
 
@@ -123,10 +74,10 @@ async def test_backfilled_then_live_events_share_one_seq_space(mock_db, gw, monk
 
     agen = event_stream("sess-bf-b", 0)
     try:
-        first = await _collect(agen, 2)
+        first = await collect_frames(agen, 2)
         _, last_seq = se.append_events("sess-bf-b", [{"type": "turn.started"}])
         gw._dispatch("sess-bf-b", last_seq)
-        more = await _collect(agen, 1, timeout=3.0)
+        more = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 
@@ -144,7 +95,7 @@ async def test_populated_log_skips_legacy_load(mock_db, gw, monkeypatch):
 
     agen = event_stream("sess-bf-c", 0)
     try:
-        frames = await _collect(agen, 1)
+        frames = await collect_frames(agen, 1)
     finally:
         await agen.aclose()
 
@@ -158,13 +109,13 @@ async def test_second_stream_does_not_duplicate_backfill(mock_db, gw, monkeypatc
 
     agen1 = event_stream("sess-bf-d", 0)
     try:
-        await _collect(agen1, 2)
+        await collect_frames(agen1, 2)
     finally:
         await agen1.aclose()
 
     agen2 = event_stream("sess-bf-d", 0)
     try:
-        frames = await _collect(agen2, 2)
+        frames = await collect_frames(agen2, 2)
     finally:
         await agen2.aclose()
 
@@ -182,7 +133,7 @@ async def test_backfill_failure_does_not_break_the_stream(mock_db, gw, monkeypat
     try:
         # Stream must stay alive and deliver a later live event.
         se.append_events("sess-bf-e", [{"type": "turn.started"}])
-        frames = await _collect(agen, 1, timeout=3.0)
+        frames = await collect_frames(agen, 1, timeout=3.0)
     finally:
         await agen.aclose()
 

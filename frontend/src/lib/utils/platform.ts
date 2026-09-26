@@ -22,10 +22,6 @@ export const UI_PLATFORM_ATTRIBUTE = 'data-platform';
 /** Vite env flag that selects the shell at build time (`desktop` unless `mobile`). */
 export const SHELL_ENV_KEY = 'VITE_SHUFFLE_SHELL';
 
-export function isUiPlatform(value: unknown): value is UiPlatform {
-	return value === 'mobile' || value === 'desktop';
-}
-
 /**
  * The shell this build was compiled for. Anything other than an explicit
  * `mobile` is the desktop web UI.

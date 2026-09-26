@@ -7,8 +7,7 @@ side-effect-free apart from the outbound HTTP it makes: every function takes an
 optional ``client`` so tests drive it with an ``httpx.MockTransport`` and NEVER
 touch the real network.
 
-Mechanics are the verified F3 finding of ``docs/MULTI_PROVIDER_PHASE2_PLAN.md``
-(read from openai/codex ``main``):
+Mechanics (read from openai/codex ``main``):
 
 * OAuth 2.0 Authorization-Code + PKCE (S256), DEVICE-CODE variant.
 * Issuer ``https://auth.openai.com``.

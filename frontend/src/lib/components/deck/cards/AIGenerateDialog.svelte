@@ -8,6 +8,7 @@
 		type AgentExport,
 		type SubagentExport
 	} from '$lib/api/client';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 	type GenerationType = 'profile' | 'subagent';
 	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
 
@@ -166,10 +167,19 @@
 	function selectOption(questionId: string, option: string) {
 		clarificationAnswers[questionId] = option;
 	}
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (isOpen && e.key === 'Escape') {
+			e.preventDefault();
+			handleClose();
+		}
+	}
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 {#if isOpen}
-	<div class="dialog-overlay" role="dialog" aria-modal="true">
+	<div class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="ai-generate-title" tabindex="-1" use:focusTrap={{ initial: 'textarea, input' }}>
 		<button class="dialog-overlay-close" onclick={handleBackdropClick} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="dialog-container" class:clarifying={dialogState === 'clarifying'}>
 			<div class="dialog-header">
@@ -186,9 +196,9 @@
 							<circle cx="12" cy="14" r="1" />
 						{/if}
 					</svg>
-					<span>{title()}</span>
+					<span id="ai-generate-title">{title()}</span>
 				</div>
-				<button class="close-btn" onclick={handleClose} disabled={isLoading} title="Close">
+				<button class="close-btn" onclick={handleClose} disabled={isLoading} title="Close" aria-label="Close">
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 						<path d="M18 6L6 18M6 6l12 12" />
 					</svg>

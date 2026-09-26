@@ -35,9 +35,11 @@ Routing identity on the Codex backend is an experiment (E1), chosen with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
@@ -46,15 +48,21 @@ import httpx
 
 from fluid.providers._trace import trace_request
 
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
-from fluid.providers._sse import sse_events
+from fluid.providers._retry import RetryPolicy
+from fluid.providers._sse import KEEPALIVE_EVENT, sse_events
 from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
+    FirstByteTimeout,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
+    first_byte_note,
     is_closed_client_error,
     is_usable_client,
+    open_stream,
+    refusal_payload,
+    truncated_stream_payload,
     with_deadline,
 )
 from fluid.providers.base import (
@@ -124,6 +132,8 @@ class OpenAIResponsesClient:
         auth: ResponsesAuth | None = None,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
+        event_silence_timeout: float | None = None,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         routing_arm: str | None = None,
@@ -139,6 +149,24 @@ class OpenAIResponsesClient:
         # Wall clock for one whole model call, above the per-read ``timeout``.
         # None disables it. See fluid.providers._transport.
         self._stream_deadline = stream_deadline
+        # Wall clock from sending the request to its first SSE frame (headers
+        # included; a heartbeat counts). Headers that never came are retried
+        # on the transport budget; a 200 followed by silence is reported as a
+        # truncated stream. None or 0 disables it. See
+        # fluid.providers._transport.FirstByteTimeout.
+        self._first_byte_timeout = first_byte_timeout
+        # Wall clock from the headers to the first real (data) event. A
+        # heartbeat keeps the read timeout and the first-byte timer satisfied,
+        # so a server that answers 200 and then sends only heartbeats would
+        # otherwise be bounded by the stream deadline alone (or nothing when
+        # that is off). Once heartbeats have been the only frames for this
+        # long, the stream ends as truncated. After the first data event the
+        # bound no longer applies: with encrypted-only reasoning, heartbeats
+        # can be the only frames for minutes, and only the stream deadline
+        # caps that. None means the per-read ``timeout``; 0 disables it.
+        self._event_silence_timeout = (
+            timeout if event_silence_timeout is None else event_silence_timeout
+        )
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
@@ -317,11 +345,8 @@ class OpenAIResponsesClient:
         body = build_request_body(request)
         if self._is_codex_backend():
             # The ChatGPT/Codex backend is not the public Responses API and
-            # the Codex CLI never sends an output ceiling. Session turns leave
-            # max_tokens unset and succeed; every memory-learner request,
-            # which set it, came back HTTP 400 on the desktop worker (273
-            # calls, 2026-09-13..18, and the 2026-09-09/10 ones before the
-            # effort field existed). The model's own maximum applies instead.
+            # answers an output ceiling with HTTP 400 (the Codex CLI never
+            # sends one). The model's own maximum applies instead.
             body.pop("max_output_tokens", None)
         # An uncertain media request can already have generated a billed image.
         # Keep an explicit auth-refresh retry, but never replay a native image
@@ -351,9 +376,13 @@ class OpenAIResponsesClient:
                 try:
                     headers = await self._headers(body, wire, request_id)
                     trace_request("openai_responses", body)
-                    async with client.stream(
-                        "POST", self._base_url, json=body, headers=headers
-                    ) as resp:
+                    first_byte = self._first_byte_timeout
+                    sent_at = time.monotonic()
+                    async with contextlib.AsyncExitStack() as scope:
+                        resp = await open_stream(
+                            scope, client, "POST", self._base_url,
+                            first_byte_timeout=first_byte, json=body, headers=headers,
+                        )
                         diagnostics.received_headers(resp)
                         self._log_quota_headers(resp, request.model)
                         self._capture_turn_state(resp, wire)
@@ -361,11 +390,23 @@ class OpenAIResponsesClient:
                             normalizer = ResponsesStreamNormalizer()
                             # Heartbeats become provider_alive chunks: with
                             # encrypted-only reasoning they can be the only
-                            # frames for minutes. The stream deadline still
-                            # caps the whole call.
+                            # frames for minutes once response.created has
+                            # arrived. Before the first data event they count
+                            # for at most the heartbeat-only bound below;
+                            # after it, the stream deadline alone caps the
+                            # call.
+                            # The headers took part of the first-byte budget;
+                            # the first frame gets the rest (never less than a
+                            # sliver, so a slow header does not fail the read).
+                            first_frame_wait = (
+                                max(first_byte - (time.monotonic() - sent_at), 0.05)
+                                if first_byte and first_byte > 0 else None
+                            )
                             events = with_deadline(
                                 sse_events(diagnostics.lines(), keepalives=True),
                                 self._stream_deadline,
+                                first_item_timeout=first_frame_wait,
+                                first_byte_budget=first_byte,
                             )
                             # message_start (sent on response.created) is held
                             # until the next chunk, and an in-stream error that
@@ -375,8 +416,28 @@ class OpenAIResponsesClient:
                             # released, a retry's own start is dropped.
                             pending_start: StreamChunk | None = None
                             content = False
+                            # Set once the response's own end (usage +
+                            # message_stop) or an error reached the engine; a
+                            # body that ends before either was cut off.
+                            terminal = False
                             retry_class: ErrorClass | None = None
+                            # Heartbeat-only bound: applies only until the
+                            # first data event (proof of life for the first
+                            # frame, not a limit on later reasoning).
+                            silence_limit = self._event_silence_timeout
+                            headers_at = time.monotonic()
+                            data_seen = False
+                            heartbeats_only = False
                             async for event_name, data in events:
+                                if event_name != KEEPALIVE_EVENT:
+                                    data_seen = True
+                                elif (
+                                    not data_seen
+                                    and silence_limit and silence_limit > 0
+                                    and time.monotonic() - headers_at > silence_limit
+                                ):
+                                    heartbeats_only = True
+                                    break
                                 for chunk in normalizer.consume(event_name, data):
                                     if chunk.kind == "message_start":
                                         # Held, so not yet yielded: a
@@ -404,6 +465,8 @@ class OpenAIResponsesClient:
                                     if chunk.kind != "provider_alive":
                                         yielded = True
                                         content = True
+                                    if chunk.kind in ("message_stop", "error"):
+                                        terminal = True
                                     yield chunk
                                 if retry_class is not None:
                                     break
@@ -428,9 +491,18 @@ class OpenAIResponsesClient:
                                 await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
+                            if heartbeats_only:
+                                await events.aclose()
                             if pending_start is not None:
                                 start_sent = True
                                 yield pending_start
+                            if not terminal:
+                                payload = truncated_stream_payload("response.completed")
+                                if heartbeats_only:
+                                    payload["message"] += (
+                                        f" (only heartbeats for {silence_limit:g}s)"
+                                    )
+                                yield StreamChunk("error", payload)
                             return
                         text = (await resp.aread()).decode(errors="replace")
                         # One free retry: a 401 with the OAuth hook refreshes
@@ -443,20 +515,16 @@ class OpenAIResponsesClient:
                             await self._auth.on_401()
                             refreshed_401 = True
                             continue
-                        retriable = resp.status_code in RETRIABLE_STATUSES
-                        if retriable and not native_image and attempt < self._retry.max_retries:
+                        refusal = refusal_payload(resp.status_code, text)
+                        if (
+                            refusal["retriable"] and not native_image
+                            and attempt < self._retry.max_retries
+                        ):
                             await asyncio.sleep(self._retry.delay(
                                 attempt, resp.headers.get("retry-after")))
                             attempt += 1
                             continue
-                        yield StreamChunk(
-                            "error",
-                            {
-                                "status": resp.status_code,
-                                "message": text[:2000],
-                                "retriable": retriable,
-                            },
-                        )
+                        yield StreamChunk("error", refusal)
                         return
                 except StreamDeadlineExceeded as exc:
                     yield StreamChunk("error", deadline_error_payload(exc))
@@ -482,6 +550,16 @@ class OpenAIResponsesClient:
                     )
                     return
                 except httpx.TransportError as exc:
+                    if isinstance(exc, FirstByteTimeout) and diagnostics.response is not None:
+                        # A 200 and then silence: the call was accepted (and
+                        # may be billed), so it is not re-sent here. Reported
+                        # as the empty stream it is; the engine's
+                        # empty-completion retry decides whether to re-send.
+                        diagnostics.failure(exc, yielded=yielded, retrying=False)
+                        payload = truncated_stream_payload("response.completed")
+                        payload["message"] += first_byte_note(exc.budget)
+                        yield StreamChunk("error", payload)
+                        return
                     evidence = diagnostics.failure(
                         exc, yielded=yielded,
                         retrying=not yielded and attempt < transport_retries,

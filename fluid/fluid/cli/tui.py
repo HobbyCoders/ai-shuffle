@@ -22,7 +22,7 @@ try:  # pragma: no cover - trivial import guard
 except ImportError:  # pragma: no cover
     _HAVE_TEXTUAL = False
 
-# Slash commands the TUI answers in place (read-only views; no turn submitted).
+# Slash commands the TUI handles in place without submitting a turn.
 _INFO_COMMANDS = frozenset({"/help", "/context", "/usage", "/tools", "/skills", "/model", "/questions", "/answer"})
 
 _INSTALL_HINT = (
@@ -30,10 +30,6 @@ _INSTALL_HINT = (
     "Install it with:  pip install 'fluid[tui]'\n"
     "Falling back to the plain REPL is available with 'fluid chat' (no --tui)."
 )
-
-
-def textual_available() -> bool:
-    return _HAVE_TEXTUAL
 
 
 async def run_tui(engine, session_id: str) -> int:
@@ -120,8 +116,8 @@ async def run_tui(engine, session_id: str) -> int:
                 self.exit()
                 return
             if text.split(maxsplit=1)[0].lower() in _INFO_COMMANDS:
-                # Read-only views shared with the line REPL; they never
-                # submit a turn, so they cannot collide with the event pump.
+                # Handled by the line REPL's dispatcher; none of them submits
+                # a turn, so they cannot collide with the event pump.
                 await Repl(self.engine, self.session_id, out=self._writer).dispatch_slash(text)
                 return
             await self.engine.submit(UserTurn(content=text))

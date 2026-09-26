@@ -174,7 +174,7 @@ def test_settings_policy_keeps_device_bound_keys_local():
     shared = ["tts_model", "image_model", "security_instructions", "onboarding_complete", "fal_api_key",
               "voice_model", "text_generation_model"]
     local = ["workspace_path", "workspace_path:desk-1234", "cluster_secret", "cluster_share_sessions",
-             "mobile_account_hub_secret:desk-1234", "credential_key_state_v1", "claude_active_account:desk-1234",
+             "mobile_account_hub_secret:desk-1234", "credential_key_state_v1", "claude_cli_relogin_notice:desk-1234",
              "encryption_salt", "owner_preference_identity", "schema_migrations_fingerprint",
              "migration:sessions_is_worker_backfilled", "installation_configured", "network_state", ""]
     assert all(policy.is_shared_setting_key(k) for k in shared)
@@ -183,8 +183,8 @@ def test_settings_policy_keeps_device_bound_keys_local():
 
 @pytest.mark.parametrize("resource,collections", [
     ("agents", {"agents"}),
-    ("settings", {"system_settings", "model_providers", "claude_accounts", "permission_rules"}),
-    ("hooks", {"project_hooks", "webhooks"}),
+    ("settings", {"system_settings", "model_providers", "permission_rules"}),
+    ("hooks", {"project_hooks"}),
 ])
 def test_catalog_changes_use_ui_resource_names(resource, collections):
     assert collections <= {coll.name for coll in policy.collections_for_resource(resource)}

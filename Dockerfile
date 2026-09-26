@@ -12,6 +12,8 @@ RUN npm ci
 # Build frontend
 ARG CACHEBUST=0
 COPY frontend/ ./
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
 RUN npm run build
 
 
@@ -62,16 +64,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ── System deps (git, curl for health check, gosu for UID/GID, gh CLI) ──
+# ── System deps (git, curl for health check, gh CLI) ──
 # ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
 # Python scan without it, which is slow enough to dominate a session.
+# bubblewrap sandboxes the code-mode kernel child (code_mode_os_sandbox); it
+# only takes effect when the container may create user namespaces, otherwise
+# the kernel logs why and runs without it.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    bubblewrap \
     curl \
     ca-certificates \
     gnupg \
     git \
-    gosu \
     ripgrep \
     tini \
     libpq-dev \
@@ -121,7 +126,6 @@ RUN node --version && npm --version && gh --version
 # full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
 # in this headless single-tab setup; Chromium is far leaner and behaves
 # identically for the CDP automation used here.
-ARG TARGETARCH
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
         chromium; \
@@ -136,8 +140,11 @@ RUN groupadd -g 1000 appuser && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
 # ── Python dependencies ──
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir -r requirements.txt
+# requirements.lock is the hash-pinned closure of requirements.txt, fluid's own
+# dependencies and its build backend (scripts/lock_requirements.sh). A changed
+# or substituted package on the index fails the build instead of shipping.
+COPY requirements.lock .
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # ── Dev / test dependencies ──
 # The runtime image is also the agent's workbench: it checks out this repo and
@@ -151,13 +158,15 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # fluid is developed in this repo under fluid/ (its own pyproject; the package
 # is fluid/fluid). Installed from the tree so the image needs no registry or
 # cross-repo credentials. The build must fail if the harness cannot install.
+# Its dependencies and build backend already came from the locked install
+# above, so nothing unpinned is fetched here.
 COPY fluid/ /opt/fluid/
-RUN pip install --no-cache-dir /opt/fluid && python -c "import fluid"
+RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid, importlib.util; assert importlib.util.find_spec('claude_agent_sdk') is None"
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
 
-# ── Maintenance / migration scripts (e.g. session-store backfill) ──
+# ── Maintenance / migration scripts (e.g. credential_keys, backup, usage backfills) ──
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # ── Copy pre-built frontend assets from builder stage ──
@@ -177,12 +186,13 @@ COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_module
 COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
 
 COPY --chown=appuser:appuser .env.example .
+COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
 COPY Dockerfile entrypoint.sh ./
-COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh ./docker/
+COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh docker/install-claude-cli.sh ./docker/
 COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
@@ -198,6 +208,8 @@ RUN chown appuser:appuser /app
 # "container restarted but old image is still running" (mismatch). Falls back
 # to boot-time-only detection (landed_unverified) if this file is absent.
 ARG GIT_SHA=unknown
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
 # Production publishing supplies a first-parent ordinal. Ad-hoc/lab images
 # without provenance remain pinned instead of silently following main.
 ARG APPLICATION_SEQUENCE=0

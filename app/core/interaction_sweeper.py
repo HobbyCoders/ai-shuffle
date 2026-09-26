@@ -1,11 +1,11 @@
-"""Pending-interaction expiry sweeper (V2 Phase 4, Q4-4).
+"""Pending-interaction expiry sweeper.
 
 A ~10s periodic pass that flips every ``pending_interactions`` row
 past its TTL to ``expired`` and NOTIFYs each affected session so any in-process
 waiter re-reads the durable row (and the FE tidies its stale modal on the next
 resync). This is *belt* — the ``interaction_wait`` adapter ALSO honours its own
 local ``expires_at`` deadline (asyncio timeout), so a dead sweeper never wedges
-a turn (Q4-4). The sweeper is the *braces*: it turns a lapsed-but-unanswered row
+a turn. The sweeper is the *braces*: it turns a lapsed-but-unanswered row
 durable so peer installs and reconnecting clients agree the prompt is gone.
 
 Start/stop plumbing mirrors ``turn_claim`` exactly:
@@ -14,7 +14,7 @@ Start/stop plumbing mirrors ``turn_claim`` exactly:
 * cancelled at teardown from ``startup.shutdown_services`` via a ``sys.modules``
   lookup.
 
-Since F5 the "~10s background loop" is not a loop of its own: ``start()``
+The "~10s background loop" is not a loop of its own: ``start()``
 registers the expiry pass on the shared sweep driver in
 :mod:`app.core.turn_claim`, which runs it every ``SWEEP_INTERVAL_SECONDS`` while
 peer installs exist and at the stretched single-install cadence otherwise.
@@ -27,7 +27,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Cleanup cadence (Q4-4: "dedicated standalone ~10s sweeper loop").
+# Cleanup cadence: a ~10s sweep.
 SWEEP_INTERVAL_SECONDS = 10.0
 
 async def sweep_once() -> int:
@@ -83,14 +83,13 @@ def start() -> None:
     Called from ``startup.install_v2_turns_wiring`` (inside the lifespan
     startup, so a loop is running).
 
-    F5: this used to own a private 10s asyncio task. It is now a
-    :class:`app.core.turn_claim.SweepPass`, so it shares one timer with the
+    The pass is a :class:`app.core.turn_claim.SweepPass`, so it shares one timer with the
     other cross-install loops — same 10s cadence whenever the install registry
     shows a peer, stretched to the single-install cadence when it does not.
 
     SAFETY of the stretch. The sweeper is *belt*: the ``interaction_wait``
     adapter honours its own local ``expires_at`` deadline, so a late sweep can
-    never wedge a turn (Q4-4). What it adds is making the lapse DURABLE so peer
+    never wedge a turn. What it adds is making the lapse DURABLE so peer
     installs and reconnecting clients agree the prompt is gone — and on an
     install with no peers the only reader is this process and its own browsers,
     which re-read the row on resync. So the stretch delays a tidy-up by at most

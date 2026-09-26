@@ -10,9 +10,7 @@ export interface AppShellProps {
 	isAdmin: boolean;
 	onNewSession: () => void;
 	onSettledOpenSession: () => void;
-	onNewSessionForProject: (projectId: string) => void;
 	onOpenSession: (sessionId: string) => void;
 	onOpenFeature: (type: ViewType) => void;
 	onOpenSpotlight: () => void;
-	onOpenPlugins: () => void;
 }

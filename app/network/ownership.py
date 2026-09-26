@@ -61,10 +61,6 @@ def owns(row: Mapping[str, Any]) -> bool:
     return execution_eligible() and bool(me) and owner_of(row) == me
 
 
-def is_unowned(row: Mapping[str, Any]) -> bool:
-    return owner_of(row) is None
-
-
 def _claimant(ctx: engine.NetworkContext) -> Optional[str]:
     """The one online, eligible worker that may claim unowned work: the lowest device id."""
     from app.network import transport

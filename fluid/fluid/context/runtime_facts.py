@@ -137,11 +137,9 @@ def runtime_facts(cwd: str) -> str:
 
 # ─── mechanical fact harvest ─────────────────────────────────────────────────
 #
-# The note above is per turn and per process; nothing carried it across
-# sessions, so every session re-discovered "no pytest in the worker Python"
-# and "this worktree has no node_modules" by hand (round 9: 6fb34af0,
-# 59e41e2f, 98490077, 80c82234 ...). The harvesters below turn the same
-# observations into FactStore entries with ``provenance="tool"`` and a stable
+# The note above is per turn and per process. The harvesters below turn the
+# same observations ("no pytest in the worker Python", "this worktree has no
+# node_modules") into FactStore entries with ``provenance="tool"`` and a stable
 # key, so a later session on the same project sees them in the # Memory
 # section (rendered with a "confirm with Remember" hint) without the model
 # or the synthesizer having to do anything.
@@ -227,13 +225,19 @@ def harvest_tool_facts(name: str, output: str) -> list[tuple[str, str]]:
     if not match:
         return []
     origin = match.group(1)
-    host = origin.split("://", 1)[-1].split(":", 1)[0]
-    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+    scheme, _, authority = origin.partition("://")
+    if authority.startswith("["):  # bracketed IPv6 literal, maybe with a port
+        host = authority[: authority.find("]") + 1]
+    else:
+        host = authority.split(":", 1)[0]
+    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "[::]"):
         return []
+    # Built from scheme + host, not by cutting the last ":" off the origin —
+    # a portless origin has no port colon, and that cut left "http:".
     return [(
         _KEY_BROWSER_HOST,
         f"The browser tools run on another host: local servers must bind "
-        f"0.0.0.0 and be browsed via {origin.rsplit(':', 1)[0]}:<port> "
+        f"0.0.0.0 and be browsed via {scheme}://{host}:<port> "
         f"(loopback URLs are rewritten to this host).",
     )]
 

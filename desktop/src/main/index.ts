@@ -6,22 +6,25 @@
  * to one already running on this computer), and opens its web UI. A first
  * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, dialog, nativeTheme, safeStorage, session, shell } from 'electron';
+import { app, dialog, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs } from './installed-host';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
-import { installPermissionPolicy } from './navigation';
+import { forgetServiceWorkers, installPermissionPolicy } from './navigation';
+import { installListenerHeader, type ListenerTarget } from './listener';
+import { AGENT_ACCESS, agentAccessDetail, DisclosureStore, ensureAgentAccessAcknowledged } from './disclosure';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
+import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
@@ -50,7 +53,11 @@ if (!app.isPackaged && !managedContext() && process.env.SHUFFLE_DESKTOP_USER_DAT
 if (!app.requestSingleInstanceLock()) {
 	app.quit();
 } else {
-	void main();
+	// A startup failure must not leave a windowless process behind.
+	main().catch((error) => {
+		dialog.showErrorBox('AI Shuffle could not start', error instanceof Error ? error.message : String(error));
+		app.quit();
+	});
 }
 
 async function main(): Promise<void> {
@@ -67,10 +74,10 @@ async function main(): Promise<void> {
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
-	if (isolation) { /* Isolated profiles never replace the normal app’s URL handler. */ }
-	else if (installedExecutable) app.setAsDefaultProtocolClient(identity.protocol, installedExecutable);
-	else if (managed) app.setAsDefaultProtocolClient(identity.protocol, managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]);
-	else if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
+	// No aishuffle:// link is produced anywhere and the app never read one, so
+	// the scheme is no longer registered: it only let any web page launch the
+	// app with arguments of its choosing. Drop the handler older builds set.
+	if (!isolation) forgetProtocolHandler(identity.protocol, installedExecutable, managed);
 
 	await app.whenReady();
 
@@ -127,8 +134,6 @@ async function main(): Promise<void> {
 						allowAttach: applications ? false : identity.allowAttach,
 						postgres: () => postgres?.connection() ?? null
 					});
-		worker.supervisor = supervisor;
-		worker.runtimeError = runtimeError;
 		observeWorker();
 	}
 	// Development: point the window at a frontend dev server instead of the worker UI.
@@ -137,6 +142,17 @@ async function main(): Promise<void> {
 	const ses = session.fromPartition(PARTITION);
 	ses.setUserAgent(`${ses.getUserAgent()} AIShuffleDesktop/${app.getVersion()}`);
 	installPermissionPolicy(() => window.currentWorkerUrl);
+	// Requests to the worker from its own UI (and top-level loads of it) carry the listener token.
+	const listenerTarget = (): ListenerTarget | null => {
+		const token = supervisor?.listenerToken;
+		if (!supervisor || !token) return null;
+		// pageOrigin: a development run's frontend dev server; the worker's own origin otherwise.
+		try { return { origin: new URL(supervisor.state.url).origin, token, pageOrigin: window.currentWorkerUrl }; } catch { return null; }
+	};
+	installListenerHeader(ses, listenerTarget);
+	// A service worker an earlier version let a pop-up register would own the
+	// window's requests; the app never uses one, so none survives a launch.
+	await forgetServiceWorkers(ses);
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',
@@ -182,35 +198,80 @@ async function main(): Promise<void> {
 	};
 
 	const worker: WorkerControl = {
-		supervisor,
-		runtimeError,
-		bundledPostgresError: postgresError,
 		state: desktopState,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
-		openStatus: () => window.showPage('status'),
 		restart: async () => {
 			if (!supervisor) { app.relaunch(); app.quit(); return; }
 			if (window.currentPage !== 'status') await window.showPage('status');
-			await supervisor.stop();
+			try {
+				await supervisor.stop();
+			} catch (error) {
+				// Sessions could not be stopped, so the worker is still running: go back to its UI.
+				const state = supervisor.state;
+				if (state.phase === 'ready' && window.currentPage === 'status') {
+					loadRetries = 0;
+					void window.loadWorker(state.url);
+				}
+				throw error;
+			}
 			await startStack();
+		},
+		// "Worker Status…" can show the status page while the worker runs; its
+		// ready state never changes then, so the page asks to go back itself.
+		openUi: async () => {
+			const state = supervisor?.state;
+			if (state?.phase !== 'ready' || window.currentPage !== 'status') return;
+			loadRetries = 0;
+			await window.loadWorker(state.url);
 		}
 	};
 
 	updater.setPolicy(() => supervisor?.updatesAllowed() ?? Promise.resolve(false));
+	// The hub's gated feed wants this worker's license lease; older source managers lack useLease.
+	applications?.useLease?.(() => supervisor?.sourceLease() ?? Promise.resolve(null));
 	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
+	// macOS and Linux: new releases come as signed installers (D22: checked on
+	// launch and daily without asking). Windows keeps its source-update path.
+	const platform = installerPlatform();
+	if (!applications && platform && app.isPackaged && !isolation) {
+		try {
+			const publicKey = readFileSync(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8');
+			updater.useInstallers(new InstallerUpdates({ platform, arch: process.arch, currentVersion: app.getVersion(), publicKey, directory: app.getPath('downloads') }),
+				file => shell.showItemInFolder(file));
+			let offered: string | null = null;
+			updater.subscribe((state) => {
+				// Offer each new release once per launch; the sidebar button keeps offering it.
+				if (state.phase !== 'available' || !state.version || state.version === offered) return;
+				offered = state.version;
+				void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: `AI Shuffle ${state.version} is available`,
+					detail: 'Download the installer now? It is checked against the signed release before it is saved to your Downloads folder.',
+					buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1 })
+					.then(({ response }) => { if (response === 0) void updater.download(); });
+			});
+		} catch (error) {
+			console.error('Installer update checks are unavailable', error);
+		}
+	}
 	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
-	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
 	let quitting = false;
 	let applicationFailed = false;
+	/** Set once the agent-access disclosure is accepted; no window or worker before that. */
+	let accepted = false;
 	// A worker that has just answered /health/ready can still refuse its first
 	// page load for a moment; retry briefly before showing the failure.
 	let loadRetries = 0;
+	let claudeNoticeShown = false;
 	function observeWorker(): void {
 	supervisor?.on('state', (state: WorkerState) => {
 		if (quitting) return;
+		if (state.phase === 'ready' && state.setupNotice && !claudeNoticeShown) {
+			// Claude sessions need the user's own CLI; say how to install it once per launch.
+			claudeNoticeShown = true;
+			void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: 'Claude Code CLI not installed', detail: state.setupNotice, buttons: ['OK'] });
+		}
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
 			void applications.healthy().then(() => updater.check()).catch(error => console.error('Could not record healthy application', error));
@@ -252,8 +313,8 @@ async function main(): Promise<void> {
 
 	const actions = {
 		command: (name: string) => window.send('desktop:command', name),
-		restartWorker: () => void worker.restart(),
-		openWorkerStatus: () => void worker.openStatus(),
+		restartWorker: () => void worker.restart().catch((error) => dialog.showErrorBox('Restart Worker', error instanceof Error ? error.message : String(error))),
+		openWorkerStatus: () => void window.showPage('status'),
 		updatesEnabled: identity.updates,
 		showLogs: () => void shell.showItemInFolder(worker.state().logPath),
 		showPostgresLogs: () => {
@@ -263,10 +324,17 @@ async function main(): Promise<void> {
 		},
 		openInBrowser: () => {
 			const state = worker.state();
-			if (state.phase === 'ready') window.openExternal(state.url);
+			if (state.phase !== 'ready') return;
+			// The worker refuses requests without the listener token, which only
+			// this app's window sends: hand the browser a one-time session URL.
+			void (supervisor ? supervisor.browserHandoffUrl() : Promise.resolve(null)).then(
+				(url) => window.openExternal(url ?? state.url),
+				(error) => dialog.showErrorBox('Open in Browser', error instanceof Error ? error.message : String(error))
+			);
 		},
 		checkForUpdates: () => void updater.check(true),
 		reload: () => window.browserWindow?.webContents.reload(),
+		showAgentAccess: () => void showAgentAccess(false),
 		openDocs: () => {
 			if (window.currentWorkerUrl) window.send('desktop:command', 'open-docs');
 			else window.openExternal('https://github.com/HobbyCoders/ai-shuffle#readme');
@@ -274,7 +342,9 @@ async function main(): Promise<void> {
 		show: () => {
 			window.focus();
 			void open();
-		}
+		},
+		// The tray's Quit: the graceful stop first, then a kill if the worker is wedged.
+		forceQuit: () => void quitGuard.request({ force: true })
 	};
 	installMenu(actions);
 	if (!isolation) installTray(actions);
@@ -287,7 +357,37 @@ async function main(): Promise<void> {
 		}
 		await postgres?.stop();
 	});
+	// Restarting into an update stops the worker's sessions: ask first while any run.
+	updater.onConfirmInstall(async () => {
+		let active: number | null;
+		try { active = supervisor ? await supervisor.activeSessionCount() : 0; }
+		catch { active = null; }
+		if (active === 0) return true;
+		const activity = active === null ? 'AI Shuffle could not check for active sessions.' : `You have ${active} active session${active === 1 ? '' : 's'}.`;
+		const options = {
+			type: 'warning' as const, title: 'AI Shuffle', message: 'Restart to install the update?',
+			detail: `${activity} Restarting stops ${active === 1 ? 'it' : 'any active sessions'}.`,
+			buttons: ['Stop Sessions and Restart', 'Cancel'], defaultId: 1, cancelId: 1, noLink: true
+		};
+		const parent = window.browserWindow;
+		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+		return response === 0;
+	});
+	// An install that failed after the step above leaves the stack down: start it again.
+	updater.onInstallFailed(async (error) => {
+		const reason = error instanceof Error ? error.message : String(error);
+		try {
+			await startStack();
+		} catch (failure) {
+			dialog.showErrorBox('AI Shuffle could not restart', `The update could not be installed: ${reason}\n\nStarting AI Shuffle again also failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+			return;
+		}
+		dialog.showErrorBox('Update could not be installed', reason);
+	});
 
+	// Set once a quit kills the worker; a graceful stop still settling in the
+	// background must not reopen the app's state after that.
+	let forcedQuit = false;
 	const quitGuard = new QuitGuard({
 		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
 		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount),
@@ -302,16 +402,23 @@ async function main(): Promise<void> {
 				if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
 				updater.stop();
 			} catch (error) {
-				quitting = false;
+				if (!forcedQuit) quitting = false;
 				throw error;
 			}
 		},
+		forceStop: async () => {
+			quitting = true;
+			forcedQuit = true;
+			updater.stop();
+			// The worker never confirmed its sessions stopped: end it without asking again.
+			if (supervisor && !supervisor.state.external) await supervisor.stop({ force: true });
+			if (postgres) await postgres.stop();
+			if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
+		},
 		quit: () => app.quit(),
-		failed: async () => {
-			await showCloseDialog(window.browserWindow, null, true).catch(() => {
-				// A failed renderer must never turn an error into permission to quit.
-			});
-		}
+		failed: (_error, offerForce) =>
+			// A failed renderer must never turn an error into permission to quit.
+			showCloseDialog(window.browserWindow, null, true, offerForce).catch(() => false)
 	});
 	// Windows/Linux window close must be intercepted BEFORE its renderer dies.
 	// On macOS closing the window leaves the app running; Cmd+Q uses before-quit.
@@ -327,11 +434,37 @@ async function main(): Promise<void> {
 	});
 	app.on('activate', () => void open());
 
+	// "Agents run as you": once, before the first worker ever starts.
+	// Until it is accepted, a dock click or the tray's Open must not start the worker.
+	// Isolated test profiles are driven by scripts, not people.
+	if (!isolation && !(await ensureAgentAccessAcknowledged(DisclosureStore.forProfile(userData), () => showAgentAccess(true)))) {
+		app.quit();
+		return;
+	}
+
+	accepted = true;
 	await open();
 	updater.start();
 	installScreenshotHook(window);
 
+	async function showAgentAccess(firstRun: boolean): Promise<'continue' | 'quit'> {
+		const options = {
+			type: 'warning' as const,
+			title: AGENT_ACCESS.title,
+			message: AGENT_ACCESS.message,
+			detail: agentAccessDetail(),
+			buttons: firstRun ? ['I understand, continue', 'Quit'] : ['OK'],
+			defaultId: 0,
+			cancelId: firstRun ? 1 : 0,
+			noLink: true
+		};
+		const parent = window.browserWindow;
+		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+		return response === 0 ? 'continue' : 'quit';
+	}
+
 	async function open(): Promise<void> {
+		if (!accepted) return;
 		if (window.browserWindow) {
 			window.focus();
 			return;
@@ -340,8 +473,29 @@ async function main(): Promise<void> {
 			await window.loadWorker(devUrl);
 			return;
 		}
+		// macOS keeps the app and its worker running after the window closes;
+		// a new window goes straight back to the running worker.
+		const state = supervisor?.state;
+		if (state?.phase === 'ready') {
+			loadRetries = 0;
+			await window.loadWorker(state.url);
+			return;
+		}
 		await window.showPage('status');
 		void startStack();
+	}
+}
+
+/** Remove this build's own aishuffle:// registration from an earlier version, if it is still there. */
+function forgetProtocolHandler(protocol: string, installedExecutable: string | undefined, managed: ReturnType<typeof managedContext>): void {
+	const handler: [string?, string[]?] | null = installedExecutable ? [installedExecutable]
+		: managed ? [managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]]
+			: app.isPackaged ? [] : null;
+	if (!handler) return;
+	try {
+		if (app.isDefaultProtocolClient(protocol, ...handler)) app.removeAsDefaultProtocolClient(protocol, ...handler);
+	} catch (error) {
+		console.error('Could not remove the old aishuffle:// handler', error);
 	}
 }
 

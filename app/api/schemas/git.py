@@ -150,9 +150,8 @@ class PrStateResponse(BaseModel):
     """Response for the pr-state endpoint (PR lifecycle for the current branch).
 
     ``open_pr is None`` is only meaningful when ``pr_lookup_failed`` is False.
-    The two flags together give the client a tri-state instead of the old
-    lie-by-omission where an unreachable ``gh`` looked exactly like "this branch
-    has no pull request" (finding G2):
+    The two flags together give the client a tri-state, so an unreachable ``gh``
+    never looks like "this branch has no pull request":
 
     * ``pr_lookup_failed=False`` — the answer is authoritative.
     * ``pr_lookup_failed=True``, ``stale=True`` — the refresh failed and
@@ -220,7 +219,10 @@ class InitRepoRequest(BaseModel):
     create_github_repo: bool = Field(default=False, description="Create a GitHub repository and add as remote")
     github_repo_name: Optional[str] = Field(default=None, max_length=100, description="GitHub repo name (if creating)")
     github_private: bool = Field(default=True, description="Make the GitHub repo private")
-    default_branch: str = Field(default="main", pattern=r'^[a-zA-Z0-9._/-]+$')
+    # No leading "-": the name is passed to `git init --initial-branch` and,
+    # with a GitHub repo, to `git push` as a refspec, where it would parse as
+    # an option ("--mirror", "--force").
+    default_branch: str = Field(default="main", pattern=r'^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$')
 
 
 class InitRepoResponse(BaseModel):
@@ -323,18 +325,6 @@ class DiscardRequest(BaseModel):
 # Worktree Models
 # =============================================================================
 
-class WorktreeCreate(BaseModel):
-    """Request to create a new worktree"""
-    branch_name: str = Field(..., min_length=1, max_length=255)
-    create_new_branch: bool = False
-    base_branch: Optional[str] = None
-    profile_id: Optional[str] = None
-    copy_uncommitted: bool = Field(
-        default=False,
-        description="Copy uncommitted files (modified and untracked) from main repo to worktree"
-    )
-
-
 class SessionInfo(BaseModel):
     """Session info embedded in worktree response"""
     id: str
@@ -404,24 +394,6 @@ class WorktreeListResponse(BaseModel):
     total: int
 
 
-class WorktreeCreateResponse(BaseModel):
-    """Response for worktree creation"""
-    success: bool
-    message: str
-    worktree: Optional[WorktreeInfo] = None
-    session: Optional[dict] = None
-    errors: Optional[List[str]] = None  # Errors from copy_uncommitted operation
-
-
-class WorktreeSyncResponse(BaseModel):
-    """Response for worktree sync endpoint"""
-    synced: int
-    orphaned: int
-    cleaned_up: int
-    imported: int = 0  # External worktrees imported into database
-    errors: List[str] = []
-
-
 # =============================================================================
 # Branch Name Generation Models
 # =============================================================================
@@ -435,32 +407,6 @@ class GenerateBranchNameResponse(BaseModel):
     """Generated branch name"""
     branch_name: str
     display_name: str  # Human-readable version
-
-
-# =============================================================================
-# Upload Migration Models
-# =============================================================================
-
-class MigrateUploadsRequest(BaseModel):
-    """Request to copy pending uploads from main project to worktree"""
-    worktree_id: str
-    file_paths: List[str] = Field(..., description="Absolute paths of files to copy to worktree")
-
-class MigrateUploadsResponse(BaseModel):
-    """Result of upload migration"""
-    migrated: List[Dict[str, str]]  # List of {original_path, new_path, relative_path}
-    errors: List[str]
-
-
-# =============================================================================
-# Standalone Worktree Models
-# =============================================================================
-
-class WorktreeCreateStandalone(BaseModel):
-    """Request to create a standalone worktree (no session)"""
-    branch_name: str = Field(..., min_length=1, max_length=255)
-    create_new_branch: bool = False
-    base_branch: Optional[str] = None
 
 
 # =============================================================================

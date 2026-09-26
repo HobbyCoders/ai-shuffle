@@ -2,7 +2,7 @@
 Plugin Service - Core business logic for plugin management.
 
 User-global plugins live in Fluid's home so native legs pick them up
-(fluid.context.plugins, ruling CE5). Package format is still Claude's.
+(fluid.context.plugins, CE5). Package format is still Claude's.
 
 Plugin Scopes:
 - USER: ~/.fluid/plugins/ (user-global plugins)
@@ -18,29 +18,23 @@ and enabling/disabling plugins.
 import json
 import logging
 import re
-import stat
-import shutil
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, NoReturn, Optional, Dict, Any
 
-import os
+from app.core.mcp_service import McpConfigUnreadable
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
-    DictMixin,
     PluginScope,
     MarketplaceInfo,
-    PluginInstallation,
     PluginInfo,
     PluginDetails,
     PluginUpdateInfo,
     AutoUpdateSettings,
     AvailablePlugin,
-    _get_claude_dir,
     _get_fluid_dir,
-    _force_rmtree,
 )
 
 # Import delegate modules
@@ -50,6 +44,21 @@ from app.core import plugin_hooks as _hooks_mod
 from app.core import plugin_updates as _upd_mod
 
 logger = logging.getLogger(__name__)
+
+
+class PluginConfigUnreadable(McpConfigUnreadable):
+    """A plugin settings/registry file exists but cannot be read, so it is not rewritten.
+
+    Same 409 and message as :class:`McpConfigUnreadable` (the plugins API
+    lets it through like any HTTPException); when the bytes were readable,
+    the detail also names the ``<name>.<timestamp>.bak`` copy.
+    """
+
+    def __init__(self, path: Path, backup: Optional[Path] = None):
+        super().__init__(path)
+        self.backup = backup
+        if backup is not None:
+            self.detail = f"{self.detail} A copy of it was saved to {backup}."
 
 
 class PluginService:
@@ -133,22 +142,173 @@ class PluginService:
             plugins_dir.mkdir(parents=True, exist_ok=True)
         return plugins_dir
 
-    def _read_json_file(self, path: Path, default: Any = None) -> Any:
-        """Safely read a JSON file"""
+    def _read_json_file(self, path: Path, default: Any = None, *, for_update: bool = False) -> Any:
+        """Read a JSON object file.
+
+        A missing file reads as ``default`` (``{}``). An unreadable or corrupt
+        one (permission denied, not UTF-8, not JSON, not an object) also reads
+        as ``default`` for display, but with ``for_update`` it raises
+        :class:`PluginConfigUnreadable`: the caller is about to write the
+        result back, and writing what an unreadable file "read as" would
+        replace the whole file.
+        """
+        fallback = default if default is not None else {}
         try:
-            if path.exists():
-                with open(path, 'r') as f:
-                    return json.load(f)
-            return default if default is not None else {}
-        except (json.JSONDecodeError, IOError) as e:
+            if not path.exists():
+                return fallback
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Every caller indexes the result as an object; a file holding
+            # ``null`` or a list would otherwise raise AttributeError.
+            if not isinstance(data, dict):
+                raise ValueError("top-level JSON is not an object")
+            return data
+        except (ValueError, OSError) as e:
+            # ValueError covers JSONDecodeError and a non-UTF-8 file.
             logger.error(f"Error reading {path}: {e}")
-            return default if default is not None else {}
+            if for_update:
+                self._refuse_unreadable(path, e)
+            return fallback
+
+    # Backups of refused files: <name>.<UTC timestamp>.bak, never overwritten,
+    # the newest few kept per file. A hand-made <name>.bak is never touched.
+    _BACKUP_KEEP = 5
+    _BACKUP_STAMP = re.compile(r"^(\d{8}T\d{12}Z)(?:-(\d+))?$")
+
+    @classmethod
+    def _backups_of(cls, path: Path) -> List[Path]:
+        """This module's backups of ``path``, oldest first."""
+        prefix, suffix = path.name + ".", ".bak"
+        found = []
+        try:
+            siblings = list(path.parent.iterdir())
+        except OSError:
+            return []
+        for sibling in siblings:
+            name = sibling.name
+            if name.startswith(prefix) and name.endswith(suffix):
+                match = cls._BACKUP_STAMP.match(name[len(prefix):-len(suffix)])
+                if match:
+                    found.append(((match.group(1), int(match.group(2) or 0)), sibling))
+        return [backup for _key, backup in sorted(found)]
+
+    @classmethod
+    def _keep_backup(cls, path: Path, raw: bytes) -> Optional[Path]:
+        """Save ``raw`` (the bytes of a file that failed to parse) beside ``path``.
+
+        Written to ``<name>.<UTC timestamp>.bak`` with exclusive create, so no
+        earlier backup (and no ``<name>.bak`` the owner made) is ever
+        overwritten. When a kept backup already holds these bytes, that one is
+        returned instead of a new copy, so repeated background refusals of the
+        same file do not rotate the original out. Only the newest
+        ``_BACKUP_KEEP`` backups of each file are kept.
+        """
+        existing = cls._backups_of(path)
+        for backup in reversed(existing):
+            try:
+                if backup.read_bytes() == raw:
+                    return backup
+            except OSError:
+                continue
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = None
+        try:
+            for attempt in range(100):
+                candidate = path.with_name(
+                    f"{path.name}.{stamp}{'' if attempt == 0 else f'-{attempt}'}.bak"
+                )
+                try:
+                    with open(candidate, "xb") as f:
+                        f.write(raw)
+                except FileExistsError:
+                    continue
+                backup = candidate
+                break
+        except OSError as e:
+            logger.error(f"Could not back up {path}: {e}")
+            return None
+        if backup is None:
+            logger.error(f"Could not back up {path}: no free backup name")
+            return None
+        for old in cls._backups_of(path)[:-cls._BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError as e:
+                logger.warning(f"Could not remove old backup {old}: {e}")
+        return backup
+
+    def _refuse_unreadable(self, path: Path, cause: BaseException) -> NoReturn:
+        """Raise :class:`PluginConfigUnreadable` for ``path``, leaving it untouched.
+
+        When the file's bytes can be read (it failed to parse rather than to
+        open), a copy is kept at ``<name>.<timestamp>.bak`` (see
+        :meth:`_keep_backup`) so the owner can recover it even after deleting
+        or hand-editing the original.
+        """
+        try:
+            raw: Optional[bytes] = path.read_bytes()
+        except OSError:
+            raw = None
+        backup = self._keep_backup(path, raw) if raw is not None else None
+        raise PluginConfigUnreadable(path, backup) from cause
+
+    def _check_replaceable(self, path: Path) -> None:
+        """Refuse to replace a file that exists but is not a readable JSON object.
+
+        Every read that precedes a write uses ``for_update=True``, so a file
+        caught mid-write after the up-front check (see
+        :meth:`_check_files_replaceable`) is refused rather than read as
+        ``{}`` and written back; this check on the write itself is the last
+        guard. A missing file is fine: the write creates it.
+
+        The auto-update settings file is the exception: it is always written
+        as a whole record (never merged into), so one that fails to parse is
+        backed up (see :meth:`_keep_backup`) and replaced; otherwise it could never be fixed
+        from the app and every background run would fail. One that cannot be
+        opened at all is still refused, since no copy can be kept.
+        """
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            self._refuse_unreadable(path, e)
+        try:
+            data = json.loads(raw.decode('utf-8'))
+            if isinstance(data, dict):
+                return
+            cause: Exception = ValueError("top-level JSON is not an object")
+        except ValueError as e:
+            cause = e
+        if path == self.AUTO_UPDATE_FILE:
+            logger.error(f"Replacing unreadable {path}: {cause}")
+            self._keep_backup(path, raw)
+            return
+        self._refuse_unreadable(path, cause)
+
+    def _check_files_replaceable(self, *paths: Optional[Path]) -> None:
+        """Run :meth:`_check_replaceable` on every file an operation will write.
+
+        Called at the top of each multi-step change (install, uninstall,
+        update, marketplace add/sync/remove, project install/uninstall) before
+        it deletes, clones or copies anything, so a 409 for one unreadable file
+        leaves the whole change unapplied and the request can be retried once
+        the file is fixed. ``None`` entries (no project directory) are skipped.
+        """
+        for path in paths:
+            if path is not None:
+                self._check_replaceable(path)
 
     def _write_json_file(self, path: Path, data: Any) -> bool:
-        """Safely write a JSON file with atomic operation"""
+        """Atomically write a JSON file.
+
+        Raises :class:`PluginConfigUnreadable` (409) instead of replacing an
+        existing file that cannot be read as a JSON object.
+        """
+        self._check_replaceable(path)
         try:
             temp_path = path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             temp_path.replace(path)
             return True
@@ -220,10 +380,14 @@ class PluginService:
         if not manifest_path.exists():
             return None
         try:
-            return json.loads(manifest_path.read_text(encoding='utf-8'))
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         except (IOError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning(f"Failed to parse marketplace.json at {manifest_path}")
             return None
+        if not isinstance(manifest, dict):
+            logger.warning(f"marketplace.json at {manifest_path} is not an object")
+            return None
+        return manifest
 
     def _resolve_plugin_source(self, source, mp_path: Path, plugin_root: Optional[str] = None) -> Optional[Path]:
         """
@@ -360,14 +524,24 @@ class PluginService:
 
             plugin_root = manifest.get("metadata", {}).get("pluginRoot") if isinstance(manifest.get("metadata"), dict) else None
 
-            for entry in manifest.get("plugins", []):
+            entries = manifest.get("plugins")
+            for entry in entries if isinstance(entries, list) else []:
+                # One malformed entry must not take down the whole listing.
+                if not isinstance(entry, dict):
+                    continue
                 plugin_name = entry.get("name")
-                if not plugin_name:
+                if not plugin_name or not isinstance(plugin_name, str):
+                    continue
+                try:
+                    _inst_mod._safe_path_component(plugin_name, "name")
+                except ValueError:
+                    logger.warning(f"Skipping plugin with unsafe name in {mp.id}: {plugin_name[:100]!r}")
                     continue
 
                 plugin_id = f"{plugin_name}@{mp.id}"
                 source = entry.get("source", "")
-                description = entry.get("description", "")[:200]
+                description = entry.get("description")
+                description = description[:200] if isinstance(description, str) else ""
 
                 # Try to resolve to a local directory for component detection
                 local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
@@ -811,7 +985,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, True)
-        settings = self._read_json_file(self.SETTINGS_FILE, {})
+        settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
@@ -823,7 +997,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, False)
-        settings = self._read_json_file(self.SETTINGS_FILE, {})
+        settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = False
@@ -857,8 +1031,14 @@ class PluginService:
             return self.project_dir / ".fluid" / "settings.local.json"
         return self.project_dir / ".fluid" / "settings.json"
 
-    def _read_project_settings(self, scope: Optional[PluginScope] = None) -> Dict[str, Any]:
-        """Read project Fluid settings. No scope merges both enabledPlugins maps."""
+    def _read_project_settings(
+        self, scope: Optional[PluginScope] = None, *, for_update: bool = False
+    ) -> Dict[str, Any]:
+        """Read project Fluid settings. No scope merges both enabledPlugins maps.
+
+        ``for_update`` (single scope only) refuses an unreadable file; see
+        :meth:`_read_json_file`.
+        """
         if scope is None:
             enabled: Dict[str, Any] = {}
             for layer_scope in (PluginScope.PROJECT, PluginScope.LOCAL):
@@ -867,7 +1047,7 @@ class PluginService:
             return {"enabledPlugins": enabled}
         settings_file = self._get_project_settings_file(scope)
         if settings_file:
-            return self._read_json_file(settings_file, {})
+            return self._read_json_file(settings_file, {}, for_update=for_update)
         return {}
 
     def _write_project_settings(self, data: Dict[str, Any], scope: PluginScope = PluginScope.PROJECT) -> bool:
@@ -1019,7 +1199,7 @@ class PluginService:
     def enable_project_plugin(self, plugin_id: str) -> bool:
         """Enable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
-        settings = self._read_project_settings(scope)
+        settings = self._read_project_settings(scope, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
@@ -1028,7 +1208,7 @@ class PluginService:
     def disable_project_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
-        settings = self._read_project_settings(scope)
+        settings = self._read_project_settings(scope, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = False
@@ -1142,13 +1322,6 @@ def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
         if cache_key not in _plugin_services:
             _plugin_services[cache_key] = PluginService(project_dir=project_dir)
         return _plugin_services[cache_key]
-
-
-def clear_plugin_service_cache():
-    """Clear the plugin service cache (useful for testing)"""
-    global _plugin_services
-    with _plugin_services_lock:
-        _plugin_services = {}
 
 
 def get_all_plugin_hooks() -> List[Dict[str, Any]]:

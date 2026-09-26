@@ -29,6 +29,7 @@ import app.core.query_options as qo
 from app.core import encryption
 from app.db import database as db
 from app.core.generation_options import build_generation_options
+from tests.core.helpers import make_profile
 
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
 AUTH_TOKEN_KEY = "ANTHROPIC_AUTH_TOKEN"
@@ -56,15 +57,6 @@ def _mk_provider(provider_id="op", *, token="gw-secret", context_window=272000):
     )
 
 
-def _mk_profile(profile_id, config):
-    return db.create_profile(
-        profile_id=profile_id,
-        name=profile_id,
-        description=None,
-        config=config,
-    )
-
-
 def _build_options(profile, *, session_id=None, overrides=None):
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(
@@ -79,14 +71,14 @@ def _build_options(profile, *, session_id=None, overrides=None):
 
 class TestBindingStampedAtCreation:
     def test_provider_profile_stamps_provider_id(self, mock_db):
-        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
         row = db.create_session("s-prov", profile_id="prov")
         assert row["provider_id"] == "op"
         # And the persisted read-back agrees.
         assert db.get_session("s-prov")["provider_id"] == "op"
 
     def test_native_profile_leaves_binding_null(self, mock_db):
-        _mk_profile("nat", {"model": "opus"})
+        make_profile("nat", {"model": "opus"})
         row = db.create_session("s-nat", profile_id="nat")
         assert row["provider_id"] is None
         assert db.get_session("s-nat")["provider_id"] is None
@@ -105,7 +97,7 @@ class TestSpawnResolvesFromBinding:
         not the live profile, is authoritative."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
         db.create_session("s-bound", profile_id="prov")  # stamps provider_id='op'
 
         # Simulate an EDITED profile: provider removed. Passing overrides.cwd
@@ -136,7 +128,7 @@ class TestSpawnResolvesFromBinding:
         provider. The binding's NULL wins over config.provider."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("nat", {"model": "opus"})
+        make_profile("nat", {"model": "opus"})
         row = db.create_session("s-native", profile_id="nat")
         assert row["provider_id"] is None
 
@@ -282,7 +274,7 @@ class TestCompositeOverrideRebindsProvider:
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
         _mk_anthropic_provider("ap", token="ak-secret")
-        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
         db.create_session("s-x", profile_id="prov")
 
         opts = _build_options(
@@ -301,7 +293,7 @@ class TestCompositeOverrideRebindsProvider:
         """No binding at all → a composite still sets the provider for the turn."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("nat", {"model": "opus"})
+        make_profile("nat", {"model": "opus"})
         db.create_session("s-nat2", profile_id="nat")
 
         opts = _build_options(
@@ -319,7 +311,7 @@ class TestCompositeOverrideRebindsProvider:
         gate), so nothing about this path is a special case any more."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("nat", {"model": "opus"})
+        make_profile("nat", {"model": "opus"})
         db.create_session("s-or", profile_id="nat")
 
         opts = _build_options(
@@ -336,7 +328,7 @@ class TestNativePickClearsTheBinding:
         on a provider-bound session now resolves the turn back to native."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
         db.create_session("s-clear", profile_id="prov")
 
         opts = _build_options(
@@ -358,7 +350,7 @@ class TestNativePickClearsTheBinding:
             "op",
             token="gw-secret",
         )
-        _mk_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
         db.create_session("s-keep", profile_id="prov")
 
         opts = _build_options(
@@ -377,7 +369,7 @@ class TestNativePickClearsTheBinding:
         exemption keeps the session on its own provider."""
         encryption.set_encryption_key("pw", db)
         _mk_anthropic_provider("ap", token="ak-secret")
-        _mk_profile("apx", {"model": "claude-sonnet-4-5", "provider": "ap"})
+        make_profile("apx", {"model": "claude-sonnet-4-5", "provider": "ap"})
         db.create_session("s-ap", profile_id="apx")
 
         opts = _build_options(
@@ -392,7 +384,7 @@ class TestNativePickClearsTheBinding:
         explicitly — a model pick must not unbind them."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("op", token="gw-secret")
-        _mk_profile("nat", {"model": "opus"})
+        make_profile("nat", {"model": "opus"})
         db.create_session("s-pin", profile_id="nat")
 
         opts = _build_options(

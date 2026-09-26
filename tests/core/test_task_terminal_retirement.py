@@ -32,26 +32,24 @@ from app.db import turns as turns_db
 # Fixtures / doubles
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
+@pytest.fixture(autouse=True)
+def _short_terminal_batch_window(monkeypatch):
+    """The real 2s terminal-batch window made every on_task_terminal test wait
+    it out; keep a short (non-zero, so batching still happens) window."""
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
 
 
 @pytest.fixture(autouse=True)
 def _clean_module_state():
-    from app.core import idle_reader, session_runtime, turn_manager
+    from app.core import session_runtime, turn_manager
 
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     turn_scheduler._batch_kick_tasks.clear()
     task_registry.reset_all()
     yield
     session_runtime.register_scheduler(None)
-    idle_reader.register_on_task_terminal(None)
     turn_manager.register_kick(None)
     turn_scheduler._kick_tasks.clear()
     turn_scheduler._batch_kick_tasks.clear()
@@ -525,31 +523,6 @@ class TestParkedWorkerIsNotComplete:
 # ===========================================================================
 
 class TestCancellationsDoNotWake:
-    def test_an_unattributed_stop_is_recognised(self):
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "tail the log")
-        reg.complete_task("s1", "sh-1", "killed")
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is True
-
-    def test_an_attributed_stop_is_not(self):
-        from app.core.task_registry import (
-            SERVER_SHUTDOWN_REASON, SERVER_SHUTDOWN_SUMMARY,
-        )
-
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "tail the log")
-        reg.complete_task(
-            "s1", "sh-1", "killed",
-            summary=SERVER_SHUTDOWN_SUMMARY, reason=SERVER_SHUTDOWN_REASON,
-        )
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is False
-
-    def test_a_clean_completion_is_not_a_cancellation(self):
-        reg = TaskRegistry()
-        reg.start_task("s1", "sh-1", "shell", "npm test")
-        reg.complete_task("s1", "sh-1", "completed")
-        assert reg.is_unattributed_cancellation("s1", "sh-1") is False
-
     @pytest.mark.asyncio
     async def test_an_unattributed_kill_queues_a_wake(self, mock_db):
         _user_turn("sess-1")
@@ -640,8 +613,6 @@ class TestTerminalsBatch:
         with patch.object(
             turn_scheduler, "_try_steer_terminal_notification",
             new=AsyncMock(return_value=False),
-        ), patch.object(
-            turn_scheduler, "_cli_owns_at_rest_wake", lambda sid, frame: False,
         ), _pool_with(_RecordingAdapter()):
             for tid in ("t-1", "t-2", "t-3"):
                 await turn_scheduler.on_task_terminal("sess-1", {
@@ -670,8 +641,6 @@ class TestTerminalsBatch:
         with patch.object(
             turn_scheduler, "_try_steer_terminal_notification",
             new=AsyncMock(return_value=False),
-        ), patch.object(
-            turn_scheduler, "_cli_owns_at_rest_wake", lambda sid, frame: False,
         ), patch.object(
             turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.05,
         ), patch.object(

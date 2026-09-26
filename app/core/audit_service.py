@@ -108,27 +108,6 @@ def log_event(
         }
 
 
-def log_login_success(request: Request, user_id: str, user_type: str = "admin", method: str = "password") -> Dict[str, Any]:
-    """Log a successful login event."""
-    return log_event(
-        event_type=AuditEventType.LOGIN_SUCCESS,
-        request=request,
-        user_id=user_id,
-        user_type=user_type,
-        details={"method": method}
-    )
-
-
-def log_login_failure(request: Request, username: Optional[str] = None, reason: str = "invalid_credentials") -> Dict[str, Any]:
-    """Log a failed login attempt."""
-    return log_event(
-        event_type=AuditEventType.LOGIN_FAILURE,
-        request=request,
-        user_id=username,
-        details={"reason": reason, "attempted_username": username}
-    )
-
-
 def log_logout(request: Request, user_id: str, user_type: str = "admin") -> Dict[str, Any]:
     """Log a logout event."""
     return log_event(
@@ -136,53 +115,4 @@ def log_logout(request: Request, user_id: str, user_type: str = "admin") -> Dict
         request=request,
         user_id=user_id,
         user_type=user_type
-    )
-
-
-def log_password_changed(request: Request, user_id: str) -> Dict[str, Any]:
-    """Log password change."""
-    return log_event(
-        event_type=AuditEventType.PASSWORD_CHANGED,
-        request=request,
-        user_id=user_id
-    )
-
-
-def log_password_change_failed(request: Request, user_id: str, reason: str) -> Dict[str, Any]:
-    """Log failed password change attempt."""
-    return log_event(
-        event_type=AuditEventType.PASSWORD_CHANGE_FAILED,
-        request=request,
-        user_id=user_id,
-        details={"reason": reason}
-    )
-
-
-def log_api_key_created(request: Request, user_id: str, api_key_name: str, api_key_id: str) -> Dict[str, Any]:
-    """Log API key creation."""
-    return log_event(
-        event_type=AuditEventType.API_KEY_CREATED,
-        request=request,
-        user_id=user_id,
-        details={"api_key_name": api_key_name, "api_key_id": api_key_id}
-    )
-
-
-def log_api_key_deleted(request: Request, user_id: str, api_key_name: str, api_key_id: str) -> Dict[str, Any]:
-    """Log API key deletion."""
-    return log_event(
-        event_type=AuditEventType.API_KEY_DELETED,
-        request=request,
-        user_id=user_id,
-        details={"api_key_name": api_key_name, "api_key_id": api_key_id}
-    )
-
-
-def log_admin_setup(request: Request, username: str) -> Dict[str, Any]:
-    """Log admin account setup."""
-    return log_event(
-        event_type=AuditEventType.ADMIN_SETUP,
-        request=request,
-        user_id=username,
-        details={"action": "initial_setup"}
     )

@@ -4,7 +4,7 @@ Pure-function tests: no database. The parser must tolerate passwords with
 reserved characters (literal ``@``) and percent-encoding, because libpq cannot
 parse either from a raw DSN string (observed in production: a literal ``@`` in
 the password made the event-gateway listener resolve the host as
-``"Pwd@10.0.0.200"`` and crash-loop).
+``"Xyz@192.0.2.10"`` and crash-loop).
 """
 
 from app.db.base import parse_database_url
@@ -22,18 +22,18 @@ def test_plain_url():
 
 
 def test_percent_encoded_password_is_decoded():
-    parsed = parse_database_url("postgresql://REDACTED@10.0.0.200:5432/appdb")
-    assert parsed["host"] == "10.0.0.200"
+    parsed = parse_database_url("postgresql://alice:p%40ss@192.0.2.10:5432/appdb")
+    assert parsed["host"] == "192.0.2.10"
     assert parsed["password"] == "p@ss"
 
 
 def test_literal_at_in_password_keeps_real_host():
     # urlparse splits userinfo at the LAST '@', unlike libpq.
-    parsed = parse_database_url("postgresql://REDACTED@10.0.0.200:5432/appdb")
-    assert parsed["host"] == "10.0.0.200"
+    parsed = parse_database_url("postgresql://alice:p@ssXyz@192.0.2.10:5432/appdb")
+    assert parsed["host"] == "192.0.2.10"
     assert parsed["port"] == 5432
     assert parsed["user"] == "alice"
-    assert parsed["password"] == "p@ssPwd"
+    assert parsed["password"] == "p@ssXyz"
 
 
 def test_scheme_prefix_is_optional():

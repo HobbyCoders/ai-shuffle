@@ -65,8 +65,25 @@ const github = {
 """
 
 
+class UniqueKeyLoader(yaml.BaseLoader):
+    """Keep Actions scalar spellings, but reject keys GitHub would reject."""
+
+    def construct_mapping(self, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a workflow mapping", node.start_mark,
+                    f"duplicate mapping key {key!r}", key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
 def workflow(name):
-    return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    with (WORKFLOWS / name).open(encoding="utf-8") as source:
+        return yaml.load(source, Loader=UniqueKeyLoader)
 
 
 def uploads(job):
@@ -74,6 +91,45 @@ def uploads(job):
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_all_workflow_mappings_have_unique_keys(self):
+        paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            with self.subTest(file=path.name):
+                workflow(path.name)
+
+    def test_duplicate_keys_are_rejected_at_each_mapping_depth(self):
+        cases = [
+            ("on: push\non: pull_request\n", "on"),
+            ("jobs:\n  build: {}\n  build: {}\n", "build"),
+            ("jobs:\n  verify:\n    env:\n      EXPECT_SIGNED: true\n"
+             "    runs-on: windows-latest\n    env:\n      RELEASE_TAG: v1.2.3\n", "env"),
+            ("jobs:\n  verify:\n    steps:\n      - env:\n          TOKEN: first\n"
+             "          TOKEN: second\n        run: check\n", "TOKEN"),
+        ]
+        for source, key in cases:
+            with self.subTest(key=key):
+                with self.assertRaises(yaml.constructor.ConstructorError) as failure:
+                    yaml.load(source, Loader=UniqueKeyLoader)
+                self.assertEqual(failure.exception.problem, f"duplicate mapping key {key!r}")
+                self.assertIsNotNone(failure.exception.problem_mark)
+                self.assertIn("line", str(failure.exception))
+
+    def test_keys_can_repeat_in_different_jobs_and_actions_on_stays_a_string(self):
+        source = ("on: push\njobs:\n  first:\n    env:\n      NAME: first\n"
+                  "  second:\n    env:\n      NAME: second\n")
+        parsed = yaml.load(source, Loader=UniqueKeyLoader)
+        self.assertEqual(parsed["on"], "push")
+        self.assertEqual(parsed["jobs"]["first"]["env"]["NAME"], "first")
+        self.assertEqual(parsed["jobs"]["second"]["env"]["NAME"], "second")
+
+    def test_windows_verifier_keeps_both_release_and_signing_inputs(self):
+        verify = workflow("desktop-installer.yml")["jobs"]["verify"]
+        self.assertEqual(verify["env"], {
+            "EXPECT_SIGNED": "${{ needs.build.outputs.signed }}",
+            "RELEASE_TAG": "${{ inputs.release_tag }}",
+        })
+
     def test_every_upload_has_a_short_explicit_retention(self):
         count = 0
         for path in WORKFLOWS.glob("*.yml"):
@@ -110,11 +166,23 @@ class ArtifactPolicyTests(unittest.TestCase):
         preview = next(s for j in desktop["jobs"].values() for s in uploads(j) if s["with"]["name"] == "windows-preview-installer")
         self.assertEqual(desktop["on"]["workflow_dispatch"]["inputs"]["upload_preview"]["default"], "false")
         cases = []
-        for event, ref, enabled, tag in itertools.product(["pull_request", "workflow_dispatch", "push"], ["refs/heads/main", "refs/heads/feature"], [False, True], ["", "v1.2.3"]):
+        for event, ref, enabled, tag, owner, same_rerun_actor in itertools.product(
+            ["pull_request", "workflow_dispatch", "push"],
+            ["refs/heads/main", "refs/heads/feature", "refs/tags/v1.2.3"],
+            [False, True], ["", "v1.2.3"], [False, True], [False, True],
+        ):
             inputs = {"publish_download": enabled, "upload_preview": enabled, "release_tag": tag}
-            github = {"event_name": event, "ref": ref}
-            cases.append({"inputs": inputs, "github": github, "android": enabled and event != "pull_request" and (bool(tag) or ref == "refs/heads/main"), "desktop": event == "workflow_dispatch" and enabled})
-        runner = "const {android,desktop,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); for(const c of cases) for(const [key,expr] of Object.entries({android,desktop})) require('assert').strictEqual(new Function('inputs','github','return '+expr)(c.inputs,c.github), c[key]);"
+            github = {"event_name": event, "ref": ref, "repository": "HobbyCoders/ai-shuffle",
+                      "actor_id": "76577322" if owner else "7", "actor": "Quickkill0",
+                      "triggering_actor": "Quickkill0" if same_rerun_actor else "another-maintainer"}
+            permitted_ref = ref == "refs/heads/main" or ref.startswith("refs/tags/v")
+            permitted_event = ((event == "workflow_dispatch" and permitted_ref)
+                               or (event == "push" and ref.startswith("refs/tags/v")))
+            android_allowed = (enabled and owner and same_rerun_actor and permitted_event
+                               and (bool(tag) or ref == "refs/heads/main"))
+            cases.append({"inputs": inputs, "github": github, "android": android_allowed,
+                          "desktop": event == "workflow_dispatch" and enabled})
+        runner = "const {android,desktop,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); for(const c of cases) for(const [key,expr] of Object.entries({android,desktop})) require('assert').strictEqual(new Function('inputs','github','startsWith','return '+expr)(c.inputs,c.github,(s,p)=>s.startsWith(p)), c[key]);"
         subprocess.run(["node", "-e", runner], input=json.dumps({"android": android, "desktop": preview["if"], "cases": cases}), text=True, check=True)
         self.assertEqual(preview["with"]["retention-days"], "1")
         steps = next(j["steps"] for j in desktop["jobs"].values() if preview in j.get("steps", []))
@@ -164,6 +232,31 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertEqual(binary["with"]["retention-days"], "1")
         download = next(s for s in installer["jobs"]["verify"]["steps"] if s.get("uses", "").startswith("actions/download-artifact@"))
         self.assertEqual(download["with"]["run-id"], "${{ inputs.candidate_run_id || github.run_id }}")
+
+    def test_platform_installer_publishes_the_tagged_android_download(self):
+        config = workflow("platform-installer.yml")
+        self.assertEqual(config["on"]["workflow_dispatch"]["inputs"]["platform"]["options"], ["mac", "linux", "android"])
+        build = config["jobs"]["android-build"]
+        # The APK comes from Android CI's own release path, built for this tag.
+        self.assertEqual(build["uses"], "./.github/workflows/android.yml")
+        self.assertEqual(build["with"], {"publish_download": "true", "release_tag": "${{ github.ref_name }}"})
+        self.assertIn("inputs.platform == 'android'", build["if"])
+        self.assertIn("github.ref_type == 'tag'", build["if"])
+        publish = config["jobs"]["publish"]
+        self.assertEqual(publish["needs"], "android-build")
+        self.assertEqual(publish["environment"], "release-signing")
+        self.assertIn("needs.android-build.result == 'success'", publish["if"])
+        self.assertNotIn("always()", publish["if"])
+        download = next(s for s in publish["steps"] if s.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(download["with"]["run-id"], "${{ inputs.build_run_id || github.run_id }}")
+        # android.yml uploads exactly this artifact name; the publisher reads its files.
+        uploaded = {s["with"]["name"] for s in uploads(workflow("android.yml")["jobs"]["build"])}
+        self.assertIn("android-download", uploaded)
+        run = "\n".join(s.get("run", "") for s in publish["steps"])
+        self.assertIn("name=android-download", run)
+        self.assertIn("sha256sum --check AI-Shuffle-Android.apk.sha256", run)
+        self.assertIn('publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"', run)
+        self.assertFalse((WORKFLOWS / "desktop-platform-installer.yml").exists())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 <!--
 title: iMessage
-description: Connect Claude to iMessage using the imsg CLI on macOS
+description: Connect AI Shuffle agents to iMessage using the imsg CLI on macOS
 order: 8
 -->
 
@@ -8,7 +8,7 @@ order: 8
 
 ## Overview
 
-The iMessage connector allows Claude to send and receive iMessages through AI Shuffle. Under the hood, it drives the [`imsg`](https://github.com/) command-line tool, which exposes a JSON-RPC interface over a subprocess. AI Shuffle spawns `imsg rpc`, subscribes to incoming messages, and sends replies through the same connection. This means Claude can participate in your iMessage (and SMS) conversations and respond to texts — all from the Mac that owns the iMessage account.
+The iMessage connector lets an AI Shuffle agent send and receive iMessages. Under the hood, it drives the `imsg` command-line tool, which exposes a JSON-RPC interface over a subprocess. AI Shuffle spawns `imsg rpc`, subscribes to incoming messages, and sends replies through the same connection. This means the agent can take part in your iMessage (and SMS) conversations and respond to texts — all from the Mac that owns the iMessage account.
 
 Because iMessage is a proprietary Apple protocol with no public API, the connector relies on the `imsg` CLI talking directly to the local Messages database and `Messages.app`. As a result, **this connector only runs on macOS** — the machine running the AI Shuffle backend must be a Mac that is signed into iMessage.
 
@@ -42,35 +42,23 @@ This launches the RPC process (it reads requests on stdin). Press Ctrl-C to exit
 
 ### 3. Create the iMessage connector in AI Shuffle
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "My iMessage",
-    "connector_type": "imessage",
-    "config": {
-      "cli_path": "imsg",
-      "service": "auto",
-      "allowed_handles": ["+15551234567"]
-    }
-  }'
-```
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **iMessage**.
+2. Click **Install iMessage** if prompted, then click **Connect account**.
+3. Fill in the configuration fields:
+   - **CLI Path** (optional): Path to the `imsg` binary. Defaults to `imsg`.
+   - **Service** (optional): `imessage`, `sms`, or `auto`. Defaults to `auto`.
+   - **Allowed Handles**: At least one phone number or email address. Only messages from these senders are processed.
+4. Click **Create Connector**.
 
-All config fields are optional. Omit `allowed_handles` to process messages from every sender. Or add the connector through the AI Shuffle UI under **Settings > Connectors > Add Connector** and select **iMessage** from the connector type dropdown.
+The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps). To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
 
 ### 4. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
-
-When activated, the connector spawns `imsg rpc`, probes it with a `chats.list` request, and subscribes to incoming messages.
+Turn on the connection's **Activate** switch. When activated, the connector spawns `imsg rpc`, probes it with a `chats.list` request, and subscribes to incoming messages.
 
 ### 5. Test the connection
 
-Send an iMessage to the Apple ID or phone number signed into Messages on the Mac. The message should appear in AI Shuffle, and Claude's response will be delivered back through iMessage. Messages sent by the account itself are ignored to avoid echoes.
+Send an iMessage to the Apple ID or phone number signed into Messages on the Mac. The message should appear in AI Shuffle, and the agent's response will be delivered back through iMessage. Messages sent by the account itself are ignored to avoid echoes.
 
 ## Configuration Reference
 
@@ -78,16 +66,16 @@ Send an iMessage to the Apple ID or phone number signed into Messages on the Mac
 |-------|------|----------|-------------|
 | `cli_path` | string | No | Path to the `imsg` binary. Defaults to `imsg` (resolved on the `PATH`). |
 | `service` | string | No | Default service to send through: `imessage`, `sms`, or `auto`. Defaults to `auto`. |
-| `allowed_handles` | list of strings | No | If set, only messages from these phone numbers or email addresses are processed. Omit to allow all senders. |
+| `allowed_handles` | list of strings | Yes (to enable) | Only messages from these phone numbers or email addresses are processed. At least one entry is required before the connector can be enabled. |
 
 ## Capabilities
 
-The iMessage connector exposes plain text messaging only. None of the optional rich-messaging capabilities are supported:
+The iMessage connector sends plain text replies. None of the optional rich-messaging capabilities are used automatically:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `typing_indicator` | No | Not supported |
-| `reactions` | No | Tapback reactions are not supported |
+| `typing_indicator` | No | Not sent automatically; your agent can send one with the `send_typing` action |
+| `reactions` | No | Not sent automatically; your agent can send tapbacks with the `send_tapback` action |
 | `rich_text` | No | Messages are sent as plain text |
 | `file_upload` | No | Sending attachments is not supported |
 | `read_receipts` | No | Not supported |
@@ -96,14 +84,11 @@ The iMessage connector exposes plain text messaging only. None of the optional r
 
 The connector does not define a maximum message length, so long messages are sent as-is without automatic splitting.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to an iMessage chat get two MCP tools instead of one tool per feature:
+See [How AI actions work](/docs/connectors#how-ai-actions-work).
 
-- **`imessage_actions`** — discovery. Returns the action catalog (5 actions: send message, send tapback reaction, list chats, get chat info, send typing indicator), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`imessage_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
-
-There are no destructive actions in this catalog — the `imsg` CLI has no delete/ban-equivalent RPC — so no in-chat approval flow is needed here.
+Your agent can use 5 actions: send message, send tapback reaction, list chats, get chat info and send typing indicator. There are no destructive actions, so nothing asks for approval.
 
 ## Troubleshooting
 
@@ -115,12 +100,12 @@ There are no destructive actions in this catalog — the `imsg` CLI has no delet
 ### Messages are not arriving in AI Shuffle
 
 - **Verify iMessage is signed in.** Open the Messages app on the Mac and confirm your Apple ID is signed in and iMessage is enabled under **Messages > Settings > iMessage**.
-- **Check `allowed_handles`.** If you set `allowed_handles`, messages from any sender not in that list are ignored. Remove the field or add the sender's phone number / email to receive their messages.
+- **Check `allowed_handles`.** Messages from any sender not in `allowed_handles` are ignored. Add the sender's phone number or email to receive their messages.
 - **Confirm the RPC subscription.** On activation the connector probes `imsg` with `chats.list` and then subscribes via `watch.subscribe`. If the probe fails, activation reports an "RPC probe failed" error — check that running `imsg rpc` manually works.
 
 ### Responses are not being sent back
 
-- **Check connector activation.** Verify the connector shows as "active" in AI Shuffle settings or via the API.
+- **Check connector activation.** Verify the connection is activated under **Build > Plugins > iMessage**.
 - **Check macOS permissions.** Ensure the process running the AI Shuffle backend (and `imsg`) has the macOS permissions it needs to control Messages and access your data. You may have to grant these the first time `imsg rpc` runs.
 - **Check the `service` setting.** If sends fail, try setting `service` to `imessage` or `sms` explicitly instead of `auto`.
 - **Review AI Shuffle logs.** Check the backend logs for error messages related to the iMessage connector and the `imsg` RPC subprocess.

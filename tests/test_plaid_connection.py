@@ -154,7 +154,6 @@ async def test_gmail_is_tool_connection_not_an_incoming_chat_bot():
 
 @pytest.mark.asyncio
 async def test_gmail_explicit_watch_only_emits_automation_triggers():
-    from unittest.mock import patch
     conn = GmailConnector("g", "gmail", {"watch_inbox": True}, AsyncMock(), AsyncMock())
     conn._build_credentials = MagicMock()
     conn._build_service = MagicMock()

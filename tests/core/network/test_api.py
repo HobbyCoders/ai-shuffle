@@ -9,25 +9,8 @@ from app.api import pairing as pairing_api
 from app.api.auth import require_admin, require_auth
 from app.db import database
 from app.db import network as store
-from app.network import crypto, engine, enrollment, membership, tokens, transport
-from tests.core.network.harness import Worker, exchange
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
+from app.network import crypto, engine, enrollment, membership, tokens
+from tests.core.network.harness import exchange
 
 
 @pytest.fixture
@@ -257,7 +240,11 @@ def test_fork_here_and_hydrate_enforce_api_user_session_scope(workers):
         assert a.sql("SELECT COUNT(*) AS n FROM sessions")[0]["n"] == 1  # nothing was forked
         database.create_api_user(user_id="u-in", name="Insider", api_key_hash="h" * 64, project_id="proj-a")
         insider = _client_as_api_user({"id": "u-in", "project_id": "proj-a"})
-        forked = insider.post("/api/v1/network/sessions/s-scoped/fork-here")
+        # In scope is not enough: a key reaches only the sessions it owns (e90f7808).
+        assert insider.post("/api/v1/network/sessions/s-scoped/fork-here").status_code == 403
+        database.create_session(session_id="s-insider", profile_id="default", project_id="proj-a",
+                                title="Insider's", api_user_id="u-in", is_active=True)
+        forked = insider.post("/api/v1/network/sessions/s-insider/fork-here")
         assert forked.status_code == 201, forked.text
         assert database.get_session(forked.json()["session_id"])["api_user_id"] == "u-in"
 
@@ -275,6 +262,27 @@ def test_legacy_plaintext_blob_route_is_gone(workers, make_client):
         assert client.get("/api/v1/network/peer/blob/" + "a" * 64, headers=headers).status_code == 404
         assert client.get("/api/v1/network/peer/blob/" + "a" * 64 + "/parts/0", headers=headers).status_code == 404
         assert not any(getattr(r, "path", "") == "/api/v1/network/peer/blob/{hash_value}" for r in network_api.router.routes)
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("http://[::ffff:169.254.169.254]:80", False),       # IPv4-mapped
+    ("http://[::ffff:a9fe:a9fe]/", False),               # the same, hex form
+    ("http://[::ffff:0:169.254.169.254]/", False),       # IPv4-translated (SIIT)
+    ("http://[64:ff9b::169.254.169.254]/", False),       # NAT64 well-known
+    ("http://[64:ff9b:1::169.254.1.1]/", False),         # NAT64 local-use
+    ("http://[::169.254.169.254]/", False),              # IPv4-compatible
+    ("http://[fe80::1%25eth0]:8000", False),             # link-local with a zone
+    ("http://[::ffff:192.168.1.20]:8000", True),         # a mapped LAN address stays allowed
+    ("http://[64:ff9b::10.0.0.5]:8000", True),
+    ("http://[::1]:8000", True),                         # IPv6 loopback, not ::0.0.0.1
+    ("http://[2001:db8::1]:8000", True),
+], ids=["mapped", "mapped-hex", "translated", "nat64", "nat64-local", "compatible",
+        "zone", "mapped-lan", "nat64-lan", "v6-loopback", "global"])
+def test_ipv4_carrying_ipv6_endpoints_are_classified_by_the_ipv4(url, ok):
+    """R13-12: ``ipaddress`` calls ``::ffff:169.254.169.254`` neither link-local
+    nor private, so the "no link-local" rule let the metadata address through."""
+    from app.network import endpoints
+    assert endpoints.is_valid_endpoint(url) is ok
 
 
 def test_member_endpoints_are_validated_before_they_are_stored(workers, make_client):

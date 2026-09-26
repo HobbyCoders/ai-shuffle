@@ -267,12 +267,17 @@ test('a live pid that is not PostgreSQL is left alone and reported', async () =>
 		results: { pg_isready: { code: 2 } }
 	});
 	const stored = { host: '127.0.0.1', port: 50000, user: 'ai_shuffle', database: 'ai_shuffle', password: 'kept', managed: true };
-	const state = await supervisor(rt, credentialsStore(stored).credentials).start();
+	const pg = supervisor(rt, credentialsStore(stored).credentials);
+	const state = await pg.start();
 	assert.equal(state.phase, 'failed');
 	assert.match(state.error, /Another process \(4321\) holds/);
 	assert.ok(!calls.some((c) => c.op === 'remove' && c.target === PID_FILE));
 	assert.equal(execs('pg_ctl').length, 0, 'nothing is signalled');
 	assert.equal(execs('initdb').length, 0);
+	// Quitting afterwards must not hand that pid file to pg_ctl stop either.
+	await pg.stop();
+	assert.equal(pg.state.phase, 'stopped');
+	assert.equal(execs('pg_ctl').length, 0, 'nothing is signalled on quit');
 });
 
 test('a failed pg_ctl start reports the server log tail and stop cleans up', async () => {

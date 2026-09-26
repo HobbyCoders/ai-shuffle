@@ -20,8 +20,8 @@ import type { PreferenceSync } from '$lib/services/preference-sync';
 import { compatible } from '$lib/services/preference-values';
 import { createStore } from './store-utils';
 
-export const UI_KEY_PREFIX = 'ui:';
-export const STORAGE_KEY_PREFIX = 'ai-shuffle:';
+const UI_KEY_PREFIX = 'ui:';
+const STORAGE_KEY_PREFIX = 'ai-shuffle:';
 
 export type PersistedSync = Pick<PreferenceSync, 'register' | 'save'>;
 

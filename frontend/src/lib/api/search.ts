@@ -34,7 +34,7 @@ export function matches(item: SearchItem, query: string): boolean {
  return query.toLowerCase().split(/\s+/).every(term => text.includes(term));
 }
 
-export function excerpt(text: string, query: string): string {
+function excerpt(text: string, query: string): string {
  const index = text.toLowerCase().indexOf(query.toLowerCase());
  const start = Math.max(0, index - 60);
  return `${start ? '…' : ''}${text.slice(start, start + 220)}${text.length > start + 220 ? '…' : ''}`;

@@ -39,8 +39,6 @@ import com.hobbycoders.aishuffle.net.ApiResult
 import com.hobbycoders.aishuffle.presence.ProbeResult
 import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
-import com.hobbycoders.aishuffle.voice.VoiceCallActivity
-import com.hobbycoders.aishuffle.voice.VoiceCallService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -57,7 +55,9 @@ import java.io.ByteArrayInputStream
  *
  * Native capabilities are restricted to the bundle's asset origin; no
  * JavascriptInterface. The paired session is handed to the page as a Bearer
- * token through a document-start script, never as a cookie.
+ * token through a document-start script, never as a cookie. Voice calls are
+ * the page's own (the same as the website); the shell only grants the
+ * microphone to that origin.
  */
 class ChatActivity : NativeScreen() {
     private lateinit var server: Server
@@ -76,7 +76,6 @@ class ChatActivity : NativeScreen() {
     private var reloadOnSession = true
     private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
-    private lateinit var nativeVoice: NativeVoiceBridge
     private var switchJob: Job? = null
     @Volatile private var document = 0
     private var fileDocument = -1
@@ -132,15 +131,6 @@ class ChatActivity : NativeScreen() {
             .build()
         downloads = ChatDownloads(this, web, server, ::authorized, { sessionToken }) { status.text = it }
         downloads.install()
-        nativeVoice = NativeVoiceBridge(this, web, MobileUi.ORIGIN, ::authorized, refusal = { sessionId ->
-            val call = com.hobbycoders.aishuffle.voice.VoiceCallState.state.value
-            if (com.hobbycoders.aishuffle.voice.VoiceCallState.isActive && (call.serverId != server.id || call.sessionId != sessionId))
-                "End the current voice call before opening another chat." else null
-        }) { sessionId ->
-            startActivity(Intent(this, VoiceCallActivity::class.java)
-                .putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id).putExtra(VoiceCallService.EXTRA_SESSION_ID, sessionId))
-        }
-        nativeVoice.install()
         // The page's own origin never gets a cookie. A Cloudflare Access worker is
         // the one exception: its CF cookie (installed below with SameSite=None) must
         // ride the page's cross-origin API calls, which the WebView counts as third-party.
@@ -222,7 +212,6 @@ class ChatActivity : NativeScreen() {
                 workerDocumentAllowed = MobileUi.isAssetOrigin(url) && WorkerAssetLoader.workerUrl(server.baseUrl, url) == null
                 workerAssets.cancel()
                 downloads.navigating()
-                nativeVoice.navigating()
                 cancelPagePermissions()
                 if (!MobileUi.isAssetOrigin(url)) { view.stopLoading(); return }
             }
@@ -255,9 +244,6 @@ class ChatActivity : NativeScreen() {
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                 setPadding(dp(4), 0, dp(8), 0)
             }
-        }
-        navigationAction(R.drawable.ic_mic, "Start voice call") {
-            startActivity(Intent(this, VoiceCallActivity::class.java).putExtra("server_id", server.id))
         }
         val more = iconButton(R.drawable.ic_more, "More chat options") { }
         more.setOnClickListener {
@@ -340,7 +326,7 @@ class ChatActivity : NativeScreen() {
         if (::web.isInitialized) {
             if (!authorized()) finish()
             else {
-                web.onResume(); nativeVoice.resumed(); web.post { completeMicrophonePermission() }
+                web.onResume(); web.post { completeMicrophonePermission() }
                 DeviceToolsRuntime.attach(this, server)
                 web.post { if (needsSession && !isFinishing && authorized()) startSession() }
             }
@@ -456,7 +442,6 @@ class ChatActivity : NativeScreen() {
         cancelPagePermissions()
         switchJob?.cancel()
         if (::downloads.isInitialized) downloads.close()
-        if (::nativeVoice.isInitialized) nativeVoice.close()
         bootstrap?.remove(); bootstrap = null
         if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
         super.onDestroy()

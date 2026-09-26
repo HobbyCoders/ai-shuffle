@@ -6,10 +6,13 @@
 	 * Renders markdown to HTML using the `marked` library with:
 	 * - Heading ID injection for anchor links
 	 * - Code blocks with copy-to-clipboard
+	 * - In-panel navigation for `/docs/<category>/<slug>#anchor` and `#anchor` links
 	 * - Existing .prose CSS styling
 	 */
+	import { tick } from 'svelte';
 	import { marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { layout } from '$lib/stores/layout.svelte';
 	import type { DocSection } from '$lib/docs/types';
 
 	interface Props {
@@ -49,8 +52,39 @@
 		</div>`;
 	};
 
+	function scrollToAnchor(anchor: string) {
+		if (!anchor || !contentEl) return;
+		const el = contentEl.querySelector(`#${CSS.escape(decodeURIComponent(anchor))}`);
+		el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
+	/**
+	 * Doc pages link to each other as `/docs/<category>/<slug>` (a bare
+	 * `/docs/<category>` means its `_index` page). The app has no `/docs` route,
+	 * so a plain navigation would leave the app and 404. Open the target inside
+	 * the Docs panel instead, through the same deep link the search uses.
+	 */
+	async function handleDocLink(e: MouseEvent, link: HTMLAnchorElement): Promise<boolean> {
+		const href = link.getAttribute('href') ?? '';
+		if (href.startsWith('#')) {
+			e.preventDefault();
+			scrollToAnchor(href.slice(1));
+			return true;
+		}
+		const match = href.match(/^\/docs\/([\w-]+)(?:\/([\w-]+))?\/?(?:#(.*))?$/);
+		if (!match) return false;
+		e.preventDefault();
+		const [, category, slug = '_index', anchor = ''] = match;
+		layout.openFeaturePage('docs', `${category}/${slug}`);
+		await tick();
+		if (anchor) requestAnimationFrame(() => scrollToAnchor(anchor));
+		return true;
+	}
+
 	async function handleContentClick(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
+		const link = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+		if (link && contentEl?.contains(link) && (await handleDocLink(e, link))) return;
 		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
 		if (!btn) return;
 		e.preventDefault();

@@ -96,6 +96,15 @@ class ProviderConfig:
     # this bounds the call itself. Absent → the client's own generous default
     # (fluid.providers._transport.DEFAULT_STREAM_DEADLINE_S); 0 disables it.
     stream_deadline: float | None = None
+    # Seconds a call may wait for its first byte (the response headers, then
+    # the first SSE event) before it is abandoned: retried like a read
+    # timeout when the headers never came, a truncated stream after them
+    # (the Anthropic kind reports that as a transport failure). Absent → the client's default
+    # (fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S, 60 s); 0
+    # disables it. Honoured by every native kind ("local" defaults to off: a
+    # local server may hold its headers while it loads a model); raise it for
+    # a gateway that sends nothing until the upstream's first token.
+    first_byte_timeout: float | None = None
     # Standing server-specific request-body knobs, merged into every request
     # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
     # by the "local" kind.
@@ -118,6 +127,7 @@ class ProviderConfig:
             api_key_env=d.get("api_key_env"),
             tool_style=tool_style,
             stream_deadline=_optional_seconds(d.get("stream_deadline")),
+            first_byte_timeout=_optional_seconds(d.get("first_byte_timeout")),
             extra=dict(d.get("extra") or {}),
         )
 
@@ -268,9 +278,7 @@ class ContextConfig:
     """The mechanical eviction ladder + recall, from ``[context]``.
 
     Scalar mirror of :class:`fluid.context.compaction.CompactionConfig` (plus
-    the tier-1 trim knobs) so the trigger and headroom are finally
-    configurable — before this section, ``build_engine`` never passed a trim
-    config and the 120k trigger was effectively hardcoded.
+    the tier-1 trim knobs), so the trigger and headroom are configurable.
     """
 
     enabled: bool = True
@@ -390,10 +398,9 @@ class HarnessConfig:
     # ``0`` means unlimited (normalized to None for NativeLoop), leaving the
     # provider as the sole authority on when a turn has to stop.
     max_model_calls: int = 200
-    # Model context window, when the host app knows it (model ids come and go
-    # faster than any table fluid could ship, so nothing is inferred). Feeds
+    # Model context window, when the host app knows it. Feeds
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
-    # leaves those None rather than guessing a window.
+    # falls back to fluid.providers.windows.context_window_for(model).
     context_window: int | None = None
     # Prompt-cache affinity key (OpenAI Responses ``prompt_cache_key`` /
     # OpenRouter ``session_id``). None = the fluid session id, which is right
@@ -535,6 +542,7 @@ class HarnessConfig:
                 "headroom_tokens": self.context.headroom_tokens,
                 "target_ratio": self.context.target_ratio,
                 "keep_recent_turns": self.context.keep_recent_turns,
+                "image_trigger_ratio": self.context.image_trigger_ratio,
                 "max_resident_span_digests": self.context.max_resident_span_digests,
                 "epoch_fold_spans": self.context.epoch_fold_spans,
                 "intake_stub_chars": self.context.intake_stub_chars,
@@ -550,6 +558,8 @@ class HarnessConfig:
                     "base_url": pc.base_url,
                     "api_key_env": pc.api_key_env,
                     "tool_style": pc.tool_style,
+                    "stream_deadline": pc.stream_deadline,
+                    "first_byte_timeout": pc.first_byte_timeout,
                     "extra": dict(pc.extra),
                 }
                 for name, pc in self.providers.items()

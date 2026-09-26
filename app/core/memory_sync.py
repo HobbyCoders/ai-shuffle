@@ -5,12 +5,11 @@ files) to and from the shared database so installs that share a git remote
 share one logical memory.
 
 Only the NATIVE leg participates. A fluid NativeLoop session has no CLI behind
-it, so the app owns ``<fluid_projects>/<slug>/memory/`` (ruling MEM1,
-~/.fluid/projects by default). That fluid dir is the one and only synced
-mirror. Since 2026-08-31 nothing in the prompt points at it any more (the
-"# Project memory" section is gone — see docs/MEMORY_ARCHITECTURE.md), so the
-sync serves pre-existing content and the explicit per-project import only;
-durable facts travel through the continual learner instead.
+it, so the app owns ``<fluid_projects>/<slug>/memory/`` (~/.fluid/projects by
+default). That fluid dir is the one and only synced mirror. No prompt section
+points at it (see docs/MEMORY_ARCHITECTURE.md), so the sync serves pre-existing
+content and the explicit per-project import only; durable facts travel through
+the continual learner instead.
 
 The DELEGATED leg does not sync at all. ``<claude_projects>/<slug>/memory/``
 belongs to the claude CLI: the CLI writes it, the CLI reads it, and it stays
@@ -22,12 +21,11 @@ safe: an undecidable session simply does not sync.
 
 ``memory_dir_for_working_dir`` stays leg-aware regardless, because locating the
 claude dir is still needed — not for sync, but for the explicit per-project
-import (see app/core/memory_import_service.py). Copying existing claude memory
-into the fluid dir is now a deliberate, admin-triggered action, not something a
-first reconcile does behind the user's back.
+import (see app/core/memory_import_service.py). Reconcile never copies claude
+memory into the fluid dir.
 
 Two operations drive the native leg from the session lifecycle (see
-app/core/query_engine.py):
+app/core/query_engine.py and app/core/query_background.py):
 
 * **reconcile** — runs before a session starts. Brings the legacy local memory
   directory up to date with the DB and pushes local-only files. It does not
@@ -169,7 +167,7 @@ def memory_dir_for_working_dir(
 ) -> Optional[Path]:
     """`<projects_root>/<slug>/memory/` for a session's working directory.
 
-    The root is the LEG's (ruling MEM1/MEM2): ``~/.claude/projects`` for the
+    The root is the LEG's: ``~/.claude/projects`` for the
     delegated claude CLI, ``~/.fluid/projects`` for a native fluid leg. The slug
     is the same path-based normalization either way, so the two mirrors line up
     project-for-project.
@@ -191,7 +189,7 @@ def memory_dir_for_working_dir(
 
 
 def memory_leg_for_options(options: object) -> str:
-    """"native" | "delegated" for a built ``ClaudeAgentOptions`` object.
+    """"native" | "delegated" for a built ``AgentOptions`` object.
 
     Defers to the harness adapter's single leg-decision table (see
     ``provider_kind_for_sdk_options`` / ``_decide_provider_kind`` in
@@ -227,7 +225,7 @@ def _resolve_target(
     a repo root by ``memory_dir_for_working_dir``) preserves behaviour when the
     project lookup yields nothing.
 
-    ``leg`` picks the projects root (ruling MEM2); the memory_key is the same
+    ``leg`` picks the projects root; the memory_key is the same
     either way, which is what makes the two mirrors one shared memory.
     """
     try:

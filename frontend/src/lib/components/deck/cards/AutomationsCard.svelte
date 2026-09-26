@@ -661,7 +661,7 @@
 {#snippet approvalsView()}
 	<div class="auto-approvals" transition:fade={{ duration: 150 }}>
 		<div class="auto-form-header">
-			<button class="card-back-btn" onclick={() => currentView = 'list'}>
+			<button class="card-back-btn" onclick={() => currentView = 'list'} aria-label="Back to automations">
 				<ArrowLeft size={16} />
 			</button>
 			<h3 class="auto-form-title">Pending Approvals</h3>
@@ -783,7 +783,6 @@
 				onApprove={handleApprove}
 				onDeny={handleDeny}
 				onClearError={() => error = ''}
-				{formatTime}
 				{formatCost}
 				{triggerTypeLabel}
 			/>

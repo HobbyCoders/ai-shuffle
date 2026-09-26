@@ -9,9 +9,10 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 
 from app.api.auth import require_auth
-from app.services.fal_catalog import catalog_service, CatalogModel
+from app.services.fal_catalog import catalog_service
 from app.services.fal_schema import schema_service
 from app.api.settings import get_decrypted_api_key
 
@@ -74,18 +75,6 @@ async def get_model_schema(
     return {"found": True, "schema": schema.to_dict()}
 
 
-@router.get("/models/{endpoint_id:path}")
-async def get_model(
-    endpoint_id: str,
-    _: str = Depends(require_auth),
-):
-    """Get a specific model by its fal.ai endpoint ID."""
-    model = catalog_service.get_model(endpoint_id)
-    if not model:
-        return {"error": f"Model '{endpoint_id}' not found in catalog", "found": False}
-    return {"model": model.to_dict(), "found": True}
-
-
 @router.get("/categories")
 async def list_categories(
     _: str = Depends(require_auth),
@@ -101,9 +90,24 @@ async def list_categories(
 async def refresh_catalog(
     _: str = Depends(require_auth),
 ):
-    """Force refresh the model catalog from fal.ai."""
+    """Force refresh the model catalog from fal.ai.
+
+    When fal.ai cannot be read the cached catalog is kept and the answer is a
+    502 with ``success: false``, the ``error`` and the ``cached_models`` count,
+    rather than a success that reports the stale cache as fetched. A refresh
+    already running (the agent's catalog search starts one too) is waited for,
+    and its outcome is the answer.
+    """
     api_key = get_decrypted_api_key("fal_api_key")
-    count = await catalog_service.refresh(api_key)
+    count, error = await catalog_service.refresh_with_status(api_key)
+    if error:
+        return JSONResponse(status_code=502, content={
+            "detail": f"Could not refresh the model catalog: {error}. Still using the {count} cached models.",
+            "success": False,
+            "error": error,
+            "cached_models": count,
+            "categories": catalog_service.get_categories(),
+        })
     return {
         "success": True,
         "models_fetched": count,

@@ -28,13 +28,12 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 import app.api.chat_ws_handler as cwh
-import app.api.websocket as ws_mod
 from app.core.config import settings
 from app.db import database
 from app.db import turns as turns_db
+from tests.helpers import sent_frames
 
 
 def _make_session(session_id="sess-1", *, title="t", profile_id="default"):
@@ -95,14 +94,6 @@ def _make_handler():
     return handler
 
 
-def _sent(handler, ftype):
-    return [
-        c.args[0]
-        for c in handler.send_json.call_args_list
-        if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == ftype
-    ]
-
-
 def _queue_frames(handler):
     return [
         c.args[0]
@@ -129,17 +120,17 @@ async def test_nonblocking_question_ws_ack_hydration_and_authorization(mock_db, 
     handler = _make_handler()
     handler.current_session_id = sid
     await handler.handle_get_pending_questions({})
-    pending = _sent(handler, "pending_questions")[0]["questions"]
+    pending = sent_frames(handler, "pending_questions")[0]["questions"]
     assert pending[0]["request_id"] == "ws-question" and pending[0]["nonblocking"] is True
     data = {"request_id": "ws-question", "session_id": sid, "answers": {"Color?": "blue"}}
     handler._authorize_mobile_session = AsyncMock(return_value=False)
     await handler.handle_user_question_response(data)
     assert turns_db.get_queued_turns(sid) == []
-    assert _sent(handler, "user_question_response_ack") == []
+    assert sent_frames(handler, "user_question_response_ack") == []
     handler._authorize_mobile_session = AsyncMock(return_value=True)
     await handler.handle_user_question_response(data)
     await handler.handle_user_question_response(data)
-    assert [f["success"] for f in _sent(handler, "user_question_response_ack")] == [True, False]
+    assert [f["success"] for f in sent_frames(handler, "user_question_response_ack")] == [True, False]
     assert len(turns_db.get_queued_turns(sid)) == 1
 
 
@@ -156,7 +147,7 @@ async def test_nonblocking_question_ws_forwards_to_owner_without_local_answer(mo
     local.assert_not_awaited()
     assert forwarded.await_args.args == ("owner-device",)
     assert forwarded.await_args.kwargs["answered_by_device"] == "dev-1"
-    assert _sent(handler, "user_question_response_ack")[0]["success"] is True
+    assert sent_frames(handler, "user_question_response_ack")[0]["success"] is True
 
 
 def test_v2_queue_view_filters_sources_and_numbers_sequentially(mock_db):
@@ -195,7 +186,7 @@ async def test_handle_query_idle_submits_user_turn_no_queued_ack(mock_db):
 
     queued = turns_db.get_queued_turns("sess-1")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "hello world")]
-    assert _sent(handler, "query_queued") == []
+    assert sent_frames(handler, "query_queued") == []
     p.sync.broadcast_message_added.assert_awaited_once()
     # user message persisted to the surviving session_messages dual-write
     rows = mock_db.execute(
@@ -229,7 +220,7 @@ async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
     queued = turns_db.get_queued_turns("sess-1")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "second while busy")]
     # F5 ack + pending-message frame
-    assert _sent(handler, "query_queued") == [
+    assert sent_frames(handler, "query_queued") == [
         {"type": "query_queued", "session_id": "sess-1"}
     ]
     frames = _queue_frames(handler)
@@ -379,7 +370,7 @@ async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
     get_wt.assert_not_called()
 
     # a session was created and echoed WITHOUT a worktree_id key
-    created = _sent(handler, "session_created")
+    created = sent_frames(handler, "session_created")
     assert len(created) == 1
     new_sid = created[0]["session_id"]
     assert "worktree_id" not in created[0]
@@ -416,7 +407,7 @@ async def test_handle_query_persists_context_window_on_new_session(mock_db):
                 },
             })
 
-    session_id = _sent(handler, "session_created")[0]["session_id"]
+    session_id = sent_frames(handler, "session_created")[0]["session_id"]
     row = database.get_session(session_id)
     assert row["model"] == "sonnet"
     assert row["effort"] == "high"
@@ -584,7 +575,7 @@ async def test_interrupt_for_query_send_now_confirms(mock_db, monkeypatch):
     row = turns_db.get_turn(live)
     assert row["state"] == "interrupting"
     assert row["interrupt_mode"] == "send_now"
-    assert _sent(handler, "interrupt_confirmed") == [
+    assert sent_frames(handler, "interrupt_confirmed") == [
         {"type": "interrupt_confirmed", "session_id": "sess-1"}
     ]
 
@@ -613,8 +604,8 @@ async def test_pending_interrupt_while_parked_preserves_queue_and_kicks(mock_db)
     assert kicked == ["sess-1"]
     assert turns_db.get_turn(queued["id"])["state"] == "queued"
     assert turns_db.get_turn(live["id"])["state"] == "parked"
-    assert not _sent(handler, "interrupt_failed")
-    assert _sent(handler, "interrupt_confirmed")
+    assert not sent_frames(handler, "interrupt_failed")
+    assert sent_frames(handler, "interrupt_confirmed")
 
 
 async def test_pending_interrupt_stale_turn_spares_successor(mock_db):
@@ -630,7 +621,7 @@ async def test_pending_interrupt_stale_turn_spares_successor(mock_db):
             "session_id": "sess-1", "turn_id": old["id"],
         }), 1)
     assert turns_db.get_turn(successor["id"])["state"] == "running"
-    assert _sent(handler, "interrupt_confirmed")
+    assert sent_frames(handler, "interrupt_confirmed")
 
 
 async def test_interrupt_for_query_idle_confirms_immediately(mock_db):
@@ -641,6 +632,6 @@ async def test_interrupt_for_query_idle_confirms_immediately(mock_db):
         handler = _make_handler()
         await handler.handle_interrupt_for_query({"session_id": "sess-1"})
 
-    assert _sent(handler, "interrupt_confirmed") == [
+    assert sent_frames(handler, "interrupt_confirmed") == [
         {"type": "interrupt_confirmed", "session_id": "sess-1"}
     ]

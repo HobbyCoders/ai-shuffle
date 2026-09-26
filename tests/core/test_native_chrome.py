@@ -211,6 +211,8 @@ async def test_concurrent_demand_starts_only_one_supervisor(monkeypatch, tmp_pat
     monkeypatch.setattr(nc, "_last_detail", None)
     monkeypatch.setattr(nc, "resolve_chrome_executable", lambda: "fixture-chrome")
     monkeypatch.setattr(nc, "_profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(nc, "_egress_command", lambda exe, args: [exe, *args])
+    monkeypatch.setattr(nc, "_egress_env", lambda: {})
 
     async def probe(port):
         await asyncio.sleep(0)
@@ -256,3 +258,40 @@ async def test_external_browser_is_never_supervised_or_stopped(monkeypatch):
     await nc.stop()
     spawn.assert_not_called()
 
+
+
+@pytest.mark.asyncio
+async def test_rapid_launcher_exit_surfaces_its_stderr(monkeypatch, tmp_path):
+    """The launcher reports its own failures only on stderr ("[browser-egress]
+    could not start: ..."). That output goes to a log under the data dir and
+    its last lines reach get_detail(), instead of a bare crash-loop code."""
+    monkeypatch.setattr(nc, "_stopping", False)
+    monkeypatch.setattr(nc, "_proc", None)
+    monkeypatch.setattr(nc, "_last_detail", None)
+    monkeypatch.setattr(nc, "_egress_command", lambda exe, args: [exe, *args])
+    monkeypatch.setattr(nc, "_egress_env", lambda: {})
+    monkeypatch.setattr(nc, "_launcher_log_path", lambda port: tmp_path / "launcher.log", raising=False)
+    monkeypatch.setattr(nc, "_RELAUNCH_BACKOFF_S", 0.0, raising=False)
+    spawns = []
+
+    async def spawn(*argv, **kwargs):
+        err = kwargs.get("stderr")
+        spawns.append(err)
+        if hasattr(err, "write"):
+            err.write(b"policy: default\n[browser-egress] could not start: boom\n")
+            err.flush()
+        process = Mock()
+        process.pid = 4242
+        process.returncode = 1
+        process.wait = AsyncMock(return_value=1)
+        return process
+
+    monkeypatch.setattr(nc.asyncio, "create_subprocess_exec", spawn)
+    await nc._supervise("fixture-chrome", 9221)
+
+    assert len(spawns) == 5
+    assert all(err is not asyncio.subprocess.DEVNULL for err in spawns)
+    detail = nc.get_detail()
+    assert "crash-looped" in detail
+    assert "[browser-egress] could not start: boom" in detail
+    assert "could not start: boom" in (tmp_path / "launcher.log").read_text()

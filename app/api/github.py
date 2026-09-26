@@ -19,10 +19,9 @@ from app.core.github_service import (
     PullRequest,
     WorkflowRun,
 )
-from app.core.config import settings
 from app.core.session_pr_state import persist_pr_state
 from app.api.git_owner import session_git_action
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_auth
 from app.api.common import check_project_access, resolve_project_path
 
 logger = logging.getLogger(__name__)
@@ -93,9 +92,9 @@ class GitHubStatusResponse(BaseModel):
 # Every handler below is ``async def`` and therefore runs ON the event loop.
 # ``github_service`` and the project-path resolver are synchronous: they spawn
 # ``gh``/``git`` subprocesses (up to a 60s timeout) and hit the database. Calling
-# them inline froze the entire server — no other request, WebSocket frame or SSE
-# byte could be served for the duration (finding G1). Everything blocking in
-# this module now goes through ``asyncio.to_thread``; nothing here may call
+# them inline would freeze the entire server — no other request, WebSocket frame
+# or SSE byte could be served for the duration. Everything blocking in
+# this module goes through ``asyncio.to_thread``; nothing here may call
 # ``github_service.*``, ``resolve_project_path`` or the DB directly.
 
 def get_project_path(request: Request, project_id: str) -> str:
@@ -151,7 +150,7 @@ async def check_github_auth() -> None:
 
 
 def _github_unavailable(action: str, exc: GitHubCliError) -> HTTPException:
-    """Map a gh transport failure to 502 — "unknown", not "no data" (G2)."""
+    """Map a gh transport failure to 502 — "unknown", not "no data"."""
     detail = f"GitHub CLI could not {action}"
     if exc.stderr:
         detail = f"{detail}: {exc.stderr}"

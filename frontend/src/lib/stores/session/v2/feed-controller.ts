@@ -2,7 +2,7 @@
  * Feed controller — owns the SSE-fed reducer lifecycle for the active v2 session
  * and is the SINGLE writer of `activeSession` for v2_stream sessions.
  *
- * V2 Phase 1 (docs/V2_PHASE1_DESIGN.md §6):
+ * V2 Phase 1:
  *   - `start(sessionId)` opens the SSE feed at from_seq=0 (full replay = history
  *     load) and folds reducer state into `activeSession` via ONE `update()` per
  *     SSE batch, coalesced on requestAnimationFrame.
@@ -398,7 +398,6 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 	const num = (k: string): number | undefined =>
 		typeof usage[k] === 'number' ? (usage[k] as number) : undefined;
 	const inTok = num('input_tokens');
-	const outTok = num('output_tokens');
 	const cacheCreate = num('cache_creation_input_tokens');
 	const cacheRead = num('cache_read_input_tokens');
 	// Best-effort context gauge: prefer an explicit field, else sum the input +
@@ -413,7 +412,6 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 
 	const patch: Partial<ActiveSessionState> = {};
 	if (inTok != null) patch.totalTokensIn = inTok;
-	if (outTok != null) patch.totalTokensOut = outTok;
 	if (cacheCreate != null) patch.totalCacheCreationTokens = cacheCreate;
 	if (cacheRead != null) patch.totalCacheReadTokens = cacheRead;
 	if (contextUsed != null) patch.contextUsed = contextUsed;
@@ -447,6 +445,10 @@ function transcriptPatch(
 ): Partial<ActiveSessionState> {
 	const optimistic = optimisticStreaming || opts.appOptimistic;
 	const usagePatch = deriveUsageFields(rs.usage);
+	// The Output row is a session total: sum completed turns, never the latest
+	// per-call `turn.usage` output. Until a turn completes on this feed the
+	// value from `/live` (the stored session total) stays in place.
+	if ((rs.outputTokensTotal ?? 0) > 0) usagePatch.totalTokensOut = rs.outputTokensTotal;
 	return {
 		// Released: the array leaves the reducer here, so the next append copies
 		// instead of mutating what the view now holds (reducer.ts ownership).
@@ -643,8 +645,6 @@ export interface FeedController {
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
 	isFeeding: (sessionId?: string) => boolean;
-	/** The session currently being fed, or null. */
-	currentSessionId: () => string | null;
 
 	// ── Transcript cache (S2) ──────────────────────────────────────
 	/**
@@ -979,10 +979,6 @@ export const feedController: FeedController = {
 	isFeeding(sessionId?: string) {
 		if (feed === null || currentSessionId === null) return false;
 		return sessionId === undefined || sessionId === currentSessionId;
-	},
-
-	currentSessionId() {
-		return currentSessionId;
 	},
 
 	cachedPatch(sessionId: string) {

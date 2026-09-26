@@ -83,13 +83,15 @@ Replace `+15551234567` with your personal phone number. You should receive the m
 
 ### Step 5: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **Signal**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Signal**.
+2. Click **Install Signal** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Phone Number (E.164)**: The registered phone number in E.164 format (e.g., `+14155551234`)
    - **API URL** (optional): Base URL of the signal-cli REST API service. Defaults to `http://127.0.0.1:8080`.
-   - **Allowed Phone Numbers** (optional): Restrict the bot to only process messages from these numbers.
-4. Click **Save** and then **Enable** the connector.
+   - **Allowed Phone Numbers**: At least one number. The bot only processes messages from these numbers.
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
+
+The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
 
 ## Configuration Reference
 
@@ -99,7 +101,7 @@ Replace `+15551234567` with your personal phone number. You should receive the m
 | `api_url` | string | No | Base URL of the signal-cli REST API service. Defaults to `http://127.0.0.1:8080`. Set this if the service runs on a different host or port. |
 | `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `presence`, `reactions`, `groups`. |
 | `auto_approve_destructive` | string | No | Set to `true` to skip the text-based Approve/Deny prompt for destructive AI actions (leaving a group). Default: prompts are required. |
-| `allowed_numbers` | list | No | If set, only messages from these phone numbers (in E.164 format) are processed. Messages from any other number are ignored. |
+| `allowed_numbers` | list | Yes (to enable) | Only messages from these phone numbers (in E.164 format) are processed. At least one entry is required before the connector can be enabled. |
 
 ## Capabilities
 
@@ -108,7 +110,7 @@ The Signal connector supports the following capabilities:
 | Capability | Supported | Notes |
 |------------|-----------|-------|
 | Read receipts | Yes | Sends read receipts back to the sender via the REST API |
-| File upload | Yes | Send images, documents, voice notes, and other files as attachments |
+| File upload | No | Only text is sent |
 | Typing indicator | Yes | Available to the AI via the `send_typing_indicator`/`stop_typing_indicator` actions (see below). Not sent automatically. |
 | Reactions | Yes | Available to the AI via the `add_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
 | Rich text | No | Signal does not support text formatting in messages. All messages are sent as plain text. |
@@ -118,18 +120,15 @@ The Signal connector supports the following capabilities:
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a Signal conversation get two MCP tools instead of one tool per feature:
+See [How AI actions work](/docs/connectors#how-ai-actions-work).
 
-- **`signal_actions`** — discovery. Returns the action catalog (9 actions: send message, mark read, start/stop typing indicator, add/remove reaction, list groups, get group info, leave group), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`signal_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the signal-cli REST API.
+Your agent can use 9 actions: send message, mark read, start/stop typing indicator, add/remove reaction, list groups, get group info and leave group.
 
-Safety rails:
-
-- Message-level and group-lookup actions only work in the session's bound conversation and the connector's `allowed_numbers`.
-- Signal has no interactive-button support, so the one **destructive** action (`leave_group`) is confirmed with a plain-text prompt instead of a button: the connector sends "Approve or deny? Reply with `approve` or `deny`." and only proceeds once a human replies `approve` (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
-- All other actions (messages, presence, reactions, group lookups) are `safe`/`write` risk and run immediately.
+- Message and group-lookup actions only work in the conversation the session started from and the connector's `allowed_numbers`.
+- Signal has no buttons, so the one destructive action (`leave_group`) is confirmed by text: the connector sends a "Destructive Action Approval" message asking you to reply `approve` or `deny`, and only proceeds once a person replies `approve`.
+- All other actions (messages, presence, reactions, group lookups) run immediately.
 
 ## Troubleshooting
 
@@ -156,7 +155,7 @@ Safety rails:
 ### Bot does not receive messages
 
 - **Service not in json-rpc mode.** The connector receives messages over the SSE stream at `GET /api/v1/receive/{account}`. Make sure the REST API service is started with `MODE=json-rpc` so the stream stays open.
-- **Messages filtered out.** If you set **Allowed Phone Numbers**, only messages from those numbers are processed; all others are silently ignored. Remove or correct the list to receive from other senders.
+- **Messages filtered out.** Only messages from the numbers in **Allowed Phone Numbers** are processed; all others are silently ignored. Add or correct numbers in the list to receive from other senders.
 
 ### "Unregistered user" error when sending messages
 

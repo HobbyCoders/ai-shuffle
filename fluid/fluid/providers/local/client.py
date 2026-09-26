@@ -49,6 +49,7 @@ class LocalClient:
         base_url: str,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = None,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         extra: dict[str, Any] | None = None,
@@ -58,6 +59,11 @@ class LocalClient:
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
         self._stream_deadline = stream_deadline
+        # Off by default: a local server may hold its headers while it loads
+        # a model from disk, far longer than a hosted API's first byte. The
+        # 30 s first-data watchdog after the headers applies either way (see
+        # fluid.providers._chat_completions.FIRST_DATA_TIMEOUT).
+        self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
         self._extra = dict(extra) if extra else {}
@@ -85,5 +91,6 @@ class LocalClient:
             timeout=self._timeout,
             retry=self._retry,
             stream_deadline=self._stream_deadline,
+            first_byte_timeout=self._first_byte_timeout,
         ):
             yield chunk

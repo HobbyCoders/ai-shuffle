@@ -406,26 +406,6 @@ def _narrow_pass(worker, session_ids):
     return count, queries
 
 
-@pytest.fixture
-def workers(tmp_path):
-    from app.network import tokens
-    from tests.core.network.harness import Worker
-
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
-
-
 def test_narrow_catalog_pass_reads_and_publishes_only_dirty_sessions(workers):
     worker = workers("narrow-catalog")
     with worker.active():

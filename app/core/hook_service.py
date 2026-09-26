@@ -5,14 +5,12 @@ This service provides a unified interface for handling hooks from multiple sourc
 1. Plugin hooks - Shell/Python scripts defined in plugin hooks.json files
 2. Database hooks - Custom hooks created via HooksCard
 
-IMPORTANT: The Claude Agent SDK does NOT auto-execute plugin hooks!
-Unlike the terminal CLI which reads hooks.json and executes the scripts,
-the SDK only executes Python callbacks we provide via options.hooks.
-
-This service bridges that gap by:
+The harness runs only the Python callbacks on ``options.hooks`` (bridged onto
+fluid's HookBus by ``app.core.provider.sdk_hook_bridge``); nothing executes a
+plugin's hooks.json on its own. This service bridges that gap by:
 1. Reading all enabled plugins' hooks.json files
 2. Creating Python wrapper functions that execute the plugin scripts
-3. Registering those wrappers with the SDK
+3. Attaching those wrappers to the options (``attach_hooks_to_options``)
 
 This enables plugins like Ralph Loop, security-guidance, etc. to work
 through AI Shuffle just like they do in the terminal CLI.
@@ -22,20 +20,29 @@ import asyncio
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
-from claude_agent_sdk.types import (
+from app.core.agent_types import (
     HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
     PreToolUseHookSpecificOutput, PostToolUseHookSpecificOutput,
 )
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.hook_executor import execute_hook, spawn_hook_shell
+from app.core.hook_executor import (
+    execute_hook,
+    execute_hooks_for_event,
+    hook_base_env,
+    hook_data_env_value,
+    hook_env_value,
+    kill_hook_process,
+    spawn_hook_shell,
+    tool_matcher_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +198,8 @@ async def execute_plugin_hook(
     # Fix python3 -> python on Windows
     command = _fix_python_command_for_windows(command)
 
-    # Prepare environment with plugin root
-    env = os.environ.copy()
+    # Prepare environment with plugin root (host secrets scrubbed)
+    env = hook_base_env()
     env["CLAUDE_PLUGIN_ROOT"] = plugin_path
 
     # Add Python jq shim to PATH (cross-platform)
@@ -264,8 +271,7 @@ async def execute_plugin_hook(
         logger.warning(f"Plugin hook timed out after {timeout}s: {command} (cwd={working_dir})")
         logger.warning(f"If this is a Stop hook (e.g., ralph-loop), the transcript may be too large for the timeout.")
         try:
-            process.kill()
-            await process.wait()
+            await kill_hook_process(process)
         except Exception:
             pass
         return None
@@ -306,6 +312,9 @@ async def get_database_hooks_for_event(
 # =============================================================================
 # Unified Stop Hook Handler
 # =============================================================================
+
+_STOP_TEXT_LIMIT = 16_000
+
 
 def create_stop_hook_handler(
     working_dir: str,
@@ -379,21 +388,36 @@ def create_stop_hook_handler(
 
         # 2. Check for database Stop hooks
         db_hooks = await get_database_hooks_for_event(project_id, "Stop")
+        if db_hooks:
+            # Same wrapper as the other events: bash hooks read HOOK_TIMESTAMP,
+            # HOOK_DATA and HOOK_<KEY> from "timestamp" and "data".
+            stop_data = json.loads(json.dumps({**script_input, "project_id": project_id}, default=str))
+            if isinstance(stop_data.get("text"), str):
+                # The turn's final text; bounded so the environment stays under
+                # the per-variable limit.
+                stop_data["text"] = stop_data["text"][:_STOP_TEXT_LIMIT]
+            stop_event = {
+                "event": "Stop",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "working_dir": working_dir,
+                "project_id": project_id,
+                "data": stop_data,
+            }
         for hook in db_hooks:
             logger.debug(f"Executing database Stop hook: {hook.get('name')}")
 
             # Execute the hook and check if it wants to block
-            result = await execute_hook(hook, {
-                "event": "Stop",
-                "working_dir": working_dir,
-                "project_id": project_id
-            })
+            result = await execute_hook(hook, stop_event)
 
-            # If hook output contains a block decision, honor it
-            if result.get("success") and result.get("output"):
+            # A block decision is JSON: a bash hook's stdout, or a webhook's
+            # 2xx response body ("output" is the "HTTP n: ..." summary there).
+            decision_text = (
+                result.get("body") if hook.get("hook_type") == "webhook" else result.get("output")
+            )
+            if result.get("success") and decision_text:
                 try:
-                    output = json.loads(result["output"])
-                    if output.get("decision") == "block":
+                    output = json.loads(decision_text)
+                    if isinstance(output, dict) and output.get("decision") == "block":
                         return SyncHookJSONOutput(
                             decision="block",
                             reason=output.get("reason", ""),
@@ -483,9 +507,9 @@ def create_plugin_hook_handler(
         for hook_def in hook_defs:
             matcher_pattern = hook_def.get("matcher")
 
-            # Skip if matcher doesn't match tool name
-            if matcher_pattern and tool_name:
-                if not re.match(matcher_pattern, tool_name, re.IGNORECASE):
+            # Skip if matcher doesn't match tool name ("*" means every tool)
+            if matcher_pattern and matcher_pattern != "*" and tool_name:
+                if not tool_matcher_matches(matcher_pattern, tool_name, plugin=True):
                     logger.debug(f"[HookService] Skipping - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
                     continue
 
@@ -571,12 +595,14 @@ async def _execute_db_bash_hook(
     legacy `execute_bash_hook` path are also supplied for backward compatibility.
 
     Returns a tuple (status, returncode, stdout, stderr):
-        status == "ok"      → process ran to completion; returncode/stdout/stderr set
-        status == "timeout" → process exceeded its timeout (killed)
-        status == "error"   → process could not be spawned or crashed while reading
-    On timeout/error the returncode/stdout/stderr are None. Callers MUST treat
-    both as "no opinion" (do not block) — a broken/slow user hook must never
-    hard-fail a tool call.
+        status == "ok"          → process ran to completion; returncode/stdout/stderr set
+        status == "timeout"     → process exceeded its timeout (killed)
+        status == "error"       → no command, or it crashed while reading
+        status == "spawn_error" → the process could not be started; stderr
+                                  carries the reason
+    Callers treat timeout/error as "no opinion", but spawn_error as a block:
+    the guard never saw the call, and anything the model controls (an
+    oversized or NUL-bearing tool input) must not switch a guard off.
     """
     command = hook.get("command") or ""
     if not command:
@@ -590,10 +616,13 @@ async def _execute_db_bash_hook(
 
     # Env vars mirror the legacy execute_bash_hook contract (HOOK_* keys) so
     # existing bash hooks that read env still work; stdin JSON is the primary path.
-    env = os.environ.copy()
+    # Values are capped/NUL-stripped so a padded tool input cannot make execve
+    # fail; HOOK_DATA stays valid JSON (long strings shortened, "truncated":
+    # true). The full input is on stdin.
+    env = hook_base_env()
     env["HOOK_EVENT"] = "PreToolUse"
-    env["HOOK_TOOL_NAME"] = str(script_input.get("tool_name", "") or "")
-    env["HOOK_DATA"] = json.dumps(script_input)
+    env["HOOK_TOOL_NAME"] = hook_env_value(script_input.get("tool_name", "") or "")
+    env["HOOK_DATA"] = hook_data_env_value(script_input)
 
     stdin_data = json.dumps(script_input)
 
@@ -608,7 +637,7 @@ async def _execute_db_bash_hook(
         )
     except Exception as e:
         logger.warning(f"DB PreToolUse hook failed to spawn ({command[:80]}): {e}")
-        return ("error", None, None, None)
+        return ("spawn_error", None, None, str(e))
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -621,8 +650,7 @@ async def _execute_db_bash_hook(
             f"treating as no-opinion (tool not blocked)"
         )
         try:
-            process.kill()
-            await process.wait()
+            await kill_hook_process(process)
         except Exception:
             pass
         return ("timeout", None, None, None)
@@ -647,7 +675,7 @@ def _map_db_pretooluse_decision(
     """
     Map a DB bash hook's result to a PreToolUse permission decision.
 
-    Semantics (matching the bundled CLI's hook contract):
+    Semantics (matching the Claude Code CLI's hook contract):
       - Parseable JSON stdout:
           * hookSpecificOutput.permissionDecision (or top-level permissionDecision)
             in {allow, deny, ask}  → mapped directly, with permissionDecisionReason.
@@ -772,18 +800,11 @@ def create_db_pretooluse_hook_handler(
             if not hook.get("enabled", True):
                 continue
 
-            # tool_matcher: exact tool name or regex. Mirror the DB dispatcher
-            # (execute_hooks_for_event) which uses re.fullmatch — an exact name
-            # fullmatches itself, and patterns like "Bash|Edit" work as expected.
+            # tool_matcher: exact tool name or regex, the whole name must match
+            # (same rule as the DB dispatcher; an invalid regex is plain text).
             tool_matcher = hook.get("tool_matcher")
-            if tool_matcher and tool_name:
-                try:
-                    if not re.fullmatch(tool_matcher, tool_name):
-                        continue
-                except re.error:
-                    # Invalid regex → fall back to exact-string comparison.
-                    if tool_matcher != tool_name:
-                        continue
+            if tool_matcher and tool_name and not tool_matcher_matches(tool_matcher, tool_name):
+                continue
 
             hook_type = hook.get("hook_type")
             if hook_type != "bash":
@@ -807,6 +828,18 @@ def create_db_pretooluse_hook_handler(
                 except Exception as e:
                     logger.debug(f"Failed to update hook triggered status: {e}")
 
+            if status == "spawn_error":
+                # Fail closed: a guard that could not start never judged the call.
+                reason = (
+                    f"PreToolUse hook {hook_id or '<unknown>'} could not run "
+                    f"({stderr_str}); blocking the tool call"
+                )
+                logger.warning(reason)
+                return SyncHookJSONOutput(hookSpecificOutput={
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                })
             if status != "ok":
                 # timeout/error → no opinion for this hook; try the next one.
                 continue
@@ -838,7 +871,7 @@ def create_agent_arg_strip_hook_handler(
     Create a PreToolUse handler that strips coerced ``model``/``isolation`` args
     from Agent/Task tool calls on translated (ChatGPT/Codex-served) mains.
 
-    Ruling S8-R1: a translated main's Responses backend coerces every tool schema
+    A translated main's Responses backend coerces every tool schema
     to strict:true + all-props-required, so the model is grammar-forced to fill
     ``model`` and ``isolation`` on every Agent call. Both are enums with no neutral
     value, so the filled value carries no intent — and on a translated main every
@@ -893,6 +926,74 @@ def _project_has_db_pretooluse_hooks(project_id: Optional[str]) -> bool:
         return False
 
 
+# DB hook events with no blocking handler of their own (PreToolUse and Stop have
+# one). Their bash/webhook hooks are observational: dispatched fire-and-forget
+# through hook_executor.execute_hooks_for_event, so they cannot block or modify.
+_OBSERVED_DB_HOOK_EVENTS = (
+    "PostToolUse", "UserPromptSubmit", "SessionStart", "SessionEnd",
+    "SubagentStop", "PreCompact", "Notification",
+)
+
+
+# A HookMatcher's timeout is the deadline for its whole callback, and the
+# bridge falls back to a shared 60 s one when it is unset. The callbacks below
+# run their hooks one after another, each under its own configured timeout, so
+# a matcher's deadline is the sum of those timeouts plus a margin per hook for
+# spawning and killing it. Never below the old shared 60 s, so a hook added
+# mid-session (the DB handlers re-query at fire time) gets at least that.
+_MIN_MATCHER_TIMEOUT_S = 60.0
+_PER_HOOK_MARGIN_S = 5.0
+_DEFAULT_DB_HOOK_TIMEOUT_MS = 30000
+
+
+def _matcher_timeout(hook_timeouts_s: List[float]) -> float:
+    """The deadline for a callback that runs hooks with these timeouts in turn."""
+    total = sum(max(float(t or 0), 0.0) + _PER_HOOK_MARGIN_S for t in hook_timeouts_s)
+    return max(_MIN_MATCHER_TIMEOUT_S, total)
+
+
+def _db_hook_timeouts_s(project_id: Optional[str], event: str) -> List[float]:
+    """Configured timeouts (seconds) of ``event``'s enabled DB hooks.
+    Best-effort: a DB error means none."""
+    if not project_id:
+        return []
+    try:
+        hooks = database.get_hooks_for_project_and_event(project_id, event) or []
+    except Exception as e:
+        logger.debug(f"Could not read DB {event} hook timeouts: {e}")
+        return []
+    return [(h.get("timeout") or _DEFAULT_DB_HOOK_TIMEOUT_MS) / 1000 for h in hooks]
+
+
+def _db_observed_hook_events(project_id: Optional[str]) -> List[str]:
+    """Observed events with at least one enabled DB hook (project + app-level).
+    Best-effort: a DB error means none, so config construction never fails."""
+    try:
+        hooks = database.get_all_hooks_for_project(project_id) if project_id else database.get_app_hooks()
+        events = {h.get("event") for h in hooks or () if h.get("enabled")}
+    except Exception as e:
+        logger.debug(f"Could not list DB hook events: {e}")
+        return []
+    return [event for event in _OBSERVED_DB_HOOK_EVENTS if event in events]
+
+
+def create_db_event_hook_handler(event: str, project_id: Optional[str]):
+    """SDK callback dispatching ``event``'s DB hooks; never blocks the turn."""
+    async def db_event_hook_handler(hook_input: HookInput, tool_use_id: Optional[str],
+                                    context: HookContext) -> SyncHookJSONOutput:
+        if hook_input.get("hook_event_name") == event:
+            data = json.loads(json.dumps(dict(hook_input), default=str))
+            try:
+                await execute_hooks_for_event(
+                    project_id, event, data,
+                    tool_name=data.get("tool_name"),
+                )
+            except Exception:  # an observational hook must never fail the turn
+                logger.exception(f"[HookService] DB {event} hooks failed to dispatch")
+        return SyncHookJSONOutput()
+    return db_event_hook_handler
+
+
 def build_hooks_config(
     working_dir: str,
     project_id: Optional[str] = None,
@@ -904,7 +1005,7 @@ def build_hooks_config(
     """
     Build SDK hooks configuration from all sources.
 
-    This creates the hooks dict to pass to ClaudeAgentOptions, combining:
+    This creates the hooks dict to pass to AgentOptions, combining:
     1. Plugin hooks from hooks.json files
     2. Database hooks
 
@@ -938,7 +1039,11 @@ def build_hooks_config(
 
         if hook_defs:
             handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
-            hooks_config[event_name] = [HookMatcher(hooks=[handler])]
+            hooks_config[event_name] = [HookMatcher(
+                hooks=[handler],
+                # hooks.json timeouts are in seconds.
+                timeout=_matcher_timeout([h.get("timeout", 30) for h in hook_defs]),
+            )]
             logger.debug(f"[HookService] Registered {event_name} handler with {len(hook_defs)} hook(s)")
 
     # Register a DB-backed PreToolUse handler when the project has enabled
@@ -949,14 +1054,21 @@ def build_hooks_config(
         db_pretooluse_handler = create_db_pretooluse_hook_handler(
             working_dir, project_id, stderr_callback
         )
-        hooks_config.setdefault("PreToolUse", []).append(
-            HookMatcher(hooks=[db_pretooluse_handler])
-        )
+        hooks_config.setdefault("PreToolUse", []).append(HookMatcher(
+            hooks=[db_pretooluse_handler],
+            timeout=_matcher_timeout(_db_hook_timeouts_s(project_id, "PreToolUse")),
+        ))
         logger.debug(f"[HookService] Registered DB PreToolUse handler for project {project_id}")
+
+    for event in _db_observed_hook_events(project_id):
+        hooks_config.setdefault(event, []).append(
+            HookMatcher(hooks=[create_db_event_hook_handler(event, project_id)])
+        )
+        logger.debug(f"[HookService] Registered DB {event} handler for project {project_id}")
 
     # On a translated (ChatGPT/Codex-served) main the backend coerces the Agent
     # tool schema to all-props-required, force-filling `model`/`isolation`. Strip
-    # them so stamped-frontmatter subagent pins survive (ruling S8-R1).
+    # them so stamped-frontmatter subagent pins survive.
     if translated_main:
         hooks_config.setdefault("PreToolUse", []).append(
             HookMatcher(matcher="Agent|Task", hooks=[create_agent_arg_strip_hook_handler(stderr_callback)])
@@ -966,7 +1078,10 @@ def build_hooks_config(
     # ALWAYS register the Stop hook handler for database hooks support
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
     stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
-    hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
+    hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler], timeout=_matcher_timeout(
+        [h.get("timeout", 120) for h in stop_plugin_hooks]
+        + _db_hook_timeouts_s(project_id, "Stop")
+    ))]
     logger.debug(f"[HookService] Registered Stop handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config

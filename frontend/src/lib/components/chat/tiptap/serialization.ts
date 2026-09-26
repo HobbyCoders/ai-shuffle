@@ -128,15 +128,6 @@ export function isEditorEmpty(editor: Editor): boolean {
 }
 
 /**
- * Get the plain text content of the editor (without @path conversion).
- *
- * FileChip nodes are rendered as their filename only.
- */
-export function getPlainText(editor: Editor): string {
-	return editor.getText();
-}
-
-/**
  * Find an active @ mention at the cursor position.
  *
  * Returns the position and query text if an @ mention is being typed,

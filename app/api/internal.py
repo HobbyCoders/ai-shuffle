@@ -38,6 +38,18 @@ async def desktop_update_policy(request: Request):
     return {"allow_updates": await run_sync(mirror_policy)}
 
 
+@router.get("/desktop/source-lease")
+async def desktop_source_lease(request: Request):
+    """The license lease for the hub's gated source feed, as the
+    ``X-Shuffle-Lease`` header value, or null in beta mode or without a lease.
+    Only the desktop that launched this worker may read it; the desktop sends
+    it to the hub's manifest and archive requests and nowhere else."""
+    require_desktop(request)
+    from app.core.license import lease_header
+    from app.db.async_database import run_sync
+    return {"lease": await run_sync(lease_header)}
+
+
 from typing import Literal
 from pydantic import BaseModel, Field
 
@@ -49,6 +61,11 @@ class DesktopUpdateState(BaseModel):
     percent: float | None = Field(default=None, ge=0, le=100)
     error: str | None = Field(default=None, max_length=4096)
     message: str | None = Field(default=None, max_length=4096)
+    # The signed manifest's version and release notes of the offered update, for
+    # the sidebar update button (the desktop checks both against the signed
+    # manifest; the limits match docker/application_updates.py).
+    release: str | None = Field(default=None, max_length=80)
+    notes: str | None = Field(default=None, max_length=4000)
     # No policy fields: the native heartbeat cannot overwrite account preferences.
 
 

@@ -1,5 +1,4 @@
-"""app/core/turn_manager.py — the command layer over the ``turns`` table
-(v2 core, Phase 2).
+"""The command layer over the ``turns`` table.
 
 This is the thin, transport-agnostic API that callers (WebSocket chat handlers,
 automation, cluster/cloud intake, …) use to *command* a session's turn queue.
@@ -23,11 +22,10 @@ callers must use the ``_async`` twins** — calling the sync form from a corouti
 blocks every other connection on the worker.
 
 The *kick* is an injected seam: this module does not know how a queued turn gets
-started — the runtime/scheduler (Phase 2 A5/A6) registers a kick callback via
-:func:`register_kick`. Until something registers one the kick is a no-op, so
-``submit`` still safely enqueues (the reap/boot sweep or a later kick will pick
-the turn up). Callers of this module are wired in later commits (A6/A7); nothing
-here imports a caller.
+started — ``turn_scheduler.install`` registers a kick callback via
+:func:`register_kick` at boot. Until something registers one the kick is a
+no-op, so ``submit`` still safely enqueues (the reap/boot sweep or a later kick
+will pick the turn up). Nothing here imports a caller.
 """
 
 from __future__ import annotations
@@ -60,8 +58,8 @@ def register_kick(hook: Optional[Callable[[str], Any]]) -> None:
 # Injected interrupt-executor seam (mirrors ``_kick_hook``). Takes
 # ``(session_id, mode)`` and reacts to the live turn having just been flipped to
 # ``interrupting`` — the boot wiring routes it to
-# ``session_runtime.get_live_runtime(sid).interrupt(mode)`` (the SDK interrupt +
-# evict/drain escalation). Fire-and-forget; ``interrupt`` runs it synchronously
+# ``session_runtime.get_live_runtime(sid).interrupt(mode)`` (the adapter
+# interrupt + evict/drain escalation). Fire-and-forget; ``interrupt`` runs it synchronously
 # right after the durable row flip. Default: no-op — with no executor (or no
 # live runtime) the durable ``interrupting`` row stands and ``reap_expired`` is
 # the backstop. ``turn_manager`` never imports ``session_runtime``; the wiring
@@ -71,11 +69,11 @@ _interrupt_executor: Optional[Callable[..., Any]] = None
 
 def register_interrupt_executor(hook: Optional[Callable[..., Any]]) -> None:
     """Register (or clear, with ``None``) the interrupt executor the boot wiring
-    uses to drive the live runtime's SDK interrupt/escalation. Tests inject a
+    uses to drive the live runtime's adapter interrupt/escalation. Tests inject a
     spy.
 
     The hook is called ``hook(session_id, mode, turn_id)`` where ``turn_id`` is
-    the optional turn identity a user stop targets (``None`` for the legacy
+    the optional turn identity a user stop targets (``None`` for the
     session-scoped internal callers)."""
     global _interrupt_executor
     _interrupt_executor = hook
@@ -137,7 +135,7 @@ def _kick(session_id: str) -> None:
 _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 
 # Sources whose ``overrides`` carry a PERSON's current pick of model / effort /
-# permission mode, so the session's stored binding (v79) follows them. An
+# permission mode, so the session's stored binding follows them. An
 # automation, a wakeup replay, and a Task worker all run with overrides that
 # were decided elsewhere — writing those back would silently re-bind a session
 # the user never touched (a wakeup replays the model the SCHEDULING turn used,
@@ -171,7 +169,7 @@ def _submit_blocking(
     work is never lost — a later kick or the periodic reap sweep starts it.
 
     A turn from a human-facing source also PERSISTS its model / effort /
-    permission overrides onto the session row (v79). Agents no longer pin a
+    permission overrides onto the session row. Agents do not pin a
     model, so the composer's current pick is the session's binding, and writing
     it here is what makes a mid-session switch survive a reload, reach another
     device, and govern the next server-initiated turn.
@@ -213,7 +211,7 @@ def _submit_blocking(
                 "wakeup supersede failed for session %s", session_id
             )
         # ...and release the Stop latch. Stop means "nothing wakes this session
-        # until the user sends a new message" (round 7); this IS that message,
+        # until the user sends a new message"; this IS that message,
         # so every wake producer is live again from here on. The same source set
         # as the wakeup supersede above, for the same reason — these are the
         # turns a PERSON authors. A server-originated turn must never lift a
@@ -264,13 +262,13 @@ def submit(
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
     See :func:`_submit_blocking` for the full contract. This does the DB work on
-    the CALLING thread, so it is for sync callers only (the wakeup service, the
-    session-delete path, worker threads). **From a coroutine use
-    :func:`submit_async`** — three sync DB round trips on the event loop stall
-    every WebSocket, SSE stream and HTTP request on the worker.
+    the CALLING thread; every production caller is a coroutine and uses
+    :func:`submit_async` (three sync DB round trips on the event loop stall
+    every WebSocket, SSE stream and HTTP request on the worker). Tests use this
+    form to queue turns from synchronous code.
 
-    ``no_kick=True`` skips the in-process kick entirely — used by the V2
-    placement submit seam (Phase 4) when the session is placed on ANOTHER
+    ``no_kick=True`` skips the in-process kick entirely — used by the
+    placement submit seam when the session is placed on ANOTHER
     runner: the durable queued row is the whole hand-off (that runner's
     turn_claim loop picks it up via NOTIFY wake or its 5s poll), and a local
     kick would only lose the placement-gate race in session_runtime.execute.
@@ -384,7 +382,7 @@ def interrupt(
     ``mode`` is ``'stop'`` or ``'send_now'``; ``stop_background`` records whether
     background children should be torn down. Flips the durable row FIRST (the
     guarded ``running -> interrupting`` transition — the durable intent), THEN
-    fires the interrupt executor so the live runtime reacts (SDK interrupt +
+    fires the interrupt executor so the live runtime reacts (adapter interrupt +
     escalation). A Stop with no valid lease settles the orphaned turn and
     records its terminal event instead. Returns the changed turn row, or
     ``None`` when there is no matching live turn.
@@ -393,8 +391,8 @@ def interrupt(
     is threaded to BOTH the DB transition (so a stale stop whose target turn
     already settled matches zero rows → ``None`` → no executor fire) and the
     runtime signal (so the live runtime is only signalled when it is executing
-    that turn). ``None`` preserves the legacy session-scoped behavior used by
-    the internal auto/resource/send-now callers (GitHub #585).
+    that turn). ``None`` keeps the session-scoped behavior used by the
+    internal auto/resource/send-now callers.
 
     SYNCHRONOUS: the guarded UPDATE runs on the calling thread. **From a
     coroutine use :func:`interrupt_async`** — this is the stop button's hot
@@ -450,12 +448,9 @@ async def interrupt_async(
 # ---------------------------------------------------------------------------
 #
 # These block a caller (automation, the cluster/cloud intake, the voice bridge,
-# tests) for as long as five minutes. The original implementation re-read the
-# turns table every 50 ms with SYNCHRONOUS psycopg2 **on the event loop** — one
-# waiting automation cost 20–60 blocking queries/second and stalled every other
-# coroutine on the worker for the whole wait (perf review 2026-08, finding F2).
-#
-# The replacement has two legs:
+# tests) for as long as five minutes, so they must not poll the turns table
+# synchronously on the event loop (that stalls every other coroutine on the
+# worker for the whole wait). Two legs:
 #
 # * **Latency** rides the PostgreSQL ``session_events`` NOTIFY gateway. Every
 #   terminal turn event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``)
@@ -597,9 +592,8 @@ def _session_is_idle(session_id: str) -> bool:
     This must be a SINGLE statement (``turns.session_has_unsettled_turns``),
     never separate live/queued reads: the queued→running handoff moves a turn
     from the second-checked set into the first-checked set, so a two-read
-    predicate that straddled ``start_turn``'s commit saw neither and declared
-    a session idle while its turn was running (the automation
-    empty-"completed" run race, 2026-08-28). Blocking — call off the loop.
+    predicate that straddles ``start_turn``'s commit can see neither and declare
+    a session idle while its turn is running. Blocking — call off the loop.
     """
     return not turns.session_has_unsettled_turns(session_id)
 

@@ -5,16 +5,19 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request, UploadFile, File
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
+    api_user_may_use_profile,
     require_session,
+    resolve_api_user_profile,
     SessionImportResponse,
     ImportJSONLRequest,
     ImportJSONLResponse,
@@ -175,7 +178,7 @@ async def export_session(
         - For JSONL: The authoritative transcript as newline-delimited JSON;
           raw Claude history files are returned verbatim when available
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     from fastapi.responses import Response
     import json
 
@@ -358,7 +361,7 @@ async def export_session(
 
         # Footer
         md_lines.append("---")
-        md_lines.append(f"*Exported from AI Hub on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+        md_lines.append(f"*Exported from AI Shuffle on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
 
         filename = f"{safe_title}-{date_str}.md"
         content = "\n".join(md_lines)
@@ -372,6 +375,34 @@ async def export_session(
         )
 
 
+_IMPORT_STRING_FIELDS = (
+    "role", "type", "subtype", "toolName", "tool_name", "agentType", "agentDescription",
+)
+_IMPORT_ID_FIELDS = ("id", "toolId", "tool_id")
+
+
+def _import_message_problem(msg: dict) -> Optional[str]:
+    """Why the transcript writer cannot take ``msg``, or None when it can."""
+    metadata = msg.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return "'metadata' must be an object"
+    if metadata and metadata.get("timestamp") is not None and not isinstance(metadata["timestamp"], str):
+        return "'metadata.timestamp' must be a string"
+    for field in _IMPORT_STRING_FIELDS:
+        value = msg.get(field)
+        if value is not None and not isinstance(value, str):
+            return f"'{field}' must be a string"
+    for field in _IMPORT_ID_FIELDS:
+        value = msg.get(field)
+        # Legacy database rows export integer ids.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+            return f"'{field}' must be a string"
+    content = msg.get("content")
+    if content is not None and not isinstance(content, (str, list)):
+        return "'content' must be a string or an array"
+    return None
+
+
 @export_router.post("/import", response_model=SessionImportResponse)
 async def import_session(
     request: Request,
@@ -381,7 +412,7 @@ async def import_session(
     """
     Import a session from a JSON file export.
 
-    Accepts AI Hub JSON export format with session metadata and messages.
+    Accepts the AI Shuffle JSON export format with session metadata and messages.
     Creates a new session with a new ID to avoid conflicts.
 
     Args:
@@ -430,12 +461,15 @@ async def import_session(
         content = b"".join(chunks)
 
         import_data = json.loads(content.decode('utf-8'))
+    except HTTPException:
+        # The size caps above: keep their 413 instead of the generic 400 below.
+        raise
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid JSON file: {str(e)}"
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to read session import file")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -443,6 +477,11 @@ async def import_session(
         )
 
     # Validate import data structure
+    if not isinstance(import_data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export format. The file must hold a JSON object."
+        )
     if 'session' not in import_data or 'messages' not in import_data:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -457,6 +496,39 @@ async def import_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid export format. 'session' must be an object and 'messages' must be an array."
         )
+    if not all(isinstance(m, dict) for m in messages_data):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export format. Every message must be an object."
+        )
+    # The transcript writer below reads these per-message fields. A wrong type
+    # there used to fail it after the session row was saved, leaving an empty
+    # session behind a 200, so every message is checked before anything is.
+    for index, msg in enumerate(messages_data):
+        problem = _import_message_problem(msg)
+        if problem:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. Message {index + 1}: {problem}."
+            )
+    # These name the session and its agent and project. A non-string would fail
+    # the lookups, or the response after the session row was already created.
+    for field in ('title', 'profile_id', 'project_id'):
+        value = session_data.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. '{field}' must be a string."
+            )
+    # These feed numeric increments; a string would fail the UPDATE after the
+    # session row was already created.
+    for field in ('total_cost_usd', 'total_tokens_in', 'total_tokens_out', 'turn_count'):
+        value = session_data.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid export format. '{field}' must be a number."
+            )
 
     # Generate new session ID
     new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
@@ -465,11 +537,32 @@ async def import_session(
     # The agent the export names, else this install's first one. The app seeds
     # no agents, so "none configured" is a real state and has to be refused
     # here — sessions.profile_id has a FK to agents.
-    profile_id = await _resolve_import_profile_id(session_data.get('profile_id'))
-
-    # Get API user if applicable
+    # Get API user if applicable. A key imports only into its own scope: a
+    # named agent outside its assigned set is refused (403), and a
+    # project-limited key files the session under its project — another
+    # project named by the export is refused.
     api_user = get_api_user_from_request(request)
     api_user_id = api_user['id'] if api_user else None
+    profile_id = await _resolve_import_profile_id(
+        resolve_api_user_profile(api_user, session_data.get('profile_id'))
+    )
+    if not api_user_may_use_profile(api_user, profile_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This API key is not allowed to use agent '{profile_id}'.",
+        )
+    project_id = session_data.get('project_id') or None
+    if api_user and api_user.get('project_id'):
+        if project_id and project_id != api_user['project_id']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+        project_id = api_user['project_id']
+    elif project_id and not await run_sync(database.get_project, project_id):
+        # An export from another install names a project this one lacks;
+        # sessions.project_id has a FK to projects, so file it projectless.
+        project_id = None
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
@@ -480,7 +573,7 @@ async def import_session(
         database.create_session,
         session_id=new_session_id,
         profile_id=profile_id,
-        project_id=session_data.get('project_id'),
+        project_id=project_id,
         title=title,
         api_user_id=api_user_id
     )
@@ -497,6 +590,7 @@ async def import_session(
     )
 
     # Create JSONL file for the session
+    jsonl_path = None
     try:
         from app.core.jsonl_parser import get_project_dir_name
 
@@ -505,8 +599,8 @@ async def import_session(
 
         # Determine project directory - use /workspace by default
         working_dir = "/workspace"
-        if session_data.get('project_id'):
-            project = await run_sync(database.get_project, session_data['project_id'])
+        if project_id:
+            project = await run_sync(database.get_project, project_id)
             if project:
                 working_dir = get_project_working_dir(project)
 
@@ -525,7 +619,7 @@ async def import_session(
                 role = msg.get('role', 'user')
                 content = msg.get('content', '')
                 msg_type = msg.get('type')
-                timestamp = msg.get('metadata', {}).get('timestamp') or datetime.now(timezone.utc).isoformat()
+                timestamp = (msg.get('metadata') or {}).get('timestamp') or datetime.now(timezone.utc).isoformat()
                 msg_uuid = msg.get('id') or str(uuid.uuid4())
 
                 if role == 'user' and msg_type != 'tool_result':
@@ -642,9 +736,23 @@ async def import_session(
 
         logger.debug(f"Created JSONL file for imported session: {jsonl_path}")
 
-    except Exception as e:
-        logger.error(f"Failed to create JSONL file for imported session: {e}")
-        # Continue anyway - the session is in the database
+    except Exception:
+        # A session without its transcript is not an import: remove both, so a
+        # failure here never leaves an empty session behind a "success".
+        logger.exception("Failed to create JSONL file for imported session")
+        if jsonl_path is not None:
+            try:
+                jsonl_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove the partial transcript %s", jsonl_path)
+        try:
+            await run_sync(database.delete_session, new_session_id)
+        except Exception:
+            logger.exception("Could not remove imported session %s", new_session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not write the imported transcript; nothing was imported.",
+        )
 
     logger.debug(f"Imported session {new_session_id} with {len(messages_data)} messages")
 
@@ -656,14 +764,34 @@ async def import_session(
     )
 
 
+def _confined_jsonl_path(raw_path: str) -> Path:
+    """Resolve ``raw_path`` and require it inside a transcript root.
+
+    Roots are the Claude projects directory (where CLI transcripts live) and
+    the workspace. Resolution follows symlinks and ``..``, so traversal or a
+    link pointing outside a root is rejected with 400 before any existence
+    check (no probing of arbitrary server paths).
+    """
+    from app.core.config import settings
+
+    resolved = Path(raw_path).expanduser().resolve()
+    roots = (settings.get_claude_projects_dir, settings.effective_workspace_dir)
+    if not any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="jsonl_path must be inside the Claude projects directory or the workspace",
+        )
+    return resolved
+
+
 @export_router.post("/import-jsonl", response_model=ImportJSONLResponse)
 async def import_jsonl_session(
     request: Request,
     body: ImportJSONLRequest,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """
-    Import an existing Claude Code JSONL session into AI Shuffle.
+    Import an existing Claude Code JSONL session into AI Shuffle - Owner only.
 
     This allows resuming sessions that were created directly in Claude Code
     without going through AI Shuffle. The session will be registered in the
@@ -671,7 +799,8 @@ async def import_jsonl_session(
 
     Args:
         body: Request containing:
-            - jsonl_path: Full path to the JSONL file
+            - jsonl_path: Full path to the JSONL file, inside the Claude
+              projects directory or the workspace (400 otherwise)
             - profile_id: Optional profile to associate (defaults to 'default')
             - project_id: Optional project to associate
 
@@ -679,13 +808,12 @@ async def import_jsonl_session(
         Information about the imported session
     """
     import uuid
-    from pathlib import Path
     from app.core.jsonl_parser import (
         get_session_cost_from_jsonl,
         _get_session_title_and_preview
     )
 
-    jsonl_path = Path(body.jsonl_path)
+    jsonl_path = _confined_jsonl_path(body.jsonl_path)
 
     # Validate the file exists and is a JSONL file
     if not jsonl_path.exists():

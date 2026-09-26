@@ -1,12 +1,12 @@
 <script lang="ts">
 	/**
 	 * TeamMemberMessage - Display for a single teammate in an agent team.
-	 * Mirrors SubagentMessage patterns but surfaces team/teammate identity,
-	 * teammate status, and a Kill action when a PID is known.
+	 * Mirrors SubagentMessage patterns but surfaces team/teammate identity and
+	 * teammate status. Team cards only come from the history of old sessions
+	 * (nothing records new ones), so the card is read-only.
 	 */
 	import type { ChatMessage, TeammateStatus } from '$lib/stores/types';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
-	import { killTeammate } from '$lib/api/client';
 	import ToolUseMessage from '$lib/components/chat/ToolUseMessage.svelte';
 
 	/** Child toolStatus values are trusted — they only arrive as these three. */
@@ -14,13 +14,9 @@
 
 	interface Props {
 		message: ChatMessage;
-		parentSessionId: string;
 	}
 
-	let { message, parentSessionId }: Props = $props();
-
-	let killing = $state(false);
-	let killError = $state<string | null>(null);
+	let { message }: Props = $props();
 
 	// Code mode: a run_python cell that is running or succeeded is plumbing, not
 	// work. The tool calls it makes arrive as their own child rows, so showing
@@ -61,10 +57,6 @@
 
 	const pillLabel = $derived(
 		`${message.teamName ?? 'Team'} / ${message.teammateName ?? 'Teammate'}`
-	);
-
-	const canKill = $derived(
-		status === 'running' && typeof message.teammatePid === 'number'
 	);
 
 	function truncateSessionId(id?: string): string {
@@ -126,22 +118,6 @@
 		}
 		return '';
 	}
-
-	async function handleKill(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (!canKill || killing) return;
-		if (!message.teamName || !message.teammateName) return;
-		killing = true;
-		killError = null;
-		try {
-			await killTeammate(parentSessionId, message.teamName, message.teammateName);
-		} catch (e) {
-			killError = e instanceof Error ? e.message : 'Kill failed';
-		} finally {
-			killing = false;
-		}
-	}
 </script>
 
 <details class="w-full team-card group">
@@ -198,17 +174,6 @@
 		{/if}
 
 		<div class="ml-auto flex items-center gap-2 shrink-0">
-			{#if canKill}
-				<button
-					type="button"
-					onclick={handleKill}
-					disabled={killing}
-					class="min-h-[32px] px-2.5 py-1 text-xs font-medium rounded-sm border border-red-500/40 text-red-600 hover:bg-red-500/10 active:bg-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-					aria-label="Kill teammate"
-				>
-					{killing ? 'Killing\u2026' : 'Kill'}
-				</button>
-			{/if}
 			<!-- Chevron -->
 			<svg class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -229,12 +194,6 @@
 					<span class="text-muted-foreground">•</span>
 					<span class="text-muted-foreground">pid <span class="font-mono">{message.teammatePid}</span></span>
 				{/if}
-			</div>
-		{/if}
-
-		{#if killError}
-			<div class="px-4 py-2 border-b border-border/50 text-xs text-red-600">
-				{killError}
 			</div>
 		{/if}
 
@@ -342,10 +301,6 @@
 	@media (max-width: 639px) {
 		.team-summary {
 			min-height: 44px;
-		}
-
-		.team-summary button {
-			min-height: 36px;
 		}
 	}
 

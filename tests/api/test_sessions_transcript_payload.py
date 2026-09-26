@@ -8,7 +8,7 @@ whole file) and inline base64 screenshot data URIs.
 import base64
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI

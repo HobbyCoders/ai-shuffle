@@ -21,7 +21,7 @@
 	 * "switching lanes lands you on that lane's compose screen" behaviour. What
 	 * this page still owns is the reverse direction: any path that opens or
 	 * creates a session has to put the sidepanel in the matching lane, which is
-	 * what handleOpenSession and handleNewSessionForProject do below.
+	 * what handleOpenSession does.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
@@ -45,7 +45,6 @@
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
-	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 
@@ -61,7 +60,6 @@
 	let showKeyboardShortcuts = $state(false);
 	let showImportModal = $state(false);
 	let showTagManager = $state(false);
-	let showKnowledgeModal = $state(false);
 	let showSpotlight = $state(false);
 
 	// Tag state
@@ -82,27 +80,6 @@
 	 */
 	function handleNewSession() {
 		activeSession.newChat();
-
-		if ($sidebarOverlay && !$sidebarCollapsed) {
-			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(() => layout.openChat(null));
-		} else {
-			layout.openChat(null);
-		}
-	}
-
-	/**
-	 * Create a new chat session with a specific project pre-selected.
-	 *
-	 * Only the projects panel calls this, and a project only means something in
-	 * the code lane — chat and voice sessions are projectless. So the lane is
-	 * forced first: picking a project out of a chat-lane sidepanel would
-	 * otherwise create a session the list beside it cannot show.
-	 */
-	function handleNewSessionForProject(projectId: string) {
-		appMode.set('code');
-		activeSession.newChat();
-		activeSession.setProject(projectId);
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
@@ -322,7 +299,6 @@
 					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
-					else if (showKnowledgeModal) showKnowledgeModal = false;
 					else if (showTagManager) showTagManager = false;
 				}
 			}),
@@ -446,11 +422,9 @@
 		isAdmin: $isAdmin,
 		onNewSession: handleNewSession,
 		onSettledOpenSession: handleNewSession,
-		onNewSessionForProject: handleNewSessionForProject,
 		onOpenSession: handleOpenSession,
 		onOpenFeature: handleOpenFeature,
-		onOpenSpotlight: () => { showSpotlight = true; },
-		onOpenPlugins: () => handleOpenFeature('plugins')
+		onOpenSpotlight: () => { showSpotlight = true; }
 	})}
 
 	<!-- ========================================== -->
@@ -470,7 +444,6 @@
 		onOpenSettings={handleSpotlightOpenSettings}
 		onImportSession={() => { showSpotlight = false; showImportModal = true; }}
 		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
-		onManageKnowledge={() => { showSpotlight = false; showKnowledgeModal = true; }}
 	/>
 
 	<!-- Keyboard Shortcuts Modal -->
@@ -488,14 +461,6 @@
 		<TagManager
 			onclose={handleTagManagerClose}
 			ontagsupdated={() => loadAllTags()}
-		/>
-	{/if}
-
-	<!-- Knowledge Base Modal -->
-	{#if showKnowledgeModal && $activeSession?.project}
-		<KnowledgeManager
-			projectId={$activeSession.project}
-			onclose={() => showKnowledgeModal = false}
 		/>
 	{/if}
 

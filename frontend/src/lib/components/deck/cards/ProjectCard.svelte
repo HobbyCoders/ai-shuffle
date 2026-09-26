@@ -28,12 +28,6 @@
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import './card-design-system.css';
 
-	interface Props {
-		mobile?: boolean;
-	}
-
-	let { mobile = false }: Props = $props();
-
 	// View mode: list or detail
 	type ViewMode = 'list' | 'detail';
 	let viewMode = $state<ViewMode>('list');

@@ -21,8 +21,9 @@ Read path
     transaction.
 
 Bootstrap
-    ``snapshot_chunks`` serves a member the current records of every
-    collection; ``apply_snapshot_chunk`` applies them. A joining worker keeps
+    ``snapshot_manifest`` / ``snapshot_chunk`` serve a member the current
+    records of every collection; ``open_snapshot_chunk`` + ``apply_snapshot_chunk``
+    apply them. A joining worker keeps
     ``bootstrap_state='syncing'`` (no outbox) until the snapshot is complete.
 """
 from __future__ import annotations
@@ -334,7 +335,7 @@ def leave_network() -> dict:
     left = {"network_id": ctx.network_id, "name": ctx.name, "member_count": len(ctx.active_members())}
     with get_db() as conn:
         cursor = conn.cursor()
-        store.lock_state(cursor)  # Same lock order as in-flight hub receipt transactions.
+        store.lock_state(cursor)  # State lock first, like the other network-state writers.
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_members"):
@@ -940,6 +941,40 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     return outcome
 
 
+SECRET_PLACEHOLDER = "<secret>"
+
+
+def redact_secrets(record: Any) -> Any:
+    """A conflict's losing record with its encrypted columns replaced by a placeholder.
+
+    ``sync_conflicts`` is kept in plaintext JSON and listed through the API, so
+    a column that is encrypted at rest (``_enc``) must never be stored there.
+    """
+    if not isinstance(record, Mapping) or not record.get("_enc"):
+        return record
+    encrypted_columns = set(record["_enc"])
+    return {k: (SECRET_PLACEHOLDER if k in encrypted_columns else v) for k, v in record.items() if k != "_enc"}
+
+
+def redact_stored_conflicts() -> int:
+    """Redact conflicts stored before losing remote writes were redacted.
+
+    Idempotent: a redacted record has no ``_enc`` left. Returns rows rewritten.
+    """
+    rewritten = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, losing_record FROM sync_conflicts")
+        for row in cursor.fetchall():
+            record = _parse_json(row["losing_record"])
+            redacted = redact_secrets(record)
+            if redacted is not record:
+                cursor.execute("UPDATE sync_conflicts SET losing_record = %s WHERE id = %s",
+                               (json.dumps(redacted, separators=(",", ":"), ensure_ascii=False, default=str), row["id"]))
+                rewritten += 1
+    return rewritten
+
+
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     """Apply the next op of a stream; classify what cannot be applied.
 
@@ -979,7 +1014,7 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
         existing = store.get_record(cursor, env.collection, env.record_id)
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id,
-                           losing_record=plaintext if env.op == OP_UPSERT else {"_deleted": True},
+                           losing_record=redact_secrets(plaintext) if env.op == OP_UPSERT else {"_deleted": True},
                            winning_clock=int(existing["clock"]) if existing else env.clock,
                            winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
         result.reasons.append(reason)
@@ -989,6 +1024,12 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
+    if env.collection in policy.RETIRED_COLLECTIONS:
+        # A peer on an older build still publishes a collection this build
+        # retired: consume the op (the watermark moves) but never store,
+        # materialize or forward it.
+        store.observe_clock(cursor, env.clock)
+        return "applied"
     coll = policy.collection(env.collection) if env.collection in policy.COLLECTIONS else None
     if coll is None:
         # Unknown collection (newer peer): keep the op for forwarding, skip materialization.
@@ -1017,7 +1058,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         if incoming_hash == (existing["content_hash"] or "") and bool(existing["deleted"]) == (env.op == OP_DELETE):
             store.insert_op(cursor, env.to_dict(), _lane(coll))
             return "lost"
-        losing_record = plaintext if env.op == OP_UPSERT else {"_deleted": True}
+        losing_record = redact_secrets(plaintext) if env.op == OP_UPSERT else {"_deleted": True}
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id, losing_record=losing_record,
                            winning_clock=int(existing["clock"]), winning_device_id=existing["origin_device_id"])
@@ -1037,11 +1078,9 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 local_plain = None
             incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
             if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
-                if local_plain.get("_enc"):
-                    local_plain = {k: ("<secret>" if k in local_plain["_enc"] else v) for k, v in local_plain.items() if k != "_enc"}
                 store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
                                    losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
-                                   losing_record=local_plain, winning_clock=env.clock,
+                                   losing_record=redact_secrets(local_plain), winning_clock=env.clock,
                                    winning_device_id=env.origin_device_id)
 
     if env.op == OP_DELETE:
@@ -1175,7 +1214,6 @@ def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any])
         from app.network import recovery
         recovery.refresh_wrap_after_rotation(_conn=conn)
     elif kind == membership.TYPE_KEY:
-        version = int(record_data["key_version"])
         try:
             key = membership.unwrap_from_key_record(record_data, ctx.device_id, ctx.identity.encryption_private)
         except crypto.CryptoError as exc:
@@ -1225,22 +1263,15 @@ def _ensure_safe_write_key(ctx: NetworkContext) -> NetworkContext:
     return current
 
 
-def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext | None = None,
-                hub_scope: str | None = None) -> ApplyResult:
+def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
+                ctx: NetworkContext | None = None) -> ApplyResult:
     """Apply a batch in one transaction per envelope so one bad op cannot poison the rest."""
     ctx = ctx or require_context()
     result = ApplyResult()
     for data in envelopes:
         try:
             with get_db() as conn:
-                cursor = conn.cursor()
-                if hub_scope is not None:
-                    state = store.lock_state(cursor)
-                    if ((state or {}).get("hub") or {}).get("binding_scope") != hub_scope:
-                        raise RuntimeError("Account network changed during feed application")
-                outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
-                if hub_scope is not None:
-                    store.record_hub_receipt(cursor, hub_scope, data)
+                outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
         except TransientApplyError as exc:
             result.retry += 1
             result.reasons.append(str(exc))
@@ -1250,11 +1281,6 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: NetworkContext |
             result.reasons.append(str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 - keep the loop alive; log once per op
-            if hub_scope is not None:
-                # A storage failure is not an invalid remote operation. Do not
-                # let the hub reader advance its cursor past an uncommitted op.
-                load_context()
-                raise
             logger.warning("Applying an operation failed: %s", exc, exc_info=True)
             result.retry += 1
             result.reasons.append("apply failed")
@@ -1334,14 +1360,22 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
                    limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
-    """One signed, encrypted page of a collection's current records."""
+    """One signed, encrypted page of a collection's current records.
+
+    A retired collection always yields one empty final page, for joiners on
+    older builds that still expect it.
+    """
     ctx = ctx or require_context()
-    coll = policy.collection(collection)
+    retired = collection in policy.RETIRED_COLLECTIONS
+    coll = None if retired else policy.collection(collection)
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
-                       (collection, limit + 1, offset))
-        versions = [dict(r) for r in cursor.fetchall()]
+        if retired:
+            versions = []
+        else:
+            cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
+                           (collection, limit + 1, offset))
+            versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
         items = []
@@ -1392,9 +1426,15 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
 
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False) -> int:
-    """Apply a chunk: records newer than what we hold replace ours (LWW by clock)."""
+    """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
+
+    A page for a collection this build does not know (retired here, or added
+    by a newer peer) is verified and skipped: it applies nothing.
+    """
     ctx = ctx or require_context()
     body = open_snapshot_chunk(chunk, ctx=ctx)
+    if body["collection"] not in policy.COLLECTIONS:
+        return 0
     coll = policy.collection(body["collection"])
     applied = 0
     touched: list[tuple[str, str, str]] = []
@@ -1415,9 +1455,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                         losing_record = serialize_row(coll, local_row) if local_row else {}
                     else:
                         losing_record = dict(item["record"] or {})
-                    if losing_record and losing_record.get("_enc"):
-                        losing_record = {k: ("<secret>" if k in losing_record["_enc"] else v)
-                                         for k, v in losing_record.items() if k != "_enc"}
+                    losing_record = redact_secrets(losing_record)
                     store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
                                        losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
                                        losing_record=losing_record, winning_clock=int(winner["clock"]),
@@ -1556,22 +1594,37 @@ def join_response(*, device_id: str, encryption_public: bytes, certificate: Mapp
     }
 
 
+# Managed-connection states in which the account has assigned this worker its
+# https tunnel address: the account link exists, even while the connector is
+# (re)starting. ``disconnected`` (signed out), ``waiting`` (claim pending),
+# ``limited`` (tunnel refused) and ``locked``/``unavailable`` advertise none.
+_TUNNEL_STATES = frozenset({"connected", "connecting", "reconnecting"})
+
+
 def _own_endpoints() -> List[str]:
-    endpoints = []
-    try:
-        from app.core.cluster import advertise_url
-        url, _ = advertise_url()
-        if url:
-            endpoints.append(url)
-    except Exception:  # noqa: BLE001
-        pass
-    # Docker's guessed LAN address can be private to its bridge. Advertise the
-    # verified managed route too; peers still authenticate the device identity.
+    """The addresses this worker tells peers to dial, tunnel first.
+
+    Peers dial the https tunnel alone whenever it is listed
+    (``endpoints.dial_endpoints``), so it is advertised for as long as the
+    account link exists, not only while the connector is up: a worker whose
+    tunnel is momentarily down reads as offline to its peers rather than
+    being reached over plain http. The LAN address follows for workers that
+    have no account link. Docker's guessed LAN address can also be private to
+    its bridge; peers authenticate the device identity at either address.
+    """
+    endpoints: List[str] = []
     try:
         from app.core import managed_connection
         connection = managed_connection.status()
         url = connection.get("url")
-        if connection.get("status") == "connected" and url and url not in endpoints:
+        if connection.get("status") in _TUNNEL_STATES and url:
+            endpoints.append(url)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.core.cluster import advertise_url
+        url, _ = advertise_url()
+        if url and url not in endpoints:
             endpoints.append(url)
     except Exception:  # noqa: BLE001
         pass

@@ -6,10 +6,10 @@ Covers:
   Monitor subprocess, marks it killed in the registry, and returns None for an
   unknown id (so callers fall through to SDK agent-task handling).
 - app.core.query_session_lifecycle.stop_session_task — routes shell tasks to the
-  shell helper and agent tasks to the SDK client's stop_task(); handles a
-  missing / disconnected session gracefully (never raises).
+  shell helper and reaps agent tasks in the registry; handles a missing /
+  disconnected session gracefully (never raises).
 
-No Postgres or live SDK is needed: the session pool and SDK client are mocked.
+No Postgres or live engine is needed: the session pool is mocked.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,7 +22,11 @@ from app.core.query_session_lifecycle import (
     stop_all_background_tasks,
     stop_session_task,
 )
-from app.core.task_registry import task_registry
+from app.core.task_registry import (
+    USER_STOP_REASON,
+    USER_STOP_SUMMARY,
+    task_registry,
+)
 
 
 def _fake_shell_task(task_id: str) -> bt._BackgroundTask:
@@ -105,12 +109,12 @@ class TestStopSessionTask:
         assert result["kind"] == "shell"
 
     @pytest.mark.asyncio
-    async def test_routes_agent_task_to_sdk_client(self):
-        fake_client = MagicMock()
-        fake_client.stop_task = AsyncMock()
-        fake_state = MagicMock(is_connected=True, client=fake_client)
+    async def test_live_agent_task_is_reaped_in_the_registry(self):
+        """The adapter has no per-task stop: a running agent row on a live
+        session is settled ``killed`` in the registry, attributed to the user."""
+        task_registry.start_task("s1", "agent-123", "agent", "bg work")
         fake_pool = MagicMock()
-        fake_pool.peek.return_value = fake_state
+        fake_pool.peek.return_value = MagicMock(is_connected=True)
 
         with patch(
             "app.core.query_session_lifecycle.get_session_pool",
@@ -118,9 +122,48 @@ class TestStopSessionTask:
         ):
             result = await stop_session_task("s1", "agent-123")
 
-        fake_client.stop_task.assert_awaited_once_with("agent-123")
         assert result["ok"] is True
         assert result["kind"] == "agent"
+        rec = task_registry.get_task("s1", "agent-123")
+        assert rec["status"] == "killed"
+        assert rec["summary"] == USER_STOP_SUMMARY
+        assert rec["reason"] == USER_STOP_REASON
+
+    @pytest.mark.asyncio
+    async def test_host_stop_of_live_agent_task_names_the_host(self):
+        task_registry.start_task("s1", "agent-456", "agent", "bg work")
+        fake_pool = MagicMock()
+        fake_pool.peek.return_value = MagicMock(is_connected=True)
+
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "agent-456", source="parent_turn_ended")
+
+        assert result["ok"] is True
+        rec = task_registry.get_task("s1", "agent-456")
+        assert rec["status"] == "killed"
+        assert rec["reason"] == "parent_turn_ended"
+        assert rec["summary"] == "Stopped by host: parent_turn_ended"
+
+    @pytest.mark.asyncio
+    async def test_agent_task_on_a_gone_session_is_reaped_unattributed(self):
+        task_registry.start_task("s1", "agent-789", "agent", "bg work")
+        fake_pool = MagicMock()
+        fake_pool.peek.return_value = None
+
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "agent-789")
+
+        assert result["ok"] is True
+        assert result["detail"] == "reaped (session gone)"
+        rec = task_registry.get_task("s1", "agent-789")
+        assert rec["status"] == "killed"
+        assert rec.get("reason") is None
 
     @pytest.mark.asyncio
     async def test_agent_task_session_not_active(self):
@@ -136,7 +179,7 @@ class TestStopSessionTask:
 
     @pytest.mark.asyncio
     async def test_agent_task_session_not_connected(self):
-        fake_state = MagicMock(is_connected=False, client=None)
+        fake_state = MagicMock(is_connected=False)
         fake_pool = MagicMock()
         fake_pool.peek.return_value = fake_state
         with patch(
@@ -148,20 +191,16 @@ class TestStopSessionTask:
         assert "not connected" in result["detail"]
 
     @pytest.mark.asyncio
-    async def test_agent_task_sdk_error_is_caught(self):
-        fake_client = MagicMock()
-        fake_client.stop_task = AsyncMock(side_effect=RuntimeError("boom"))
-        fake_state = MagicMock(is_connected=True, client=fake_client)
+    async def test_unknown_agent_task_on_live_session(self):
         fake_pool = MagicMock()
-        fake_pool.peek.return_value = fake_state
+        fake_pool.peek.return_value = MagicMock(is_connected=True)
         with patch(
             "app.core.query_session_lifecycle.get_session_pool",
             return_value=fake_pool,
         ):
             result = await stop_session_task("s1", "agent-x")
         assert result["ok"] is False
-        assert result["kind"] == "agent"
-        assert "boom" in result["detail"]
+        assert result["detail"] == "task not found"
 
 
 # =============================================================================
@@ -200,7 +239,7 @@ class TestStopSessionTaskReapsGhosts:
     @pytest.mark.asyncio
     async def test_agent_ghost_reaped_when_session_disconnected(self):
         task_registry.start_task("s1", "agent-ghost", "agent", "bg work")
-        fake_state = MagicMock(is_connected=False, client=None)
+        fake_state = MagicMock(is_connected=False)
         fake_pool = MagicMock()
         fake_pool.peek.return_value = fake_state
         with patch(

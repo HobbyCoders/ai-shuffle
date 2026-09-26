@@ -253,7 +253,3 @@ def stop_loop_watchdog() -> None:
         return
     _watchdog.stop()
     _watchdog = None
-
-
-def get_loop_watchdog() -> Optional[LoopStallWatchdog]:
-    return _watchdog

@@ -3,6 +3,7 @@
  */
 
 import { api } from './client';
+import { apiOrigin } from './runtime';
 
 // ============================================================================
 // Types
@@ -12,9 +13,29 @@ export type TriggerType = 'cron' | 'interval' | 'connector_event' | 'connector_t
 export type OutputType = 'connector' | 'webhook' | 'session' | 'none';
 export type ActionStepType = 'connector_action' | 'send_prompt' | 'webhook_call' | 'delay';
 
+/**
+ * Per-type trigger settings, as read by app/core/automation_manager.py and
+ * app/core/automation_service.py. Unlisted keys pass through untouched.
+ */
+export interface TriggerConfig {
+	/** cron */
+	expression?: string;
+	timezone?: string;
+	/** interval */
+	seconds?: number;
+	/** connector_event / connector_trigger */
+	connector_id?: string;
+	event_type?: string;
+	filter?: Record<string, unknown>;
+	trigger_id?: string;
+	/** webhook (generated server-side when absent) */
+	secret?: string;
+	[key: string]: unknown;
+}
+
 export interface TriggerItem {
 	type: TriggerType;
-	config: Record<string, any>;
+	config: TriggerConfig;
 }
 
 export interface ActionStep {
@@ -22,7 +43,7 @@ export interface ActionStep {
 	// connector_action fields
 	connector_id?: string;
 	action_id?: string;
-	params?: Record<string, any>;
+	params?: Record<string, unknown>;
 	// send_prompt fields
 	prompt?: string;
 	profile_id?: string;
@@ -40,12 +61,12 @@ export interface AutomationCreate {
 	name: string;
 	description?: string | null;
 	trigger_type?: TriggerType;
-	trigger_config?: Record<string, any>;
+	trigger_config?: TriggerConfig;
 	triggers?: TriggerItem[];
 	prompt?: string | null;
 	profile_id: string;
 	project_id?: string | null;
-	output_config?: Record<string, any>;
+	output_config?: Record<string, unknown>;
 	action_steps?: ActionStep[] | null;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
@@ -60,12 +81,12 @@ export interface AutomationUpdate {
 	name?: string;
 	description?: string | null;
 	trigger_type?: TriggerType;
-	trigger_config?: Record<string, any>;
+	trigger_config?: TriggerConfig;
 	triggers?: TriggerItem[];
 	prompt?: string | null;
 	profile_id?: string;
 	project_id?: string | null;
-	output_config?: Record<string, any>;
+	output_config?: Record<string, unknown>;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
 	max_cost_per_run?: number | null;
@@ -82,12 +103,12 @@ export interface Automation {
 	name: string;
 	description: string | null;
 	trigger_type: TriggerType;
-	trigger_config: Record<string, any>;
+	trigger_config: TriggerConfig;
 	triggers: TriggerItem[] | null;
 	prompt: string | null;
 	profile_id: string;
 	project_id: string | null;
-	output_config: Record<string, any>;
+	output_config: Record<string, unknown>;
 	action_steps: ActionStep[] | null;
 	max_turns: number | null;
 	timeout_seconds: number | null;
@@ -105,13 +126,42 @@ export interface Automation {
 	requires_approval: boolean;
 	created_at: string;
 	updated_at: string;
+	/** Advice from create/update, e.g. use an API key for scheduled runs. */
+	notices?: string[];
+}
+
+/**
+ * Where a webhook trigger is called: `POST /api/v1/automations/{id}/trigger`
+ * (app/api/automations.py), signed with `X-Webhook-Signature`. The backend
+ * has no reliable public base URL, so the address is built from the origin
+ * this UI talks to (the paired worker on mobile, the page origin otherwise).
+ */
+export function automationWebhookUrl(automationId: string): string {
+	const origin = apiOrigin() || (typeof window !== 'undefined' ? window.location.origin : '');
+	return `${origin}/api/v1/automations/${encodeURIComponent(automationId)}/trigger`;
+}
+
+/** Labels for `trigger_data.trigger`, as written by app/core/automation_manager.py. */
+const RUN_TRIGGER_LABELS: Record<string, string> = {
+	schedule: 'Schedule',
+	connector_event: 'Event',
+	connector_trigger: 'Connector',
+	webhook: 'Webhook',
+	manual: 'Manual'
+};
+
+/** What started a run. Older rows may carry `source` instead of `trigger`. */
+export function runTriggerLabel(triggerData: Record<string, unknown> | null | undefined): string {
+	const raw = triggerData?.trigger ?? triggerData?.source;
+	if (typeof raw !== 'string' || !raw) return RUN_TRIGGER_LABELS.manual;
+	return RUN_TRIGGER_LABELS[raw] ?? raw;
 }
 
 export interface AutomationRun {
 	id: string;
 	automation_id: string;
 	status: 'pending' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled' | 'budget_exceeded';
-	trigger_data: Record<string, any> | null;
+	trigger_data: Record<string, unknown> | null;
 	session_id: string | null;
 	prompt_rendered: string | null;
 	response: string | null;
@@ -150,6 +200,12 @@ export interface AutomationStats {
 	today_cost_usd: number;
 }
 
+/** Manual-trigger acknowledgement (automation_manager.trigger_manual). */
+export interface AutomationTriggerResult {
+	automation_id: string;
+	status: 'triggered';
+}
+
 export interface AutomationTestResult {
 	prompt_rendered: string;
 	budget_ok: boolean;
@@ -168,10 +224,6 @@ export async function createAutomation(data: AutomationCreate): Promise<Automati
 	return api.post<Automation>('/automations', data);
 }
 
-export async function getAutomation(id: string): Promise<Automation> {
-	return api.get<Automation>(`/automations/${id}`);
-}
-
 export async function updateAutomation(id: string, data: AutomationUpdate): Promise<Automation> {
 	return api.patch<Automation>(`/automations/${id}`, data);
 }
@@ -188,20 +240,12 @@ export async function disableAutomation(id: string): Promise<Automation> {
 	return api.post<Automation>(`/automations/${id}/disable`);
 }
 
-export async function triggerAutomation(id: string): Promise<any> {
-	return api.post<any>(`/automations/${id}/trigger`);
-}
-
-export async function testAutomation(id: string): Promise<AutomationTestResult> {
-	return api.post<AutomationTestResult>(`/automations/${id}/test`);
+export async function triggerAutomation(id: string): Promise<AutomationTriggerResult> {
+	return api.post<AutomationTriggerResult>(`/automations/${id}/trigger`);
 }
 
 export async function getAutomationRuns(id: string, limit = 50, offset = 0): Promise<AutomationRun[]> {
 	return api.get<AutomationRun[]>(`/automations/${id}/runs?limit=${limit}&offset=${offset}`);
-}
-
-export async function getAutomationRun(automationId: string, runId: string): Promise<AutomationRun> {
-	return api.get<AutomationRun>(`/automations/${automationId}/runs/${runId}`);
 }
 
 export async function getAutomationStats(id: string): Promise<AutomationStats> {

@@ -4,9 +4,9 @@ Session Sync Service
 Discovers and imports Claude Code sessions from the filesystem into the AI Shuffle database.
 This keeps the database synchronized with sessions created directly in Claude Code.
 
-Uses the SDK's list_sessions() for efficient filesystem discovery with metadata
-extraction (title, first prompt, git branch, cwd) via stat + head/tail reads —
-no full JSONL parsing required for session discovery.
+Uses the app-owned local transcript helpers for filesystem discovery and metadata
+extraction (title, first prompt, git branch, cwd). JSONL records are streamed;
+no CLI process or credentials are accessed.
 
 Key features:
 - Discovers unimported sessions for a specific project via SDK list_sessions()
@@ -18,9 +18,8 @@ import logging
 import uuid
 from typing import Dict, List, Any, Optional
 
-from claude_agent_sdk import list_sessions, SDKSessionInfo
+from app.core.cli_sessions import list_sessions, SessionInfo
 
-from app.core.config import settings
 from app.core.project_utils import get_project_working_dir
 from app.core.jsonl_parser import get_session_cost_from_jsonl
 from app.db import database
@@ -40,7 +39,7 @@ class SessionSyncService:
         self,
         project_id: str,
         working_dir: str
-    ) -> List[SDKSessionInfo]:
+    ) -> List[SessionInfo]:
         """
         Discover Claude Code sessions that exist on disk but are not in the database.
 
@@ -53,7 +52,7 @@ class SessionSyncService:
             working_dir: The working directory path for the project
 
         Returns:
-            List of SDKSessionInfo objects for sessions not yet in the database,
+            List of SessionInfo objects for sessions not yet in the database,
             sorted by last_modified descending (newest first).
         """
         try:
@@ -85,7 +84,7 @@ class SessionSyncService:
 
     def import_session(
         self,
-        session_info: SDKSessionInfo,
+        session_info: SessionInfo,
         project_id: str,
         working_dir: str,
         profile_id: str = "default"
@@ -93,11 +92,11 @@ class SessionSyncService:
         """
         Import a single Claude Code session into the database.
 
-        Uses metadata from SDKSessionInfo (populated by SDK's list_sessions())
+        Uses metadata from SessionInfo (populated by SDK's list_sessions())
         for title and summary, avoiding redundant JSONL parsing.
 
         Args:
-            session_info: SDKSessionInfo from list_sessions() with metadata
+            session_info: SessionInfo from list_sessions() with metadata
             project_id: The AI Shuffle project ID to associate
             working_dir: The working directory for token usage parsing
             profile_id: The profile to associate (defaults to 'default')
@@ -254,65 +253,6 @@ class SessionSyncService:
         )
 
         return result
-
-    def sync_all_projects(
-        self,
-        profile_id: str = "default",
-        limit_projects: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """
-        Sync Claude Code sessions across all known projects.
-
-        Iterates through all projects in the database and imports any
-        unimported Claude Code sessions for each. This is useful for
-        populating sessions in views that don't filter by project.
-
-        Args:
-            profile_id: The profile to use for imported sessions
-            limit_projects: Optional limit on number of projects to sync (for performance)
-
-        Returns:
-            Dict with: total_imported, total_skipped, projects_synced, errors
-        """
-        all_projects = database.get_all_projects()
-
-        if limit_projects:
-            all_projects = all_projects[:limit_projects]
-
-        total_imported = 0
-        total_skipped = 0
-        projects_synced = 0
-        all_errors = []
-
-        for project in all_projects:
-            try:
-                result = self.sync_project_sessions(
-                    project_id=project["id"],
-                    profile_id=profile_id
-                )
-                total_imported += result["imported_count"]
-                total_skipped += result["skipped_count"]
-                projects_synced += 1
-
-                if result["errors"]:
-                    all_errors.extend(result["errors"])
-
-            except Exception as e:
-                error_msg = f"Failed to sync project {project['id']}: {e}"
-                logger.error(error_msg)
-                all_errors.append(error_msg)
-
-        logger.debug(
-            f"Global session sync: {total_imported} imported across "
-            f"{projects_synced} projects, {len(all_errors)} errors"
-        )
-
-        return {
-            "total_imported": total_imported,
-            "total_skipped": total_skipped,
-            "projects_synced": projects_synced,
-            "errors": all_errors
-        }
 
 
 # Global service instance

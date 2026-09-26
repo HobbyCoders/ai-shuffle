@@ -35,17 +35,17 @@ class TestMainModuleImports:
     def test_app_title(self):
         """App should have correct title."""
         from app.main import app
-        assert app.title == "AI Hub"
+        assert app.title == "AI Shuffle"
 
-    def test_app_has_docs_url(self):
-        """App should have docs URL configured."""
+    def test_api_docs_are_off_by_default(self):
+        """Interactive docs and the OpenAPI schema are unauthenticated, so they
+        stay off unless API_DOCS_ENABLED is set."""
+        from app.core.config import settings
         from app.main import app
-        assert app.docs_url == "/docs"
-
-    def test_app_has_redoc_url(self):
-        """App should have redoc URL configured."""
-        from app.main import app
-        assert app.redoc_url == "/redoc"
+        assert settings.api_docs_enabled is False
+        assert app.docs_url is None
+        assert app.redoc_url is None
+        assert app.openapi_url is None
 
     def test_logger_exists(self):
         """Logger should be configured."""
@@ -228,8 +228,8 @@ class TestLifespan:
              patch("app.core.startup.init_encryption_and_sessions") as mock_enc, \
              patch("app.core.startup.init_workspace") as mock_ws, \
              patch("app.core.startup.check_prerequisites") as mock_prereqs, \
-             patch("app.core.startup.start_services", new_callable=AsyncMock) as mock_services, \
-             patch("app.core.startup.start_background_tasks", return_value=[]) as mock_bg, \
+             patch("app.core.startup.start_services", new_callable=AsyncMock), \
+             patch("app.core.startup.start_background_tasks", return_value=[]), \
              patch("app.main.settings") as mock_settings:
 
             mock_settings.version = "1.2.1"
@@ -480,7 +480,7 @@ class TestAppAttributes:
     def test_app_description(self):
         """App should have description set."""
         from app.main import app
-        assert app.description == "Claude Code Web Interface and OpenAI-compatible API"
+        assert app.description == "AI Shuffle web interface and OpenAI-compatible API"
 
     def test_app_has_lifespan(self):
         """App should have lifespan configured."""
@@ -580,7 +580,7 @@ class TestMainBlock:
         from app.main import app
         assert app is not None
         # The module is app.main
-        assert app.title == "AI Hub"
+        assert app.title == "AI Shuffle"
 
 
 # =============================================================================

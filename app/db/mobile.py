@@ -1,13 +1,12 @@
-"""Mobile device, action, schedule, and trusted action database operations."""
+"""Mobile device and pending action database operations."""
 
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db
 
 
 # ============================================================================
@@ -22,7 +21,6 @@ class MobileDeviceRow(TypedDict):
     platform: str
     api_key_hash: str
     fcm_token: Optional[str]
-    unifiedpush_endpoint: Optional[str]
     capabilities: Dict[str, Any]
     paired_client_id: Optional[str]
     api_key_expires_at: Optional[str]
@@ -33,51 +31,8 @@ class MobileDeviceRow(TypedDict):
     last_seen: Optional[str]
 
 
-class PendingActionRow(TypedDict):
-    """Full pending action row from SELECT * FROM pending_actions."""
-    id: str
-    device_id: str
-    action_type: str
-    params: Dict[str, Any]
-    security_level: str
-    created_at: str
-    expires_at: str
-    status: str
-
-
-class TrustedActionRow(TypedDict):
-    """Full trusted action row from SELECT * FROM trusted_actions."""
-    id: str
-    device_id: str
-    action_pattern: str
-    auto_approve: bool
-    require_preview: bool
-    created_at: str
-
-
-class MobileScheduleRow(TypedDict):
-    """Full mobile schedule row from SELECT * FROM mobile_schedules."""
-    id: str
-    device_id: str
-    schedule_type: str
-    trigger_time: Optional[str]
-    hour: Optional[int]
-    minute: Optional[int]
-    params: str
-    enabled: bool
-    created_at: str
-    last_triggered_at: Optional[str]
-
-
 def _parse_capabilities(raw: Any) -> Dict[str, Any]:
     """Parse capabilities field, handling both str and dict (JSONB)."""
-    if isinstance(raw, str):
-        return json.loads(raw)
-    return raw if raw else {}
-
-
-def _parse_params(raw: Any) -> Dict[str, Any]:
-    """Parse params field, handling both str and dict (JSONB)."""
     if isinstance(raw, str):
         return json.loads(raw)
     return raw if raw else {}
@@ -107,6 +62,86 @@ def _parse_mobile_device(row: Any) -> Optional[MobileDeviceRow]:
 # ============================================================================
 # Mobile Device Operations
 # ============================================================================
+
+def mobile_key_renewal_device(key_hash):
+    """Previous keys are accepted ONLY by renewal, never ordinary API auth."""
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT d.* FROM mobile_key_renewals r
+            JOIN mobile_devices d ON d.device_id=r.device_id AND d.id=r.mobile_record_id
+                AND d.api_key_hash=r.current_hash
+            WHERE r.previous_hash=%s AND r.previous_expires_at>%s""",
+            (key_hash, datetime.now(timezone.utc).isoformat()))
+        return _parse_mobile_device(c.fetchone())
+
+
+def renew_mobile_key(device, presented_hash, new_key):
+    """Compare-and-swap with a recoverable receipt until the OLD key's expiry.
+
+    A lost response or simultaneous renewal returns the exact same replacement;
+    it never extends the old key or permits it on the API. Pairing/repair changes
+    the record/key, so a stale receipt cannot undo revocation or re-enrollment.
+    """
+    import hashlib
+    from datetime import timedelta
+
+    from app.core.device_keys import KEY_LIFETIME_DAYS, RENEW_BEFORE_DAYS, key_expiry
+    from app.core.encryption import decrypt_value, encrypt_value
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('SELECT * FROM paired_clients WHERE id=%s FOR UPDATE', (device['paired_client_id'],))
+        client = c.fetchone()
+        c.execute('SELECT * FROM mobile_devices WHERE id=%s FOR UPDATE', (device['id'],))
+        row = c.fetchone()
+        if (not client or client['revoked_at'] or not row or row['revoked_at']
+                or row['paired_client_id'] != client['id'] or row['device_id'] != client['device_id']):
+            raise ValueError('Device credential changed; pair this device again')
+        # Re-check under the same client lock used by decisions, without taking
+        # a second pool connection while this transaction holds row locks.
+        for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+            c.execute(f"""SELECT a.paired_client_id, f.decision, f.mobile_record_id
+                FROM {table} a LEFT JOIN mobile_worker_confirmations f
+                ON f.device_id=a.device_id AND f.server_id=a.server_id
+                    AND f.paired_client_id=a.paired_client_id
+                WHERE a.device_id=%s""", (device['device_id'],))
+            approval = c.fetchone()
+            if approval and (approval['decision'] != 'approved'
+                    or approval['paired_client_id'] != client['id']
+                    or approval['mobile_record_id'] != row['id']):
+                raise ValueError('Confirm this device on the worker before connecting')
+        current = dict(row)
+        now = datetime.now(timezone.utc)
+        expiry = key_expiry(current)
+        if expiry <= now:
+            raise ValueError('Device credential expired; pair this device again')
+        if current['api_key_hash'] != presented_hash:
+            c.execute('SELECT * FROM mobile_key_renewals WHERE device_id=%s', (device['device_id'],))
+            receipt = c.fetchone()
+            if (not receipt or receipt['previous_hash'] != presented_hash
+                    or receipt['current_hash'] != current['api_key_hash']
+                    or receipt['mobile_record_id'] != current['id']
+                    or datetime.fromisoformat(receipt['previous_expires_at']) <= now):
+                raise ValueError('Device credential changed; pair this device again')
+            return decrypt_value(receipt['encrypted_key']), expiry
+        if expiry > now + timedelta(days=RENEW_BEFORE_DAYS):
+            return None, expiry
+        key_hash = hashlib.sha256(new_key.encode()).hexdigest()
+        encrypted = encrypt_value(new_key)
+        new_expiry = now + timedelta(days=KEY_LIFETIME_DAYS)
+        c.execute("""INSERT INTO mobile_key_renewals
+            (device_id, mobile_record_id, previous_hash, current_hash, encrypted_key, previous_expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(device_id) DO UPDATE SET
+            mobile_record_id=excluded.mobile_record_id, previous_hash=excluded.previous_hash,
+            current_hash=excluded.current_hash, encrypted_key=excluded.encrypted_key,
+            previous_expires_at=excluded.previous_expires_at""",
+            (device['device_id'], current['id'], presented_hash, key_hash, encrypted, expiry.isoformat()))
+        c.execute('UPDATE mobile_devices SET api_key_hash=%s, api_key_expires_at=%s WHERE id=%s',
+                  (key_hash, new_expiry.isoformat(), current['id']))
+        # Pending mints are tied to the old key. Existing sessions remain device
+        # bound and are still checked for expiry/revocation/confirmation per use.
+        c.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
+        return new_key, new_expiry
+
 
 def create_mobile_device(
     device_id: str,
@@ -178,51 +213,6 @@ def get_all_mobile_devices() -> List[MobileDeviceRow]:
         ]
 
 
-def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, Any]) -> Optional[MobileDeviceRow]:
-    """Update capabilities for a mobile device"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET capabilities = %s, last_seen = %s WHERE device_id = %s
-        """, (json.dumps(capabilities), now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
-
-
-def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[MobileDeviceRow]:
-    """Update FCM push token for a mobile device"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET fcm_token = %s, last_seen = %s WHERE device_id = %s
-        """, (fcm_token, now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
-
-
-def update_mobile_device_unifiedpush_endpoint(
-    device_id: str, endpoint: str
-) -> Optional[MobileDeviceRow]:
-    """Update the UnifiedPush endpoint URL for a mobile device.
-
-    UnifiedPush lets self-hosted servers POST notifications directly to the
-    user's own push distributor (e.g. ntfy) without a shared Firebase project.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET unifiedpush_endpoint = %s, last_seen = %s WHERE device_id = %s
-        """, (endpoint, now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
-
-
 def update_mobile_device_last_seen(device_id: str) -> None:
     """Update last_seen timestamp for a mobile device"""
     now = datetime.now(timezone.utc).isoformat()
@@ -248,306 +238,9 @@ def delete_mobile_device(device_id: str) -> bool:
 
 
 # ============================================================================
-# Pending Action Operations
-# ============================================================================
-
-def create_pending_action(
-    device_id: str,
-    action_type: str,
-    params: Dict[str, Any],
-    security_level: str,
-    expires_at: str
-) -> Optional[PendingActionRow]:
-    """Create a new pending action"""
-    import uuid
-    action_id = str(uuid.uuid4())[:8]
-    now = datetime.now(timezone.utc).isoformat()
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO pending_actions (id, device_id, action_type, params, security_level, created_at, expires_at, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
-        """, (action_id, device_id, action_type, json.dumps(params), security_level, now, expires_at))
-
-    return get_pending_action(action_id)
-
-
-def get_pending_action(action_id: str) -> Optional[PendingActionRow]:
-    """Get a pending action by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pending_actions WHERE id = %s", (action_id,))
-        row = cursor.fetchone()
-        if row:
-            result = dict(row)
-            if result.get("params"):
-                result["params"] = _parse_params(result["params"])
-            return result
-        return None
-
-
-def get_pending_actions_for_device(device_id: str) -> List[PendingActionRow]:
-    """Get all pending actions for a device that haven't expired"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM pending_actions
-            WHERE device_id = %s AND status = 'pending' AND expires_at > %s
-            ORDER BY created_at DESC
-        """, (device_id, now))
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            result = dict(row)
-            if result.get("params"):
-                result["params"] = _parse_params(result["params"])
-            results.append(result)
-        return results
-
-
-def update_pending_action_status(action_id: str, status: str) -> Optional[PendingActionRow]:
-    """Update the status of a pending action"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pending_actions SET status = %s WHERE id = %s",
-            (status, action_id)
-        )
-        if cursor.rowcount == 0:
-            return None
-    return get_pending_action(action_id)
-
-
-def cleanup_expired_actions() -> int:
-    """Mark expired pending actions as expired"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE pending_actions SET status = 'expired'
-            WHERE status = 'pending' AND expires_at <= %s
-        """, (now,))
-        return cursor.rowcount
-
-
-# ============================================================================
-# Trusted Action Operations
-# ============================================================================
-
-def create_trusted_action(
-    device_id: str,
-    action_pattern: str,
-    auto_approve: bool = True,
-    require_preview: bool = False
-) -> Optional[TrustedActionRow]:
-    """Create a trusted action pattern"""
-    import uuid
-    trusted_id = str(uuid.uuid4())[:8]
-    now = datetime.now(timezone.utc).isoformat()
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO trusted_actions (id, device_id, action_pattern, auto_approve, require_preview, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (trusted_id, device_id, action_pattern, auto_approve, require_preview, now))
-
-    return get_trusted_action(trusted_id)
-
-
-def get_trusted_action(trusted_id: str) -> Optional[TrustedActionRow]:
-    """Get a trusted action by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM trusted_actions WHERE id = %s", (trusted_id,))
-        return row_to_dict(cursor.fetchone())
-
-
-def get_trusted_actions_for_device(device_id: str) -> List[TrustedActionRow]:
-    """Get all trusted actions for a device"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM trusted_actions WHERE device_id = %s ORDER BY created_at DESC",
-            (device_id,)
-        )
-        return rows_to_list(cursor.fetchall())
-
-
-def delete_trusted_action(trusted_id: str) -> bool:
-    """Delete a trusted action"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM trusted_actions WHERE id = %s", (trusted_id,))
-        return cursor.rowcount > 0
-
-
-# ============================================================================
-# Mobile Schedule Operations (for proactive notifications)
-# ============================================================================
-
-def get_mobile_schedules() -> List[MobileScheduleRow]:
-    """Get all mobile schedules"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_schedules ORDER BY created_at DESC")
-        return rows_to_list(cursor.fetchall())
-
-
-def get_mobile_schedule(schedule_id: str) -> Optional[MobileScheduleRow]:
-    """Get a mobile schedule by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_schedules WHERE id = %s", (schedule_id,))
-        return row_to_dict(cursor.fetchone())
-
-
-def save_mobile_schedule(
-    schedule_id: str,
-    device_id: str,
-    schedule_type: str,
-    trigger_time: Optional[str],
-    hour: Optional[int],
-    minute: Optional[int],
-    params: str,
-    enabled: bool,
-    last_triggered_at: Optional[str]
-) -> Optional[MobileScheduleRow]:
-    """Save or update a mobile schedule"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO mobile_schedules (id, device_id, schedule_type, trigger_time, hour, minute, params, enabled, created_at, last_triggered_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(id) DO UPDATE SET
-                device_id = EXCLUDED.device_id,
-                schedule_type = EXCLUDED.schedule_type,
-                trigger_time = EXCLUDED.trigger_time,
-                hour = EXCLUDED.hour,
-                minute = EXCLUDED.minute,
-                params = EXCLUDED.params,
-                enabled = EXCLUDED.enabled,
-                last_triggered_at = EXCLUDED.last_triggered_at
-        """, (schedule_id, device_id, schedule_type, trigger_time, hour, minute, params, enabled, now, last_triggered_at))
-    return get_mobile_schedule(schedule_id)
-
-
-def delete_mobile_schedule(schedule_id: str) -> bool:
-    """Delete a mobile schedule"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM mobile_schedules WHERE id = %s", (schedule_id,))
-        return cursor.rowcount > 0
-
-
-# ============================================================================
-# Mobile Action Operations (extended for action_queue service)
-# ============================================================================
-
-def get_mobile_actions() -> List[PendingActionRow]:
-    """Get all mobile actions (for service initialization)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pending_actions ORDER BY created_at DESC")
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            result = dict(row)
-            if result.get("params"):
-                result["params"] = _parse_params(result["params"])
-            results.append(result)
-        return results
-
-
-def save_mobile_action(
-    action_id: str,
-    device_id: str,
-    action_type: str,
-    params: str,
-    security_level: str,
-    status: str,
-    executor_result: Optional[str],
-    error_message: Optional[str],
-    expires_at: str,
-    confirmed_at: Optional[str],
-    completed_at: Optional[str]
-) -> Optional[PendingActionRow]:
-    """Save or update a mobile action"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO pending_actions (id, device_id, action_type, params, security_level, status, created_at, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(id) DO UPDATE SET
-                device_id = EXCLUDED.device_id,
-                action_type = EXCLUDED.action_type,
-                params = EXCLUDED.params,
-                security_level = EXCLUDED.security_level,
-                status = EXCLUDED.status,
-                expires_at = EXCLUDED.expires_at
-        """, (action_id, device_id, action_type, params, security_level, status, now, expires_at))
-    return get_pending_action(action_id)
-
-
-def delete_mobile_action(action_id: str) -> bool:
-    """Delete a mobile action"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_actions WHERE id = %s", (action_id,))
-        return cursor.rowcount > 0
-
-
-# ============================================================================
-# Mobile Device Operations (extended for mobile_device_manager service)
+# Mobile Device Operations
 # ============================================================================
 
 def get_mobile_devices() -> List[MobileDeviceRow]:
     """Get all mobile devices (alias for get_all_mobile_devices)"""
     return get_all_mobile_devices()
-
-
-def save_mobile_device(
-    device_id: str,
-    name: str,
-    platform: str,
-    model: Optional[str],
-    os_version: Optional[str],
-    app_version: Optional[str],
-    fcm_token: Optional[str],
-    api_key_hash: Optional[str],
-    capabilities: str,
-    is_active: bool,
-    last_seen_at: Optional[str]
-) -> Optional[MobileDeviceRow]:
-    """Save or update a mobile device"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # Check if device exists
-        cursor.execute("SELECT id FROM mobile_devices WHERE device_id = %s", (device_id,))
-        existing = cursor.fetchone()
-
-        if existing:
-            cursor.execute("""
-                UPDATE mobile_devices SET
-                    device_name = %s,
-                    platform = %s,
-                    fcm_token = %s,
-                    api_key_hash = COALESCE(%s, api_key_hash),
-                    capabilities = %s,
-                    last_seen = %s
-                WHERE device_id = %s
-            """, (name, platform, fcm_token, api_key_hash, capabilities, last_seen_at or now, device_id))
-        else:
-            import uuid
-            record_id = str(uuid.uuid4())[:8]
-            cursor.execute("""
-                INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, fcm_token, capabilities, created_at, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (record_id, device_id, name, platform, api_key_hash, fcm_token, capabilities, now, last_seen_at or now))
-
-    return get_mobile_device(device_id)

@@ -6,7 +6,6 @@ opens entries with OPEN_REPARSE_POINT. Other platforms fail closed.
 from contextlib import contextmanager, ExitStack
 import os
 from pathlib import Path
-import stat
 
 from app.core import chat_files
 from app.core.chat_files import AccessDenied

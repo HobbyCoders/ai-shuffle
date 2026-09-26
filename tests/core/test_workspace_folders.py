@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.core import query_options as qo
 from app.core.session_pool import SessionState, requires_reconnect
@@ -84,5 +84,5 @@ def test_existing_database_gains_nullable_folders_column(mock_db):
 
 @pytest.mark.parametrize("before,after,expected", [(["/docs"], [], True), ([], ["/docs"], True), (["/docs"], ["/docs"], False)])
 def test_folder_changes_reconnect_provider(before, after, expected):
-    state = SessionState(adapter=MagicMock(), connect_options=ClaudeAgentOptions(add_dirs=before))
-    assert requires_reconnect(state, ClaudeAgentOptions(add_dirs=after)) is expected
+    state = SessionState(adapter=MagicMock(), connect_options=AgentOptions(add_dirs=before))
+    assert requires_reconnect(state, AgentOptions(add_dirs=after)) is expected

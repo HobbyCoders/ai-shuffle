@@ -1,12 +1,9 @@
 """Organization-bound browser balances remain isolated from API-key polling."""
 
-import asyncio
 import uuid
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.core import provider_usage as usage
 from app.core.config import settings
 from app.db import database as db
 

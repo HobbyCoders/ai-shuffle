@@ -171,8 +171,7 @@ async def test_native_read_execution_rejects_outside_symlink(workspace, tmp_path
     loop = NativeLoop(provider=SimpleNamespace(name="test", caps=ProviderCaps()),
                       store=MemoryStore(), model="test", registry=registry,
                       permissions=_engine_for("chat"), ctx=ToolCtx(cwd=str(workspace)),
-                      allowed_tools=CHAT_SURFACE,
-                      claude_settings=False, claude_plugins=False, claude_agents=False)
+                      allowed_tools=CHAT_SURFACE)
     for index, spelling in enumerate([str(inside), "inside.txt", alias, escape]):
         outcome = await loop._gated_call("test-session", "test-turn", "Read", str(index), {"file_path": spelling})
         if spelling == escape:
@@ -208,8 +207,7 @@ async def test_uploaded_attachment_and_hardlink_through_actual_registry(workspac
     if native:
         loop = NativeLoop(provider=SimpleNamespace(name="test", caps=ProviderCaps()),
             store=MemoryStore(), model="test", registry=registry,
-            permissions=_engine_for("chat"), ctx=ctx, allowed_tools=_tool_allowlist(options),
-            claude_settings=False, claude_plugins=False, claude_agents=False)
+            permissions=_engine_for("chat"), ctx=ctx, allowed_tools=_tool_allowlist(options))
         async def call(path):
             return await loop._gated_call("session", "turn", "Read", path.name, {"file_path": str(path)})
     else:

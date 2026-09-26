@@ -1,17 +1,15 @@
-"""Voice-mode API routes (waves VW1 + VW3 of docs/VOICE_MODE_PLAN.md).
+"""Voice-mode API routes.
 
 Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
   realtime call. OpenAI Realtime is **API-key only**: a ChatGPT/Codex
-  subscription row (ruling VM3) can never be used, so those are filtered out
+  subscription row can never be used, so those are filtered out
   here rather than failing at mint time.
-* ``POST /api/v1/voice/sessions`` — create the session row (ruling VM5: a voice
+* ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
-  provider's API key never leaves this process. A declared
-  ``session_mode='command'`` (hands-free wake-word one-shots) creates the row
-  list-hidden — fully functional, just not in "recent sessions".
+  provider's API key never leaves this process.
 * ``POST /api/v1/voice/sessions/{id}/secret`` — re-mint that secret for an
   EXISTING voice session (rejoin, or the FE's reconnect near OpenAI's session
   wall). Same flag / eligibility / decrypt path as creation.
@@ -41,7 +39,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_auth
+from app.api.auth import get_api_user_from_request, require_auth
+from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
@@ -57,16 +56,11 @@ router = APIRouter(prefix="/api/v1/voice", tags=["Voice"])
 OPENAI_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 
 # How long a minted secret stays usable (OpenAI default 600s, max 7200s). The
-# secret is ALSO the sideband's primary credential (live-validated 2026-08-14:
-# an API-key sideband handshake 404s on browser-created calls, the call's own
-# secret connects), so it must outlive the whole call — cap is 60 minutes
-# (voice_max_call_minutes) plus reconnect headroom, hence the maximum.
+# secret is ALSO the sideband's primary credential (an API-key sideband
+# handshake can 404 on browser-created calls; the call's own secret connects),
+# so it must outlive the whole realtime session (OpenAI caps one at 60 minutes;
+# the FE reconnects with a fresh secret near that wall), hence the maximum.
 CLIENT_SECRET_TTL_SECONDS = 7200
-
-# Input-transcription model for the user's side of the conversation. Kept here
-# because VW1 mints with a MINIMAL session config — the VW3 sideband owns the
-# full ``session.update`` (instructions, tools, VAD, retention).
-INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 # Upstream mint is a single small request; fail fast rather than hanging the
 # user's "start call" click.
@@ -87,8 +81,7 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
 
     Requires an enabled ``provider_type='openai'`` row carrying a stored API
     key. ChatGPT/Codex subscription rows are excluded via the same discriminator
-    the fluid credential layer uses — Realtime has no subscription-OAuth path
-    (ruling VM3).
+    the fluid credential layer uses — Realtime has no subscription-OAuth path.
     """
     from app.core.provider.fluid_credentials import _is_codex_subscription
 
@@ -101,12 +94,31 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
     return bool(row.get("auth_token"))
 
 
-def list_eligible_voice_providers() -> List[Dict[str, str]]:
+def _fal_key_for(api_user: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """The fal.ai key ``api_user`` may spend, and the policy that chose it.
+
+    Same resolution as ``/transcribe`` and ``/tts/stream``
+    (:func:`app.api.settings_audio._resolve_fal_key`): the owner and the
+    owner's paired devices (``api_user is None``) spend the owner's key; an API
+    user gets only what its fal.ai credential policy allows. Synchronous.
+    """
+    from app.api.settings_audio import _resolve_fal_key
+
+    return _resolve_fal_key(api_user)
+
+
+def list_eligible_voice_providers(
+    api_user: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
     """``[{id, name}]`` for every provider row eligible to fund voice calls.
 
     Synchronous (call via ``run_sync`` from async code). Deliberately returns
     only id + name: the rows are read with ``include_token=True`` so eligibility
     can test for a stored key, and that blob must never travel outward.
+
+    The OpenAI rows are the owner's providers for every caller (as for the
+    OpenAI audio models in :mod:`app.api.settings_audio`; there is no per-user
+    OpenAI policy). fal.ai is listed when the caller's fal key resolves.
     """
     rows = database.get_enabled_model_providers(include_token=True)
     providers = [
@@ -114,15 +126,27 @@ def list_eligible_voice_providers() -> List[Dict[str, str]]:
         for row in rows
         if _is_eligible_voice_provider(row)
     ]
-    if database.get_system_setting("fal_api_key"):
+    if api_user is None:
+        fal_available = bool(database.get_system_setting("fal_api_key"))
+    else:
+        fal_available = bool(_fal_key_for(api_user)[0])
+    if fal_available:
         providers.append({"id": FAL_PROVIDER_ID, "name": "fal.ai"})
     return providers
 
 
-def _eligible_provider_row(provider_id: str) -> Optional[Dict[str, Any]]:
-    """The full (token-carrying) provider row for ``provider_id``, if eligible."""
+def _eligible_provider_row(
+    provider_id: str, api_user: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """The full (token-carrying) provider row for ``provider_id``, if eligible.
+
+    The fal.ai row carries no key. For an API user it is always returned, so
+    :func:`_provider_api_key` explains a missing key in the caller's policy
+    terms (403 "store your own key" / 400 "not configured") instead of a
+    generic "cannot fund voice calls".
+    """
     if provider_id == FAL_PROVIDER_ID:
-        if database.get_system_setting("fal_api_key"):
+        if api_user is not None or database.get_system_setting("fal_api_key"):
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
     row = database.get_model_provider(provider_id, include_token=True)
@@ -154,10 +178,9 @@ class VoiceAgent(BaseModel):
 class VoiceSessionCreateRequest(BaseModel):
     """Start a voice session. Every field is optional.
 
-    ``session_mode`` ("command" | "chat") declared at creation lets a
-    wake-word "command" session be born hidden (``sessions.hidden``, v75) so
-    the quick one-shot task never flashes into the sessions list. Chat and
-    browser sessions (no mode) are created visible as before.
+    ``session_mode`` ("chat") marks a native phone call: it is validated here
+    and the call attach composes its instructions appendix. Browser sessions
+    send no mode and are greeted when the call opens.
     """
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -207,11 +230,10 @@ class VoiceCallRequest(BaseModel):
     ``client_instructions`` is appended to the coordinator instructions to
     teach the model when/how to use those tools.
 
-    ``session_mode`` ("command" | "chat") is how a native client reports what
-    kind of session this is; the route composes the matching instructions
-    appendix (Settings-overridable) into the sideband's system prompt, and
-    "command" additionally hides the session from the sessions list (v75).
-    Browser calls omit it and get the base prompt only.
+    ``session_mode`` ("chat") is how a native client reports what kind of
+    session this is; the route composes the matching instructions appendix
+    into the sideband's system prompt. Browser calls omit it and get the base
+    prompt only.
     """
     call_id: str
     client_tools: Optional[List[Dict[str, Any]]] = None
@@ -220,7 +242,7 @@ class VoiceCallRequest(BaseModel):
 
 
 class VoicePreviewRequest(BaseModel):
-    """Which voice to synthesise a short sample for (VM21)."""
+    """Which voice to synthesise a short sample for."""
     voice: str
     provider_id: Optional[str] = None
 
@@ -252,9 +274,11 @@ class VoiceStateResponse(BaseModel):
 # ============================================================================
 
 @router.get("/providers", response_model=List[VoiceProvider])
-async def get_voice_providers(token: str = Depends(require_auth)):
+async def get_voice_providers(http_request: Request, token: str = Depends(require_auth)):
     """List configured OpenAI and fal.ai voice providers, without credentials."""
-    return await run_sync(list_eligible_voice_providers)
+    return await run_sync(
+        list_eligible_voice_providers, get_api_user_from_request(http_request)
+    )
 
 
 def list_voice_agents() -> List[Dict[str, Any]]:
@@ -313,8 +337,11 @@ async def preview_voice(
     if voice not in LIVE_VOICES:
         raise HTTPException(400, f"voice must be one of {list(LIVE_VOICES)}")
     voice_settings = await run_sync(get_voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, None, voice_settings["voice_provider_id"])
-    api_key = await _provider_api_key(provider_row)
+    api_user = get_api_user_from_request(http_request)
+    provider_row = await run_sync(
+        _resolve_provider_row, None, voice_settings["voice_provider_id"], api_user
+    )
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     finished = asyncio.Event()
 
@@ -350,16 +377,19 @@ async def preview_voice(
 
 
 def _resolve_provider_row(
-    requested_id: Optional[str], settings_provider_id: Optional[str]
+    requested_id: Optional[str],
+    settings_provider_id: Optional[str],
+    api_user: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Pick the provider row that funds this call, or raise a helpful 400.
 
     Precedence: explicit request value > the pinned ``voice_provider_id``
-    setting > the single eligible row when exactly one exists.
+    setting > the single eligible row when exactly one exists. ``api_user`` is
+    the caller (``None`` for the owner); it only affects the fal.ai row.
     """
     requested = (requested_id or "").strip()
     if requested:
-        row = _eligible_provider_row(requested)
+        row = _eligible_provider_row(requested, api_user)
         if row is None:
             raise HTTPException(
                 status_code=400,
@@ -541,16 +571,30 @@ def _forget_client_secret(session_id: str) -> None:
     _SESSION_CLIENT_SECRETS.pop(session_id, None)
 
 
-async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
+async def _provider_api_key(
+    provider_row: Dict[str, Any], *, api_user: Optional[Dict[str, Any]]
+) -> str:
     """Decrypt the row's stored API key, or raise a 400 explaining the fix.
 
     Reuses the fluid credential layer's decryption so crypto lives in exactly one
     place; an eligible row always HAS a token, but a locked encryption service
     can still yield nothing.
+
+    ``api_user`` is the caller (``None`` for the owner and paired devices), a
+    required keyword so no route can forget it. The fal.ai key follows the
+    caller's credential policy exactly as ``/transcribe`` and ``/tts/stream``
+    do: an API user never spends the owner's fal key unless its policy allows
+    it, and gets the same 403/400 refusal those routes give. OpenAI rows are
+    the owner's providers for every caller (no per-user OpenAI policy exists).
     """
     from app.core.provider.fluid_credentials import _decrypt_auth_token
 
     if provider_row["id"] == FAL_PROVIDER_ID:
+        if api_user is not None:
+            from app.api.settings_audio import _require_fal_key
+
+            fal_key, policy = await run_sync(_fal_key_for, api_user)
+            return _require_fal_key(fal_key, policy)
         from app.api.settings import get_decrypted_api_key
         api_key = await run_sync(get_decrypted_api_key, "fal_api_key")
     else:
@@ -567,7 +611,7 @@ async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
 
 
 async def _require_voice_enabled() -> Dict[str, Any]:
-    """The voice settings, or a 403 when the mode is switched off (VM13)."""
+    """The voice settings, or a 403 when the mode is switched off."""
     from app.api.settings import get_voice_settings
 
     voice_settings = await run_sync(get_voice_settings)
@@ -580,7 +624,7 @@ async def _require_voice_enabled() -> Dict[str, Any]:
 
 
 def _reject_when_capped(session_id: str) -> None:
-    """409 while the session sits inside the post-cap grace window (VW5).
+    """409 while the session sits inside the post-cap grace window.
 
     The call-length cap is measured from the call's epoch, so the FE's silent
     re-handshake would otherwise just re-attach and keep going. Answering 409
@@ -601,15 +645,49 @@ def _reject_when_capped(session_id: str) -> None:
     )
 
 
-async def _require_voice_session(session_id: str) -> Dict[str, Any]:
+async def _load_voice_session(session_id: str) -> Dict[str, Any]:
     """The session row, or a 404 when it is missing or is not a voice session.
 
     A chat session is 404 rather than 400 on purpose: the voice call surface
     simply does not exist for it (ruling VM7 — modes never mix in V1).
+
+    Existence only. Every HTTP route goes through :func:`_require_voice_session`
+    so the caller's access is checked as well; the audio WebSocket, which has
+    no ``Request``, applies :func:`_check_voice_session_access` itself.
     """
     row = await run_sync(database.get_session, session_id)
     if not row or row.get("mode") != "voice":
         raise HTTPException(status_code=404, detail="Voice session not found.")
+    return row
+
+
+def _check_voice_session_access(
+    api_user: Optional[Dict[str, Any]], row: Dict[str, Any],
+) -> None:
+    """403 unless the caller may operate this voice session.
+
+    The install owner/admin and paired devices carry no API-user identity and
+    keep full access. An API key must OWN the session (``api_user_id``), not
+    merely be allowed into its project: the call surface mints realtime
+    credentials, attaches and hangs up the live call, and for an admin-owned
+    row hands the voice agent app-configuration tools, so project-level access
+    is not enough. :func:`check_session_access_for_api_user` is that rule: it
+    refuses a key that does not own the row (a worker row belongs to whoever
+    owns the session that spawned it) and one whose project or agent scope
+    excludes it — the same 403 as ``/api/v1/sessions/{id}``.
+    """
+    check_session_access_for_api_user(api_user, row)
+
+
+async def _require_voice_session(request: Request, session_id: str) -> Dict[str, Any]:
+    """The voice session row the caller may operate.
+
+    404 when the session is missing or is not a voice session — checked first,
+    so a chat session never turns into a 403 — then 403 when it belongs to
+    someone else (see :func:`_check_voice_session_access`).
+    """
+    row = await _load_voice_session(session_id)
+    _check_voice_session_access(get_api_user_from_request(request), row)
     return row
 
 
@@ -624,9 +702,6 @@ async def create_voice_session(
     Order matters: project authorization happens before the upstream mint, and
     the mint happens before the row is written, so neither a denied request nor
     a rejected mint leaves an orphaned session on the board.
-
-    A declared ``session_mode`` of "command" stamps ``hidden=TRUE`` at INSERT —
-    the row never exists in a visible state, so the list can't even flash it.
     """
     from app.api.settings import get_voice_settings
     from app.core import voice_bridge
@@ -635,14 +710,26 @@ async def create_voice_session(
     if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
         raise HTTPException(
             status_code=400,
-            detail="session_mode must be 'command' or 'chat'.",
+            detail="session_mode must be 'chat'.",
         )
 
     # Voice uses the same origin authorization as normal branch sessions.
     # Prefer the legacy id when both forms are supplied by the compose store,
     # then verify that it resolves to the supplied V2 project.
-    from app.api.auth import get_api_user_from_request
     from app.api.common import require_origin_access
+    from app.api.sessions_helpers import resolve_api_user_profile
+
+    api_user = get_api_user_from_request(http_request)
+    # The key that starts the call owns the session (``sessions.api_user_id``),
+    # like every other session creator, so it can drive it afterwards.
+    api_user_id = (api_user or {}).get("id")
+    # An API user's assigned agents bound the profile (omitted → its only one).
+    requested_profile_id = resolve_api_user_profile(api_user, request.profile_id)
+
+    # The creating API key owns the row on EVERY path. The call surface,
+    # ``/context`` and the audio socket all check ``api_user_id``, so a voice
+    # session created without it would lock its own creator out.
+    api_user_id = (get_api_user_from_request(http_request) or {}).get("id")
 
     execution_mode = (request.execution_mode or "").strip().lower() or None
     if execution_mode not in (None, "local", "worktree"):
@@ -682,10 +769,11 @@ async def create_voice_session(
         )
 
     provider_row = await run_sync(
-        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"]
+        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"],
+        api_user,
     )
 
-    api_key = await _provider_api_key(provider_row)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = voice_settings["voice_model"]
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
@@ -702,7 +790,7 @@ async def create_voice_session(
     # Resolve the profile the same way normal session creation does (explicit →
     # project default → first configured agent). A literal fallback id here hits
     # the sessions.profile_id FK the moment no such agent row exists.
-    profile_id = request.profile_id
+    profile_id = requested_profile_id
     if not profile_id and request.project_id:
         project = await run_sync(database.get_project, request.project_id)
         profile_id = ((project or {}).get("settings") or {}).get("default_profile_id")
@@ -726,7 +814,6 @@ async def create_voice_session(
         "context_window": request.context_window,
         "fast": request.fast,
         "mode": "voice",
-        "hidden": session_mode == "command",
         "voice_config": {
             "model": model, "voice": voice_settings["voice_voice"],
             "provider_id": provider_row["id"], "options": options,
@@ -755,10 +842,9 @@ async def create_voice_session(
             target_instance_id=target_instance_id,
         )
         created = await _create_v2_branch_session(
-            http_request,
             branch_request,
             access.get("legacy"),
-            (get_api_user_from_request(http_request) or {}).get("id"),
+            api_user_id,
             access.get("project_v2"),
             session_create_overrides=session_create_overrides,
         )
@@ -813,6 +899,7 @@ async def create_voice_session(
             session_id=session_id,
             profile_id=profile_id,
             project_id=request.project_id,
+            api_user_id=api_user_id,
             project_v2_id=resolved_pv2_id,
             worktree_id=request.worktree_id,
             worktree_branch=worktree_branch,
@@ -835,18 +922,19 @@ async def create_voice_session(
 
 
 # ============================================================================
-# Call surface (VW3) — re-mint, attach, hangup, state
+# Call surface — re-mint, attach, hangup, state
 # ============================================================================
 
 @router.post("/sessions/{session_id}/secret", response_model=VoiceSecretResponse)
 async def mint_voice_session_secret(
+    http_request: Request,
     session_id: str,
     token: str = Depends(require_auth),
 ):
     """Re-mint the browser's realtime credential for an EXISTING voice session.
 
     Two callers: reopening a voice session later, and the FE's reconnect as the
-    call approaches OpenAI's session wall (ruling VM15) — it re-handshakes with
+    call approaches OpenAI's session wall — it re-handshakes with
     a fresh secret, gets a new ``call_id``, and posts it to ``/call``, which
     replaces the sideband and reseeds context.
 
@@ -854,12 +942,13 @@ async def mint_voice_session_secret(
     resolution, so a call keeps being funded by the row it started on.
     """
     voice_settings = await _require_voice_enabled()
-    session_row = await _require_voice_session(session_id)
+    api_user = get_api_user_from_request(http_request)
+    session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
     config = session_config(session_row, voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
-    api_key = await _provider_api_key(provider_row)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = config["model"]
     client_secret, expires_at = "", None
@@ -936,11 +1025,12 @@ def _sanitize_client_tools(
 
 @router.post("/sessions/{session_id}/call", response_model=VoiceOkResponse)
 async def attach_voice_call(
+    http_request: Request,
     session_id: str,
     request: VoiceCallRequest,
     token: str = Depends(require_auth),
 ):
-    """Join the browser's realtime call from the backend (ruling VM2/VM8).
+    """Join the browser's realtime call from the backend.
 
     Idempotent in the useful sense: posting a NEW ``call_id`` for a session that
     already has a bridge replaces it (the old attachment is closed first), which
@@ -952,7 +1042,8 @@ async def attach_voice_call(
     from app.core import voice_bridge
 
     voice_settings = await _require_voice_enabled()
-    session_row = await _require_voice_session(session_id)
+    api_user = get_api_user_from_request(http_request)
+    session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
     call_id = (request.call_id or "").strip()
@@ -978,31 +1069,8 @@ async def attach_voice_call(
     if session_mode is not None and session_mode not in voice_bridge.DEFAULT_MODE_INSTRUCTIONS:
         raise HTTPException(
             status_code=400,
-            detail="session_mode must be 'command' or 'chat'.",
+            detail="session_mode must be 'chat'.",
         )
-
-    # A "command" session is list-hidden (v75). Creation already stamps this
-    # when the mode is declared up front; the shipped app only declares it
-    # here at attach time, so backfill the flag for that client too — and
-    # broadcast the flip, so a list that rendered the card during the
-    # create→attach window drops it live instead of on the next refetch.
-    # User-level fan-out on purpose: no device ever watches a wake-word
-    # session, so the session-scoped broadcast would reach nobody.
-    if session_mode == "command" and not session_row.get("hidden"):
-        await run_sync(database.set_session_hidden, session_id, True)
-        try:
-            from app.core.sync_engine import sync_engine
-            await sync_engine.broadcast_user_session_updated(
-                user_id=session_row.get("api_user_id") or "admin",
-                session_id=session_id,
-                updates={"hidden": True},
-                source_device_id=None,
-            )
-        except Exception:
-            logger.warning(
-                "Voice: hidden-backfill broadcast failed for session %s",
-                session_id, exc_info=True,
-            )
 
     # Compose the agent's system prompt: the base contract, plus the appendix
     # for the client's session mode (browser calls have none).
@@ -1019,8 +1087,10 @@ async def attach_voice_call(
     # API-key user. Always available to the owner, independent of legacy
     # settings. Admin is asserted for write tools as chat does (``is_admin=True``)
     # because the caller has already passed the same cookie/pairing gate.
+    # Both the caller and the row must be the owner's: a worker row carries no
+    # ``api_user_id`` yet belongs to its parent's key, which may attach to it.
     app_tools: List[Any] = []
-    if not session_row.get("api_user_id"):
+    if api_user is None and not session_row.get("api_user_id"):
         app_tools = await run_sync(
             _voice_app_tools, session_row.get("project_id"),
         )
@@ -1036,8 +1106,8 @@ async def attach_voice_call(
     config = session_config(session_row, voice_settings)
     if transport_for(config["model"]) != "webrtc":
         raise HTTPException(400, "This voice model uses the audio stream, not the Realtime sideband.")
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
-    api_key = await _provider_api_key(provider_row)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     try:
         await voice_bridge.registry.attach(
@@ -1101,18 +1171,19 @@ def _voice_app_tools(project_id: Optional[str]) -> List[Any]:
 
 @router.post("/sessions/{session_id}/hangup", response_model=VoiceOkResponse)
 async def hangup_voice_call(
+    http_request: Request,
     session_id: str,
     token: str = Depends(require_auth),
 ):
     """Detach and stop the session's bridge. ``ok`` even when there was none.
 
     Tears down ONLY the bridge and the realtime session — dispatched workers
-    deliberately survive the call ending (ruling VM12). No flag gate: ending a
+    deliberately survive the call ending. No flag gate: ending a
     call must keep working even if voice mode was switched off mid-call.
     """
     from app.core import voice_bridge
 
-    await _require_voice_session(session_id)
+    await _require_voice_session(http_request, session_id)
     _forget_client_secret(session_id)
     from app.core import voice_stream
     stream_stopped = await voice_stream.stop(session_id)
@@ -1140,31 +1211,37 @@ async def hangup_voice_call(
 
 @router.get("/sessions/{session_id}/state", response_model=VoiceStateResponse)
 async def get_voice_call_state(
+    http_request: Request,
     session_id: str,
     token: str = Depends(require_auth),
 ):
     """Whether this session has a live sideband, and whether it is connected.
 
     ``active`` without ``connected`` is the FE's cue that the sideband dropped:
-    the server never reconnects on its own (ruling VM15 puts reconnect on the
-    FE, with a fresh ``call_id``).
+    the server never reconnects on its own; reconnect is the FE's job, with a
+    fresh ``call_id``.
     """
     from app.core import voice_bridge
 
-    await _require_voice_session(session_id)
+    await _require_voice_session(http_request, session_id)
     from app.core import voice_stream
     return VoiceStateResponse(**(voice_stream.state(session_id) or voice_bridge.registry.state(session_id)))
 
 @router.get("/sessions/{session_id}/config")
-async def get_voice_session_config(session_id: str, token: str = Depends(require_auth)):
+async def get_voice_session_config(
+    http_request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
     from app.api.settings import get_voice_settings
-    row = await _require_voice_session(session_id)
+    row = await _require_voice_session(http_request, session_id)
     return session_config(row, await run_sync(get_voice_settings))
 
 
 @router.websocket("/sessions/{session_id}/audio")
 async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None)):
     from app.api.ws_auth import authenticate_websocket
+    from app.api.ws_key_watch import watch_api_key
     from app.core import voice_stream
 
     authenticated, api_user = await authenticate_websocket(websocket, token)
@@ -1173,15 +1250,14 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         return
     try:
         settings = await _require_voice_enabled()
-        row = await _require_voice_session(session_id)
-        if api_user and row.get("api_user_id") != api_user["id"]:
-            raise HTTPException(403, "This voice session belongs to another user.")
+        row = await _load_voice_session(session_id)
+        _check_voice_session_access(api_user, row)
         _reject_when_capped(session_id)
         config = session_config(row, settings)
         if transport_for(config["model"]) != "stream":
             raise HTTPException(400, "This voice model uses WebRTC.")
-        provider = await run_sync(_resolve_provider_row, config["provider_id"], None)
-        key = await _provider_api_key(provider)
+        provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+        key = await _provider_api_key(provider, api_user=api_user)
         if session_id in voice_stream.calls:
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
@@ -1195,7 +1271,10 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         return
     try:
         await websocket.accept()
-        await call.run()
+        # A revoked API key loses the call and the provider connection it
+        # pays for (app.api.ws_key_watch).
+        async with watch_api_key(websocket, on_revoke=lambda: call.close()):
+            await call.run()
     finally:
         if voice_stream.calls.get(session_id) is call:
             voice_stream.calls.pop(session_id, None)

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
 
@@ -198,21 +196,6 @@ def get_tags_for_sessions(session_ids: list[str]) -> dict[str, list[TagSummary]]
             'id': row['id'], 'name': row['name'], 'color': row['color']
         })
     return result
-
-
-def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-    """Get all sessions with a specific tag"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT s.* FROM sessions s
-               INNER JOIN session_tags st ON s.id = st.session_id
-               WHERE st.tag_id = %s
-               ORDER BY s.updated_at DESC
-               LIMIT %s OFFSET %s""",
-            (tag_id, limit, offset)
-        )
-        return rows_to_list(cursor.fetchall())
 
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync

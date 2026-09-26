@@ -10,9 +10,7 @@ nothing about this app: each reads an env var (``OPENAI_API_KEY`` /
 argument, and ``OpenAIResponsesClient`` additionally accepts an ``auth`` object
 implementing fluid's ``ResponsesAuth`` protocol (``async get_access_token()``,
 ``async on_401()``, optional ``account_id``) for ChatGPT-subscription (Codex)
-OAuth. Without this module the flag-on native legs are built bare and every
-request fails with a missing-credential 401 — the app's encrypted provider rows
-were never consulted.
+OAuth.
 
 This module is the adapter-side resolver: given the session's bound
 ``model_providers`` row id and the fluid provider kind, it returns a
@@ -37,8 +35,8 @@ Auth per kind
   (a ``ProviderConfigError``/``ValueError``, i.e. the channel the query engines
   already turn into a user-visible error) instead of a bare upstream 401.
 
-HARD CONSTRAINT (F1/G9, mirrored from the translator gateway)
--------------------------------------------------------------
+HARD CONSTRAINT
+---------------
 A Claude Pro/Max **subscription** OAuth token is NEVER routed into
 ``AnthropicClient``. Anthropic bans third-party use of subscription tokens;
 Claude subscription traffic belongs to the delegated engine (the official
@@ -63,8 +61,8 @@ class ProviderCredentialError(ProviderConfigError):
     """A session's bound model provider has no usable credentials.
 
     Subclasses :class:`app.core.environment.ProviderConfigError` (a
-    ``ValueError``) so it travels the same user-visible error channel the
-    gateway-env path already uses — the user sees "provider X has no
+    ``ValueError``) so it travels the same user-visible error channel as
+    ``environment.apply_provider_env`` — the user sees "provider X has no
     credentials configured" instead of an opaque 401 mid-turn.
     """
 
@@ -108,7 +106,7 @@ _SUBSCRIPTION_AUTH_MODES = frozenset(
 def _is_codex_subscription(row: Dict[str, Any]) -> bool:
     """Whether a provider row is a ChatGPT/Codex-subscription OAuth row.
 
-    Mirrors the gateway's mode resolution: ``provider_type == "chatgpt"`` OR
+    ``provider_type == "chatgpt"`` OR
     ``auth_mode == "chatgpt"`` (a ``custom`` row can carry the Codex auth mode).
     """
     return row.get("provider_type") == "chatgpt" or row.get("auth_mode") == "chatgpt"
@@ -131,7 +129,7 @@ def _decrypt_auth_token(row: Dict[str, Any]) -> Optional[str]:
     """Decrypt a provider row's ``auth_token`` blob (or pass plaintext through).
 
     Uses the app's crypto service only (ADMIN_PASSWORD-derived Fernet key); the
-    plaintext branch is the same migration compatibility the gateway keeps.
+    plaintext branch is migration compatibility for rows stored unencrypted.
     """
     raw = row.get("auth_token")
     if not raw:

@@ -1,39 +1,36 @@
-"""Derived session-lifecycle view + drift sensor (Phase 1 of the lifecycle
-unification).
+"""Derived session-lifecycle view + drift sensor.
 
-A session's lifecycle is spread across FOUR independent sources of truth,
-each written by a different subsystem:
+A session's lifecycle is read from several independent sources, each written
+by a different subsystem:
 
   1. durable ``runs`` rows      — lease-valid active run = a turn in flight
-                                  (``app.core.streaming_status``)
-  2. ``session_pool``           — pooled SDK client state (``SessionState``)
-  3. ``task_registry``          — background tasks + the ``unpark_pending`` latch
-  4. durable ``sessions`` rows  — ``parked_task_kind`` (v51)
+                                  (``app.core.streaming_status``), unioned with
+                                  the pooled adapter's ``is_streaming`` peek
+  2. ``task_registry``          — visible / active background work
+  3. durable ``sessions`` rows  — ``parked_task_kind``
+  4. the ``turns`` table        — a queued ``source=unpark`` wake and a
+                                  ``parked`` turn (``_v2_turn_signals``)
 
-plus two adjacent signals: the between-turns drain pump
-(``app.api.ws_cleanup._drain_pumps``) and undrained ``queued_messages`` rows.
+``unpark_latch``, ``queued_count`` and ``pump_running`` stay on the snapshot
+as inert fields so the shape does not change.
 
-Phase-1 discipline is DERIVATION BEFORE ENFORCEMENT: this module only READS
-those sources and derives one coherent snapshot; it flips no readers and
-changes no writers. ``get_live_session`` destructures ``active_tasks`` /
-``unpark_pending`` from the snapshot — the values (and the exact side-effect
-ordering that produces them) are byte-identical to what it computed inline
-before. Disagreements between the sources are reported as DRIFT (log-only,
+This module only READS those sources and derives one coherent snapshot;
+``get_live_session`` destructures ``active_tasks`` / ``unpark_pending`` from
+it. Disagreements between the sources are reported as DRIFT (log-only,
 stable prefix ``lifecycle-drift``).
 
-State model (see docs/lifecycle-states.md):
+State model:
 
   streaming        — a turn is actively producing output
                      (authority: a lease-valid active run in the durable
                      ``runs`` table — ``app.core.streaming_status`` — unioned
-                     with the pooled client's ``is_streaming`` peek)
-  waking           — not streaming, but a follow-up turn is imminent: the
-                     ``unpark_pending`` latch is set OR undrained queued
-                     messages exist (the queued-messages keep-alive absorbed
-                     verbatim from sessions.py)
+                     with the pooled adapter's ``is_streaming`` peek)
+  waking           — not streaming, but a follow-up turn is imminent: a
+                     queued ``source=unpark`` turn exists
   parked_with_work — not streaming, no follow-up committed, but visible
                      background tasks exist (running work or a retained
-                     terminal row inside its display window)
+                     terminal row inside its display window) or a turn is
+                     ``parked``
   idle             — none of the above
 """
 
@@ -64,8 +61,7 @@ class LifecycleSnapshot:
     inputs it was derived from (kept so the reconciler and the drift log can
     show their work). ``active_tasks`` is the ``get_visible`` DISPLAY view —
     the exact list /live attaches as ``activeTasks``; ``unpark_pending`` is
-    the COMPOSED wire value (registry latch OR queued keep-alive), also
-    attached verbatim.
+    the composed wire value (a queued unpark turn), also attached verbatim.
     """
 
     session_id: str
@@ -80,14 +76,14 @@ class LifecycleSnapshot:
     pool_streaming: bool = False
     active_tasks: List[Dict[str, Any]] = field(default_factory=list)
     background_work: List[Dict[str, Any]] = field(default_factory=list)
-    unpark_pending: bool = False       # composed wire value (latch OR queue)
-    unpark_latch: bool = False         # raw registry latch
-    queued_count: Optional[int] = None  # None = not queried (latch already set) or query failed
+    unpark_pending: bool = False       # composed wire value (queued unpark turn)
+    unpark_latch: bool = False         # inert, always False
+    queued_count: Optional[int] = None  # inert, always None
     parked_task_kind: Optional[str] = None
     pump_running: bool = False
 
     # Drift sensor output: human-readable disagreement descriptions. Empty when
-    # every source agrees. Log-only in Phase 1.
+    # every source agrees. Log-only.
     drift: List[str] = field(default_factory=list)
 
 
@@ -96,8 +92,7 @@ class LifecycleSnapshot:
 # a session is watched), so logging each observation buried live incidents under
 # hundreds of identical lines. Instead we log on TRANSITION: the first poll a
 # ``(session, class)`` drift newly appears, then once an hour while it still
-# stands, and again after it clears and reappears. The emitted record format is
-# byte-identical to the per-poll log it replaced.
+# stands, and again after it clears and reappears.
 _DRIFT_RELOG_SECONDS = 3600.0
 
 # (session_id, class_token) -> monotonic timestamp of the last emitted line.
@@ -143,7 +138,7 @@ def _drift_entries_to_log(session_id: str, drift: List[str]) -> List[str]:
 
 
 def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
-    """Additive V2-turns lifecycle inputs (flag-gated, fully guarded).
+    """Turns-table lifecycle inputs (fully guarded).
 
     Returns ``(has_queued_unpark, has_parked_turn)``:
 
@@ -152,8 +147,8 @@ def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
     * ``has_parked_turn`` — a ``parked`` turn exists (foreground done, background
       work survives) → contributes to ``parked_with_work``.
 
-    Returns ``(False, False)`` on ANY error, so the derivation is byte-identical
-    when the turns table is absent.
+    Returns ``(False, False)`` on ANY error, so a failed read leaves the other
+    signals to decide.
     """
     try:
         from app.db import turns as turns_db
@@ -180,9 +175,8 @@ def _detect_drift(snap: LifecycleSnapshot) -> List[str]:
     """Cross-source disagreement classes (log-only).
 
     Every entry is a stable, greppable ``class=...`` string. These are
-    SENSORS, not judgments: some classes are legal for a short window (e.g.
-    ``unpark-no-pump`` during the latch -> start_streaming hand-off), which is
-    exactly why Phase 1 only logs and the reconciler age-gates its repairs.
+    SENSORS, not judgments: some classes are legal for a short window, which
+    is why they are only logged.
     """
     drift: List[str] = []
 
@@ -192,13 +186,13 @@ def _detect_drift(snap: LifecycleSnapshot) -> List[str]:
             f"class=parked-marker-while-idle parked_task_kind={snap.parked_task_kind}"
         )
 
-    # (2) unpark latch with no pump and nothing streaming: the committed
-    # follow-up has neither a between-turns reader nor a live turn. Legal for
-    # the brief latch -> follow-up-start hand-off; stale beyond that.
+    # (2) unpark latch with no between-turns reader and nothing streaming.
+    # Both the latch and the pump flag are inert (see ``compute``), so this
+    # class cannot fire.
     if snap.unpark_latch and not snap.pump_running and not snap.live_store_streaming:
         drift.append("class=unpark-no-pump")
 
-    # (3) registry says background work is running but the pooled SDK client
+    # (3) registry says background work is running but the pooled adapter
     # that owns its completion notification is gone/dead.
     if snap.background_work and (not snap.pool_present or not snap.pool_connected):
         drift.append(
@@ -219,35 +213,25 @@ async def compute(
     ``session_row`` is the already-fetched ``sessions`` row when the caller
     has one (``/live`` does — ``require_session`` fetched it); passing it
     avoids a second DB read on the poll hot path. When omitted, the row is
-    fetched best-effort (the reconciler's periodic sweep does this).
+    fetched best-effort.
 
-    ORDERING CONTRACT: the first three reads below — ``get_visible``, the
-    ``unpark_pending`` latch, and the queued-messages keep-alive (queried ONLY
-    when the latch is unset, failures swallowed to ``debug``) — are absorbed
-    VERBATIM from ``get_live_session`` (sessions.py), in the same order and
-    with the same side effects (``get_visible`` prunes the terminal-retention
-    store), so destructuring this snapshot is byte-identical to the inline
-    code it replaced. New raw inputs are read strictly AFTER them.
+    ORDERING CONTRACT: ``get_visible`` runs first (it prunes the
+    terminal-retention store); every other input is read after it.
     """
     from app.core.task_registry import task_registry
 
-    # --- absorbed verbatim from get_live_session (order matters) -----------
-    # Active background tasks (SDK agent tasks + Monitor shell subprocesses)
+    # Active background tasks (agent tasks + Monitor shell subprocesses)
     # PLUS any recently-failed task still inside the retention window.
     # ``get_visible`` (not ``get_active``) is the DISPLAY view.
     active_tasks = task_registry.get_visible(session_id)
 
-    # "Unpark pending": the legacy registry unpark latch and the undrained
-    # ``queued_messages`` keep-alive are both GONE (V2 deletion) — the latch
-    # writers and the queue table's writers were removed, so both are
-    # permanently inert. The composed ``unpark_pending`` wire value is now
-    # driven solely by the v2 ``has_queued_unpark`` signal below (a queued
-    # ``source=unpark`` turn). The raw fields are retained on the snapshot for
-    # shape parity, hard-set to their inert values.
+    # The composed ``unpark_pending`` wire value is driven solely by the
+    # ``has_queued_unpark`` signal below (a queued ``source=unpark`` turn).
+    # ``unpark_latch`` / ``queued_count`` stay on the snapshot for shape
+    # parity, hard-set to their inert values.
     unpark_latch = False
     unpark_pending = unpark_latch
     queued_count: Optional[int] = None
-    # --- end verbatim block -------------------------------------------------
 
     # Remaining raw inputs (read-only; no side effects).
     background_work = task_registry.get_active_background_work(session_id)
@@ -266,7 +250,7 @@ async def compute(
     except Exception:
         logger.debug("session pool peek failed for %s", session_id, exc_info=True)
 
-    # Streaming authority: the durable runs table (v2 core — a lease-valid
+    # Streaming authority: the durable runs table (a lease-valid
     # active run means a turn is in flight), unioned with the pooled client's
     # is_streaming peek (belt-and-braces: a turn whose run claim failed records
     # UNFENCED and reads idle from runs, but the pooled client still knows).
@@ -288,12 +272,11 @@ async def compute(
     except Exception:
         logger.debug("session row read failed for %s", session_id, exc_info=True)
 
-    # The between-turns drain pump is GONE (V2 deletion) — nothing registers a
-    # pump, so this signal is permanently inert. Retained on the snapshot for
-    # shape parity, hard-set False.
+    # Nothing registers a between-turns pump, so this signal is inert.
+    # Retained on the snapshot for shape parity, hard-set False.
     pump_running = False
 
-    # Additive V2-turns signals (flag-gated; (False, False) with the flag off).
+    # Turns-table signals ((False, False) on a read error).
     # A queued unpark turn folds into the composed ``unpark_pending`` wire value
     # (so the /live wire agrees with the derived state); a parked turn is an
     # additional trigger for ``parked_with_work``.
@@ -335,9 +318,8 @@ async def compute(
 
     # Stable prefix + one line per class, gated to TRANSITIONS (see
     # _drift_entries_to_log): a persistent drift logs once when it appears and
-    # hourly thereafter, not on every poll. Plain INFO (mirrors the
-    # _log_unpark_decision verbosity decision): exactly the trace a live
-    # incident needs. The gate itself runs even when drift is empty so a
+    # hourly thereafter, not on every poll. Plain INFO: exactly the trace a
+    # live incident needs. The gate itself runs even when drift is empty so a
     # just-cleared condition is forgotten. Never raises into the caller.
     try:
         for entry in _drift_entries_to_log(session_id, snap.drift):

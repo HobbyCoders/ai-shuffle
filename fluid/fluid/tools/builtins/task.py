@@ -171,9 +171,8 @@ _SLUG_MAX = 40
 def agent_name_for(input: dict[str, Any]) -> str:
     """A short, addressable name for the agent a Task starts.
 
-    Round 9: every subagent was listed as "General Purpose" (its agent
-    TYPE), so SendMessage by description failed with "Unknown agent" and
-    two same-type agents were indistinguishable. The name is the explicit
+    Naming an agent after its TYPE would make two same-type agents
+    indistinguishable to SendMessage. The name is the explicit
     ``name`` when given, else the first few words of the label or prompt as
     a slug (``fix-flaky-login-test``). The host appends the task id's short
     ref when two agents collide, so the slug does not have to be unique.
@@ -234,16 +233,9 @@ async def _dispatch_and_register(
     """Dispatch, then register whatever the HOST actually detached.
 
     The decision is read off the returned receipt, never off the requested
-    ``mode``. Hosts upgrade: ai-shuffle promotes every read-only agent surface
-    (its Explore class) to background, and the model correctly omits ``mode``
-    because the schema hides it for those targets. Branching on the request
-    meant the sync path returned the receipt without ever calling
-    ``background_task_started`` — the task never entered ``_background_pending``,
-    the turn ended with a live worker and no ``SessionParked``, and the
-    completion arrived through ``background.py``'s "finished a task we never saw
-    start" recovery path. Two audited sessions ended turns that way, one for
-    44% of its workers, and any host trusting fluid's accounting sees an idle
-    session with research still running.
+    ``mode``: a host may detach a sync request (ai-shuffle backgrounds its
+    read-only agent classes), and that worker must still be registered via
+    ``background_task_started`` so the turn parks on it instead of ending.
     """
     # The host receives the derived name so its roster and its SendMessage
     # resolution can address the agent by what it is doing.

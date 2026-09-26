@@ -1,7 +1,7 @@
 """
-SDK option building for Claude queries.
+Agent option building for queries.
 
-Contains functions that construct ClaudeAgentOptions, assemble system prompts,
+Contains functions that construct AgentOptions, assemble system prompts,
 configure MCP servers, build tool/permission configurations, and manage
 subagent definitions.
 
@@ -17,14 +17,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.db import database
 from app.core.config import settings
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
-from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
 from app.core.model_registry import context_window_choices
 
 # --- Re-exports for backward compatibility ---
@@ -74,10 +73,10 @@ def _ai_tools_credential_config(
 ) -> Dict[str, Any]:
     """The ``ai_tools`` toggle map the credential env is built from.
 
-    Ruling T5 attaches the ai-tools server from the permitted tool set, not the
+    The ai-tools server is attached from the permitted tool set, not the
     profile's retired ``ai_tools`` switches. The env that carries ``FAL_KEY`` and
-    the per-category default models has to follow the same set: gating it on the
-    old switches alone attached the tools to a Node worker with no key (#1398).
+    the per-category default models has to follow the same set: gated on the
+    switches alone, the tools would attach to a Node worker with no key.
     Unlike ``ai_tools_config_from_names`` this keeps the catch-all tools, since
     ``runFalModel`` and ``searchModels`` run on the same key.
     """
@@ -92,42 +91,26 @@ def _ai_tools_credential_config(
     return config
 
 
-# The CLI's interactive question tool, blocked for ProviderAgent worker
-# sessions (ruling A3, 2026-07-25 — workers cannot ask user questions).
-# Ruling A3: a worker must not be able to ask the human anything. Approvals
-# redirect to the parent; questions do not — they stall on the question TTL.
-# Fluid's AskUser has the same interaction kind as the SDK's AskUserQuestion.
+# The interactive question tools, blocked for worker sessions: a worker must
+# not be able to ask the human anything. Approvals redirect to the parent;
+# questions do not — they would stall on the question TTL. Fluid's AskUser has
+# the same interaction kind as the CLI's AskUserQuestion.
 WORKER_DISALLOWED_TOOLS = ("AskUserQuestion", "AskUser")
-WORKER_DISALLOWED_TOOL = WORKER_DISALLOWED_TOOLS[0]
 
 
-# The CLI ships a bundled ``claude-api`` skill (Anthropic SDK reference docs).
-# Invoking it injects ~595K chars / ~142K tokens of documentation in one shot,
-# which is fine on a native Claude session but catastrophic on a gateway-routed
-# NON-Claude session: its trigger text is broad ("the prompt names Claude in any
-# form"), so a GPT-class model fires it constantly and blows the turn's context
-# (see the ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` note in
-# ``app/core/environment.py`` — the same injection is what forced that override
-# to exist). The skill is also useless there: those sessions are not writing
-# Anthropic SDK code, they are being SERVED by a translator gateway.
-#
-# Mechanism: a ``Skill(<name>)`` deny rule. Verified against the pinned
-# claude-agent-sdk (0.2.126) and its bundled CLI:
-#   - ``ClaudeAgentOptions.disallowed_tools`` → ``--disallowedTools`` (SDK
-#     ``_internal/transport/subprocess_cli.py``);
-#   - ``--disallowedTools`` entries are parsed as ``ToolName(ruleContent)`` and
-#     land in the session's deny rules;
-#   - the CLI's ``Skill`` tool ``checkPermissions`` walks the deny rules for tool
-#     name ``Skill`` and matches each rule's content against the skill name,
-#     returning ``{behavior: "deny", message: "Skill execution blocked by
-#     permission rules"}`` on a hit. (The same specifier form the SDK itself
-#     emits for its ``skills`` option, which maps each entry to
-#     ``Skill(<name>)`` in ``allowedTools``.)
+# The Claude Code CLI ships a ``claude-api`` skill (Anthropic SDK reference
+# docs). Invoking it injects ~142K tokens of documentation in one shot, and its
+# broad trigger ("the prompt names Claude in any form") makes non-Claude models
+# fire it constantly (see the ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` note in
+# ``environment.apply_provider_env``). Denied with a ``Skill(<name>)`` rule in
+# ``--disallowed-tools``, which the CLI matches against the skill name (verified
+# against the CLI once bundled with claude-agent-sdk 0.2.126; re-check on CLI
+# upgrades).
 NON_CLAUDE_DISALLOWED_SKILL = "Skill(claude-api)"
 
 
 # ---------------------------------------------------------------------------
-# Provider-model composite codec (`prov:<providerId>:<modelId>`) — PA13
+# Provider-model composite codec (`prov:<providerId>:<modelId>`)
 # ---------------------------------------------------------------------------
 #
 # The frontend counterpart lives in
@@ -203,10 +186,9 @@ from app.core.session_modes import (
     session_mode_of,
 )
 
-# Tool access (ruling T2). ``resolve_tool_access`` is the one seam both legs
-# read; it lives in ``app.core.tool_access`` (no app imports, so the v82
-# migration and the API layer can use it too) and is re-exported here because
-# the plan names this module as its home.
+# Tool access. ``resolve_tool_access`` is the one seam both legs read; it lives
+# in ``app.core.tool_access`` (no app imports, so migrations and the API layer
+# can use it too) and is re-exported here for existing importers.
 from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
     DENY_ALL,
     LEGACY_TOOL_ALIASES as _LEGACY_TOOL_ALIASES,
@@ -222,7 +204,7 @@ from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
 def _ai_tools_available() -> bool:
     """Whether the AI-generation tools have a credential to run on.
 
-    Ruling T5 attaches the ai-tools server when at least one AI tool is both
+    The ai-tools server is attached when at least one AI tool is both
     AVAILABLE and permitted — every one of them runs on the same fal.ai key, so
     without it the picker's selection would put non-functional tools on the
     model's surface.
@@ -278,7 +260,7 @@ def _drop_orphan_task_managers(
 def _app_config_permitted(config: Optional[Dict[str, Any]]) -> bool:
     """Whether this agent's tool access permits ANY ``mcp__app-config__*`` tool.
 
-    Ruling T5 retired the standalone ``app_config_tools`` switch: the group is
+    There is no standalone ``app_config_tools`` switch: the group is
     permitted or not by the same picker every other tool goes through. Admin-ness
     is a separate, unchanged gate the callers apply.
     """
@@ -331,7 +313,7 @@ class WorktreeUnavailableError(Exception):
 def _claim_and_run_pending_checkout(
     project_v2: Dict[str, Any], branch: Optional[str]
 ) -> bool:
-    """Spawn-path inline claim of a queued ``ensure_worktree`` git op (D5).
+    """Spawn-path inline claim of a queued ``ensure_worktree`` git op.
 
     Returns True when an op for (this runner, this project, this branch) was
     found, won, and executed successfully — meaning a retry of ``resolve_cwd``
@@ -390,8 +372,9 @@ def _claim_and_run_pending_checkout(
 
 
 def _rescue_pending_checkout(session_row: Dict[str, Any]) -> bool:
-    """Pre-flight half of the D5 race guard: materialize this session's checkout
-    from a queued ``ensure_worktree`` op BEFORE the cwd resolver runs.
+    """Pre-flight half of the branch-session race guard: materialize this
+    session's checkout from a queued ``ensure_worktree`` op BEFORE the cwd
+    resolver runs.
 
     Running first matters for the logs, not the outcome: letting
     ``resolve_cwd`` try and fail first records the checkout as "branch … not
@@ -548,33 +531,6 @@ COMPUTER_USE_GUIDANCE = (
     "If you hit an elevation prompt or a black screenshot, stop and ask the user to handle it."
 )
 
-# ─── Session store singleton (Phase 1.5) ────────────────────────────────────
-# Constructed once per process. Wrapped in try/except so Postgres
-# unavailability is non-fatal — callers get None and degrade gracefully.
-_session_store_singleton = None
-_session_store_init_attempted = False
-
-
-def _get_session_store():
-    """Return the module-level PgSessionStore singleton, or None if unavailable."""
-    global _session_store_singleton, _session_store_init_attempted
-    if _session_store_init_attempted:
-        return _session_store_singleton
-    _session_store_init_attempted = True
-    try:
-        from app.core.pg_session_store import PgSessionStore
-        _session_store_singleton = PgSessionStore()
-        logger.info("PgSessionStore singleton created")
-    except Exception:
-        logger.warning(
-            "PgSessionStore construction failed — proceeding without session_store. "
-            "Check the managed PostgreSQL supervisor and its private descriptor.",
-            exc_info=True,
-        )
-        _session_store_singleton = None
-    return _session_store_singleton
-
-
 # Token budgets for thinking modes (token-based thinking)
 THINKING_TOKEN_BUDGETS = {
     'think': 8000,
@@ -591,9 +547,9 @@ def _build_thinking_config(
     allow_profile_effort: bool = True,
 ) -> Dict[str, Any]:
     """
-    Build thinking/effort configuration for ClaudeAgentOptions.
+    Build thinking/effort configuration for AgentOptions.
 
-    SDK 0.1.36+ decouples thinking and effort into independent fields:
+    Thinking and effort are independent fields:
     - thinking: ThinkingConfigAdaptive|ThinkingConfigEnabled|ThinkingConfigDisabled
       - 'adaptive': model decides when/how much to think
       - 'enabled' + budget_tokens: token-budget based thinking
@@ -607,14 +563,14 @@ def _build_thinking_config(
         config: Profile configuration dict
         model: Model name (e.g., 'opus', 'sonnet', 'haiku')
         overrides: Optional query-level overrides dict (may contain 'thinking_mode' and/or 'effort')
-        session_effort: The effort the session itself is bound to (v79 —
-            picked at session creation, not pinned by the agent). Beaten by a
+        session_effort: The effort the session itself is bound to (picked at
+            session creation, not pinned by the agent). Beaten by a
             query-level override, beats the agent's legacy config.effort.
         allow_profile_effort: False for worker sessions, which use the model
             default when neither spawn nor caller selected an effort.
 
     Returns:
-        Dict with thinking/effort configuration to spread into ClaudeAgentOptions
+        Dict with thinking/effort configuration to spread into AgentOptions
     """
     result: Dict[str, Any] = {}
     overrides = overrides or {}
@@ -632,7 +588,7 @@ def _build_thinking_config(
         budget_tokens = THINKING_TOKEN_BUDGETS[thinking_mode]
         result['thinking'] = {'type': 'enabled', 'budget_tokens': budget_tokens}
         logger.debug(f"Using token-based thinking with budget={budget_tokens}")
-    # 'default' or unrecognized: omit thinking field, let SDK use its default
+    # 'default' or unrecognized: omit thinking field, so the leg uses its default
 
     # Resolve effort: override takes priority over profile config (independent of thinking)
     # Preserve recognized values here; the adapter validates the selected route and model.
@@ -652,14 +608,13 @@ def _resolve_thinking_display(
 ) -> Optional[str]:
     """Resolve the thinking-display CLI flag value ("summarized" | "omitted").
 
-    SDK 0.1.65 / CLI 2.1.111+: Opus 4.7 silently defaults ``display`` to
-    ``"omitted"`` (signature-only, no thinking text). Callers that want
-    summarized thinking text must pass ``summarized``.
+    Opus 4.7 silently defaults ``display`` to ``"omitted"`` (signature-only, no
+    thinking text). Callers that want summarized thinking text must pass
+    ``summarized``.
 
-    Forwarded via ``extra_args={"thinking-display": ...}`` rather than the
-    typed ``ThinkingConfig.display`` field because the 0.1.65 wheel on PyPI
-    does not yet contain PR #830 — the field is silently dropped by the
-    SubprocessCLITransport there. The raw CLI flag is stable either way.
+    Forwarded via ``extra_args={"thinking-display": ...}``, the one
+    ``extra_args`` key the harness adapter honors (it rides to the CLI as a raw
+    flag and to the native anthropic lane via ``SessionOptions.extra``).
     """
     overrides = overrides or {}
     value = overrides.get('thinking_display') or config.get('thinking_display')
@@ -677,13 +632,13 @@ def build_options_from_profile(
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
     session_id: Optional[str] = None,
-) -> tuple[ClaudeAgentOptions, None]:
+) -> tuple[AgentOptions, None]:
     """
-    Convert a profile to ClaudeAgentOptions with all available options.
+    Convert a profile to AgentOptions with all available options.
 
     Returns:
-        Tuple of (ClaudeAgentOptions, agents_dict)
-        - ClaudeAgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
+        Tuple of (AgentOptions, agents_dict)
+        - AgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
         - agents_dict: Always None; agents are dispatched through the harness
 
     Args:
@@ -697,8 +652,7 @@ def build_options_from_profile(
         session_id: Optional our session ID (for worktree lookup)
 
     Note: Agents are always passed programmatically via options.agents for tool
-    enforcement. On Windows local mode, callers also write agent files to
-    .claude/agents/ for supplemental CLI discovery.
+    enforcement.
     """
     config = profile["config"]
     overrides = overrides or {}
@@ -746,7 +700,7 @@ def build_options_from_profile(
         # project_id / worktree_branch. Fetch the session row ONCE.
         from app.core import project_resolver
 
-        # RACE GUARD (D5), first half. A branch session created FROM ANOTHER
+        # RACE GUARD, first half. A branch session created FROM ANOTHER
         # DEVICE arrives with a queued ``ensure_worktree`` op instead of a
         # materialized checkout, and its first turn can be claimed before the
         # git-ops loop's next 5s tick. Run that op HERE, so the expected remote
@@ -797,7 +751,7 @@ def build_options_from_profile(
                 row = session_row or {}
                 branch = row.get("branch") or row.get("worktree_branch")
                 if branch or row.get("worktree_id") or row.get("worktree_path"):
-                    # RACE GUARD (D5). A branch session created FROM ANOTHER
+                    # RACE GUARD. A branch session created FROM ANOTHER
                     # DEVICE leaves a queued ``ensure_worktree`` git op for us
                     # instead of a materialized checkout, and its first turn can
                     # be claimed before the git-ops loop's next 5s tick. That op
@@ -843,7 +797,7 @@ def build_options_from_profile(
                 working_dir = config.get("cwd")
                 working_dir_source = "profile config"
             else:
-                working_dir = str(settings.workspace_dir)
+                working_dir = str(settings.effective_workspace_dir)
     elif project:
         working_dir = get_project_working_dir(project)
         working_dir_source = "project"
@@ -851,7 +805,7 @@ def build_options_from_profile(
         working_dir = config.get("cwd")
         working_dir_source = "profile config"
     else:
-        working_dir = str(settings.workspace_dir)
+        working_dir = str(settings.effective_workspace_dir)
 
     # ── The session's sidepanel lane, resolved BEFORE the cwd is final ───────
     #
@@ -872,11 +826,10 @@ def build_options_from_profile(
     # ── Where this session EXECUTES, for the <env> block below ───────────────
     #
     # ``sessions.placement["where"]`` — ``runner:<id>`` for a pinned session.
-    # The app has always known this and never told the model, which is how a
-    # session on a shared runner spends nine minutes starting the app inside
-    # that runner and pointing the browser tool at its loopback address. Read
+    # Without it, a session on a shared runner can start the app inside that
+    # runner and point the browser tool at its loopback address. Read
     # off the same row snapshot as the lane above; only an EXPLICIT placement
-    # counts (the A11 implicit ``instance_id`` pin is every session, including
+    # counts (the implicit ``instance_id`` pin is every session, including
     # the local lane, so surfacing it would say "shared runner" everywhere).
     placement_where: Optional[str] = None
     try:
@@ -904,7 +857,7 @@ def build_options_from_profile(
 
     # Fail fast when the resolved cwd doesn't exist: an invalid cwd otherwise
     # surfaces as an opaque OS-level spawn failure (WinError 267 "directory name
-    # is invalid") deep inside the SDK subprocess connect. Shared-DB installs can
+    # is invalid") deep inside the adapter's connect. Shared-DB installs can
     # carry project rows whose paths only exist on another machine — name the
     # path so the failure is actionable. The default workspace is ours to create.
     if not Path(working_dir).is_dir():
@@ -992,7 +945,7 @@ def build_options_from_profile(
 
             final_system_prompt = "\n\n".join(prompt_parts)
         else:
-            # Preset system prompt - pass to SDK with append
+            # Preset system prompt - pass the preset with append
             existing_append = system_prompt.get("append", "")
             full_append = security_instructions
             if existing_append:
@@ -1012,24 +965,24 @@ def build_options_from_profile(
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
-    # SDK AgentDefinitions stay retired (P2c, ruling A6): the CLI's native
-    # Task/Agent/Workflow tools are banned on the delegated leg (harness_adapter
-    # passes --disallowed-tools), so ``agents_dict`` is permanently None.
+    # SDK AgentDefinitions are retired: the CLI's native Task/Agent/Workflow
+    # tools are banned on the delegated leg (harness_adapter passes
+    # --disallowed-tools), so ``agents_dict`` is permanently None.
     #
-    # ``enabled_agents``/``agent_invoke_mode`` are now a CONTEXT-DECLARATION
-    # concern (2026-08-17 ruling, superseding A10) — see app.core.agent_context.
+    # ``enabled_agents``/``agent_invoke_mode`` are a CONTEXT-DECLARATION
+    # concern — see
+    # app.core.agent_provider_models.available_subagents.
     # The resolved name+description list is stamped onto the options object as
     # ``aih_declared_agents`` further down and projected by the fluid
     # HarnessAdapter onto the compiled prompt's agents index. Dispatch itself is
     # never gated by it.
     agents_dict = None
 
-    # (P2c) The old built-in-subagent prompt instructions died with SDK
-    # AgentDefinitions — the Task tool's own description tells the model how
-    # to dispatch agents, and the agents themselves carry their prompts.
+    # No built-in-subagent prompt instructions: the Task tool's own description
+    # tells the model how to dispatch agents, and the agents carry their prompts.
 
     # Inject app-config system prompt instructions when the picker permits the
-    # app_config group and the session is an admin one (ruling T5).
+    # app_config group and the session is an admin one.
     if session_mode != "chat" and _app_config_permitted(config) and not api_user_id:
         from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT
         if isinstance(final_system_prompt, dict):
@@ -1038,16 +991,15 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
 
-    # ── The session's own run binding (v79) ─────────────────────────────────
+    # ── The session's own run binding ───────────────────────────────────────
     #
-    # Agents used to pin a model, an effort level and a permission mode; now
-    # the user picks them when the session is created and they live on the
-    # session row. The row is read ONCE, up with the working directory — the
-    # chat lane's cwd is derived from it and had to be settled before the
-    # environment-details block rendered the path into the prompt — and every
-    # binding below reads that same snapshot. A session-LESS build (tests,
-    # project-only spawns) has no row and falls through to the agent's config,
-    # exactly as before.
+    # The user picks the model, effort level and permission mode when the
+    # session is created and they live on the session row. The row is read
+    # ONCE, up with the working directory — the chat lane's cwd is derived from
+    # it and had to be settled before the environment-details block rendered
+    # the path into the prompt — and every binding below reads that same
+    # snapshot. A session-LESS build (tests,
+    # project-only spawns) has no row and falls through to the agent's config.
     _session_effort = (_binding_row or {}).get("effort")
     _session_fast = (_binding_row or {}).get("fast")
     _session_permission_mode = (_binding_row or {}).get("permission_mode")
@@ -1060,7 +1012,7 @@ def build_options_from_profile(
         context_window = None
     if context_window is not None and context_window <= 0:
         context_window = None
-    # Fast mode (v81). A BOOLEAN, so the usual ``or`` chain would swallow an
+    # Fast mode. A BOOLEAN, so the usual ``or`` chain would swallow an
     # explicit False: test the override for presence, not truthiness, and only
     # fall back to the session row when the turn said nothing. There is no
     # agent-config fallback — fast mode is a per-session user choice.
@@ -1072,8 +1024,8 @@ def build_options_from_profile(
     fast = None if _fast_value is None else bool(_fast_value)
 
     # Determine permission mode. Like the model and effort, this is the
-    # session's own binding (v79) with the agent's legacy config as the
-    # pre-v79 fallback; a query-level override still wins for this turn.
+    # session's own binding with the agent's legacy config as the fallback for
+    # older sessions; a query-level override still wins for this turn.
     permission_mode = (
         overrides.get("permission_mode")
         or _session_permission_mode
@@ -1087,35 +1039,32 @@ def build_options_from_profile(
     # depend on which branch happened to fetch the row.
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
-    # Create stderr callback to log CLI output
-    # Note: We only log stderr, don't forward to frontend. The SDK sends proper
-    # typed messages for important events (compact_boundary, api errors via
-    # synthetic AssistantMessage with isApiErrorMessage, etc.)
-    # Use lazy %-formatting to avoid f-string overhead when debug is disabled
+    # Stderr callback for AgentOptions.stderr (SDK-shaped; the harness adapter
+    # ignores it). Lazy %-formatting avoids f-string overhead when debug is off.
     def stderr_callback(line: str):
         logger.debug("[Claude CLI stderr] %s", line)
 
     # Process model selection.
-    # The preset model values (haiku, sonnet, opus, fable) are native Agent SDK /
-    # CLI shorthand aliases; custom model IDs pass through as-is too.
-    # Model provider (multi-provider phase-2 Chunk E, ruling G2-r). Resolution:
+    # The preset model values (haiku, sonnet, opus, fable) are Claude Code CLI
+    # shorthand aliases; custom model IDs pass through as-is too.
+    # Model provider. Resolution:
     # a query-level override wins; otherwise the SESSION's bound provider
     # (sessions.provider_id, stamped at creation from the model the user
     # picked) is authoritative for a real session spawn — editing the agent
     # later never reroutes a live session, and a NULL binding stays native even
     # if the agent now carries a provider. Only session-LESS builds (e.g. tests
     # / project-only spawns) fall back to the agent's config.provider. None =
-    # native Anthropic; when set, the env is overlaid with the gateway vars
+    # native Anthropic; when set, the env is overlaid with the provider's vars
     # (apply_provider_env).
     if _binding_row is not None:
         provider_id = overrides.get("provider") or _binding_row.get("provider_id")
     else:
         provider_id = overrides.get("provider") or config.get("provider")
 
-    # The session's model (v79). Agents no longer pin one: the user picks a
+    # The session's model. Agents do not pin one: the user picks a
     # model when the session is created and it lands on the row, so the
     # SELECTION is this turn's override or the row's own binding. The legacy
-    # chain below only carries pre-v79 sessions, whose column is NULL —
+    # chain below only carries older sessions, whose column is NULL —
     # ``launched_model`` (what that session actually last ran on) first, then
     # the agent's old config.model — so upgrading never reroutes an existing
     # conversation.
@@ -1124,13 +1073,11 @@ def build_options_from_profile(
     raw_model = _selected_model or _legacy_model
     model_to_use = raw_model
 
-    # ── PA13: the composer's model override may REBIND the provider ─────────
+    # ── The composer's model override may REBIND the provider ───────────────
     #
-    # Until W-R4 the ``or``-chain above could only ever SET a provider, never
-    # clear one, and ``model_to_use`` was taken verbatim — so the composer had to
-    # be locked to the session's own provider (R7). Two selection shapes now
-    # re-resolve the binding for THIS turn. Since v79 the selection is durable:
-    # the turn intake writes it back to ``sessions.model`` /
+    # The ``or``-chain above can only SET a provider, never clear one, so two
+    # selection shapes re-resolve the binding for THIS turn. The selection is
+    # durable: the turn intake writes it back to ``sessions.model`` /
     # ``sessions.provider_id`` (``set_session_run_binding``), so the rebind
     # below and the stored row always describe the same leg.
     #
@@ -1146,14 +1093,14 @@ def build_options_from_profile(
     #      serves real ``claude-*`` ids on its own provider (case 3).
     #
     #   3. anything else (a bare model id belonging to the bound provider, a
-    #      custom id, no override at all) keeps the pre-PA13 behavior verbatim.
+    #      custom id, no override at all) keeps the binding as resolved above.
     #
-    # An explicit ``overrides["provider"]`` (internal callers: ProviderAgent
-    # workers, generation) still pins the provider and is never cleared by a
+    # An explicit ``overrides["provider"]`` (internal callers: Task workers,
+    # generation) still pins the provider and is never cleared by a
     # model pick.
     # Only an EXPLICIT selection (this turn's override or the session's own
     # binding) may rebind the provider. The legacy fallbacks above must not:
-    # a pre-v79 provider session whose launched_model happens to read as a
+    # an older provider session whose launched_model happens to read as a
     # native Claude id would otherwise silently drop back to the native leg.
     _override_model = _selected_model
     _decoded_model = decode_provider_model(_override_model)
@@ -1194,30 +1141,26 @@ def build_options_from_profile(
     # Last-resort floor: a native session with nothing bound anywhere (a fresh
     # row whose first turn carried no selection, an agent with no legacy model)
     # still needs a model. A PROVIDER-bound session deliberately gets no floor —
-    # a native alias would be meaningless on a gateway leg, and resolving to an
-    # arbitrary curated id is the exact failure #919 fixed.
+    # a native alias would be meaningless on a provider leg, and resolving to an
+    # arbitrary curated id would silently pick a model the user never chose.
     if not model_to_use and not provider_id:
         from app.core.model_registry import DEFAULT_MODEL
 
         model_to_use = DEFAULT_MODEL
 
-    # (P2c) The D4-era subagent frontmatter-model resolution died with SDK
-    # AgentDefinitions — the Task tool resolves the target agent's own binding
-    # at dispatch time instead.
+    # Subagent models are not resolved here: the Task tool resolves the target
+    # agent's own binding at dispatch time.
 
     # True only for a provider-bound session whose MAIN model is NOT a Claude
-    # model. PRESERVED ACROSS D4 (see PR #775): this used to read
-    # ``SubagentLegPlan.main_serves_claude_ids``, but that field was only ever
-    # the main provider row's ``provider_type == "anthropic"`` — the leg-map
-    # assembly contributed nothing to it, so it survives the leg removal
-    # verbatim off the session's bound provider row. Deliberately a provider-
-    # SHAPE signal, not a model-id prefix sniff: a native session (no binding)
-    # and an anthropic-type provider row both serve real ``claude-*`` ids and
+    # model, read off the session's bound provider row
+    # (``provider_type != "anthropic"``). Deliberately a provider-SHAPE signal,
+    # not a model-id prefix sniff: a native session (no binding) and an
+    # anthropic-type provider row both serve real ``claude-*`` ids and
     # stay False. Consumed by the ``claude-api`` skill exclusion below.
     is_non_claude_provider_session = False
     main_provider_row = None
     if provider_id:
-        # Reuse the row the PA13 resolution above already fetched (validated
+        # Reuse the row the rebind resolution above already fetched (validated
         # composite / binding-clear check) rather than hitting the DB twice.
         main_provider_row = _bound_provider_row
         if main_provider_row is None:
@@ -1241,22 +1184,21 @@ def build_options_from_profile(
 
     final_system_prompt = _append_system_block(
         final_system_prompt,
-        parent_subagent_guidance(profile.get("id"), provider_id),
+        parent_subagent_guidance(),
     )
     final_system_prompt = _append_system_block(
         final_system_prompt,
         subagent_system_prompt(session_id),
     )
 
-    # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
-    # Priority: tools > tools_preset > allowed_tools (legacy)
+    # SDK-shaped tool fields. ``tools`` / ``tools_preset`` feed
+    # ``AgentOptions.tools``, which the harness adapter ignores.
     tools_config = config.get("tools")  # Explicit list of tools
     tools_preset = config.get("tools_preset")  # "claude_code" preset
 
-    # Ruling T2: ``tool_selection_mode`` decides, not list emptiness. ``access``
-    # carries the SURFACE (``allowed``) and the blocklist (``disallowed``);
-    # "Disable all tools" now really is ``disallowed=["*"]`` on both legs
-    # instead of an empty allow list every runtime path read as unrestricted.
+    # ``tool_selection_mode`` decides, not list emptiness. ``access`` carries the
+    # SURFACE (``allowed``) and the blocklist (``disallowed``); "Disable all
+    # tools" is ``disallowed=["*"]`` on both legs, not an empty allow list.
     access = resolve_tool_access(config)
     # The session's sidepanel mode is a CEILING over whatever the agent allows
     # (see ``app.core.session_modes``): a chat session gets the general web
@@ -1276,11 +1218,11 @@ def build_options_from_profile(
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
 
-    # Block the bundled ``claude-api`` skill on every non-Claude provider session
+    # Block the CLI's ``claude-api`` skill on every non-Claude provider session
     # (see NON_CLAUDE_DISALLOWED_SKILL). This sits here — on the shared
     # ``disallowed_tools`` list built from the profile — rather than in the
-    # ProviderAgent branch below, so it covers BOTH a non-Claude main session and
-    # a non-Claude ProviderAgent worker: a worker is an ordinary session with its
+    # worker branch below, so it covers BOTH a non-Claude main session and
+    # a non-Claude worker: a worker is an ordinary session with its
     # own provider binding, so it flows through this same build. Claude sessions
     # (native, or an anthropic-type provider row) are untouched.
     if (
@@ -1289,28 +1231,23 @@ def build_options_from_profile(
     ):
         disallowed_tools = [*disallowed_tools, NON_CLAUDE_DISALLOWED_SKILL]
 
-    # Determine tools parameter for SDK
-    # New SDK way: use 'tools' param with list or preset dict
-    # Legacy way: use 'allowed_tools' param
     sdk_tools = None
     if tools_config:
         # Explicit tool list provided
         sdk_tools = tools_config
     elif tools_preset == "claude_code":
-        # Use preset (TypedDict format for SDK)
         sdk_tools = {"type": "preset", "preset": "claude_code"}
 
     # Collect MCP tool names that always need to be in allowed_tools
     # (MCP tools must be explicitly allowed regardless of the tools preset)
     mcp_allowed_tools: list = []
 
-    # Ruling T5: ``ai_tools`` and ``app_config_tools`` are no longer independent
-    # switches. The picker decides, through the same T2 lists every other tool
-    # goes through; these two flags stay on the model for import compatibility
-    # and are ignored here. The ai-tools server is attached whenever at least
-    # one AI tool is permitted, and the app-config server whenever its group is
-    # permitted AND the caller is an admin (an API-key session never gets it,
-    # exactly as before).
+    # ``ai_tools`` and ``app_config_tools`` are not independent switches. The
+    # picker decides, through the same access lists every other tool goes
+    # through; these two flags stay on the model for import compatibility and
+    # are ignored here. The ai-tools server is attached whenever at least one AI
+    # tool is permitted, and the app-config server whenever its group is
+    # permitted AND the caller is an admin (an API-key session never gets it).
     from app.core.tool_catalog import (
         ai_tool_names_for_config,
         ai_tools_config_from_names,
@@ -1338,8 +1275,8 @@ def build_options_from_profile(
 
     # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
     # EnterWorktree, CronCreate, NotifyDevices, ToolSearch, etc). These are
-    # harness-level tools that the CLI ships natively; under the SDK we provide
-    # our own implementations bridged to AI Shuffle infrastructure.
+    # harness-level tools that the CLI ships natively; the app provides its own
+    # implementations bridged to AI Shuffle infrastructure.
     from app.mcp.builtin_tools import get_builtin_tool_names
     mcp_allowed_tools.extend(
         _drop_orphan_task_managers(
@@ -1347,15 +1284,14 @@ def build_options_from_profile(
         )
     )
 
-    # P2c: the standalone ProviderAgent tool is superseded by the unified Task
-    # tool (mcp__builtins__Task / fluid's bare Task builtin), which is depth-
-    # gated in app.core.task_dispatch rather than denied to workers outright —
-    # workers may dispatch sub-workers up to settings.task_tool_max_depth (A9).
+    # Workers keep the Task tool (mcp__builtins__Task / fluid's bare Task
+    # builtin); nesting is depth-gated in app.core.task_dispatch, so workers may
+    # dispatch sub-workers up to settings.task_tool_max_depth.
     if settings.provider_agent_enabled and session_id:
         try:
             from app.core.provider_agent import is_provider_agent_worker
             if is_provider_agent_worker(session_id):
-                # Ruling A3 (2026-07-25): a worker must not be able to ask the
+                # A worker must not be able to ask the
                 # human anything. Worker tool APPROVALS are redirected to the
                 # parent, but ``AskUserQuestion`` is a different interaction
                 # kind with its own handler/TTL and is NOT redirected — a
@@ -1456,13 +1392,13 @@ def build_options_from_profile(
             if tool_permitted(t, access.allowed, access.disallowed)
         ]
         if not final_allowed_tools and DENY_ALL not in disallowed_tools:
-            # An empty allow list reads as "unrestricted" on the runtime legs
-            # (ruling T2), so say the denial out loud instead.
+            # An empty allow list reads as "unrestricted" on the runtime legs,
+            # so say the denial out loud instead.
             disallowed_tools = [*disallowed_tools, DENY_ALL]
 
     # Build AI tool environment (API keys + provider settings) ONCE, then pass to both:
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
-    # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
+    # 2. AgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(
         config.get("env"),
         _ai_tools_credential_config(ai_tools_config, ai_tool_names),
@@ -1489,7 +1425,7 @@ def build_options_from_profile(
     ai_tool_env = full_env if full_env else None
 
     # Build MCP servers dict (pre-compute so we can add app-config server).
-    # T5: the ai-tools server rides the PERMITTED set, not ``config.ai_tools``.
+    # The ai-tools server rides the PERMITTED set, not ``config.ai_tools``.
     # ``create_ai_tools_server`` still gates on the per-category booleans, so the
     # picker's selection is projected back onto that shape. (The credential ENV
     # above follows the raw config plus this permitted set, so every attached
@@ -1519,7 +1455,7 @@ def build_options_from_profile(
         else:
             final_system_prompt = f"{final_system_prompt or ''}\n\n{guidance}"
 
-    # Add app-config MCP server for admin sessions whose picker permits it (T5)
+    # Add app-config MCP server for admin sessions whose picker permits it
     if app_config_enabled:
         try:
             from app.mcp.app_config_sdk import create_app_config_server
@@ -1560,11 +1496,10 @@ def build_options_from_profile(
     except Exception:
         logger.exception("Failed to create builtin bridge MCP server")
 
-    # (P2c) The standalone ProviderAgent MCP server is retired: the unified
-    # Task tool rides the builtins server above (mcp__builtins__Task) and, on
-    # native legs, fluid's bare-named Task builtin. Workers get it too —
-    # nesting is depth-gated in app.core.task_dispatch (max_depth=5, A9)
-    # instead of denied at registration (the old P14 one-level rule).
+    # The Task tool rides the builtins server above (mcp__builtins__Task) and,
+    # on native legs, fluid's bare-named Task builtin. Workers get it too —
+    # nesting is depth-gated in app.core.task_dispatch
+    # (settings.task_tool_max_depth) instead of denied at registration.
 
     # Register the computer-use server (host desktop control) when enabled and
     # the host supports it. computer_use_enabled was already validated against
@@ -1611,19 +1546,18 @@ def build_options_from_profile(
         mcp_servers_dict = {name: server for name, server in mcp_servers_dict.items()
                             if name in {"builtins", "chat-access"}}
 
-    # Build options with all ClaudeAgentOptions fields
-    # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
-    # The SDK handles finding Claude properly on all platforms
-    options = ClaudeAgentOptions(
+    # Build options with all AgentOptions fields
+    options = AgentOptions(
         # Core settings
         model=model_to_use,
         permission_mode=permission_mode,
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
-        # Tool configuration (SDK 0.1.12+)
-        # 'tools' is the new way - explicit list or preset
-        # 'allowed_tools' is legacy - used if tools not set, but MCP tools always go here
-        # 'disallowed_tools' always applies as a blocklist
+        # Tool configuration. The harness adapter ignores 'tools'. The delegated
+        # leg reads 'allowed_tools' as CLI permission grants (its in-proc MCP entries,
+        # via harness_adapter._delegated_permission_grants); native legs read
+        # the tool_allowlist stamped below instead. 'disallowed_tools' is the
+        # blocklist on both legs.
         tools=sdk_tools,
         allowed_tools=final_allowed_tools,
         disallowed_tools=disallowed_tools,
@@ -1634,14 +1568,10 @@ def build_options_from_profile(
         # Streaming behavior - enable partial messages for real-time streaming
         include_partial_messages=config.get("include_partial_messages", True),
 
-        # Session behavior
-        continue_conversation=config.get("continue_conversation", False),
-        fork_session=config.get("fork_session", False),
-
         # Settings loading
         setting_sources=[] if session_mode == "chat" else config.get("setting_sources"),
 
-        # MCP servers - pass all registered MCP servers directly to the SDK
+        # MCP servers - pass all registered MCP servers directly to the adapter
         # This ensures tools from MCP servers are available regardless of
         # whether the CLI discovers them from .mcp.json files
         # Note: ai_tool_env is passed so Node.js tool subprocesses get API keys
@@ -1652,15 +1582,10 @@ def build_options_from_profile(
         env=full_env,
         extra_args=_build_extra_args(config.get("extra_args") or {}, hooks, detect_deployment_mode()),
 
-        # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
-        # The SDK's default is 1MB which causes "JSON message exceeded maximum buffer size" errors
-        # when reading images or PDFs (their base64 content easily exceeds 1MB)
-        max_buffer_size=config.get("max_buffer_size") or DEFAULT_SDK_BUFFER_SIZE,
-
         # User identification
         user=config.get("user"),
 
-        # Token budget management (SDK 0.1.51+)
+        # Token budget (SDK-shaped; the harness adapter ignores it)
         **({"task_budget": config["task_budget"]} if config.get("task_budget") else {}),
 
         # The harness owns subagent dispatch; SDK-native agent definitions
@@ -1673,7 +1598,7 @@ def build_options_from_profile(
         # Hooks - for interactive tool handling like AskUserQuestion
         hooks=hooks,
 
-        # Stderr callback for debugging
+        # Stderr callback (SDK-shaped; the harness adapter ignores it)
         stderr=stderr_callback,
 
         # Plugins - load from enabled_plugins in profile config
@@ -1684,10 +1609,10 @@ def build_options_from_profile(
             config.get("setting_sources")
         ),
 
-        # File checkpointing for rewind (SDK 0.1.15+)
+        # File checkpointing (SDK-shaped; the harness adapter ignores it)
         enable_file_checkpointing=config.get("enable_file_checkpointing", False),
 
-        # Extended thinking configuration (SDK 0.1.36+)
+        # Extended thinking configuration
         # For Opus 4.6+: use effort-based adaptive thinking
         # For Sonnet/Haiku: use token budget-based thinking
         **_build_thinking_config(
@@ -1736,10 +1661,15 @@ def build_options_from_profile(
     # Additional directories.
     # Notes live in the data dir (e.g. /data/notes in Docker), which is OUTSIDE
     # every possible working directory (workspace / project / worktree all live
-    # under the workspace root). The SDK's file tools can only touch the cwd plus
+    # under the workspace root). The CLI's file tools can only touch the cwd plus
     # add_dirs, so an @-referenced note path like /data/notes/foo.md would be
-    # unreachable. Always register the notes dir so referenced notes (and their
-    # attachments, stored beneath it) resolve from any session.
+    # unreachable. Register the notes dir so referenced notes (and their
+    # attachments, stored beneath it) resolve from any owner session.
+    # Not for an API key's session: the folder is shared (one flat directory of
+    # every note, the owner's included) and an add_dir is an auto-approved read
+    # root on the delegated leg, so the key's agent could Glob/Read every note
+    # the notes API hides from it. A key's own note is still readable through
+    # the notes API and the scoped ``@Notes/`` expansion.
     merged_add_dirs: list = list(config.get("add_dirs") or [])
     if session_mode != "chat":
         from app.core.workspace_folders import workspace_directories
@@ -1752,7 +1682,9 @@ def build_options_from_profile(
     try:
         from app.core.note_files import get_notes_dir
         notes_dir = str(get_notes_dir())
-        if notes_dir not in (str(d) for d in merged_add_dirs):
+        if api_user_id:
+            merged_add_dirs = [d for d in merged_add_dirs if str(d) != notes_dir]
+        elif notes_dir not in (str(d) for d in merged_add_dirs):
             merged_add_dirs.append(notes_dir)
     except Exception:
         logger.exception("Failed to register notes dir as an accessible directory")
@@ -1771,35 +1703,8 @@ def build_options_from_profile(
     if resume_session_id:
         options.resume = resume_session_id
 
-    # Hook event forwarding (SDK 0.1.81+) — always enable so the frontend
-    # receives HookEventMessage payloads without requiring profile changes.
-    options.include_hook_events = True
-
-    # Strict MCP config validation (SDK 0.1.81+) — off by default; a future
-    # profile field (Slice F) will allow per-profile override.
-    options.strict_mcp_config = bool(getattr(config, "strict_mcp_config", False) or config.get("strict_mcp_config", False))
-
-    # Session store wiring (Phase 1.5) — attach PgSessionStore when enabled.
-    _store = _get_session_store()
-    if _store is not None:
-        options.session_store = _store
-        options.session_store_flush = "eager"
-        # The SDK forbids combining a session_store with file checkpointing
-        # ("checkpoints are local-disk only and would diverge from the mirrored
-        # transcript") and raises at connect time, which fails the whole query.
-        # When the store is attached it is the source of truth, so suppress
-        # checkpointing rather than let the connection fail.
-        if getattr(options, "enable_file_checkpointing", False):
-            logger.warning(
-                "Disabling enable_file_checkpointing because a session_store is "
-                "attached — the SDK rejects combining the two, and the "
-                "mirrored transcript supersedes local-disk checkpoints."
-            )
-            options.enable_file_checkpointing = False
-
-    # Carry the resolved model-provider binding on the options object. The Agent
-    # SDK ignores unknown attributes, so this is inert on the default (flag-off)
-    # path; the fluid HarnessAdapter reads it in connect_with_sdk_options and
+    # Carry the resolved model-provider binding on the options object. The fluid
+    # HarnessAdapter reads it in connect_with_sdk_options and
     # projects it onto SessionOptions.extra["provider_id"], which is how a native
     # (non-delegated) fluid leg gets the provider row's decrypted credentials
     # instead of failing with a missing-credential 401. Always stamped (None for
@@ -1809,7 +1714,7 @@ def build_options_from_profile(
     # The harness adapter uses this for native-loop compaction/usage accounting;
     # delegated Claude also receives the authoritative env pins above.
     options.aih_context_window = context_window
-    # Per-session fast mode (v81), same ride-along pattern: the harness adapter
+    # Per-session fast mode, same ride-along pattern: the harness adapter
     # reads it off the options object and projects it onto SessionOptions.fast,
     # where the delegated lane turns it into the CLI's ``fastMode`` setting and
     # the OpenAI Responses lane into ``service_tier: priority``. None/False both
@@ -1826,7 +1731,7 @@ def build_options_from_profile(
 
     # The bound row's SHAPE, carried alongside the id so the fluid
     # HarnessAdapter can decide the leg from the provider row instead of
-    # sniffing the model string (PA13 / W-R4): a cross-provider pick like
+    # sniffing the model string: a cross-provider pick like
     # "claude-3.5-sonnet on an OpenRouter row" reads as delegated-Claude to the
     # sniff, which is the wrong leg entirely. Both are None for a native
     # session; the adapter falls back to a lookup (then the sniff) when a
@@ -1853,12 +1758,9 @@ def build_options_from_profile(
     # shape carries no app env block at all.
     options.aih_turn_env = turn_env
 
-    # The old ``aih_memory_dir`` stamping lived here (rulings MEM1/MEM3): the
-    # native leg's per-project memory dir, rendered into the prompt as a
-    # "# Project memory" section. Removed 2026-08-31 (see
-    # docs/MEMORY_ARCHITECTURE.md): the section's write path — the Memory
-    # tool — went away in PR #997, so the prompt was promising a memory that
-    # nothing could write. Durable facts now flow through the continual
+    # No per-project memory dir is stamped here and the prompt has no
+    # "# Project memory" section: nothing writes one (see
+    # docs/MEMORY_ARCHITECTURE.md). Durable facts flow through the continual
     # learner (Remember → journal → synthesizer → the # Memory snapshot).
     # memory_sync still resolves its own dir for the DB mirror and the
     # explicit per-project import.
@@ -1890,12 +1792,12 @@ def build_options_from_profile(
 
     # Per-turn TOOL-SURFACE restriction (ruling CE12), set today by Task
     # dispatch when the target is a file/plugin agent whose definition carries a
-    # ``tools:`` list. Deliberately NOT ``allowed_tools`` above: that field is
-    # the SDK's PERMISSION allowlist (it holds every MCP tool name so MCP calls
-    # do not prompt, and is empty of builtins whenever a tools preset is
-    # active), so reading it as a surface restriction would strip Read/Bash/Edit
+    # ``tools:`` list. Deliberately NOT ``allowed_tools`` above: that field is a
+    # PERMISSION grant list (it holds every MCP tool name so MCP calls do not
+    # prompt, and the delegated leg passes its MCP entries as ``--allowed-tools``
+    # grants), so reading it as a surface restriction would strip Read/Bash/Edit
     # from every native session. This one means exactly what it says — a
-    # non-empty list is the whole tool surface. Inert on the SDK path.
+    # non-empty list is the whole tool surface.
     _tool_allowlist = overrides.get("tool_allowlist")
     _surface = (
         [str(t).strip() for t in _tool_allowlist if str(t).strip()]
@@ -1907,7 +1809,7 @@ def build_options_from_profile(
     # ``tools:`` line asked for.
     _dispatch_surface = _surface or None
 
-    # Ruling T3: the AGENT's own ``allow`` list is a surface too, and the two
+    # The AGENT's own ``allow`` list is a surface too, and the two
     # compose — when both exist the session gets the INTERSECTION. This is what
     # makes "Allow only selected" real on the native leg: fluid filters the
     # request schemas, the ToolSearch catalog and dispatch, so an unselected

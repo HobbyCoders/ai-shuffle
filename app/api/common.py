@@ -59,7 +59,12 @@ _served_roots_cache = None
 
 
 def reset_served_roots_cache() -> None:
-    """Drop the cached served-roots set (used by tests)."""
+    """Drop the cached served-roots set.
+
+    Called when the workspace changes (relative project paths resolve against
+    it) and by tests. A ``_registered_serve_roots`` scan already running in a
+    worker thread can still store the roots it read, for at most the TTL.
+    """
     global _served_roots_cache
     _served_roots_cache = None
 
@@ -165,6 +170,12 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def get_file_extension(name: str) -> str:
+    """Get lowercase file extension without the dot"""
+    ext = Path(name).suffix.lower()
+    return ext[1:] if ext else ""
 
 
 # =============================================================================
@@ -338,7 +349,7 @@ def resolve_project_path(
             the main project path.
         fallback_to_workspace: When True **and** neither *worktree_id*
             nor *project_id* resolve to a path, fall back to
-            ``settings.workspace_dir``.
+            ``settings.effective_workspace_dir``.
 
     Returns:
         A :class:`~pathlib.Path` pointing at the resolved directory, or
@@ -367,7 +378,7 @@ def resolve_project_path(
             if allow_missing:
                 return None
             if fallback_to_workspace:
-                return Path(str(settings.workspace_dir))
+                return Path(settings.effective_workspace_dir)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Project not found: {project_id}",
@@ -385,7 +396,7 @@ def resolve_project_path(
 
     # --- fallback -------------------------------------------------------------
     if fallback_to_workspace:
-        return Path(str(settings.workspace_dir))
+        return Path(settings.effective_workspace_dir)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -409,8 +420,8 @@ async def api_error_handler(
     HTTPException. Existing HTTPExceptions pass through unchanged.
 
     Usage:
-        async with api_error_handler("tag session"):
-            sdk_tag_session(session_id=sdk_sid, tag=tag)
+        async with api_error_handler("rename session"):
+            sdk_rename_session(session_id=sdk_sid, title=title)
             return {"status": "ok"}
     """
     try:

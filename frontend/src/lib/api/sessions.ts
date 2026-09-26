@@ -103,20 +103,6 @@ export interface Session {
 	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)
 }
 
-export interface SessionMessage {
-	id: number;
-	role: string;
-	content: string;
-	tool_name?: string;
-	tool_input?: Record<string, unknown>;
-	metadata?: Record<string, unknown>;
-	created_at: string;
-}
-
-export interface SessionWithMessages extends Session {
-	messages: SessionMessage[];
-}
-
 export interface SessionSearchResult extends Session {
 	match_type: 'title' | 'content';
 	match_snippet: string | null;
@@ -260,8 +246,6 @@ export interface AdoptSessionResponse {
 	instance_id: string;
 	adopted: boolean;
 	status: 'adopted' | 'already_local' | 'unpinned' | (string & {});
-	warning?: string | null;
-	local_project_id?: string | null;
 }
 
 export interface MoveSessionResponse {
@@ -275,11 +259,6 @@ export interface MoveSessionResponse {
 /** Pin this session to the viewing install (Resume here). */
 export async function adoptSession(sessionId: string): Promise<AdoptSessionResponse> {
 	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, {});
-}
-
-/** Take ownership here and drop the sticky pin (follow-me). */
-export async function unpinSession(sessionId: string): Promise<AdoptSessionResponse> {
-	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, { follow: true });
 }
 
 /** Re-pin this session to another runner. */

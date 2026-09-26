@@ -22,7 +22,6 @@ spawns real throwaway child processes so the reaping is genuinely exercised.
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -58,14 +57,14 @@ def _make_state(*, is_streaming: bool, streaming_age_seconds: float = 0.0,
                 connected: bool = True, alive: bool = True) -> SessionState:
     """Build a SessionState backed by a mock adapter.
 
-    The mock adapter reports is_alive()/is_connected() and exposes a sdk_client
-    whose SdkProcessHandle PID resolution returns None (so no real process is
-    touched unless a test wires one up explicitly).
+    The mock adapter reports is_alive()/is_connected() and a None
+    subprocess_pid() (so no real process is touched unless a test wires one up
+    explicitly).
     """
     adapter = MagicMock()
     adapter.is_alive.return_value = alive
     adapter.is_connected.return_value = connected
-    adapter.sdk_client = None  # subprocess_pid() -> None by default
+    adapter.subprocess_pid.return_value = None
 
     started = datetime.now(timezone.utc) - timedelta(seconds=streaming_age_seconds)
     return SessionState(
@@ -166,7 +165,7 @@ def _spawn_sleeper() -> subprocess.Popen:
     )
 
 
-def test_reaper_kills_recorded_orphan_descendants():
+async def test_reaper_kills_recorded_orphan_descendants():
     """A recorded terminated-subprocess descendant that is still alive gets reaped."""
     psutil = pytest.importorskip("psutil")
 
@@ -189,7 +188,7 @@ def test_reaper_kills_recorded_orphan_descendants():
         )
         assert dead_parent_pid in sp._terminated_trees
 
-        reaped = sp.reap_terminated_process_trees()
+        reaped = await sp.reap_terminated_process_trees()
 
         assert reaped == 2
         # Registry entry consumed.
@@ -206,9 +205,9 @@ def test_reaper_kills_recorded_orphan_descendants():
                 c.wait(timeout=5)
 
 
-def test_reaper_skips_descendant_of_live_session(monkeypatch):
+async def test_reaper_skips_descendant_of_live_session(monkeypatch):
     """A descendant that belongs to a still-LIVE SDK subprocess must NOT be reaped."""
-    psutil = pytest.importorskip("psutil")
+    pytest.importorskip("psutil")
 
     child = _spawn_sleeper()
     try:
@@ -224,7 +223,7 @@ def test_reaper_skips_descendant_of_live_session(monkeypatch):
         monkeypatch.setattr(sp, "subprocess_pid", lambda st: os.getpid())
 
         sp.record_terminated_subprocess(999_999_998, descendants=[child.pid])
-        reaped = sp.reap_terminated_process_trees()
+        reaped = await sp.reap_terminated_process_trees()
 
         # Protected: not reaped.
         assert reaped == 0
@@ -235,17 +234,17 @@ def test_reaper_skips_descendant_of_live_session(monkeypatch):
             child.wait(timeout=5)
 
 
-def test_reaper_noop_when_registry_empty():
+async def test_reaper_noop_when_registry_empty():
     """Reaper is a safe no-op with nothing recorded."""
-    assert sp.reap_terminated_process_trees() == 0
+    assert await sp.reap_terminated_process_trees() == 0
 
 
 def test_record_terminated_subprocess_is_bounded():
     """The terminated-tree registry never grows unbounded."""
     for i in range(sp._TERMINATED_TREES_MAX + 50):
         # Use a fake descendant list so it actually records.
-        sp.record_terminated_subprocess(1_000_000 + i, descendants=[2_000_000 + i])
-    assert len(sp._terminated_trees) <= sp._TERMINATED_TREES_MAX
+        sp.record_terminated_subprocess(1_000_000 + i, descendants=[(2_000_000 + i, 0.0)])
+    assert len(sp._terminated_trees) == sp._TERMINATED_TREES_MAX
 
 
 # ─── (c) Admission backpressure refuses past the ceiling ────────────────────

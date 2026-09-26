@@ -22,9 +22,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import ipaddress
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from collections import OrderedDict
+from typing import Dict, Iterable, Optional, Tuple
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, status
 
@@ -32,20 +35,86 @@ from app.network import crypto, engine, membership
 
 TOKEN_TTL_SECONDS = 300
 CHALLENGE_TTL_SECONDS = 120
-# Outstanding challenges per member device. A member re-authenticates from
-# a handful of endpoints at most; anything beyond this is a flood and
-# evicts that device's own oldest challenge, never another member's.
+# Outstanding challenges per (requester address, member device). A member
+# re-authenticates from a handful of endpoints at most; anything beyond this is
+# a flood and evicts that requester's own oldest challenge for the device,
+# never one another requester (the member itself) is about to spend.
 CHALLENGES_PER_DEVICE = 8
+# Ceiling on outstanding challenges from unrecognised addresses (memory bound
+# under a flood from many addresses). Past it new ones are refused with 429;
+# a pending challenge is never evicted to make room, so a flood cannot take a
+# member's challenge away during its round trip.
+CHALLENGES_MAX = 4096
+# Member addresses keep headroom beyond the ceiling: a (device, address) pair
+# that has spent a challenge with the member's key, or an address the member
+# advertises as its own endpoint, can always hold its CHALLENGES_PER_DEVICE.
+# The remembered pairs are bounded (least recently used dropped), which also
+# bounds the reserved headroom to MEMBER_ADDRESSES_MAX * CHALLENGES_PER_DEVICE.
+MEMBER_ADDRESSES_MAX = 1024
+CHALLENGE_RETRY_AFTER_SECONDS = 30
 _DOMAIN = b"shuffle-device-token-v1"
 
 _secret = secrets.token_bytes(32)
 _lock = threading.Lock()
-# challenge -> (expires_at_monotonic, device_id)
-_challenges: Dict[str, Tuple[float, str]] = {}
+# challenge -> (expires_at_monotonic, device_id, requester, reserved)
+_challenges: Dict[str, Tuple[float, str, str, bool]] = {}
+# (device_id, requester) pairs proven to belong to the member (a spent challenge).
+_member_addresses: "OrderedDict[Tuple[str, str], None]" = OrderedDict()
 
 
-def new_challenge(device_id: str) -> str:
-    """Issue a challenge for an active member; unknown devices get none."""
+def at_capacity() -> bool:
+    """True when an unrecognised address would be refused a new challenge right now."""
+    with _lock:
+        _purge_expired(time.monotonic())
+        return _unreserved_count() >= CHALLENGES_MAX
+
+
+def is_member_endpoint(requester: str, endpoints: Iterable[object]) -> bool:
+    """Whether ``requester`` is the literal IP host of one of a member's advertised endpoints."""
+    try:
+        address = ipaddress.ip_address(requester)
+    except ValueError:
+        return False
+    for url in endpoints or ():
+        if not isinstance(url, str):
+            continue
+        try:
+            host = urlsplit(url).hostname
+            if host and ipaddress.ip_address(host) == address:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _purge_expired(now: float) -> None:
+    for stale in [c for c, entry in _challenges.items() if entry[0] <= now]:
+        _challenges.pop(stale, None)
+
+
+def _unreserved_count() -> int:
+    return sum(1 for entry in _challenges.values() if not entry[3])
+
+
+def _remember_member_address(device_id: str, requester: str) -> None:
+    key = (device_id, requester)
+    with _lock:
+        _member_addresses[key] = None
+        _member_addresses.move_to_end(key)
+        while len(_member_addresses) > MEMBER_ADDRESSES_MAX:
+            _member_addresses.popitem(last=False)
+
+
+def new_challenge(device_id: str, requester: str = "", *, member_address: bool = False) -> str:
+    """Issue a challenge for an active member; unknown devices get none.
+
+    ``requester`` is the caller's address: the per-device bound applies per
+    requester, so naming a member's public device id from another host cannot
+    evict the challenge that member is about to spend. ``member_address`` says
+    the caller already matched ``requester`` to the member's advertised
+    endpoints; such an address (like one that has spent a challenge before)
+    is not subject to the global ceiling.
+    """
     ctx = engine.context()
     if ctx is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This worker has no network")
@@ -55,26 +124,37 @@ def new_challenge(device_id: str) -> str:
     challenge = crypto.b64u_encode(secrets.token_bytes(32))
     with _lock:
         now = time.monotonic()
-        for stale in [c for c, (exp, _d) in _challenges.items() if exp <= now]:
-            _challenges.pop(stale, None)
+        _purge_expired(now)
+        reserved = member_address or (device_id, requester) in _member_addresses
         # Sort only by expiry: Python's stable sort preserves issuance order
         # when Windows gives several calls the same monotonic timestamp.
-        mine = sorted(((exp, c) for c, (exp, d) in _challenges.items() if d == device_id),
+        mine = sorted(((entry[0], c) for c, entry in _challenges.items()
+                       if entry[1] == device_id and entry[2] == requester),
                       key=lambda item: item[0])
+        # The global ceiling never evicts: only this requester's own oldest
+        # challenge for this device makes room, and past the ceiling an
+        # unrecognised address that has no slot to recycle is refused.
+        if not reserved and len(mine) < CHALLENGES_PER_DEVICE and _unreserved_count() >= CHALLENGES_MAX:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                "Too many outstanding authentication challenges; retry shortly",
+                                headers={"Retry-After": str(CHALLENGE_RETRY_AFTER_SECONDS)})
         while len(mine) >= CHALLENGES_PER_DEVICE:
             _exp, oldest = mine.pop(0)
             _challenges.pop(oldest, None)
-        _challenges[challenge] = (now + CHALLENGE_TTL_SECONDS, device_id)
+        _challenges[challenge] = (now + CHALLENGE_TTL_SECONDS, device_id, requester, reserved)
     return challenge
 
 
-def _take_challenge(challenge: str, device_id: str) -> bool:
+def _take_challenge(challenge: str, device_id: str) -> Optional[str]:
+    """Spend ``challenge`` for ``device_id``; the address it was issued to, or None."""
     with _lock:
         entry = _challenges.pop(challenge, None)
     if entry is None:
-        return False
-    expires, issued_to = entry
-    return expires > time.monotonic() and hmac.compare_digest(issued_to, device_id)
+        return None
+    expires, issued_to, requester, _reserved = entry
+    if expires > time.monotonic() and hmac.compare_digest(issued_to, device_id):
+        return requester
+    return None
 
 
 def challenge_message(challenge: str, audience: str) -> bytes:
@@ -93,7 +173,8 @@ def issue_token(*, device_id: str, challenge: str, signature: str) -> dict:
     member = ctx.member(device_id)
     if member is None or member.status != membership.STATUS_ACTIVE:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Device is not an active member of this network")
-    if not _take_challenge(challenge, device_id):
+    requester = _take_challenge(challenge, device_id)
+    if requester is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Challenge expired or unknown")
     try:
         ok = crypto.verify(member.signing_public, challenge_message(challenge, ctx.device_id),
@@ -102,6 +183,9 @@ def issue_token(*, device_id: str, challenge: str, signature: str) -> dict:
         ok = False
     if not ok:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Challenge signature is invalid")
+    # The member's key signed a challenge issued to this address: it keeps
+    # headroom past the global ceiling from now on.
+    _remember_member_address(device_id, requester)
     expires = int(time.time()) + TOKEN_TTL_SECONDS
     return {"token": _mint(device_id, expires, _scope(ctx)), "expires_at": expires, "device_id": ctx.device_id,
             "network_id": ctx.network_id, "generation": ctx.generation}
@@ -157,4 +241,5 @@ def reset_for_tests() -> None:
     global _secret
     with _lock:
         _challenges.clear()
+        _member_addresses.clear()
     _secret = secrets.token_bytes(32)

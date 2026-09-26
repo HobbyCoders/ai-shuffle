@@ -145,3 +145,112 @@ async def test_call_after_actor_death_raises_instead_of_hanging() -> None:
             raise AssertionError("a command against a dead actor returned")
     finally:
         await client.aclose()
+
+
+# ─── Actor error handling against fake sessions (no server process) ─────────
+
+
+class _SdkTimeout(Exception):
+    """Shaped like the SDK's McpError for its own read timeout (code 408)."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"mcp error {code}")
+        self.error = type("ErrorData", (), {"code": code})()
+
+
+class _FakeSession:
+    def __init__(self, raise_exc: Exception | None = None, legacy: bool = False) -> None:
+        self.raise_exc = raise_exc
+        self.legacy = legacy
+        self.calls: list[tuple] = []
+
+    async def call_tool(self, tool, input, **kwargs):
+        self.calls.append((tool, input, kwargs))
+        if self.legacy and kwargs:
+            raise TypeError("unexpected keyword argument 'allow_input_required'")
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return {"content": [{"type": "text", "text": f"ran {tool}"}], "isError": False}
+
+
+async def test_sdk_read_timeout_is_reported_as_a_tool_timeout_result() -> None:
+    from fluid.tools.mcp.client import McpClient
+
+    client = McpClient("srv", {"call_timeout": 7})
+    out = await client._do_call(_FakeSession(_SdkTimeout(408)), "slow", {})
+    assert out["is_error"] and out["error_code"] == "tool_timeout"
+    assert "did not respond to slow within 7 s" in out["text"]
+
+
+async def test_other_session_errors_propagate_rather_than_masquerading_as_timeouts() -> None:
+    from fluid.tools.mcp.client import McpClient
+
+    client = McpClient("srv", {})
+    for exc in (_SdkTimeout(500), ValueError("bad params")):
+        try:
+            await client._do_call(_FakeSession(exc), "t", {})
+        except Exception as raised:  # noqa: BLE001
+            assert raised is exc
+        else:
+            raise AssertionError(f"{exc!r} was swallowed")
+
+
+async def test_legacy_sdk_without_mrtr_kwargs_is_called_positionally() -> None:
+    from fluid.tools.mcp.client import McpClient
+
+    session = _FakeSession(legacy=True)
+    out = await McpClient("srv", {})._do_call(session, "echo", None)
+    assert out == {
+        "kind": "result", "text": "ran echo", "images": [], "is_error": False,
+        "structured": None,
+    }
+    assert session.calls[0][2] == {"allow_input_required": True}
+    assert session.calls[1] == ("echo", {}, {})
+
+
+async def test_actor_death_fails_every_queued_command() -> None:
+    """``_fail_pending`` resolves each queued future with an error (skipping
+    the stop sentinel and futures a caller already abandoned), so no caller
+    waits on a dead actor."""
+    from fluid.tools.mcp.client import McpClient
+
+    client = McpClient("srv", {})
+    client._fail_pending("never started")  # no queue yet: a no-op
+    client._cmd_q = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    waiting = [loop.create_future() for _ in range(2)]
+    abandoned = loop.create_future()
+    abandoned.cancel()
+    await client._cmd_q.put((waiting[0], "list", (), {}))
+    await client._cmd_q.put(None)
+    await client._cmd_q.put((abandoned, "call", ("t", {}), {}))
+    await client._cmd_q.put((waiting[1], "call", ("t", {}), {}))
+    client._fail_pending("connection closed")
+    assert client._cmd_q.empty()
+    for fut in waiting:
+        exc = fut.exception()
+        assert isinstance(exc, RuntimeError) and "'srv': connection closed" in str(exc)
+    assert abandoned.cancelled()
+
+
+async def test_command_loop_survives_a_failing_command_and_skips_cancelled_ones() -> None:
+    from fluid.tools.mcp.client import McpClient
+
+    client = McpClient("srv", {})
+    client._cmd_q = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    unknown, cancelled, ok = (loop.create_future() for _ in range(3))
+    cancelled.cancel()
+    session = _FakeSession()
+    for cmd in (
+        (unknown, "bogus", (), {}),
+        (cancelled, "call", ("skipped", {}), {}),
+        (ok, "call", ("echo", {"a": 1}), {}),
+        None,
+    ):
+        await client._cmd_q.put(cmd)
+    await asyncio.wait_for(client._command_loop(session), 5)
+    assert isinstance(unknown.exception(), ValueError)
+    assert "unknown mcp command: bogus" in str(unknown.exception())
+    assert ok.result()["text"] == "ran echo"
+    assert [c[0] for c in session.calls] == ["echo"]

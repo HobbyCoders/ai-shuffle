@@ -13,6 +13,7 @@ adapter, reusing the boundary patches from tests/core/test_resume_turn.py.
 
 import uuid
 from contextlib import ExitStack
+from unittest.mock import AsyncMock
 
 from app.core import query_engine as qe
 from app.core.provider.events import (
@@ -23,12 +24,8 @@ from app.core.provider.events import (
 )
 from app.db import database
 
-from tests.core.test_resume_turn import (
-    _StubPool,
-    _engine_patches,
-    _make_state,
-    _stream_response,
-)
+from tests.core.engine_harness import StubPool, make_state, stream_response
+from tests.core.test_resume_turn import _engine_patches
 
 _GIVE_UP = "provider returned an empty response 11 times in a row; giving up"
 
@@ -50,9 +47,9 @@ async def _frames(messages, tmp_path):
     """Run the real pump over ``messages`` and return every yielded frame."""
     session_id = f"sess-{uuid.uuid4()}"
     database.create_session(session_id=session_id, profile_id="default")
-    state = _make_state()
-    pool = _StubPool(state)
-    state.adapter.receive_events = _stream_response(
+    state = make_state(send_resume=AsyncMock())
+    pool = StubPool(state)
+    state.adapter.receive_events = stream_response(
         [SystemMessage(subtype="init", data={"session_id": "ses_x"})] + list(messages)
     )
     out = []

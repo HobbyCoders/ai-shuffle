@@ -112,6 +112,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "headroom_tokens": 16_000,
         "target_ratio": 0.7,
         "keep_recent_turns": 3,
+        "image_trigger_ratio": 1.0,
         "max_resident_span_digests": 20,
         "epoch_fold_spans": 10,
         "intake_stub_chars": 25_000,
@@ -162,9 +163,6 @@ def system_config_path(
         base = env.get("ProgramData") or env.get("PROGRAMDATA") or r"C:\ProgramData"
         return Path(base) / "fluid" / "config.toml"
     return Path("/etc/fluid/config.toml")
-
-
-SYSTEM_CONFIG = system_config_path()
 
 
 def _user_config_path() -> Path:
@@ -313,50 +311,47 @@ def _load_hooks_json(path: Path) -> dict[str, Any]:
     with a logged warning naming them. A malformed file is logged and
     ignored rather than fatal.
     """
-    import logging
-
     from fluid.config.model import resolve_hook_event
 
-    log = logging.getLogger(__name__)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        log.warning("%s: hooks file ignored: %s", path, exc)
+        logger.warning("%s: hooks file ignored: %s", path, exc)
         return {}
     if not isinstance(raw, dict):
-        log.warning("%s: hooks file ignored: expected a JSON object", path)
+        logger.warning("%s: hooks file ignored: expected a JSON object", path)
         return {}
     groups = raw.get("hooks", raw)
     if not isinstance(groups, dict):
-        log.warning("%s: hooks file ignored: 'hooks' is not an object", path)
+        logger.warning("%s: hooks file ignored: 'hooks' is not an object", path)
         return {}
     entries: list[dict[str, Any]] = []
     for event_name, matchers in groups.items():
         event = resolve_hook_event(event_name)
         if event is None:
-            log.warning("%s: hooks for %r dropped: fluid has no such event", path, event_name)
+            logger.warning("%s: hooks for %r dropped: fluid has no such event", path, event_name)
             continue
         if not isinstance(matchers, list):
-            log.warning("%s: hooks for %r dropped: expected a list", path, event_name)
+            logger.warning("%s: hooks for %r dropped: expected a list", path, event_name)
             continue
         for group in matchers:
             if not isinstance(group, dict):
-                log.warning("%s: %s hook group dropped: not an object", path, event_name)
+                logger.warning("%s: %s hook group dropped: not an object", path, event_name)
                 continue
             matcher = group.get("matcher")
             for hook in group.get("hooks") or ():
                 if not isinstance(hook, dict):
-                    log.warning("%s: %s hook dropped: not an object", path, event_name)
+                    logger.warning("%s: %s hook dropped: not an object", path, event_name)
                     continue
                 if hook.get("type", "command") != "command":
-                    log.warning(
+                    logger.warning(
                         "%s: %s hook of type %r dropped: only command hooks run",
                         path, event_name, hook.get("type"),
                     )
                     continue
                 command = hook.get("command")
                 if not isinstance(command, str) or not command.strip():
-                    log.warning("%s: %s hook dropped: empty command", path, event_name)
+                    logger.warning("%s: %s hook dropped: empty command", path, event_name)
                     continue
                 entry: dict[str, Any] = {"event": event, "command": command}
                 if isinstance(matcher, str) and matcher:
@@ -557,7 +552,9 @@ def _sensitive_file_rules():
     """
     from fluid.permissions.rules import Rule
     from fluid.tools.hardening import (
+        PROTECTED_WRITE_PREFIXES,
         SENSITIVE_BASENAME_GLOBS,
+        SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
         SENSITIVE_PATH_SUFFIXES,
     )
@@ -568,6 +565,8 @@ def _sensitive_file_rules():
         pattern if pattern.startswith("*") else f"*{pattern}"
         for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
     ]
+    for name in SENSITIVE_DIR_NAMES:
+        globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
     field_by_tool = {
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
@@ -577,6 +576,11 @@ def _sensitive_file_rules():
         for tool, field in field_by_tool.items()
         for glob in globs
     ]
+    asks.extend(
+        Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
+        for tool in ("Edit", "Write")
+        for prefix in PROTECTED_WRITE_PREFIXES
+    )
     # Template files (.env.example and friends) hold no values and are meant
     # to be read. They match ``.env.*`` above, so an allow rule after the
     # asks lets them through; last match wins, and a user rule still comes
@@ -642,6 +646,10 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         if pc.stream_deadline is not None
         else {}
     )
+    # Same convention for the first-byte bound: 0 disables, absent keeps the
+    # client's default (60 s; off for the "local" kind). Every kind takes it.
+    if pc.first_byte_timeout is not None:
+        deadline["first_byte_timeout"] = pc.first_byte_timeout or None
 
     if pc.kind == "anthropic":
         from fluid.providers.anthropic.client import AnthropicClient
@@ -701,9 +709,8 @@ def _wire_continual(
 ) -> tuple[Any, Any | None]:
     """The skill store and, when ``client`` is given, its synthesizer.
 
-    Wires the Recall builtin (``recall_store``) and, under ``continual``, the
-    Remember builtin (``continual_journal``) onto ``ctx`` so both legs of the
-    engine serve them. ``client`` is the ProviderClient synthesis passes run
+    Wires the Recall and Remember builtins (``recall_store``/``memory_store``)
+    onto ``ctx`` so both legs of the engine serve them. ``client`` is the ProviderClient synthesis passes run
     on; None keeps the journal without a synthesizer, which is what the
     delegated leg gets when no ``continual_provider`` is configured. A
     ``synthesizer`` handed in (a subagent host passing its parent's) is used
@@ -750,7 +757,7 @@ def _wire_continual(
 
             on_change = _announce
 
-        # Phase 2.3: the synthesizer sees the SESSION model id (so a
+        # The synthesizer sees the SESSION model id (so a
         # guidance-proposal stem can be validated against it) and the raw
         # guidance file(s) currently matching it (so proposals amend the
         # file instead of overwriting blind). Gated on the "user" setting
@@ -776,19 +783,6 @@ def _wire_continual(
         )
         if bus is not None:
             learner.append(synthesizer)
-
-    def _remember(text: str, scope: str | None = None) -> None:
-        # The Remember builtin's write path: journal a high-salience entry
-        # and, when a synthesizer is running, pull its next pass forward.
-        entry: dict[str, Any] = {"kind": "remember", "text": text}
-        if scope:
-            entry["scope"] = scope
-        skills.journal_append(entry)
-        if synthesizer is not None:
-            synthesizer.mark_urgent()
-            synthesizer.kick()
-
-    ctx.extra.setdefault("continual_journal", _remember)
     return skills, synthesizer
 
 
@@ -1038,7 +1032,7 @@ def build_engine(
     # ``trim_only`` splits the ladder at tier 1: results are trimmed to
     # recoverable placeholders, but no turn is digested and no epoch folded.
     # Inert when the whole section is disabled.
-    trim_only = cc.enabled and getattr(cc, "trim_only", False)
+    trim_only = cc.enabled and cc.trim_only
     compaction = CompactionConfig(
         enabled=cc.enabled and not trim_only,
         trim=TrimConfig(
@@ -1057,7 +1051,7 @@ def build_engine(
         epoch_fold_spans=cc.epoch_fold_spans,
         intake_stub_chars=cc.intake_stub_chars,
         tool_result_stub_chars=cc.tool_result_stub_chars,
-        image_trigger_ratio=getattr(cc, "image_trigger_ratio", 1.0),
+        image_trigger_ratio=cc.image_trigger_ratio,
     )
 
     return NativeLoop(

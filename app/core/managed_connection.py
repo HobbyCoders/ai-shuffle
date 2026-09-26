@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import random
 import secrets
 import ssl
 import threading
@@ -28,6 +29,53 @@ _error = None
 _url = None
 _offer_lock = threading.RLock()
 _generation = 0
+# The hub's last tunnel_limit refusal ({limit, used, licensed}), shown in the
+# remote-access UI until a connector starts or the worker signs out.
+_refusal = None
+# Bumped by retry_soon() (a license was just activated): cuts the hub backoff short.
+_wake = 0
+
+# Hub failures back off exponentially with jitter, from 15 s up to 10 minutes,
+# and never retry sooner than the hub's Retry-After (a kill switch sends an
+# hour). A running connector survives hub 5xx, 429 and network errors; only an
+# explicit 401/403, or the local binding going away, stops it.
+BACKOFF_BASE_SECONDS = 15.0
+BACKOFF_CAP_SECONDS = 600.0
+REVOKED_STATUSES = (401, 403)
+
+
+def _backoff(failures, retry_after=None):
+    ceiling = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2 ** max(0, failures - 1))
+    delay = random.uniform(ceiling / 2, ceiling)
+    if retry_after:
+        delay = max(delay, retry_after)
+    return delay
+
+
+def _hub_failure(exc):
+    """A hub call that failed for a reason other than revocation."""
+    return isinstance(exc, HTTPException) and account_hub.hub_status(exc) not in REVOKED_STATUSES
+
+
+def _tunnel_limit_message(refused):
+    if refused.licensed:
+        return (f'Remote access is off: this account already uses all {refused.limit} remote connections '
+                'its license covers. Turn off remote access on another worker to free one.')
+    one = 'its one remote connection' if refused.limit == 1 else f'its {refused.limit} remote connections'
+    return (f'Remote access is off: this account already uses {one}. Remote access for more workers '
+            'needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. '
+            'Local use is not affected.')
+
+
+def _hub_error_message(exc):
+    refused = account_hub.tunnel_limit(exc)
+    if refused:
+        return _tunnel_limit_message(refused)
+    if account_hub.hub_status(exc) == 503 and account_hub.retry_after(exc):
+        return 'The account service is paused. Remote access keeps working; Shuffle will retry later.'
+    if account_hub.hub_status(exc) == 429:
+        return 'The account service is busy. Shuffle will retry shortly.'
+    return 'The account connection is unavailable. Shuffle will retry.'
 
 
 def _key():
@@ -49,24 +97,46 @@ def status():
               'server_id': binding['server_id'] if binding else None}
     if not encryption.is_encryption_ready():
         return {**common, 'status': 'locked', 'error': encryption.credential_storage_error(),
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     if not cloudflared.find_executable():
         return {**common, 'status': 'unavailable', 'error': _missing_connector_message(),
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     try:
         pending = _pending()
     except (RuntimeError, ValueError):
         return {**common, 'status': 'locked', 'error': 'Restore the server credential key to unlock this connection.',
-                'url': None, 'code': None, 'expires_at': None}
+                'url': None, 'code': None, 'expires_at': None, 'refusal': None}
     valid = pending and pending['expires'] > time.time()
     state = _state if binding or valid else 'disconnected'
     if binding and (state == 'disconnected' or not binding['active']):
         state = 'connecting'
     if valid and not binding:
         state = 'waiting'
+    refusal = _refusal if binding else None
+    if refusal and state != 'connected':
+        state = 'limited'
     return {**common, 'status': state, 'error': _error, 'url': _url,
             'code': pending['code'] if valid and _state != 'connected' else None,
-            'expires_at': pending['expires'] if valid else None}
+            'expires_at': pending['expires'] if valid else None,
+            'refusal': dict(refusal) if refusal else None}
+
+
+def _set_refusal(exc):
+    global _refusal
+    refused = account_hub.tunnel_limit(exc) if exc is not None else None
+    _refusal = ({'code': 'tunnel_limit', 'limit': refused.limit, 'used': refused.used,
+                 'licensed': refused.licensed, 'message': _tunnel_limit_message(refused)}
+                if refused else None)
+
+
+def retry_soon():
+    """Ask the hub again within seconds instead of after the backoff.
+
+    Called when a license was activated: an account the hub refused a tunnel
+    (tunnel_limit) may now be allowed more.
+    """
+    global _wake
+    _wake += 1
 
 
 def begin(name):
@@ -188,6 +258,7 @@ def _disconnect_local():
         mobile_hub.disconnect()
         _generation += 1
         _state, _error, _url = 'disconnected', None, None
+        _set_refusal(None)
         return binding, credential, _generation
 
 
@@ -252,31 +323,83 @@ async def _stop():
             await process.wait()
 
 
+def _linked_binding():
+    binding = mobile_hub.get_binding()
+    if not binding or binding['linked_by'] != _owner() or not binding['active']:
+        raise ValueError('Worker unlinked')
+    return binding
+
+
+async def _sleep(delay, generation):
+    """Sleep, waking early when the worker signs out (so a relink is not
+    delayed) or a license is activated (retry_soon)."""
+    if delay <= 30:
+        await asyncio.sleep(delay)
+        return
+    end = time.monotonic() + delay
+    wake = _wake
+    while generation == _generation and wake == _wake:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 15))
+
+
 async def supervise():
     global _process, _state, _error, _url
     unreachable_since = None
+    failures = 0
+    hub_retry_at = 0.0
+    hub_error = None
+    backoff_generation = _generation
+    seen_wake = _wake
     try:
         while True:
             delay = 3
+            generation = _generation
+            if generation != backoff_generation:
+                # Signed out or relinked: the old binding's backoff is moot.
+                failures, hub_retry_at, hub_error, backoff_generation = 0, 0.0, None, generation
+            if _wake != seen_wake:
+                # A license was just activated: a refused tunnel may be allowed now.
+                seen_wake = _wake
+                failures, hub_retry_at = 0, 0.0
             try:
                 if _process and _process.returncode is None:
-                    binding = await run_sync(_check_authorized)
+                    if time.monotonic() >= hub_retry_at:
+                        try:
+                            binding = await run_sync(_check_authorized)
+                            failures, hub_retry_at, hub_error = 0, 0.0, None
+                        except HTTPException as exc:
+                            if not _hub_failure(exc):
+                                raise ValueError('Worker revoked') from None
+                            # The hub is down, slow or rate limiting: the
+                            # connector and its token are still good.
+                            failures += 1
+                            hub_retry_at = time.monotonic() + _backoff(failures, account_hub.retry_after(exc))
+                            hub_error = _hub_error_message(exc)
+                            binding = await run_sync(_linked_binding)
+                    else:
+                        binding = await run_sync(_linked_binding)
                     ready = await run_sync(_reachable, binding, _url)
-                    _state, _error = ('connected' if ready else 'connecting'), None
+                    _state, _error = ('connected' if ready else 'connecting'), hub_error
                     delay = 30 if ready else 5
                     if ready:
                         unreachable_since = None
                     elif unreachable_since is None:
                         unreachable_since = time.monotonic()
-                    elif time.monotonic() - unreachable_since >= 60:
+                    elif time.monotonic() - unreachable_since >= 60 and time.monotonic() >= hub_retry_at:
                         # cloudflared can stay alive while its route is stuck.
                         # Refresh the connector for the SAME saved binding.
                         await _stop()
                         unreachable_since = None
                         _state, _error = 'reconnecting', 'The cloud route is not responding. Restarting the connection.'
                         delay = 3
+                elif time.monotonic() < hub_retry_at:
+                    # The connector stopped while the hub is backing us off;
+                    # wait for the backoff before asking for a new token.
+                    delay = hub_retry_at - time.monotonic()
                 else:
-                    generation = _generation
                     credentials = await run_sync(_credentials)
                     if credentials and generation == _generation:
                         token, _url = credentials
@@ -292,15 +415,29 @@ async def supervise():
                             await _stop()
                             continue
                         unreachable_since = time.monotonic()
+                        failures, hub_retry_at, hub_error = 0, 0.0, None
                         _state, _error = 'connecting', None
+                        _set_refusal(None)
                         delay = 3
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 await _stop()
                 _state, _error = 'reconnecting', 'The account connection is unavailable. Shuffle will retry.'
                 delay = 15
-            await asyncio.sleep(delay)
+                if isinstance(exc, HTTPException):
+                    # Activation or connector refresh failed at the hub
+                    # (including 401/403): back off instead of every 15 s.
+                    failures += 1
+                    delay = _backoff(failures, account_hub.retry_after(exc))
+                    hub_retry_at = time.monotonic() + delay
+                    _error = _hub_error_message(exc)
+                    # The hub refused a tunnel (account at its cap): the
+                    # worker keeps running locally; the UI says why.
+                    _set_refusal(exc)
+                else:
+                    failures = 0
+            await _sleep(delay, generation)
     finally:
         await _stop()
         _state = 'disconnected'

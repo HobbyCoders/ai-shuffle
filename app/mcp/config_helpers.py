@@ -16,7 +16,7 @@ from app.core.models import VALID_HOOK_EVENTS
 # Constants
 # ============================================================================
 
-VALID_HOOK_TYPES = ["bash", "webhook", "message"]
+VALID_HOOK_TYPES = ["bash", "webhook"]
 
 VALID_TRIGGER_TYPES = ["cron", "interval", "webhook"]
 

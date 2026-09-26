@@ -50,6 +50,12 @@ const initialState: HooksState = {
 
 let _state = $state<HooksState>({ ...initialState });
 
+/** Latest list load (app or project); an older (slower) response is discarded
+ *  so a project the user already left cannot overwrite the current list. */
+let _loadSeq = 0;
+
+const errorText = (fallback: string) => (e: unknown) => api.getErrorMessage(e, fallback);
+
 // ============================================================================
 // Subscribe Shim (centralized via store-utils)
 // ============================================================================
@@ -59,6 +65,30 @@ const { subscribe, update: _update, notifySubscribers: _notifySubscribers, creat
 		() => _state,
 		(v) => { _state = v; }
 	);
+
+/**
+ * Run the load numbered `seq` and apply its result only while it is still the
+ * latest one. Not withLoading: a superseded load writes nothing, neither its
+ * lists nor its error nor the loading flag (the newer load still owns that).
+ */
+async function latestLoad<T>(
+	seq: number,
+	load: () => Promise<T>,
+	apply: (state: HooksState, data: T) => HooksState,
+	fallback: string
+): Promise<void> {
+	_update((state) => ({ ...state, loading: true, error: null }));
+	try {
+		const data = await load();
+		if (seq !== _loadSeq) return;
+		_update((state) => ({ ...apply(state, data), loading: false }));
+	} catch (e) {
+		if (seq !== _loadSeq) return;
+		const error = api.getErrorMessage(e, fallback);
+		_update((state) => ({ ...state, error, loading: false }));
+		throw e;
+	}
+}
 
 // ============================================================================
 // Exported Store
@@ -76,27 +106,15 @@ export const hooks = {
 	// ========================================================================
 
 	/**
-	 * Load hooks for a project (includes app-level hooks)
-	 */
-	async loadProjectHooks(projectId: string): Promise<void> {
-		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
-			const hooksData = await api.getProjectHooks(projectId);
-			_update((state) => ({ ...state, hooks: hooksData }));
-		}, 'Failed to load hooks');
-	},
-
-	/**
 	 * Load app-level hooks only (no project context)
 	 */
 	async loadAppHooks(): Promise<void> {
-		return withLoading(_update, async () => {
-			const [appHooksData, pluginHooksData] = await Promise.all([
-				api.getAppHooks(),
-				api.getPluginHooks()
-			]);
-			_update((state) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }));
-		}, 'Failed to load app hooks');
+		return latestLoad(
+			++_loadSeq,
+			() => Promise.all([api.getAppHooks(), api.getPluginHooks()]),
+			(state, [appHooksData, pluginHooksData]) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }),
+			'Failed to load app hooks'
+		);
 	},
 
 	/**
@@ -107,7 +125,7 @@ export const hooks = {
 			const hook = await api.createHook(projectId, data);
 			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		}, 'Failed to create hook');
+		}, errorText('Failed to create hook'));
 	},
 
 	/**
@@ -118,7 +136,7 @@ export const hooks = {
 			const hook = await api.createAppHook(data);
 			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		}, 'Failed to create app hook');
+		}, errorText('Failed to create app hook'));
 	},
 
 	/**
@@ -140,7 +158,7 @@ export const hooks = {
 			}));
 			return hook;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update hook';
+			const error = api.getErrorMessage(e, 'Failed to update hook');
 			_update((state) => ({
 				...state,
 				saving: { ...state.saving, [hookId]: false },
@@ -168,7 +186,7 @@ export const hooks = {
 				saving: { ...state.saving, [hookId]: false }
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to delete hook';
+			const error = api.getErrorMessage(e, 'Failed to delete hook');
 			_update((state) => ({
 				...state,
 				saving: { ...state.saving, [hookId]: false },
@@ -206,7 +224,7 @@ export const hooks = {
 			}));
 			return result;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to test hook';
+			const error = api.getErrorMessage(e, 'Failed to test hook');
 			_update((state) => ({
 				...state,
 				testing: { ...state.testing, [hookId]: false },
@@ -221,33 +239,27 @@ export const hooks = {
 	// ========================================================================
 
 	/**
-	 * Load all plugin-contributed hooks
-	 */
-	async loadPluginHooks(): Promise<void> {
-		return withLoading(_update, async () => {
-			const pluginHooks = await api.getPluginHooks();
-			_update((state) => ({ ...state, pluginHooks }));
-		}, 'Failed to load plugin hooks');
-	},
-
-	/**
 	 * Load all hooks (project + app + plugin)
 	 */
 	async loadAll(projectId: string): Promise<void> {
+		const seq = ++_loadSeq;
 		_update((state) => ({ ...state, currentProjectId: projectId }));
-		return withLoading(_update, async () => {
-			// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
-			const [hooksData, globalPluginHooks, projectPluginHooks] = await Promise.all([
+		// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
+		return latestLoad(
+			seq,
+			() => Promise.all([
 				api.getProjectHooks(projectId),
 				api.getPluginHooks(),
 				api.getProjectPluginHooks(projectId)
-			]);
-
+			]),
 			// Combine global and project plugin hooks
-			const pluginHooks = [...globalPluginHooks, ...projectPluginHooks];
-
-			_update((state) => ({ ...state, hooks: hooksData, pluginHooks }));
-		}, 'Failed to load hooks');
+			(state, [hooksData, globalPluginHooks, projectPluginHooks]) => ({
+				...state,
+				hooks: hooksData,
+				pluginHooks: [...globalPluginHooks, ...projectPluginHooks]
+			}),
+			'Failed to load hooks'
+		);
 	},
 
 	// ========================================================================
@@ -265,20 +277,11 @@ export const hooks = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
+		_loadSeq++;
 		_state = { ...initialState };
 		_notifySubscribers();
 	},
 
-	/**
-	 * Set current project (for switching without reloading)
-	 */
-	setCurrentProject(projectId: string | null): void {
-		_update((state) => ({
-			...state,
-			currentProjectId: projectId,
-			hooks: projectId === state.currentProjectId ? state.hooks : []
-		}));
-	}
 };
 
 // ============================================================================
@@ -310,7 +313,6 @@ export const hookStats = createDerived(() => {
 	let totalProject = 0;
 	let bash = 0;
 	let webhook = 0;
-	let message = 0;
 
 	for (const h of _state.hooks) {
 		if (h.enabled) totalEnabled++;
@@ -318,7 +320,6 @@ export const hookStats = createDerived(() => {
 		else totalProject++;
 		if (h.hook_type === 'bash') bash++;
 		else if (h.hook_type === 'webhook') webhook++;
-		else if (h.hook_type === 'message') message++;
 	}
 
 	return {
@@ -327,6 +328,6 @@ export const hookStats = createDerived(() => {
 		totalApp,
 		totalProject,
 		totalPlugin: _state.pluginHooks.length,
-		byType: { bash, webhook, message }
+		byType: { bash, webhook }
 	};
 });

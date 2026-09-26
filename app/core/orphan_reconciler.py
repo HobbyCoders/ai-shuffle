@@ -3,17 +3,17 @@ Self-healing reconciler for orphaned sessions.
 
 Background
 ----------
-A session row links to its Claude SDK transcript via ``sessions.sdk_session_id``.
-That id is captured from the SDK ``init`` message early in a turn but, prior to
-the persist-on-init fix in ``query_engine.py``, was only written to the row at
+A session row links to its Claude transcript via ``sessions.sdk_session_id``.
+That id is captured from the ``init`` message early in a turn but, before the
+persist-on-init fix in ``query_engine.py``, was only written to the row at
 end-of-turn inside ``_persist_turn_results``. If a turn crashed mid-stream
 (typically an **OOM/SIGKILL during a subagent fan-out**), the WS handler's
 ``except`` early-``return`` skipped that write and left ``sdk_session_id`` NULL.
 
-In ``SESSION_STORE_MODE=postgres_only`` the history endpoints read the transcript
-**only** from ``session_store_entries`` keyed by ``sdk_session_id``. A NULL link
-therefore renders the chat blank even though the full transcript is sitting in
-the store — the session is *orphaned*, not lost.
+The store-backed history read looks the transcript up in
+``session_store_entries`` by ``sdk_session_id``. A NULL link therefore renders
+the chat blank even though the full transcript is sitting in the store — the
+session is *orphaned*, not lost.
 
 The persist-on-init fix prevents new orphans. This reconciler heals ones that
 already happened (and any that slip through), by re-attaching the orphaned
@@ -25,7 +25,7 @@ Matching strategy (conservative — never mis-link)
 For each session with ``sdk_session_id IS NULL`` we look for unlinked main-thread
 transcripts (``subpath IS NULL``, not referenced by any session row) whose first
 store entry was written within a tight window after the session's ``created_at``
-(the SDK ``init`` lands within a second or two of the turn starting). We only
+(the ``init`` lands within a second or two of the turn starting). We only
 auto-link when there is **exactly one** candidate in the window. Zero candidates
 → a genuinely empty session (opened, never produced a turn). More than one →
 ambiguous; we log a warning and leave it for manual review rather than risk
@@ -41,7 +41,7 @@ from app.db.base import get_db, get_cursor
 logger = logging.getLogger(__name__)
 
 # How long after a session's created_at the orphaned transcript's first entry
-# may appear. The SDK init lands within ~1-2s; a generous window is fine because
+# may appear. The init lands within ~1-2s; a generous window is fine because
 # the exactly-one-candidate rule is what actually guards against mis-linking.
 DEFAULT_WINDOW_SECONDS = 120
 
@@ -52,19 +52,18 @@ DEFAULT_WINDOW_SECONDS = 120
 # yet) is younger. Without this floor the reconciler "heals" healthy running
 # sessions — and because the timing heuristic can match the SAME live transcript
 # to two young sessions created seconds apart, it double-relinks them to one
-# sdk_session_id. PR #477's init-time early link starves this for the app's own
+# sdk_session_id. The init-time early link starves this for the app's own
 # query paths; the floor + in-sweep/DB uniqueness below defend the reconciler
 # itself.
 MIN_SESSION_AGE_SECONDS = 60
 
-# ─── Inconclusive-result memo (F6) ────────────────────────────────────────
+# ─── Inconclusive-result memo ─────────────────────────────────────────────
 #
 # The overwhelming majority of NULL-link sessions are not orphans at all: they
 # are sessions that were opened and never produced a turn. They stay NULL
-# forever, so every sweep re-examined every one of them — and the examination is
-# an aggregation over the whole session store. On the old 5-minute cadence that
-# was the heaviest recurring query on the box, repeated for 14 days per session,
-# to re-derive the same "no candidates" answer every time.
+# forever, and examining one is an aggregation over the whole session store.
+# Re-examining every one of them on every sweep re-derives the same
+# "no candidates" answer every time.
 #
 # We therefore remember which session ids came back INCONCLUSIVE ("none" or
 # "ambiguous") and skip them until the memo entry ages out. Two properties make
@@ -144,14 +143,13 @@ def find_orphan_candidates(
     drops sessions whose last examination was inconclusive and is still inside
     ``MEMO_TTL_SECONDS`` — see the memo notes above.
 
-    COST (F6): the unlinked-transcript aggregation runs ONCE per call, over the
+    COST: the unlinked-transcript aggregation runs ONCE per call, over the
     union of every examined session's match window, and its rows are then
-    assigned to individual sessions in Python. It used to run once PER NULL
-    session with the per-session window inlined into ``HAVING``. The two are
-    equivalent — the per-session ``HAVING`` was a filter on ``min(created_at)``,
-    which is exactly what the Python assignment now applies — but the rewrite
-    turns N aggregations over ``session_store_entries`` into one. When every
-    NULL session is memoized, the aggregation is skipped entirely.
+    assigned to individual sessions in Python. That is equivalent to one
+    aggregation per NULL session with a ``HAVING`` filter on
+    ``min(created_at)``, but runs one aggregation over ``session_store_entries``
+    instead of N. When every NULL session is memoized, the aggregation is
+    skipped entirely.
     """
     results: List[Dict[str, Any]] = []
     with get_db() as conn:
@@ -246,8 +244,8 @@ def find_orphan_candidates(
 def _in_window(first_at: Any, created: Any, window_seconds: int) -> bool:
     """``created - 2s <= first_at <= created + window_seconds``.
 
-    Mirrors the SQL ``HAVING ... BETWEEN`` the per-session query used to run, so
-    the single-aggregation rewrite selects exactly the same candidate sets.
+    The same bound a per-session SQL ``HAVING ... BETWEEN`` would apply, so the
+    single aggregation selects exactly the per-session candidate sets.
     """
     try:
         delta = (first_at - created).total_seconds()

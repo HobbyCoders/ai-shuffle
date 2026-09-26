@@ -1,21 +1,15 @@
 """Shared filtering for internal/transient system-message subtypes.
 
-The Claude Agent SDK persists some system messages into the session
-JSONL/DB even though they are NOT rendered as standalone system cards
-during live streaming. During live streaming these subtypes are routed
-into other UI elements (thinking-token counter, subagent progress) rather
-than rendered as system cards:
+Some system-message subtypes are never shown as standalone system cards:
 
-  - ``thinking_tokens`` — routed to the live thinking-block token counter
-    via ``update_thinking_tokens`` (commit d30ed9c8).
-  - ``task_progress`` — routed to its parent subagent's progress via
-    ``update_subagent_progress``.
+  - ``thinking_tokens`` — live thinking-token estimates.
+  - ``task_progress`` — a subagent's progress updates.
 
-On history reload, the loaders (DB + JSONL) replay every persisted system
-entry, so without filtering these would appear as raw JSON system cards
-(the frontend ``SystemMessage.svelte`` does not mark them hidden by their
-own subtype). Filtering them here on load makes reload match live
-behavior exactly.
+The live stream drops them (``query_engine`` adds this set to its
+suppressed subtypes), but persisted transcripts and older DB rows can
+still carry them. The history loaders (DB, JSONL, backfill) replay every
+persisted system entry, so they filter these subtypes here to make reload
+match live behavior.
 
 This is deliberately conservative: only subtypes that are provably
 routed-and-returned during live streaming are listed. Legitimately shown

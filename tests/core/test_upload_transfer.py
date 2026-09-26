@@ -19,21 +19,6 @@ from app.db import upload_blobs as upload_blobs_db
 
 
 @pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
-
-@pytest.fixture
 def project_dir(tmp_path):
     d = tmp_path / "proj"
     (d / "uploads").mkdir(parents=True)

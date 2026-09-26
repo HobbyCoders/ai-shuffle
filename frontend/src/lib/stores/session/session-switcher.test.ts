@@ -44,7 +44,6 @@ vi.mock('./v2/feed-controller', () => ({
 		start: vi.fn(),
 		stop: vi.fn(),
 		isFeeding: vi.fn(() => false),
-		currentSessionId: vi.fn(() => null),
 		// Transcript cache (S2): switchSession primes its single update from
 		// whatever the controller has cached for the target. Default = cache miss,
 		// i.e. the full-replay behaviour these isolation tests assert; the cache

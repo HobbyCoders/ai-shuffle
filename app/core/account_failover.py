@@ -10,14 +10,14 @@ out and a new one in — deliberately manual.
 What survives:
 
 * limit detection (:func:`is_usage_limit_error`), and
-* the user-facing notification (:func:`_notify`): on a limit we surface a clear
-  "rate-limited — wait for the window to reset or sign into a different account"
-  state (OC-4) with NO auto-rotation.
+* the user-facing notification (:func:`_notify`): on a subscription's limit we
+  surface a clear "rate-limited — wait for the window to reset or sign into a
+  different account" state (OC-4) with NO auto-rotation; an API key's 429 gets a
+  plain "rate limited by the provider" notice (no window to wait for).
 
 :func:`attempt_failover` is kept as the single seam every caller already invokes
 (the streaming SSE wrapper, ``turn_scheduler``, and
-:func:`execute_query_with_failover`); it now only emits that notification and
-always returns ``retry=False`` so each caller's retry loop terminates at once.
+:func:`execute_query_with_failover`); it only emits that notification.
 
 Cross-install note: an offloaded / cloud turn runs this seam on the WORKER
 install (the machine that actually spawns the SDK subprocess).
@@ -29,8 +29,7 @@ a realized 429.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +53,8 @@ def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Failover decision + execution
+# Rate-limited notification
 # ---------------------------------------------------------------------------
-
-@dataclass
-class FailoverDecision:
-    retry: bool
-    account_id: Optional[str] = None
-    account_name: Optional[str] = None
-    switched: bool = False
 
 
 async def _notify(
@@ -88,35 +80,72 @@ async def _notify(
         logger.debug("account_failover notification emit failed", exc_info=True)
 
 
+USAGE_LIMIT_MESSAGE = (
+    "Usage limit reached — wait for the window to reset or sign into a "
+    "different account."
+)
+RATE_LIMIT_MESSAGE = (
+    "Rate limited by the provider (HTTP 429). The request was retried and "
+    "still refused; try again shortly."
+)
+
+
+def _is_subscription_session(session_id: Optional[str]) -> bool:
+    """Whether the session runs on a subscription login, whose 429 is a usage
+    window (Claude plan limits, Codex or SuperGrok limits), rather than on an
+    API key, whose 429 is an ordinary rate or token limit.
+
+    The session's bound provider row decides (``sessions.provider_id``,
+    classified like ``fluid_credentials``: a ChatGPT/Grok row or a subscription
+    ``auth_mode``). With no row the turn ran on Claude, and this worker's
+    Claude auth mode decides. Any lookup failure keeps the usage-limit wording,
+    the historic default.
+    """
+    try:
+        from app.db import database
+
+        row = database.get_session(session_id) if session_id else None
+        provider_id = (row or {}).get("provider_id")
+        if provider_id:
+            from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
+
+            provider = database.get_model_provider(provider_id, include_token=False) or {}
+            ptype = (provider.get("provider_type") or "").strip().lower()
+            mode = (provider.get("auth_mode") or "").strip().lower()
+            return ptype in ("chatgpt", "grok") or mode in _SUBSCRIPTION_AUTH_MODES
+        from app.core import claude_auth_mode
+
+        return claude_auth_mode.current_mode() != claude_auth_mode.MODE_API_KEY
+    except Exception:  # noqa: BLE001 — classification must never break the seam
+        logger.debug("account_failover: 429 classification failed", exc_info=True)
+        return True
+
+
 async def attempt_failover(
     session_id: Optional[str],
     api_user_id: Optional[str],
-    attempted: Set[str],
-) -> FailoverDecision:
+) -> None:
     """Native automatic account failover was RETIRED (OC-1).
 
     On a usage-limit 429 we no longer rotate to another saved account. Surface a
     clear rate-limited state (OC-4) and let the turn end — the user waits for the
-    window to reset or signs into a different account. Always returns
-    ``retry=False`` so every caller's retry loop terminates immediately.
-
-    ``attempted`` is accepted for call-site compatibility and is ignored (there
-    is nothing to fail over to).
+    window to reset or signs into a different account. A 429 on an API key
+    (OpenRouter, Groq, xAI, a custom row, Claude in API-key mode) has no usage
+    window: it gets the plain rate-limit notice instead.
     """
+    from app.db.async_database import run_sync
+
+    subscription = await run_sync(_is_subscription_session, session_id)
     await _notify(
         api_user_id, session_id,
         severity="warning",
-        message=(
-            "Usage limit reached — wait for the window to reset or sign into a "
-            "different account."
-        ),
+        message=USAGE_LIMIT_MESSAGE if subscription else RATE_LIMIT_MESSAGE,
     )
     logger.info(
         "Usage limit hit for session %s — automatic account failover retired; "
         "not rotating accounts (user waits or switches manually).",
         session_id,
     )
-    return FailoverDecision(retry=False)
 
 
 async def execute_query_with_failover(**kwargs) -> Dict[str, Any]:
@@ -136,7 +165,5 @@ async def execute_query_with_failover(**kwargs) -> Dict[str, Any]:
 
     result = await execute_query(**kwargs)
     if is_usage_limit_error(result.get("metadata")):
-        await attempt_failover(
-            result.get("session_id"), kwargs.get("api_user_id"), set()
-        )
+        await attempt_failover(result.get("session_id"), kwargs.get("api_user_id"))
     return result

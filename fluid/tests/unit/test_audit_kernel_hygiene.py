@@ -249,7 +249,7 @@ class _MiniLoop:
 
 
 def _edit_registry():
-    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.inproc import tool
     from fluid.tools.registry import ToolRegistry
 
     @tool("Read", "Read a file.",

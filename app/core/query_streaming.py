@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 # Use centralized constants from config (can be overridden via env vars)
 MAX_TOOL_OUTPUT_SIZE = settings.max_tool_output_chars
 MAX_DISPLAY_OUTPUT_SIZE = settings.max_display_output_chars
-DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 
 _USAGE_TOKEN_KEYS = (

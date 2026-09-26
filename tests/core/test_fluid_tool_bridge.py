@@ -13,7 +13,6 @@ state), so two sessions' same-named servers must not collide.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -136,7 +135,7 @@ def test_register_recorded_sdk_servers_applies_risk_maps():
     cron_delete = registry.get("mcp__builtins__CronDelete")
     gateway = registry.get("mcp__builtins__gateway_slack_send")
     assert monitor is not None and cron_delete is not None and gateway is not None
-    assert monitor.risk == "safe"
+    assert monitor.risk == "write"
     assert cron_delete.risk == "destructive"  # from BUILTINS_RISK_MAP
     assert gateway.risk == "write"  # dynamic gateway tool → server default
 
@@ -248,7 +247,7 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
         if server == "builtins":
             from app.core.config import settings
             from app.mcp.builtin_tools import _build_memory_bridge_tools
-            from claude_agent_sdk import tool
+            from fluid.tools.inproc import tool
 
             # Building these tool objects does not execute their handlers or
             # open a store. Conversation-history registration is covered by

@@ -8,6 +8,7 @@ Covers the three deliverable test areas:
 
 from tests.conftest import async_twin
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -520,7 +521,8 @@ async def test_watchdog_cooldown_blocks_immediate_renudge(mock_db, monkeypatch):
 def _clock(monkeypatch, wakeup_service, start=1_000.0):
     """Patch wakeup_service's monotonic clock; returns a setter for "now"."""
     state = {"now": start}
-    monkeypatch.setattr(wakeup_service.time, "monotonic", lambda: state["now"])
+    # Module-local clock: patching stdlib time.monotonic would freeze the loop clock too.
+    monkeypatch.setattr(wakeup_service, "time", SimpleNamespace(monotonic=lambda: state["now"]))
     return state
 
 

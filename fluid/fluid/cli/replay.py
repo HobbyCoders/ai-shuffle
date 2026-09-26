@@ -1,4 +1,4 @@
-"""The anchor-replay runner — headless, isolated, bounded (Phase 2.1/2.2).
+"""The anchor-replay runner — headless, isolated, bounded.
 
 Replays run **in-process** through the same recipe the subagent host uses
 (:meth:`fluid.cli.host.CliHost._run_child`): build an engine, submit one
@@ -37,6 +37,7 @@ from typing import Any
 from fluid.codemode.anchors import Anchor, ReplayOutcome, evaluate_checks
 from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
 from fluid.config.model import HarnessConfig, ToolsConfig
+from fluid.context.guidance import guidance_dir
 from fluid.events.model import (
     ErrorEvent,
     Interrupted,
@@ -73,9 +74,7 @@ class AnchorRunner:
         self._timeout = timeout
         # Where the *current* guidance files live (staging copies from here).
         self._guidance_source = (
-            guidance_source
-            if guidance_source is not None
-            else Path.home() / ".fluid" / "guidance"
+            guidance_source if guidance_source is not None else guidance_dir()
         )
 
     async def replay(
@@ -155,12 +154,12 @@ class AnchorRunner:
         if getattr(proposal, "kind", None) != "guidance":
             return None
         home = stage / "home"
-        guidance_dir = home / ".fluid" / "guidance"
-        guidance_dir.mkdir(parents=True)
+        staged = guidance_dir(home)
+        staged.mkdir(parents=True)
         if self._guidance_source.is_dir():
             for path in self._guidance_source.glob("*.md"):
-                shutil.copy(path, guidance_dir / path.name)
-        (guidance_dir / f"{proposal.target}.md").write_text(
+                shutil.copy(path, staged / path.name)
+        (staged / f"{proposal.target}.md").write_text(
             proposal.content, encoding="utf-8"
         )
         return home
@@ -172,6 +171,7 @@ class AnchorRunner:
         guidance_home: Path | None,
     ) -> ReplayOutcome:
         from fluid.cli.config import resolved_prompt
+        from fluid.cli.host import final_assistant_text
         from fluid.config.loader import build_engine
         from fluid.store import MemoryStore
 
@@ -218,20 +218,9 @@ class AnchorRunner:
                         status, error = "error", event.message
                         break
             await engine.wait_turn()
-            final_text = ""
-            try:
-                nodes = await store.load_path(meta.session_id)
-            except Exception:  # noqa: BLE001
-                nodes = []
-            for node in reversed(nodes):
-                if node.message.role == "assistant":
-                    text = node.message.text().strip()
-                    if text:
-                        final_text = text
-                        break
             return ReplayOutcome(
                 status=status,
-                final_text=final_text,
+                final_text=await final_assistant_text(store, meta.session_id),
                 tool_calls=tuple(tool_calls),
                 error=error,
             )

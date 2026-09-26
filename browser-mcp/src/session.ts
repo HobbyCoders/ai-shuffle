@@ -16,6 +16,7 @@ import type { Page, Locator, ConsoleMessage, Response, CDPSession } from "playwr
 import { BrowserManager, BrowserRestartingError } from "./browser.js";
 import { RefRegistry, STALE_REF_REMEDY, isRefToken } from "./refs.js";
 import {
+  maskSecretValues,
   renderSnapshot,
   type SnapshotRenderOptions,
 } from "./snapshot.js";
@@ -79,6 +80,42 @@ export interface AppliedViewport {
  * settle on its own — we cannot cancel an in-flight evaluate — but the caller is
  * unblocked. The timer is always cleared so the process can exit cleanly.
  */
+/**
+ * Current values of every password input in every frame (open shadow roots
+ * included), for {@link maskSecretValues}. Best effort per frame: a frame that
+ * is navigating or detached contributes nothing.
+ */
+export async function passwordValues(page: Page): Promise<string[]> {
+  let frames;
+  try {
+    frames = page.frames();
+  } catch {
+    return [];
+  }
+  const perFrame = await Promise.all(
+    frames.map((frame) =>
+      raceWithTimeout(
+        frame.evaluate(() => {
+          const out: string[] = [];
+          const visit = (root: Document | ShadowRoot): void => {
+            for (const el of Array.from(root.querySelectorAll("input"))) {
+              if (el.type === "password" && el.value) out.push(el.value);
+            }
+            for (const el of Array.from(root.querySelectorAll("*"))) {
+              if (el.shadowRoot) visit(el.shadowRoot);
+            }
+          };
+          visit(document);
+          return out;
+        }),
+        2000,
+        "password scan timed out",
+      ).catch(() => [] as string[]),
+    ),
+  );
+  return perFrame.flat();
+}
+
 export function raceWithTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -377,6 +414,10 @@ export class Session {
       throw err;
     }
 
+    // Only a snapshot that shows a textbox value can carry a password.
+    if (/^\s*- textbox\b.*: \S/m.test(rawYaml)) {
+      rawYaml = maskSecretValues(rawYaml, await passwordValues(page));
+    }
     const rendered = renderSnapshot(rawYaml, renderOpts);
     const snapshot_id = this.refs.registerSnapshot(rendered.refs, Boolean(scopeRef));
     return {

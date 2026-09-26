@@ -60,6 +60,16 @@ from fluid.store.base import MemoryStore
 SID = "ses_test"
 
 
+@pytest.fixture(autouse=True)
+def _claude_cli_on_path(monkeypatch):
+    """Delegated connects here never spawn the CLI, but connect resolves it and
+    raises when no ``claude`` is on PATH (CI has none). The resolver itself is
+    covered in tests/core/test_claude_cli_resolver.py."""
+    monkeypatch.setattr(
+        "app.core.provider.harness_adapter._resolve_claude_cmd", lambda: ["claude"]
+    )
+
+
 # ─── Fakes ────────────────────────────────────────────────────────────────────
 
 
@@ -220,6 +230,23 @@ async def test_translation_table():
     assert got[13].total_cost_usd == 0.01
     assert got[13].usage == {"input_tokens": 10}
     assert len(got) == 14  # nothing after the terminal event
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_status_reaches_the_app():
+    """The CLI's verdict rides the RateLimitInfo: a ``rejected`` window with no
+    utilization must still say so; an event without a verdict reads allowed."""
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", resets_at="1900000000", status="rejected"),
+        lm.RateLimit(session_id=SID, kind="seven_day", utilization=0.2),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+           if isinstance(e, RateLimitEvent)]
+    assert [(e.rate_limit_info.rate_limit_type, e.rate_limit_info.status,
+             e.rate_limit_info.utilization) for e in got] == [
+        ("five_hour", "rejected", None), ("seven_day", "allowed", 0.2),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1417,6 +1444,66 @@ async def test_send_resume_carries_the_turn_source():
     adapter.set_turn_source("resume")
     await adapter.send_resume()
     assert isinstance(submitted[0], Resume) and submitted[0].source == "user"
+
+
+@pytest.mark.asyncio
+async def test_send_resume_continues_after_a_reply_cut_off_by_a_provider_error():
+    """Regression (R10-11): a retriable in-stream error after text left the
+    kept partial reply at the head, and Retry (``send_resume``) over a real
+    NativeLoop ended with "nothing to resume" instead of re-running the
+    prompt. A completed reply still has nothing to resume."""
+    from fluid.engine.native import NativeLoop
+
+    def _text(text: str) -> list:
+        return [
+            StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": text}),
+        ]
+
+    calls = 0
+
+    class _FailsOnceMidReply:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            nonlocal calls
+            calls += 1
+            for chunk in _text("Half an ans" if calls == 1 else "The full answer"):
+                yield chunk
+            if calls == 1:
+                yield StreamChunk("error", {"message": "Overloaded", "retriable": True,
+                                            "status": 529})
+                return
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {"output_tokens": 3},
+                                        "stop_reason": "end_turn"})
+
+    loop = NativeLoop(provider=_FailsOnceMidReply(), store=MemoryStore(), model="fake")
+    adapter = _adapter_with(loop)
+    await loop._ensure_session()
+
+    await adapter.send_query("question")
+    failed = await _collect(adapter)
+    assert isinstance(failed[-1], ResultMessage) and failed[-1].api_error_status == 529
+
+    await loop.wait_turn()
+    await adapter.send_resume()
+    retried = await _collect(adapter)
+    assert isinstance(retried[-1], ResultMessage) and not retried[-1].is_error
+    assert calls == 2
+    path = await loop.store.load_path(loop.session_id)
+    assert [n.message.role for n in path] == ["user", "assistant"]
+    assert path[-1].message.text() == "The full answer"
+
+    # The answer is complete now: another Retry has nothing to continue.
+    await loop.wait_turn()
+    await adapter.send_resume()
+    refused = await _collect(adapter)
+    assert refused[-1].is_error and "nothing to resume" in refused[-1].result
+    assert calls == 2
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio
@@ -3884,7 +3971,6 @@ from app.core.provider.harness_adapter import (
     _native_max_output_tokens,
     _normalize_mcp_config_for_fluid,
     _positive_int,
-    _prune_duplicate_plugin_mcp_servers as ha_prune,
 )
 
 _HA_LOGGER = "app.core.provider.harness_adapter"
@@ -3906,7 +3992,9 @@ def test_normalize_mcp_http_config_becomes_streamable_http():
     assert cfg == {"type": "http", "url": "https://example.test/mcp"}
 
 
-def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
+def test_normalize_mcp_http_headers_are_kept(caplog):
+    # fluid's HTTP transport sends per-server headers, so they pass through
+    # without a warning.
     cfg = {
         "type": "http",
         "url": "https://example.test/mcp",
@@ -3917,10 +4005,8 @@ def test_normalize_mcp_http_headers_warn_but_still_connect(caplog):
 
     assert out is not None
     assert out["transport"] == "streamable_http"
-    assert any(
-        "authed" in r.getMessage() and "headers" in r.getMessage().lower()
-        for r in caplog.records
-    )
+    assert out["headers"] == {"Authorization": "Bearer x"}
+    assert not any("authed" in r.getMessage() for r in caplog.records)
 
 
 def test_normalize_mcp_sse_config_is_skipped_with_warning(caplog):
@@ -4023,82 +4109,6 @@ async def test_delegated_leg_never_connects_external_mcp(monkeypatch):
     assert set(calls) == {"local", "remote"}
 
 
-class _PluginMcpLoop(_CapturingLoop):
-    """A NativeLoop that did what fluid does: merged an enabled plugin's MCP
-    servers into its own lazy-connect set at construction time."""
-
-    plugin_servers: dict = {
-        "chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp"]},
-        "plugin-only": {"command": "npx", "args": ["other"]},
-    }
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._mcp_servers = dict(kwargs.get("mcp_servers") or {})
-        for name, cfg in type(self).plugin_servers.items():
-            if name in self._mcp_servers:
-                continue
-            self._mcp_servers[name] = cfg
-
-
-def test_prune_duplicate_plugin_mcp_servers_is_name_keyed_and_app_wins(caplog):
-    engine = _types.SimpleNamespace(
-        _mcp_servers={"chrome-devtools": {"command": "npx"}, "solo": {"command": "x"}}
-    )
-    with caplog.at_level(_logging.WARNING, logger=_HA_LOGGER):
-        dropped = ha_prune(engine, {"chrome-devtools": {"command": "app-side"}})
-
-    assert dropped == ["chrome-devtools"]
-    assert set(engine._mcp_servers) == {"solo"}
-    assert any("chrome-devtools" in r.getMessage() for r in caplog.records)
-
-
-def test_prune_duplicate_plugin_mcp_servers_no_op_cases():
-    """No app servers, no plugin servers, or an engine without the attribute at
-    all (delegated leg / a future fluid) — all inert, never raising."""
-    engine = _types.SimpleNamespace(_mcp_servers={"solo": {"command": "x"}})
-    assert ha_prune(engine, None) == []
-    assert ha_prune(engine, {}) == []
-    assert ha_prune(_types.SimpleNamespace(), {"solo": {}}) == []
-    assert set(engine._mcp_servers) == {"solo"}
-
-
-@pytest.mark.asyncio
-async def test_connect_drops_plugin_mcp_servers_the_app_already_connected(
-    monkeypatch, tmp_path
-):
-    """A plugin server whose name matches an app-configured one must not be
-    connected a second time: the app connects its servers eagerly onto the
-    shared registry, so fluid's own host-wins check (which only sees servers
-    passed as mcp_servers=) cannot see the collision."""
-    import app.core.provider.harness_adapter as ha
-
-    connected: list = []
-
-    async def fake_connect_mcp(self, name, config):
-        connected.append(name)
-        return []
-
-    monkeypatch.setattr(ha.ToolRegistry, "connect_mcp", fake_connect_mcp)
-    monkeypatch.setattr(ha, "NativeLoop", _PluginMcpLoop)
-    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
-
-    adapter = ha.HarnessAdapter()
-    await adapter.connect(
-        SessionOptions(
-            model="gpt-4o",
-            cwd=str(tmp_path),
-            extra={"fluid_provider": "openai_responses"},
-            mcp_servers={"chrome-devtools": {"command": "app-configured"}},
-        )
-    )
-
-    # The app connected its own copy...
-    assert connected == ["chrome-devtools"]
-    # ...and the engine's lazy set keeps only the plugin server nobody owns.
-    assert set(adapter._engine._mcp_servers) == {"plugin-only"}
-
-
 @pytest.mark.asyncio
 async def test_connect_native_leg_keeps_provider_settings_inert(monkeypatch, tmp_path):
     """Native sessions never activate provider-home env or permission rules."""
@@ -4176,11 +4186,25 @@ async def test_max_turns_becomes_model_call_budget(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_native_get_usage_receives_the_cache_only_host_callback(monkeypatch, tmp_path):
+    """The callback is the cache-only snapshot, bound to this adapter's app
+    session so an API key's session is refused (app.api.usage)."""
+    import app.api.usage as usage_api
+
+    seen = []
+
+    async def _payload(session_id):
+        seen.append(session_id)
+        return {"available": False}
+
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(usage_api, "get_session_usage_payload", _payload)
+    monkeypatch.setattr(ha.HarnessAdapter, "_resolve_app_session_id", lambda self: "app-sess-1")
     captured = await _connect_capturing_native(monkeypatch, tmp_path)
     callback = captured["ctx"].extra.get("usage_snapshot")
-    from app.api.usage import get_cached_usage_payload
 
-    assert callback is get_cached_usage_payload
+    assert await callback() == {"available": False}
+    assert seen == ["app-sess-1"]
 
 
 @pytest.mark.asyncio
@@ -4910,7 +4934,7 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
     """The delegated bridge receives the same host-scoped Task contract."""
     from unittest.mock import patch as _patch
 
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     import app.mcp.builtin_tools as bt
     import app.core.agent_provider_models as agent_models
@@ -4932,7 +4956,7 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
         captured["tools"] = tools
         return {"name": name, "version": version, "tools": tools}
 
-    with _patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with _patch.object(sdk, "create_tool_server", side_effect=_spy):
         bt.create_builtin_tools_server(
             session_id="s-policy", profile_id="p", provider_id="or-1",
             model="openai/gpt-5",
@@ -5255,7 +5279,8 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
     """``aih_tool_allowlist`` is the surface channel through the projection
     shim. ``allowed_tools`` — the SDK's PERMISSION allowlist, full of MCP names
     and empty of builtins under a tools preset — must NOT become one: projecting
-    it would delete Read/Bash/Edit from every native session."""
+    it would delete Read/Bash/Edit from every native session. It rides as the
+    permission list, and in allow mode grants nothing off the surface."""
     from types import SimpleNamespace
 
     adapter, made = recording_adapter
@@ -5280,7 +5305,8 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
     await adapter.connect_with_sdk_options(sdk_options)
     assert made["delegated"]["allowed_tools"] == ["Read"]
     assert adapter._options.tool_allowlist == ["Read"]
-    assert adapter._options.allowed_tools is None
+    assert adapter._options.allowed_tools == ["mcp__builtins__Task", "mcp__ai-tools"]
+    assert made["delegated"]["permission_grants"] is None
 
 
 @pytest.mark.asyncio
@@ -5641,7 +5667,6 @@ def test_vendored_native_loop_accepts_the_restriction_kwargs():
     loop = _RealNative(
         provider=FakeProvider([]), store=MemoryStore(), model="fake",
         allowed_tools=["Read", "mcp__x__*"], disallowed_tools=["mcp__x__danger"],
-        claude_settings=False, claude_plugins=False, claude_agents=False,
     )
     assert loop._tool_permitted("Read") is True
     assert loop._tool_permitted("Bash") is False            # outside the allowlist
@@ -7085,6 +7110,34 @@ async def test_error_event_with_no_calls_still_bills_zero():
     assert result.num_turns == 0
 
 
+@pytest.mark.asyncio
+async def test_error_event_status_reaches_api_error_status():
+    """Regression: a native provider refusal reached the app as body text
+    only, so ``api_error_status`` stayed None and the rate-limited notice and
+    "provider returned HTTP N" handling never ran for native sessions."""
+    events = [lm.ErrorEvent(
+        session_id=SID, retriable=True, status=429,
+        message='{"error": {"message": "Rate limit reached", "type": "rate_limit"}}',
+        provider_message="Rate limit reached",
+    )]
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert isinstance(result, ResultMessage) and result.is_error
+    assert result.api_error_status == 429
+    assert result.errors == ["provider returned HTTP 429: Rate limit reached"]
+    assert result.result == "provider returned HTTP 429: Rate limit reached"
+
+
+@pytest.mark.asyncio
+async def test_error_event_without_status_keeps_its_message():
+    events = [lm.ErrorEvent(session_id=SID, message="stream truncated", retriable=False,
+                            provider_message="ignored without a status")]
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert result.api_error_status is None
+    assert result.errors == ["stream truncated"]
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Round-9 session audit (app half): prompt text, catalog, workspace card,
 # per-turn subagent roster.
@@ -7446,3 +7499,242 @@ def test_code_mode_examples_never_slice_an_unchecked_read():
         # Every bound Read result is tested for truth before it is used.
         for name in re.findall(r"(\w+) = Read\(", block):
             assert re.search(rf"if (not )?{name}\b", block), block
+
+
+# ── PROVIDER_* timeouts reach every native client the app builds ─────────────
+
+
+def _patch_provider_timeouts(monkeypatch, read, deadline, first_byte):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "provider_read_timeout", read)
+    monkeypatch.setattr(settings, "provider_stream_deadline", deadline)
+    monkeypatch.setattr(settings, "provider_first_byte_timeout", first_byte)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter", "openai_responses"])
+async def test_build_provider_client_env_fallback_carries_configured_timeouts(monkeypatch, kind):
+    import app.core.provider.harness_adapter as ha
+
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setenv(var, "test")
+    _patch_provider_timeouts(monkeypatch, 123.0, 456.0, 7.5)
+
+    client, http_client = await ha._build_provider_client(kind, SessionOptions(model="m"))
+
+    assert http_client is None
+    assert client._timeout == 123.0
+    assert client._stream_deadline == 456.0
+    if kind == "anthropic":
+        assert client._first_byte_timeout == 7.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("anthropic", None),
+        ("anthropic", "https://gateway.example"),
+        ("openrouter", None),
+        ("openrouter", "https://api.x.ai"),
+        ("openai_responses", None),
+    ],
+)
+async def test_build_provider_client_bound_row_carries_configured_timeouts(
+    monkeypatch, kind, base_url
+):
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 15.0)
+
+    client, http_client = await ha._build_provider_client(
+        kind, SessionOptions(model="m", extra={"provider_id": "prov-1"})
+    )
+    try:
+        assert client._timeout == 90.0
+        assert client._stream_deadline == 300.0
+        if kind == "anthropic":
+            assert client._first_byte_timeout == 15.0
+        if http_client is not None:
+            # An injected transport replaces the client's own, so it carries
+            # the configured read timeout too.
+            assert http_client.timeout.read == 90.0
+    finally:
+        if http_client is not None:
+            await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_zero_disables_deadline_and_first_byte(monkeypatch):
+    """0 disables the whole-call deadline and the first-byte bound (fluid's
+    None); a 0 read timeout keeps fluid's 600 s, since fluid cannot disable it."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    _patch_provider_timeouts(monkeypatch, 0.0, 0.0, 0.0)
+
+    client, _ = await ha._build_provider_client("anthropic", SessionOptions(model="m"))
+
+    assert client._timeout == 600.0
+    assert client._stream_deadline is None
+    assert client._first_byte_timeout is None
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_default_timeouts_match_fluid(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import Settings
+    from fluid.providers._transport import (
+        DEFAULT_FIRST_BYTE_TIMEOUT_S,
+        DEFAULT_STREAM_DEADLINE_S,
+    )
+
+    defaults = Settings.model_fields
+    _patch_provider_timeouts(
+        monkeypatch,
+        defaults["provider_read_timeout"].default,
+        defaults["provider_stream_deadline"].default,
+        defaults["provider_first_byte_timeout"].default,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    client, _ = await ha._build_provider_client("anthropic", SessionOptions(model="m"))
+
+    assert client._timeout == 600.0
+    assert client._stream_deadline == DEFAULT_STREAM_DEADLINE_S
+    assert client._first_byte_timeout == DEFAULT_FIRST_BYTE_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("openrouter", None),
+        ("openrouter", "https://api.x.ai"),
+        ("openai_responses", None),
+        ("openai_responses", "https://api.openai.example"),
+    ],
+)
+async def test_build_provider_client_first_byte_timeout_reaches_chat_and_responses(
+    monkeypatch, kind, base_url
+):
+    """Regression: PROVIDER_FIRST_BYTE_TIMEOUT reached the Anthropic client only,
+    so a silent OpenRouter / OpenAI-format / Responses server held a turn for
+    the whole read timeout. 0 disables it there too."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    for configured, expected in ((12.5, 12.5), (0.0, None)):
+        _patch_provider_timeouts(monkeypatch, 90.0, 300.0, configured)
+        for options in (
+            SessionOptions(model="m", extra={"provider_id": "prov-1"}),
+            SessionOptions(model="m"),
+        ):
+            client, http_client = await ha._build_provider_client(kind, options)
+            try:
+                assert client._first_byte_timeout == expected
+            finally:
+                if http_client is not None:
+                    await http_client.aclose()
+
+
+# ── A local server (Ollama, vLLM) gets the local first-byte bound, off by default ──
+
+_LOCAL_BASE_URLS = [
+    "http://localhost:11434",
+    "http://127.0.0.1:8000/v1",
+    "http://[::1]:8000",
+    "http://192.168.1.20:11434",
+    "http://10.0.0.5:8000/v1",
+    "http://172.17.0.1:11434",
+    "http://ollama.local:11434",
+    "http://host.docker.internal:11434",
+    "localhost:11434",
+]
+_REMOTE_BASE_URLS = ["https://api.x.ai", "https://openrouter.ai/api", "https://8.8.8.8", "https://local.example.com"]
+
+
+@pytest.mark.parametrize("base_url", _LOCAL_BASE_URLS, ids=_LOCAL_BASE_URLS)
+def test_is_local_base_url_true_for_local_servers(base_url):
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._is_local_base_url(base_url) is True
+
+
+@pytest.mark.parametrize("base_url", _REMOTE_BASE_URLS + ["", None], ids=_REMOTE_BASE_URLS + ["empty", "none"])
+def test_is_local_base_url_false_for_hosted_or_missing(base_url):
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._is_local_base_url(base_url) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,base_url",
+    [
+        ("openrouter", "http://localhost:11434"),
+        ("openrouter", "http://192.168.1.20:8000/v1"),
+        ("openai_responses", "http://127.0.0.1:8000"),
+        ("anthropic", "http://host.docker.internal:4000"),
+    ],
+    ids=["ollama-loopback", "vllm-lan", "responses-loopback", "anthropic-docker-host"],
+)
+async def test_local_server_row_has_no_first_byte_bound_by_default(monkeypatch, kind, base_url):
+    """Regression (R15-2): an OpenAI-format custom row on a local server got the
+    60 s first-byte bound, so a cold model load that holds the headers failed
+    the turn. It now follows PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL (0 = off), while
+    a hosted row keeps PROVIDER_FIRST_BYTE_TIMEOUT."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=base_url)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 60.0)
+    options = SessionOptions(model="m", extra={"provider_id": "prov-1"})
+
+    for local_setting, expected in ((0.0, None), (240.0, 240.0)):
+        monkeypatch.setattr(settings, "provider_first_byte_timeout_local", local_setting)
+        client, http_client = await ha._build_provider_client(kind, options)
+        try:
+            assert client._first_byte_timeout == expected
+            # Only the first-byte bound differs for a local server.
+            assert client._timeout == 90.0
+            assert client._stream_deadline == 300.0
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
+
+
+def test_provider_timeout_kwargs_hosted_row_keeps_the_global_bound(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+
+    _patch_provider_timeouts(monkeypatch, 90.0, 300.0, 45.0)
+    monkeypatch.setattr(settings, "provider_first_byte_timeout_local", 0.0)
+    assert ha._provider_timeout_kwargs("https://api.x.ai")["first_byte_timeout"] == 45.0
+    assert ha._provider_timeout_kwargs(None)["first_byte_timeout"] == 45.0
+    assert ha._provider_timeout_kwargs("http://localhost:11434")["first_byte_timeout"] is None
+
+
+def test_local_first_byte_setting_defaults_to_off_and_reads_env(monkeypatch):
+    from app.core.config import Settings
+
+    assert Settings.model_fields["provider_first_byte_timeout_local"].default == 0.0
+    monkeypatch.setenv("PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL", "180")
+    assert Settings(_env_file=None).provider_first_byte_timeout_local == 180.0

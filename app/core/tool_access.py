@@ -1,9 +1,8 @@
 """Tool-access resolution — ``tool_selection_mode`` is the runtime authority.
 
-Ruling T2 (tool access redesign, 2026-08-23). Before this module the runtime
-inferred intent from list emptiness, which made "Disable All Tools"
-(``allowed_tools: []``) read as *unrestricted* on every path that wrote
-``config.get("allowed_tools") or []``. The mode now says what it means:
+The runtime does not infer intent from list emptiness: that made "Disable All
+Tools" (``allowed_tools: []``) read as *unrestricted* on every path that wrote
+``config.get("allowed_tools") or []``. The mode says what it means:
 
 ===========  ==========================  =====================
 mode         allowed (SURFACE)           disallowed
@@ -27,10 +26,9 @@ match patterns the same way (``NativeLoop(allowed_tools=/disallowed_tools=)``),
 and ``tool_permitted`` below is the app-side equivalent used by the permission
 callback and by the delegated-leg subtraction.
 
-Kept deliberately free of app imports (no db, no SDK, no fluid) so the v82
-migration in ``app.db.database`` and the API layer can both use it without an
-import cycle. ``app.core.query_options`` re-exports ``resolve_tool_access`` and
-``ToolAccess`` because the plan names that module as their home.
+Kept deliberately free of app imports (no db, no fluid) so the v82 migration in
+``app.db.database`` and the API layer can both use it without an import cycle.
+``app.core.query_options`` re-exports ``resolve_tool_access`` and ``ToolAccess``.
 """
 
 from __future__ import annotations
@@ -43,15 +41,15 @@ from typing import Any, Dict, Iterable, List, Optional
 TOOL_SELECTION_MODES = ("all", "none", "allow", "disallow")
 
 # The deny-everything pattern. fluid matches it with fnmatch on both engines;
-# the pinned Claude CLI matches it too (its deny rules are glob-matched — see
-# the T4 note in ``app.core.provider.harness_adapter``).
+# the Claude Code CLI matches it too (its deny rules are glob-matched — see
+# ``harness_adapter._delegated_disallowed``).
 DENY_ALL = "*"
 
 
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
-# resolve a collision with a bare stub of the same name (issue #610).
+# resolve a collision with a bare stub of the same name.
 LEGACY_TOOL_ALIASES: Dict[str, str] = {
     "PushNotification": "mcp__builtins__NotifyDevices",
     "mcp__builtins__PushNotification": "mcp__builtins__NotifyDevices",
@@ -85,13 +83,9 @@ class ToolAccess:
     allowed: Optional[List[str]] = None
     disallowed: Optional[List[str]] = None
 
-    @property
-    def restricted(self) -> bool:
-        return bool(self.allowed) or bool(self.disallowed)
-
 
 def infer_tool_selection_mode(config: Dict[str, Any]) -> str:
-    """The mode a pre-T2 config was implicitly in, exactly as the old editor
+    """The mode an unstamped config was implicitly in, exactly as the old editor
     inferred it: ``[]`` → ``none``, a non-empty allow list → ``allow``, a
     non-empty deny list → ``disallow``, otherwise ``all``.
 
@@ -119,7 +113,7 @@ def tool_selection_mode(config: Dict[str, Any]) -> str:
 
 
 def resolve_tool_access(config: Optional[Dict[str, Any]]) -> ToolAccess:
-    """Resolve one agent config into ``ToolAccess`` (ruling T2).
+    """Resolve one agent config into ``ToolAccess``.
 
     The single seam both legs read. Legacy aliases are applied to whichever
     list survives.
@@ -134,8 +128,8 @@ def resolve_tool_access(config: Optional[Dict[str, Any]]) -> ToolAccess:
         allowed = apply_legacy_tool_aliases(config.get("allowed_tools") or [])
         if not allowed:
             # "Allow only selected" with nothing selected is a request for no
-            # tools. Degrading to unrestricted here is the exact bug T2 exists
-            # to kill.
+            # tools. Degrading to unrestricted here would silently grant every
+            # tool.
             return ToolAccess(allowed=None, disallowed=[DENY_ALL])
         return ToolAccess(allowed=allowed, disallowed=None)
 
@@ -178,7 +172,7 @@ def matches_any(name: str, patterns: Iterable[str]) -> bool:
 def intersect_tool_surfaces(
     first: Optional[Iterable[str]], second: Optional[Iterable[str]]
 ) -> Optional[List[str]]:
-    """Compose two tool SURFACES (ruling T3): the result is the narrower one.
+    """Compose two tool SURFACES: the result is the narrower one.
 
     Either side may be ``None`` ("unrestricted"), in which case the other is
     returned unchanged. When both name something, an entry survives if the
@@ -210,7 +204,7 @@ def intersect_tool_surfaces(
 
 def fold_legacy_tool_switches(config: Dict[str, Any]) -> Dict[str, Any]:
     """Fold the retired ``ai_tools`` / ``app_config_tools`` switches into the
-    lists (ruling T5), and stamp ``tool_selection_mode``. Returns a NEW dict;
+    lists, and stamp ``tool_selection_mode``. Returns a NEW dict;
     the caller decides whether anything changed.
 
     * ``ai_tools`` was a per-category enable map. In ``all``/``disallow`` mode

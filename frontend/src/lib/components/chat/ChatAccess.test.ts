@@ -3,7 +3,16 @@ import { cleanup, render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: m, getErrorMessage: (e: {detail?: string}) => e.detail ?? 'Unavailable' }));
-const accessAuth = vi.hoisted(() => ({current: {status: {preview_access: false}}}));
+const accessAuth = vi.hoisted(() => {
+ type Status = Record<string, unknown>;
+ const listeners = new Set<(state: {status: Status}) => void>();
+ const store = {
+  current: {status: {preview_access: false} as Status},
+  subscribe(fn: (state: {status: Status}) => void) { listeners.add(fn); fn(store.current); return () => { listeners.delete(fn); }; },
+  set(status: Status) { store.current = {status}; listeners.forEach(fn => fn(store.current)); },
+ };
+ return store;
+});
 vi.mock('$lib/stores/auth.svelte', () => ({auth: accessAuth}));
 import ChatAccess from './ChatAccess.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
@@ -17,7 +26,7 @@ function hidden(value: boolean) {
  document.dispatchEvent(new Event('visibilitychange'));
 }
 beforeEach(() => {
- vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current.status.preview_access = false;
+ vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current = {status: {preview_access: false}};
  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code' } : snapshot);
  m.post.mockResolvedValue({}); m.delete.mockResolvedValue({});
 });
@@ -57,11 +66,11 @@ describe('private-access recovery and live invalidations', () => {
   expect(accessCalls()).toHaveLength(1);
  });
 
- it('uses slow empty recovery, wakes on scoped events, and polls pending approvals promptly', async () => {
+ it('does not poll an empty snapshot, wakes on scoped events, and polls pending approvals promptly', async () => {
   render(ChatAccess, { sessionId: 's1' }); await flush();
-  await vi.advanceTimersByTimeAsync(29_999);
+  await vi.advanceTimersByTimeAsync(600_000);
   expect(accessCalls()).toHaveLength(1);
-  await vi.advanceTimersByTimeAsync(1);
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100);
   expect(accessCalls()).toHaveLength(2);
   snapshot = { ...empty(), actions: [{ id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'pwd'}, expires_at: 9999999999 }] };
   resourceSync.invalidate(['chat-access:other']); await vi.advanceTimersByTimeAsync(100);
@@ -89,8 +98,11 @@ describe('private-access recovery and live invalidations', () => {
   resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   expect(screen.queryByRole('textbox',{name:'Resource name'})).toBeNull();
   expect(screen.getByText('My folder')).toBeTruthy();
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(3);
+  // The broker announces grant expiry; no grant polling is needed.
   snapshot = empty();
-  await vi.advanceTimersByTimeAsync(2000); await tick();
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   expect(screen.queryByText('My folder')).toBeNull();
  });
  it('does not fetch private state for an unsupported persisted mode', async () => {
@@ -99,18 +111,17 @@ describe('private-access recovery and live invalidations', () => {
   await vi.advanceTimersByTimeAsync(300_000);
   expect(m.get).toHaveBeenCalledTimes(1); expect(accessCalls()).toHaveLength(0);
  });
- it('backs off persistent denial and retries on reconnect without bypassing authorization', async () => {
+ it('stops on persistent denial and retries on reconnect without bypassing authorization', async () => {
   m.get.mockImplementation(async (url: string) => {
    if (url.startsWith('/sessions/')) return { mode: 'chat' };
    throw { status: 403, detail: 'Denied' };
   });
   render(ChatAccess, {sessionId: 's1'}); await flush();
   expect(screen.getByRole('alert').textContent).toBe('Denied');
-  await vi.advanceTimersByTimeAsync(299_999); expect(accessCalls()).toHaveLength(1);
-  await vi.advanceTimersByTimeAsync(1); expect(accessCalls()).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(3_600_000); expect(accessCalls()).toHaveLength(1);
   m.get.mockResolvedValue(empty());
-  window.dispatchEvent(new Event('online')); await flush();
-  expect(accessCalls()).toHaveLength(3);
+  window.dispatchEvent(new Event('online')); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(accessCalls()).toHaveLength(2);
   expect(screen.queryByRole('alert')).toBeNull();
  });
  it('keeps denial backoff across broad and scoped resource events', async () => {
@@ -153,12 +164,25 @@ describe('private-access recovery and live invalidations', () => {
  it('does no hidden polling and catches up immediately on return or online', async () => {
   hidden(true); const view = render(ChatAccess, {sessionId: 's1'}); await flush();
   expect(m.get).not.toHaveBeenCalled();
-  hidden(false); await flush(); expect(accessCalls()).toHaveLength(1);
+  hidden(false); await vi.advanceTimersByTimeAsync(100); expect(accessCalls()).toHaveLength(1);
   hidden(true); resourceSync.invalidate(['chat-access:s1']);
   await vi.advanceTimersByTimeAsync(300_000); expect(accessCalls()).toHaveLength(1);
-  hidden(false); await flush(); expect(accessCalls()).toHaveLength(2);
-  window.dispatchEvent(new Event('online')); await flush(); expect(accessCalls()).toHaveLength(3);
+  hidden(false); await vi.advanceTimersByTimeAsync(100); expect(accessCalls()).toHaveLength(2);
+  window.dispatchEvent(new Event('online')); await vi.advanceTimersByTimeAsync(100); expect(accessCalls()).toHaveLength(3);
   view.unmount(); await vi.advanceTimersByTimeAsync(300_000); expect(accessCalls()).toHaveLength(3);
+ });
+ it('refreshes the saved list when another session saves or deletes a saved connection', async () => {
+  const saved = {id: 'c1', label: 'Build box', target: 'ops@10.0.0.5:22', fingerprint: 'SHA256:x'};
+  snapshot = {...empty(), saved_connections: [saved]};
+  render(ChatAccess, {sessionId: 's2'}); await flush();
+  expect(screen.getByText('Build box')).toBeTruthy();
+  // A delete in session s1 invalidates s1 and the owner-wide resource.
+  snapshot = empty();
+  resourceSync.invalidate(['chat-access:s1', 'chat-access']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(accessCalls()).toHaveLength(2);
+  expect(screen.queryByText('Build box')).toBeNull();
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(2);
  });
  it('keeps one follow-up when an access change arrives during a request', async () => {
   let finish!: (value: unknown) => void;
@@ -168,5 +192,78 @@ describe('private-access recovery and live invalidations', () => {
   expect(accessCalls()).toHaveLength(1);
   m.get.mockResolvedValue(empty()); finish(empty()); await flush();
   expect(accessCalls()).toHaveLength(2);
+ });
+});
+
+// Issue #1281: request counts over simulated time. Previously an empty snapshot
+// polled every 30 s, any grant/request/action every 2 s, and a denial every 300 s.
+describe('private-access request rate', () => {
+ const deny = () => m.get.mockImplementation(async (url: string) => {
+  if (url.startsWith('/sessions/')) return {mode: 'code'};
+  throw {status: 403, detail: 'Denied'};
+ });
+ const pending = () => ({...empty(), requests: [{id: 'r1', kind: 'folder', purpose: 'Read a file', expires_at: 9999999999}]});
+ it('empty: one request on mount, none over the next ten minutes', async () => {
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(1);
+  expect(sessionCalls()).toHaveLength(1);
+ });
+ it('grant only: no polling while access is active', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Folder', kind: 'folder', target: '/x', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(accessCalls()).toHaveLength(1);
+ });
+ it('denied (403): stops despite a two-second event stream until the sign-in changes', async () => {
+  deny();
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  for (let i = 0; i < 300; i++) {
+   resourceSync.invalidate(['sessions', 'chat-access', 'chat-access:s1']);
+   await vi.advanceTimersByTimeAsync(2000);
+  }
+  hidden(true); hidden(false); await vi.advanceTimersByTimeAsync(100);
+  expect(accessCalls()).toHaveLength(1);
+  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode: 'code'} : snapshot);
+  accessAuth.set({preview_access: false, authenticated: true, is_admin: true, username: 'owner'});
+  await flush();
+  expect(accessCalls()).toHaveLength(2);
+  expect(screen.queryByRole('alert')).toBeNull();
+ });
+ it('pending: polls 2 s doubling to a 30 s cap, and an event resets the interval', async () => {
+  snapshot = pending();
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  const at = (ms: number) => vi.advanceTimersByTimeAsync(ms).then(() => accessCalls().length);
+  // Mount, then +2, +4, +8, +16, +30 s safety polls.
+  expect(await at(60_000)).toBe(6);
+  // Steady state: two per minute.
+  expect(await at(60_000)).toBe(8);
+  resourceSync.invalidate(['chat-access:s1']);
+  expect(await at(100)).toBe(9);
+  expect(await at(2000)).toBe(10);
+  snapshot = empty();
+  expect(await at(4000)).toBe(11);
+  expect(await at(600_000)).toBe(11);
+ });
+ it('reconnect: a full invalidation checks the session and snapshot once each', async () => {
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect([sessionCalls().length, accessCalls().length]).toEqual([1, 1]);
+  // live-sync invalidates every resource on sync_ready and on return to the tab.
+  resourceSync.invalidate(); await vi.advanceTimersByTimeAsync(100);
+  expect([sessionCalls().length, accessCalls().length]).toEqual([2, 2]);
+  resourceSync.invalidate(); hidden(true); hidden(false); await vi.advanceTimersByTimeAsync(100);
+  expect([sessionCalls().length, accessCalls().length]).toEqual([3, 3]);
+ });
+ it('hidden tab: no requests while hidden, even for pending approvals or events', async () => {
+  snapshot = pending();
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  hidden(true);
+  for (let i = 0; i < 60; i++) {
+   resourceSync.invalidate(['sessions', 'chat-access:s1']);
+   await vi.advanceTimersByTimeAsync(10_000);
+  }
+  expect(accessCalls()).toHaveLength(1);
+  hidden(false); await vi.advanceTimersByTimeAsync(100);
+  expect([sessionCalls().length, accessCalls().length]).toEqual([2, 2]);
  });
 });

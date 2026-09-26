@@ -23,7 +23,6 @@ def clean_runtime():
 @pytest.mark.asyncio
 async def test_real_task_dispatch_producer_routes_only_aggregate_completion(agents, monkeypatch):
     from app.core import task_dispatch, provider_agent, turn_scheduler
-    from app.core.task_registry import task_registry
     _mk_session(agents, "swarm-parent", "root-agent")
     events, calls = [], []
     async def persist(snapshot):
@@ -58,7 +57,7 @@ async def test_real_task_dispatch_producer_routes_only_aggregate_completion(agen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("preserve_session", [True, False])
 async def test_pool_replacement_preserves_session_workflow(monkeypatch, preserve_session):
-    from claude_agent_sdk import ClaudeAgentOptions
+    from app.core.agent_types import AgentOptions
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.core.session_pool import SessionPool, SessionState, requires_reconnect
     from fluid.tools.registry import BackgroundTaskReceipt, ToolOutcome
@@ -71,7 +70,7 @@ async def test_pool_replacement_preserves_session_workflow(monkeypatch, preserve
     adapter._connected = True
     adapter._app_session_id = "replace-parent"
     state = SessionState(adapter=adapter, is_connected=True,
-                         connect_options=ClaudeAgentOptions(system_prompt="old"))
+                         connect_options=AgentOptions(system_prompt="old"))
     pool.put("replace-parent", state)
     monkeypatch.setattr(adapter, "is_alive", lambda: adapter._connected)
     monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "replace-parent")
@@ -102,7 +101,7 @@ async def test_pool_replacement_preserves_session_workflow(monkeypatch, preserve
     ]}, ToolCtx())
     key = snapshot["id"]
     await asyncio.wait_for(entered.wait(), 2)
-    assert requires_reconnect(state, ClaudeAgentOptions(system_prompt="changed"))
+    assert requires_reconnect(state, AgentOptions(system_prompt="changed"))
     # Install the replacement before completion delivery; removal pops the old
     # state synchronously, then yields to transport cleanup.
     engine.aclose.side_effect = lambda: pool.put("replace-parent", SessionState(

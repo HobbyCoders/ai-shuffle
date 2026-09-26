@@ -10,26 +10,9 @@ project-level gate at all.
 
 from unittest.mock import patch
 
-import pytest
-
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
 
 
 def _seed_admin_and_onboarding():

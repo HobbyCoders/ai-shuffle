@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from app.core import codex_oauth
+from tests.fakes.http import mock_transport_client
 
 
 # ---------------------------------------------------------------------------
@@ -27,11 +28,6 @@ def _make_id_token(claims: dict) -> str:
         raw = json.dumps(obj).encode()
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
     return f"{_seg({'alg': 'none'})}.{_seg(claims)}.sig"
-
-
-def _client(handler):
-    """An AsyncClient whose requests are served by ``handler`` (no network)."""
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +100,7 @@ class TestDeviceStart:
                 "expires_at": "2099-01-01T00:00:00Z",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             start = await codex_oauth.start_device_code(client=c)
 
         assert start.user_code == "WXYZ-1234"
@@ -124,7 +120,7 @@ class TestDeviceStart:
                 "code": "invalid_client",
             }})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.start_device_code(client=c)
         assert ei.value.code == "invalid_client"
@@ -133,7 +129,7 @@ class TestDeviceStart:
         def handler(request):
             return httpx.Response(400, json={"error": "invalid_client"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.start_device_code(client=c)
         assert ei.value.code == "invalid_client"
@@ -153,7 +149,7 @@ class TestDevicePoll:
                 "code": "deviceauth_authorization_pending",
             }})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthPending) as ei:
                 await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.slow_down is False
@@ -162,7 +158,7 @@ class TestDevicePoll:
         def handler(request):
             return httpx.Response(400, json={"error": {"code": "deviceauth_slow_down"}})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthPending) as ei:
                 await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.slow_down is True
@@ -171,7 +167,7 @@ class TestDevicePoll:
         def handler(request):
             return httpx.Response(400, json={"error": {"code": "access_denied"}})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.code == "access_denied"
@@ -186,7 +182,7 @@ class TestDevicePoll:
             return httpx.Response(400, json={"error": {
                 "code": "deviceauth_authorization_pending"}})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthPending):
                 await codex_oauth.poll_device_code(
                     "deviceauth_abc123", "verifier", "WXYZ-1234", client=c
@@ -205,7 +201,7 @@ class TestDevicePoll:
                 "access_token": "at-1", "refresh_token": "rt-1", "id_token": id_token,
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert bundle.access_token == "at-1"
         assert bundle.refresh_token == "rt-1"
@@ -237,7 +233,7 @@ class TestDevicePoll:
                 })
             return httpx.Response(404)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await codex_oauth.poll_device_code(
                 "dev", "local-fallback-verifier", "AAAA-BBBBB", client=c
             )
@@ -257,7 +253,7 @@ class TestDevicePoll:
                 })
             return httpx.Response(404)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await codex_oauth.poll_device_code(
                 "dev", "the-verifier", "AAAA-BBBBB", client=c
             )
@@ -279,7 +275,7 @@ class TestRefresh:
                 "access_token": "new-at", "refresh_token": "new-rt",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await codex_oauth.refresh_tokens("old-rt", client=c)
         assert bundle.access_token == "new-at"
         assert bundle.refresh_token == "new-rt"  # ROTATED
@@ -288,7 +284,7 @@ class TestRefresh:
         def handler(request):
             return httpx.Response(200, json={"access_token": "new-at"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await codex_oauth.refresh_tokens("old-rt", client=c)
         assert bundle.refresh_token == "old-rt"  # preserved, never dropped
 
@@ -299,7 +295,7 @@ class TestRefresh:
         def handler(request):
             return httpx.Response(400, json={"error": code})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.refresh_tokens("old-rt", client=c)
         assert ei.value.code == code
@@ -309,7 +305,7 @@ class TestRefresh:
         def handler(request):
             return httpx.Response(503, json={"error": "server_error"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.refresh_tokens("old-rt", client=c)
         assert ei.value.is_permanent is False
@@ -326,7 +322,7 @@ class TestRefresh:
                 "code": "refresh_token_invalidated",
             }})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.refresh_tokens("old-rt", client=c)
         assert ei.value.code == "refresh_token_invalidated"
@@ -339,7 +335,7 @@ class TestRefresh:
                 "error_description": "refresh token is not valid",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
                 await codex_oauth.refresh_tokens("old-rt", client=c)
         assert ei.value.code == "invalid_grant"
@@ -373,14 +369,14 @@ class TestRevoke:
             assert request.url.path.endswith("/oauth/revoke")
             return httpx.Response(200)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             assert await codex_oauth.revoke_token("rt", client=c) is True
 
     async def test_revoke_failure_returns_false_never_raises(self):
         def handler(request):
             return httpx.Response(500)
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             assert await codex_oauth.revoke_token("rt", client=c) is False
 
 

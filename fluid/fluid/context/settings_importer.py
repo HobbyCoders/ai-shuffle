@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote_plus, urlsplit, urlunsplit
 
+from fluid.context.plugins import DEFAULT_MARKETPLACE, _plain_component, _version_key
+
 try:  # pragma: no cover - Python 3.11+ in supported deployments
     import tomllib
 except ImportError:  # pragma: no cover
@@ -352,14 +354,14 @@ def _add_skills(items: list[SettingsImportItem], system: Literal["claude", "code
 
 
 def _add_agents(items: list[SettingsImportItem], system: Literal["claude", "codex"], root: Path,
-                destination: Path, kind: str, pattern: str = "*.md", *, recursive: bool = True) -> None:
+                destination: Path, kind: str, *, recursive: bool = True) -> None:
     """One item per markdown file under ``root``; agents recurse, commands do not."""
     if not root.exists() and not _is_symlink(root):
         return
     if _is_symlink(root) or not root.is_dir():
         items.append(_item(system, kind, (root,), destination, is_directory=True))
         return
-    for source in sorted(root.rglob(pattern) if recursive else root.glob(pattern)):
+    for source in sorted(root.rglob("*.md") if recursive else root.glob("*.md")):
         _add_file(items, system, kind, source, destination / source.relative_to(root))
 
 
@@ -463,7 +465,7 @@ def _add_hooks(items: list[SettingsImportItem], sources: list[Path], destination
                        message="; ".join(notes), provenance=provenance))
 
 
-def _add_claude_project(items: list[SettingsImportItem], project: Path, system_home: Path,
+def _add_claude_project(items: list[SettingsImportItem], project: Path,
                         mcp_inputs: dict[Path, list[tuple[Path, dict[str, Any]]]]) -> None:
     for source in sorted(project.glob("CLAUDE*.md")):
         _add_file(items, "claude", "project_instruction", source, _instruction_destination(project, source))
@@ -514,13 +516,6 @@ def _project_registration(
     return replace(item, id=f"{item.id}-{suffix}")
 
 
-def _plugin_version_key(name: str) -> tuple[int, tuple[int, ...], str]:
-    parts = name.split(".")
-    if parts and all(p.isdigit() for p in parts):
-        return (1, tuple(int(p) for p in parts), "")
-    return (0, (), name)
-
-
 def _claude_plugin_root(plugins: Path, name: str, marketplace: str) -> Path | None:
     """Resolve one enabled plugin's on-disk root inside the SOURCE home.
 
@@ -535,7 +530,7 @@ def _claude_plugin_root(plugins: Path, name: str, marketplace: str) -> Path | No
         except OSError:
             versions = []
         if versions:
-            return max(versions, key=lambda d: _plugin_version_key(d.name))
+            return max(versions, key=lambda d: _version_key(d.name))
     clone = plugins / "marketplaces" / marketplace / name
     if clone.is_dir():
         return clone
@@ -581,7 +576,11 @@ def _claude_plugins(items: list[SettingsImportItem], root: Path, fluid: Path) ->
     for ref in enabled:
         name, sep, marketplace = str(ref).partition("@")
         name = name.strip()
-        marketplace = (marketplace.strip() if sep else "") or "claude-plugins-official"
+        marketplace = (marketplace.strip() if sep else "") or DEFAULT_MARKETPLACE
+        if name and not (_plain_component(name) and _plain_component(marketplace)):
+            items.append(_diagnostic("claude", "plugin", plugins,
+                                     f"enabled plugin {ref!r} is not a plain name@marketplace; rejected"))
+            continue
         source = _claude_plugin_root(plugins, name, marketplace) if name else None
         if source is None:
             items.append(_diagnostic("claude", "plugin", plugins / marketplace / (name or "?"),
@@ -674,7 +673,7 @@ def _claude(items: list[SettingsImportItem], home: Path, fluid: Path,
             continue
         items.append(_project_registration("claude", config_path, project))
         project_inputs: dict[Path, list[tuple[Path, dict[str, Any]]]] = {}
-        _add_claude_project(items, project, home, project_inputs)
+        _add_claude_project(items, project, project_inputs)
         if isinstance(record, dict) and isinstance(record.get("mcpServers"), dict):
             project_inputs.setdefault(project, []).append((config_path, record["mcpServers"]))
         for key, values in project_inputs.items():
@@ -861,7 +860,12 @@ def _has_secret_key(value: str) -> bool:
 
 
 def _contains_embedded_secret(value: str) -> bool:
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        # "http://[oops" and friends: unparseable, so it cannot be vetted —
+        # treated as secret-bearing (placeholder or rejection), never copied.
+        return True
     if parsed.username is not None or parsed.password is not None:
         return True
     if any(_has_secret_key(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)):
@@ -913,7 +917,10 @@ def _redact_map(server: str, raw: Any, placeholders: list[str]) -> dict[str, str
 
 def _redact_url(server: str, url: str, placeholders: list[str]) -> str | None:
     """Secret query values become placeholders; credentials anywhere else reject the URL."""
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:  # malformed (e.g. an unbalanced IPv6 bracket): reject
+        return None
     if parsed.username is not None or parsed.password is not None:
         return None
     if _contains_embedded_secret(urlunsplit(parsed._replace(query=""))):
@@ -970,8 +977,8 @@ def _redact_args(server: str, args: list[str], placeholders: list[str]) -> list[
     return clean
 
 
-def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None, list[str]]:
-    """One server entry in fluid's mcp.json shape: ``(entry, note, placeholders)``.
+def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """One server entry in fluid's mcp.json shape: ``(entry, note)``.
 
     Secret-shaped values in ``env``, ``headers``, query strings and arguments
     are replaced by ``${SERVER_KEY}`` placeholders (never copied, never
@@ -982,26 +989,26 @@ def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | 
     placeholder in.
     """
     if not isinstance(name, str) or not name or not isinstance(raw, dict):
-        return None, "server name and definition must be non-empty string/object", []
+        return None, "server name and definition must be non-empty string/object"
     command, url = raw.get("command"), raw.get("url")
     if not isinstance(command, str) and not isinstance(url, str):
-        return None, "server requires a string command or url", []
+        return None, "server requires a string command or url"
     if isinstance(command, str) and isinstance(url, str):
-        return None, "server cannot specify both command and url", []
+        return None, "server cannot specify both command and url"
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-        return None, "server args must be a list of strings", []
+        return None, "server args must be a list of strings"
     placeholders: list[str] = []
     notes: list[str] = []
     clean: dict[str, Any] = {}
     if isinstance(command, str):
         if _contains_embedded_secret(command):
-            return None, "server command embeds a credential", []
+            return None, "server command embeds a credential"
         clean["command"] = command
     else:
         redacted = _redact_url(name, url, placeholders)
         if redacted is None:
-            return None, "server URL carries a credential outside its query string", []
+            return None, "server URL is malformed or carries a credential outside its query string"
         clean["url"] = redacted
     if args:
         clean["args"] = _redact_args(name, args, placeholders)
@@ -1030,7 +1037,7 @@ def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | 
         notes.append("unsupported field(s) omitted: " + ", ".join(dropped_other))
     if placeholders:
         notes.append("set before use: " + ", ".join(dict.fromkeys(placeholders)))
-    return clean, "; ".join(notes) or None, placeholders
+    return clean, "; ".join(notes) or None
 
 
 def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[tuple[Path, dict[str, Any]]]],
@@ -1043,7 +1050,7 @@ def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[t
         for path, supplied in groups:
             paths.append(path)
             for name, raw in sorted(supplied.items()):
-                clean, note, _placeholders = _sanitize_server(str(name), raw)
+                clean, note = _sanitize_server(str(name), raw)
                 if clean is None:
                     items.append(_diagnostic("claude" if path.name.endswith("json") else "codex", "mcp_server", path,
                                              f"MCP server {name!r} rejected: {note}"))

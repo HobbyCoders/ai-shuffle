@@ -4,28 +4,46 @@ Subscription OAuth reuse is deliberately unsupported: Anthropic bans and
 technically blocks third-party use of Pro/Max OAuth tokens. Claude
 subscription traffic belongs to the delegated engine (official ``claude`` CLI
 subprocess), not this client.
+
+Timeouts: ``timeout`` (600 s) is per read; ``stream_deadline`` (900 s) bounds
+one whole call; ``first_byte_timeout`` (60 s,
+``fluid.providers._transport.DEFAULT_FIRST_BYTE_TIMEOUT_S``) bounds the wait
+for the headers plus the first SSE event, after which the call is abandoned.
+It is retried like a pre-content read timeout only when the headers never
+came; once the provider answered 200 it is reported, not re-sent. The last two are per-provider
+settings (``[providers.<name>] stream_deadline`` / ``first_byte_timeout`` in
+config.toml, read by ``fluid.config.loader._build_provider_client``); ``0``
+disables either. Raise ``first_byte_timeout`` for a gateway that sends nothing
+until the upstream model's first token.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 
 import httpx
 
 from fluid.providers._trace import trace_request
 
-from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
+from fluid.providers._retry import RetryPolicy
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
+    FirstByteTimeout,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
     is_closed_client_error,
     is_usable_client,
+    open_stream,
+    refusal_payload,
+    truncated_stream_payload,
     with_deadline,
 )
 from fluid.providers.anthropic.pricing import estimate_cost as _estimate_cost
@@ -54,6 +72,7 @@ class AnthropicClient:
         base_url: str = API_URL,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
     ) -> None:
@@ -63,6 +82,12 @@ class AnthropicClient:
         # Wall clock for one whole model call, above the per-read ``timeout``.
         # None disables it. See fluid.providers._transport.
         self._stream_deadline = stream_deadline
+        # Wall clock from sending the request to its first SSE event (headers
+        # included). The API sends message_start as soon as it accepts a
+        # call, so a stream silent this long is dead: it is abandoned instead
+        # of holding the turn for the whole per-read ``timeout`` (retried only
+        # when even the headers never came). None or 0 disables it.
+        self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
@@ -112,23 +137,23 @@ class AnthropicClient:
                 )
                 try:
                     trace_request("anthropic", body)
-                    async with client.stream(
-                        "POST", self._base_url, json=body, headers=headers
-                    ) as resp:
+                    first_byte = self._first_byte_timeout
+                    sent_at = time.monotonic()
+                    async with contextlib.AsyncExitStack() as scope:
+                        resp = await open_stream(
+                            scope, client, "POST", self._base_url,
+                            first_byte_timeout=first_byte, json=body, headers=headers,
+                        )
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
-                            retriable = resp.status_code in RETRIABLE_STATUSES
-                            if retriable and attempt < self._retry.max_retries:
+                            refusal = refusal_payload(resp.status_code, text)
+                            if refusal["retriable"] and attempt < self._retry.max_retries:
                                 await asyncio.sleep(self._retry.delay(
                                     attempt, resp.headers.get("retry-after")))
                                 attempt += 1
                                 continue
-                            yield StreamChunk(
-                                "error",
-                                {"status": resp.status_code, "message": text[:2000],
-                                 "retriable": retriable},
-                            )
+                            yield StreamChunk("error", refusal)
                             return
                         # message_start is held until the first chunk after
                         # it, so an overloaded_error sent in place of content
@@ -136,8 +161,20 @@ class AnthropicClient:
                         # begin. Once content has flowed, an error surfaces.
                         pending_start: StreamChunk | None = None
                         retry_error = False
+                        # Set once message_stop or an error reached the
+                        # engine; a body that ends before either was cut off.
+                        terminal = False
+                        # The headers took part of the first-byte budget; the
+                        # first SSE event gets the rest (never less than a
+                        # sliver, so a slow header does not fail the read).
+                        first_event_wait = (
+                            max(first_byte - (time.monotonic() - sent_at), 0.05)
+                            if first_byte and first_byte > 0 else None
+                        )
                         events = with_deadline(
-                            sse_events(diagnostics.lines()), self._stream_deadline
+                            sse_events(diagnostics.lines()), self._stream_deadline,
+                            first_item_timeout=first_event_wait,
+                            first_byte_budget=first_byte,
                         )
                         async for event_name, data in events:
                             chunk = sse_to_chunk(event_name, data)
@@ -159,6 +196,8 @@ class AnthropicClient:
                                 yield pending_start
                                 pending_start = None
                             yielded = True
+                            if chunk.kind in ("message_stop", "error"):
+                                terminal = True
                             yield chunk
                         if retry_error:
                             await asyncio.sleep(self._retry.delay(attempt))
@@ -167,6 +206,10 @@ class AnthropicClient:
                         if pending_start is not None:
                             yielded = True
                             yield pending_start
+                        if not terminal:
+                            yield StreamChunk(
+                                "error", truncated_stream_payload("message_stop")
+                            )
                         return
                 except StreamDeadlineExceeded as exc:
                     yield StreamChunk("error", deadline_error_payload(exc))
@@ -188,13 +231,25 @@ class AnthropicClient:
                     )
                     return
                 except httpx.TransportError as exc:
-                    evidence = diagnostics.failure(
-                        exc, yielded=yielded,
-                        retrying=not yielded and attempt < self._retry.transport_retries,
-                    )
                     # Pre-stream connection failures retry; mid-stream ones
-                    # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.transport_retries:
+                    # don't (chunks were already delivered downstream). A
+                    # first-byte timeout that fired after the 200 headers is
+                    # not retried either: the provider accepted the call and
+                    # may bill it, and a gateway that holds the first event
+                    # until its upstream answers would only cost another full
+                    # budget per attempt. Raise ``first_byte_timeout`` for it.
+                    retrying = (
+                        not yielded
+                        and attempt < self._retry.transport_retries
+                        and not (
+                            isinstance(exc, FirstByteTimeout)
+                            and diagnostics.response is not None
+                        )
+                    )
+                    evidence = diagnostics.failure(
+                        exc, yielded=yielded, retrying=retrying,
+                    )
+                    if retrying:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue

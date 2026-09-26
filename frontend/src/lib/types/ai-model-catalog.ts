@@ -7,12 +7,7 @@
 
 import type {
 	ImageModel,
-	ImageAspectRatio,
-	VideoAspectRatio,
-	ImageStylePreset,
-	ImageModelCapabilities,
 	VideoModel,
-	VideoModelCapabilities,
 	Model3DModel,
 	TTSVoice,
 	TTSModel,
@@ -1238,9 +1233,6 @@ export const OPENAI_STT_MODELS: STTModel[] = [
 // Combined Model Collections
 // ============================================================================
 
-export const ALL_IMAGE_MODELS: ImageModel[] = [...FAL_IMAGE_MODELS];
-export const ALL_VIDEO_MODELS: VideoModel[] = [...FAL_VIDEO_MODELS];
-export const ALL_3D_MODELS: Model3DModel[] = [...FAL_3D_MODELS];
 export const ALL_TTS_MODELS: TTSModel[] = [...FAL_TTS_MODELS, ...OPENAI_TTS_MODELS];
 export const ALL_STT_MODELS: STTModel[] = [...FAL_STT_MODELS, ...OPENAI_STT_MODELS];
 
@@ -1255,96 +1247,6 @@ export const IMAGE_TO_VIDEO_MODELS = FAL_VIDEO_MODELS.filter(m => m.capabilities
 // Convenience subsets — 3D
 export const TEXT_TO_3D_MODELS = FAL_3D_MODELS.filter(m => m.capabilities.textTo3D);
 export const IMAGE_TO_3D_MODELS = FAL_3D_MODELS.filter(m => m.capabilities.imageTo3D);
-
-// ============================================================================
-// Style Presets (provider-agnostic)
-// ============================================================================
-
-export const IMAGE_STYLE_PRESETS: ImageStylePreset[] = [
-	{ id: 'none', name: 'None' },
-	{ id: 'photographic', name: 'Photographic', description: 'Realistic photography' },
-	{ id: 'digital-art', name: 'Digital Art', description: 'Modern digital illustration' },
-	{ id: 'anime', name: 'Anime', description: 'Japanese anime style' },
-	{ id: 'watercolor', name: 'Watercolor', description: 'Soft watercolor painting' },
-	{ id: 'oil-painting', name: 'Oil Painting', description: 'Classical oil painting' },
-	{ id: 'sketch', name: 'Sketch', description: 'Pencil or charcoal sketch' },
-	{ id: 'cinematic', name: 'Cinematic', description: 'Film-like dramatic lighting' },
-	{ id: 'pixel-art', name: 'Pixel Art', description: 'Retro pixel graphics' },
-	{ id: '3d-render', name: '3D Render', description: 'Photorealistic 3D rendering' }
-];
-
-// ============================================================================
-// Aspect Ratios (provider-agnostic)
-// ============================================================================
-
-export const IMAGE_ASPECT_RATIOS: ImageAspectRatio[] = [
-	{ value: '1:1', label: 'Square', width: 40, height: 40 },
-	{ value: '16:9', label: 'Landscape', width: 48, height: 27 },
-	{ value: '9:16', label: 'Portrait', width: 27, height: 48 },
-	{ value: '4:3', label: 'Standard', width: 44, height: 33 },
-	{ value: '3:4', label: 'Portrait 3:4', width: 33, height: 44 },
-	{ value: '3:2', label: 'Photo', width: 45, height: 30 },
-	{ value: '2:3', label: 'Photo Portrait', width: 30, height: 45 },
-	{ value: '21:9', label: 'Ultrawide', width: 52, height: 22 },
-	{ value: '5:4', label: 'Classic', width: 42, height: 34 },
-	{ value: '4:5', label: 'Instagram', width: 34, height: 42 }
-];
-
-export const VIDEO_ASPECT_RATIOS: VideoAspectRatio[] = [
-	{ value: '16:9', label: 'Landscape', width: 48, height: 27 },
-	{ value: '9:16', label: 'Portrait', width: 27, height: 48 },
-	{ value: '1:1', label: 'Square', width: 40, height: 40 }
-];
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-export function getImageModel(id: string): ImageModel | undefined {
-	return ALL_IMAGE_MODELS.find(m => m.id === id);
-}
-
-export function getVideoModel(id: string): VideoModel | undefined {
-	return ALL_VIDEO_MODELS.find(m => m.id === id);
-}
-
-export function get3DModel(id: string): Model3DModel | undefined {
-	return ALL_3D_MODELS.find(m => m.id === id);
-}
-
-export function getTTSModel(id: string): TTSModel | undefined {
-	return ALL_TTS_MODELS.find(m => m.id === id);
-}
-
-export function getSTTModel(id: string): STTModel | undefined {
-	return ALL_STT_MODELS.find(m => m.id === id);
-}
-
-export function getAspectRatiosForModel(modelId: string): ImageAspectRatio[] {
-	const model = getImageModel(modelId);
-	if (!model) return IMAGE_ASPECT_RATIOS;
-	return IMAGE_ASPECT_RATIOS.filter(ar => model.aspectRatios.includes(ar.value));
-}
-
-export function supportsFeature(modelId: string, feature: keyof ImageModelCapabilities | keyof VideoModelCapabilities): boolean {
-	const imageModel = getImageModel(modelId);
-	if (imageModel) {
-		return Boolean(imageModel.capabilities[feature as keyof ImageModelCapabilities]);
-	}
-	const videoModel = getVideoModel(modelId);
-	if (videoModel) {
-		return Boolean(videoModel.capabilities[feature as keyof VideoModelCapabilities]);
-	}
-	return false;
-}
-
-// ============================================================================
-// Provider Display Names
-// ============================================================================
-
-export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-	'fal-ai': 'fal.ai'
-};
 
 // ============================================================================
 // Dynamic Catalog Display Data

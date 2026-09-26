@@ -41,6 +41,7 @@ vi.mock('./settings/VoiceSection.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/ApiTab.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/SystemTab.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/LogsTab.svelte', () => ({ default: () => {} }));
+vi.mock('./settings/LicenseSection.svelte', () => ({ default: () => {} }));
 
 import SettingsCard from './SettingsCard.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
@@ -65,8 +66,26 @@ async function mountAccount() {
 }
 
 describe('Account settings', () => {
- it.each([false, true])('omits Downloads and Plugins from settings (mobile=%s)', async (mobile) => {
-  render(SettingsCard, { props: { mobile } });
+ it('opens the License tab when another panel asks for it (remote-access refusal)', async () => {
+  // jsdom has no Web Animations; the tab switch fades.
+  const proto = Element.prototype as unknown as { animate?: unknown };
+  const hadAnimate = 'animate' in proto;
+  if (!hadAnimate) proto.animate = () => ({ cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() });
+  await mountAccount();
+  const nav = screen.getByRole('navigation', { name: 'Settings sections' });
+  const license = within(nav).getByRole('button', { name: 'License' });
+  expect(license.classList.contains('on')).toBe(false);
+  const { openSettingsTab } = await import('$lib/api/account');
+  openSettingsTab('not-a-tab');
+  await Promise.resolve();
+  expect(within(nav).getByRole('button', { name: 'Account' }).classList.contains('on')).toBe(true);
+  openSettingsTab('license');
+  await waitFor(() => expect(license.classList.contains('on')).toBe(true));
+  if (!hadAnimate) delete proto.animate;
+ });
+
+ it('omits Downloads and Plugins from settings', async () => {
+  render(SettingsCard);
   await screen.findByDisplayValue('/workspace/projects');
   expect(screen.queryByRole('button', { name: 'Downloads' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Plugins' })).toBeNull();

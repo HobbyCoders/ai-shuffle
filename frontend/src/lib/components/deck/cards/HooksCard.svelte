@@ -32,7 +32,6 @@
 	import './card-design-system.css';
 
 	interface Props {
-		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less rows list
 		 *  while keeping the same editor form. */
 		embedded?: boolean;
@@ -41,7 +40,6 @@
 	}
 
 	let {
-		mobile = false,
 		embedded = false,
 		onDetailChange
 	}: Props = $props();
@@ -68,12 +66,13 @@
 
 
 	// ── Data loading ───────────────────────────────────────────────────
+	// A failed load is shown through $hooksError.
 	$effect(() => {
 		if ($selectedProject) {
-			hooks.loadAll($selectedProject);
+			hooks.loadAll($selectedProject).catch(() => {});
 		} else {
 			// Still load app hooks even without a project
-			hooks.loadAppHooks();
+			hooks.loadAppHooks().catch(() => {});
 		}
 	});
 

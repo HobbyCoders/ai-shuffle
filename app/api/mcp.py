@@ -8,15 +8,14 @@ Provides REST endpoints for managing MCP (Model Context Protocol) servers:
 """
 
 import logging
-from pathlib import Path
+import math
+import re
 from typing import List, Optional, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.db import database
-from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.core.project_utils import get_project_working_dir_as_path
+from app.api.auth import get_api_user_from_request, require_auth, require_admin
 from app.api.common import validate_project_access, get_project_path_from_dict, api_error_handler
 from app.core.mcp_service import (
     get_mcp_service,
@@ -52,9 +51,19 @@ class McpServerResponse(BaseModel):
     cli_flag: Optional[str] = None
 
 
+# Checked by the create handlers (not the schema) so an over-long name gets
+# the same 400 as the other name rules instead of a schema 422.
+MAX_SERVER_NAME_LENGTH = 64
+
+
 class McpServerCreateRequest(BaseModel):
     """Request to create a new MCP server"""
-    name: str = Field(..., description="Unique server name", min_length=1, max_length=64)
+    name: str = Field(
+        ...,
+        description=(
+            f"Unique server name: 1 to {MAX_SERVER_NAME_LENGTH} letters, digits, hyphens or underscores"
+        ),
+    )
     type: Literal["stdio", "sse", "http"] = Field("stdio", description="Server type: stdio, sse, or http")
     command: Optional[str] = Field(None, description="Command to execute (stdio only)")
     args: Optional[List[str]] = Field(None, description="Command arguments (stdio only)")
@@ -124,6 +133,199 @@ def _server_to_response(server: McpServerConfig) -> McpServerResponse:
     )
 
 
+_SECRET_MASK = "********"
+
+
+def _is_owner(request: Request) -> bool:
+    """False for an API key or a non-owner paired device.
+
+    Every ``require_auth`` branch stamps ``request.state.is_admin``; only a
+    caller it marked as a non-owner (or an API user) loses the secrets.
+    """
+    if get_api_user_from_request(request) is not None:
+        return False
+    return getattr(request.state, "is_admin", True) is not False
+
+
+# Name parts that make a flag, a NAME=value pair or a header carry a secret
+# (split on - _ . so ``--author`` or ``--keyboard`` do not match).
+_SECRET_NAME_PARTS = frozenset({
+    "token", "tokens", "secret", "secrets", "password", "passwd", "pwd", "passphrase",
+    "apikey", "auth", "authorization", "credential", "credentials", "bearer", "cookie",
+    "pat", "jwt", "session", "sessionid", "signature",
+})
+# Two-part names whose halves are harmless alone (``--key-file`` stays).
+_SECRET_NAME_PAIRS = frozenset({
+    ("api", "key"), ("access", "key"), ("secret", "key"), ("private", "key"),
+    ("client", "secret"), ("auth", "key"), ("account", "key"), ("master", "key"),
+})
+# Well-known credential prefixes (GitHub, OpenAI/Anthropic, Slack, GitLab, AWS,
+# Stripe, Hugging Face, npm, Google).
+_TOKEN_PREFIX_RE = re.compile(
+    r"^(gh[pousr]_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|xox[abprs]-|glpat-|AKIA|ASIA|hf_|npm_|AIza)",
+)
+_FLAG_RE = re.compile(r"^(--?)([A-Za-z0-9][\w.-]*)(=(.*))?$", re.DOTALL)
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)=(.+)$", re.DOTALL)
+_HEADER_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.+)$", re.DOTALL)
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic|token)\s+[^\s\"']+")
+_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:token|key|secret|password|auth|sig)[\w.-]*=)[^&#\s]+")
+
+
+# A ``name=value`` or ``"name": value`` pair inside a larger value: a libpq
+# DSN (``host=db password=x``), an ADO/ODBC string (``;Pwd=x;``) or JSON.
+_EMBEDDED_NAME_RE = re.compile(r"(?<![\w.-])([\"']?)([A-Za-z][\w.-]*)\1\s*[=:]\s*")
+_EMBEDDED_VALUE_RE = re.compile(r"[^\s;&,}\]]*")
+
+
+def _secret_name(name: str) -> bool:
+    parts = [p for p in re.split(r"[-_.]+", name.lower()) if p]
+    if any(p in _SECRET_NAME_PARTS for p in parts) or parts == ["key"]:
+        return True
+    if parts and parts[-1] == "pass":  # ``--db-pass``, ``--pass`` (not ``--pass-through``)
+        return True
+    return any(pair in _SECRET_NAME_PAIRS for pair in zip(parts, parts[1:]))
+
+
+def _mask_embedded_pairs(text: str) -> str:
+    """Mask the value of every secret-named pair inside ``text``."""
+    out: List[str] = []
+    pos = 0
+    for match in _EMBEDDED_NAME_RE.finditer(text):
+        if match.start() < pos or not _secret_name(match.group(2)):
+            continue
+        start = match.end()
+        if start < len(text) and text[start] in "\"'":
+            quote = text[start]
+            close = text.find(quote, start + 1)
+            end = len(text) if close == -1 else close + 1
+            replacement = f"{quote}{_SECRET_MASK}{quote}"
+        else:
+            end = _EMBEDDED_VALUE_RE.match(text, start).end()
+            replacement = _SECRET_MASK
+        if end == start:
+            continue
+        out.append(text[pos:start])
+        out.append(replacement)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _looks_like_token(value: str) -> bool:
+    """A standalone credential: a known token prefix, or a long high-entropy word.
+
+    Paths, URLs, package names (``@scope/pkg``) and plain words stay readable.
+    """
+    value = value.strip().strip("'\"")
+    if len(value) < 16 or any(c.isspace() for c in value):
+        return False
+    if _TOKEN_PREFIX_RE.match(value) and len(value) >= 20:
+        return True
+    if len(value) < 24 or value.startswith(("/", ".", "~", "@", "-")) or "://" in value:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_\-+/=.]+", value):
+        return False
+    if re.search(r"\.[A-Za-z][A-Za-z0-9]{0,9}$", value):
+        return False  # a file name
+    if "/" in value and all(len(part) < 20 for part in value.split("/")):
+        return False  # a relative path
+    words = [part for part in re.split(r"[-_.]+", value) if part]
+    if len(words) >= 2 and all(part.isalpha() or part.isdigit() for part in words):
+        return False  # an identifier such as a model id or a dated name
+    classes = sum(bool(re.search(p, value)) for p in (r"[a-z]", r"[A-Z]", r"[0-9]"))
+    if classes < 2:
+        return False
+    counts: Dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    entropy = -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
+    return entropy >= 3.5
+
+
+def _mask_arg_text(arg: str) -> str:
+    """One argument with any secret-looking value replaced by the mask."""
+    from app.core.scrub import redact_url_credentials
+
+    flag = _FLAG_RE.match(arg)
+    if flag and flag.group(3) is not None:
+        # ``--name=value``: a secret name masks it all; otherwise the value is
+        # checked on its own (``--header=Authorization: x``, ``--env=K=v``).
+        if _secret_name(flag.group(2)):
+            return f"{flag.group(1)}{flag.group(2)}={_SECRET_MASK}"
+        return f"{flag.group(1)}{flag.group(2)}={_mask_arg_text(flag.group(4))}"
+    assign = _ASSIGN_RE.match(arg)
+    if assign and not flag and _secret_name(assign.group(1)):
+        return f"{assign.group(1)}={_SECRET_MASK}"
+    header = _HEADER_RE.match(arg)
+    if header and "://" not in arg and _secret_name(header.group(1)):
+        return f"{header.group(1)}: {_SECRET_MASK}"
+    if _looks_like_token(arg):
+        return _SECRET_MASK
+    masked = redact_url_credentials(arg)
+    masked = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + _SECRET_MASK, masked)
+    masked = _BEARER_RE.sub(lambda m: f"{m.group(1)} {_SECRET_MASK}", masked)
+    return _mask_embedded_pairs(masked)
+
+
+def _mask_args(args: Optional[List[str]]) -> Optional[List[str]]:
+    """Command args as a non-owner may see them (see ``_redacted``).
+
+    Masks ``--token=v`` / ``--api-key v`` values, ``NAME=v`` pairs and
+    ``Header: v`` values whose name reads as a secret, the argument after a
+    bare ``Authorization``, bearer tokens, URL userinfo and secret query
+    parameters, and any standalone value that looks like a credential.
+    """
+    if not args:
+        return args
+    out: List[str] = []
+    mask_next = False
+    for arg in args:
+        text = arg if isinstance(arg, str) else str(arg)
+        if mask_next and not text.startswith("--"):
+            out.append(_SECRET_MASK)
+            mask_next = False
+            continue
+        mask_next = False
+        flag = _FLAG_RE.match(text)
+        if flag and flag.group(3) is None and _secret_name(flag.group(2)):
+            mask_next = True  # ``--token VALUE``
+        elif text.strip().rstrip(":").lower() in ("authorization", "proxy-authorization", "cookie"):
+            mask_next = True  # ``-H Authorization "Bearer x"`` split in two
+        out.append(_mask_arg_text(text))
+    return out
+
+
+def _redacted(response: McpServerResponse) -> McpServerResponse:
+    """A server as a non-owner may see it: env and header VALUES masked (the
+    names stay, so the UI can still say what a server needs), secret-looking
+    args masked the same way, and URL-embedded credentials scrubbed."""
+    from app.core.scrub import scrub_url_credentials
+
+    return response.model_copy(update={
+        "args": _mask_args(response.args),
+        "env": {k: _SECRET_MASK for k in response.env} if response.env else response.env,
+        "headers": (
+            {k: _SECRET_MASK for k in response.headers}
+            if response.headers else response.headers
+        ),
+        "url": scrub_url_credentials(response.url) if response.url else response.url,
+    })
+
+
+def _server_view(server: McpServerConfig, request: Request) -> McpServerResponse:
+    """``_server_to_response`` for a read route: secrets only for the owner."""
+    response = _server_to_response(server)
+    return response if _is_owner(request) else _redacted(response)
+
+
+def _create_errors(service, config: McpServerConfig) -> List[str]:
+    """Validation errors for a new server: the service rules plus the name length."""
+    errors = list(service.validate_server_config(config))
+    if len(config.name) > MAX_SERVER_NAME_LENGTH:
+        errors.append(f"Server name must be at most {MAX_SERVER_NAME_LENGTH} characters")
+    return errors
+
+
 def _request_to_config(
     name: str,
     request: McpServerCreateRequest,
@@ -168,12 +370,16 @@ def _parse_scope(scope_str: str) -> McpScope:
 # ============================================================================
 
 @router.get("/mcp/servers", response_model=List[McpServerResponse])
-async def list_global_mcp_servers(token: str = Depends(require_auth)):
-    """List all globally available MCP servers including builtins"""
+async def list_global_mcp_servers(request: Request, token: str = Depends(require_auth)):
+    """List all globally available MCP servers including builtins.
+
+    Readable by API keys (the web UI's search lists them); secret values are
+    the owner's only.
+    """
     async with api_error_handler("list MCP servers"):
         service = get_mcp_service()
         servers = service.get_all_servers_with_builtins()
-        return [_server_to_response(s) for s in servers]
+        return [_server_view(s, request) for s in servers]
 
 
 @router.post("/mcp/servers", response_model=McpServerResponse, status_code=status.HTTP_201_CREATED)
@@ -190,7 +396,7 @@ async def add_global_mcp_server(
             config = _request_to_config(request.name, request, "user")
 
             # Validate
-            errors = service.validate_server_config(config)
+            errors = _create_errors(service, config)
             if errors:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -331,13 +537,10 @@ async def list_project_mcp_servers(
         service = get_mcp_service(project_path)
         all_servers = service.get_all_servers()
 
-        response = McpServersResponse(
-            builtin=[_server_to_response(s) for s in all_servers.get("builtin", [])],
-            user=[_server_to_response(s) for s in all_servers.get("user", [])],
-            installed=[_server_to_response(s) for s in all_servers.get("installed", [])],
-            local=[_server_to_response(s) for s in all_servers.get("local", [])],
-            project=[_server_to_response(s) for s in all_servers.get("project", [])],
-        )
+        response = McpServersResponse(**{
+            group: [_server_view(s, http_request) for s in all_servers.get(group, [])]
+            for group in ("builtin", "user", "installed", "local", "project")
+        })
         response.total_count = (
             len(response.builtin) + len(response.user) + len(response.installed)
             + len(response.local) + len(response.project)
@@ -374,7 +577,7 @@ async def add_project_mcp_server(
             config = _request_to_config(request.name, request, request.scope)
 
             # Validate
-            errors = service.validate_server_config(config)
+            errors = _create_errors(service, config)
             if errors:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -592,7 +795,7 @@ async def list_mcp_tools(
     """
     List every MCP tool a session can be given.
 
-    Discovered live from the configured servers (ruling T1) rather than from
+    Discovered live from the configured servers rather than from
     whatever the Claude CLI last reported: the same ``tools/list`` round-trip
     the tool-surface endpoint runs, cached per server for 10 minutes.
 

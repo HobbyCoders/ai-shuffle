@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import './deck/cards/card-design-system.css';
 
 	export interface PermissionRequestData {
@@ -18,9 +19,7 @@
 
 	interface Props {
 		request: PermissionRequestData;
-		isFirst?: boolean;
 		queueCount?: number;
-		compact?: boolean;
 		onRespond?: (detail: {
 			request_id: string;
 			decision: 'allow' | 'deny';
@@ -29,7 +28,7 @@
 		}) => void;
 	}
 
-	let { request, isFirst = true, queueCount = 1, compact = false, onRespond }: Props = $props();
+	let { request, queueCount = 1, onRespond }: Props = $props();
 
 	let showDetails = $state(false);
 	/**
@@ -181,31 +180,168 @@
 		return alwaysForTool ? 'profile' : 'none';
 	}
 
-	function handleAllow() {
-		onRespond?.({
-			request_id: request.request_id,
-			decision: 'allow',
-			remember: currentRemember()
-		});
-	}
+	// Arming. A prompt must never be answered by input meant for something
+	// else, so every way of answering it is held back for a moment after it
+	// appears, and again whenever a new request replaces it:
+	// - A pointer click on Approve / Deny counts only once the request has been
+	//   visible for POINTER_ARM_DELAY_MS. The queue shows the next request's
+	//   buttons where the last ones were, so the second click of a double-click
+	//   would otherwise answer a request the user never saw.
+	// - Enter (the page-wide approve shortcut, and Enter or Space on one of the
+	//   prompt's focused buttons) counts only once the request has been visible
+	//   for SHORTCUT_ARM_DELAY_MS, and only for a fresh press: never an
+	//   auto-repeat, and never a key whose keydown predates the request. So an
+	//   Enter typed a moment later to send a chat message (focus moves onto the
+	//   prompt as it appears) and a held Enter cannot approve. After the window
+	//   the first fresh press counts, with or without a keyup seen before it, so
+	//   an idle keyboard or screen-reader user's first Enter works; a polite live
+	//   region announces when the shortcuts become live.
+	// - Escape denies (the safe side), so it also counts before the window once
+	//   a keyup has been seen since the request appeared.
+	// - A request is answered once: after an answer the buttons are disabled and
+	//   further keys and clicks are ignored until the next request (or, if this
+	//   one is still shown after ANSWER_RETRY_MS, e.g. the answer was lost on a
+	//   dropped connection, until the buttons come back so it can be retried).
+	// The page-wide shortcuts also leave alone keys a focused control owns:
+	// Enter on a focused Deny / Details button activates that button, and
+	// Enter / Escape while typing (the chat composer, a form field) stay with
+	// the field instead of approving or denying.
+	const SHORTCUT_ARM_DELAY_MS = 500;
+	const POINTER_ARM_DELAY_MS = 300;
+	const ANSWER_RETRY_MS = 5000;
+	let answered = $state(false);
+	let shortcutsArmed = $state(false);
+	let pointerArmed = false;
+	let keyupSeen = false;
+	/** When this request appeared, on the clock events' `timeStamp` uses. */
+	let shownAt = 0;
+	/** An unarmed Enter / Space on one of the prompt's buttons: the click it
+	 *  would generate is dropped too. */
+	let keyClickBlocked = false;
+	let panelEl: HTMLElement | undefined = $state();
 
-	function handleDeny() {
-		onRespond?.({
-			request_id: request.request_id,
-			decision: 'deny',
-			remember: currentRemember()
+	const requestId = $derived(request.request_id);
+	$effect(() => {
+		void requestId;
+		// Everything per-request starts over when the request changes, even if
+		// this component instance is reused for the next one.
+		untrack(() => {
+			alwaysForTool = false;
+			showDetails = false;
+			descriptionExpanded = false;
+			enrichmentDetailsExpanded = false;
+			answered = false;
+			shortcutsArmed = false;
+			pointerArmed = false;
+			keyupSeen = false;
+			keyClickBlocked = false;
+			// A synthetic event's timeStamp reads the same clock as input events.
+			shownAt = new Event('permission-shown').timeStamp;
 		});
-	}
+		const pointerTimer = setTimeout(() => (pointerArmed = true), POINTER_ARM_DELAY_MS);
+		const shortcutTimer = setTimeout(() => (shortcutsArmed = true), SHORTCUT_ARM_DELAY_MS);
+		return () => {
+			clearTimeout(pointerTimer);
+			clearTimeout(shortcutTimer);
+		};
+	});
 
-	// Keyboard shortcuts
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			handleAllow();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			handleDeny();
+	$effect(() => {
+		if (!answered) return;
+		const retry = setTimeout(() => (answered = false), ANSWER_RETRY_MS);
+		return () => clearTimeout(retry);
+	});
+
+	function answer(decision: 'allow' | 'deny', e?: MouseEvent) {
+		if (answered) return;
+		if (e) {
+			if (!pointerArmed) return;
+			// A click with no pointer behind it (detail 0) that an unarmed Enter
+			// or Space on the button generated.
+			if (e.detail === 0 && keyClickBlocked) return;
 		}
+		answered = true;
+		onRespond?.({
+			request_id: request.request_id,
+			decision,
+			remember: currentRemember()
+		});
+	}
+
+	function handleAllow(e?: MouseEvent) {
+		answer('allow', e);
+	}
+
+	function handleDeny(e?: MouseEvent) {
+		answer('deny', e);
+	}
+
+	/** Not an auto-repeat, and not a key that was already down when this
+	 *  request appeared. */
+	function isFreshPress(e: KeyboardEvent): boolean {
+		if (e.repeat) return false;
+		return !(e.timeStamp > 0 && e.timeStamp < shownAt);
+	}
+
+	function handleKeyup(e: KeyboardEvent) {
+		keyupSeen = true;
+		if (keyClickBlocked) {
+			// Space activates a focused button on keyup: hold that back as well,
+			// then let later clicks through once this one would have fired.
+			if (isSpaceKey(e)) e.preventDefault();
+			setTimeout(() => (keyClickBlocked = false), 0);
+		}
+	}
+
+	function isSpaceKey(e: KeyboardEvent): boolean {
+		return e.key === ' ' || e.key === 'Spacebar';
+	}
+
+	function isTextEntry(target: HTMLElement): boolean {
+		if (target.isContentEditable || target.closest('textarea, select, [contenteditable="true"], [role="textbox"]')) return true;
+		return target instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(target.type);
+	}
+
+	function ownsKey(target: EventTarget | null, key: string): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		if (isTextEntry(target)) return true;
+		return key === 'Enter' && !!target.closest('button, a[href], input');
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.defaultPrevented || e.isComposing) return;
+		const isEnter = e.key === 'Enter' && !e.shiftKey;
+		const isSpace = isSpaceKey(e);
+		if (!isEnter && !isSpace && e.key !== 'Escape') return;
+		const target = e.target instanceof HTMLElement ? e.target : null;
+		if (target && isTextEntry(target)) return;
+		const inPanel = !!target && !!panelEl?.contains(target);
+
+		const fresh = !answered && isFreshPress(e);
+		if (isSpace) {
+			// Space is not a shortcut; it only activates a focused button, and on
+			// this prompt's buttons it is armed exactly like Enter.
+			if (inPanel && target?.closest('button') && !(fresh && shortcutsArmed)) {
+				e.preventDefault();
+				keyClickBlocked = true;
+			}
+			return;
+		}
+
+		const armed = fresh && (shortcutsArmed || (!isEnter && keyupSeen));
+		if (!armed) {
+			// A native Enter activation of this prompt's own buttons (a focused
+			// Approve after a click, then a held Enter) is held back too.
+			if (isEnter && inPanel) {
+				e.preventDefault();
+				keyClickBlocked = true;
+			}
+			return;
+		}
+		if (ownsKey(target, e.key)) return;
+		e.preventDefault();
+		if (isEnter) handleAllow();
+		else handleDeny();
 	}
 
 	const config = $derived(getToolConfig(request.tool_name));
@@ -222,7 +358,23 @@
 	const hasEnrichmentDetails = $derived(
 		Boolean(request.decision_reason || request.blocked_path)
 	);
+	// A Python cell's prompt (the `run_python` tool, titled "Run Python code")
+	// carries the first lines of the code as its description. It is shown
+	// whole in a scrolling block that replaces both the one-line subhead and
+	// the JSON-escaped summary of the input. The block is keyed on the tool,
+	// never on the description's shape or the title alone: both are supplied
+	// by the caller, and other prompts carry multi-line descriptions too (a
+	// ProviderAgent worker's tag line, a computer-use reason), where the
+	// command line or path must stay visible.
+	const PYTHON_CELL_TOOL = /^(?:mcp__.+__)?run_python$/;
+	const codeDescription = $derived.by(() => {
+		if (!PYTHON_CELL_TOOL.test(request.tool_name ?? '')) return null;
+		// Keep the first line's indentation; drop blank edges only.
+		const text = (request.description ?? '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+		return text.trim() ? text : null;
+	});
 	const descriptionTruncatedView = $derived.by(() => {
+		if (codeDescription !== null) return null;
 		const desc = request.description?.trim();
 		if (!desc) return null;
 		const needsTruncate = desc.length > DESCRIPTION_TRUNCATE_LEN;
@@ -234,11 +386,12 @@
 
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onkeyup={handleKeyup} />
 
 
 <!-- Permission Request Panel -->
 <div
+	bind:this={panelEl}
 	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
 	style="
 		border-color: var(--border);
@@ -246,6 +399,7 @@
 	"
 	role="dialog"
 	aria-labelledby="permission-title"
+	tabindex="-1"
 >
 	<!-- Compact Header -->
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
@@ -303,7 +457,7 @@
 		<!-- Slice D: SDK-provided description, rendered as supporting subhead. -->
 		{#if descriptionTruncatedView}
 			<p class="enrichment-description text-xs text-muted-foreground leading-relaxed mb-2">
-				{descriptionTruncatedView.visible}
+				<span class="enrichment-description-text">{descriptionTruncatedView.visible}</span>
 				{#if descriptionTruncatedView.needsTruncate}
 					<button
 						type="button"
@@ -316,14 +470,18 @@
 			</p>
 		{/if}
 
-		<div class="relative group">
-			<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
-				{#if request.tool_name === 'Bash'}
-					<span class="text-muted-foreground select-none">$ </span>
-				{/if}
-				{summary || 'No details available'}
+		{#if codeDescription !== null}
+			<pre class="permission-code" aria-label="Code to run">{codeDescription}</pre>
+		{:else}
+			<div class="relative group">
+				<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
+					{#if request.tool_name === 'Bash'}
+						<span class="text-muted-foreground select-none">$ </span>
+					{/if}
+					{summary || 'No details available'}
+				</div>
 			</div>
-		</div>
+		{/if}
 
 		<!-- Slice D: enrichment details (decision_reason / blocked_path) -->
 		{#if hasEnrichmentDetails}
@@ -414,6 +572,7 @@
 			<button
 				type="button"
 				onclick={handleDeny}
+				disabled={answered}
 				class="deny-btn"
 			>
 				Deny
@@ -423,11 +582,17 @@
 			<button
 				type="button"
 				onclick={handleAllow}
+				disabled={answered}
 				class="allow-btn"
 			>
 				Approve
 			</button>
 		</div>
+
+		<!-- Tells screen-reader users when the shortcuts start to count. -->
+		<p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+			{shortcutsArmed && !answered ? 'Press Enter to approve, Escape to deny' : ''}
+		</p>
 
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
@@ -444,6 +609,10 @@
 </div>
 
 <style>
+	.permission-panel:focus {
+		outline: none;
+	}
+
 	.permission-panel {
 		animation: panel-enter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 	}
@@ -594,11 +763,42 @@
 		min-height: 44px;
 	}
 
+	/* Answered, waiting for the next request. */
+	.deny-btn:disabled,
+	.allow-btn:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+
 	/* Slice D: SDK enrichment subhead + details disclosure */
 	.enrichment-description {
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		line-height: 1.5;
+	}
+
+	/* A multi-line description (a worker's tag line, a reason) keeps its breaks. */
+	.enrichment-description-text {
+		white-space: pre-line;
+	}
+
+	/* A Python cell's code: kept whole, line breaks
+	   and indentation intact, scrolling past a readable height. */
+	.permission-code {
+		margin: 0;
+		max-height: 16rem;
+		overflow: auto;
+		padding: 0.625rem 0.75rem;
+		border-radius: var(--radius, 0.75rem);
+		border: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 35%, var(--card));
+		color: var(--foreground);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		line-height: 1.5;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		tab-size: 4;
 	}
 
 	.enrichment-expand-btn {

@@ -16,7 +16,6 @@ import pytest
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch, AsyncMock
-from contextlib import contextmanager
 
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,6 +26,45 @@ os.environ["TESTING"] = "1"
 # fixture setup. Disposable PostgreSQL jobs opt in below with TEST_POSTGRES_DSN.
 _TEST_DATA = tempfile.TemporaryDirectory(prefix="shuffle-tests-")
 os.environ["DATA_DIR"] = _TEST_DATA.name
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_cli_probe(monkeypatch):
+    """Status endpoints must not run whatever `claude` the test machine has.
+
+    The probe finds no CLI unless a test installs its own resolver or stubs
+    ``claude_cli_status.probe``; the cache starts empty in every test.
+    """
+    from app.core import claude_cli_status
+
+    def _missing():
+        raise RuntimeError("The Claude Code CLI is not installed (test default).")
+
+    monkeypatch.setattr(claude_cli_status, "_default_resolver", _missing)
+    claude_cli_status.invalidate()
+    yield
+    claude_cli_status.invalidate()
+
+
+@pytest.fixture(autouse=True)
+def _agent_credentials_ready_by_default(request, monkeypatch):
+    """Turn-start tests run on a worker that is set up to start agents.
+
+    The test machine has no signed-in CLI (see above) and no stored key, so the
+    credential gate would refuse every turn. Tests of the gate itself opt out
+    with ``@pytest.mark.real_agent_gate``.
+    """
+    # Each test starts from a fresh database, so no memoized setting (the
+    # Claude Code mode, the loop guard's limits) may carry over from the last.
+    from app.db.settings import invalidate_system_setting_memo
+    invalidate_system_setting_memo()
+    if request.node.get_closest_marker("real_agent_gate"):
+        yield
+        return
+    from app.core import credential_gate
+
+    monkeypatch.setattr(credential_gate, "claude_credential_ready", lambda cli=None: (True, None))
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -205,7 +243,11 @@ def _auto_db_shim(_raw_sqlite: sqlite3.Connection, request):
         # Startup-owned extension schemas are not part of create_postgres_schema.
         from app.db import mobile_tool_identity
         mobile_tool_identity.init_schema()
-        # Seed a "default" profile so tests can reference it.
+        # Seed a "default" profile so tests can reference it (unless the test
+        # asked for an unseeded database via ``bare_db``).
+        if "bare_db" in request.fixturenames:
+            yield
+            return
         try:
             database.create_profile(
                 profile_id="default",
@@ -228,6 +270,16 @@ def mock_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connectio
     return _raw_sqlite
 
 
+@pytest.fixture(scope="function")
+def bare_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connection:
+    """Like ``mock_db`` but without the seeded "default" profile.
+
+    For tests that count or list every row of a table (``get_all_profiles``
+    and similar) and so must start from an empty database.
+    """
+    return _raw_sqlite
+
+
 # =============================================================================
 # FastAPI Test Client
 # =============================================================================
@@ -245,7 +297,6 @@ def client(mock_db, _api_unit_credentials):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.core.automation_manager import automation_manager
-    from app.core.connectors.manager import connector_manager
 
     # Prevent scheduler shutdown errors during test teardown
     automation_manager._scheduler = None
@@ -282,7 +333,6 @@ def authenticated_client(mock_db, _api_unit_credentials):
     from app.main import app
     from app.api.auth import require_auth, require_admin
     from app.core.automation_manager import automation_manager
-    from app.core.connectors.manager import connector_manager
 
     # Prevent scheduler shutdown errors during test teardown
     automation_manager._scheduler = None
@@ -301,70 +351,6 @@ def authenticated_client(mock_db, _api_unit_credentials):
 
 
 # =============================================================================
-# Auth Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="function")
-def mock_auth():
-    """
-    Mock authentication for protected endpoints using patches.
-
-    Note: For HTTP tests with authenticated_client, use the authenticated_client
-    fixture which properly overrides FastAPI dependencies. This fixture is for
-    direct function calls that need mocked auth.
-
-    This fixture patches:
-    - require_auth: Returns a valid session token
-    - require_admin: Passes admin check
-    - require_api_key: Returns valid API user
-    """
-    with patch("app.api.auth.require_auth") as mock_require_auth:
-        mock_require_auth.return_value = "test-session-token"
-
-        with patch("app.api.auth.require_admin") as mock_require_admin:
-            mock_require_admin.return_value = None
-
-            with patch("app.api.auth.get_api_user_from_request") as mock_api_user:
-                mock_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user",
-                    "role": "admin"
-                }
-
-                yield {
-                    "require_auth": mock_require_auth,
-                    "require_admin": mock_require_admin,
-                    "api_user": mock_api_user
-                }
-
-
-@pytest.fixture(scope="function")
-def admin_user():
-    """
-    Return admin user data for tests.
-    """
-    return {
-        "id": "admin-user-id",
-        "username": "admin",
-        "role": "admin",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture(scope="function")
-def api_user():
-    """
-    Return API user data for tests.
-    """
-    return {
-        "id": "api-user-id",
-        "username": "api-user",
-        "role": "user",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-# =============================================================================
 # Temporary Directory Fixtures
 # =============================================================================
 
@@ -377,86 +363,6 @@ def temp_dir() -> Generator[Path, None, None]:
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
-
-
-@pytest.fixture(scope="function")
-def mock_workspace(temp_dir: Path):
-    """
-    Create a mock workspace directory structure.
-    """
-    workspace = temp_dir / "workspace"
-    workspace.mkdir()
-
-    # Create .claude directory
-    claude_dir = workspace / ".claude"
-    claude_dir.mkdir()
-
-    return workspace
-
-
-# =============================================================================
-# Sample Data Fixtures
-# =============================================================================
-
-@pytest.fixture
-def sample_session():
-    """
-    Return sample session data.
-    """
-    return {
-        "id": "test-session-id",
-        "title": "Test Session",
-        "profile_id": "default",
-        "project_id": None,
-        "status": "active",
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture
-def sample_profile():
-    """
-    Return sample profile data.
-    """
-    return {
-        "id": "test-profile-id",
-        "name": "Test Profile",
-        "system_prompt": "You are a helpful assistant.",
-        "model": "claude-sonnet-4-20250514",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-@pytest.fixture
-def sample_project():
-    """
-    Return sample project data.
-    """
-    return {
-        "id": "test-project-id",
-        "name": "Test Project",
-        "path": "/path/to/project",
-        "created_at": "2024-01-01T00:00:00Z"
-    }
-
-
-# =============================================================================
-# Claude SDK Mocks
-# =============================================================================
-
-@pytest.fixture
-def mock_claude_sdk():
-    """
-    Mock the Claude Agent SDK for testing query execution.
-    """
-    with patch("claude_agent_sdk.query") as mock_query:
-        # Create an async generator that yields mock messages
-        async def mock_query_gen(*args, **kwargs):
-            yield {"type": "text", "content": "Mock response"}
-
-        mock_query.return_value = mock_query_gen()
-        yield mock_query
 
 
 # =============================================================================
@@ -570,6 +476,20 @@ def live_hub_verdicts(monkeypatch):
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_host_memory_admission_floor(monkeypatch):
+    """Admission must not depend on how much RAM the test host has free.
+
+    ``SessionPool.admission_check`` reads real host MemAvailable against
+    ``sdk_admission_min_available_mb``; under ``-n 4`` on a small machine the
+    other workers push it below the floor and real turns get refused. Tests
+    that exercise the floor set their own value.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "sdk_admission_min_available_mb", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -726,6 +646,25 @@ def mock_encryption():
                     "decrypt": mock_decrypt,
                     "is_ready": mock_ready
                 }
+
+
+@pytest.fixture
+def artifacts_dir(tmp_path, monkeypatch):
+    """Point ``artifact_store.ARTIFACTS_DIR`` at a per-test directory."""
+    from app.core import artifact_store
+
+    d = tmp_path / "artifacts"
+    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", d)
+    return d
+
+
+@pytest.fixture
+def loop_thread():
+    """The thread the test's event loop runs on — every DB call must land
+    somewhere else (used by the ``*_offload`` tests)."""
+    import threading
+
+    return threading.get_ident()
 
 
 # ---------------------------------------------------------------------------

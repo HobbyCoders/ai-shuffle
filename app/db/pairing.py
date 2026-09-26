@@ -587,13 +587,8 @@ def _lock_current_mobile_client(cursor, client_id, mobile_device):
     if current is None:
         return None
     current = dict(current)
-    expiry = current.get('api_key_expires_at') or current.get('created_at')
-    if isinstance(expiry, str):
-        expiry = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
-    if expiry is not None and current.get('api_key_expires_at') is None:
-        from datetime import timedelta
-        expiry += timedelta(days=365)
-    if expiry is None or expiry <= datetime.now(timezone.utc):
+    from app.core.device_keys import key_expiry
+    if key_expiry(current) <= datetime.now(timezone.utc):
         return None
     if current.get('scopes') and 'web:session' not in _json_list(current['scopes']):
         return None

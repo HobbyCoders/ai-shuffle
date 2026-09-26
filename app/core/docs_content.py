@@ -7,7 +7,7 @@ and builds an in-memory index for the documentation API.
 
 import re
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 DOCS_DIR = Path(__file__).parent.parent.parent / "docs" / "content"
 
@@ -114,7 +114,12 @@ class DocsIndex:
 
             title = meta.get("title", slug.replace("-", " ").title())
             description = meta.get("description", "")
-            order = int(meta.get("order", 99))
+            # A malformed ``order`` sorts last instead of failing the whole
+            # index (every documentation request would 500 until a restart).
+            try:
+                order = int(meta.get("order", 99))
+            except ValueError:
+                order = 99
 
             entry = DocEntry(
                 slug=slug,

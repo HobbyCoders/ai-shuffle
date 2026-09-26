@@ -8,16 +8,13 @@ picker keep working unchanged.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.core.config import settings
 from app.db import network as store
+from app.db.base import utc_now_iso as _now_iso
 from app.network import engine, membership, transport
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from app.network.endpoints import peer_endpoints
 
 
 def directory() -> dict:
@@ -34,7 +31,8 @@ def directory() -> dict:
         device_id = member["device_id"]
         seen = presence.get(device_id) or {}
         is_self = device_id == ctx.device_id
-        endpoints = list(seen.get("endpoints") or member.get("endpoints") or [])
+        # The addresses this worker dials it at (the tunnel alone when it has one).
+        endpoints = peer_endpoints(member, seen)
         rows.append({
             "id": device_id,
             "device_id": device_id,

@@ -52,10 +52,10 @@ describe('Media gallery', () => {
 	});
 	it('removes represented embeds without losing prose, and restores them when expanded', async () => {
 		const content = 'My choices. ![First](/one.png) ![Second](/two.png)';
-		const view = render(AssistantMessage, { content, messageIndex: 0, messageId: 'gallery-answer', gallerySources: new Set(['/one.png', '/two.png']) });
+		const view = render(AssistantMessage, { content, gallerySources: new Set(['/one.png', '/two.png']) });
 		expect(view.container.textContent).toContain('My choices.');
 		expect(view.container.querySelector('.media-zoomable')).toBeNull();
-		await view.rerender({ content, messageIndex: 0, messageId: 'gallery-answer', gallerySources: undefined });
+		await view.rerender({ content, gallerySources: undefined });
 		expect(view.container.querySelectorAll('.media-zoomable')).toHaveLength(2);
 	});
 });

@@ -1,5 +1,4 @@
 """Command discovery uses the selected runtime and authorizes before disk reads."""
-from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException
@@ -74,28 +73,23 @@ def test_plugin_enablement_uses_selected_stack_and_same_lookup(source_tree, kind
 
 
 @pytest.mark.parametrize("sources", [None, [], ["user"], ["project", "local"]])
-async def test_api_native_list_detail_execute_share_profile_sources(source_tree, monkeypatch, sources):
+async def test_api_native_list_and_detail_share_profile_sources(source_tree, monkeypatch, sources):
     home, project, child = source_tree
     put(home / ".fluid/commands/greet.md", "Hello $ARGUMENTS")
     session = {"id": "s", "profile_id": "p", "project_id": "mine", "api_user_id": "me", "model": "gpt-test"}
     monkeypatch.setattr(context.database, "get_session", lambda sid: session)
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {"config": {"setting_sources": sources}})
     monkeypatch.setattr("app.core.project_resolver.resolve_existing_cwd", lambda row: str(child))
-    req = caller({"id": "me", "project_id": "mine", "profile_id": "p"})
+    req = caller({"id": "me", "project_id": "mine", "profile_ids": ["p"]})
     listed = await commands.list_commands(session_id="s", http_request=req)
     allowed = sources is None or "user" in sources
     assert {entry.name for entry in listed.commands} == ({"greet"} if allowed else set())
     if allowed:
         detail = await commands.get_command("greet", session_id="s", http_request=req)
-        executed = await commands.execute_command(commands.ExecuteCommandRequest(command="/greet world", session_id="s"), req)
         assert detail.content == "Hello $ARGUMENTS"
-        assert executed.expanded_prompt == "Hello world"
     else:
         with pytest.raises(HTTPException) as exc:
             await commands.get_command("greet", session_id="s", http_request=req)
-        assert exc.value.status_code == 404
-        with pytest.raises(HTTPException) as exc:
-            await commands.execute_command(commands.ExecuteCommandRequest(command="/greet world", session_id="s"), req)
         assert exc.value.status_code == 404
 
 
@@ -125,9 +119,23 @@ def test_scoped_profile_cannot_override_sources_even_in_voice(monkeypatch):
     lookup = Mock(side_effect=AssertionError("unauthorized profile loaded"))
     monkeypatch.setattr(context.database, "get_profile", lookup)
     with pytest.raises(HTTPException) as exc:
-        context.command_provider_kind(caller({"profile_id": "mine"}), None, None, "other", "voice")
+        context.command_provider_kind(caller({"profile_ids": ["mine"]}), None, None, "other", "voice")
     assert exc.value.status_code == 403
     lookup.assert_not_called()
+
+
+def test_scoped_caller_defaults_to_its_only_agent_and_may_use_any_assigned(monkeypatch):
+    """``profile_ids`` (not the dead ``profile_id`` column) scopes commands."""
+    seen = []
+    monkeypatch.setattr(context.database, "get_profile",
+                        lambda pid: seen.append(pid) or {"config": {}})
+    context.command_setting_sources(caller({"profile_ids": ["only"]}), None, None)
+    context.command_setting_sources(caller({"profile_ids": ["a", "b"]}), None, "b")
+    assert seen == ["only", "b"]
+    with pytest.raises(HTTPException) as exc:
+        context.command_setting_sources(
+            caller({"profile_id": "legacy", "profile_ids": ["a"]}), None, "legacy")
+    assert exc.value.status_code == 403
 
 
 def caller(user=None):
@@ -148,10 +156,7 @@ def test_native_menu_uses_fluid_files_without_cli_builtins(monkeypatch, tmp_path
     assert not slash_commands.get_all_commands(str(tmp_path), provider_kind=kind, setting_sources=[])
 
 
-def test_delegated_menu_keeps_prompt_commands_and_omits_terminal_settings(monkeypatch):
-    monkeypatch.setattr(slash_commands,'discover_commands',lambda cwd: [])
-    monkeypatch.setattr(slash_commands,'discover_plugin_commands',lambda: [])
-    monkeypatch.setattr(slash_commands,'discover_skills',lambda cwd: [])
+def test_delegated_menu_keeps_prompt_commands_and_omits_terminal_settings():
     names = {c['name'] for c in slash_commands.get_all_commands('/fixture')}
     assert {'compact','context','cost','review','init','security-review','pr-comments'} <= names
     assert not names & {'model','plan','memory','doctor','export','sandbox','bug','status'}
@@ -177,7 +182,7 @@ def test_menu_route_matches_adapter_model_and_provider_binding(monkeypatch, mode
     assert context.command_provider_kind(caller(), {'provider_id':provider}, model,None,'code') == expected
 
 
-@pytest.mark.parametrize('endpoint', ['list','detail','execute'])
+@pytest.mark.parametrize('endpoint', ['list','detail'])
 async def test_session_command_endpoints_deny_other_principal_before_path_scan(monkeypatch, endpoint):
     user={'id':'me','project_id':'mine'}
     monkeypatch.setattr(context.database,'get_session',lambda sid:{'id':sid,'project_id':'theirs','api_user_id':'other'})
@@ -185,8 +190,7 @@ async def test_session_command_endpoints_deny_other_principal_before_path_scan(m
     monkeypatch.setattr('app.core.project_resolver.resolve_existing_cwd',resolve)
     with pytest.raises(HTTPException) as exc:
         if endpoint=='list': await commands.list_commands(session_id='foreign',http_request=caller(user))
-        elif endpoint=='detail': await commands.get_command('review',session_id='foreign',http_request=caller(user))
-        else: await commands.execute_command(commands.ExecuteCommandRequest(command='/rewind',session_id='foreign'),caller(user))
+        else: await commands.get_command('review',session_id='foreign',http_request=caller(user))
     assert exc.value.status_code == 403
     resolve.assert_not_called()
 
@@ -201,15 +205,6 @@ async def test_foreign_project_and_worktree_rejected_before_scan(monkeypatch, wo
         await commands.list_commands(project_id=project_id,worktree_id=worktree_id,http_request=caller({'id':'me','project_id':'mine'}))
     assert exc.value.status_code == 403
     scan.assert_not_called()
-
-
-async def test_custom_execution_uses_authorized_session_checkout(monkeypatch,tmp_path):
-    checkout=tmp_path/'session-checkout'; command_dir=checkout/'.claude'/'commands'; command_dir.mkdir(parents=True)
-    (command_dir/'greet.md').write_text('Hello $ARGUMENTS from this checkout',encoding='utf-8')
-    monkeypatch.setattr(context.database,'get_session',lambda sid:{'id':sid,'project_id':'mine','api_user_id':'me'})
-    monkeypatch.setattr('app.core.project_resolver.resolve_existing_cwd',lambda row:str(checkout))
-    result=await commands.execute_command(commands.ExecuteCommandRequest(command='/greet world',session_id='s'),caller({'id':'me','project_id':'mine'}))
-    assert result.expanded_prompt == 'Hello world from this checkout'
 
 
 def test_scoped_projectless_discovery_uses_assigned_project(monkeypatch,tmp_path):

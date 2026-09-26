@@ -9,37 +9,34 @@ a browser through a Cloudflare login to read them.
 """
 
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
+from tests.mcp.tool_helpers import tool_result_json
+
 
 def _handlers(session_id="session-logs"):
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     from app.mcp import builtin_tools
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
-        builtin_tools.create_builtin_tools_server(session_id=session_id)
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
+        builtin_tools.create_builtin_tools_server(session_id=session_id, is_admin=True)
 
     return {tool.name: tool for tool in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 def _get(**args):
-    return _body(asyncio.run(_handlers()["GetAppLogs"].handler(args)))
+    return tool_result_json(asyncio.run(_handlers()["GetAppLogs"].handler(args)))
 
 
 @pytest.fixture

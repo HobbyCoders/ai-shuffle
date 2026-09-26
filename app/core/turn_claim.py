@@ -1,10 +1,9 @@
-"""Cross-runner turn claim + interrupt observer (V2 Phase 4, Q3).
+"""Cross-runner turn claim + interrupt observer.
 
-This is the piece that replaces the legacy HTTP relay DISPATCH: when a WS
-handler on install A enqueues a turn for a session placed on install B, nothing
-on A executes it — B's copy of this loop notices the durable ``queued`` row and
-kicks B's own scheduler, which claims the session's run lease and executes
-exactly as if the turn had been submitted locally (OD-1).
+A turn enqueued on install A for a session placed on install B is noticed and
+executed by B's copy of this loop: nothing on A executes it — B sees the
+durable ``queued`` row and kicks B's own scheduler, which claims the session's
+run lease and executes exactly as if the turn had been submitted locally.
 
 Two passes per tick, both cheap indexed reads against shared tables:
 
@@ -13,11 +12,11 @@ Two passes per tick, both cheap indexed reads against shared tables:
   ``turn_scheduler.kick`` ONLY the sessions whose decision is explicitly
   ``("runner", me)``. ``kind == "local"`` is deliberately EXCLUDED: placement
   resolution is install-relative, and the only rows that still resolve "local"
-  after the A11 instance_id fallback are OWNERLESS (NULL placement AND blank
+  after the ``instance_id`` fallback are OWNERLESS (NULL placement AND blank
   ``instance_id``) — those resolve "local" on EVERY install, so acting on them
   here would let install B steal install A's local-default sessions. Owned
   NULL-placement rows resolve deterministically to ``("runner", <owner>)`` via
-  A11 and ARE claimable — but only by their owner. Local sessions are kicked
+  that fallback and ARE claimable — but only by their owner. Local sessions are kicked
   by their own submit path (and the reap sweep), never by this loop.
 
 * **Interrupt-observe pass** — ``turns.list_interrupting_for_runner(me)``:
@@ -26,10 +25,10 @@ Two passes per tick, both cheap indexed reads against shared tables:
   This pass bridges that gap: for each of MY turns durably marked
   interrupting, drive the live runtime's ``interrupt(mode)`` (fire-and-forget —
   it can block up to the 8s escalation window). Idempotent via the runtime's
-  per-turn ``_interrupt_driving`` guard (O4), so re-observing the same flip on
+  per-turn ``_interrupt_driving`` guard (``SessionRuntime``), so re-observing the same flip on
   the next tick is a no-op.
 
-Cadence (OD-1): a ≥5s slow poll is the CORRECTNESS mechanism; a NOTIFY wake
+Cadence: a ≥5s slow poll is the CORRECTNESS mechanism; a NOTIFY wake
 off the ``session_events`` gateway channel is the LATENCY mechanism (the
 submit/interrupt seams fire ``session_events.notify_session`` after writing).
 The gateway listener fires on EVERY event tick of every session — including
@@ -39,16 +38,15 @@ one pass per ``WAKE_COOLDOWN_SECONDS``, and both passes are tiny indexed reads.
 Started from ``startup.install_v2_turns_wiring``.
 
 
-THE UNIFIED BACKGROUND SWEEP (F5)
----------------------------------
-This module also hosts the driver that all of the cross-install correctness
-loops now share. There used to be four independent timers — turn claim (5s),
-git-ops claim (5s), interaction expiry (10s) and the streaming reap — each with
-its own task, its own sleep, its own thread dispatch and its own connection
-checkout, producing ~46 empty DB reads a minute on a box where nothing was
-happening. They are now multiplexed onto ONE timer here: peers register a
-:class:`SweepPass` via :func:`register_pass` and the driver runs each one when
-it comes due, batching everything that falls in the same tick.
+THE UNIFIED BACKGROUND SWEEP
+----------------------------
+This module also hosts a driver that cross-install correctness loops can
+share. A loop registers a :class:`SweepPass` here (via :func:`register_pass`)
+and shares one timer; the driver runs each pass when it comes due, batching
+everything that falls in the same tick. Today the registered passes are
+``turn_claim``, ``git_ops``, ``git_ops_retention`` and ``interaction_expiry``.
+The streaming-status dead-lease reap is not one of them: it runs its own 15 s
+loop (``streaming_status.sweep_loop``, started from ``startup``).
 
 Two things make the idle cost collapse:
 
@@ -94,7 +92,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Correctness cadence (OD-1: "≥5s slow poll, never a hot poll").
+# Correctness cadence: a ≥5s slow poll, never a hot poll.
 CLAIM_POLL_SECONDS = 5.0
 # Latency damping: NOTIFY ticks arrive per event batch during streaming; never
 # run passes more often than this.
@@ -125,7 +123,7 @@ def notify_turns_changed(session_id: str) -> None:
 
     Fired by the placement submit/interrupt seams right after the durable
     turns write, so the owning runner reacts in NOTIFY time instead of poll
-    time. Pure latency optimization: correctness rides the 5s poll (OD-1).
+    time. Pure latency optimization: correctness rides the 5s poll.
     """
     from app.db import session_events
 
@@ -183,7 +181,7 @@ async def claim_once() -> int:
             continue
         mode = row.get("interrupt_mode") or "stop"
         # Fire-and-forget: interrupt() can hold for the full escalation window;
-        # the loop must keep ticking. The runtime's per-turn guard (O4) makes
+        # the loop must keep ticking. The runtime's per-turn guard makes
         # duplicate observations of the same flip no-ops.
         task = asyncio.create_task(runtime.interrupt(mode))
         _interrupt_tasks.add(task)
@@ -229,7 +227,7 @@ async def claim_once() -> int:
 
 
 # ---------------------------------------------------------------------------
-# The unified sweep driver (F5)
+# The unified sweep driver
 # ---------------------------------------------------------------------------
 
 
@@ -311,9 +309,9 @@ def register_pass(
 def unregister_pass(name: str) -> None:
     """Remove a pass and cancel it if it is mid-flight. Never raises.
 
-    Cancelling matches what the pass's owner used to get from cancelling its own
-    loop task at shutdown — e.g. a git op that is running when the server tears
-    down is stopped rather than left to race the pool shutdown.
+    Cancelling stops a pass that is mid-flight at shutdown — e.g. a git op
+    that is running when the server tears down is stopped rather than left to
+    race the pool shutdown.
     """
     sweep = _passes.pop(name, None)
     if sweep is not None and sweep.in_flight():
@@ -526,11 +524,6 @@ async def sweep_loop() -> None:
     logger.info("turn_claim: unified sweep driver stopped")
 
 
-# Back-compat alias — this loop's only caller is :func:`start`, but the name is
-# referenced in docs/commit history.
-claim_loop = sweep_loop
-
-
 def _ensure_driver() -> None:
     """Spawn the sweep driver task if it is not already running."""
     global _loop_task
@@ -591,8 +584,7 @@ async def stop() -> None:
     task = _loop_task
     _loop_task = None
     # Cancel any pass still executing: a pass racing the session-pool shutdown
-    # is exactly what this teardown exists to prevent, and each pass used to be
-    # cancelled with its own loop task.
+    # is exactly what this teardown exists to prevent.
     in_flight = [t for t in list(_pass_tasks) if not t.done()]
     for t in in_flight:
         t.cancel()

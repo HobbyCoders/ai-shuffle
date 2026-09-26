@@ -42,8 +42,34 @@ def validate(value):
         account_hub.require_active(owner)
         if (owner['account_id'] if owner else None) != value.get('account_id'):
             raise PermissionError('Account membership changed')
-    elif value['kind'] != 'api_user':
+    elif value['kind'] == 'api_user':
+        # The key that authenticated must still be this user's live key: a
+        # disabled, deleted or rotated key no longer matches.
+        from app.db import database
+        user = database.get_api_user_by_key_hash(value['credential_hash'])
+        if not user or user['id'] != value['principal_id']:
+            raise PermissionError('API key disabled, deleted or rotated')
+    else:
         raise PermissionError('Unknown principal')
+
+
+def revalidate(value):
+    """:func:`validate` for an open socket's periodic re-check.
+
+    A paired device must still be paired (not revoked), its token generation
+    unchanged (the session hash still matches, so an unpair, a logout or a
+    rotation all fail) and its account membership live. The device's live
+    checks refuse with HTTP 401/403; those mean the principal is gone and
+    become ``PermissionError`` like every other refusal. An outage (5xx) is
+    raised as is, so the caller retries instead of dropping a live socket.
+    """
+    from fastapi import HTTPException
+    try:
+        validate(value)
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            raise PermissionError(str(exc.detail)) from exc
+        raise
 
 
 def bind_session(session_id, value, *, new=False, claim=False, conn=None):

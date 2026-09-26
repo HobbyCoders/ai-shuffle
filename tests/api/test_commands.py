@@ -14,6 +14,7 @@ These tests cover:
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 
@@ -57,17 +58,11 @@ def mock_slash_commands():
     """Mock slash_commands module."""
     with patch("app.api.commands.get_command_by_name") as mock_get_cmd, \
          patch("app.api.commands.get_all_commands") as mock_get_all, \
-         patch("app.api.commands.is_interactive_command") as mock_is_interactive, \
-         patch("app.api.commands.is_rest_api_command") as mock_is_rest, \
-         patch("app.api.commands.get_rest_api_command_info") as mock_rest_info, \
-         patch("app.api.commands.parse_command_input") as mock_parse:
+         patch("app.api.commands.is_interactive_command") as mock_is_interactive:
         yield {
             "get_command_by_name": mock_get_cmd,
             "get_all_commands": mock_get_all,
             "is_interactive_command": mock_is_interactive,
-            "is_rest_api_command": mock_is_rest,
-            "get_rest_api_command_info": mock_rest_info,
-            "parse_command_input": mock_parse,
         }
 
 
@@ -169,8 +164,11 @@ class TestGetWorkingDirForProject:
         """Should return workspace dir when project_id is None."""
         from app.api.commands import get_working_dir_for_project
 
+        mock_settings.effective_workspace_dir = Path("/workspace")
+
         result = get_working_dir_for_project(None)
 
+        assert result == "/workspace"
         mock_database.get_project.assert_not_called()
 
     def test_returns_workspace_dir_when_project_not_found(self, mock_database, mock_settings):
@@ -178,9 +176,11 @@ class TestGetWorkingDirForProject:
         from app.api.commands import get_working_dir_for_project
 
         mock_database.get_project.return_value = None
+        mock_settings.effective_workspace_dir = Path("/workspace")
 
         result = get_working_dir_for_project("nonexistent-project")
 
+        assert result == "/workspace"
         mock_database.get_project.assert_called_once_with("nonexistent-project")
 
     def test_returns_project_path_when_project_exists(self, mock_database, mock_settings):
@@ -188,9 +188,11 @@ class TestGetWorkingDirForProject:
         from app.api.commands import get_working_dir_for_project
 
         mock_database.get_project.return_value = {"id": "test-project", "path": "my-project"}
+        mock_settings.effective_workspace_dir = Path("/workspace")
 
         result = get_working_dir_for_project("test-project")
 
+        assert result == "/workspace/my-project"
         mock_database.get_project.assert_called_once_with("test-project")
 
 
@@ -313,320 +315,6 @@ class TestGetCommandEndpoint:
 
         assert exc_info.value.status_code == 404
         assert "Command not found" in str(exc_info.value.detail)
-
-
-# =============================================================================
-# Tests for execute_command endpoint
-# =============================================================================
-
-class TestExecuteCommandEndpoint:
-    """Tests for POST /api/v1/commands/execute endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_execute_invalid_command_format(self, mock_slash_commands, mock_database):
-        """Should raise 400 when command format is invalid."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-        from fastapi import HTTPException
-
-        mock_slash_commands["parse_command_input"].return_value = ("", "invalid")
-
-        request = ExecuteCommandRequest(command="invalid", session_id="session-1")
-
-        with pytest.raises(HTTPException) as exc_info:
-            await execute_command(request)
-
-        assert exc_info.value.status_code == 400
-        assert "Invalid command format" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_execute_interactive_command(self, mock_slash_commands, mock_database):
-        """Should return is_interactive=True for interactive commands."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-
-        mock_slash_commands["parse_command_input"].return_value = ("resume", "")
-        mock_slash_commands["is_interactive_command"].return_value = True
-
-        request = ExecuteCommandRequest(command="/resume", session_id="session-1")
-
-        response = await execute_command(request)
-
-        assert response.success is True
-        assert response.is_interactive is True
-        assert "requires interactive terminal" in response.message
-
-    @pytest.mark.asyncio
-    async def test_execute_rest_api_command(self, mock_slash_commands, mock_database):
-        """Should return API endpoint for REST API commands."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-
-        mock_slash_commands["parse_command_input"].return_value = ("rewind", "")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = True
-        mock_slash_commands["get_rest_api_command_info"].return_value = {
-            "api_endpoint": "/api/v1/commands/rewind/checkpoints/{session_id}"
-        }
-
-        request = ExecuteCommandRequest(command="/rewind", session_id="session-123")
-
-        response = await execute_command(request)
-
-        assert response.success is True
-        assert "uses REST API" in response.message
-        assert "session-123" in response.message
-
-    @pytest.mark.asyncio
-    async def test_execute_session_not_found(self, mock_slash_commands, mock_database, mock_settings):
-        """Should raise 404 when session not found."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-        from fastapi import HTTPException
-
-        mock_slash_commands["parse_command_input"].return_value = ("my-command", "arg1")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        mock_database.get_session.return_value = None
-
-        request = ExecuteCommandRequest(command="/my-command arg1", session_id="nonexistent")
-
-        with pytest.raises(HTTPException) as exc_info:
-            await execute_command(request)
-
-        assert exc_info.value.status_code == 404
-        assert "Session not found" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_execute_command_not_found(self, mock_slash_commands, mock_database, mock_settings):
-        """Should raise 404 when custom command not found."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-        from fastapi import HTTPException
-
-        mock_slash_commands["parse_command_input"].return_value = ("unknown-cmd", "")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": None}
-        mock_database.get_project.return_value = None
-        mock_slash_commands["get_command_by_name"].return_value = None
-
-        request = ExecuteCommandRequest(command="/unknown-cmd", session_id="session-1")
-
-        with pytest.raises(HTTPException) as exc_info:
-            await execute_command(request)
-
-        assert exc_info.value.status_code == 404
-        assert "Command not found" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_execute_command_missing_required_arguments(self, mock_slash_commands, mock_database, mock_settings):
-        """Should return failure when required arguments are missing."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-
-        mock_slash_commands["parse_command_input"].return_value = ("my-command", "")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": None}
-        mock_database.get_project.return_value = None
-
-        mock_cmd = MockSlashCommand(
-            name="my-command",
-            description="Test",
-            content="Do something with $ARGUMENTS",
-            argument_hint="<required-arg>"
-        )
-        mock_slash_commands["get_command_by_name"].return_value = mock_cmd
-
-        request = ExecuteCommandRequest(command="/my-command", session_id="session-1")
-
-        response = await execute_command(request)
-
-        assert response.success is False
-        assert "requires arguments" in response.message
-        assert response.expanded_prompt is None
-
-    @pytest.mark.asyncio
-    async def test_execute_command_success(self, mock_slash_commands, mock_database, mock_settings):
-        """Should expand prompt and return success."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-
-        mock_slash_commands["parse_command_input"].return_value = ("my-command", "test-arg")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-1"}
-        mock_database.get_project.return_value = {"id": "proj-1", "path": "my-project"}
-
-        mock_cmd = MockSlashCommand(
-            name="my-command",
-            description="Test",
-            content="Process: $ARGUMENTS",
-        )
-        mock_slash_commands["get_command_by_name"].return_value = mock_cmd
-
-        request = ExecuteCommandRequest(command="/my-command test-arg", session_id="session-1")
-
-        response = await execute_command(request)
-
-        assert response.success is True
-        assert response.message == "Command expanded successfully"
-        assert response.expanded_prompt == "Process: test-arg"
-        assert response.is_interactive is False
-
-
-# =============================================================================
-# Tests for sync_after_rewind endpoint
-# =============================================================================
-
-class TestSyncAfterRewindEndpoint:
-    """Tests for POST /api/v1/commands/sync-after-rewind endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_sync_invalid_restore_option(self, mock_database):
-        """Should raise 400 for invalid restore option."""
-        from app.api.commands import sync_after_rewind
-        from fastapi import HTTPException
-
-        with pytest.raises(HTTPException) as exc_info:
-            await sync_after_rewind(
-                session_id="session-1",
-                checkpoint_message="test message",
-                restore_option=5
-            )
-
-        assert exc_info.value.status_code == 400
-        assert "Invalid restore option" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_sync_option_3_no_sync_needed(self, mock_database):
-        """Should return no sync needed for option 3 (code only)."""
-        from app.api.commands import sync_after_rewind
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="test message",
-            restore_option=3
-        )
-
-        assert response["success"] is True
-        assert response["deleted_count"] == 0
-        assert "No chat sync needed" in response["message"]
-
-    @pytest.mark.asyncio
-    async def test_sync_option_4_no_sync_needed(self, mock_database):
-        """Should return no sync needed for option 4 (cancel)."""
-        from app.api.commands import sync_after_rewind
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="test message",
-            restore_option=4
-        )
-
-        assert response["success"] is True
-        assert response["deleted_count"] == 0
-
-    @pytest.mark.asyncio
-    async def test_sync_session_not_found(self, mock_database):
-        """Should raise 404 when session not found."""
-        from app.api.commands import sync_after_rewind
-        from fastapi import HTTPException
-
-        mock_database.get_session.return_value = None
-
-        with pytest.raises(HTTPException) as exc_info:
-            await sync_after_rewind(
-                session_id="nonexistent",
-                checkpoint_message="test message",
-                restore_option=1
-            )
-
-        assert exc_info.value.status_code == 404
-        assert "Session not found" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_sync_checkpoint_not_found(self, mock_database):
-        """Should return failure when checkpoint message not found."""
-        from app.api.commands import sync_after_rewind
-
-        mock_database.get_session.return_value = {"id": "session-1"}
-        mock_database.get_session_messages.return_value = [
-            {"id": 1, "role": "user", "content": "different message"},
-            {"id": 2, "role": "assistant", "content": "response"},
-        ]
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="checkpoint message not in history",
-            restore_option=1
-        )
-
-        assert response["success"] is False
-        assert "Could not find checkpoint message" in response["message"]
-
-    @pytest.mark.asyncio
-    async def test_sync_checkpoint_found_exact_match(self, mock_database):
-        """Should find checkpoint and delete messages after it."""
-        from app.api.commands import sync_after_rewind
-
-        mock_database.get_session.return_value = {"id": "session-1"}
-        mock_database.get_session_messages.return_value = [
-            {"id": 1, "role": "user", "content": "first message"},
-            {"id": 2, "role": "assistant", "content": "response 1"},
-            {"id": 3, "role": "user", "content": "checkpoint message"},
-            {"id": 4, "role": "assistant", "content": "response 2"},
-            {"id": 5, "role": "user", "content": "after checkpoint"},
-        ]
-        mock_database.delete_session_message.return_value = True
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="checkpoint message",
-            restore_option=1
-        )
-
-        assert response["success"] is True
-        assert response["deleted_count"] == 2  # Messages 4 and 5
-        assert response["checkpoint_index"] == 2
-
-    @pytest.mark.asyncio
-    async def test_sync_checkpoint_found_partial_match(self, mock_database):
-        """Should find checkpoint with partial match."""
-        from app.api.commands import sync_after_rewind
-
-        mock_database.get_session.return_value = {"id": "session-1"}
-        mock_database.get_session_messages.return_value = [
-            {"id": 1, "role": "user", "content": "checkpoint message that is very long"},
-            {"id": 2, "role": "assistant", "content": "response"},
-        ]
-        mock_database.delete_session_message.return_value = True
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="checkpoint message that is very long and continues...",
-            restore_option=2
-        )
-
-        assert response["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_sync_delete_message_raises_exception(self, mock_database):
-        """Should continue even when delete_session_message raises an exception."""
-        from app.api.commands import sync_after_rewind
-
-        mock_database.get_session.return_value = {"id": "session-1"}
-        mock_database.get_session_messages.return_value = [
-            {"id": 1, "role": "user", "content": "checkpoint message"},
-            {"id": 2, "role": "assistant", "content": "response 1"},
-            {"id": 3, "role": "user", "content": "after checkpoint"},
-        ]
-        # First call succeeds, second call raises exception
-        mock_database.delete_session_message.side_effect = [True, Exception("DB error")]
-
-        response = await sync_after_rewind(
-            session_id="session-1",
-            checkpoint_message="checkpoint message",
-            restore_option=1
-        )
-
-        # Should still return success, but with only 1 deleted
-        assert response["success"] is True
-        assert response["deleted_count"] == 1
 
 
 # =============================================================================
@@ -781,6 +469,7 @@ class TestExecuteRewindEndpoint:
             "project_id": None
         }
         mock_database.get_project.return_value = None
+        mock_settings.effective_workspace_dir = Path("/workspace")
         mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
             success=True,
             message="Rewind successful",
@@ -802,7 +491,7 @@ class TestExecuteRewindEndpoint:
         mock_jsonl_rewind_service.truncate_to_checkpoint.assert_called_once_with(
             sdk_session_id="sdk-session-1",
             target_uuid="uuid-1",
-            working_dir=mock_settings.workspace_dir.__truediv__.return_value.__str__.return_value if mock_database.get_project.return_value else str(mock_settings.workspace_dir),
+            working_dir="/workspace",  # no project: the effective workspace
             include_response=True,
             target_role="user"
         )
@@ -1886,36 +1575,6 @@ class TestLegacyRewindEndpoints:
 
 
 # =============================================================================
-# Tests for rewind status and clear endpoints
-# =============================================================================
-
-class TestRewindStatusEndpoints:
-    """Tests for rewind status and clear endpoints."""
-
-    @pytest.mark.asyncio
-    async def test_get_rewind_status(self):
-        """Should return V2 rewind status."""
-        from app.api.commands import get_rewind_status
-
-        response = await get_rewind_status()
-
-        assert response["version"] == "v2"
-        assert response["method"] == "direct_jsonl"
-        assert response["has_pending"] is False
-        assert response["pending_rewind"] is None
-
-    @pytest.mark.asyncio
-    async def test_clear_pending_rewind(self):
-        """Should return success (V2 doesn't use pending config)."""
-        from app.api.commands import clear_pending_rewind
-
-        response = await clear_pending_rewind()
-
-        assert response["success"] is True
-        assert "V2" in response["message"]
-
-
-# =============================================================================
 # Tests for Pydantic models
 # =============================================================================
 
@@ -1951,18 +1610,6 @@ class TestCommandModels:
 
         assert response.count == 2
         assert len(response.commands) == 2
-
-    def test_execute_command_request_model(self):
-        """Test ExecuteCommandRequest model."""
-        from app.api.commands import ExecuteCommandRequest
-
-        request = ExecuteCommandRequest(
-            command="/test arg1 arg2",
-            session_id="session-123"
-        )
-
-        assert request.command == "/test arg1 arg2"
-        assert request.session_id == "session-123"
 
     def test_rewind_request_v2_model(self):
         """Test RewindRequestV2 model."""
@@ -2047,15 +1694,6 @@ class TestCommandsAuthentication:
         app.include_router(router)
         return TestClient(app)
 
-    def test_execute_unauthenticated_returns_401(self):
-        """Unauthenticated POST /execute → 401 (no cookie, no bearer)."""
-        client = self._build_app_no_auth_override()
-        resp = client.post(
-            "/api/v1/commands/execute",
-            json={"command": "/foo", "session_id": "session-1"},
-        )
-        assert resp.status_code == 401
-
     def test_get_checkpoints_unauthenticated_returns_401(self):
         """Unauthenticated GET rewind checkpoints → 401."""
         client = self._build_app_no_auth_override()
@@ -2086,57 +1724,13 @@ class TestCommandsSessionOwnership:
         """Build a mock FastAPI Request carrying an API user (non-admin)."""
         req = MagicMock()
         req.state = MagicMock()
-        req.state.api_user = {"project_id": project_id, "profile_id": profile_id}
+        req.state.api_user = {"project_id": project_id,
+                              "profile_ids": [profile_id] if profile_id else None}
         return req
-
-    @pytest.mark.asyncio
-    async def test_execute_command_cross_project_denied(
-        self, mock_slash_commands, mock_database, mock_settings
-    ):
-        """API user restricted to another project → 403 on /execute."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-        from fastapi import HTTPException
-
-        mock_slash_commands["parse_command_input"].return_value = ("my-command", "arg1")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        # Session belongs to proj-A; user is scoped to proj-B.
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
-
-        http_request = self._request_for_api_user(project_id="proj-B")
-        request = ExecuteCommandRequest(command="/my-command arg1", session_id="session-1")
-
-        with pytest.raises(HTTPException) as exc_info:
-            await execute_command(request, http_request)
-
-        assert exc_info.value.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_execute_command_same_project_allowed(
-        self, mock_slash_commands, mock_database, mock_settings
-    ):
-        """API user scoped to the SAME project passes the ownership check."""
-        from app.api.commands import execute_command, ExecuteCommandRequest
-
-        mock_slash_commands["parse_command_input"].return_value = ("my-command", "arg1")
-        mock_slash_commands["is_interactive_command"].return_value = False
-        mock_slash_commands["is_rest_api_command"].return_value = False
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
-        mock_database.get_project.return_value = {"id": "proj-A", "path": "proj-a"}
-        mock_slash_commands["get_command_by_name"].return_value = MockSlashCommand(
-            name="my-command", description="d", content="Do $ARGUMENTS", argument_hint=None
-        )
-
-        http_request = self._request_for_api_user(project_id="proj-A")
-        request = ExecuteCommandRequest(command="/my-command arg1", session_id="session-1")
-
-        response = await execute_command(request, http_request)
-        assert response.success is True
 
     @pytest.mark.asyncio
     async def test_execute_rewind_cross_project_denied(self, mock_database):
         """API user restricted to another project → 403 on rewind/execute."""
-        from app.api.commands import execute_command  # noqa: F401 (ensure module loaded)
         from app.api.commands import execute_rewind, RewindRequestV2
         from fastapi import HTTPException
 
@@ -2162,27 +1756,6 @@ class TestCommandsSessionOwnership:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_rewind_checkpoints("session-1", http_request)
-
-        assert exc_info.value.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_sync_after_rewind_cross_project_denied(self, mock_database):
-        """API user restricted to another project → 403 on sync-after-rewind."""
-        from app.api.commands import sync_after_rewind
-        from fastapi import HTTPException
-
-        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
-
-        http_request = self._request_for_api_user(project_id="proj-B")
-
-        with pytest.raises(HTTPException) as exc_info:
-            # restore_option 1 forces the session lookup + access check.
-            await sync_after_rewind(
-                session_id="session-1",
-                checkpoint_message="hello",
-                restore_option=1,
-                http_request=http_request,
-            )
 
         assert exc_info.value.status_code == 403
 

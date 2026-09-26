@@ -1,10 +1,9 @@
-"""V2 TurnRecorder — typed event-log appender tapped into the SDK pump (Phase 1).
+"""TurnRecorder — typed event-log appender tapped into the stream pump.
 
-Every session streams on the V2 path, so this module translates every legacy
-pump event (``stream_to_websocket`` yields, plus the between-turns drain pump's
-re-dispatches) into typed contract events (`app.contract.events`) appended to
-the append-only ``session_events`` log (`app.db.session_events`) under a fenced
-run lease (`app.db.runs`). Design: ``docs/V2_PHASE1_DESIGN.md`` §2–§3.
+This module translates every pump event (``stream_to_websocket`` yields, plus
+between-turns re-dispatches) into typed contract events
+(`app.contract.events`) appended to the append-only ``session_events`` log
+(`app.db.session_events`) under a fenced run lease (`app.db.runs`).
 
 Invariants (program rules):
 - NEVER imports ``sync_engine`` or any WebSocket-layer module.
@@ -13,7 +12,7 @@ Invariants (program rules):
 - Recording never blocks a turn: if the run lease cannot be claimed, events are
   appended UNFENCED (``run_id=None``) with a logged warning.
 
-Delta batching (§2): ``stream_delta`` text/thinking/tool-input payloads are
+Delta batching: ``stream_delta`` text/thinking/tool-input payloads are
 buffered in memory and flushed as ONE coalesced contract event per kind when
 150ms have elapsed since the first buffered delta, OR the kind's buffer reaches
 2048 chars, OR any non-delta event arrives (flushed BEFORE it so log order
@@ -100,7 +99,7 @@ def _as_dict(value: Any) -> Dict[str, Any]:
 
 
 # Pump event types whose ``screenshot`` data URI is content-addressed into the
-# artifact store (Q5). ``tool_result`` renders on the main-lane tool card;
+# artifact store. ``tool_result`` renders on the main-lane tool card;
 # ``subagent_tool_result`` on the subagent child card.
 _SCREENSHOT_EVENT_TYPES = ("tool_result", "subagent_tool_result")
 
@@ -131,9 +130,9 @@ def _stamp_screenshot(event: Dict[str, Any]) -> Optional[tuple]:
 
 
 async def _ingest_screenshot_unfenced(
-    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
+    session_id: str, event: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Unfenced-path screenshot ingest (drain pump / CLI wake turns).
+    """Unfenced-path screenshot ingest (between-turns re-dispatch).
 
     Mirrors ``TurnRecorder._maybe_ingest_screenshot`` for callers with no live
     recorder: stamp ``artifact_hashes`` onto the pump event, store the bytes
@@ -162,7 +161,7 @@ async def _ingest_screenshot_unfenced(
                 session_id, digest, exc_info=True,
             )
         return [_build_event(
-            contract.ArtifactCreated, session_id, turn_id=turn_id,
+            contract.ArtifactCreated, session_id,
             hash=digest, mime=mime, filename=filename, size=len(data),
         )]
     except Exception:
@@ -188,7 +187,7 @@ def _build_event(
     ``id``/``seq``/``created_at`` are server-assigned by the log layer, so the
     model is built with placeholders purely to validate the typed payload
     fields; only ``{"type", "payload", "turn_id", "command_id"}`` is appended.
-    ``extra_payload`` carries §3 payload notes the frozen contract models have
+    ``extra_payload`` carries payload fields the frozen contract models have
     no field for (e.g. turn.aborted ``message``) — payload is a free-form JSON
     column and the reducer ignores unknown keys. ``exclude_none`` drops unset
     optional fields from the payload instead of writing them as nulls, for
@@ -280,7 +279,7 @@ def _translate_shared(
     turn_id: Optional[str] = None,
     command_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """§3 translation for the stateless pump event types.
+    """Translation for the stateless pump event types.
 
     Shared by the in-turn recorder (fenced) and ``record_drained_event``
     (unfenced). Returns ``[]`` for anything unmapped (the not-recorded row).
@@ -401,9 +400,8 @@ def _translate_shared(
     if etype == "system":
         subtype = event.get("subtype") or ""
         if subtype == "task_updated":
-            # Background-task status chip (TaskUpdatedMessage in-stream, or the
-            # drain pump's mirrored/synthesized shape — see
-            # _task_status_events_from_message). Recording it as a generic
+            # Background-task status chip (a TaskUpdatedMessage from the
+            # stream). Recording it as a generic
             # system.note loses the terminal state: a replay then shows the
             # task stuck on its last in-turn "running" update forever.
             data = _as_dict(event.get("data"))
@@ -412,7 +410,7 @@ def _translate_shared(
                 patch = data.get("patch")
                 patch = patch if isinstance(patch, dict) else {}
                 state = patch.get("status") or data.get("status") or "updated"
-                # The SDK's TaskUpdatedMessage never carries tool_use_id; enrich
+                # A TaskUpdatedMessage never carries tool_use_id; enrich
                 # from the registry so terminal chips can settle the subagent card
                 # (whose toolId is the launch tool_use_id). Function-local import
                 # keeps this off the hot path / import graph.
@@ -434,7 +432,7 @@ def _translate_shared(
                 )]
         if subtype in _COMPACTION_SUBTYPES:
             # Contract model carries no fields; pass the raw frame through in
-            # the payload per the §3 "passthrough" note.
+            # the payload.
             return [_build_event(
                 contract.SystemCompactionBoundary, session_id,
                 extra_payload={"subtype": subtype, "data": event.get("data")},
@@ -466,7 +464,7 @@ def _translate_shared(
             **kw,
         )]
 
-    # Not-recorded row (§3): stream_block_start/stop, stream_message_delta
+    # Not recorded: stream_block_start/stop, stream_message_delta
     # (non-usage), rate_limit, plugin_message, heartbeat, api_error — and
     # anything unknown (forward compatibility).
     return []
@@ -493,8 +491,8 @@ class TurnRecorder:
         self.fence_token = fence_token
         self.runner_id = runner_id
         self.turn_id = str(uuid.uuid4())
-        # True when THIS recorder owns the run lease (the legacy ``maybe_create``
-        # self-claim path): ``close()`` then releases the lease. The Phase-2
+        # True when THIS recorder owns the run lease (the ``maybe_create``
+        # self-claim path): ``close()`` then releases the lease. The
         # ``create_for_run`` injection path sets this False — the SessionRuntime
         # owns the lease + renew loop and releases it itself, so ``close()`` must
         # NOT release out from under the runtime.
@@ -535,15 +533,11 @@ class TurnRecorder:
         self._recording_failed = False
         self._recording_failed_dropped = 0
         self.on_recording_failed: Optional[Callable[[], None]] = None
-        # seq of this turn's FIRST appended event — the truncation point for
-        # an empty-turn discard (record_empty_turn_discard, wired in a later
-        # commit).
-        self._first_seq: Optional[int] = None
         self._renew_task: Optional[asyncio.Task] = None
         # Serializes buffer mutation + appends (on_event vs. the flush timer)
         # so log order always reflects pump order.
         self._lock = asyncio.Lock()
-        # In-flight fire-and-forget screenshot-artifact stores (Q5). Held so the
+        # In-flight fire-and-forget screenshot-artifact stores. Held so the
         # loop keeps a strong ref (asyncio only weak-refs tasks) and ``close``
         # can drain them, making the bytes durable before teardown.
         self._artifact_tasks: set[asyncio.Task] = set()
@@ -561,7 +555,7 @@ class TurnRecorder:
         Never raises and never blocks the turn: any failure (including a lost
         run-lease claim) degrades to ``None`` / unfenced recording.
         """
-        # Seed the event log from legacy history BEFORE this turn's first
+        # Seed the event log from pre-event-log history BEFORE this turn's first
         # append, so turn.started never lands on an unseeded log. Lazy import:
         # history_backfill imports this module's builders.
         from app.core.history_backfill import ensure_backfilled
@@ -595,11 +589,6 @@ class TurnRecorder:
         recorder = cls(session_id, command_id, run_id, fence_token, runner_id)
         if run_id is not None:
             recorder._renew_task = asyncio.create_task(recorder._renew_loop())
-        # Registry of the LAST recorder per session so the post-turn
-        # empty-turn-discard path (``discard_empty_turn``) can reach it after
-        # the pump has closed it — the instance itself never escapes
-        # ``stream_to_websocket``.
-        _last_turn_recorders[session_id] = recorder
         return recorder
 
     @classmethod
@@ -614,7 +603,7 @@ class TurnRecorder:
         runner_id: Optional[str] = None,
     ) -> "TurnRecorder":
         """Build a recorder bound to a run lease the CALLER already claimed
-        (Phase 2 injection path).
+        (the injection path).
 
         :class:`app.core.session_runtime.SessionRuntime` claims the fenced run
         lease, starts the ``turns`` row, and owns the renew loop, then hands the
@@ -631,7 +620,7 @@ class TurnRecorder:
 
         All other recording internals (delta batching, usage coalescing,
         terminal translation) are identical. Like ``maybe_create`` this seeds the
-        legacy history backfill before the turn's first append and never raises
+        history backfill before the turn's first append and never raises
         for the backfill.
         """
         from app.core.history_backfill import ensure_backfilled
@@ -646,7 +635,6 @@ class TurnRecorder:
         )
         recorder.turn_id = turn_id
         recorder._owns_lease = False
-        _last_turn_recorders[session_id] = recorder
         return recorder
 
     async def start(
@@ -730,8 +718,8 @@ class TurnRecorder:
         wake IS the delivery point for those frames, so it is also where the
         event log — and with it the frontend card — has to learn the task is
         done: nothing in the wake turn's own stream repeats a completion that
-        happened before it started, and the frontend no longer force-settles
-        background shells at turn end (#991). Without this append the card runs
+        happened before it started, and the frontend does not force-settle
+        background shells at turn end. Without this append the card runs
         forever, its elapsed timer counting past the real completion.
 
         Mirrors the in-stream ``task_updated`` translation: registry ``kind`` so
@@ -785,7 +773,7 @@ class TurnRecorder:
             return 0
 
     async def on_event(self, event: Dict[str, Any]) -> None:
-        """Translate one yielded pump event per §3. Never raises."""
+        """Translate one yielded pump event. Never raises."""
         try:
             if not isinstance(event, dict):
                 return
@@ -850,7 +838,7 @@ class TurnRecorder:
             )
         finally:
             # Drain in-flight screenshot stores so the bytes are durable before
-            # teardown (Q5). Errors are already swallowed inside each task.
+            # teardown. Errors are already swallowed inside each task.
             if self._artifact_tasks:
                 await asyncio.gather(
                     *list(self._artifact_tasks), return_exceptions=True
@@ -877,28 +865,6 @@ class TurnRecorder:
                 # release lost). Either way, re-check + broadcast the diff.
                 _notify_run_change(self.session_id)
 
-    async def record_empty_turn_discard(self) -> None:
-        """Append ``transcript.rewound`` erasing this turn's events.
-
-        For turns whose user message is discarded end-to-end (stopped before
-        any output — see the interrupted-user-message poller). Truncates the
-        reduced transcript from this turn's FIRST appended event. Unfenced —
-        the discard decision lands after the turn's run lease is released.
-        Reached post-turn via module-level ``discard_empty_turn``. Never raises.
-        """
-        if self._first_seq is None or self._recording_failed:
-            return
-        try:
-            await _append_unfenced(self.session_id, [_build_event(
-                contract.TranscriptRewound, self.session_id,
-                from_seq=self._first_seq,
-            )])
-        except Exception:
-            logger.warning(
-                "[TurnRecorder] record_empty_turn_discard failed for %s",
-                self.session_id, exc_info=True,
-            )
-
     # ------------------------------------------------------------------
     # translation core (lock held)
     # ------------------------------------------------------------------
@@ -916,7 +882,7 @@ class TurnRecorder:
             return
 
         # Any non-delta pump event flushes buffered deltas FIRST so the log
-        # order always reflects pump order (§2) — including not-recorded
+        # order always reflects pump order — including not-recorded
         # events like stream_block_start (a block boundary).
         events = self._drain_buffered_events()
 
@@ -930,7 +896,7 @@ class TurnRecorder:
         elif etype == "provider_alive":
             # The provider accepted a model request and its stream is open.
             # Recorded for the Task worker's first-frame watchdog, which reads
-            # only this log (#1418): it proves the request started, not that
+            # only this log: it proves the request started, not that
             # the model is doing useful work. Bounded, since fluid sends one
             # per model call even when content follows at once.
             silent = not events and (
@@ -962,15 +928,15 @@ class TurnRecorder:
                 for k in (
                     "tokens_in", "tokens_out", "cache_creation_tokens",
                     "cache_read_tokens", "total_cost_usd", "duration_ms",
-                    "num_turns",
+                    "num_turns", "usage_estimated",
                 )
                 if k in metadata
             }
             # usage is an open dict in the contract, so per-model usage rides here to stay durable in session_events under postgres_only.
             if metadata.get("model_usage"):
                 usage_summary["model_usage"] = metadata["model_usage"]
-            # Phase 2 A5 amendment (plan §1.6(1)): carry the pump's API error
-            # status into the terminal payload — a usage-limit 429 turn
+            # Carry the pump's API error status into the terminal payload — a
+            # usage-limit 429 turn
             # otherwise settles as a normal completion with api_error_status
             # living only in in-memory pump metadata, leaving the scheduler's
             # failover policy nothing durable to key on. ``extra_payload``
@@ -1010,7 +976,7 @@ class TurnRecorder:
             ))
             self._terminal_recorded = True
         else:
-            # Q5: content-address a tool_result screenshot BEFORE translation so
+            # Content-address a tool_result screenshot BEFORE translation so
             # the ToolResult carries its artifact_hashes; append artifact.created
             # first (no-op for every non-screenshot event / flag OFF).
             events.extend(self._maybe_ingest_screenshot(event))
@@ -1022,7 +988,7 @@ class TurnRecorder:
         await self._append(events)
 
     # ------------------------------------------------------------------
-    # screenshot artifact ingest (Q5)
+    # screenshot artifact ingest
     # ------------------------------------------------------------------
 
     def _maybe_ingest_screenshot(
@@ -1236,17 +1202,15 @@ class TurnRecorder:
             return
         try:
             if self.run_id is not None and self.fence_token is not None:
-                seqs = await asyncio.to_thread(
+                await asyncio.to_thread(
                     session_events_db.append_events,
                     self.session_id, events,
                     run_id=self.run_id, fence_token=self.fence_token,
                 )
             else:
-                seqs = await asyncio.to_thread(
+                await asyncio.to_thread(
                     session_events_db.append_events, self.session_id, events
                 )
-            if self._first_seq is None and seqs:
-                self._first_seq = seqs[0]
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
@@ -1353,41 +1317,8 @@ class TurnRecorder:
 
 
 # ----------------------------------------------------------------------
-# Module-level taps (drain pump / stop / park) — all unfenced appends.
+# Module-level taps (between turns / stop / park) — all unfenced appends.
 # ----------------------------------------------------------------------
-
-# Last recorder per session (set by ``TurnRecorder.maybe_create``). Lets the
-# post-turn empty-turn-discard path reach the just-closed recorder — the
-# instance itself is encapsulated inside ``stream_to_websocket``. Overwritten
-# every turn; entries are tiny (buffers are drained on close).
-_last_turn_recorders: Dict[str, "TurnRecorder"] = {}
-
-
-async def discard_empty_turn(session_id: str) -> None:
-    """Append ``transcript.rewound`` erasing the LAST recorded turn's events.
-
-    Caller: the #420 empty-turn discard in ``chat_ws_handler.run_query`` —
-    a turn stopped before ANY output whose user message is discarded
-    end-to-end. Delegates to the last recorder's
-    ``record_empty_turn_discard`` (no-op if the turn appended nothing or no
-    recorder exists). Never raises.
-    """
-    recorder = _last_turn_recorders.get(session_id)
-    if recorder is None:
-        return
-    await recorder.record_empty_turn_discard()
-
-
-def pop_last_turn_recorder(session_id: str) -> None:
-    """Drop the session's last-recorder entry (session teardown).
-
-    ``_last_turn_recorders`` is overwritten per turn but never emptied when a
-    session goes away, so a long-lived server leaks one (tiny) entry per dead
-    session. Called from the session teardown paths alongside
-    ``task_registry.clear_session``. Never raises.
-    """
-    _last_turn_recorders.pop(session_id, None)
-
 
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
     if not events:
@@ -1396,10 +1327,10 @@ async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> Non
 
 
 async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
-    """Record a drain-pump re-dispatch (§2): subagent_*/task_*/system only.
+    """Record a between-turns event: subagent_*/task_*/system only.
 
-    Unfenced append (run_id=None, turn_id=None) — the drain pump runs between
-    turns with no owning run. Never raises.
+    Unfenced append (run_id=None, turn_id=None) — callers run between turns with
+    no owning run. Never raises.
     """
     try:
         if not isinstance(event, dict):
@@ -1411,9 +1342,7 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
             or etype == "system"
         ):
             # Deliberately narrow (other drain callers depend on it). Log the
-            # dropped type so a silently-unrendered drain event is diagnosable —
-            # the CLI-wake render surface (chunk/tool_use/tool_result) is served
-            # by record_cli_wake_event, NOT by widening this filter.
+            # dropped type so a silently-unrendered drain event is diagnosable.
             logger.debug(
                 "[TurnRecorder] record_drained_event dropped type=%r for %s",
                 etype, session_id,
@@ -1432,99 +1361,8 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
         )
 
 
-async def record_cli_wake_event(
-    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
-) -> int:
-    """Record ONE forwarded CLI-owned wake-turn event to the session log.
-
-    The between-turns CLI wake turn (``idle_reader``) renders assistant TEXT and
-    top-level tool activity that :func:`record_drained_event` deliberately drops
-    (its filter accepts only ``subagent_*``/``task_*``/``system``). This entry
-    point widens the accepted set to the full render surface — ``chunk`` /
-    ``tool_use`` / ``tool_result`` PLUS everything ``record_drained_event``
-    accepts — and stamps the synthesized wake ``turn_id`` so each row ties to the
-    ``turn.started``/``turn.completed`` the reader brackets around the wake.
-
-    Unfenced append (run_id=None): the CLI wake runs between turns under the idle
-    reader's reader token, so no fenced ``TurnRecorder`` can be live for the same
-    session concurrently. Returns the number of contract rows appended (``0`` =
-    filtered out or untranslatable). Never raises.
-    """
-    try:
-        if not isinstance(event, dict):
-            return 0
-        etype = event.get("type") or ""
-        if not (
-            etype in ("chunk", "tool_use", "tool_result")
-            or etype.startswith("subagent_")
-            or etype.startswith("task_")
-            or etype == "system"
-        ):
-            return 0
-        # Screenshot ingest BEFORE translation (mirrors the fenced record()
-        # order) so a wake-turn browser/computer-use screenshot renders too.
-        rows = await _ingest_screenshot_unfenced(session_id, event, turn_id=turn_id)
-        rows.extend(_translate_shared(event, session_id, turn_id=turn_id))
-        await _append_unfenced(session_id, rows)
-        return len(rows)
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_event failed for %s", session_id,
-            exc_info=True,
-        )
-        return 0
-
-
-async def record_cli_wake_turn_started(session_id: str, turn_id: str) -> None:
-    """Append a synthetic ``turn.started`` opening a CLI-owned wake turn.
-
-    Brackets the between-turns wake as a first-class turn so the FE reducer flips
-    its streaming indicator (``turn.started`` → ``isStreaming``) and — on the
-    paired ``turn.completed`` — settles any speculative subagent card. ``turn_id``
-    is a synthesized id with NO ``turns``-table row; the scheduler keys its
-    terminal reads by turns-table ids, so a synthetic wake turn is invisible to
-    the parked-turn state machine. Unfenced. Never raises.
-    """
-    try:
-        await _append_unfenced(session_id, [_build_event(
-            contract.TurnStarted, session_id, turn_id=turn_id,
-        )])
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_turn_started failed for %s",
-            session_id, exc_info=True,
-        )
-
-
-async def record_cli_wake_turn_completed(
-    session_id: str,
-    turn_id: str,
-    *,
-    usage: Optional[Dict[str, Any]] = None,
-    stop_reason: Optional[str] = None,
-) -> None:
-    """Append a synthetic ``turn.completed`` closing a CLI-owned wake turn.
-
-    Mirrors the fenced recorder's ``done`` terminal shape (``stop_reason`` +
-    ``usage`` summary) so the FE reducer treats the wake like a normal turn:
-    ``isStreaming`` off + ``settleStaleBackgroundWork``. Paired with
-    :func:`record_cli_wake_turn_started` (same ``turn_id``). Unfenced. Never
-    raises.
-    """
-    try:
-        await _append_unfenced(session_id, [_build_event(
-            contract.TurnCompleted, session_id, turn_id=turn_id,
-            stop_reason=stop_reason, usage=usage or {},
-        )])
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] record_cli_wake_turn_completed failed for %s",
-            session_id, exc_info=True,
-        )
-
-
 # ----------------------------------------------------------------------
-# Voice exchanges (VW3 / ruling VM9) — synthetic turns, no ``turns`` row.
+# Voice exchanges — synthetic turns, no ``turns`` row.
 # ----------------------------------------------------------------------
 
 # Placeholder title stamped by ``POST /api/v1/voice/sessions``; the first
@@ -1593,8 +1431,8 @@ def _is_voice_system_note(text: str) -> bool:
     """Whether ``text`` is bridge boilerplate rather than something spoken.
 
     Belt-and-braces behind the bridge's own classification: the greeting
-    preamble reaching this function as ``user_text`` is exactly how two audited
-    sessions ended up titled "[call started] The user just joined the call…".
+    preamble reaching this function as ``user_text`` would title the session
+    "[call started] The user just joined the call…".
     """
     try:
         from app.core.voice_bridge import is_backend_note
@@ -1613,7 +1451,7 @@ async def record_voice_exchange(
     usage: Optional[Dict[str, Any]] = None,
     system_text: Optional[str] = None,
 ) -> Optional[str]:
-    """Persist ONE completed voice exchange as a synthetic turn (ruling VM9).
+    """Persist ONE completed voice exchange as a synthetic turn.
 
     Appends ``turn.started`` / ``message.user`` / ``message.assistant`` /
     ``turn.completed`` in a SINGLE unfenced batch (so the four rows get
@@ -1737,10 +1575,10 @@ async def record_task_start_frame(
     """Emit the durable RUNNING task frame that puts a task on the chip strip.
 
     The mirror of :func:`record_task_settle_frame` for the START of a task's
-    life, and the reason a long-lived background shell is now visible after a
+    life, and the reason a long-lived background shell is visible after a
     reload or a session switch: ``deriveActiveTasks`` (feed-controller.ts) is
-    built purely from ``task.updated`` summaries, so before this frame the only
-    surface a running Monitor shell had was the LIVE feed of the turn that
+    built purely from ``task.updated`` summaries, so without this frame the only
+    surface a running Monitor shell has is the LIVE feed of the turn that
     spawned it — nothing durable, nothing to replay.
 
     ``status`` is an explicit ``running`` (rather than the per-type ``started``
@@ -1800,7 +1638,7 @@ async def record_task_settle_frame(
 
 
 async def record_parked(session_id: str, task_ids: List[str]) -> None:
-    """Append ``turn.parked`` when the drain pump starts over active bg work."""
+    """Append ``turn.parked`` when a turn parks over active bg work."""
     try:
         await _append_unfenced(session_id, [_build_event(
             contract.TurnParked, session_id,

@@ -158,6 +158,16 @@ class ErrorEvent(Event):
     # Model calls issued before the error ended the turn — same accounting
     # rationale as Interrupted. ``None`` means "not reported".
     num_model_calls: int | None = None
+    # The HTTP status the provider refused the call with (a non-200 response,
+    # or the code an in-stream error carried), when it gave one. A host reads
+    # it the way it reads the CLI's ``api_error_status``: 429 is a rate limit,
+    # 5xx a service fault. ``None`` for errors that carry no status (a dropped
+    # connection, a truncated stream, an engine-side failure).
+    status: int | None = None
+    # The provider's own short explanation (its ``error.message``, or the
+    # response body with HTML stripped), at most ~300 characters. ``message``
+    # may carry the raw body; this is what a person should read.
+    provider_message: str | None = None
 
 
 # ─── Streaming content ───────────────────────────────────────────────────────
@@ -419,6 +429,9 @@ class RateLimit(Event):
     kind: str
     resets_at: str | None = None
     utilization: float | None = None
+    # The CLI's verdict on the window: ``allowed``, ``allowed_warning`` or
+    # ``rejected``. A ``rejected`` reading may carry no utilization at all.
+    status: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -515,12 +528,11 @@ class SubagentEvent(Event):
     * ``"suppressed"`` — a terminal completion where a wake IS owed but the
       host owns it: the embedding app already unparks its own session, or the
       CLI drives the continuation itself, so the engine deliberately stands
-      down. Audits repeatedly misread the ``wake=False`` this produces as "the
-      session never woke", and concluded a latch was stuck when nothing was.
+      down. The ``wake=False`` this produces does not mean the session never
+      woke.
     * ``"not_applicable"`` — a non-terminal event (``started``,
-      ``completion_pending``) where waking is not a question yet. These
-      previously carried ``wake=True`` purely because that is the field default,
-      which was never a claim about anything.
+      ``completion_pending``) where waking is not a question yet; their
+      ``wake`` is just the field default.
 
     Additive and defaulted, so rows persisted before it existed decode as
     ``"auto"`` — which is what the old default ``wake=True`` already meant."""
@@ -695,9 +707,9 @@ def event_from_dict(d: dict[str, Any]) -> Event:
     if cls is Usage and isinstance(kwargs.get("raw"), dict):
         usage_raw = kwargs["raw"]
         if "cache_read_report" in usage_raw:
-            # Stored reports predating #1406 used provider capabilities to
-            # interpret already-normalized input. Recompute from the durable
-            # exclusive counters, including plausible but incorrect full hits.
+            # Older stored reports used provider capabilities to interpret
+            # already-normalized input. Recompute from the durable exclusive
+            # counters, including plausible but incorrect full hits.
             from fluid.context.cache_probe import cache_read_report
 
             kwargs["raw"] = {

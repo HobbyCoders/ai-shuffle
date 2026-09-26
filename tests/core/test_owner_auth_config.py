@@ -27,6 +27,8 @@ def test_dotenv_hostname_and_service_origins(tmp_path, monkeypatch):
     loaded = Settings(_env_file=config, data_dir=tmp_path, workspace_dir=tmp_path)
     monkeypatch.setattr(owner_auth, 'settings', loaded)
     monkeypatch.setattr(account_hub, 'settings', loaded)
+    # A LAN browser is the owner only with "trusted LAN, no login" on.
+    monkeypatch.setattr(owner_auth, 'trusted_lan', lambda: True)
     assert owner_auth.local_access(request('workstation.lan:8000'))
     assert not owner_auth.local_access(request('attacker.example:8000'))
     assert owner_auth.browser_origin() == 'https://connect.example.com'

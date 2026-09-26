@@ -8,10 +8,6 @@ It is never derived from the worktree row's ``status``, and a remote session
 never stats the viewing install. The frontend uses this purely to drive a
 "worktree dir missing" banner/badge; it does not block sending, and nothing is
 recreated automatically.
-
-This logic used to be copy-pasted in four near-identical blocks across
-``sessions.py``, ``chat_ws_handler.py`` and ``websocket.py`` and had already
-drifted. It now lives here so all call sites stay in sync.
 """
 
 import time
@@ -23,11 +19,10 @@ from app.core.project_utils import get_worktree_working_dir, resolve_existing_wo
 from app.db import checkouts as checkouts_db
 from app.db import git_ops as git_ops_db
 
-# TTL cache for the worktree-dir existence stat. enrich_session_worktree_meta
-# runs synchronously on the event loop on EVERY /live poll (150ms while
-# streaming, 1.5s parked — before the 304 short-circuit), so the filesystem must
-# not be hit each time. GIL + benign races make a lock unnecessary; a stale
-# answer self-corrects within the TTL.
+# TTL cache for the worktree-dir existence stat: enrich_session_worktree_meta
+# runs on the event loop for every session read, so the filesystem must not be
+# hit each time. GIL + benign races make a lock unnecessary; a stale answer
+# self-corrects within the TTL.
 _IS_DIR_TTL_SECONDS = 3.0
 _IS_DIR_CACHE_MAX = 256
 _is_dir_cache: Dict[str, Tuple[bool, float]] = {}

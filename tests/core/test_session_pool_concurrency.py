@@ -39,14 +39,14 @@ def _make_state(
 ) -> SessionState:
     """Build a SessionState backed by a mock adapter with an awaitable disconnect.
 
-    The adapter's subprocess PID resolves to None (sdk_client=None), so no real
-    process is ever touched. `idle_seconds` backdates last_activity so
+    The adapter's subprocess PID resolves to None, so no real process is ever
+    touched. `idle_seconds` backdates last_activity so
     evict_idle can be exercised without sleeping.
     """
     adapter = MagicMock()
     adapter.is_alive.return_value = alive
     adapter.is_connected.return_value = connected
-    adapter.sdk_client = None
+    adapter.subprocess_pid.return_value = None
     adapter.disconnect = AsyncMock()
 
     last_activity = datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)
@@ -248,10 +248,10 @@ async def test_reap_terminated_trees_snapshots_pool(monkeypatch):
         return None
 
     monkeypatch.setattr(sp, "subprocess_pid", _mutating_pid)
-    sp._terminated_trees[99999] = [99998]  # non-empty so the walk runs
+    sp._terminated_trees[99999] = [(99998, 0.0)]  # non-empty so the walk runs
 
     # Must not raise despite the pool shrinking during the values() walk.
-    sp.reap_terminated_process_trees()
+    await sp.reap_terminated_process_trees()
 
     # The walk visited BOTH entries. Under the old live-view iteration the
     # RuntimeError was swallowed by the surrounding try/except, silently
@@ -370,3 +370,42 @@ async def test_parallel_evict_if_needed_calls_are_serialized_and_safe():
     assert len(evicted) == len(set(evicted))  # no session evicted twice
     for sid, st in states.items():
         assert st.adapter.disconnect.await_count <= 1
+
+
+@pytest.mark.asyncio
+async def test_remove_broken_snapshots_descendants_off_the_loop(monkeypatch):
+    """remove_broken's process-table scan runs in a worker thread, before the
+    disconnect ends the parent, and the snapshot is recorded for the reaper."""
+    import threading
+
+    pool = SessionPool(max_size=3)
+    state = _make_state()
+    state.adapter.subprocess_pid.return_value = 4242
+    pool.put("wedged", state)
+
+    order: list[str] = []
+    snapshot_threads: list[threading.Thread] = []
+
+    def _snapshot(pid):
+        snapshot_threads.append(threading.current_thread())
+        order.append("snapshot")
+        return [(4243, 1.0)]
+
+    async def _disconnect(*args, **kwargs):
+        order.append("disconnect")
+
+    recorded: list[tuple] = []
+    monkeypatch.setattr(sp, "snapshot_descendants", _snapshot)
+    monkeypatch.setattr(sp, "graceful_disconnect", _disconnect)
+    monkeypatch.setattr(
+        sp, "record_terminated_subprocess", lambda pid, d=None: recorded.append((pid, d))
+    )
+
+    assert await pool.remove_broken("wedged") is state
+    assert "wedged" not in pool
+    for task in list(pool._background_teardowns):
+        await task
+
+    assert order == ["snapshot", "disconnect"]
+    assert snapshot_threads and snapshot_threads[0] is not threading.main_thread()
+    assert recorded == [(4242, [(4243, 1.0)])]

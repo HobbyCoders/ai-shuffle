@@ -1,14 +1,11 @@
 /** Validated Swarm snapshots shared by tool results, live events and hydration. */
-export type SwarmStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
-export interface SwarmTask {
- id: string; title: string; agent: string; depends_on: string[];
- status: SwarmStatus | 'blocked'; task_id?: string | null; worker_session_id?: string | null;
- result?: string | null; error?: string | null; started_at?: string | null; finished_at?: string | null;
-}
-export interface SwarmSnapshot {
- id: string; session_id: string; title: string; status: SwarmStatus;
- created_at: string; updated_at: string; tasks: SwarmTask[];
-}
+import type { SwarmSnapshot as WireSwarmSnapshot, SwarmTask as WireSwarmTask } from '$lib/contract/events';
+/** Contract fields only: drops the generated `[k: string]: unknown` pass-through. */
+type Known<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] };
+export type SwarmStatus = WireSwarmSnapshot['status'];
+/** parseSwarm rejects tasks without `depends_on`, so it is required here. */
+export type SwarmTask = Known<WireSwarmTask> & { depends_on: string[] };
+export type SwarmSnapshot = Omit<Known<WireSwarmSnapshot>, 'tasks'> & { tasks: SwarmTask[] };
 const statuses = new Set(['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']);
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 export function isSwarmTool(name: string): boolean {

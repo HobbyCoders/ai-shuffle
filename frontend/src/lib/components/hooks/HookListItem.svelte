@@ -51,9 +51,7 @@
 			? hook.command
 			: hook.hook_type === 'webhook' && hook.url
 				? hook.url
-				: hook.hook_type === 'message' && hook.message_template
-					? hook.message_template
-					: ''
+				: ''
 	);
 	const detailShort = $derived(detail.length > 60 ? detail.slice(0, 60) + '…' : detail);
 </script>

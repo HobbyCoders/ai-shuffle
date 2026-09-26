@@ -1,10 +1,10 @@
 """Durable background-task snapshot writer and shared sidebar presence.
 
-``task_registry`` is in-memory and rebuilt empty on every restart — which is
-exactly why a whole class of lifecycle incidents (stranded parked sessions,
-silent kills, forever-spinning cards) has been invisible after the fact.
-This module mirrors every registry transition into the durable
-``background_tasks`` table (v55) WITHOUT changing any behavior:
+``task_registry`` is in-memory and rebuilt empty on every restart, so
+lifecycle failures (stranded parked sessions, silent kills, forever-spinning
+cards) would be invisible after the fact. This module mirrors every registry
+transition into the durable ``background_tasks`` table WITHOUT changing any
+behavior:
 
 - SHARED PRESENCE: committed batches publish sidebar task presence. This
   does not change registry, Monitor parking, pool, or task lifecycle semantics.

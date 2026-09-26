@@ -4,14 +4,14 @@ Git management API routes
 Provides endpoints for git repository operations including:
 - Repository status and diff stats
 - Branch management (list, create, delete, checkout)
-- Worktree management (list, create, delete, file browsing)
+- Worktree management (list, delete, file browsing)
 - Commit, push, and commit graph visualization
 - AI-powered commit message and PR description generation
 - Fetch from remote
 
 Sub-modules:
 - git_helpers: Thread pool, request coalescing, path utilities
-- git_worktrees: Worktree CRUD and file browsing endpoints
+- git_worktrees: Worktree list/get/delete/reopen and file browsing endpoints
 - git_ai: AI-powered commit message, PR description, and branch name generation
 """
 
@@ -24,51 +24,29 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.config import settings
-from app.core.git_service import git_service
-from app.core.worktree_manager import worktree_manager
-from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+from app.core.git_service import classify_clone_url, git_service
+from app.core.scrub import redact_url_credentials, strip_url_userinfo
 from app.db import database
 from app.db.async_database import run_sync
-from app.db.base import WorktreeStatus
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.common import check_project_access, resolve_project_path
+from app.api.common import check_project_access, is_path_served
 
 # Import from sub-modules
-from app.api.git_helpers import (  # noqa: F401
-    _git_executor,
+from app.api.git_helpers import (
     run_git,
-    _RequestCoalescer,
     _coalescer,
     get_project_path,
-    get_working_dir,
     get_working_dir_async,
     SessionCheckoutUnavailable,
     stage_and_commit,
-    _repo_record_cache,
-    _REPO_RECORD_TTL,
     ensure_git_repository_record,
     peek_repo_record_cache,
     _CACHE_MISS,
 )
 
-from app.api.git_worktrees import (  # noqa: F401
-    _convert_worktree_to_info,
-    _copy_uncommitted_files,
-    _get_file_extension,
-    _format_file_size,
-)
-
-from app.api.git_ai import (  # noqa: F401
-    STOP_WORDS,
-    FIX_KEYWORDS,
-    CHORE_KEYWORDS,
-    DOCS_KEYWORDS,
-    REFACTOR_KEYWORDS,
-    TEST_KEYWORDS,
-    infer_prefix,
-    slugify_branch,
-)
+# Re-exported: tests/api/test_git.py imports it from here.
+from app.api.git_worktrees import _convert_worktree_to_info  # noqa: F401
 
 # Import sub-routers
 from app.api import git_worktrees as _git_worktrees_mod
@@ -108,10 +86,6 @@ from app.api.schemas.git import (  # noqa: E402
     InitRepoResponse,
     CloneRepoRequest,
     CloneRepoResponse,
-    GenerateCommitMessageRequest,
-    GenerateCommitMessageResponse,
-    GeneratePRDescriptionRequest,
-    GeneratePRDescriptionResponse,
     FileChangeInfo,
     ChangedFilesResponse,
     FileDiffRequest,
@@ -119,20 +93,6 @@ from app.api.schemas.git import (  # noqa: E402
     StageRequest,
     UnstageRequest,
     DiscardRequest,
-    WorktreeCreate,
-    SessionInfo,
-    WorktreeGitStatus,
-    WorktreeInfo,
-    WorktreeListResponse,
-    WorktreeCreateResponse,
-    WorktreeSyncResponse,
-    GenerateBranchNameRequest,
-    GenerateBranchNameResponse,
-    MigrateUploadsRequest,
-    MigrateUploadsResponse,
-    WorktreeCreateStandalone,
-    WorktreeFileInfo,
-    WorktreeFilesResponse,
 )
 
 
@@ -196,7 +156,7 @@ async def get_git_status(
         current_branch=status_data.get("current_branch"),
         is_detached=status_data.get("is_detached", False),
         head_commit=status_data.get("head_commit"),
-        remote_url=status_data.get("remote_url"),
+        remote_url=strip_url_userinfo(status_data.get("remote_url")),
         is_clean=status_data.get("is_clean", True),
         staged=staged_files,
         modified=status_data.get("modified", []),
@@ -338,7 +298,7 @@ async def init_repository(
         await run_sync(
             database.update_git_repository,
             repo["id"],
-            remote_url=remote_url,
+            remote_url=strip_url_userinfo(remote_url),
             github_repo_name=github_full_name,
         )
 
@@ -357,6 +317,41 @@ async def init_repository(
     )
 
 
+def _local_clone_source_served(source: str, working_dir: str) -> bool:
+    """True when a local clone source resolves inside a served project root."""
+    path = Path(source)
+    if not path.is_absolute():
+        # git resolves a relative source against its cwd, the clone target.
+        path = Path(working_dir) / path
+    return is_path_served(path, settings.effective_workspace_dir)
+
+
+async def _authorize_clone_source(request: Request, working_dir: str, clone_url: str) -> None:
+    """Refuse a clone source the caller may not read (400).
+
+    Remote HTTPS/SSH URLs are open to everyone. A local path or ``file://`` URL
+    would copy a repository from this server's disk: API keys never get one
+    (a project-scoped key could otherwise take another project's history), and
+    the owner only from inside the workspace or a registered project folder,
+    the same roots the file routes serve.
+    """
+    kind, detail = classify_clone_url(clone_url)
+    if kind == "remote":
+        return
+    if kind == "invalid":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    if get_api_user_from_request(request):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="API keys can clone only HTTPS or SSH remotes",
+        )
+    if not await run_sync(_local_clone_source_served, detail, working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A local clone source must be inside the workspace or a project folder",
+        )
+
+
 @router.post("/clone", response_model=CloneRepoResponse)
 @session_git_action
 async def clone_repository(
@@ -373,6 +368,7 @@ async def clone_repository(
     """
     check_project_access(request, project_id)
     working_dir = await get_working_dir_async(project_id, session_id=session_id)
+    await _authorize_clone_source(request, working_dir, body.clone_url)
 
     # Guard: don't clone into an existing repo
     if await run_git(git_service.is_git_repo, working_dir):
@@ -392,7 +388,7 @@ async def clone_repository(
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to clone repository: {error}"
+            detail=f"Failed to clone repository: {redact_url_credentials(error or '')}"
         )
 
     # Create database record
@@ -405,13 +401,13 @@ async def clone_repository(
         await run_sync(
             database.update_git_repository,
             repo["id"],
-            remote_url=remote_url,
+            remote_url=strip_url_userinfo(remote_url),
             default_branch=current_branch or "main",
         )
 
     return CloneRepoResponse(
         success=True,
-        message=f"Repository cloned from {body.clone_url}",
+        message=f"Repository cloned from {redact_url_credentials(body.clone_url)}",
         repository_id=repo["id"] if repo else None,
     )
 
@@ -1303,83 +1299,3 @@ async def pull_from_remote(
         status=inline_status,
         diff_stats=inline_diff,
     )
-
-
-# =============================================================================
-# Pending Upload Migration
-# =============================================================================
-
-@router.post("/migrate-uploads")
-async def migrate_uploads_to_worktree(
-    request: Request,
-    project_id: str,
-    body: MigrateUploadsRequest,
-    token: str = Depends(require_auth)
-):
-    """
-    Copy uploaded files from the main project to a worktree directory.
-
-    Used when files were uploaded before a worktree existed (auto-worktree flow).
-    """
-    import shutil
-
-    check_project_access(request, project_id)
-
-    def _load_project_and_worktree():
-        """Both existence probes in ONE hop, same order, same short-circuit:
-        an unknown project still 404s before the worktree row is ever read.
-        The HTTPExceptions propagate out of ``run_sync`` unchanged."""
-        project = database.get_project(project_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        worktree = database.get_worktree(body.worktree_id)
-        if not worktree:
-            raise HTTPException(status_code=404, detail="Worktree not found")
-
-        return project, worktree
-
-    project, worktree = await run_sync(_load_project_and_worktree)
-
-    worktree_dir = Path(get_worktree_working_dir(worktree))
-    if not worktree_dir.exists():
-        raise HTTPException(status_code=400, detail="Worktree directory does not exist")
-
-    project_dir = Path(get_project_working_dir(project_id))
-    migrated = []
-    errors = []
-
-    def _migrate_files() -> None:
-        # The WHOLE loop is offloaded, not each copy: N uploads would otherwise
-        # be N thread hops, and every copy2/stat/mkdir in between would run on
-        # the event loop. Per-file errors are still collected exactly as before,
-        # so one bad path does not abort the rest.
-        for file_path in body.file_paths:
-            try:
-                src = Path(file_path)
-                if not src.exists():
-                    errors.append(f"File not found: {file_path}")
-                    continue
-
-                # Ensure the file is within the project directory
-                try:
-                    rel = src.relative_to(project_dir)
-                except ValueError:
-                    errors.append(f"File not in project directory: {file_path}")
-                    continue
-
-                dest = worktree_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dest))
-
-                migrated.append({
-                    "original_path": str(src),
-                    "new_path": str(dest),
-                    "relative_path": rel.as_posix()
-                })
-            except Exception as e:
-                errors.append(f"Failed to copy {file_path}: {str(e)}")
-
-    await run_sync(_migrate_files)
-
-    return MigrateUploadsResponse(migrated=migrated, errors=errors)

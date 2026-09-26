@@ -191,3 +191,77 @@ def test_codex_and_claude_project_registries_deduplicate(import_homes, monkeypat
     assert len(created) == 1
     assert created[0]["path"] == str(project.resolve())
     assert result["imported_projects"][0]["status"] == "imported"
+
+
+def test_settings_category_describes_what_apply_copies(import_homes) -> None:
+    """The dialog shows this description verbatim; hooks (and enabled plugins)
+    in the category are copied on apply, so it must not claim inventory only."""
+    source, destination = import_homes
+    hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "true"}]}]}
+    _write(source / ".claude" / "settings.json", json.dumps({"hooks": hooks, "theme": "dark"}))
+
+    preview = service.preview_import(source_home=str(source), providers=["claude"])
+    category = next(c for c in preview["categories"] if c["id"] == "settings_plugins_inventory")
+    assert "inventory only" not in category["description"].lower()
+    assert "hooks" in category["description"].lower()
+    assert "plugins" in category["description"].lower()
+    hooks_item = next(entry for entry in category["items"] if entry["selectable"])
+
+    result = service.apply_import(
+        token=preview["token"],
+        selected_item_ids=[hooks_item["id"]],
+        source_home=str(source),
+        providers=["claude"],
+    )
+
+    assert [entry["item_id"] for entry in result["imported"]] == [hooks_item["id"]]
+    written = json.loads((destination / ".fluid" / "hooks.json").read_text(encoding="utf-8"))
+    assert written.get("hooks", written) == hooks
+
+
+@pytest.fixture
+def docker_workspaces(tmp_path, monkeypatch):
+    """Docker mode with a setup-chosen workspace that differs from start-up."""
+    from app.core import config as config_module
+
+    startup, chosen = tmp_path / "startup-workspace", tmp_path / "chosen-workspace"
+    startup.mkdir()
+    chosen.mkdir()
+    monkeypatch.setattr(service, "is_local_mode", lambda: False)
+    monkeypatch.setattr(service.settings, "workspace_dir", startup)
+    monkeypatch.setitem(config_module._runtime_overrides, "workspace_dir", chosen)
+    monkeypatch.setattr(service.database, "get_all_projects", list)
+    monkeypatch.setattr(service.database, "get_project", lambda _project_id: None)
+    return startup, chosen
+
+
+def test_relative_project_row_resolves_against_effective_workspace(docker_workspaces) -> None:
+    _, chosen = docker_workspaces
+    assert service._project_path_for_row({"path": "proj"}) == (chosen / "proj").resolve()
+
+
+def test_docker_project_inside_effective_workspace_is_ready(docker_workspaces) -> None:
+    startup, chosen = docker_workspaces
+    inside = chosen / "proj"
+    inside.mkdir()
+    assert service._project_status(inside, set(), set())[0] == "ready"
+    elsewhere = startup / "proj"
+    elsewhere.mkdir()
+    assert service._project_status(elsewhere, set(), set())[0] == "diagnostic"
+
+
+def test_docker_registration_stores_path_relative_to_effective_workspace(
+    docker_workspaces, monkeypatch
+) -> None:
+    _, chosen = docker_workspaces
+    project = chosen / "nested" / "proj"
+    project.mkdir(parents=True)
+    created = []
+    monkeypatch.setattr(
+        service.database,
+        "create_project",
+        lambda **kwargs: created.append(kwargs) or {"id": kwargs["project_id"]},
+    )
+    result = service._register_project(project)
+    assert result.get("status") != "skipped"
+    assert created and created[0]["path"] == "nested/proj"

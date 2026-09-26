@@ -13,13 +13,11 @@ import pytest
 
 from app.core import encryption, xai_token_refresh
 from app.db import database as db
+from tests.fakes.http import mock_transport_client
+from tests.helpers import unlock_encryption
 
 
 PROVIDER_ID = "prov-grok-1"
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _iso(dt):
@@ -47,10 +45,6 @@ def _seed_provider(*, access="access-old", refresh="refresh-old",
     )
 
 
-def _client(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
 @pytest.fixture(autouse=True)
 def _reset_locks():
     xai_token_refresh._locks.clear()
@@ -60,7 +54,7 @@ def _reset_locks():
 
 class TestRefreshRotation:
     async def test_rotated_bundle_persisted_encrypted_keeps_grok_mode(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
 
         def handler(request):
@@ -68,7 +62,7 @@ class TestRefreshRotation:
                 "access_token": "access-new", "refresh_token": "refresh-new",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await xai_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is True
 
@@ -82,7 +76,7 @@ class TestRefreshRotation:
         assert not stored["needs_reauth"]
 
     async def test_not_due_skips(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
 
@@ -91,13 +85,13 @@ class TestRefreshRotation:
             return httpx.Response(200, json={
                 "access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await xai_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
         assert posted == []
 
     async def test_chatgpt_bundle_is_not_refreshed(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.create_model_provider(
             provider_id=PROVIDER_ID,
             name="ChatGPT",
@@ -121,7 +115,7 @@ class TestRefreshRotation:
             return httpx.Response(200, json={
                 "access_token": "x", "refresh_token": "y"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await xai_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
         assert posted == []
@@ -131,7 +125,7 @@ class TestPermanentFailure:
     async def test_invalid_grant_sets_needs_reauth_preserves_bundle(
         self, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(
             access="access-keep", refresh="refresh-keep",
             last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)),
@@ -147,7 +141,7 @@ class TestPermanentFailure:
         def handler(request):
             return httpx.Response(400, json={"error": "invalid_grant"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await xai_token_refresh.refresh_provider(PROVIDER_ID, client=c)
         assert did is False
 
@@ -161,7 +155,7 @@ class TestPermanentFailure:
 
 class TestRefreshOn401:
     async def test_forces_exactly_one_refresh(self, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc)))
         posted = []
 
@@ -171,7 +165,7 @@ class TestRefreshOn401:
                 "access_token": "access-401", "refresh_token": "refresh-401",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             did = await xai_token_refresh.refresh_on_401_once(
                 PROVIDER_ID, stale_access_token="access-old", client=c
             )

@@ -39,7 +39,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/test', {
 				method: 'GET',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: undefined
 			});
 			expect(result).toEqual(mockResponse);
@@ -74,7 +74,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -96,7 +96,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -118,7 +118,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify(requestBody)
 			});
 			expect(result).toEqual(mockResponse);
@@ -138,7 +138,7 @@ describe('ApiClient', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
 				method: 'DELETE',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include'
+				redirect: 'error', credentials: 'include'
 			});
 			expect(result).toEqual({ deleted: true });
 		});
@@ -244,6 +244,36 @@ describe('ApiClient', () => {
 			});
 		});
 
+		it('should flatten a FastAPI validation list into a string detail', async () => {
+			// e.g. POST /projects/{id}/git/init with an option-like default_branch.
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [
+					{ type: 'string_pattern_mismatch', loc: ['body', 'default_branch'], msg: "String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'" },
+					{ type: 'missing', loc: ['query', 0], msg: 'Field required' }
+				] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: "default_branch: String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'; Field required",
+				status: 422
+			});
+		});
+
+		it('should fall back to the status message for a validation list without messages', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [{ loc: ['body'] }] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Validation error — the input data is invalid',
+				status: 422
+			});
+		});
+
 		it('should use status description for unknown status when body is empty', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
@@ -257,6 +287,32 @@ describe('ApiClient', () => {
 				detail: 'Server error (HTTP 418: I\'m a teapot)',
 				status: 418
 			});
+		});
+
+		// SDK structured `api_error` bodies name the real upstream status and
+		// retry hint; they beat the canned per-status strings.
+		it.each([
+			['explicit detail wins', 502, { type: 'api_error', status: 529, detail: 'Anthropic is overloaded' }, 'Anthropic is overloaded'],
+			['message when no detail', 500, { type: 'api_error', message: 'Upstream reset' }, 'Upstream reset'],
+			['429 with a retry hint', 500, { type: 'api_error', status: 429, retry_after_seconds: 42 }, 'Rate limited — retry in 42s'],
+			['429 without a hint', 429, { type: 'api_error' }, 'Rate limited — too many requests, try again shortly'],
+			['upstream status over the HTTP status', 500, { type: 'api_error', status: 503 }, 'API error: HTTP 503'],
+			['a malformed status falls back to HTTP', 502, { type: 'api_error', status: '503', retry_after_seconds: '9' }, 'API error: HTTP 502'],
+			['untyped 429 with a retry hint', 429, { retry_after_seconds: 7 }, 'Rate limited — retry in 7s'],
+			['a structured error object', 400, { error: { code: 'bad_branch' } }, '{"code":"bad_branch"}'],
+		])('api_error body: %s', async (_name, status, body, detail) => {
+			fetchMock.mockResolvedValueOnce(Response.json(body, { status }));
+			await expect(client.get('/error')).rejects.toEqual({ detail, status });
+		});
+
+		it('does not re-check worker auth on 403, only on 401', async () => {
+			// A 403 is an authorization answer from a signed-in worker session;
+			// re-checking the session would not change it.
+			const checkAuth = vi.spyOn(auth, 'checkAuth').mockResolvedValue(undefined as never);
+			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Owner only' }, { status: 403 }));
+			await expect(client.get('/sessions')).rejects.toEqual({ detail: 'Owner only', status: 403 });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(checkAuth).not.toHaveBeenCalled();
 		});
 	});
 
@@ -293,7 +349,7 @@ describe('ApiClient', () => {
 			expect(auth.current.status?.authenticated).toBe(false);
 			expect(window.location.assign).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/auth/status', expect.objectContaining({
-				credentials: 'include', cache: 'no-store'
+				redirect: 'error', credentials: 'include', cache: 'no-store'
 			}));
 		});
 

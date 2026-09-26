@@ -10,11 +10,10 @@ stale ``disabledMcpServers`` entries for it are stripped on read.
 Currently this provides a single built-in:
 
 - ``browser`` — AI Shuffle's own browser-automation tool suite. This IS a normal
-  spawned STDIO MCP server: the SDK launches ``node /opt/browser-mcp/dist/index.js``
+  spawned STDIO MCP server: the harness launches ``node /opt/browser-mcp/dist/index.js``
   once per session and tears it down on exit (session isolation + cleanup for free).
   It exposes tools named ``mcp__browser__<tool>`` (``browser_navigate``,
-  ``browser_snapshot``, ``browser_act``, ``browser_screenshot``; more land in later
-  PRs).
+  ``browser_snapshot``, ``browser_act``, ``browser_screenshot``, ...).
 
 Architecture (the decision record):
   Each spawned server is a thin CDP client built on ``playwright-core``. It calls
@@ -31,17 +30,22 @@ Architecture (the decision record):
   spawnable ``McpServerConfig`` (``command="node"``, ``args=[BROWSER_MCP_ENTRY]``);
   the mcp_servers builder adds it like any other server, and its per-session env
   (``ANTHROPIC_*`` for the future ``browser_find`` sub-call plus ``CHROME_CDP_PORT``)
-  is injected by mcp_config for this server only. The old ``cli_flag`` path is gone.
+  is injected by mcp_config for this server only.
 
   The entry point is installed at ``/opt/browser-mcp/dist/index.js`` in the Docker
-  image (PR A3); ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
+  image; ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
 
 SECURITY NOTE (SSRF / local-network reach): browser-mcp intercepts HTTP(S) requests
 and checks resolved addresses against its SSRF policy. Cloud metadata is always
-blocked; private LAN addresses are allowed, and this app enables loopback for local
-development unless the operator disables it. BROWSER_SSRF_BLOCK/ALLOW configure the
-policy. Request interception is not a complete network sandbox: WebSocket coverage
-and independent Chromium DNS resolution remain limitations. Separate session pages
+blocked; private LAN and carrier-grade NAT addresses are refused unless listed in
+BROWSER_SSRF_ALLOW; this app enables loopback by default in every runtime
+(BROWSER_SSRF_ALLOW_LOOPBACK=false disables it), and the worker's own ports and
+the DevTools port stay closed on every internal
+address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. The supervised Chromium is
+launched behind browser-mcp's egress proxy (app.core.browser_egress,
+docker/start-chrome.sh), which sees every connection including WebSockets,
+resolves each host once and connects only to the checked address; it enforces
+the app's base policy, so a session-only allow entry does not widen it. Separate session pages
 also share the persistent context's cookies; page ownership is not profile isolation.
 """
 
@@ -61,8 +65,8 @@ logger = logging.getLogger(__name__)
 # every tool from it.
 BROWSER_SERVER_NAME = "browser"
 
-# Default path to the spawned STDIO server's entry point inside the Docker image
-# (installed by PR A3). Overridable via the ``BROWSER_MCP_ENTRY`` env var for
+# Default path to the spawned STDIO server's entry point inside the Docker image.
+# Overridable via the ``BROWSER_MCP_ENTRY`` env var for
 # local/dev checkouts where the built package lives elsewhere.
 DEFAULT_BROWSER_MCP_ENTRY = "/opt/browser-mcp/dist/index.js"
 
@@ -97,7 +101,7 @@ def get_browser_server_config() -> McpServerConfig:
     Build the McpServerConfig for the ``browser`` built-in.
 
     Returns a spawnable STDIO server (``command="node"``,
-    ``args=[<entry>]``) — an ordinary MCP server the SDK launches per session,
+    ``args=[<entry>]``) — an ordinary MCP server the harness launches per session,
     NOT a CLI-flag integration. It is surfaced in the admin MCP list and is
     always enabled (stale disable entries are ignored).
     """

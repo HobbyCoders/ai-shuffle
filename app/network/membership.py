@@ -37,7 +37,6 @@ TYPE_KEY = "key"
 TYPE_RECOVERY = "recovery"
 STATUS_ACTIVE = "active"
 STATUS_REVOKED = "revoked"
-STATUS_PENDING = "pending"
 _PROOF_INFO = b"shuffle-recovery-certificate-proof-v1"
 
 

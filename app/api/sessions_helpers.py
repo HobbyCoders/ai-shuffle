@@ -1,8 +1,7 @@
 """
 Session helper functions, models, and shared state.
 
-Extracted from sessions.py for maintainability. All symbols are
-re-exported from sessions.py for backward compatibility.
+Extracted from sessions.py for maintainability.
 """
 
 from typing import List, Optional
@@ -48,14 +47,6 @@ class BatchDeleteRequest(BaseModel):
 class SessionActiveUpdate(BaseModel):
     """Request body for setting a session's active status"""
     is_active: bool
-
-
-class SessionImportData(BaseModel):
-    """Data structure for imported session"""
-    session: dict
-    messages: List[dict]
-    exported_at: Optional[str] = None
-    format_version: Optional[str] = None
 
 
 class SessionImportResponse(BaseModel):
@@ -123,11 +114,6 @@ class AdoptSessionResponse(BaseModel):
     instance_id: str
     adopted: bool
     status: str
-    # Cross-device rebind preflight (populated only when the session carries a
-    # project): a non-blocking advisory (e.g. an unpushed worktree branch) and
-    # the local clone the session was rebound onto, when a sibling was used.
-    warning: Optional[str] = None
-    local_project_id: Optional[str] = None
 
 
 class MoveSessionRequest(BaseModel):
@@ -166,16 +152,15 @@ class CreateWorktreeSessionRequest(BaseModel):
     create_new_branch: bool = False  # False = use existing branch, True = create new branch
     # Optional first-prompt kickoff — when ``prompt`` is set the backend
     # persists the user message, migrates any pending uploads into the new
-    # worktree, and launches ``run_query`` in a detached task. This lets the
-    # user lock their phone / switch sessions during creation without losing
-    # the in-flight query (it runs server-side regardless of WS state).
+    # worktree, and submits a durable first turn, so the query runs server-side
+    # regardless of WS state.
     prompt: Optional[str] = None
     overrides: Optional[dict] = None
     pending_upload_paths: Optional[List[str]] = None
-    # Composer device pick (D4). When set to another install's id the session is
+    # Composer device pick. When set to another install's id the session is
     # created PINNED to it: no local checkout is materialized, a durable
     # ``ensure_worktree`` git op is queued for that install instead, and any
-    # ``pending_upload_paths`` travel as D8 upload blobs on the first turn. The
+    # ``pending_upload_paths`` travel as upload blobs on the first turn. The
     # response's ``worktree_path`` is None for a remote target — the path does
     # not exist on this machine and never will.
     target_instance_id: Optional[str] = None
@@ -193,15 +178,15 @@ class WorktreeSessionResponse(BaseModel):
     # The materialized checkout path (v2) or the legacy worktree path.
     worktree_path: Optional[str] = None
     status: str
-    # True when ``prompt`` was provided and the backend has already spawned
-    # a ``run_query`` task for the new session. Frontend uses this flag to
-    # skip sending a redundant WS ``query`` message.
+    # True when ``prompt`` was provided and the backend has already submitted
+    # the first turn. Frontend uses this flag to skip sending a redundant WS
+    # ``query`` message.
     query_started: bool = False
     upload_migration_errors: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------
-# SDK message transformation
+# Transcript parsing
 # ---------------------------------------------------------------------------
 
 def parse_session_history_via_store(
@@ -257,123 +242,118 @@ def parse_session_history_via_store(
     )
 
 
-def _transform_sdk_messages(sdk_messages: list) -> list:
-    """Transform SDK SessionMessage objects into our frontend-compatible format.
-
-    The SDK's get_session_messages() returns SessionMessage objects with
-    type ("user"/"assistant"), uuid, session_id, and message (raw Anthropic API dict).
-    This transforms them into the same shape our frontend expects.
-    """
-    messages = []
-    tool_id_to_name: dict[str, str] = {}  # Track tool_use_id → tool_name
-
-    for i, sdk_msg in enumerate(sdk_messages):
-        raw = sdk_msg.message  # Raw Anthropic API message dict
-        role = raw.get("role", sdk_msg.type)
-        content = raw.get("content", "")
-
-        if role == "assistant" and isinstance(content, list):
-            # Assistant messages contain content blocks (text, tool_use, thinking, etc.)
-            for block in content:
-                block_type = block.get("type")
-
-                if block_type == "text":
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-text-{len(messages)}",
-                        "role": "assistant",
-                        "content": block.get("text", ""),
-                        "type": "text",
-                        "created_at": None,
-                    })
-
-                elif block_type == "tool_use":
-                    tool_id = block.get("id")
-                    tool_name = block.get("name", "unknown")
-                    if tool_id:
-                        tool_id_to_name[tool_id] = tool_name
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-tool-{tool_id}",
-                        "role": "assistant",
-                        "content": f"Using tool: {tool_name}",
-                        "type": "tool_use",
-                        "toolName": tool_name,
-                        "toolInput": block.get("input"),
-                        "toolId": tool_id,
-                        "tool_name": tool_name,
-                        "tool_input": block.get("input"),
-                        "created_at": None,
-                    })
-
-                elif block_type == "thinking":
-                    messages.append({
-                        "id": f"{sdk_msg.uuid}-thinking-{len(messages)}",
-                        "role": "assistant",
-                        "content": block.get("thinking", ""),
-                        "type": "thinking",
-                        "created_at": None,
-                    })
-
-        elif role == "user":
-            if isinstance(content, list):
-                # User messages with tool results
-                for block in content:
-                    block_type = block.get("type")
-                    if block_type == "tool_result":
-                        tool_use_id = block.get("tool_use_id", "")
-                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                        result_content = block.get("content", "")
-                        if isinstance(result_content, list):
-                            # Flatten content blocks to text
-                            result_content = "\n".join(
-                                b.get("text", "") for b in result_content
-                                if b.get("type") == "text"
-                            ) or str(result_content)
-                        messages.append({
-                            "id": f"{sdk_msg.uuid}-result-{tool_use_id}",
-                            "role": "tool_result",
-                            "content": str(result_content)[:2000],
-                            "type": "tool_result",
-                            "toolName": tool_name,
-                            "toolId": tool_use_id,
-                            "tool_name": tool_name,
-                            "created_at": None,
-                        })
-                    elif block_type == "text":
-                        messages.append({
-                            "id": f"{sdk_msg.uuid}-{len(messages)}",
-                            "role": "user",
-                            "content": block.get("text", ""),
-                            "type": "text",
-                            "created_at": None,
-                        })
-            elif isinstance(content, str):
-                messages.append({
-                    "id": sdk_msg.uuid,
-                    "role": "user",
-                    "content": content,
-                    "type": "text",
-                    "created_at": None,
-                })
-
-    return messages
-
-
 # ---------------------------------------------------------------------------
 # Access control helpers
 # ---------------------------------------------------------------------------
 
-def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
-    """Enforce an API user's project/profile access to a session.
+def resolve_api_user_profile(api_user: Optional[dict], requested: Optional[str]) -> Optional[str]:
+    """Return the agent an API user may run, enforcing its assigned agents.
 
-    Pure helper (no Request): ``api_user`` is None for admins (full access).
-    Raises HTTPException(403) when a restricted API user is denied. Extracted
-    from :func:`check_session_access` so non-HTTP callers (e.g. the browser
-    panel WebSocket) can reuse the exact same rule.
+    ``api_user['profile_ids']`` (the ``api_user_profiles`` junction) is the
+    restriction. Unrestricted callers (the owner passes ``None``; an API user
+    with no assigned agents) get ``requested`` back unchanged. A restricted
+    user asking for an agent outside the set gets 403; one that names no agent
+    runs its only agent, or gets 400 listing the allowed ids when it has
+    several.
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    if not allowed:
+        return requested
+    if requested:
+        if requested not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This API key is not allowed to use agent '{requested}'.",
+            )
+        return requested
+    if len(allowed) == 1:
+        return allowed[0]
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Specify 'profile': this API key may use agents "
+               + ", ".join(allowed) + ".",
+    )
+
+
+def api_user_may_use_profile(api_user: Optional[dict], profile_id: Optional[str]) -> bool:
+    """True when ``api_user`` may use agent ``profile_id``.
+
+    The owner (``None``) and an API user with no assigned agents are
+    unrestricted; otherwise the agent must be in ``api_user['profile_ids']``.
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    return not allowed or profile_id in allowed
+
+
+def api_user_profile_filter(api_user: Optional[dict], requested: Optional[str]) -> Optional[str]:
+    """The profile filter for a restricted API user's session list/search.
+
+    A requested agent outside the assigned set is 403; with no request, a
+    single assigned agent becomes the filter (several leave it unset — the
+    list is already limited to the caller's own sessions).
+    """
+    allowed = (api_user or {}).get("profile_ids") or []
+    if not allowed:
+        return requested
+    if requested:
+        if requested not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this profile",
+            )
+        return requested
+    return allowed[0] if len(allowed) == 1 else None
+
+
+_WORKER_OWNER_DEPTH = 8
+
+
+def api_user_owns_session(api_user: dict, session: dict) -> bool:
+    """True when ``session`` belongs to API user ``api_user``.
+
+    A session belongs to the key that started it (``sessions.api_user_id``,
+    the same column the session list filters on). Worker sessions an agent
+    spawns (``is_worker``) are minted without one and belong to whoever owns
+    the session that spawned them. Every other session with no
+    ``api_user_id`` is the owner's, and a fork belongs to whoever forked it.
+    """
+    caller = api_user.get("id")
+    if not caller:
+        return False
+    row: Optional[dict] = session
+    for _ in range(_WORKER_OWNER_DEPTH):
+        owner = row.get("api_user_id")
+        if owner or not row.get("is_worker") or not row.get("parent_session_id"):
+            return owner == caller
+        row = database.get_session(row["parent_session_id"])
+        if not row:
+            return False
+    return False
+
+
+def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
+    """Enforce an API user's access to a session.
+
+    Pure helper (no Request): ``api_user`` is None for the owner (full
+    access). An API user may act only on its own sessions
+    (:func:`api_user_owns_session`), and only while the session is inside its
+    project and agent scope, so a project-limited key reaches a session with
+    no project only when that session is its own. Raises
+    HTTPException(403) on refusal. Extracted from :func:`check_session_access`
+    so non-HTTP callers (the chat and sync WebSockets, the browser panel) use
+    the exact same rule.
     """
     if not api_user:
         return  # Admin has full access
 
+    if not api_user_owns_session(api_user, session):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this session"
+        )
+
     # Check project restriction
+    # (a projectless session passes only because it is the caller's own).
     if api_user.get("project_id") and session.get("project_id"):
         if api_user["project_id"] != session["project_id"]:
             raise HTTPException(
@@ -381,17 +361,16 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
                 detail="Access denied to this session"
             )
 
-    # Check profile restriction
-    if api_user.get("profile_id"):
-        if api_user["profile_id"] != session.get("profile_id"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this session"
-            )
+    # Check agent restriction (assigned agents, ``profile_ids``)
+    if not api_user_may_use_profile(api_user, session.get("profile_id")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this session"
+        )
 
 
 def check_session_access(request: Request, session: dict) -> None:
-    """Check if API user has access to a session based on project/profile restrictions."""
+    """Check that the request's API user owns ``session`` and has it in scope."""
     check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 
@@ -500,7 +479,7 @@ def is_session_degraded(
     claimable_ids: set,
     installs_map: Optional[dict] = None,
 ) -> bool:
-    """Derive the transient V2 Q7 ``degraded`` state for one session.
+    """Derive the transient ``degraded`` state for one session.
 
     ``degraded`` is True IFF ALL of:
       1. the session has a QUEUED turn and no live run — i.e. its id is in
@@ -642,16 +621,15 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
 
     # v2-projects: resolve each session's origin-keyed project + origin token
     # with TARGETED reads for just the ids/origins this page references (never a
-    # per-session DB call, and no longer a full ``list_projects_v2`` table scan
+    # per-session DB call, and never a full ``list_projects_v2`` table scan
     # per request). ``origin`` is 1:1 with ``link_group_id`` for grouped
-    # projects, so the board folds identically. Unconditional since PR-B (the
-    # ``v2_projects`` kill switch was removed).
+    # projects, so the board folds identically.
     pv2_by_id, pv2_origin_to_id = _projects_v2_targeted(
         (s.get("project_v2_id") for s in sessions),
         project_origins.values(),
     )
 
-    # V2 Q7 degraded derivation. Read the queued-with-no-live-run candidate set
+    # Degraded derivation. Read the queued-with-no-live-run candidate set
     # ONCE (batched — never a per-session query); each degraded derivation then
     # just tests membership + resolves placement.
     claimable_ids: set = set()
@@ -832,8 +810,8 @@ def enrich_search_results_with_tags(results: list) -> list:
 #
 # The listing query and the whole enrichment pipeline are both synchronous
 # psycopg2 work. Running them as two ``run_sync`` calls costs two thread hops
-# per request; running the enrichment on the event loop (as it used to be)
-# blocked EVERY concurrent request for the duration of 6-10 queries. These
+# per request; running the enrichment on the event loop would block EVERY
+# concurrent request for the duration of 6-10 queries. These
 # wrappers let a handler do the lot in ONE ``run_sync``.
 # ---------------------------------------------------------------------------
 
@@ -888,8 +866,7 @@ async def _apply_session_filters(
     if api_user:
         if api_user.get("project_id"):
             project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
+        profile_id = api_user_profile_filter(api_user, profile_id)
         # API users can only see their own sessions
         api_user_id = api_user["id"]
         admin_only = False
@@ -943,12 +920,11 @@ async def _apply_session_filters(
 
 
 # ---------------------------------------------------------------------------
-# Transcript payload shaping (B1)
+# Transcript payload shaping
 #
-# A session open used to return the ENTIRE transcript with untruncated tool
-# inputs (a Write call carries the whole file) and inline base64 screenshot
-# data URIs — multi-megabyte JSON per open and per legacy ``/live`` poll. The
-# helpers below add, in the API layer:
+# A raw transcript carries untruncated tool inputs (a Write call carries the
+# whole file) and inline base64 screenshot data URIs — multi-megabyte JSON per
+# open and per legacy ``/live`` poll. The helpers below add, in the API layer:
 #   * opt-in keyset pagination over the message list (newest window first,
 #     cursor for older) with a generous default cap so existing clients are
 #     unaffected;
@@ -1160,8 +1136,8 @@ def finalize_transcript(
 ) -> tuple[List[dict], dict]:
     """Attach cost/user metadata, paginate, and compact — ONE thread hop.
 
-    Every step here is synchronous DB or CPU work that used to run directly on
-    the event loop. Cost attachment walks the WHOLE transcript (turn indices
+    Every step here is synchronous DB or CPU work that must stay off the event
+    loop. Cost attachment walks the WHOLE transcript (turn indices
     must line up with ``usage_log`` rows), so it runs before the window is
     taken; the display caps then apply only to the messages being sent.
     """
@@ -1169,7 +1145,7 @@ def finalize_transcript(
 
     attach_cost_metadata(messages, session_id)
     # Store/JSONL transcripts drop the DB row's user-message metadata
-    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+    # (e.g. automation_id/automation_run_id) — merge it back.
     attach_user_message_metadata(messages, session_id)
 
     page, pagination = paginate_messages(messages, limit, before_seq)

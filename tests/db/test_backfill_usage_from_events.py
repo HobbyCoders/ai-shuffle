@@ -17,15 +17,7 @@ import json
 import pytest
 
 from scripts import backfill_usage_from_events as backfill
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 
 @pytest.fixture

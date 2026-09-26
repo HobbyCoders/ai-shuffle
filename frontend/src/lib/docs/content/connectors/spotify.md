@@ -1,6 +1,6 @@
 <!--
 title: Spotify
-description: Control Spotify playback through Claude
+description: Control Spotify playback through your AI Shuffle agent
 order: 12
 -->
 
@@ -8,7 +8,7 @@ order: 12
 
 ## Overview
 
-The Spotify connector allows Claude to control music playback on your Spotify account through AI Shuffle. With this connector active, you can ask Claude to play songs, albums, or playlists, skip tracks, adjust volume, search for music, and manage your playback queue -- all through natural language conversation.
+The Spotify connector lets your agent control music playback on your Spotify account through AI Shuffle. With this connector active, you can ask your agent to play songs, albums, or playlists, skip tracks, adjust volume, search for music, and manage your playback queue -- all through natural language conversation.
 
 The connector uses the [Spotify Web API](https://developer.spotify.com/documentation/web-api) with OAuth 2.0. You will need to create a Spotify Developer application to obtain client credentials and a long-lived **refresh token**, which the connector uses to mint short-lived access tokens automatically. Note that some playback control features require a Spotify Premium subscription.
 
@@ -55,7 +55,7 @@ AI Shuffle does **not** host an OAuth callback for Spotify. Instead, the connect
 
 Run the standard Spotify [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow) once to get a refresh token. You can use Spotify's own tutorial, a small local script, or a community helper. At a high level:
 
-1. Send the user to `https://accounts.spotify.com/authorize` with your `client_id`, your registered redirect URI, and the scopes you need (for full playback and library control: `user-read-playback-state`, `user-modify-playback-state`, `user-read-currently-playing`, `user-top-read`, `user-library-read`, `user-library-modify`).
+1. Send the user to `https://accounts.spotify.com/authorize` with your `client_id`, your registered redirect URI, and the scopes you need (for full playback and library control: `user-read-playback-state`, `user-modify-playback-state`, `user-read-currently-playing`, `user-top-read`, `user-library-read`, `user-library-modify`, `playlist-read-private`, `playlist-read-collaborative`).
 2. After you click **Agree**, Spotify redirects to your redirect URI with a `?code=...` query parameter.
 3. Exchange that authorization code at `https://accounts.spotify.com/api/token` (`grant_type=authorization_code`) using your `client_id` and `client_secret`.
 4. The token response includes a `refresh_token`. Save this value -- it is what AI Shuffle needs.
@@ -64,31 +64,16 @@ The refresh token is long-lived and does not expire under normal use. The connec
 
 ### 5. Create the Spotify connector in AI Shuffle
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Spotify",
-    "connector_type": "spotify",
-    "config": {
-      "client_id": "1a2b3c4d5e6f7g8h9i0j",
-      "client_secret": "AbCdEfGhIjKlMnOpQrSt",
-      "refresh_token": "AQD...your_refresh_token"
-    }
-  }'
-```
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Spotify**.
+2. Click **Install Spotify** if prompted, then click **Connect account**.
+3. Fill in **Client ID**, **Client Secret** and **Refresh Token**.
+4. Click **Create Connector**.
 
-Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Spotify**.
+To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
 
 ### 6. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
-
-On activation the connector immediately exchanges your refresh token for an access token and begins polling playback.
+Turn on the connection's **Activate** switch. On activation the connector immediately exchanges your refresh token for an access token and begins polling playback.
 
 ### 7. Test playback control
 
@@ -123,16 +108,13 @@ The Spotify connector supports the following capabilities:
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-### AI Actions (Action Gateway)
+### AI Actions
 
-While a Spotify connector is running, every AI session gets two MCP tools:
+See [How AI actions work](/docs/connectors#how-ai-actions-work). While a Spotify connector is active, every agent session gets its tools.
 
-- **`spotify_actions`** -- discovery. Returns the action catalog (21 actions across playback, read, devices, search, queue, playlists, and library), each with its input schema, filtered by this install's `enabled_action_categories`.
-- **`spotify_invoke`** -- execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Spotify Web API.
+Your agent can use 21 actions across playback, read, devices, search, queue, playlists and library. Spotify has no destructive actions, so nothing asks for approval.
 
-Every action is `safe` or `write` risk -- Spotify has no destructive actions, since this non-messaging connector has no interactive approval surface to route them through.
-
-What that lets Claude do:
+What that lets your agent do:
 
 - **Playback control** -- Play, pause, skip, previous, seek, set volume, toggle shuffle and repeat
 - **Search** -- Find songs, albums, artists, and playlists by name
@@ -161,7 +143,7 @@ The Spotify Web API can only control playback on a device that is already active
 
 1. Open the Spotify app on any device (desktop, phone, smart speaker, or web player at [open.spotify.com](https://open.spotify.com))
 2. Start playing any song (even briefly)
-3. Now Claude can control playback on that device
+3. Now your agent can control playback on that device
 
 The API cannot "wake up" a device that is not running Spotify or not currently active.
 
@@ -188,4 +170,4 @@ The connector automatically exchanges your refresh token for new access tokens. 
 
 ### Rate limiting
 
-Spotify's API has rate limits. If Claude is making many rapid requests (e.g., repeatedly checking what is playing), you may hit the rate limit. The connector handles rate limit responses by waiting and retrying, but if issues persist, space out your requests.
+Spotify's API has rate limits. If your agent makes many rapid requests (e.g., repeatedly checking what is playing), you may hit the rate limit. Rate-limited requests fail and the error is returned to the agent; space out requests.

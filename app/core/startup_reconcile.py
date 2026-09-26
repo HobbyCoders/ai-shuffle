@@ -4,8 +4,8 @@ After a crash or restart the in-memory control planes are empty — the session
 pool and the task registry hold nothing — but durable state written by the
 previous run can still claim sessions are mid-flight:
 
-- ``sessions.parked_task_kind`` (v51) is set when a turn ends with live
-  background work (a sub-agent or an SDK-backgrounded shell — see
+- ``sessions.parked_task_kind`` is set when a turn ends with live
+  background work (a sub-agent or a background shell — see
   ``turn_finalize.persist_turn_end_state``). No background work survives a
   restart, so any marker found at boot is stale: left in place it reads as a
   session forever "parked" awaiting an unpark that can never arrive.
@@ -36,12 +36,7 @@ parked or streaming right now. Only rows with
 ``instance_id = settings.effective_instance_id`` are ever touched, and the
 process sweep only matches this install's env marker.
 
-Branch (b) of the reconcile plan — recomputing the automation scheduler from
-persisted state — is deliberately NOT duplicated here:
-``automation_manager.start()`` already calls ``_reconcile_schedules()``
-synchronously at boot and re-runs it every 60s
-(``SCHEDULE_RECONCILE_SECONDS``), rebuilding the APScheduler jobs from the
-``automations`` table. See ``app/core/automation_manager.py``.
+Automation schedules are reconciled by ``automation_manager.start()``, not here.
 
 Each branch is independently guarded and ``reconcile_from_durable_truth``
 never raises: a reconcile failure must never block boot (see the call site in
@@ -124,7 +119,7 @@ def _clear_stale_parked_markers() -> int:
 
 
 async def _mark_stale_background_task_rows() -> int:
-    """Mark this install's non-terminal durable task rows killed (v55).
+    """Mark this install's non-terminal durable task rows killed.
 
     ``background_tasks`` mirrors the in-memory registry, so any own-instance row
     still non-terminal at boot was stranded by the previous process: background
@@ -352,9 +347,8 @@ async def sweep_stalled_parks(
     """Report — and past a hard ceiling, break — a park that never woke.
 
     A session parked on background work is supposed to wake when that work
-    settles. When the settle never arrives the park is silent AND unbounded:
-    the audited session sat parked 9m37s past a green CI run and only moved
-    because an unrelated force-cleanup killed the shell. From outside, a lost
+    settles. When the settle never arrives the park is silent AND unbounded.
+    From outside, a lost
     wake looks exactly like a healthy long wait, so the only honest treatment
     is a time bound with two stages:
 
@@ -544,13 +538,14 @@ async def _force_stalled_park(
 
 
 async def _repair_orphaned_engine_pending() -> int:
-    """Clear phantom ids out of this install's engine pending sets (v-audit F1).
+    """Clear phantom ids out of this install's engine pending sets.
 
     fluid's ``_background_pending`` is rebuilt from the ``SubagentEvent`` log on
     every rehydrate and popped only by a terminal event, so a completion that
     never reached the engine is re-created as a phantom for the life of the
-    session and listed on every ``SessionParked``. The round-6 retirement fix
-    stops new ones; it cannot undo a log that is already missing the terminal.
+    session and listed on every ``SessionParked``.
+    ``turn_scheduler.retire_task_terminals`` stops new ones; it cannot undo a
+    log that is already missing the terminal.
 
     This appends the missing terminal events itself, for ids the durable
     ``background_tasks`` rows prove are over. Records one error row when it
@@ -792,13 +787,11 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             context={"reconcile": "background_tasks"},
         )
 
-    # One-off pending-set repair (2026-09-05 audit F1). Runs AFTER the stale-row
-    # sweep above: that sweep is what settles this install's leftover
-    # non-terminal rows, and the repair only ever writes a terminal for an id
-    # the durable rows can prove is over. Sessions poisoned before the round-6
-    # retirement fix shipped carry their phantoms in the fluid event log, so
-    # nothing but a write into that log clears them — a session parked on a
-    # twenty-one-hour-dead task never repairs itself.
+    # Pending-set repair. Runs AFTER the stale-row sweep above: that sweep is
+    # what settles this install's leftover non-terminal rows, and the repair
+    # only ever writes a terminal for an id the durable rows can prove is over.
+    # A phantom lives in the fluid event log, so nothing but a write into that
+    # log clears it — the session never repairs itself.
     try:
         counts["engine_pending_repaired"] = await _repair_orphaned_engine_pending()
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot

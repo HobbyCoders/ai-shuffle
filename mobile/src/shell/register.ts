@@ -29,8 +29,3 @@ export function installMobileShell(): void {
 		ControlsSheet: MobileComposerControlsSheet
 	});
 }
-
-/** Test hook. */
-export function _resetMobileShellForTests(): void {
-	installed = false;
-}

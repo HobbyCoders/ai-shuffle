@@ -332,3 +332,31 @@ class TestMcpApiErrors:
         response = client.delete("/api/v1/mcp/servers/nonexistent")
 
         assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("name", "detail"),
+    [
+        ("a" * 65, "Server name must be at most 64 characters"),
+        ("bad name!", "Server name must be alphanumeric with hyphens/underscores only"),
+        ("", "Server name is required"),
+    ],
+)
+def test_invalid_server_names_are_400_with_the_name_rule(tmp_path, monkeypatch, name, detail):
+    """Every name rule, length included, answers the same 400 (not a schema 422)."""
+    from app.core import mcp_service
+
+    monkeypatch.setattr(mcp_service, "_get_claude_dir", lambda: tmp_path / ".claude")
+    monkeypatch.setattr(mcp_service, "_get_user_claude_json", lambda: tmp_path / ".claude.json")
+    monkeypatch.setattr("app.api.mcp.get_mcp_service", mcp_service.McpService)
+    application = FastAPI()
+    application.include_router(router)
+    application.dependency_overrides[require_admin] = lambda: "test-admin"
+    with TestClient(application) as client:
+        response = client.post("/api/v1/mcp/servers", json={"name": name, "command": "not-started"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == detail
+        assert mcp_service.McpService().get_servers_for_scope(McpScope.USER) == []
+
+        at_limit = client.post("/api/v1/mcp/servers", json={"name": "b" * 64, "command": "not-started"})
+        assert at_limit.status_code == 201

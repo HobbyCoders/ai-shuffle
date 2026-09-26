@@ -6,7 +6,6 @@ Security tests for WebhookConnector.verify_inbound_request (Phase 1.4).
   False) rather than accept any unauthenticated request
 """
 
-import pytest
 from unittest.mock import MagicMock
 
 from app.core.connectors.webhook_connector import WebhookConnector

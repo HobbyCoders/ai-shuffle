@@ -18,26 +18,13 @@ from uuid import uuid4
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.environ.get("ALLOW_REAL_PG") != "1",
-                                reason="requires disposable TEST_POSTGRES_DSN")
+from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401  (pg_schema: autouse fixture)
+
+pytestmark = requires_real_pg
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCER = Path(__file__).with_name("delegated_crash_producer.py")
 FAKE = ROOT / "fluid" / "tests" / "fixtures" / "fake_claude.py"
-
-
-@pytest.fixture(scope="module", autouse=True)
-def pg_schema():
-    from app.db import base
-    from app.db.schema_postgres import create_postgres_schema
-    assert os.environ.get("TEST_POSTGRES_DSN")
-    base.init_pool(min_conn=1, max_conn=6)
-    try:
-        with base.get_db() as conn:
-            create_postgres_schema(conn.cursor())
-        yield
-    finally:
-        base.close_pool()
 
 
 def _loop(store, session_id, *, deltas="40,8"):

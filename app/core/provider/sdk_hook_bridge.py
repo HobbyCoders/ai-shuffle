@@ -8,7 +8,9 @@ project's DB hooks (including blocking PreToolUse security guards), plugin
 call them, so :func:`sdk_hooks_bus` registers each one on a HookBus: the bus
 payload is turned into Claude Code's hook input, and the callback's output is
 read the way fluid reads a command hook's JSON stdout
-(:meth:`fluid.hooks.command.CommandHook.interpret`).
+(:meth:`fluid.hooks.command.CommandHook.interpret`). A PreToolUse callback
+that raises or times out answers with a deny (fail closed); on other events
+the failure is a warning and the turn carries on.
 """
 
 from __future__ import annotations
@@ -85,11 +87,24 @@ def _callback_hook(
                 callback(hook_input, payload.get("tool_use_id"), {"signal": None}),
                 timeout,
             )
+            return reader.interpret(event, 0, _output_json(output), "")
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
+            problem = f"timed out after {timeout:g}s"
+        except Exception as exc:
+            if event != PRE_TOOL_USE:
+                raise  # the bus reports it as a warning and carries on
+            problem = f"failed ({type(exc).__name__}: {exc})"
+            logger.warning("%s %s", reader.label, problem, exc_info=True)
+        if event == PRE_TOOL_USE:
+            # A guard that cannot answer must not let the call through: the
+            # engines treat a missing answer as "no opinion" and proceed.
             return HookDecision(
-                warnings=(f"{reader.label} timed out after {timeout:g}s; continuing",)
+                action="deny",
+                note=f"{reader.label} {problem}; the call was denied",
             )
-        return reader.interpret(event, 0, _output_json(output), "")
+        return HookDecision(warnings=(f"{reader.label} {problem}; continuing",))
 
     hook.label = reader.label  # type: ignore[attr-defined]
     return hook

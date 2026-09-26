@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 88
+SCHEMA_VERSION = 90
 
 
 def create_postgres_schema(cursor) -> None:
@@ -81,7 +81,7 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 4. Agents (unified agent entity — was `profiles`; ruling A4)
+    # 4. Agents (unified agent entity — was `profiles`)
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agents (
@@ -113,7 +113,7 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
-    # Boot's orphaned-instance adoption scans DISTINCT instance_id here (v84).
+    # Boot's orphaned-instance adoption scans DISTINCT instance_id here.
     # Guarded like idx_sessions_active below: on a database old enough to
     # predate projects.instance_id the CREATE TABLE above is a no-op and the
     # column only arrives in _run_column_migrations, which runs AFTER this pass.
@@ -380,7 +380,14 @@ def create_postgres_schema(cursor) -> None:
             cache_creation_tokens BIGINT DEFAULT 0,
             cost_usd DOUBLE PRECISION,
             duration_ms INTEGER,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            -- v90 (usage estimates): TRUE when any token count in this turn
+            -- was estimated by the harness (chars/4) because the provider
+            -- reported no usage or the reply was interrupted. The amounts
+            -- still count toward budgets; the flag only marks them as
+            -- estimates in the usage displays. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            usage_estimated BOOLEAN DEFAULT FALSE
         )
     """)
 
@@ -455,7 +462,7 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 20. (RETIRED v71) Global subagents — folded into `agents` (ruling A4).
+    # 20. (RETIRED) Global subagents — folded into `agents`.
     # Existing rows are migrated by database._migrate_profiles_to_agents();
     # fresh installs never create the table.
     # ------------------------------------------------------------------
@@ -522,20 +529,10 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 25. Webhooks for external integrations
+    # 25. (RETIRED) Standalone outbound webhooks — dropped by
+    # database._retire_webhooks_and_legacy_push (v90); fresh installs never
+    # create the table.
     # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS webhooks (
-            id TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            secret TEXT,
-            events JSONB NOT NULL DEFAULT '[]',
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            last_triggered_at TIMESTAMP WITH TIME ZONE,
-            failure_count INTEGER DEFAULT 0
-        )
-    """)
 
     # ------------------------------------------------------------------
     # 26. Audit log for security events
@@ -565,7 +562,8 @@ def create_postgres_schema(cursor) -> None:
             is_pinned BOOLEAN DEFAULT FALSE,
             file_path TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            api_user_id TEXT
         )
     """)
 
@@ -626,7 +624,6 @@ def create_postgres_schema(cursor) -> None:
             secret TEXT,
             enabled BOOLEAN DEFAULT TRUE,
             tool_matcher TEXT,
-            message_template TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_triggered_at TIMESTAMP WITH TIME ZONE,
@@ -747,7 +744,6 @@ def create_postgres_schema(cursor) -> None:
             platform TEXT NOT NULL,
             api_key_hash TEXT NOT NULL,
             fcm_token TEXT,
-            unifiedpush_endpoint TEXT,
             capabilities JSONB DEFAULT '{}',
             paired_client_id TEXT,
             api_key_expires_at TIMESTAMP WITH TIME ZONE,
@@ -784,42 +780,16 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)"
     )
 
-    # ------------------------------------------------------------------
-    # 36b. Claude accounts (v52). Multiple Anthropic (Claude Code OAuth)
-    #      accounts with in-app switching. The account LIST is shared across
-    #      installs; the ACTIVE pointer is per-install and lives in
-    #      system_settings under key ``claude_active_account:{instance_id}``
-    #      (same pattern as ``workspace_path:{instance_id}``) — so there is
-    #      deliberately NO is_active column here. ``credentials`` holds an
-    #      ``enc:``-prefixed Fernet blob of the full claudeAiOauth JSON;
-    #      ``expires_at`` is a plaintext copy for display without decrypting.
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS claude_accounts (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT,
-            subscription_type TEXT,
-            credentials TEXT,
-            credential_fingerprint TEXT,
-            expires_at BIGINT,
-            has_refresh_token BOOLEAN DEFAULT TRUE,
-            sync_pending BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            last_used_at TIMESTAMP WITH TIME ZONE
-        )
-    """)
+    # 36b. (retired) Claude accounts. The in-app Claude sign-in and its
+    #      ``claude_accounts`` table were removed; the Claude Code CLI
+    #      owns its own login and AI Shuffle stores no Claude credentials.
 
     # ------------------------------------------------------------------
-    # 36c. Usage snapshots (v53). Per-install Claude usage-limits snapshot,
-    #      keyed by instance_id. The 5-hour Claude usage window is PER-ACCOUNT,
-    #      and on a shared database two installs may run different Claude
-    #      accounts — so each install persists its own snapshot here and the
-    #      usage endpoint serves every install's snapshot (joined to the
-    #      installs registry for device_name/online). ``windows`` is the
-    #      normalized window list; ``account_*`` records which Claude account
-    #      produced the reading (Nones in legacy single-account mode).
+    # 36c. Usage snapshots. Per-install Claude usage-limits snapshot,
+    #      keyed by instance_id: the windows that install's Claude Code CLI
+    #      reported in its rate-limit events, so the usage endpoint can serve
+    #      every install's snapshot (joined to the installs registry for
+    #      device_name/online). No Claude account identity.
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -828,15 +798,12 @@ def create_postgres_schema(cursor) -> None:
             available BOOLEAN DEFAULT FALSE,
             generation BIGINT,
             fetched_at BIGINT,
-            account_id TEXT,
-            account_email TEXT,
-            account_name TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
 
     # ------------------------------------------------------------------
-    # 36c-bis. Per-provider usage snapshots (v67). Single row per non-Claude
+    # 36c-bis. Per-provider usage snapshots. Single row per non-Claude
     #      provider (ChatGPT/Codex via the loopback gateway, OpenRouter on the
     #      direct base-URL path) capturing plan-usage/limit windows, credits and
     #      the allowlisted raw source payload. Distinct from usage_snapshots
@@ -868,12 +835,12 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
 
-    # 36e. Pending wakeups (v68, #598). Durable per-session wakeups so an app
+    # 36e. Pending wakeups. Durable per-session wakeups so an app
     #      restart rehydrates and re-arms them instead of dropping the bare
     #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
     #      both persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
     #      the rehydrate math is timezone/shim-agnostic.
-    #      ``model`` (v72) is the scheduling turn's effective model, replayed as
+    #      ``model`` is the scheduling turn's effective model, replayed as
     #      the wake query's model override so a wake never fires on the profile
     #      default (which re-primes the prompt cache on the wrong model).
     # ------------------------------------------------------------------
@@ -901,13 +868,13 @@ def create_postgres_schema(cursor) -> None:
         ON pending_wakeups(session_id)
     """)
 
-    # fluid harness session store (v69): branching node-tree sessions + durable
+    # fluid harness session store: branching node-tree sessions + durable
     # event log, mirroring fluid.store.base.SessionStore / JsonlStore semantics.
     # Used whenever the app has a database (the fluid pg store is derived, not flagged).
-    # cli_session_id (v70): the delegated engine's ``claude --resume`` handle —
+    # cli_session_id: the delegated engine's ``claude --resume`` handle —
     # a CLI uuid, NOT the fluid session id — so a restart can reconnect to the
     # same CLI conversation instead of resuming a handle the CLI never issued.
-    # project_root (v83): the project the session ran in, derived from its cwd
+    # project_root: the project the session ran in, derived from its cwd
     # (fluid.store.base.project_root_for) — SessionSearch scopes cross-session
     # recall on it. NULL = unknown (legacy session), never "another project".
     cursor.execute("""
@@ -955,7 +922,7 @@ def create_postgres_schema(cursor) -> None:
         cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
 
     # ------------------------------------------------------------------
-    # 36d. Background tasks (v55). Durable per-task lifecycle snapshots.
+    # 36d. Background tasks. Durable per-task lifecycle snapshots.
     #      task_registry mirrors start/update/complete/unpark transitions here
     #      through app.core.task_persistence (coalescing async writer, kill
     #      switch settings.durable_task_state). Two recovery readers depend on
@@ -1190,7 +1157,7 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 45b. Automation fire claims (v50) — cross-install double-fire guard
+    # 45b. Automation fire claims — cross-install double-fire guard
     # ------------------------------------------------------------------
     # Every install schedules every enabled automation and the runner
     # election deliberately fails open, so one scheduled tick can be
@@ -1254,7 +1221,7 @@ def create_postgres_schema(cursor) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 48. Model providers (v64). Admin-configured non-Anthropic model
+    # 48. Model providers. Admin-configured non-Anthropic model
     #     gateways (OpenRouter / custom Anthropic-compatible endpoints)
     #     injected per spawned session as the officially supported Claude
     #     Code LLM-gateway env vars. Self-contained block WITH its index
@@ -1267,9 +1234,9 @@ def create_postgres_schema(cursor) -> None:
     #     is nullable (falls back to default_model / session model in the
     #     env overlay).
     # ------------------------------------------------------------------
-    #     v65 (2026-07-18) adds the Codex/ChatGPT-subscription OAuth credential
-    #     columns to this SAME single-credential row (one account per provider,
-    #     per plan amendment A1 — no separate pool table): ``auth_mode``
+    #     The Codex/ChatGPT-subscription OAuth credential columns live on this
+    #     SAME single-credential row (one account per provider — no separate
+    #     pool table): ``auth_mode``
     #     ('apikey' | 'chatgpt'; NULL == legacy 'apikey'), the encrypted
     #     write-only ``codex_access_token`` / ``codex_refresh_token`` blobs
     #     (``enc:``-prefixed Fernet, never exposed on public reads — same
@@ -1280,7 +1247,7 @@ def create_postgres_schema(cursor) -> None:
     #     flag). All nullable/defaulted so the fresh CREATE and the additive
     #     _run_column_migrations bootstrap agree.
     #
-    #     2026-08-16: cross-instance refresh lease columns
+    #     Cross-instance refresh lease columns
     #     (``codex_refresh_lease_owner`` / ``codex_refresh_lease_expires_at``).
     #     The periodic refresh worker claims the row via a conditional UPDATE on
     #     the database clock before POSTing, because the Codex refresh token
@@ -1369,15 +1336,18 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     # Per-session lookups (``get_all_session_usage`` on every session open, and
     # the ``UPDATE usage_log SET session_id = NULL`` unlink in delete_session)
-    # sequentially scanned the whole ledger without this (v84).
+    # would sequentially scan the whole ledger without this.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_session ON usage_log(session_id)")
-    # One booking per execution attempt (#1407). The startup migration adds the
+    # One booking per execution attempt. The startup migration adds the
     # same index to existing installs (app.db.database._run_column_migrations);
-    # settle_turn_usage's ON CONFLICT claim needs it on both paths.
-    cursor.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_settlement_key "
-        "ON usage_log(settlement_key)"
-    )
+    # settle_turn_usage's ON CONFLICT claim needs it on both paths. Guarded:
+    # on an upgrade usage_log predates the column, which only arrives in
+    # _run_column_migrations AFTER this pass (unguarded, boot aborted).
+    if column_exists(cursor, "usage_log", "settlement_key"):
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_settlement_key "
+            "ON usage_log(settlement_key)"
+        )
 
     # -- auth_sessions
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
@@ -1436,9 +1406,6 @@ def create_postgres_schema(cursor) -> None:
     # -- session_tags
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
-
-    # -- webhooks
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
 
     # -- audit_log
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
@@ -1519,13 +1486,11 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
 
     # ------------------------------------------------------------------
-    # 49. SDK SessionStore — Postgres-backed transcript mirror (v43)
+    # 49. Session store — Postgres copy of Claude-format transcripts
     # ------------------------------------------------------------------
-    # Implements the SDK 0.1.65+ SessionStore Protocol so session transcripts
-    # (normally written as JSONL by the Claude Code subprocess) can be
-    # persisted to Postgres as the single source of truth. The subprocess
-    # still writes to an ephemeral CLAUDE_CONFIG_DIR; this table holds the
-    # durable copy consumed by resume/list/summary APIs.
+    # Transcript entries (written as JSONL by the Claude Code CLI) kept in
+    # Postgres for the history/rewind/list/summary reads. Rows are written by
+    # the lazy JSONL backfill (pg_session_store.lazy_backfill_session_from_jsonl).
     #
     # ``subpath`` is NULL for main transcripts, populated for subagent
     # transcripts (e.g. "subagents/agent-{id}"). Per-entry ordering is by
@@ -1647,7 +1612,7 @@ def create_postgres_schema(cursor) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 50. Application error log (v44)
+    # 50. Application error log
     # ------------------------------------------------------------------
     # Durable, queryable record of every error in the app — backend
     # unhandled exceptions / ERROR-level logs (captured via the root-logger
@@ -1776,8 +1741,8 @@ def create_postgres_schema(cursor) -> None:
     # 52. pending_interactions — durable prompt/answer state machine (v2 core).
     #
     # Records interactions (permission prompts, tool approvals, …) awaiting a
-    # user answer, with a TTL. Pure CRUD state machine here; session-event
-    # wiring is Phase 1. See app/db/interactions.py.
+    # user answer, with a TTL. Pure CRUD state machine here. See
+    # app/db/interactions.py.
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pending_interactions (
@@ -1851,7 +1816,7 @@ def create_postgres_schema(cursor) -> None:
 
     # ------------------------------------------------------------------
     # 56. turns — the durable per-session turn queue + live-turn state
-    #     machine (v2 core, Phase 2).
+    #     machine (v2 core).
     #
     # A *turn* is one unit of work for a session (a user prompt, a queued
     # follow-up, an unpark wake, a failover retry, …). The table is the state
@@ -1896,8 +1861,17 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
 
+    # Latest generated composer hint; retained even with no watching browser.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL
+        )
+    """)
+
     # ------------------------------------------------------------------
-    # 57. git_ops — the durable cross-install git-operation queue (D5).
+    # 57. git_ops — the durable cross-install git-operation queue.
     #
     # An *op* is one unit of git work targeted at ONE install (``runner_id`` =
     # that install's ``effective_instance_id``). The serving install writes a
@@ -1927,7 +1901,7 @@ def create_postgres_schema(cursor) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 58. upload_blobs — cross-install upload delivery (D8).
+    # 58. upload_blobs — cross-install upload delivery.
     #
     # Modeled on ``note_attachments``: the bytes in shared Postgres are the
     # source of truth, local disk is a cache. At SEND time a turn placed on

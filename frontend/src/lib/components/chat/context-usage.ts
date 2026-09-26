@@ -124,7 +124,7 @@ export function formatTokenCount(count: number): string {
 	return count.toString();
 }
 
-/** Severity thresholds mirror UsageLimitIndicator: ≥70 warning, >90 danger. */
+/** Usage severity thresholds: ≥70 warning, >90 danger. */
 export function usageSeverity(percent: number): UsageSeverity {
 	if (percent > 90) return 'danger';
 	if (percent >= 70) return 'warning';

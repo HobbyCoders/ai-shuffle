@@ -25,9 +25,9 @@ from app.core.provider_usage import (
     GROK_TOKEN_AUTH,
     ProviderUsageMonitor,
     _grok_url_is_pinned,
-    _is_grok_subscription_row,
     normalize_grok_billing,
 )
+from app.core.usage_sources import is_grok_subscription_row as _is_grok_subscription_row
 
 
 _TOKEN_KEY_RE = re.compile(

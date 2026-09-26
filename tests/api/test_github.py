@@ -938,7 +938,6 @@ class TestCreatePullRequestEndpoint:
     async def test_create_broadcasts_pr_changed(self, sample_pull_request):
         """A successful PR create broadcasts branch_changed so other
         tabs/devices re-query pr-state (cross-device freshness)."""
-        import asyncio as _asyncio
         from unittest.mock import AsyncMock
         from app.api.github import create_pull_request, CreatePullRequest
 

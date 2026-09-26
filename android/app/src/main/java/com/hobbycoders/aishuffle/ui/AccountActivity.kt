@@ -28,6 +28,8 @@ class AccountActivity : NativeScreen() {
     private var profileUsername: TextInputEditText? = null
     private var profileDraft: String? = null
     private var mode = "login"
+    /** Set once the deletion page was opened, so returning to the app checks the result. */
+    private var deletionOpened = false
     private lateinit var oauthService: AuthorizationService
     private val oauthLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode != RESULT_OK || result.data == null) {
@@ -53,9 +55,12 @@ class AccountActivity : NativeScreen() {
         oauthService = AuthorizationService(this)
         mode = savedInstanceState?.getString("account_mode") ?: intent.getStringExtra("mode") ?: "login"
         profileDraft = savedInstanceState?.getString("profile_username")
+        deletionOpened = savedInstanceState?.getBoolean("deletion_opened") ?: false
         navigation("Account")
         when {
             mode == "manage" && repo.store.session() != null -> manage()
+            mode == "delete" && repo.store.session() != null -> deleteAccount()
+            mode == "delete" -> deletionFinished()
             mode == "profile_sync" || (mode == "profile_setup" && repo.store.session()?.profileComplete == true) -> {
                 profileSyncScreen()
                 runWork { syncAfterSignIn() }
@@ -68,7 +73,13 @@ class AccountActivity : NativeScreen() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("account_mode", mode)
+        outState.putBoolean("deletion_opened", deletionOpened)
         if (mode == "profile_setup" || mode == "profile_edit") outState.putString("profile_username", profileUsername?.text?.toString())
+    }
+    override fun onResume() {
+        super.onResume()
+        // Back from the deletion page: ask the hub whether this account still exists.
+        if (mode == "delete" && deletionOpened) runWork { checkDeletion() }
     }
     override fun onDestroy() { oauthService.dispose(); super.onDestroy() }
     private fun launchScanner() { scanner.launch(ScanOptions().setCaptureActivity(QrCaptureActivity::class.java).setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setPrompt("Scan a trusted device’s account QR code")) }
@@ -211,10 +222,7 @@ class AccountActivity : NativeScreen() {
         row("Edit username", "Choose how your account appears in Shuffle", R.drawable.ic_account) { loadProfile(onboarding = false) }
         row("Trusted devices", "View devices and manage access", R.drawable.ic_phone) { runWork { devices(session) } }
         row("Add a trusted device", "Create a sign-in QR code or pairing code", R.drawable.ic_qr) { runWork { grant(session) } }
-        row("Delete account", "Permanently delete your Shuffle account in your browser", R.drawable.ic_account) {
-            androidx.browser.customtabs.CustomTabsIntent.Builder().build()
-                .launchUrl(this, android.net.Uri.parse("${session.hub.trimEnd('/')}/delete-account"))
-        }
+        row("Delete account", "Permanently delete your Shuffle account and its data", R.drawable.ic_account) { deleteAccount() }
         gap(16)
         button("Sign out") {
             confirm("Sign out?", "This removes your account connections from this phone. Direct worker connections stay saved. If you’re offline, revoke this device from another trusted device too.") {
@@ -227,6 +235,62 @@ class AccountActivity : NativeScreen() {
                     finish()
                 }
             }
+        }
+    }
+    /**
+     * Google Play account deletion, started in the app. The hub's deletion
+     * page does the deleting: it asks for a fresh sign-in on the hub itself,
+     * so a stolen phone token cannot delete an account. See AccountDeletion.
+     */
+    private fun deleteAccount() {
+        val session = repo.store.session() ?: return deletionFinished()
+        mode = "delete"
+        navigation("Delete account")
+        heading("Delete ${session.username}", "Permanently delete your Shuffle account.")
+        section("WHAT IS DELETED")
+        text("Your Shuffle profile and sign-in identity, trusted devices, pairing codes and worker registrations.", 14f)
+        text("Hosted network membership, recovery information and sync records held by the account service.", 14f)
+        text("Remote-access tunnels and addresses created for your workers.", 14f)
+        section("WHAT STAYS")
+        text("Files, conversations and credentials on your own workers and devices, and anything your AI providers hold. Deletion is not a remote wipe. Your Google or other sign-in provider account is not deleted.", 14f)
+        section("HOW IT WORKS")
+        text("You sign in again on the account service's deletion page and type DELETE to confirm. It cannot be undone. When you come back, this phone checks the result and signs out.", 14f)
+        gap(8)
+        button(if (deletionOpened) "Open the deletion page again" else "Continue to delete", primary = true) {
+            confirm("Delete your account?", "You will sign in again in your browser and confirm there. Deletion cannot be undone.") { openDeletion(session) }
+        }
+        if (deletionOpened) button("Check again") { runWork { checkDeletion() } }
+        link("Cancel") { deletionOpened = false; manage() }
+    }
+    private fun openDeletion(session: AccountSession) {
+        val url = try { AccountDeletion.pageFor(session.hub) } catch (e: IllegalArgumentException) { status.text = e.message; return }
+        try {
+            androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, android.net.Uri.parse(url))
+            deletionOpened = true
+        } catch (_: android.content.ActivityNotFoundException) {
+            status.text = "Install a browser to delete your account, or open $url on any device."
+        }
+    }
+    private suspend fun checkDeletion() {
+        val session = repo.store.session() ?: return deletionFinished()
+        status.text = "Checking your account…"
+        when (AccountDeletion.check { HubClient.call(session.hub, "/v1/devices", token = session.token) }) {
+            AccountDeletion.Result.ACCESS_ENDED -> { repo.clearLocal(); deletionFinished() }
+            AccountDeletion.Result.STILL_ACTIVE -> {
+                deleteAccount()
+                status.text = "Your account is still active. Finish deletion in the browser, then come back here."
+            }
+        }
+    }
+    /** The hub no longer accepts this phone and its account data here is gone. */
+    private fun deletionFinished() {
+        mode = "delete"
+        deletionOpened = false
+        navigation("Account")
+        heading("Account deleted", "The account service no longer accepts this phone, and your account connections on this phone were removed. Direct worker connections stay saved. If cleanup is still finishing, the deletion page in your browser shows its status.")
+        button("Done", primary = true) {
+            startActivity(Intent(this, ServerListActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            finish()
         }
     }
     private suspend fun devices(session: AccountSession) {

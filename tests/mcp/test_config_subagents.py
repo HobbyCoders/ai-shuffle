@@ -18,19 +18,12 @@ import pytest
 from unittest.mock import patch
 
 from app.mcp.config_subagents import _create_subagent_tools
+from tests.mcp.tool_helpers import get_tool
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _get_tool(tools: list, name: str):
-    """Return the SdkMcpTool with the given name."""
-    for t in tools:
-        if t.name == name:
-            return t
-    raise KeyError(f"Tool '{name}' not found in tool list")
-
 
 def _parse_result(result: dict) -> dict:
     """Unwrap the MCP tool response envelope to the inner dict."""
@@ -88,7 +81,7 @@ class TestListSubagents:
     @pytest.mark.asyncio
     async def test_list_subagents_empty(self, admin_tools):
         """Fresh DB → empty list, count=0."""
-        tool = _get_tool(admin_tools, "listSubagents")
+        tool = get_tool(admin_tools, "listSubagents")
         with patch("app.db.database.get_all_subagents", return_value=[]):
             result = await tool.handler({})
         data = _parse_result(result)
@@ -106,7 +99,7 @@ class TestListSubagents:
             model="claude-opus-4-5",
             memory="project",
         )
-        tool = _get_tool(admin_tools, "listSubagents")
+        tool = get_tool(admin_tools, "listSubagents")
         with patch("app.db.database.get_all_subagents", return_value=[subagent]):
             result = await tool.handler({})
         data = _parse_result(result)
@@ -130,7 +123,7 @@ class TestGetSubagent:
     @pytest.mark.asyncio
     async def test_get_subagent_not_found(self, admin_tools):
         """Missing ID → error response."""
-        tool = _get_tool(admin_tools, "getSubagent")
+        tool = get_tool(admin_tools, "getSubagent")
         with patch("app.db.database.get_subagent", return_value=None):
             result = await tool.handler({"subagent_id": "nonexistent"})
         data = _parse_result(result)
@@ -148,7 +141,7 @@ class TestGetSubagent:
             memory="user",
             model="claude-sonnet-4-5",
         )
-        tool = _get_tool(admin_tools, "getSubagent")
+        tool = get_tool(admin_tools, "getSubagent")
         with patch("app.db.database.get_subagent", return_value=subagent):
             result = await tool.handler({"subagent_id": "full-agent"})
         data = _parse_result(result)
@@ -179,7 +172,7 @@ class TestCreateSubagent:
             memory=None,
             mcp_servers=None,
         )
-        tool = _get_tool(admin_tools, "createSubagent")
+        tool = get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=None), \
              patch("app.db.database.create_subagent", return_value=created) as mock_create:
             result = await tool.handler({
@@ -210,7 +203,7 @@ class TestCreateSubagent:
             mcp_servers=[{"name": "foo"}],
             model="haiku",
         )
-        tool = _get_tool(admin_tools, "createSubagent")
+        tool = get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=None), \
              patch("app.db.database.create_subagent", return_value=created) as mock_create:
             result = await tool.handler({
@@ -236,7 +229,7 @@ class TestCreateSubagent:
     async def test_create_subagent_tools_none_is_inherit_all(self, admin_tools):
         """Omitting tools → create_subagent called with tools=None (inherit all)."""
         created = _make_subagent(id="agent-x", tools=None)
-        tool = _get_tool(admin_tools, "createSubagent")
+        tool = get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=None), \
              patch("app.db.database.create_subagent", return_value=created) as mock_create:
             await tool.handler({
@@ -251,7 +244,7 @@ class TestCreateSubagent:
     async def test_create_subagent_tools_empty_list_is_no_tools(self, admin_tools):
         """Passing tools=[] → create_subagent called with tools=[] (no tools)."""
         created = _make_subagent(id="agent-y", tools=[])
-        tool = _get_tool(admin_tools, "createSubagent")
+        tool = get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=None), \
              patch("app.db.database.create_subagent", return_value=created) as mock_create:
             await tool.handler({
@@ -267,7 +260,7 @@ class TestCreateSubagent:
     async def test_create_subagent_duplicate_id_rejected(self, admin_tools):
         """Duplicate name → ID collision → error response."""
         existing = _make_subagent(id="my-agent", name="My Agent")
-        tool = _get_tool(admin_tools, "createSubagent")
+        tool = get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=existing):
             result = await tool.handler({
                 "name": "My Agent",
@@ -281,7 +274,7 @@ class TestCreateSubagent:
     @pytest.mark.asyncio
     async def test_create_subagent_requires_admin(self, non_admin_tools):
         """Non-admin session → error response."""
-        tool = _get_tool(non_admin_tools, "createSubagent")
+        tool = get_tool(non_admin_tools, "createSubagent")
         result = await tool.handler({
             "name": "Agent",
             "description": "Desc",
@@ -314,7 +307,7 @@ class TestUpdateSubagent:
             description="Desc",
             prompt="new",
         )
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=original), \
              patch("app.db.database.update_subagent", return_value=updated) as mock_update:
             result = await tool.handler({
@@ -334,7 +327,7 @@ class TestUpdateSubagent:
         """Update tools=None (explicit null) → update_subagent called with tools=None."""
         original = _make_subagent(id="agent-2", tools=["Read"])
         updated = _make_subagent(id="agent-2", tools=None)
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=original), \
              patch("app.db.database.update_subagent", return_value=updated) as mock_update:
             result = await tool.handler({
@@ -351,7 +344,7 @@ class TestUpdateSubagent:
         """Update tools=[] → update_subagent called with tools=[]."""
         original = _make_subagent(id="agent-3", tools=None)
         updated = _make_subagent(id="agent-3", tools=[])
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=original), \
              patch("app.db.database.update_subagent", return_value=updated) as mock_update:
             result = await tool.handler({
@@ -366,7 +359,7 @@ class TestUpdateSubagent:
     @pytest.mark.asyncio
     async def test_update_subagent_not_found(self, admin_tools):
         """Missing subagent ID → error response."""
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=None):
             result = await tool.handler({
                 "subagent_id": "ghost",
@@ -380,7 +373,7 @@ class TestUpdateSubagent:
     async def test_update_subagent_no_fields_returns_error(self, admin_tools):
         """Only subagent_id provided, no updatable fields → error."""
         original = _make_subagent(id="agent-4")
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=original):
             result = await tool.handler({"subagent_id": "agent-4"})
         data = _parse_result(result)
@@ -390,7 +383,7 @@ class TestUpdateSubagent:
     @pytest.mark.asyncio
     async def test_update_subagent_requires_admin(self, non_admin_tools):
         """Non-admin session → error response."""
-        tool = _get_tool(non_admin_tools, "updateSubagent")
+        tool = get_tool(non_admin_tools, "updateSubagent")
         result = await tool.handler({
             "subagent_id": "agent-5",
             "prompt": "new",
@@ -404,7 +397,7 @@ class TestUpdateSubagent:
         """Built-in subagents remain editable via MCP (mirrors REST behavior)."""
         builtin = _make_subagent(id="builtin-test", name="Built-in Test", is_builtin=True)
         updated_row = _make_subagent(id="builtin-test", name="Built-in Test", prompt="new", is_builtin=True)
-        tool = _get_tool(admin_tools, "updateSubagent")
+        tool = get_tool(admin_tools, "updateSubagent")
         with patch("app.db.database.get_subagent", return_value=builtin), \
              patch("app.db.database.update_subagent", return_value=updated_row) as mock_update:
             result = await tool.handler({
@@ -428,7 +421,7 @@ class TestDeleteSubagent:
     @pytest.mark.asyncio
     async def test_delete_subagent_requires_confirm(self, admin_tools):
         """confirm=False or missing → error response."""
-        tool = _get_tool(admin_tools, "deleteSubagent")
+        tool = get_tool(admin_tools, "deleteSubagent")
         # confirm=False
         result = await tool.handler({"subagent_id": "agent-1", "confirm": False})
         data = _parse_result(result)
@@ -444,7 +437,7 @@ class TestDeleteSubagent:
     @pytest.mark.asyncio
     async def test_delete_subagent_not_found(self, admin_tools):
         """Missing subagent → error response."""
-        tool = _get_tool(admin_tools, "deleteSubagent")
+        tool = get_tool(admin_tools, "deleteSubagent")
         with patch("app.db.database.get_subagent", return_value=None):
             result = await tool.handler({"subagent_id": "ghost", "confirm": True})
         data = _parse_result(result)
@@ -455,7 +448,7 @@ class TestDeleteSubagent:
     async def test_delete_subagent_rejects_builtin(self, admin_tools):
         """Built-in subagent → error mentions built-in."""
         builtin = _make_subagent(id="builtin-agent", is_builtin=True)
-        tool = _get_tool(admin_tools, "deleteSubagent")
+        tool = get_tool(admin_tools, "deleteSubagent")
         with patch("app.db.database.get_subagent", return_value=builtin):
             result = await tool.handler({"subagent_id": "builtin-agent", "confirm": True})
         data = _parse_result(result)
@@ -466,7 +459,7 @@ class TestDeleteSubagent:
     async def test_delete_subagent_success(self, admin_tools):
         """Successful deletion → success response."""
         subagent = _make_subagent(id="del-agent", name="Delete Me")
-        tool = _get_tool(admin_tools, "deleteSubagent")
+        tool = get_tool(admin_tools, "deleteSubagent")
         with patch("app.db.database.get_subagent", return_value=subagent), \
              patch("app.db.database.get_automations_for_profile", return_value=[]), \
              patch("app.db.database.delete_subagent", return_value=True):
@@ -480,7 +473,7 @@ class TestDeleteSubagent:
         """Subagent referenced by automations → error, no delete."""
         subagent = _make_subagent(id="blocked-agent", name="Blocked Agent")
         automations = [{"name": "Nightly Sync"}]
-        tool = _get_tool(admin_tools, "deleteSubagent")
+        tool = get_tool(admin_tools, "deleteSubagent")
         with patch("app.db.database.get_subagent", return_value=subagent), \
              patch("app.db.database.get_automations_for_profile", return_value=automations), \
              patch("app.db.database.delete_subagent") as mock_delete:
@@ -494,7 +487,7 @@ class TestDeleteSubagent:
     @pytest.mark.asyncio
     async def test_delete_subagent_requires_admin(self, non_admin_tools):
         """Non-admin session → error response."""
-        tool = _get_tool(non_admin_tools, "deleteSubagent")
+        tool = get_tool(non_admin_tools, "deleteSubagent")
         result = await tool.handler({"subagent_id": "agent-x", "confirm": True})
         data = _parse_result(result)
         assert data["success"] is False

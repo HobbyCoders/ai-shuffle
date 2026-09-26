@@ -290,7 +290,12 @@ async def test_four_tool_schema_and_task_uses_three_tools() -> None:
 
 
 @pytest.mark.parametrize("decision,expect_error", [("allow", False), ("deny", True)])
-async def test_destructive_host_call_triggers_permission_request(decision, expect_error) -> None:
+async def test_destructive_host_call_triggers_permission_request(
+    decision, expect_error, monkeypatch
+) -> None:
+    # run_python itself is safe only behind the OS sandbox; pin it on so the
+    # one prompt here is the inner host call's.
+    monkeypatch.setattr(CodeModeSession, "os_sandbox_active", lambda self: True)
     @tool("wipe", "Delete a record.", {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}, risk="destructive")
     async def wipe(args: dict) -> dict:
         return {"content": [{"type": "text", "text": f"wiped {args['id']}"}]}

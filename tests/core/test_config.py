@@ -14,7 +14,7 @@ Tests cover:
 import os
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import tempfile
 
 
@@ -60,9 +60,7 @@ class TestSettingsDefaults:
                 from app.core.config import Settings
                 settings = Settings()
 
-                assert settings.session_secret is None
                 assert settings.session_expire_days == 30
-                assert settings.command_timeout == 300
 
     def test_default_security_settings(self):
         """Default security settings should be set correctly."""
@@ -71,7 +69,6 @@ class TestSettingsDefaults:
                 from app.core.config import Settings
                 settings = Settings()
 
-                assert settings.api_key_session_expire_hours == 24
                 # Note: cookie_secure may be overridden by .env file, so we just check it's a bool
                 assert isinstance(settings.cookie_secure, bool)
                 assert settings.max_request_body_mb == 50
@@ -126,9 +123,7 @@ class TestSettingsFromEnvironment:
             "LOG_LEVEL": "DEBUG",
             "SERVICE_NAME": "test-service",
             "VERSION": "1.0.0",
-            "SESSION_SECRET": "test-secret",
             "SESSION_EXPIRE_DAYS": "7",
-            "COMMAND_TIMEOUT": "600",
             "COOKIE_SECURE": "false",
         }
 
@@ -143,9 +138,7 @@ class TestSettingsFromEnvironment:
                     assert settings.log_level == "DEBUG"
                     assert settings.service_name == "test-service"
                     assert settings.version == "1.0.0"
-                    assert settings.session_secret == "test-secret"
                     assert settings.session_expire_days == 7
-                    assert settings.command_timeout == 600
                     assert settings.cookie_secure is False
 
     def test_local_mode_env_var_true(self):
@@ -234,8 +227,8 @@ class TestSettingsModelPostInit:
             "WORKSPACE_DIR": str(custom_workspace)
         }, clear=False):
             # These mocks should not be called since paths are provided
-            with patch("app.core.config._get_default_data_dir") as mock_data:
-                with patch("app.core.config._get_default_workspace_dir") as mock_workspace:
+            with patch("app.core.config._get_default_data_dir"):
+                with patch("app.core.config._get_default_workspace_dir"):
                     from app.core.config import Settings
                     settings = Settings()
 
@@ -581,115 +574,74 @@ class TestEnsureDirectories:
                         assert config_module.settings.effective_data_dir.exists()
 
 
-@pytest.mark.skip(reason="Module reload tests are flaky in CI due to import caching")
 class TestLoadWorkspaceFromDatabase:
-    """Test load_workspace_from_database function."""
+    """Test load_workspace_from_database function.
 
-    def test_load_workspace_from_database_with_valid_path(self):
-        """load_workspace_from_database should set workspace from database."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            configured_path = Path(tmpdir) / "configured_workspace"
-            configured_path.mkdir()
+    No importlib.reload (see TestEnsureDirectories): the function writes the
+    module-level ``_runtime_overrides`` dict, which is swapped for a fresh one
+    per test, and reads ``database.get_system_setting``, which is stubbed.
+    """
 
-            mock_database = MagicMock()
-            mock_database.get_system_setting.return_value = str(configured_path)
+    @pytest.fixture
+    def loader(self, monkeypatch):
+        import app.core.config as config_module
+        from app.db import database
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        overrides: dict = {}
+        stored: dict = {}
+        monkeypatch.setattr(config_module, "_runtime_overrides", overrides)
+        monkeypatch.setattr(database, "get_system_setting", lambda key: stored.get(key))
+        instance_key = f"workspace_path:{config_module.settings.effective_instance_id}"
+        return config_module, overrides, stored, instance_key
 
-                    # Patch at the point of import in the load_workspace_from_database function
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+    def test_instance_scoped_path_wins(self, loader, tmp_path):
+        config_module, overrides, stored, instance_key = loader
+        stored[instance_key] = str(tmp_path / "mine")
+        stored["workspace_path"] = str(tmp_path / "global")
+        (tmp_path / "mine").mkdir()
 
-                        mock_database.get_system_setting.assert_called_once_with("workspace_path")
-                        assert config_module.settings.workspace_dir == configured_path
+        config_module.load_workspace_from_database()
 
-    def test_load_workspace_from_database_with_parent_exists(self):
-        """load_workspace_from_database should accept path if parent exists."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            parent_dir = Path(tmpdir)
-            configured_path = parent_dir / "new_workspace"  # Doesn't exist but parent does
+        assert overrides["workspace_dir"] == tmp_path / "mine"
+        assert config_module.settings.effective_workspace_dir == tmp_path / "mine"
 
-            mock_database = MagicMock()
-            mock_database.get_system_setting.return_value = str(configured_path)
+    def test_falls_back_to_global_key_and_accepts_missing_leaf(self, loader, tmp_path):
+        config_module, overrides, stored, _ = loader
+        stored["workspace_path"] = str(tmp_path / "not-yet-created")
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+        assert overrides["workspace_dir"] == tmp_path / "not-yet-created"
 
-                        assert config_module.settings.workspace_dir == configured_path
+    def test_no_configured_path_keeps_default(self, loader):
+        config_module, overrides, _, _ = loader
 
-    def test_load_workspace_from_database_no_configured_path(self):
-        """load_workspace_from_database should keep default if no path configured."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.return_value = None
+        config_module.load_workspace_from_database()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            default_workspace = Path(tmpdir) / "default_workspace"
+        assert "workspace_dir" not in overrides
 
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=default_workspace):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+    def test_invalid_path_is_ignored_with_warning(self, loader, tmp_path, caplog):
+        config_module, overrides, stored, _ = loader
+        stored["workspace_path"] = str(tmp_path / "missing-parent" / "workspace")
 
-                    original_workspace = config_module.settings.workspace_dir
+        with caplog.at_level("WARNING", logger="app.core.config"):
+            config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        config_module.load_workspace_from_database()
+        assert "workspace_dir" not in overrides
+        assert "does not exist" in caplog.text
 
-                        # Should not change
-                        assert config_module.settings.workspace_dir == original_workspace
+    def test_database_error_is_swallowed(self, loader, monkeypatch):
+        config_module, overrides, _, _ = loader
+        from app.db import database
 
-    def test_load_workspace_from_database_invalid_path(self):
-        """load_workspace_from_database should warn for invalid paths."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.return_value = "/nonexistent/invalid/path/workspace"
+        def _boom(key):
+            raise RuntimeError("Database error")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
+        monkeypatch.setattr(database, "get_system_setting", _boom)
 
-                    original_workspace = config_module.settings.workspace_dir
+        config_module.load_workspace_from_database()
 
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        # Should log warning but not crash
-                        config_module.load_workspace_from_database()
-
-                        # Should not change to invalid path
-                        assert config_module.settings.workspace_dir == original_workspace
-
-    def test_load_workspace_from_database_handles_exception(self):
-        """load_workspace_from_database should handle database errors gracefully."""
-        mock_database = MagicMock()
-        mock_database.get_system_setting.side_effect = Exception("Database error")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.config._get_default_data_dir", return_value=Path(tmpdir) / "data"):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path(tmpdir) / "workspace"):
-                    import importlib
-                    import app.core.config as config_module
-                    importlib.reload(config_module)
-
-                    original_workspace = config_module.settings.workspace_dir
-
-                    with patch.dict("sys.modules", {"app.db.database": mock_database}):
-                        # Should not crash
-                        config_module.load_workspace_from_database()
-
-                        # Should keep original workspace
-                        assert config_module.settings.workspace_dir == original_workspace
+        assert "workspace_dir" not in overrides
 
 
 class TestGetDefaultHelpers:
@@ -755,83 +707,96 @@ class TestSettingsConfigClass:
         assert Settings.model_config.get('env_file_encoding') == 'utf-8'
 
 
+class TestBlankEnvironmentValues:
+    """Unraid passes blank template fields to the container as empty variables."""
 
-class TestDatabaseUrlNormalization:
-    """A DATABASE_URL whose password carries reserved characters.
+    def _settings(self):
+        from app.core.config import Settings
+        return Settings(_env_file=None)
 
-    Python's ``urlsplit`` splits userinfo at the LAST ``@``; libpq splits at
-    the FIRST. An unencoded ``@`` in the password therefore makes the same
-    string name two different hosts depending on who reads it — a worker
-    container reported ``could not translate host name "Pwd@10.0.0.200"`` and
-    put a password fragment in the event log. Normalizing at load makes both
-    readings agree.
-    """
+    def test_blank_bool_int_and_path_settings_keep_their_defaults(self, monkeypatch):
+        for name in ("BROWSER_SSRF_ALLOW_LOOPBACK", "COOKIE_SECURE", "AI_SHUFFLE_DURABLE_TASKS"):
+            monkeypatch.setenv(name, "")
+        monkeypatch.setenv("PORT", "")
+        monkeypatch.setenv("SESSION_EXPIRE_DAYS", "  ")
+        monkeypatch.setenv("WS_RATE_LIMIT_WINDOW_SECONDS", "")
+        monkeypatch.setenv("TOOLS_DIR", "")
+        settings = self._settings()
+        assert settings.browser_ssrf_allow_loopback is None
+        assert settings.cookie_secure is True and settings.durable_task_state is True
+        assert settings.port == 8000 and settings.session_expire_days == 30
+        assert settings.ws_rate_limit_window_seconds == 10.0
+        assert settings.tools_dir is None
 
-    def test_unencoded_at_in_password_is_encoded(self):
-        from app.core.config import normalize_database_url
+    def test_blank_comma_separated_list_setting_is_kept_as_given(self, monkeypatch):
+        # List-like settings are comma-separated text; a blank text value is a value.
+        monkeypatch.setenv("TRUSTED_PROXIES", "")
+        monkeypatch.setenv("CORS_ORIGINS", "")
+        settings = self._settings()
+        assert settings.trusted_proxies == "" and settings.cors_origins == ""
 
-        assert normalize_database_url(
-            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
-        ) == "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+    def test_no_setting_is_json_decoded_from_the_environment(self):
+        # pydantic-settings JSON-decodes list/dict/set/tuple fields before any
+        # validator runs, so a blank value for one would still fail start-up.
+        from typing import get_args, get_origin
+        from app.core.config import Settings
+        complex_types = (list, dict, set, tuple, frozenset)
+        for name, field in Settings.model_fields.items():
+            kinds = [field.annotation, get_origin(field.annotation), *get_args(field.annotation),
+                     *(get_origin(arg) for arg in get_args(field.annotation))]
+            assert not any(kind in complex_types for kind in kinds), name
 
-    def test_normalization_is_idempotent(self):
-        from app.core.config import normalize_database_url
+    @pytest.mark.parametrize("raw,expected", [("true", True), ("0", False), ("false", False), ("1", True)])
+    def test_non_blank_bool_still_parses(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("BROWSER_SSRF_ALLOW_LOOPBACK", raw)
+        monkeypatch.setenv("COOKIE_SECURE", raw)
+        settings = self._settings()
+        assert settings.browser_ssrf_allow_loopback is expected and settings.cookie_secure is expected
 
-        once = normalize_database_url(
-            "postgresql://REDACTED@db.local:5432/app"
-        )
-        assert normalize_database_url(once) == once
-        assert once == "postgresql://REDACTED@db.local:5432/app"
+    def test_non_blank_int_still_parses(self, monkeypatch):
+        monkeypatch.setenv("PORT", "9001")
+        assert self._settings().port == 9001
 
-    def test_colon_in_password_is_encoded(self):
-        """The userinfo splits on the FIRST colon, so a password may contain
-        more of them — they come back encoded."""
-        from app.core.config import normalize_database_url
+    @pytest.mark.parametrize("name,raw", [("BROWSER_SSRF_ALLOW_LOOPBACK", "maybe"), ("PORT", "eighty"),
+                                          ("COOKIE_SECURE", "yes please")])
+    def test_garbage_still_fails(self, monkeypatch, name, raw):
+        from pydantic import ValidationError
+        monkeypatch.setenv(name, raw)
+        with pytest.raises(ValidationError):
+            self._settings()
 
-        assert normalize_database_url(
-            "postgresql://REDACTED@host:5432/app"
-        ) == "postgresql://REDACTED@host:5432/app"
 
-    def test_password_with_a_slash_is_left_alone(self):
-        """``/``, ``?`` and ``#`` end the netloc, so a URL carrying one bare in
-        the password is not recoverable by anyone — including us. It is
-        returned untouched rather than silently rewritten into a different
-        connection string; the operator must encode those themselves (the
-        POSTGRES_* path already does)."""
-        from app.core.config import normalize_database_url
+class TestProviderTimeoutSettings:
+    """PROVIDER_READ_TIMEOUT / PROVIDER_STREAM_DEADLINE / PROVIDER_FIRST_BYTE_TIMEOUT."""
 
-        broken = "postgresql://u:pa/ss@host:5432/app"
-        assert normalize_database_url(broken) == broken
+    _NAMES = ("PROVIDER_READ_TIMEOUT", "PROVIDER_STREAM_DEADLINE", "PROVIDER_FIRST_BYTE_TIMEOUT")
 
-    def test_clean_url_is_untouched(self):
-        from app.core.config import normalize_database_url
+    def _settings(self):
+        from app.core.config import Settings
+        return Settings(_env_file=None)
 
-        clean = "postgresql://REDACTED@10.0.0.5:5433/mydb"
-        assert normalize_database_url(clean) == clean
+    def test_defaults_match_fluid(self, monkeypatch):
+        from fluid.providers._transport import DEFAULT_FIRST_BYTE_TIMEOUT_S, DEFAULT_STREAM_DEADLINE_S
+        for name in self._NAMES:
+            monkeypatch.delenv(name, raising=False)
+        settings = self._settings()
+        assert settings.provider_read_timeout == 600.0
+        assert settings.provider_stream_deadline == DEFAULT_STREAM_DEADLINE_S
+        assert settings.provider_first_byte_timeout == DEFAULT_FIRST_BYTE_TIMEOUT_S
 
-    def test_url_without_credentials_is_untouched(self):
-        from app.core.config import normalize_database_url
+    def test_blank_means_default(self, monkeypatch):
+        for name in self._NAMES:
+            monkeypatch.setenv(name, "")
+        settings = self._settings()
+        assert settings.provider_read_timeout == 600.0
+        assert settings.provider_stream_deadline == 900.0
+        assert settings.provider_first_byte_timeout == 60.0
 
-        bare = "postgresql://localhost:5432/mydb"
-        assert normalize_database_url(bare) == bare
-
-    def test_empty_and_garbage_never_raise(self):
-        from app.core.config import normalize_database_url
-
-        assert normalize_database_url("") == ""
-        assert normalize_database_url("   ") == ""
-        # No scheme, no credentials: returned as given rather than mangled.
-        assert normalize_database_url("not a url at all") == "not a url at all"
-
-    def test_libpq_first_at_split_now_finds_the_host(self):
-        """Simulates libpq's split (FIRST ``@``) on the normalized string: with
-        the password encoded there is exactly one ``@`` left, so both splitters
-        agree."""
-        from app.core.config import normalize_database_url
-
-        normalized = normalize_database_url(
-            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
-        )
-        after_scheme = normalized.split("://", 1)[1]
-        assert after_scheme.count("@") == 1
-        assert after_scheme.split("@", 1)[1] == "10.0.0.200:5432/ai_shuffle"
+    def test_values_parse_and_zero_is_kept(self, monkeypatch):
+        monkeypatch.setenv("PROVIDER_READ_TIMEOUT", "120")
+        monkeypatch.setenv("PROVIDER_STREAM_DEADLINE", "0")
+        monkeypatch.setenv("PROVIDER_FIRST_BYTE_TIMEOUT", "12.5")
+        settings = self._settings()
+        assert settings.provider_read_timeout == 120.0
+        assert settings.provider_stream_deadline == 0.0
+        assert settings.provider_first_byte_timeout == 12.5

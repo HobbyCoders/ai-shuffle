@@ -9,7 +9,6 @@ gateway session-linked registration.
 """
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,14 +24,12 @@ from app.core.connectors.imessage import IMessageConnector
 from app.core.connectors.line import LINEConnector
 from app.core.connectors.msteams import MSTeamsConnector
 from app.mcp.connector_gateway_sdk import build_gateway_tools, get_gateway_tool_names
+from tests.fakes.http import fake_response
+from tests.mcp.tool_helpers import tool_result_json
 
 BOUND_CHAT = "conv-0000001"
 FORBIDDEN_CHAT = "conv-9999999"
 CTX = {"session_id": "ai-1", "connector_id": "c1", "bound_chat_id": BOUND_CHAT}
-
-
-def _payload(result):
-    return json.loads(result["content"][0]["text"])
 
 
 def _async_cm(client: MagicMock) -> MagicMock:
@@ -41,14 +38,6 @@ def _async_cm(client: MagicMock) -> MagicMock:
     cm.__aenter__ = AsyncMock(return_value=client)
     cm.__aexit__ = AsyncMock(return_value=False)
     return cm
-
-
-def _resp(status=200, body=None, text=""):
-    r = MagicMock()
-    r.status_code = status
-    r.json = MagicMock(return_value=body if body is not None else {})
-    r.text = text or json.dumps(body or {})
-    return r
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +135,7 @@ class TestTeamsHandlers:
     async def test_update_message(self):
         conn = make_msteams()
         client = MagicMock()
-        client.request = AsyncMock(return_value=_resp(200))
+        client.request = AsyncMock(return_value=fake_response(200))
         with patch("app.core.connectors.msteams_actions.httpx.AsyncClient", return_value=_async_cm(client)):
             res = await conn.execute_action(
                 "update_message", {"activity_id": "a1", "text": "edited"}, context=CTX,
@@ -160,7 +149,7 @@ class TestTeamsHandlers:
     async def test_delete_message(self):
         conn = make_msteams()
         client = MagicMock()
-        client.request = AsyncMock(return_value=_resp(200))
+        client.request = AsyncMock(return_value=fake_response(200))
         with patch("app.core.connectors.msteams_actions.httpx.AsyncClient", return_value=_async_cm(client)):
             res = await conn.execute_action("delete_message", {"activity_id": "a1"}, context=CTX)
         assert res["success"] is True
@@ -170,7 +159,7 @@ class TestTeamsHandlers:
     async def test_list_members(self):
         conn = make_msteams()
         client = MagicMock()
-        client.request = AsyncMock(return_value=_resp(200, body=[{"id": "u1", "name": "Alice"}]))
+        client.request = AsyncMock(return_value=fake_response(200, body=[{"id": "u1", "name": "Alice"}]))
         with patch("app.core.connectors.msteams_actions.httpx.AsyncClient", return_value=_async_cm(client)):
             res = await conn.execute_action("list_members", {}, context=CTX)
         assert res["success"] is True
@@ -311,7 +300,7 @@ class TestLineHandlers:
     async def test_get_profile(self):
         conn = make_line()
         client = MagicMock()
-        client.get = AsyncMock(return_value=_resp(200, body={
+        client.get = AsyncMock(return_value=fake_response(200, body={
             "userId": "u1", "displayName": "Alice",
         }))
         with patch("app.core.connectors.line_actions.httpx.AsyncClient", return_value=_async_cm(client)):
@@ -323,7 +312,7 @@ class TestLineHandlers:
     async def test_get_quota(self):
         conn = make_line()
         client = MagicMock()
-        client.get = AsyncMock(return_value=_resp(200, body={"type": "limited", "value": 1000}))
+        client.get = AsyncMock(return_value=fake_response(200, body={"type": "limited", "value": 1000}))
         with patch("app.core.connectors.line_actions.httpx.AsyncClient", return_value=_async_cm(client)):
             res = await conn.execute_action("get_quota", {}, context=CTX)
         assert res["success"] is True
@@ -492,8 +481,8 @@ def make_bluebubbles(config=None):
         on_permission_response=AsyncMock(),
     )
     conn._resolve_chat_guid = AsyncMock(return_value="iMessage;-;+15551234567")
-    conn._api_post = AsyncMock(return_value=_resp(200))
-    conn._api_get = AsyncMock(return_value=_resp(200))
+    conn._api_post = AsyncMock(return_value=fake_response(200))
+    conn._api_get = AsyncMock(return_value=fake_response(200))
     conn.send_message = AsyncMock(return_value=True)
     return conn
 
@@ -528,7 +517,7 @@ class TestBlueBubblesHandlers:
     @pytest.mark.asyncio
     async def test_list_chats(self):
         conn = make_bluebubbles()
-        conn._api_post = AsyncMock(return_value=_resp(200, body={
+        conn._api_post = AsyncMock(return_value=fake_response(200, body={
             "data": [{"guid": "g1", "displayName": "Group", "participants": [1, 2]}],
         }))
         res = await conn.execute_action("list_chats", {}, context=CTX)
@@ -538,7 +527,7 @@ class TestBlueBubblesHandlers:
     @pytest.mark.asyncio
     async def test_get_chat(self):
         conn = make_bluebubbles()
-        conn._api_get = AsyncMock(return_value=_resp(200, body={
+        conn._api_get = AsyncMock(return_value=fake_response(200, body={
             "data": {"guid": "g1", "displayName": "Group", "participants": []},
         }))
         res = await conn.execute_action("get_chat", {}, context=CTX)
@@ -549,7 +538,7 @@ class TestBlueBubblesHandlers:
     async def test_rename_chat(self):
         conn = make_bluebubbles()
         client = MagicMock()
-        client.put = AsyncMock(return_value=_resp(200))
+        client.put = AsyncMock(return_value=fake_response(200))
         with patch("app.core.connectors.bluebubbles_actions.httpx.AsyncClient", return_value=_async_cm(client)):
             res = await conn.execute_action(
                 "rename_chat", {"display_name": "New Name"}, context=CTX,
@@ -584,7 +573,7 @@ class TestBlueBubblesApprovalFlow:
         )
         await asyncio.sleep(0.05)
         conn.send_message.assert_awaited_once()
-        request_id = next(iter(conn._pending_action_approvals))
+        assert conn._pending_action_approvals
 
         handled = conn._check_permission_response("approve")
         assert handled is True
@@ -673,7 +662,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["msteams_actions"]({}))
+            res = tool_result_json(await tools["msteams_actions"]({}))
         assert res["success"] is True
         ids = {a["id"] for a in res["actions"]}
         assert {"send_message", "send_card", "list_members"} <= ids
@@ -690,7 +679,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["bluebubbles_invoke"]({
+            res = tool_result_json(await tools["bluebubbles_invoke"]({
                 "action": "send_message", "params": {"text": "hi"},
             }))
         assert res["success"] is True

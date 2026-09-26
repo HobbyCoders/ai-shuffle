@@ -137,7 +137,7 @@
 					onToggle={(e) => toggleRowActions(e, server.name)}
 					label="Server actions"
 				>
-					<button class="bml-act bml-act--danger" title="Delete" onclick={() => { actionsOpenId = null; pendingName = server.name; }}>
+					<button class="bml-act bml-act--danger" title="Delete" aria-label={`Delete ${server.name}`} onclick={() => { actionsOpenId = null; pendingName = server.name; }}>
 						<Trash2 size={15} strokeWidth={1.7} />
 					</button>
 				</RowActionMenu>

@@ -1,6 +1,6 @@
 <!--
 title: Home Assistant
-description: Control smart home devices through Claude via Home Assistant integration
+description: Control smart home devices through your AI Shuffle agent via Home Assistant
 order: 10
 -->
 
@@ -8,9 +8,9 @@ order: 10
 
 ## Overview
 
-The Home Assistant connector integrates AI Shuffle with your [Home Assistant](https://www.home-assistant.io/) instance, allowing Claude to monitor and control your smart home devices. With this connector, you can ask Claude to turn on lights, adjust thermostats, lock doors, check sensor readings, trigger automations, and interact with any entity managed by Home Assistant.
+The Home Assistant connector integrates AI Shuffle with your [Home Assistant](https://www.home-assistant.io/) instance, allowing your agent to monitor and control your smart home devices. With this connector, you can ask your agent to turn on lights, adjust thermostats, lock doors, check sensor readings, trigger automations, and interact with any entity managed by Home Assistant.
 
-Home Assistant is a popular open-source home automation platform that supports over 2,000 integrations. By connecting it to AI Shuffle, you gain natural language control over your entire smart home -- no need to remember entity IDs or write YAML automations. Claude can interpret requests like "set the living room to 72 degrees" or "turn off all the lights downstairs" and translate them into the appropriate Home Assistant service calls.
+Home Assistant is a popular open-source home automation platform that supports over 2,000 integrations. By connecting it to AI Shuffle, you gain natural language control over your entire smart home -- no need to remember entity IDs or write YAML automations. Your agent can interpret requests like "set the living room to 72 degrees" or "turn off all the lights downstairs" and translate them into the appropriate Home Assistant service calls.
 
 ## Prerequisites
 
@@ -62,56 +62,27 @@ curl http://homeassistant.local:8123/api/states \
 
 ### 4. Create the Home Assistant connector in AI Shuffle
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "My Home Assistant",
-    "connector_type": "homeassistant",
-    "config": {
-      "url": "http://homeassistant.local:8123",
-      "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOi..."
-    }
-  }'
-```
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Home Assistant**.
+2. Click **Install Home Assistant** if prompted, then click **Connect account**.
+3. Fill in **Home Assistant URL** (e.g., `http://homeassistant.local:8123`) and **Long-Lived Access Token**.
+4. Optionally set **Entity Filter** to limit which entities the connector monitors. It is a comma-separated list of entity-id prefixes, such as `light.,switch.,climate.,lock.,sensor.`; only entities whose ID starts with one of the prefixes are tracked. You can also tune how often states are polled with **Poll Interval (seconds)** (defaults to `60`).
+5. Click **Create Connector**.
 
-To limit which entities the connector monitors, add the optional `entity_filter` field. It is a comma-separated string of entity-id prefixes -- only entities whose ID starts with one of the prefixes are tracked. You can also tune how often states are polled with the optional `poll_interval_seconds` field (defaults to `"60"`):
-
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "My Home Assistant",
-    "connector_type": "homeassistant",
-    "config": {
-      "url": "http://homeassistant.local:8123",
-      "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOi...",
-      "entity_filter": "light.,switch.,climate.,lock.,sensor.",
-      "poll_interval_seconds": "60"
-    }
-  }'
-```
-
-Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Home Assistant**.
+To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
 
 ### 5. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
+Turn on the connection's **Activate** switch.
 
 ### 6. Test with a command
 
-In an AI Shuffle chat session, try asking Claude something like:
+In an AI Shuffle chat session, try asking your agent something like:
 
 - "What's the current temperature in the living room?"
 - "Turn on the kitchen lights"
 - "Set the thermostat to 70 degrees"
 
-Claude will use the Home Assistant connector to query or control the appropriate entities.
+Your agent will use the Home Assistant connector to query or control the appropriate entities.
 
 ## Configuration Reference
 
@@ -129,23 +100,22 @@ The Home Assistant connector supports the following capabilities:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `rich_text` | No | The connector is not a messaging connector (`is_messaging=False`) |
+| `rich_text` | No | Not a chat connector |
 | `typing_indicator` | No | Not applicable for smart home control |
 | `reactions` | No | Not applicable for smart home control |
 | `file_upload` | No | Not supported |
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-### AI Actions (Action Gateway)
+### AI Actions
 
-While a Home Assistant connector is running, every AI session gets two MCP tools:
+See [How AI actions work](/docs/connectors#how-ai-actions-work). While a Home Assistant connector is active, every agent session gets its tools.
 
-- **`homeassistant_actions`** — discovery. Returns the action catalog (13 actions: entity states and history, turn on/off/toggle, set values by domain, arbitrary service calls, service/config discovery, template rendering, event firing, persistent notifications), each with its input schema, filtered by this install's `enabled_action_categories`.
-- **`homeassistant_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Home Assistant REST API.
+Your agent can use 13 actions: entity states and history, turn on/off/toggle, set values by domain, any service call, service and config lookup, template rendering, event firing and persistent notifications.
 
-`call_service` is the escape hatch for HA's hundreds of domain services — the AI discovers them at runtime with `list_services`, so nothing needs a code change to become controllable. The install's `entity_filter` still applies to state listings, and the access token's own permissions bound what the AI can reach.
+`call_service` reaches any of Home Assistant's domain services. Your agent finds them with `list_services`. The connector's `entity_filter` still applies to state listings, and the access token's own permissions limit what your agent can reach.
 
-What that lets Claude do:
+What that lets your agent do:
 
 - **Query state** -- Ask about the current state and history of any entity (lights, sensors, switches, climate, etc.)
 - **Control devices** -- Turn devices on/off, set brightness, change temperature, lock/unlock
@@ -165,9 +135,9 @@ What that lets Claude do:
 - **Check the URL.** Ensure the `url` in your config includes the protocol (`http://` or `https://`) and the correct port (default is `8123`).
 - **DNS resolution.** If using `homeassistant.local`, ensure mDNS is working on your network. Alternatively, use the IP address directly (e.g., `http://192.168.1.100:8123`).
 - **Firewall.** Ensure no firewall is blocking traffic on port 8123 between the AI Shuffle host and the Home Assistant host.
-- **HTTPS issues.** If Home Assistant uses a self-signed certificate, you may need to configure the connector to skip certificate verification, or use a proper certificate from Let's Encrypt.
+- **HTTPS issues.** The connector always verifies TLS certificates, so a self-signed certificate fails. Use a certificate from a trusted CA (e.g., Let's Encrypt), or connect over plain HTTP on your LAN.
 
-### Claude says it cannot find an entity
+### Your agent says it cannot find an entity
 
 - **Check entity ID.** Entity IDs in Home Assistant are case-sensitive and follow the format `domain.name` (e.g., `light.living_room`). Check the exact ID in Home Assistant under **Developer Tools > States**.
 - **Entity filtering.** If you specified an `entity_filter` in the connector config, ensure the entity's ID starts with one of the configured prefixes. Entities that do not match the filter are not tracked.

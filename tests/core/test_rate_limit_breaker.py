@@ -133,7 +133,6 @@ class TestTripAndExpiry:
         sees the same open circuit (the 07-22 storm spanned many sessions)."""
         circuit_breaker.record_rate_limited(PROVIDER)
         assert circuit_breaker.check(PROVIDER) is not None
-        assert circuit_breaker.get_breaker().check(PROVIDER) is not None
 
     def test_until_reflects_retry_after(self):
         now = 1_000_000.0
@@ -185,16 +184,6 @@ class TestTripAndExpiry:
         assert circuit_breaker.record_rate_limited(None) is None
         assert circuit_breaker.record_rate_limited("") is None
         assert circuit_breaker.check(None) is None
-
-    def test_refusal_message_names_provider_and_clear_time(self):
-        now = 1_000_000.0
-        trip = circuit_breaker.record_rate_limited(PROVIDER, "120", now=now)
-        msg = circuit_breaker.refusal_message(trip, now=now)
-        assert PROVIDER in msg
-        assert "rate limited" in msg.lower()
-        assert "120s" in msg
-        assert trip.until_iso() in msg
-        assert "NOT sent upstream" in msg
 
 
 # ─── Kill switch ─────────────────────────────────────────────────────────────
@@ -314,7 +303,7 @@ class TestFluidResponseHookTripsOnlyOn429:
         assert trip is not None
         assert trip.provider_id == PROVIDER
         assert trip.status_code == 429
-        assert trip.remaining_seconds() == pytest.approx(120.0, abs=2.0)
+        assert trip.until - trip.tripped_at == pytest.approx(120.0)
 
     async def test_429_without_retry_after_uses_the_default_cooldown(self):
         def handler(request):
@@ -325,7 +314,7 @@ class TestFluidResponseHookTripsOnlyOn429:
 
         trip = circuit_breaker.check(PROVIDER)
         assert trip is not None
-        assert trip.remaining_seconds() == pytest.approx(60.0, abs=2.0)
+        assert trip.until - trip.tripped_at == pytest.approx(60.0)
 
     async def test_429_on_the_codex_backend_also_trips(self):
         def handler(request):
@@ -336,7 +325,7 @@ class TestFluidResponseHookTripsOnlyOn429:
 
         trip = circuit_breaker.check(PROVIDER)
         assert trip is not None
-        assert trip.remaining_seconds() == pytest.approx(45.0, abs=2.0)
+        assert trip.until - trip.tripped_at == pytest.approx(45.0)
 
     @pytest.mark.parametrize("status", [200, 400, 401, 500, 502, 529])
     async def test_non_429_statuses_do_not_trip(self, status):

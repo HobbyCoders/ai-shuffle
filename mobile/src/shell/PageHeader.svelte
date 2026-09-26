@@ -1,20 +1,11 @@
 <script lang="ts">
 	/**
-	 * PageHeader - Codex-style thin header bar for the main content panel
+	 * PageHeader - thin header row over MainPanel in the mobile app.
 	 *
-	 * Sits at the top of MainPanel.
-	 *
-	 * Layout:
-	 * - Desktop: a single row. Left cluster (sidebar toggle, profile selector,
-	 *   download) sits at the start; git actions sit at the right edge; the chat
-	 *   title is an in-flow flex item filling the space between the two clusters —
-	 *   it centers itself and shrinks/ellipsizes so it can never overlap the side
-	 *   clusters on narrow screens.
-	 * - Mobile: a single row. The chat name moves to the global app bar
-	 *   (AppTopBar), so the title is hidden here; the row carries download pinned
-	 *   at the start with the git actions in a horizontal scroll rail filling the
-	 *   rest (chat mode omits the git cluster). Both <div class="hdr-row*">
-	 *   wrappers use `display:contents` so all items share one flex row on every width.
+	 * The chat name lives in the global app bar (AppTopBar), so this row only
+	 * carries actions: the meta actions (voice input, download) pinned at the
+	 * start and the git actions in a horizontal touch-scroll rail filling the
+	 * rest (chat mode omits the git cluster).
 	 *
 	 * The project/worktree context badge that used to render here now lives in the
 	 * ContextPillBar above the chat input, alongside the profile + branch pills.
@@ -26,66 +17,41 @@
 	import type { Snippet } from 'svelte';
 
 	interface Props {
-		title: string;
-		isMobile?: boolean;
 		hideGlobalStt?: boolean;
-		/** Profile selector — left cluster (desktop) / bottom rail start (mobile). */
-		profile?: Snippet;
-		/** Left-cluster meta actions (e.g. download chat history). */
+		/** Pinned meta actions (e.g. download chat history). */
 		leftActions?: Snippet;
-		/** Right cluster / bottom rail: git actions, diff stats, etc. */
+		/** Scroll rail: git actions, diff stats, etc. */
 		actions?: Snippet;
 	}
 
-	let {
-		title,
-		isMobile = false,
-		hideGlobalStt = false,
-		profile,
-		leftActions,
-		actions
-	}: Props = $props();
+	let { hideGlobalStt = false, leftActions, actions }: Props = $props();
 
-	let showStt = $derived(isMobile && $hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
+	let showStt = $derived($hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
 </script>
 
 <header class="page-header">
-	<!-- Row 1: title + meta (static row on mobile; flattened on desktop) -->
-	<div class="hdr-row1">
-		<h1 class="header-title">{title}</h1>
-
-		<div class="hdr-meta">
-			{#if showStt}
-				<button
-					class="header-btn mic"
-					class:recording={$globalSttState.isRecording}
-					class:transcribing={$globalSttState.isTranscribing}
-					class:preparing={$globalSttState.isPreparing}
-					onclick={triggerToggle}
-					aria-label={$globalSttState.isRecording ? 'Stop recording' : 'Start voice input'}
-				>
-					<Mic size={18} />
-				</button>
-			{/if}
-			{#if leftActions}
-				{@render leftActions()}
-			{/if}
-		</div>
+	<div class="hdr-meta">
+		{#if showStt}
+			<button
+				class="header-btn mic"
+				class:recording={$globalSttState.isRecording}
+				class:transcribing={$globalSttState.isTranscribing}
+				class:preparing={$globalSttState.isPreparing}
+				onclick={triggerToggle}
+				aria-label={$globalSttState.isRecording ? 'Stop recording' : 'Start voice input'}
+			>
+				<Mic size={18} />
+			</button>
+		{/if}
+		{#if leftActions}
+			{@render leftActions()}
+		{/if}
 	</div>
 
-	<!-- Row 2: profile + git actions (scroll rail on mobile; flattened on desktop) -->
-	<div class="hdr-row2">
-		{#if profile}
-			<div class="hdr-profile">
-				{@render profile()}
-			</div>
+	<div class="hdr-right">
+		{#if actions}
+			{@render actions()}
 		{/if}
-
-		<div class="hdr-right">
-			{#if actions}
-				{@render actions()}
-			{/if}
-		</div>
 	</div>
 </header>
 
@@ -94,20 +60,17 @@
 		position: relative;
 		display: flex;
 		align-items: center;
-		min-height: 40px;
+		min-height: 44px;
 		flex-shrink: 0;
-		padding: 4px 12px;
+		padding: 0 8px;
 		gap: 8px;
 		background: var(--background);
 		border-bottom: 1px solid var(--border);
+		/* Only the git rail (.hdr-right) scrolls. */
+		overflow: visible;
 	}
 
-	/* Desktop default: flatten both row wrappers so all items live on one flex row. */
-	.hdr-row1,
-	.hdr-row2 {
-		display: contents;
-	}
-
+	/* Pinned, non-scrolling meta actions such as download. */
 	.hdr-meta {
 		display: flex;
 		align-items: center;
@@ -115,46 +78,31 @@
 		flex-shrink: 0;
 	}
 
-	.hdr-profile {
-		display: flex;
-		align-items: center;
-		flex-shrink: 0;
-	}
-
+	/* Git actions: horizontal touch-scroll rail filling the remaining width.
+	   Editable-prompt popovers inside it switch to position:fixed on mobile,
+	   so this overflow doesn't clip them. flex-start (not flex-end) sends the
+	   overflow to the END, so the rail scrolls left→right and never slides
+	   under the pinned meta cluster. */
 	.hdr-right {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		min-width: 0;
-	}
-
-	/* Desktop ordering across the flattened single row:
-	   [profile] [meta] ...[title fills/centers]... [git/right]
-	   The title is an in-flow flex item that occupies the space between the
-	   side clusters. It grows to centre itself and shrinks (ellipsising) so it
-	   can never overlap the profile selector or git actions on narrow screens. */
-	.hdr-profile { order: 2; }
-	.hdr-meta { order: 3; }
-	.header-title { order: 4; }
-	.hdr-right {
-		order: 5;
-		justify-content: flex-end;
-		flex-wrap: wrap;
-	}
-
-	.header-title {
 		flex: 1 1 auto;
 		min-width: 0;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		text-align: center;
-		margin: 0;
-		line-height: 1;
-		pointer-events: none;
+		flex-wrap: nowrap;
+		justify-content: flex-start;
+		overflow-x: auto;
+		overflow-y: hidden;
+		-webkit-overflow-scrolling: touch;
+		scrollbar-width: none; /* Firefox */
+	}
+
+	.hdr-right::-webkit-scrollbar {
+		display: none;
+	}
+
+	.hdr-right > :global(*) {
+		flex-shrink: 0;
 	}
 
 	/* Header action buttons (mic) */
@@ -162,8 +110,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
+		width: 36px;
+		height: 36px;
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
@@ -215,83 +163,6 @@
 	@keyframes pulse-transcribing {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.6; }
-	}
-
-	/* ===================================================================
-	   Mobile: a single row. The chat name now lives in the global app bar
-	   (AppTopBar), so the title is hidden here and the row carries the
-	   original actions — download pinned at the start, with
-	   the git actions in a horizontal touch-scroll rail filling the rest
-	   (omitted in chat mode).
-	   =================================================================== */
-	/* The mobile shell is the Android WebView (see docs/mobile-desktop-ui-split.md),
-	   stamped as html[data-platform='mobile'] before first paint — not a width. */
-	:global(html[data-platform='mobile']) .page-header {
-		flex-direction: row;
-		align-items: center;
-		min-height: 44px;
-		padding: 0 8px;
-		gap: 8px;
-		/* Only the git rail (.hdr-right) scrolls. */
-		overflow: visible;
-	}
-
-	/* Flatten both wrappers so every item shares the single row (as on desktop). */
-	:global(html[data-platform='mobile']) .hdr-row1,
-	:global(html[data-platform='mobile']) .hdr-row2 {
-		display: contents;
-	}
-
-	/* Chat name is shown in the global app bar on mobile. */
-	:global(html[data-platform='mobile']) .header-title {
-		display: none;
-	}
-
-	/* Pinned, non-scrolling meta actions such as download. */
-	:global(html[data-platform='mobile']) .hdr-meta {
-		order: 1;
-		flex-shrink: 0;
-		margin: 0;
-	}
-
-	:global(html[data-platform='mobile']) .hdr-profile {
-		order: 2;
-		flex-shrink: 0;
-		margin: 0;
-	}
-
-	/* Git actions: horizontal touch-scroll rail filling the remaining width.
-	   Editable-prompt popovers inside it switch to position:fixed on mobile,
-	   so this overflow doesn't clip them. */
-	:global(html[data-platform='mobile']) .hdr-right {
-		order: 3;
-		flex: 1 1 auto;
-		min-width: 0;
-		flex-wrap: nowrap;
-		/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
-		   overflows past the START (left) edge, which is unreachable by scroll —
-		   so the git actions slide under the pinned meta-actions cluster
-		   instead of scrolling. flex-start sends the overflow to the END so the
-		   rail scrolls left→right and never overlaps the meta cluster. */
-		justify-content: flex-start;
-		margin: 0;
-		overflow-x: auto;
-		overflow-y: hidden;
-		-webkit-overflow-scrolling: touch;
-		scrollbar-width: none; /* Firefox */
-	}
-
-	:global(html[data-platform='mobile']) .hdr-right::-webkit-scrollbar {
-		display: none;
-	}
-
-	:global(html[data-platform='mobile']) .hdr-right > :global(*) {
-		flex-shrink: 0;
-	}
-
-	:global(html[data-platform='mobile']) .header-btn {
-		width: 36px;
-		height: 36px;
 	}
 
 	/* Reduced motion */

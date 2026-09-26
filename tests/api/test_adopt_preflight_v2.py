@@ -11,16 +11,14 @@ A pre-cutover session (only a legacy ``project_id``) goes through the SAME gate,
 which self-heals its project_v2 binding off the legacy id.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.auth import require_auth
-from app.api.sessions import router
 from app.api.sessions_helpers import is_pinned
 from app.core.config import settings
+from tests.api.helpers import app, mock_api_user, not_streaming  # noqa: F401  (fixtures)
 
 
 @pytest.fixture
@@ -35,32 +33,9 @@ def mock_database():
 
 
 @pytest.fixture
-def mock_api_user():
-    with patch("app.api.sessions.get_api_user_from_request") as mock, \
-            patch("app.api.sessions_helpers.get_api_user_from_request", new=mock):
-        mock.return_value = None  # admin
-        yield mock
-
-
-@pytest.fixture
-def app(mock_database, mock_api_user):
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[require_auth] = lambda: "test-session-token"
-    yield app
-
-
-@pytest.fixture
 def client(app):
     with TestClient(app) as test_client:
         yield test_client
-
-
-@pytest.fixture(autouse=True)
-def _not_streaming():
-    """No lease-valid active run so the streaming gate never blocks adopt."""
-    with patch("app.core.streaming_status.has_active_run", return_value=False):
-        yield
 
 
 @pytest.fixture(autouse=True)
@@ -134,8 +109,8 @@ def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_databas
     assert data["status"] == "adopted"
     assert data["instance_id"] == settings.effective_instance_id
     # project_id is NEVER rewritten under v2 — the legacy rebind must not run.
-    assert data["local_project_id"] is None
-    assert data["warning"] is None
+    assert "local_project_id" not in data
+    assert "warning" not in data
     mock_database.set_session_project.assert_not_called()
     legacy_preflight.assert_not_called()
     mock_database.adopt_session.assert_called_once_with(
@@ -406,7 +381,6 @@ def test_imported_native_context_is_not_cleared(client, mock_database, prepared_
     assert response.status_code == 200
     keep.assert_not_called()
     prepared_checkout.assert_not_called()
-
 
 
 @pytest.mark.parametrize("follow", [False, True])

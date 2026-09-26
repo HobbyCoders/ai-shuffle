@@ -35,8 +35,8 @@ TOOL_NAMES = frozenset({
 
 # Tools the startup handshake itself depends on. A build that predates the
 # shared-workspace runtime exposes neither, so the handshake would otherwise
-# fail with an undiagnosable parse error (audit R7: a stale dist shipped a 503
-# reading only "startup failed (KeyError)").
+# fail with an undiagnosable parse error (a 503 reading only "startup failed
+# (KeyError)").
 HANDSHAKE_TOOLS = ("browser_status", "browser_tabs")
 
 STALE_BUILD_DETAIL = (
@@ -49,8 +49,7 @@ STALE_BUILD_DETAIL = (
 # Wall clock for one agent-facing browser tool call, measured at this host-call
 # boundary. A page that stops answering (a modal dialog, a hung renderer, a
 # navigation that never commits) must return an error to the model instead of
-# holding the turn open — audit R7 saw a browser_eval + four browser_act calls
-# leave a session "running" for three hours. Override with
+# holding the turn open. Override with
 # BROWSER_TOOL_TIMEOUT_SECONDS; the underlying MCP call gets a slightly longer
 # deadline so this boundary is the one that normally fires.
 DEFAULT_CALL_TIMEOUT = 30.0
@@ -100,6 +99,7 @@ class RawMcpClient(McpClient):
 
 def resolve_config(session_id):
     """Resolve the same profile env and project MCP scopes as query options."""
+    from app.core.api_user_scope import session_api_user_id
     from app.core.config import settings
     from app.core.environment import _build_env_with_ai_tools, apply_provider_env
     from app.core.mcp_config import _build_mcp_servers_dict
@@ -117,10 +117,11 @@ def resolve_config(session_id):
     cwd = resolve_cwd(row)
     if cwd is None and resolve_project_v2(row):
         raise RuntimeUnavailable("Session project is not checked out on this device")
-    cwd = cwd or config.get("cwd") or str(settings.workspace_dir)
+    cwd = cwd or config.get("cwd") or str(settings.effective_workspace_dir)
     provider = row.get("provider_id")
+    # A worker row may carry no key of its own; it runs as its parent's.
     env = _build_env_with_ai_tools(
-        config.get("env"), config.get("ai_tools"), row.get("api_user_id"), provider
+        config.get("env"), config.get("ai_tools"), session_api_user_id(row), provider
     )
     if provider:
         apply_provider_env(
@@ -189,9 +190,11 @@ class Runtime:
         if broker.runtime_id is not None:
             raise RuntimeUnavailable("An existing browser runtime already owns this session")
         try:
-            config = await run_sync(resolve_config, self.session_id)
+            # Start the native browser first: the server env built below flags
+            # BROWSER_EGRESS_PROXY only while its supervisor is running.
             from app.core.native_chrome import ensure_started
             await ensure_started()
+            config = await run_sync(resolve_config, self.session_id)
             if self.closed:
                 raise RuntimeUnavailable("Browser runtime closed")
             # Correlate this child before its bridge can register, even if MCP

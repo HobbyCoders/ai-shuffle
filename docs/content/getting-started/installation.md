@@ -1,150 +1,32 @@
 <!--
-title: Installation
-description: How to install and run AI Shuffle locally or on a server
-order: 2
+title: Choose an Install
+description: Which AI Shuffle install fits your machine, and what every install has in common
+order: 3
 -->
 
-# Installation
+# Choose an install
 
-For an ordinary desktop installation, use the packaged desktop app. It includes
-its database and starts with a clean local store; no database credentials or
-import are needed. The requirements below are for building from source.
+| You have | Use | Guide |
+| --- | --- | --- |
+| An Unraid server | The Unraid template (Community Applications or manual) | [Install on Unraid](/docs/getting-started/install-unraid) |
+| A Linux server, a NAS with Docker, or any PC with Docker | Docker Compose | [Install with Docker Compose](/docs/getting-started/install-docker-compose) |
+| A Windows PC and no Docker | The desktop app (beta) | Download it from your account page on hobbycoders.com |
 
-## Prerequisites
+Check the [requirements](/docs/getting-started/requirements) first: the image runs on 64-bit Intel or AMD machines only.
 
-- **Python 3.12+** — Backend runtime
-- **Node.js 22.12+** — Frontend build tooling
-- **Managed runtime** — The desktop app and Docker image bundle and supervise their own private PostgreSQL. Do not install or configure an external database.
-- **GitHub CLI** — [Download](https://cli.github.com/) — Used for PR reviews, issue management, etc.
-- **Git** — For project management and worktree features
+## What every install has in common
 
-## Quick Start
+- **One container, one worker.** Everything runs in a single container with its own private database. You never set up a database, and there are no database settings.
+- **A pinned version.** Your compose file or Unraid template names an exact release. Nothing changes until you change that version (or accept an in-app update). See [Updates](/docs/getting-started/updates).
+- **A pull token, not a login.** The image is private. Your pull token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
+- **Your data stays on your machine.** Projects, sessions, the database and your saved credentials live in folders or volumes on the host. Back them up while the container is stopped.
+- **Your Claude sign-in stays with the Claude Code CLI.** Run `claude auth login` in the AI Shuffle terminal (or `docker exec -it -u appuser <container> claude auth login`). AI Shuffle never reads your Claude credentials.
+- **Reachable from one address.** The web interface listens on one address you choose: the host itself by default, or one LAN or Tailscale address. Never `0.0.0.0`, and never a port forwarded from your router.
 
-### 1. Clone the Repository
+## After installing
 
-```bash
-git clone https://github.com/your-org/ai-shuffle.git
-cd ai-shuffle
-```
+Open the address in a browser and follow [First run](/docs/getting-started/first-run): read the welcome screen, set your owner password, enter your license key (or continue on the beta), choose how Claude Code is paid for, sign in or add your key, pick a workspace and run your first agent.
 
-### 2. Install Backend Dependencies
+## More than one worker
 
-```bash
-pip install -r requirements.txt ./fluid
-# Optional: computer-use (host desktop control), native runs only
-pip install -r requirements-native.txt
-```
-
-### 3. Install Frontend Dependencies
-
-```bash
-cd frontend
-npm install
-cd ..
-```
-
-### 4. Build the Frontend
-
-Build the frontend and copy the output into `app/static`, which is where the
-backend serves it from:
-
-```bash
-cd frontend
-npm run build
-cd ..
-rm -rf app/static && cp -r frontend/build app/static
-```
-
-> **Tip:** `python run_local.py --setup` performs the dependency install, build,
-> and copy steps for you in one command.
-
-### 5. Start Through the Managed Runtime
-
-Use the desktop app, or build and start the managed Docker runtime:
-
-```bash
-docker compose up -d --build
-```
-
-Docker starts the application on `http://localhost:8000` by default. Source
-workers require a managed supervisor and its private `DATA_DIR/managed-postgres.json`
-descriptor; standalone `app.main` startup is not a database setup path. Never
-construct, edit or publish that descriptor yourself.
-
-## First Launch
-
-On first launch, you'll be directed to the setup page where you:
-
-1. **Start** — Choose a clean install, sign in to your Shuffle account to sync settings from your other workers (a new account starts clean), or join another worker with the invite it shows under Settings → Devices → Add device.
-2. **Choose a workspace** — Set the working directory for projects.
-3. **Providers & GitHub** — Add a model provider (Claude, OpenAI, Grok or OpenRouter) and sign in to GitHub for repository features. Both are optional and also live in Settings.
-
-Local setup and trusted local-network use require no username, password, or Shuffle account. You can sign in to, create, or sign out of a Shuffle account at any time under **Settings → Devices**. Signing in links the worker to your account for remote access, lists it in the Shuffle app on your phone, and syncs its settings with your other workers with nothing to approve. Remote browsers sign in with the account that owns that worker.
-
-## Configuration
-
-The managed runtime generates and retains database credentials privately. There
-are no database connection or tuning environment options. Preserve the complete
-data directory and protected backups when updating.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `8000` | Server port |
-| `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access from direct trusted local/LAN requests on the local listener. Use `false` during an existing deployment's protected-ingress upgrade. |
-| `CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed CORS origins (use `*` for development only) |
-
-### Running in Production
-
-For production deployments, consider:
-
-- Using Shuffle's managed remote connection, or directing a custom HTTPS reverse proxy to the protected loopback listener on port 8001 in the same network namespace. Never expose the local owner listener through a public proxy or tunnel.
-- Setting specific CORS origins instead of `*`
-- Using the desktop or Docker supervisor for ordered worker/database restarts
-- Reviewing security settings and audit logging
-
-## Updating
-
-Keep a non-managed installation on its existing release and preserve its data,
-configuration and backup until a separately tested migration is approved. This
-release does not automatically attach to or import an existing external database.
-For packaged desktop installs, update the package and restart through the desktop
-app. For a managed source/Docker install, rebuild through its supervisor:
-
-```bash
-git pull
-docker compose up -d --build
-```
-
-Database schema migrations run automatically on startup. Before upgrading a password-encrypted installation, stop all writers and back up both PostgreSQL and the persistent data directory. Adopt its existing encryption key using the legacy startup password or the private `python -m scripts.credential_keys adopt` prompt, then verify `python -m scripts.credential_keys status` reports ready. Browser sign-in is not an encryption-unlock step.
-
-For an existing managed tunnel, start the new build with `SHUFFLE_LOCAL_ACCESS=false`, verify its protected port 8001 and public remote authorization, then enable local access. Preserve persistent credential keys and remove the legacy password from configuration after successful adoption and restart verification. The repository's [local-access rollout](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/LOCAL_ACCESS.md) and [credential recovery guide](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/credential-key-recovery.md) describe the full migration and backup requirements.
-
-> **Always rebuild the frontend when you update the backend.** The backend
-> serves the SPA from `app/static`, so a `git pull` that changes API routes but
-> leaves a stale `app/static` in place will ship a frontend that calls endpoints
-> the new backend no longer exposes. Symptoms of a skipped rebuild include
-> repeated `404`s in the browser network tab and a stale service worker (`sw.js`)
-> that keeps requesting cached assets such as `/offline.html`. The `git pull`
-> Docker rebuild above includes the frontend build and deploy; do not skip it
-> when updating source. A source-only `--update` also rebuilds its assets.
-
-## Multiple Workers
-
-Each worker has its own private managed PostgreSQL database. Join workers through
-**Settings → Devices**; never point multiple workers at a shared database.
-Historical shared-database installations need a coordinated, separately rehearsed
-migration. Preserve the original deployment and backup until recovery is verified;
-see the [network migration guide](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/network/migration.md).
-
-### Refreshing a native checkout
-
-After `git pull`, run `python run_local.py --update` (or the platform launcher with
-`--update`). This installs the checked-in Fluid harness and locked Node packages,
-then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
-database or restart an already running server. Restart through the managed desktop
-runtime after it succeeds; do not launch the worker directly.
-Native release archives already contain the frontend; replace the archive to update
-that frontend, then run `--update` to install/build its runtime tools.
+One license covers up to 3 workers on one account. Install each worker the same way, with the same pull token, then activate your license on each one and link them under **Settings → Providers → Devices**. Every worker keeps its own database; never point two workers at the same data folder.

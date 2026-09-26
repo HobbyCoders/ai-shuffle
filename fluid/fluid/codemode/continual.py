@@ -306,9 +306,8 @@ class SynthesisIncomplete(RuntimeError):
 
     Raised by :meth:`Synthesizer._complete` when the stream stopped for
     ``max_tokens`` or produced no text at all. Either way the slice was not
-    judged, so the caller must not advance the cursor: an empty completion
-    used to parse as "no tags" and count as a clean NO_CHANGES pass, which is
-    how ~557 passes wrote nothing while burning the daily budget.
+    judged, so the caller must not advance the cursor (an empty completion is
+    not a clean NO_CHANGES pass).
     """
 
     def __init__(self, stop_reason: str | None, usage: dict[str, int], output_chars: int) -> None:
@@ -326,12 +325,8 @@ class SynthesisProviderError(RuntimeError):
     """The provider answered the learner's request with an error chunk.
 
     Providers report HTTP and stream failures as a ``kind="error"`` chunk
-    rather than raising. The learner used to ignore that chunk, so a
-    rejected request looked like an empty completion ("synthesis returned no
-    text (stop_reason=unknown, output_tokens=0)") and the provider's reason
-    was thrown away. The desktop worker logged 273 such rows; per local day
-    their count matches the app log's HTTP 400 answers from the Codex
-    backend exactly (96, 48, 48 on 2026-09-13/14/15-16).
+    rather than raising; this keeps the provider's reason instead of
+    reporting the rejection as an empty completion.
     """
 
     def __init__(self, payload: dict[str, Any], usage: dict[str, int]) -> None:
@@ -351,14 +346,10 @@ class InferenceBudgetExhausted(RuntimeError):
 
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
-# The request's user-message size. Split so the journal always fits: the old
-# prompt put the skill library and the whole memory list first and then cut
-# the text at 32,000 characters, so a store with 95 facts (33,274 characters
-# of memory lines on the desktop worker) sent every pass without a single
-# journal line. The model answered NO_CHANGES and the cursor advanced over
-# evidence nobody read. Now memory lines have a fixed budget, the skill
-# library a reserve, and the journal the rest (never less than the minimum);
-# the library then fills whatever the journal left unused.
+# The request's user-message size. Split so the journal always fits: memory
+# lines have a fixed budget, the skill library a reserve, and the journal the
+# rest (never less than the minimum); the library then fills whatever the
+# journal left unused.
 PROMPT_CHAR_LIMIT = 32_000
 MEMORY_PROMPT_CHARS = 6_000
 LIBRARY_PROMPT_RESERVE = 8_000
@@ -383,13 +374,10 @@ YIELD_ALARM_REPEAT_SECONDS = 86400.0
 # A pass costs one of the day's 48 inference calls (facts.MAX_INFERENCE_CALLS_
 # PER_DAY), so it has to see a real slice: a turn writes its user prompt, its
 # assistant reply and a handful of cells, so 20 is roughly three turns of
-# evidence. At 8 the container spent the whole budget by late morning on
-# slices of three to eight entries.
+# evidence.
 MIN_NEW_ENTRIES = 20
-# Output room for a pass. The old 4,096 cap was consumed by reasoning alone
-# on gpt-6-class models, so the stream ended ``incomplete`` with no text and
-# the pass counted as a clean NO_CHANGES. Overridable through the
-# constructor (``max_tokens``) for hosts that pin a smaller model.
+# Output room for a pass, large enough that reasoning alone cannot consume
+# it. Overridable through the constructor (``max_tokens``) for hosts that pin a smaller model.
 SYNTH_MAX_TOKENS = 16_000
 # Reasoning effort sent on every synthesis request. Low: the task is a
 # read-and-classify over a bounded journal, and the budget is calls per day,
@@ -398,7 +386,7 @@ SYNTH_MAX_TOKENS = 16_000
 SYNTH_EFFORT = "low"
 # Skill source shown per pass: skills the slice referenced are always shown
 # whole; the rest fill this budget most-used first and beyond it appear as an
-# index line only. Every pass used to re-send every skill's full source.
+# index line only.
 SKILL_SOURCE_BUDGET = 24_000
 # Lock file (next to the journal) held for the whole pass, so two processes
 # over one store never pay for the same slice or write the same memory twice.
@@ -433,7 +421,7 @@ class Synthesizer:
         # The current project's memory-scope key: ``scope="project"`` tags in
         # the model's output resolve to it. ``None`` keeps everything global.
         self._project = project
-        # Phase 2.3: the SESSION's model id (may differ from the synthesis
+        # The SESSION's model id (may differ from the synthesis
         # model above) — a guidance proposal's stem must be a substring of it
         # to ever load — and the current guidance file(s) matching it, shown
         # in the prompt so proposals amend rather than overwrite blindly.
@@ -457,10 +445,9 @@ class Synthesizer:
         # stalled stream can never wedge a turn or, worse, session close.
         self._pass_timeout = pass_timeout
         self._close_timeout = close_timeout
-        # Set by the Remember channel: a pending explicit remember request
-        # lowers the trigger threshold to "any new entries at all", so a
-        # user's "remember this" lands before the session's eighth event
-        # instead of maybe never.
+        # Set by mark_urgent(): lowers the trigger threshold to "any new
+        # entries at all", so the request lands on the next pass instead of
+        # waiting for MIN_NEW_ENTRIES.
         self._urgent = False
         self.last_error: str | None = None
         # Spend: the last pass's tokens and the running total for this
@@ -1371,7 +1358,7 @@ class Synthesizer:
             if self._store.delete_memory(match.group(1)):
                 changed.append(f"-memory:{match.group(1)}")
         for match in _GUIDANCE_RE.finditer(text or ""):
-            # Phase 2.3: guidance edits are PROPOSED, never applied here.
+            # Guidance edits are PROPOSED, never applied here.
             # Queue-time validation is cheap; the commit gate (validity →
             # improvement → retention over the anchor set) runs out-of-band
             # via `fluid evolve run`, because gating replays a live model.

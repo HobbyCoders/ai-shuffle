@@ -27,6 +27,34 @@ _COLOR_TEMP_PRESETS: Dict[str, int] = {
 }
 
 
+def bridge_errors(resp: Any) -> List[str]:
+    """Error descriptions in a Hue v1 response body.
+
+    The bridge answers a rejected write (and an unauthorised read) with HTTP
+    200 and a list of ``{"error": {...}}`` entries, so the status code alone
+    does not say whether anything happened.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    errors: List[str] = []
+    for entry in payload:
+        err = entry.get("error") if isinstance(entry, dict) else None
+        if isinstance(err, dict):
+            errors.append(str(err.get("description") or f"error type {err.get('type', '?')}"))
+    return errors
+
+
+def _rejected(resp: Any) -> Optional[Dict[str, Any]]:
+    errors = bridge_errors(resp)
+    if errors:
+        return _err("Bridge rejected the change: " + "; ".join(errors))
+    return None
+
+
 def _schema(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required or []}
 
@@ -174,6 +202,8 @@ async def _set_light_state(conn: Any, light_id: str, state: Dict[str, Any]) -> D
     resp = await conn._api_put(f"/lights/{light_id}/state", state)
     if resp.status_code != 200:
         return _err(f"Bridge returned {resp.status_code}")
+    if (rejected := _rejected(resp)) is not None:
+        return rejected
     return _ok(light_id=light_id, state=state)
 
 
@@ -268,6 +298,8 @@ async def _h_set_group_state(conn, params, ctx):
     resp = await conn._api_put(f"/groups/{group_id}/action", state)
     if resp.status_code != 200:
         return _err(f"Bridge returned {resp.status_code}")
+    if (rejected := _rejected(resp)) is not None:
+        return rejected
     return _ok(group_id=group_id, state=state)
 
 
@@ -279,6 +311,8 @@ async def _h_activate_scene(conn, params, ctx):
     resp = await conn._api_put("/groups/0/action", {"scene": scene_id})
     if resp.status_code != 200:
         return _err(f"Bridge returned {resp.status_code}")
+    if (rejected := _rejected(resp)) is not None:
+        return rejected
     return _ok(scene_id=scene_id, activated=True)
 
 

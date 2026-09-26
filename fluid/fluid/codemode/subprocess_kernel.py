@@ -15,18 +15,24 @@ time the child spends running until it either finishes or asks for a tool) is
 deducted from the budget, but the time the host spends servicing a host call —
 which can be an arbitrarily long parked permission prompt — is not. A single
 host call is nonetheless bounded (``KernelConfig.host_call_timeout``, and never
-below the cell's own declared timeout): an audited cell declaring ``timeout:
-30`` sat three hours on a hung browser MCP call, with no ToolResult, no
-TurnComplete and a session that still presented as running. Time the host spent
+below the cell's own declared timeout), so a hung MCP call cannot hold the cell
+open. Time the host spent
 waiting on a *human* is credited back, so an approval nobody answers for ten
 minutes is never mistaken for a hung tool.
+
+On Linux the child can run under an OS-level sandbox (bubblewrap: private
+user/pid/net namespaces, an empty read-only root, a private ``/tmp``), chosen
+by ``KernelConfig.os_sandbox`` (``auto``/``required``/``off``, default from
+``CODE_MODE_OS_SANDBOX``); see :mod:`fluid.codemode.os_sandbox`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import secrets
 import signal
 import struct
 import sys
@@ -34,7 +40,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from fluid.codemode import os_sandbox
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
+from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
@@ -74,8 +82,8 @@ class KernelConfig:
     mem_limit_bytes: int = _GB
     allow_network: bool = False
     allow_fs: bool = False  # direct open()/io/pathlib I/O inside the kernel
-    ref_threshold: int = 8192
-    stdout_cap: int = 16384
+    ref_threshold: int = DEFAULT_LIMIT
+    stdout_cap: int = DEFAULT_STDOUT_CAP
     # Namespace checkpointing: after each exec the child pickles its picklable
     # variables; on a timeout/OOM restart the host restores them, so kernel
     # death no longer destroys accumulated data (functions/classes defined in
@@ -91,6 +99,10 @@ class KernelConfig:
     # turn open until the session ends.
     host_call_timeout: float = 900.0
     python: str = field(default_factory=lambda: sys.executable)
+    # OS-level sandbox for the child (``auto``/``required``/``off``; see
+    # ``fluid.codemode.os_sandbox``). The host app's ``code_mode_os_sandbox``
+    # setting reads the same ``CODE_MODE_OS_SANDBOX`` variable.
+    os_sandbox: str = field(default_factory=os_sandbox.default_mode)
 
     def boot_payload(self) -> dict:
         return {
@@ -109,12 +121,10 @@ class KernelConfig:
 def _restart_notice(detail: str) -> str:
     """The "your kernel restarted" line stamped onto the next cell's result.
 
-    A restart between turns left no trace at all: the next cell just raised
-    ``NameError: name 'Note' is not defined. Did you mean: 'None'?`` for a name
-    that had worked one turn earlier, and the model — told by run_python's own
-    description that kernel state persists — had no way to read that as a
-    restart. Four audited sessions lost a cell to it, one of them re-billing a
-    52k-token uncached prefix twice on the way.
+    Without it a restart between turns leaves no trace: the next cell raises
+    ``NameError`` for a name that worked one turn earlier, and the model —
+    told by run_python's own description that kernel state persists — has no
+    way to read that as a restart.
     """
     if "namespace lost" in detail:
         return (
@@ -127,6 +137,18 @@ def _restart_notice(detail: str) -> str:
         f"[kernel restarted since your last cell{detail}. Functions and "
         "classes defined in cells never survive a restart; if a name comes "
         "back undefined, re-import the tool or redefine it.]"
+    )
+
+
+def os_sandbox_active(config: KernelConfig | None = None) -> bool:
+    """Whether a kernel with ``config`` would run under the OS sandbox now.
+
+    Reads only the cached self-test (:func:`os_sandbox.is_active`), so it
+    never spawns anything; False until a self-test has passed in this process.
+    """
+    config = config or KernelConfig()
+    return os_sandbox.is_active(
+        config.os_sandbox, config.python, allow_fs=config.allow_fs
     )
 
 
@@ -154,23 +176,102 @@ class SubprocessKernel:
         # the child) into a bounded tail kept for the death diagnostic.
         self._stderr_task: asyncio.Task | None = None
         self._stderr_tail = bytearray()
+        # Per-process framing nonce (SE-2). Generated fresh on every spawn and
+        # handed to the child in the boot frame; the child stamps it onto every
+        # child→host frame and the host drops any frame that lacks it, so a cell
+        # that reaches the raw pipe cannot mint a frame the host will act on
+        # without also extracting the nonce from the child's closures.
+        self._nonce = ""
+        # Whether the live child runs under the OS sandbox (bwrap), and why it
+        # does not when it does not.
+        self.sandboxed = False
+        self.sandbox_note = ""
+        # ``required`` could not start the sandbox: the refusal, until a
+        # spawn succeeds. The kernel is down while it is set, and every cell
+        # error in that state is the host's, not the code's.
+        self.refusal = ""
 
     # ── lifecycle ──
     async def start(self) -> None:
-        await self._spawn()
+        try:
+            await self._spawn()
+        except os_sandbox.OsSandboxUnavailable as exc:
+            # ``required`` and no sandbox: do not start. Every exec retries the
+            # spawn and returns this refusal as the cell's error, which is
+            # where the model and the operator will see it.
+            self.refusal = str(exc)
 
     async def _spawn(self) -> None:
+        # The first call runs the sandbox self-test (a short subprocess), so
+        # it is kept off the event loop; later calls hit its cache.
+        plan = await asyncio.to_thread(
+            os_sandbox.plan_spawn,
+            self.config.os_sandbox,
+            python=self.config.python,
+            runner=_RUNNER,
+            base_env=scrub_env(os.environ),
+            allow_network=self.config.allow_network,
+            allow_fs=self.config.allow_fs,
+        )
+        try:
+            await self._launch(plan)
+        except (asyncio.IncompleteReadError, ConnectionError) as exc:
+            if not plan.sandboxed:
+                raise
+            # The self-test passed, yet the sandboxed child died before its
+            # first frame. When bwrap itself refused (namespace exhaustion, a
+            # changed AppArmor policy) that is the host, not the cell: ``auto``
+            # starts this kernel without the sandbox, ``required`` refuses
+            # with bwrap's reason. Anything else fails with the child's own.
+            proc = self._proc
+            stderr = await self._reap_unstarted(proc)
+            code = proc.returncode if proc is not None else None
+            await self._kill()
+            if not os_sandbox.is_bwrap_refusal(code, stderr):
+                raise RuntimeError(
+                    "code-mode kernel failed to start under the OS sandbox: "
+                    + self._death_note(proc)
+                ) from exc
+            lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+            plan = os_sandbox.plan_after_refusal(
+                self.config.os_sandbox,
+                python=self.config.python,
+                runner=_RUNNER,
+                base_env=scrub_env(os.environ),
+                reason=" | ".join(lines[-3:]),
+            )
+            await self._launch(plan)
+
+    async def _reap_unstarted(self, proc: asyncio.subprocess.Process | None) -> str:
+        """Wait for a child that died before its first frame; its stderr."""
+        if proc is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (TimeoutError, Exception):
+                pass
+        drain = self._stderr_task
+        if drain is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(drain), timeout=2)
+            except (TimeoutError, Exception):
+                pass
+        return self._stderr_tail.decode("utf-8", errors="replace")
+
+    async def _launch(self, plan: os_sandbox.SpawnPlan) -> None:
         spawn_kwargs: dict = {}
         if sys.platform != "win32":
             # Own process group, so a kill reaches whatever the cell spawned
             # through an allowed route; on Windows the Job Object does this.
+            # Under bwrap the group holds the outer bwrap; killing it tears
+            # down the sandbox's pid namespace (``--die-with-parent``).
             spawn_kwargs["start_new_session"] = True
+        self.sandboxed, self.sandbox_note = plan.sandboxed, plan.reason
         self._proc = await asyncio.create_subprocess_exec(
-            self.config.python, "-I", "-S", _RUNNER,
+            *plan.argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=scrub_env(os.environ),
+            env=plan.env,
             **spawn_kwargs,
         )
         self._stderr_tail = bytearray()
@@ -183,9 +284,12 @@ class SubprocessKernel:
             self._job_handle = _win_assign_memory_job(
                 self._proc.pid, self.config.mem_limit_bytes
             )
-        await self._send({"kind": "boot", "config": self.config.boot_payload()})
+        self._nonce = secrets.token_hex(16)
+        boot_config = {**self.config.boot_payload(), "nonce": self._nonce}
+        await self._send({"kind": "boot", "config": boot_config})
         await self._read_frame()  # {"kind": "ready"}
         self._ever_started = True
+        self.refusal = ""
         if self._vfs_sources or self._skill_sources:
             await self._send_vfs()
 
@@ -236,11 +340,14 @@ class SubprocessKernel:
         """Why the child is gone, from its exit status and stderr tail.
 
         An exit the runner chose (a cell called ``sys.exit``), a signal, and
-        a memory-cap kill all used to read as "likely OOM"; the status tells
-        them apart, and the last lines of stderr say what the child printed
-        on its way out.
+        a memory-cap kill are not all "likely OOM"; the status tells them
+        apart, and the last lines of stderr say what the child printed on its
+        way out.
         """
         code = proc.returncode if proc is not None else None
+        if code is not None and self.sandboxed and code > 128:
+            # bwrap reports a signalled child as 128 + signal number.
+            code = 128 - code
         if code is None:
             reason = "kernel died mid-exec"
         elif code == -9:
@@ -324,12 +431,17 @@ class SubprocessKernel:
 
         Returns the note appended to the exec error message, so the model
         knows exactly what state survived, and arms :attr:`_restart_note` for
-        the NEXT cell — a kernel recycled between turns produced no signal at
-        all, and four audited sessions lost a cell to a bare ``NameError: name
-        'Note' is not defined. Did you mean: 'None'?`` after a park.
+        the NEXT cell (see :func:`_restart_notice`). When ``required`` can no
+        longer start the sandbox the kernel stays down and the note says why;
+        the next exec retries and returns the refusal as its error.
         """
-        await self._restart()
-        detail = await self._restore()
+        try:
+            await self._restart()
+            detail = await self._restore()
+        except os_sandbox.OsSandboxUnavailable as exc:
+            self._restart_note = ""
+            self.refusal = str(exc)
+            return f"; the kernel could not be restarted: {exc}"
         self._restart_note = _restart_notice(detail)
         return detail
 
@@ -425,13 +537,17 @@ class SubprocessKernel:
     ) -> KernelResult:
         if self._proc is None or self._proc.returncode is not None:
             # The kernel died between turns (eviction, an OOM kill, a host
-            # restart). This used to be a bare respawn: the checkpoint was
-            # never replayed, so the next cell met a fresh empty namespace and
-            # a NameError with no explanation. Restore it, and arm the notice.
-            if self._ever_started:
-                await self._restart_and_restore()
-            else:
-                await self._spawn()
+            # restart). Restore the checkpoint and arm the notice rather than
+            # hand the next cell an empty namespace with no explanation.
+            try:
+                if self._ever_started:
+                    await self._restart()
+                    self._restart_note = _restart_notice(await self._restore())
+                else:
+                    await self._spawn()
+            except os_sandbox.OsSandboxUnavailable as exc:
+                self.refusal = str(exc)
+                return KernelResult(error=str(exc))
         await self._send({"kind": "exec", "code": code})
 
         loop = asyncio.get_running_loop()
@@ -521,7 +637,7 @@ class SubprocessKernel:
     # ── frame IO ──
     async def _send(self, obj: dict) -> None:
         assert self._proc is not None and self._proc.stdin is not None
-        body = _dumps(obj)
+        body = json.dumps(obj).encode("utf-8")
         self._proc.stdin.write(struct.pack(">I", len(body)) + body)
         await self._proc.stdin.drain()
 
@@ -530,7 +646,16 @@ class SubprocessKernel:
         header = await self._proc.stdout.readexactly(4)
         (length,) = struct.unpack(">I", header)
         body = await self._proc.stdout.readexactly(length)
-        return _loads(body)
+        frame = json.loads(body.decode("utf-8"))
+        # SE-2: every genuine child→host frame carries the boot nonce. A frame
+        # without it is a cell-forged frame (or a desynced pipe from interleaved
+        # forged bytes); refuse to act on it and let the caller restart the
+        # kernel rather than trust fabricated output or a fabricated host_call.
+        if self._nonce and (not isinstance(frame, dict) or frame.get("_n") != self._nonce):
+            raise ConnectionError("kernel frame failed the nonce check (forged or desynced pipe)")
+        if isinstance(frame, dict):
+            frame.pop("_n", None)
+        return frame
 
 
 # ── Windows Job Object memory limit (host-side counterpart of the POSIX rlimit
@@ -640,14 +765,3 @@ def _reply_frame(reply: HostReply) -> dict:
         }
     return frame
 
-
-def _dumps(obj: dict) -> bytes:
-    import json
-
-    return json.dumps(obj).encode("utf-8")
-
-
-def _loads(body: bytes) -> dict:
-    import json
-
-    return json.loads(body.decode("utf-8"))

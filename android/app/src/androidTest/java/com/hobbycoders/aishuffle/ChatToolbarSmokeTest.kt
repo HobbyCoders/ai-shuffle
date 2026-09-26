@@ -1,7 +1,5 @@
 package com.hobbycoders.aishuffle
 
-import android.app.Activity
-import android.app.Instrumentation
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -28,7 +26,6 @@ import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.ChatActivity
 import com.hobbycoders.aishuffle.ui.MobileUi
-import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -60,6 +57,8 @@ class ChatToolbarSmokeTest {
         val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val oldApi = apiField.get(null)
         val api = OkHttpClient.Builder().addInterceptor { chain ->
+            if (chain.request().url.encodedPath == "/api/v1/mobile/key/renew")
+                return@addInterceptor PresenceFixture.renewDeviceKey(chain.request(), server)
             if (chain.request().url.encodedPath == "/api/v1/mobile/web-session/reservations")
                 return@addInterceptor Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(404).message("Legacy fixture")
                     .header("Content-Type", "application/json").body("{\"detail\":\"Not Found\"}".toResponseBody("application/json".toMediaType())).build()
@@ -70,16 +69,7 @@ class ChatToolbarSmokeTest {
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
                 .body("{\"session_token\":\"fixture-session\"}".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        val voiceLaunches = AtomicInteger()
-        val monitor = object : Instrumentation.ActivityMonitor() {
-            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
-                if (intent.component?.className != VoiceCallActivity::class.java.name) return null
-                assertEquals(server.id, intent.getStringExtra("server_id"))
-                voiceLaunches.incrementAndGet()
-                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
-            }
-        }
-        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor)
+        apiField.set(null, lazyOf(api))
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 fun loaded(orientation: Int) = waitFor("Chat did not load in the expected viewport") {
@@ -114,7 +104,7 @@ class ChatToolbarSmokeTest {
                         assertEquals(name, title.text.toString())
                         assertEquals(1, title.lineCount)
                         assertTrue("Long worker name must ellipsize", title.layout.getEllipsisCount(0) > 0)
-                        for (label in listOf("Back", "Start voice call", "More chat options")) {
+                        for (label in listOf("Back", "More chat options")) {
                             val action = (0 until toolbar.childCount).map { toolbar.getChildAt(it) }.single { it.contentDescription == label }
                             assertTrue(action.isClickable && action.isFocusable)
                             assertTrue(action.width >= (48 * density).toInt() && action.height >= (48 * density).toInt())
@@ -143,8 +133,8 @@ class ChatToolbarSmokeTest {
                 onView(withText("Refresh chat")).perform(click())
                 waitFor("Overflow refresh did not renew the session") { sessions.get() == beforeRefresh + 1 }
                 loaded(Configuration.ORIENTATION_PORTRAIT)
-                onView(withContentDescription("Start voice call")).perform(click())
-                assertEquals(1, voiceLaunches.get())
+                // Voice is the page's own; the shell adds no native call button.
+                onView(withContentDescription("Start voice call")).check(doesNotExist())
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
                 loaded(Configuration.ORIENTATION_LANDSCAPE); checkViewport()
                 TestScreenshots.capture("chat-toolbar-landscape")
@@ -156,7 +146,7 @@ class ChatToolbarSmokeTest {
                 }
             }
         } finally {
-            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi)
+            apiField.set(null, oldApi)
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
         }
     }

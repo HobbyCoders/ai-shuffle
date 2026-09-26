@@ -10,15 +10,10 @@ Mirrors the datetime-serialization regressions added in PR #464 for
 app.mcp.config_helpers, but for app.mcp.builtin_tools._ok / _err.
 """
 
-import json
 from datetime import datetime, timezone
 
 from app.mcp.builtin_tools import _ok, _err
-
-
-def _decode(result: dict) -> dict:
-    """Decode the MCP tool result envelope."""
-    return json.loads(result["content"][0]["text"])
+from tests.mcp.tool_helpers import tool_result_json
 
 
 def test_ok_serializes_datetime_payload():
@@ -27,7 +22,7 @@ def test_ok_serializes_datetime_payload():
     dt = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     result = _ok({"crons": [{"id": "a", "last_run_at": dt}], "count": 1})
 
-    body = _decode(result)
+    body = tool_result_json(result)
     assert body["success"] is True
     assert body["count"] == 1
     assert body["crons"][0]["last_run_at"].startswith("2026-01-02T03:04:05")
@@ -39,7 +34,7 @@ def test_err_serializes_datetime_extra():
     result = _err("boom", last_run_at=dt)
     assert result["isError"] is True
 
-    body = _decode(result)
+    body = tool_result_json(result)
     assert body["success"] is False
     assert body["error"] == "boom"
     assert body["last_run_at"].startswith("2026-06-07T08:09:10")
@@ -47,7 +42,7 @@ def test_err_serializes_datetime_extra():
 
 def test_ok_plain_payload_still_works():
     """No regression for the common all-primitive payload."""
-    body = _decode(_ok({"count": 0, "crons": []}))
+    body = tool_result_json(_ok({"count": 0, "crons": []}))
     assert body == {"success": True, "count": 0, "crons": []}
 
 
@@ -56,7 +51,7 @@ def test_ai_tools_result_serializes_datetime():
     from app.mcp.ai_tools_sdk import _tool_result
 
     dt = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
-    body = _decode(_tool_result({"success": True, "created_at": dt}))
+    body = tool_result_json(_tool_result({"success": True, "created_at": dt}))
     assert body["success"] is True
     assert body["created_at"].startswith("2026-03-04T05:06:07")
 
@@ -68,6 +63,6 @@ def test_connector_gateway_ok_serializes_datetime():
     from app.mcp.connector_gateway_sdk import _ok
 
     dt = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
-    body = _decode(_ok({"updated_at": dt}))
+    body = tool_result_json(_ok({"updated_at": dt}))
     assert body["success"] is True
     assert body["updated_at"].startswith("2026-03-04T05:06:07")

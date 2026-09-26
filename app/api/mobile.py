@@ -1,32 +1,21 @@
 """
-Mobile device API routes for push notifications and action confirmations
+Mobile device API routes: pairing, key renewal, web sessions and devices
 """
 
-import asyncio
 import json
 import secrets
 import logging
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Depends, Request, Response, status
 from pydantic import BaseModel, ConfigDict
-from fastapi.responses import StreamingResponse
-from starlette.requests import ClientDisconnect
 
-from app.api.sse_utils import is_client_disconnect
-from app.services.mobile_push_hub import mobile_push_hub
 from app.core.models import (
     MobileDevice,
     MobileDeviceRegisterRequest,
     MobileDeviceRegisterResponse,
-    MobileDeviceCapabilitiesRequest,
-    PendingAction,
-    ActionConfirmRequest,
-    PushTokenRequest,
-    UnifiedPushEndpointRequest,
 )
 from app.api.auth import require_admin, get_api_key, hash_api_key
 from app.core.config import settings
@@ -44,35 +33,9 @@ router.include_router(hub_router)
 # Mobile API key prefix
 MOBILE_API_KEY_PREFIX = "aim_"
 
-# Default expiry for mobile API keys (365 days)
-MOBILE_API_KEY_EXPIRY_DAYS = 365
+from app.core.device_keys import KEY_LIFETIME_DAYS, key_expiry
 
-# Default expiry for pending actions (5 minutes)
-PENDING_ACTION_EXPIRY_MINUTES = 5
-
-
-# The expired-action sweep is a table-wide UPDATE; one run per process per
-# interval is enough because every read filters on expires_at itself.
-EXPIRED_ACTION_SWEEP_INTERVAL_S = 60
-_last_expired_action_sweep: float | None = None
-
-
-def _expired_action_sweep_due() -> bool:
-    """True at most once per EXPIRED_ACTION_SWEEP_INTERVAL_S per process."""
-    global _last_expired_action_sweep
-    clock = time.monotonic()
-    if (_last_expired_action_sweep is not None
-            and clock - _last_expired_action_sweep < EXPIRED_ACTION_SWEEP_INTERVAL_S):
-        return False
-    _last_expired_action_sweep = clock
-    return True
-
-
-def _reset_expired_action_sweep() -> None:
-    """Test hook: make the next sweep check run the sweep."""
-    global _last_expired_action_sweep
-    _last_expired_action_sweep = None
-
+MOBILE_API_KEY_EXPIRY_DAYS = KEY_LIFETIME_DAYS
 
 def generate_mobile_api_key() -> str:
     """Generate a secure mobile API key"""
@@ -100,24 +63,17 @@ def get_device_from_api_key(request: Request) -> dict:
             detail="Invalid mobile API key"
         )
 
+    return validate_mobile_device(device)
+
+
+def validate_mobile_device(device: dict) -> dict:
     if device.get("revoked_at"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Mobile device credential has been revoked",
         )
 
-    expires_at = device.get("api_key_expires_at")
-    if expires_at is None:
-        # Legacy rows predate stored expiry. Honor their original documented
-        # one-year lifetime instead of silently granting permanent access.
-        expires_at = device.get("created_at")
-        if expires_at is not None:
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            expires_at = expires_at + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
-    elif isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if expires_at is None or expires_at <= datetime.now(timezone.utc):
+    if key_expiry(device) <= datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Mobile device credential has expired; pair this device again",
@@ -146,6 +102,33 @@ def get_device_with_scope(request: Request, required_scope: str) -> dict:
     return device
 
 
+@router.post('/key/renew')
+def renew_device_key(request: Request):
+    from app.db.mobile import mobile_key_renewal_device, renew_mobile_key
+    key = get_api_key(request)
+    if not key or not key.startswith(MOBILE_API_KEY_PREFIX):
+        raise HTTPException(401, 'Valid mobile API key required')
+    key_hash = hash_api_key(key)
+    device = db.get_mobile_device_by_api_key_hash(key_hash) or mobile_key_renewal_device(key_hash)
+    if device is None:
+        raise HTTPException(401, 'Invalid or expired mobile API key; pair this device again')
+    validate_mobile_device(device)
+    client = db.ensure_paired_client_for_mobile(device)
+    if not client:
+        raise HTTPException(401, 'Device credential changed; pair this device again')
+    device['paired_client_id'] = client['id']
+    try:
+        replacement, expiry = renew_mobile_key(device, key_hash, generate_mobile_api_key())
+    except ValueError as exc:
+        raise HTTPException(401, str(exc)) from None
+    except RuntimeError:
+        raise HTTPException(503, 'Device key renewal unavailable; the existing key is unchanged') from None
+    from fastapi.responses import JSONResponse
+    return JSONResponse({'api_key': replacement or key, 'device_id': public_device_id(device),
+                         'expires_at': expiry.isoformat(), 'rotated': replacement is not None},
+                        headers={'Cache-Control': 'no-store'})
+
+
 @router.post("/register", response_model=MobileDeviceRegisterResponse)
 async def register_device(request: MobileDeviceRegisterRequest):
     """
@@ -159,7 +142,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
     if not request.pairing_code:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="A one-time pairing code is required. Create one from Settings → Devices.",
+            detail="A one-time pairing code is required. Create one from Settings → Providers → Devices.",
         )
 
     # Check if device already exists
@@ -217,7 +200,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
     if result and result.get("duplicate"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Device already registered. Revoke it from Settings → Devices before pairing again.",
+            detail="Device already registered. Revoke it from Settings → Providers → Devices before pairing again.",
         )
     if not result:
         raise HTTPException(
@@ -237,257 +220,6 @@ async def register_device(request: MobileDeviceRegisterRequest):
         from fastapi.responses import JSONResponse
         return JSONResponse(registration.model_dump(mode='json'), headers={'Cache-Control': 'no-store'})
     return registration
-
-
-@router.post("/capabilities")
-async def update_capabilities(
-    request: Request,
-    caps_request: MobileDeviceCapabilitiesRequest
-):
-    """
-    Update device capabilities.
-
-    Called when device capabilities change (e.g., biometric becomes available).
-    """
-    device = await run_sync(get_device_with_scope, request, "controller")
-
-    # Verify device_id matches
-    if public_device_id(device) != caps_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    capabilities_dict = caps_request.capabilities.model_dump()
-    updated = await run_sync(db.update_mobile_device_capabilities, device['device_id'], capabilities_dict)
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    return {"status": "ok", "message": "Capabilities updated"}
-
-
-@router.get("/pending", response_model=List[PendingAction])
-async def get_pending_actions(request: Request):
-    """
-    Get pending actions for the authenticated device.
-
-    Returns a list of actions waiting for confirmation.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:actions")
-
-    # Sweep expired actions occasionally. This is a table-wide UPDATE across
-    # every device, and the read below already filters on expires_at, so it is
-    # throttled instead of running on each poll.
-    if _expired_action_sweep_due():
-        await run_sync(db.cleanup_expired_actions)
-
-    actions = await run_sync(db.get_pending_actions_for_device, device["device_id"])
-
-    return [
-        PendingAction(
-            id=a["id"],
-            device_id=a["device_id"],
-            action_type=a["action_type"],
-            params=a.get("params", {}),
-            security_level=a.get("security_level", "normal"),
-            created_at=datetime.fromisoformat(a["created_at"]) if isinstance(a["created_at"], str) else a["created_at"],
-            expires_at=datetime.fromisoformat(a["expires_at"]) if isinstance(a["expires_at"], str) else a["expires_at"],
-            status=a["status"]
-        )
-        for a in actions
-    ]
-
-
-@router.post("/confirm/{action_id}")
-async def confirm_action(
-    action_id: str,
-    confirm_request: ActionConfirmRequest,
-    request: Request
-):
-    """
-    Confirm or reject a pending action.
-
-    The action must belong to the authenticated device.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:actions")
-
-    # Get the action
-    action = await run_sync(db.get_pending_action, action_id)
-    if not action:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Action not found"
-        )
-
-    # Verify action belongs to this device
-    if action["device_id"] != device["device_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Action does not belong to this device"
-        )
-
-    # Check if action is still pending
-    if action["status"] != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Action already {action['status']}"
-        )
-
-    # Check if action has expired
-    expires_at = action["expires_at"]
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if datetime.now(timezone.utc) > expires_at:
-        await run_sync(db.update_pending_action_status, action_id, "expired")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Action has expired"
-        )
-
-    # Check biometric requirement for high/critical security levels
-    security_level = action.get("security_level", "normal")
-    if security_level in ("high", "critical") and not confirm_request.biometric_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Biometric verification required for {security_level} security actions"
-        )
-
-    # Update status
-    new_status = "approved" if confirm_request.approved else "rejected"
-    await run_sync(db.update_pending_action_status, action_id, new_status)
-
-    logger.debug(f"Action {action_id} {new_status} by device {device['device_id']}")
-
-    return {
-        "status": "ok",
-        "action_id": action_id,
-        "result": new_status,
-        "biometric_verified": confirm_request.biometric_verified
-    }
-
-
-@router.post("/push/token")
-async def register_push_token(
-    request: Request,
-    token_request: PushTokenRequest
-):
-    """
-    Register or update FCM push notification token.
-
-    Called when the app obtains a new FCM token.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    # Verify device_id matches
-    if public_device_id(device) != token_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    updated = await run_sync(db.update_mobile_device_fcm_token, device['device_id'], token_request.fcm_token)
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    logger.debug(f"Updated FCM token for device {token_request.device_id}")
-
-    return {"status": "ok", "message": "Push token registered"}
-
-
-@router.post("/push/unifiedpush")
-async def register_unifiedpush_endpoint(
-    request: Request,
-    up_request: UnifiedPushEndpointRequest,
-):
-    """
-    Register or update the device's UnifiedPush endpoint URL.
-
-    The Android app obtains this URL from its UnifiedPush distributor (e.g. ntfy)
-    and registers it so this server can deliver notifications without Firebase.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    if public_device_id(device) != up_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    updated = await run_sync(
-        db.update_mobile_device_unifiedpush_endpoint, device['device_id'], up_request.endpoint
-    )
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    logger.debug(f"Updated UnifiedPush endpoint for device {up_request.device_id}")
-
-    return {"status": "ok", "message": "UnifiedPush endpoint registered"}
-
-
-@router.get("/notifications/stream")
-async def notifications_stream(request: Request):
-    """
-    Server-Sent Events stream of notification events for this device.
-
-    The Android app's foreground service holds this connection open and raises a
-    local notification for each event, delivering push without Firebase *and*
-    without a separate UnifiedPush distributor app. Authenticated via the aim_
-    Bearer key.
-
-    Emits ``event: notification`` frames whose data is the JSON event
-    ``{type, title, body, data}``, plus periodic ``: keepalive`` comments so idle
-    connections survive proxy/timeout cutoffs.
-    """
-    # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
-    await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    async def event_generator():
-        queue = mobile_push_hub.subscribe()
-        try:
-            # Initial comment flushes proxy buffers and confirms the stream.
-            yield ": connected\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
-                yield f"event: notification\ndata: {json.dumps(event)}\n\n"
-        except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
-            # A normal SSE client disconnect must end the stream cleanly, NOT
-            # bubble a cancellation out of the generator where it collapses into
-            # an anyio ExceptionGroup and surfaces as an unhandled 500 through the
-            # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
-            # disconnect/cancellation is re-raised unchanged.
-            if not is_client_disconnect(exc):
-                raise
-            logger.debug("SSE notification stream closed (client disconnect)")
-        finally:
-            mobile_push_hub.unsubscribe(queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 class WebSessionMintRequest(BaseModel):
@@ -560,7 +292,8 @@ async def create_web_session(
     if client is None:
         raise HTTPException(status_code=401, detail="Mobile device credential changed; pair this device again")
     token = pairing.generate_controller_session()
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
+    expires_at = min(datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days),
+                     key_expiry(device))
     from app.db.pairing import WebSessionReservationConflict
     try:
         stored = await run_sync(
@@ -585,7 +318,7 @@ async def create_web_session(
             httponly=True,
             secure=settings.cookie_secure,
             samesite="lax",
-            max_age=settings.session_expire_days * 24 * 60 * 60,
+            max_age=max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds())),
         )
 
     return {
@@ -650,6 +383,9 @@ async def delete_device(device_id: str, token: str = Depends(require_admin)):
     paired_client_id = device.get("paired_client_id")
     if paired_client_id:
         await run_sync(db.revoke_paired_client, paired_client_id)
+        # Every socket the device holds closes now (4001), not at its next re-check.
+        from app.api.ws_key_watch import close_paired_client_sockets
+        close_paired_client_sockets(paired_client_id)
     if not await run_sync(db.delete_mobile_device, device_id):
         raise HTTPException(status_code=404, detail="Device not found")
 

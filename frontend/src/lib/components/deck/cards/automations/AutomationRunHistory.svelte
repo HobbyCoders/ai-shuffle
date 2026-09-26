@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { AutomationRun } from '$lib/api/automations';
+	import { runTriggerLabel, type AutomationRun } from '$lib/api/automations';
 	import { slide } from 'svelte/transition';
 	import {
 		Loader2,
@@ -51,7 +51,7 @@
 						{/if}
 						<span class="card-badge {getRunStatusBadgeClass(run.status)}">{run.status}</span>
 						<span class="auto-run-meta">
-							{run.trigger_data?.source || 'manual'}
+							{runTriggerLabel(run.trigger_data)}
 						</span>
 						<span class="auto-run-meta">{formatCost(run.cost_usd)}</span>
 						<span class="auto-run-meta">{formatDuration(run.duration_ms)}</span>

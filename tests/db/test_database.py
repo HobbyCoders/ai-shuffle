@@ -31,10 +31,8 @@ Tests cover:
 
 import logging
 import pytest
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from contextlib import contextmanager
 
 from app.db import database as db
 
@@ -42,32 +40,6 @@ from app.db import database as db
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def test_db():
-    """Create an in-memory SQLite database whose schema is the canonical
-    PostgreSQL schema, built via the test shim so it never drifts from the app.
-    """
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    """Route the app DB layer through the shim-wrapped test connection.
-
-    Domain code writes PostgreSQL SQL (``%s`` placeholders, ``NOW()``, ``JSONB``
-    …) and reaches the DB via ``get_connection``. Wrapping the raw connection in
-    a ``ShimConnection`` translates that SQL to SQLite and returns dict rows.
-    The fixture still yields the raw connection so tests that run their own
-    ``?``-placeholder SQL directly keep working.
-    """
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
 
 @pytest.fixture
 def setup_profile(mock_db):
@@ -178,16 +150,6 @@ class TestAdminOperations:
         """get_admin should return None when no admin exists."""
         assert db.get_admin() is None
 
-    def test_update_admin_password(self, mock_db):
-        """update_admin_password should update password hash."""
-        db.create_admin("admin", "old_hash")
-        result = db.update_admin_password("new_hash")
-
-        assert result is True
-        admin = db.get_admin()
-        assert admin["password_hash"] == "new_hash"
-
-
 
 # =============================================================================
 # Profile Operations Tests
@@ -220,7 +182,7 @@ class TestProfileOperations:
         """get_profile should return None for non-existent profile."""
         assert db.get_profile("nonexistent") is None
 
-    def test_get_all_profiles(self, mock_db):
+    def test_get_all_profiles(self, bare_db):
         """get_all_profiles should return all profiles ordered by builtin then name."""
         db.create_profile("profile-b", "B Profile", None, {}, False)
         db.create_profile("profile-a", "A Profile", None, {}, True)
@@ -559,16 +521,6 @@ class TestSessionOperations:
         db.create_session("session-2", setup_profile, parent_session_id="session-1")
         assert db.session_has_forks("session-1") is True
 
-    def test_get_session_forks(self, mock_db, setup_profile):
-        """get_session_forks should return forked sessions."""
-        db.create_session("session-1", setup_profile)
-        db.create_session("session-2", setup_profile, parent_session_id="session-1")
-
-        result = db.get_session_forks("session-1")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-2"
-
     def test_clear_session_conversation(self, mock_db, setup_profile):
         """clear_session_conversation wipes transcript + message rows + usage
         counters and unlinks sdk_session_id, but KEEPS the session row — the
@@ -704,66 +656,9 @@ class TestSessionMessageOperations:
         assert result is True
         assert len(db.get_session_messages("session-1")) == 0
 
-    def test_delete_session_messages_after(self, mock_db, setup_profile):
-        """delete_session_messages_after should delete messages after given ID."""
-        db.create_session("session-1", setup_profile)
-        msg1 = db.add_session_message("session-1", "user", "First")
-        db.add_session_message("session-1", "assistant", "Second")
-        db.add_session_message("session-1", "user", "Third")
-
-        deleted = db.delete_session_messages_after("session-1", msg1["id"])
-
-        assert deleted == 2
-        msgs = db.get_session_messages("session-1")
-        assert len(msgs) == 1
-
-    def test_update_message_content(self, mock_db, setup_profile):
-        """update_message_content should update message content."""
-        db.create_session("session-1", setup_profile)
-        msg = db.add_session_message("session-1", "assistant", "Original")
-
-        result = db.update_message_content(msg["id"], "Updated", metadata={"streaming": False})
-
-        assert result["content"] == "Updated"
-        assert result["metadata"]["streaming"] is False
-
 
 class TestSearchSessions:
     """Test session search functionality."""
-
-    @pytest.mark.skip(
-        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
-        "real-Postgres integration suite exists yet — the SQL's structure is "
-        "guarded by TestSearchSessionsSql below; behavior needs manual "
-        "verification against a Postgres instance."
-    )
-    def test_search_sessions_by_title(self, mock_db, setup_profile):
-        """search_sessions should find sessions by title."""
-        db.create_session("session-1", setup_profile, title="Python debugging help")
-        db.create_session("session-2", setup_profile, title="JavaScript tutorial")
-
-        result = db.search_sessions("Python")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"
-
-    @pytest.mark.skip(
-        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
-        "real-Postgres integration suite exists yet — the SQL's structure is "
-        "guarded by TestSearchSessionsSql below; behavior needs manual "
-        "verification against a Postgres instance."
-    )
-    def test_search_sessions_by_content(self, mock_db, setup_profile):
-        """search_sessions should find sessions by message content."""
-        db.create_session("session-1", setup_profile, title="Session 1")
-        db.add_session_message("session-1", "user", "How do I use React hooks?")
-
-        result = db.search_sessions("React hooks")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"
 
     def test_search_sessions_empty_query(self, mock_db, setup_profile):
         """search_sessions should return empty for empty query."""
@@ -773,74 +668,12 @@ class TestSearchSessions:
 
         assert result == []
 
-    _STORE_SKIP = (
-        "store-backed FTS uses Postgres-native constructs (sse_entry_text() "
-        "IMMUTABLE function, to_tsvector/ts_headline/plainto_tsquery over the "
-        "session_store_entries JSONB, DISTINCT ON, COUNT(*) OVER); not emulated "
-        "by the sqlite test shim. Structure is guarded by TestSearchSessionsSql "
-        "below; behavior needs a real Postgres instance."
-    )
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_finds_store_content(self, mock_db, setup_profile):
-        """A query hitting only the JSONB store transcript (not session_messages)
-        should surface the session as a 'content' match — this is the whole point
-        of store-backed search under postgres_only."""
-        db.create_session("session-1", setup_profile, title="Session 1")
-        # Under real PG: insert a session_store_entries row whose entry text
-        # contains the query, with sessions.sdk_session_id joining it.
-        result = db.search_sessions("needle-in-the-store")
-        assert any(r["id"] == "session-1" for r in result)
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_dedupes_title_legacy_store(self, mock_db, setup_profile):
-        """A session matching in title, legacy message content, AND the store must
-        appear exactly once, with title winning as the retained match_type."""
-        db.create_session("session-1", setup_profile, title="python")
-        db.add_session_message("session-1", "user", "python question")
-        result = db.search_sessions("python")
-        ids = [r["id"] for r in result]
-        assert ids.count("session-1") == 1
-        row = next(r for r in result if r["id"] == "session-1")
-        assert row["match_type"] == "title"
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_reports_match_count(self, mock_db, setup_profile):
-        """match_count reflects how many of {title, legacy-content, store-content}
-        hit for a session (counted before the final dedupe)."""
-        db.create_session("session-1", setup_profile, title="python")
-        db.add_session_message("session-1", "user", "python question")
-        result = db.search_sessions("python")
-        row = next(r for r in result if r["id"] == "session-1")
-        assert row["match_count"] >= 2
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_search_excludes_archived(self, mock_db, setup_profile):
-        """Archived sessions must be excluded from store matches just like the
-        title/legacy CTEs."""
-        db.create_session("session-1", setup_profile, title="keep")
-        db.update_session("session-1", status="archived")
-        result = db.search_sessions("keep")
-        assert all(r["id"] != "session-1" for r in result)
-
-    @pytest.mark.skip(reason=_STORE_SKIP)
-    def test_sse_entry_text_extraction_matrix(self, mock_db):
-        """Documents the sse_entry_text() contract (run against real Postgres):
-
-        * user/assistant + string content    -> the string as-is
-        * user/assistant + array content      -> string_agg of type='text' blocks
-        * isMeta true / isSidechain true       -> NULL (skipped)
-        * type NOT IN (user, assistant)        -> NULL (tool/system/summary skipped)
-        * tool_use / tool_result array blocks  -> NULL (only 'text' blocks kept)
-        """
-        assert True  # Placeholder — the real matrix requires a PG session.
-
 
 class TestSearchSessionsSql:
     """Always-on structural guard for the Postgres-native search SQL.
 
-    The FTS behavior itself can't run under the sqlite shim (see the skips
-    above), but the query's most fragile property is mechanical: the
+    The FTS behavior itself can't run under the sqlite shim (it is exercised
+    against real Postgres in tests/db/test_universal_search_pg.py), but the query's most fragile property is mechanical: the
     title_matches and content_matches CTEs feed ``SELECT * ... UNION ALL``,
     which silently mispairs values — or errors at runtime on Postgres only —
     the moment one CTE's column list drifts from the other (how a per-CTE
@@ -1232,7 +1065,7 @@ class TestSubagentOperations:
         assert result is not None
         assert result["id"] == "subagent-1"
 
-    def test_get_all_subagents(self, mock_db):
+    def test_get_all_subagents(self, bare_db):
         """get_all_subagents should return all subagents."""
         db.create_subagent("sub-a", "A Agent", "Desc", "Prompt")
         db.create_subagent("sub-b", "B Agent", "Desc", "Prompt")
@@ -1314,52 +1147,6 @@ class TestTemplateOperations:
 
 
 # =============================================================================
-# Webhook Operations Tests
-# =============================================================================
-
-class TestWebhookOperations:
-    """Test webhook operations."""
-
-    def test_create_webhook(self, mock_db):
-        """create_webhook should create webhook."""
-        result = db.create_webhook(
-            "webhook-1",
-            "https://example.com/webhook",
-            ["session.created", "session.completed"],
-            secret="secret123"
-        )
-
-        assert result["id"] == "webhook-1"
-        assert result["url"] == "https://example.com/webhook"
-        assert result["events"] == ["session.created", "session.completed"]
-
-    def test_get_webhook(self, mock_db):
-        """get_webhook should return webhook by ID."""
-        db.create_webhook("webhook-1", "https://example.com", ["event"])
-        result = db.get_webhook("webhook-1")
-
-        assert result is not None
-        assert result["id"] == "webhook-1"
-
-    def test_get_all_webhooks(self, mock_db):
-        """get_all_webhooks should return all webhooks."""
-        db.create_webhook("w-1", "https://a.com", ["event"])
-        db.create_webhook("w-2", "https://b.com", ["event"])
-
-        result = db.get_all_webhooks()
-
-        assert len(result) == 2
-
-    def test_delete_webhook(self, mock_db):
-        """delete_webhook should delete webhook."""
-        db.create_webhook("webhook-1", "https://example.com", ["event"])
-        result = db.delete_webhook("webhook-1")
-
-        assert result is True
-        assert db.get_webhook("webhook-1") is None
-
-
-# =============================================================================
 # Clear All Sessions Test
 # =============================================================================
 
@@ -1425,37 +1212,6 @@ class TestUsageLogging:
         assert stats["total_tokens_out"] == 200
         assert stats["total_cost_usd"] == 0.03
 
-    def test_get_last_session_usage(self, mock_db, setup_profile):
-        """get_last_session_usage should return the most recent usage entry."""
-        db.create_session("session-1", setup_profile)
-        # Add two usage entries
-        db.log_usage("session-1", setup_profile, "model-1", 50, 100, 0.01, 500)
-        db.log_usage("session-1", setup_profile, "model-2", 75, 150, 0.025, 750)
-
-        result = db.get_last_session_usage("session-1")
-
-        assert result is not None
-        # Should return the most recent entry (model-2)
-        assert result["total_cost_usd"] == 0.025
-        assert result["duration_ms"] == 750
-        assert result["tokens_in"] == 75
-        assert result["tokens_out"] == 150
-        assert result["model"] == "model-2"
-
-    def test_get_last_session_usage_not_found(self, mock_db, setup_profile):
-        """get_last_session_usage should return None if no usage exists."""
-        db.create_session("session-1", setup_profile)
-
-        result = db.get_last_session_usage("session-1")
-
-        assert result is None
-
-    def test_get_last_session_usage_nonexistent_session(self, mock_db):
-        """get_last_session_usage should return None for nonexistent session."""
-        result = db.get_last_session_usage("nonexistent-session")
-
-        assert result is None
-
     def test_get_all_session_usage_empty(self, mock_db, setup_profile):
         """get_all_session_usage should return empty list if no usage exists."""
         db.create_session("session-1", setup_profile)
@@ -1508,67 +1264,6 @@ class TestUsageLogging:
         result = db.get_all_session_usage("nonexistent-session")
 
         assert result == []
-
-
-# =============================================================================
-# Login Attempts Tests
-# =============================================================================
-
-class TestLoginAttempts:
-    """Test login attempt tracking."""
-
-    def test_record_login_attempt_success(self, mock_db):
-        """record_login_attempt should record successful attempt."""
-        db.record_login_attempt("192.168.1.1", "admin", True)
-
-        # Should not count as failed
-        count = db.get_failed_attempts_count("192.168.1.1")
-        assert count == 0
-
-    def test_record_login_attempt_failure(self, mock_db):
-        """record_login_attempt should record failed attempt."""
-        db.record_login_attempt("192.168.1.1", "admin", False)
-
-        count = db.get_failed_attempts_count("192.168.1.1")
-        assert count == 1
-
-    def test_get_failed_attempts_for_username(self, mock_db):
-        """get_failed_attempts_for_username should count failures."""
-        db.record_login_attempt("192.168.1.1", "admin", False)
-        db.record_login_attempt("192.168.1.2", "admin", False)
-
-        count = db.get_failed_attempts_for_username("admin")
-        assert count == 2
-
-
-# =============================================================================
-# Account Lockout Tests
-# =============================================================================
-
-class TestAccountLockout:
-    """Test account lockout operations."""
-
-    def test_create_lockout(self, mock_db):
-        """create_lockout should create lockout entry."""
-        # duration_minutes is the 3rd argument (not a datetime)
-        db.create_lockout("192.168.1.1", None, 30, "Too many failed attempts")
-
-        lockout = db.is_ip_locked("192.168.1.1")
-        assert lockout is not None
-
-    def test_is_ip_locked(self, mock_db):
-        """is_ip_locked should detect locked IP."""
-        db.create_lockout("192.168.1.1", None, 30, "Too many attempts")
-
-        assert db.is_ip_locked("192.168.1.1") is not None
-        assert db.is_ip_locked("192.168.1.2") is None
-
-    def test_is_username_locked(self, mock_db):
-        """is_username_locked should detect locked username."""
-        db.create_lockout(None, "admin", 30, "Too many attempts")
-
-        assert db.is_username_locked("admin") is not None
-        assert db.is_username_locked("other") is None
 
 
 # =============================================================================
@@ -1794,15 +1489,6 @@ class TestGitRepositoryOperations:
         assert result is not None
         assert result["id"] == "repo-1"
 
-    def test_delete_git_repository(self, mock_db, setup_project):
-        """delete_git_repository should delete repository."""
-        db.create_git_repository("repo-1", setup_project)
-
-        result = db.delete_git_repository("repo-1")
-
-        assert result is True
-        assert db.get_git_repository("repo-1") is None
-
 
 # =============================================================================
 # Worktree Tests
@@ -2001,53 +1687,6 @@ class TestUserCredentials:
         assert result is True
         assert db.get_user_credential("user-1", "openai_api_key") is None
 
-    def test_user_has_credential(self, mock_db, setup_api_user):
-        """user_has_credential should check credential existence."""
-
-        assert db.user_has_credential("user-1", "openai_api_key") is False
-
-        db.set_user_credential("user-1", "openai_api_key", "enc:value")
-
-        assert db.user_has_credential("user-1", "openai_api_key") is True
-
-
-# =============================================================================
-# Webhook Update Tests
-# =============================================================================
-
-class TestWebhookUpdates:
-    """Test webhook update operations."""
-
-    def test_update_webhook(self, mock_db):
-        """update_webhook should update webhook fields."""
-        db.create_webhook("wh-1", "https://old.com", ["event"])
-
-        result = db.update_webhook("wh-1", url="https://new.com", is_active=False)
-
-        assert result["url"] == "https://new.com"
-        assert not result["is_active"]
-
-    def test_get_active_webhooks(self, mock_db):
-        """get_active_webhooks should return only active webhooks."""
-        db.create_webhook("wh-1", "https://a.com", ["event"])
-        db.create_webhook("wh-2", "https://b.com", ["event"])
-        db.update_webhook("wh-2", is_active=False)
-
-        result = db.get_active_webhooks()
-
-        assert len(result) == 1
-        assert result[0]["id"] == "wh-1"
-
-    def test_get_webhooks_for_event(self, mock_db):
-        """get_webhooks_for_event should return webhooks for specific event."""
-        db.create_webhook("wh-1", "https://a.com", ["session.created", "session.updated"])
-        db.create_webhook("wh-2", "https://b.com", ["session.deleted"])
-
-        result = db.get_webhooks_for_event("session.created")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "wh-1"
-
 
 # =============================================================================
 # Template Categories Tests
@@ -2118,203 +1757,3 @@ class TestSessionWorktreeRelations:
         result = db.get_sessions_for_worktree(setup_worktree)
 
         assert len(result) == 2
-
-
-# =============================================================================
-# Session by Tag Tests
-# =============================================================================
-
-class TestSessionsByTag:
-    """Test getting sessions by tag."""
-
-    def test_get_sessions_by_tag(self, mock_db, setup_profile):
-        """get_sessions_by_tag should return sessions with specific tag."""
-        db.create_session("session-1", setup_profile)
-        db.create_session("session-2", setup_profile)
-        db.create_tag("tag-1", "Important", "#ff0000")
-        db.add_session_tag("session-1", "tag-1")
-
-        result = db.get_sessions_by_tag("tag-1")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "session-1"
-
-
-# =============================================================================
-# Database Maintenance Tests
-# =============================================================================
-
-@pytest.mark.skip(
-    reason="run_database_maintenance was migrated to Postgres semantics "
-    "(ANALYZE + VACUUM ANALYZE outside a txn, notifications retention). These "
-    "tests assert the old SQLite contract (wal_checkpoint/optimize/PRAGMA "
-    "checkpointed_pages) and VACUUM ANALYZE isn't valid sqlite. No "
-    "real-Postgres integration suite exists yet — verify maintenance manually "
-    "against a Postgres instance."
-)
-class TestRunDatabaseMaintenance:
-    """Test run_database_maintenance cleanup and results."""
-
-    @pytest.fixture
-    def setup_log_tables(self, mock_db, setup_profile):
-        """Add missing log tables and seed old + recent rows for maintenance tests."""
-        cursor = mock_db.cursor()
-
-        # Create a session for FK references
-        db.create_session("s1", setup_profile)
-
-        # connector_event_log requires connectors table for FK
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connectors (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                connector_type TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connector_event_log (
-                id TEXT PRIMARY KEY,
-                connector_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                direction TEXT NOT NULL DEFAULT 'outbound',
-                payload JSON,
-                status TEXT DEFAULT 'pending',
-                error TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
-            )
-        """)
-        # Insert a connector for FK reference
-        cursor.execute(
-            "INSERT INTO connectors (id, name, connector_type) VALUES (?, ?, ?)",
-            ("conn-1", "Test Connector", "slack"),
-        )
-        mock_db.commit()
-
-        now = datetime.now(timezone.utc)
-        old_ts = (now - timedelta(days=10)).isoformat()
-        recent_ts = (now - timedelta(days=1)).isoformat()
-
-        # usage_log: old + recent
-        cursor.execute(
-            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("s1", "claude-3", 100, 200, 0.01, 500, old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("s1", "claude-3", 150, 250, 0.02, 600, recent_ts),
-        )
-
-        # audit_log: old + recent
-        cursor.execute(
-            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
-            ("audit-old", "login", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
-            ("audit-new", "login", recent_ts),
-        )
-
-        # sync_log: old + recent (needs a session FK)
-        cursor.execute(
-            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
-            ("s1", "create", "message", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
-            ("s1", "create", "message", recent_ts),
-        )
-
-        # connector_event_log: old + recent
-        cursor.execute(
-            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
-            ("evt-old", "conn-1", "message", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
-            ("evt-new", "conn-1", "message", recent_ts),
-        )
-
-        mock_db.commit()
-        return mock_db
-
-    def test_maintenance_cleans_old_rows_keeps_recent(self, setup_log_tables):
-        """run_database_maintenance should delete rows older than 7 days and keep recent ones."""
-        conn = setup_log_tables
-
-        # Verify precondition: 2 rows in each table before maintenance
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM usage_log")
-        assert cursor.fetchone()[0] == 2
-        cursor.execute("SELECT COUNT(*) FROM audit_log")
-        assert cursor.fetchone()[0] == 2
-
-        results = db.run_database_maintenance()
-
-        # Note: after maintenance, the test connection may be closed by VACUUM's
-        # conn.close() since mock_get_connection returns the same connection.
-        # We verify behavior via the results dict instead.
-
-        # Should return a dict with keys for each step
-        assert isinstance(results, dict)
-        assert "wal_checkpoint" in results
-        assert "optimize" in results
-        assert "vacuum" in results
-
-        # usage_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_usage_log"] == 1
-
-        # audit_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_audit_log"] == 1
-
-        # sync_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_sync_log"] == 1
-
-        # connector_event_log: 1 old deleted, 1 recent kept
-        assert results["cleaned_connector_event_log"] == 1
-
-    def test_maintenance_returns_wal_checkpoint_info(self, setup_log_tables):
-        """run_database_maintenance should return WAL checkpoint details."""
-        results = db.run_database_maintenance()
-
-        wal = results["wal_checkpoint"]
-        # In-memory DB won't use WAL mode, but the PRAGMA still returns a row
-        assert isinstance(wal, dict)
-        assert "busy" in wal
-        assert "log_pages" in wal
-        assert "checkpointed_pages" in wal
-
-    def test_maintenance_with_no_old_rows(self, mock_db):
-        """run_database_maintenance should report 0 cleaned when no old rows exist."""
-        # Add tables that are missing from test schema
-        cursor = mock_db.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connectors (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                connector_type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connector_event_log (
-                id TEXT PRIMARY KEY,
-                connector_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
-            )
-        """)
-        mock_db.commit()
-
-        results = db.run_database_maintenance()
-
-        assert results["cleaned_usage_log"] == 0
-        assert results["cleaned_audit_log"] == 0
-        assert results["cleaned_sync_log"] == 0
-        assert results["cleaned_connector_event_log"] == 0
-        assert results["optimize"] == "ok"
-        assert results["vacuum"] == "ok"

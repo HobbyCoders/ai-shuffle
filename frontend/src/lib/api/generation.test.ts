@@ -81,7 +81,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/profile', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A Python developer profile' })
 			});
 			expect(result.status).toBe('complete');
@@ -105,7 +105,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/profile', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A Python developer profile', model: 'opus' })
 			});
 		});
@@ -127,7 +127,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/profile', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({
 					description: 'A Python developer profile',
 					model: 'sonnet',
@@ -200,7 +200,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/subagent', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A code review agent' })
 			});
 			expect(result.status).toBe('complete');
@@ -224,7 +224,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/subagent', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A code review agent', model: 'haiku' })
 			});
 		});
@@ -282,7 +282,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/continue', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({
 					generation_type: 'profile',
 					description: 'A helpful tool',
@@ -314,7 +314,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/continue', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({
 					generation_type: 'subagent',
 					description: 'A tool',
@@ -337,7 +337,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/profile/direct', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A Python developer profile' })
 			});
 			expect(result.version).toBe('1.0');
@@ -358,7 +358,7 @@ describe('AI Generation API', () => {
 			expect(fetchMock).toHaveBeenCalledWith('/api/v1/generate/subagent/direct', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
+				redirect: 'error', credentials: 'include',
 				body: JSON.stringify({ description: 'A code review agent' })
 			});
 			expect(result.version).toBe('1.0');

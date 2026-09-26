@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
     """Create hook management tools."""
-    from claude_agent_sdk import tool
+    from app.mcp.inproc import tool
     from app.db import database
     from app.db.async_database import run_sync
 
@@ -106,7 +106,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
     @tool(
         "createHook",
         "Create a new hook that triggers on specific AI Shuffle events. "
-        "Hooks can run bash commands, send webhooks, or inject messages.",
+        "Hooks can run bash commands or send webhooks.",
         {
             "type": "object",
             "properties": {
@@ -119,7 +119,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {
                     "type": "string",
                     "enum": VALID_HOOK_TYPES,
-                    "description": "How the hook executes: bash command, webhook POST, or message injection.",
+                    "description": "How the hook executes: bash command or webhook POST.",
                 },
                 "command": {
                     "type": "string",
@@ -127,10 +127,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "For PreToolUse: must output JSON with 'decision' (allow/block) and optional 'reason'.",
                 },
                 "url": {"type": "string", "description": "Webhook URL (webhook type only)."},
-                "message_template": {
-                    "type": "string",
-                    "description": "Message template with {{variable}} substitution (message type only).",
-                },
                 "tool_matcher": {
                     "type": "string",
                     "description": "Regex matching tool names. Required for PreToolUse/PostToolUse events (e.g., 'Bash', 'Write|Edit').",
@@ -165,8 +161,8 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("Bash hooks require a 'command' field.")
         if hook_type == "webhook" and not args.get("url"):
             return _error("Webhook hooks require a 'url' field.")
-        if hook_type == "message" and not args.get("message_template"):
-            return _error("Message hooks require a 'message_template' field.")
+        if hook_type not in VALID_HOOK_TYPES:
+            return _error(f"Invalid hook_type '{hook_type}'. Valid: {VALID_HOOK_TYPES}")
 
         # PreToolUse/PostToolUse should have a tool_matcher
         if event in ("PreToolUse", "PostToolUse") and not args.get("tool_matcher"):
@@ -198,7 +194,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             url=args.get("url"),
             enabled=args.get("enabled", True),
             tool_matcher=args.get("tool_matcher"),
-            message_template=args.get("message_template"),
         )
 
         if not hook:
@@ -235,7 +230,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {"type": "string", "enum": VALID_HOOK_TYPES},
                 "command": {"type": "string"},
                 "url": {"type": "string"},
-                "message_template": {"type": "string"},
                 "tool_matcher": {"type": "string"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds."},
                 "enabled": {"type": "boolean"},
@@ -267,7 +261,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             # Build update kwargs — only include provided fields
             kwargs: Dict[str, Any] = {}
             for field in ("name", "event", "hook_type", "command", "url",
-                          "message_template", "tool_matcher", "enabled"):
+                          "tool_matcher", "enabled"):
                 if field in args and args[field] is not None:
                     kwargs[field] = args[field]
 

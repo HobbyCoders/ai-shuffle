@@ -13,7 +13,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from app.core import application_updates as policy
-from docker.application_updates import ContainerUpdates, UpdateError, build_environment, extract_source, verify_manifest
+from docker.application_updates import (ContainerUpdates, UpdateError, build_environment, extract_source,
+                                        tree_lines, verify_manifest)
 
 A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
@@ -24,18 +25,23 @@ def feed(tmp_path, monkeypatch):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
     responses, requests = {}, []
-    def publish(revision=B, sequence=2, runtime=RUNTIME, entries=None):
+    def publish(revision=B, sequence=2, runtime=RUNTIME, entries=None, channel="stable", tree=None, **fields):
         output = io.BytesIO()
+        entries = entries or {f"ai-shuffle-{revision}/source.txt": "content"}
         with zipfile.ZipFile(output, "w") as archive:
-            for name, value in (entries or {f"ai-shuffle-{revision}/source.txt": "content"}).items():
+            for name, value in entries.items():
                 archive.writestr(name, value)
         archive = output.getvalue()
-        payload = json.dumps({"format": 2, "revision": revision, "sequence": sequence,
-                              "sha256": hashlib.sha256(archive).hexdigest(), "size": len(archive),
-                              "container": {"sequence": sequence, "runtime": runtime}}).encode()
+        files = [(name.split("/", 1)[1], hashlib.sha256(value.encode()).hexdigest())
+                 for name, value in entries.items() if not name.endswith("/")]
+        release = {"format": 2, "revision": revision, "sequence": sequence,
+                   "sha256": hashlib.sha256(archive).hexdigest(), "size": len(archive),
+                   "container": {"sequence": sequence, "runtime": runtime},
+                   "channel": channel, "tree": tree or hashlib.sha256(tree_lines(files)).hexdigest(), **fields}
+        payload = json.dumps({key: value for key, value in release.items() if value is not None}).encode()
         envelope = json.dumps({"payload": base64.b64encode(payload).decode(),
                                "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
-        responses["/v1/desktop/manifest"] = envelope
+        responses["/v1/desktop/manifest" + ("" if channel == "stable" else "/edge")] = envelope
         responses["/v1/desktop/sources/" + revision] = archive
         return envelope
     def handler(request):
@@ -46,7 +52,7 @@ def feed(tmp_path, monkeypatch):
     enabled = [True]
     image = {"revision": A, "sequence": 1, "runtime": RUNTIME}
     updater = ContainerUpdates(tmp_path / "updates", image, public, lambda: enabled[0], lambda action: {})
-    def build(directory, revision):
+    def build(directory, revision, version=None):
         assert (directory / "source/source.txt").read_text() == "content"
         for name in ("venv/bin/python", "source/app/static/index.html", "complete"):
             path = directory / name
@@ -74,6 +80,43 @@ def test_signed_download_stages_then_explicit_restart_and_health_commit(feed):
     offline = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {})
     assert offline.launch({})[1] == cwd
     assert all("authorization" not in request.headers for request in requests)
+
+
+def test_lease_goes_to_hub_manifest_and_archive_requests_only(feed):
+    updater, publish, _, requests, _ = feed
+    publish()
+    calls = []
+    def lease():
+        calls.append(1)
+        return "eyJsZWFzZSI6MX0"
+    updater.lease = lease
+    updater.check(download=True)
+    assert [request.url.path for request in requests] == ["/v1/desktop/manifest", "/v1/desktop/sources/" + B]
+    for request in requests:
+        assert request.url.scheme == "https" and request.url.host == "hobbycoders.com"
+        assert request.headers["x-shuffle-lease"] == "eyJsZWFzZSI6MX0"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("value", [None, "", "not a lease!", "x" * 4097, 42, RuntimeError("app not ready")])
+def test_missing_or_bad_lease_sends_no_header(feed, value):
+    updater, publish, _, requests, _ = feed
+    publish()
+    def lease():
+        if isinstance(value, Exception):
+            raise value
+        return value
+    updater.lease = lease
+    updater.check(download=True)
+    assert updater.state == {"pending": B}
+    assert requests and all("x-shuffle-lease" not in request.headers for request in requests)
+
+
+def test_no_lease_provider_sends_no_header(feed):
+    updater, publish, _, requests, _ = feed
+    publish()
+    updater.check()
+    assert requests and "x-shuffle-lease" not in requests[0].headers
 
 
 def test_disabled_before_download_and_after_staging_blocks_activation(feed):
@@ -252,8 +295,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         "from docker.application_updates import ContainerUpdates, UpdateError\n"
     )
     monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
-    def factory(root, image, public_key, allowed, lifecycle):
-        updater.allowed, updater.lifecycle = allowed, lifecycle
+    def factory(root, image, public_key, allowed, lifecycle, channel, lease):
+        assert channel == "stable", "customers follow signed releases unless UPDATE_CHANNEL says otherwise"
+        updater.allowed, updater.lifecycle, updater.lease = allowed, lifecycle, lease
         return updater
     monkeypatch.setattr(update_module, "ContainerUpdates", factory)
     monkeypatch.setattr(startup, "is_shutting_down", False)
@@ -286,6 +330,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
             if action == "update-policy":
                 internal.require_desktop(local_request)
                 return httpx.Response(200, json={"allow_updates": enabled[0]})
+            if action == "source-lease":
+                internal.require_desktop(local_request)
+                return httpx.Response(200, json={"lease": "bGVhc2U"})
             if action == "active-sessions":
                 if failure == "preflight-timeout":
                     raise httpx.ReadTimeout("synthetic preflight timeout", request=request)
@@ -367,6 +414,9 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         status = Mock(wraps=updater.publish)
         monkeypatch.setattr(updater, "publish", status)
         result = supervisor.run(Settings(_env_file=None), "run")
+        # The supervisor hands the updater the app's lease for the hub feed,
+        # read with the lifecycle token from /internal/desktop/source-lease.
+        assert updater.lease() == "bGVhc2U" and actions[-1] == "source-lease"
 
         assert result == (0 if safe or failure == "none" else 1)
         if safe:
@@ -394,3 +444,94 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         else:
             spawn.assert_called_once()
             assert updater.state == {"pending": B}
+
+
+def test_only_a_signed_release_for_the_configured_channel_is_offered(feed):
+    updater, publish, _, requests, responses = feed
+    # A hub serving an edge build at the stable address cannot relabel it.
+    responses["/v1/desktop/manifest"] = publish(channel="edge", version="0.8.18-dev.43+g3667297")
+    with pytest.raises(UpdateError, match="signed stable release"):
+        updater.check(download=True)
+    assert updater.state == {} and [r.url.path for r in requests] == ["/v1/desktop/manifest"]
+    edge = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, channel="edge")
+    edge.build = updater.build
+    edge.check(download=True)
+    assert requests[-2].url.path == "/v1/desktop/manifest/edge" and edge.state == {"pending": B}
+    # Switching the worker back to stable never activates the staged edge build.
+    stable = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {})
+    assert stable.state == {}
+    with pytest.raises(UpdateError, match="Unknown update channel"):
+        ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, channel="beta")
+
+
+@pytest.mark.parametrize("field, value", [("channel", "nightly"), ("tree", "short"),
+                                          ("version", "latest; rm"), ("notes", "x" * 4001)])
+def test_signed_manifest_with_malformed_release_fields_is_refused(feed, field, value):
+    updater, publish, _, _, _ = feed
+    with pytest.raises(UpdateError, match="Invalid or unsigned"):
+        verify_manifest(publish(**{field: value}), updater.public_key)
+
+
+def test_archive_that_differs_from_the_signed_tree_is_never_built(feed, monkeypatch):
+    updater, publish, _, _, _ = feed
+    publish(tree="0" * 64)
+    built = []
+    monkeypatch.setattr(updater, "build", lambda *args: built.append(args))
+    with pytest.raises(UpdateError, match="do not match the signed release"):
+        updater.check(download=True)
+    assert built == [] and updater.state == {} and not updater.directory(B).exists()
+
+
+def test_staged_tree_is_reverified_before_every_launch(feed):
+    updater, publish, _, _, _ = feed
+    publish(version="1.2.3", notes="Faster startup.")
+    updater.check(download=True)
+    _command, _cwd, env = updater.launch({}, activate=True)
+    assert env["APP_VERSION"] == "1.2.3"
+    source = updater.directory(B) / "source/source.txt"
+    source.write_text("backdoor")
+    with pytest.raises(UpdateError, match="changed after download"):
+        updater.launch({}, activate=True)
+    source.write_text("content")
+    listing = updater.directory(B) / "tree.txt"
+    listing.write_bytes(listing.read_bytes().replace(b"source.txt", b"sourcx.txt"))
+    with pytest.raises(UpdateError, match="listing does not match"):
+        updater.launch({}, activate=True)
+    listing.unlink()
+    with pytest.raises(UpdateError, match="listing is missing"):
+        updater.launch({}, activate=True)
+
+
+def test_release_name_and_notes_reach_the_status(feed):
+    updater, publish, _, _, _ = feed
+    publish(version="1.2.3", notes="Faster startup.")
+    updater.check()
+    status = json.loads((updater.root / "status.json").read_text())
+    assert status["phase"] == "available" and status["release"] == "1.2.3"
+    assert status["notes"] == "Faster startup." and status["channel"] == "stable"
+    updater.check(download=True)
+    reopened = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {})
+    status = json.loads((reopened.root / "status.json").read_text())
+    assert status["phase"] == "ready" and status["notes"] == "Faster startup."
+
+
+def test_published_tree_digest_matches_what_the_updater_extracts(tmp_path):
+    import subprocess
+    from scripts import source_archive
+    repo = tmp_path / "repo"
+    for name, content in {"app/main.py": "print(1)", "fluid/fluid/__init__.py": "", "frontend/package.json": "{}",
+                          "requirements.lock": "x", "requirements-native.lock": "x",
+                          "docs/reviews/secret.md": "internal"}.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(content)
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    run("add", ".")
+    run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x")
+    revision = run("rev-parse", "HEAD")
+    result = source_archive.build(revision, tmp_path / "source.zip", repo)
+    files = extract_source(tmp_path / "source.zip", tmp_path / "source", revision)
+    assert hashlib.sha256(tree_lines(files)).hexdigest() == result["tree"]
+    assert not (tmp_path / "source/docs/reviews").exists()

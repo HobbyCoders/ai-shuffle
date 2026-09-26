@@ -16,31 +16,19 @@ Tests cover:
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from app.core.slash_commands import (
     SlashCommand,
     parse_frontmatter,
     parse_command_file,
-    discover_commands,
     _scan_commands_directory,
     get_command_by_name,
     is_slash_command,
     parse_command_input,
     is_interactive_command,
-    get_interactive_command_info,
-    is_rest_api_command,
-    get_rest_api_command_info,
-    is_sdk_builtin_command,
-    get_sdk_builtin_command_info,
-    discover_plugin_commands,
-    _parse_skill_file,
-    _scan_skills_directory,
-    discover_plugin_skills,
-    discover_skills,
     get_all_commands,
     INTERACTIVE_COMMANDS,
-    REST_API_COMMANDS,
     SDK_BUILTIN_COMMANDS,
 )
 
@@ -488,45 +476,6 @@ Full content""")
 # Command Discovery Tests
 # =============================================================================
 
-class TestDiscoverCommands:
-    """Test command discovery from directories."""
-
-    def test_discover_commands_from_project(self):
-        """Should discover commands from .claude/commands/."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            working_dir = Path(tmpdir)
-            commands_dir = working_dir / ".claude" / "commands"
-            commands_dir.mkdir(parents=True)
-
-            (commands_dir / "fix.md").write_text("Fix command")
-            (commands_dir / "review.md").write_text("Review command")
-
-            result = discover_commands(str(working_dir))
-
-            assert len(result) == 2
-            names = [cmd.name for cmd in result]
-            assert "fix" in names
-            assert "review" in names
-
-    def test_discover_commands_no_commands_dir(self):
-        """Should return empty list when no commands directory."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = discover_commands(tmpdir)
-
-            assert result == []
-
-    def test_discover_commands_empty_dir(self):
-        """Should return empty list for empty commands directory."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            working_dir = Path(tmpdir)
-            commands_dir = working_dir / ".claude" / "commands"
-            commands_dir.mkdir(parents=True)
-
-            result = discover_commands(str(working_dir))
-
-            assert result == []
-
-
 class TestScanCommandsDirectory:
     """Test recursive command directory scanning."""
 
@@ -778,241 +727,6 @@ class TestInteractiveCommands:
         assert is_interactive_command("unknown") is False
         assert is_interactive_command("fix") is False
 
-    def test_get_interactive_command_info_resume(self):
-        """Should return info for resume command."""
-        info = get_interactive_command_info("resume")
-
-        assert info is not None
-        assert "description" in info
-        assert info["requires_cli"] is True
-
-    def test_get_interactive_command_info_with_slash(self):
-        """Should handle command with leading slash."""
-        info = get_interactive_command_info("/resume")
-
-        assert info is not None
-
-    def test_get_interactive_command_info_unknown(self):
-        """Should return None for unknown command."""
-        info = get_interactive_command_info("unknown")
-
-        assert info is None
-
-
-# =============================================================================
-# REST API Command Tests
-# =============================================================================
-
-class TestRestApiCommands:
-    """Test REST API command detection."""
-
-    def test_is_rest_api_command_rewind(self):
-        """Should detect rewind as REST API command."""
-        assert is_rest_api_command("rewind") is True
-        assert is_rest_api_command("/rewind") is True
-
-    def test_is_rest_api_command_unknown(self):
-        """Should return False for unknown commands."""
-        assert is_rest_api_command("unknown") is False
-        assert is_rest_api_command("fix") is False
-
-    def test_get_rest_api_command_info_rewind(self):
-        """Should return info for rewind command."""
-        info = get_rest_api_command_info("rewind")
-
-        assert info is not None
-        assert "description" in info
-        assert "api_endpoint" in info
-        assert info["requires_session"] is True
-        assert info["method"] == "direct_jsonl"
-
-    def test_get_rest_api_command_info_with_slash(self):
-        """Should handle command with leading slash."""
-        info = get_rest_api_command_info("/rewind")
-
-        assert info is not None
-
-    def test_get_rest_api_command_info_unknown(self):
-        """Should return None for unknown command."""
-        info = get_rest_api_command_info("unknown")
-
-        assert info is None
-
-
-# =============================================================================
-# SDK Built-in Command Tests
-# =============================================================================
-
-class TestSdkBuiltinCommands:
-    """Test SDK built-in command detection."""
-
-    def test_is_sdk_builtin_command_compact(self):
-        """Should detect compact as SDK builtin."""
-        assert is_sdk_builtin_command("compact") is True
-        assert is_sdk_builtin_command("/compact") is True
-
-    def test_is_sdk_builtin_command_new_commands(self):
-        """Should detect all new SDK built-in commands."""
-        new_commands = [
-            "cost", "model", "review", "doctor", "init",
-            "memory", "add-dir", "output-style", "todos", "export",
-            "pr-comments", "stats", "insights", "sandbox",
-            "security-review", "rename", "release-notes", "status",
-            "bug", "bashes",
-        ]
-        for cmd in new_commands:
-            assert is_sdk_builtin_command(cmd) is True, f"/{cmd} not detected"
-            assert is_sdk_builtin_command(f"/{cmd}") is True, f"/{cmd} (with slash) not detected"
-
-    def test_is_sdk_builtin_command_unknown(self):
-        """Should return False for unknown commands."""
-        assert is_sdk_builtin_command("unknown") is False
-        assert is_sdk_builtin_command("fix") is False
-
-    def test_get_sdk_builtin_command_info_compact(self):
-        """Should return info for compact command."""
-        info = get_sdk_builtin_command_info("compact")
-
-        assert info is not None
-        assert "description" in info
-        assert info["type"] == "sdk_builtin"
-
-    def test_get_sdk_builtin_command_info_with_slash(self):
-        """Should handle command with leading slash."""
-        info = get_sdk_builtin_command_info("/compact")
-
-        assert info is not None
-
-    def test_get_sdk_builtin_command_info_unknown(self):
-        """Should return None for unknown command."""
-        info = get_sdk_builtin_command_info("unknown")
-
-        assert info is None
-
-
-# =============================================================================
-# Plugin Command Discovery Tests
-# =============================================================================
-
-class TestDiscoverPluginCommands:
-    """Test plugin command discovery."""
-
-    def test_discover_plugin_commands_with_plugins(self):
-        """Should discover commands from enabled plugins."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create mock plugin structure
-            plugin_dir = Path(tmpdir) / "my-plugin"
-            commands_dir = plugin_dir / "commands"
-            commands_dir.mkdir(parents=True)
-
-            (commands_dir / "action.md").write_text("""---
-description: Plugin action
----
-Do something""")
-
-            mock_plugin = MagicMock()
-            mock_plugin.id = "my-plugin-id"
-            mock_plugin.name = "my-plugin"
-            mock_plugin.has_commands = True
-
-            mock_details = MagicMock()
-            mock_details.install_path = str(plugin_dir)
-
-            mock_service = MagicMock()
-            mock_service.get_installed_plugins.return_value = [mock_plugin]
-            mock_service.get_enabled_plugins.return_value = {"my-plugin-id": True}
-            mock_service.get_plugin_details.return_value = mock_details
-
-            with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-                result = discover_plugin_commands()
-
-                assert len(result) == 1
-                assert result[0]["name"] == "my-plugin:action"
-                assert result[0]["display"] == "/my-plugin:action"
-                assert result[0]["type"] == "plugin"
-                assert result[0]["source"] == "my-plugin-id"
-
-    def test_discover_plugin_commands_disabled_plugin(self):
-        """Should skip disabled plugins."""
-        mock_plugin = MagicMock()
-        mock_plugin.id = "disabled-plugin"
-        mock_plugin.name = "disabled"
-        mock_plugin.has_commands = True
-
-        mock_service = MagicMock()
-        mock_service.get_installed_plugins.return_value = [mock_plugin]
-        mock_service.get_enabled_plugins.return_value = {"disabled-plugin": False}
-
-        with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-            result = discover_plugin_commands()
-
-            assert result == []
-
-    def test_discover_plugin_commands_no_commands(self):
-        """Should skip plugins without commands."""
-        mock_plugin = MagicMock()
-        mock_plugin.id = "no-commands"
-        mock_plugin.name = "no-commands"
-        mock_plugin.has_commands = False
-
-        mock_service = MagicMock()
-        mock_service.get_installed_plugins.return_value = [mock_plugin]
-        mock_service.get_enabled_plugins.return_value = {"no-commands": True}
-
-        with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-            result = discover_plugin_commands()
-
-            assert result == []
-
-    def test_discover_plugin_commands_no_details(self):
-        """Should handle missing plugin details."""
-        mock_plugin = MagicMock()
-        mock_plugin.id = "missing-details"
-        mock_plugin.name = "missing"
-        mock_plugin.has_commands = True
-
-        mock_service = MagicMock()
-        mock_service.get_installed_plugins.return_value = [mock_plugin]
-        mock_service.get_enabled_plugins.return_value = {"missing-details": True}
-        mock_service.get_plugin_details.return_value = None
-
-        with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-            result = discover_plugin_commands()
-
-            assert result == []
-
-    def test_discover_plugin_commands_no_commands_dir(self):
-        """Should handle missing commands directory."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = Path(tmpdir) / "no-cmd-dir"
-            plugin_dir.mkdir()
-            # No commands directory created
-
-            mock_plugin = MagicMock()
-            mock_plugin.id = "no-cmd-dir"
-            mock_plugin.name = "no-cmd-dir"
-            mock_plugin.has_commands = True
-
-            mock_details = MagicMock()
-            mock_details.install_path = str(plugin_dir)
-
-            mock_service = MagicMock()
-            mock_service.get_installed_plugins.return_value = [mock_plugin]
-            mock_service.get_enabled_plugins.return_value = {"no-cmd-dir": True}
-            mock_service.get_plugin_details.return_value = mock_details
-
-            with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-                result = discover_plugin_commands()
-
-                assert result == []
-
-    def test_discover_plugin_commands_error_handling(self):
-        """Should handle errors gracefully."""
-        with patch("app.core.plugin_service.get_plugin_service", side_effect=Exception("Plugin error")):
-            result = discover_plugin_commands()
-
-            assert result == []
-
 
 # =============================================================================
 # Get All Commands Tests
@@ -1034,35 +748,25 @@ argument-hint: <arg>
 ---
 Custom content""")
 
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(str(working_dir))
+            result = get_all_commands(str(working_dir))
 
-                custom_cmd = next((c for c in result if c["name"] == "custom"), None)
-                assert custom_cmd is not None
-                assert custom_cmd["display"] == "/custom"
-                assert custom_cmd["type"] == "custom"
-                assert custom_cmd["argument_hint"] == "<arg>"
+            custom_cmd = next((c for c in result if c["name"] == "custom"), None)
+            assert custom_cmd is not None
+            assert custom_cmd["display"] == "/custom"
+            assert custom_cmd["type"] == "custom"
+            assert custom_cmd["argument_hint"] == "<arg>"
 
     def test_get_all_commands_includes_sdk_builtin(self):
         """Should include SDK built-in commands."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(tmpdir)
+            result = get_all_commands(tmpdir)
 
-                compact_cmd = next((c for c in result if c["name"] == "compact"), None)
-                assert compact_cmd is not None
-                assert compact_cmd["type"] == "sdk_builtin"
+            compact_cmd = next((c for c in result if c["name"] == "compact"), None)
+            assert compact_cmd is not None
+            assert compact_cmd["type"] == "sdk_builtin"
 
     def test_get_all_commands_includes_plugins(self):
         """Should include plugin commands."""
-        plugin_cmd = {
-            "name": "plugin:action",
-            "display": "/plugin:action",
-            "description": "Plugin action",
-            "argument_hint": None,
-            "type": "plugin",
-            "source": "plugin-id"
-        }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             command = SlashCommand(name="plugin:action", description="Plugin action",
@@ -1085,29 +789,26 @@ Custom content""")
             (commands_dir / "zebra.md").write_text("Z command")
             (commands_dir / "alpha.md").write_text("A command")
 
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(str(working_dir))
+            result = get_all_commands(str(working_dir))
 
-                names = [c["name"] for c in result]
-                assert names == sorted(names)
+            names = [c["name"] for c in result]
+            assert names == sorted(names)
 
     def test_get_all_commands_excludes_interactive(self):
         """Should NOT include interactive commands (/resume)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(tmpdir)
+            result = get_all_commands(tmpdir)
 
-                resume_cmd = next((c for c in result if c["name"] == "resume"), None)
-                assert resume_cmd is None
+            resume_cmd = next((c for c in result if c["name"] == "resume"), None)
+            assert resume_cmd is None
 
     def test_get_all_commands_excludes_rest_api(self):
         """Should NOT include REST API commands (/rewind)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(tmpdir)
+            result = get_all_commands(tmpdir)
 
-                rewind_cmd = next((c for c in result if c["name"] == "rewind"), None)
-                assert rewind_cmd is None
+            rewind_cmd = next((c for c in result if c["name"] == "rewind"), None)
+            assert rewind_cmd is None
 
 
 # =============================================================================
@@ -1122,13 +823,6 @@ class TestCommandConstants:
         assert "resume" in INTERACTIVE_COMMANDS
         assert "description" in INTERACTIVE_COMMANDS["resume"]
         assert "requires_cli" in INTERACTIVE_COMMANDS["resume"]
-
-    def test_rest_api_commands_structure(self):
-        """REST_API_COMMANDS should have correct structure."""
-        assert "rewind" in REST_API_COMMANDS
-        assert "description" in REST_API_COMMANDS["rewind"]
-        assert "api_endpoint" in REST_API_COMMANDS["rewind"]
-        assert "requires_session" in REST_API_COMMANDS["rewind"]
 
     def test_sdk_builtin_commands_structure(self):
         """SDK_BUILTIN_COMMANDS should have correct structure."""
@@ -1164,361 +858,21 @@ class TestCommandConstants:
     def test_sdk_builtin_argument_hints_in_get_all_commands(self):
         """get_all_commands should pass through argument_hint from SDK builtins."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
-                result = get_all_commands(tmpdir)
+            result = get_all_commands(tmpdir)
 
-                model_cmd = next((c for c in result if c["name"] == "model"), None)
-                # Model selection belongs to the app's controls; the CLI's
-                # terminal-only settings command must not be advertised here.
-                assert model_cmd is None
+            model_cmd = next((c for c in result if c["name"] == "model"), None)
+            # Model selection belongs to the app's controls; the CLI's
+            # terminal-only settings command must not be advertised here.
+            assert model_cmd is None
 
-                compact_cmd = next((c for c in result if c["name"] == "compact"), None)
-                assert compact_cmd is not None
-                assert compact_cmd["argument_hint"] is None
-
-
-# =============================================================================
-# User-Global Command Discovery Tests
-# =============================================================================
-
-class TestDiscoverUserGlobalCommands:
-    """Test discovery of user-global commands from ~/.claude/commands/."""
-
-    def test_discover_commands_includes_user_global(self):
-        """Should include commands from ~/.claude/commands/."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            user_commands_dir = Path(home_dir) / "commands"
-            user_commands_dir.mkdir(parents=True)
-            (user_commands_dir / "global-fix.md").write_text("Global fix command")
-
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)):
-                result = discover_commands(project_dir)
-
-            names = [cmd.name for cmd in result]
-            assert "global-fix" in names
-            user_cmd = next(c for c in result if c.name == "global-fix")
-            assert user_cmd.source == "user"
-
-    def test_discover_commands_project_shadows_user(self):
-        """A project command should shadow a same-named user-global command."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            project_commands_dir = Path(project_dir) / ".claude" / "commands"
-            project_commands_dir.mkdir(parents=True)
-            (project_commands_dir / "review.md").write_text("Project review")
-
-            user_commands_dir = Path(home_dir) / "commands"
-            user_commands_dir.mkdir(parents=True)
-            (user_commands_dir / "review.md").write_text("User review")
-
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)):
-                result = discover_commands(project_dir)
-
-            review_cmds = [c for c in result if c.name == "review"]
-            assert len(review_cmds) == 1
-            assert review_cmds[0].source == "project"
-
-    def test_discover_commands_no_user_dir(self):
-        """Should not fail when user commands dir is absent."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            # home_dir has no "commands" subdir
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)):
-                result = discover_commands(project_dir)
-
-            assert result == []
+            compact_cmd = next((c for c in result if c["name"] == "compact"), None)
+            assert compact_cmd is not None
+            assert compact_cmd["argument_hint"] is None
 
 
 # =============================================================================
-# Skill Parsing Tests
+# Skill Listing Tests
 # =============================================================================
-
-class TestParseSkillFile:
-    """Test parsing of SKILL.md files into command-style dicts."""
-
-    def test_parse_skill_file_basic(self):
-        """Should parse a SKILL.md with frontmatter description."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skill_md = Path(tmpdir) / "SKILL.md"
-            skill_md.write_text("""---
-name: my-skill
-description: Does a useful thing
----
-Skill body here.""")
-
-            result = _parse_skill_file(skill_md, "my-skill", "user")
-
-            assert result is not None
-            assert result["name"] == "my-skill"
-            assert result["display"] == "/my-skill"
-            assert result["description"] == "Does a useful thing"
-            assert result["type"] == "skill"
-            assert result["source"] == "user"
-
-    def test_parse_skill_file_uses_folder_name_not_frontmatter_name(self):
-        """Invokable name should be the folder name, not the frontmatter name."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skill_md = Path(tmpdir) / "SKILL.md"
-            skill_md.write_text("""---
-name: Some Display Name
-description: Desc
----
-Body""")
-
-            result = _parse_skill_file(skill_md, "folder-slug", "project")
-
-            assert result is not None
-            assert result["name"] == "folder-slug"
-            assert result["display"] == "/folder-slug"
-
-    def test_parse_skill_file_collapses_multiline_description(self):
-        """Folded multi-line YAML descriptions should collapse to one line."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skill_md = Path(tmpdir) / "SKILL.md"
-            skill_md.write_text("""---
-description: >
-  This is a long description
-  that spans multiple lines
-  in the YAML frontmatter.
----
-Body""")
-
-            result = _parse_skill_file(skill_md, "wrapped", "user")
-
-            assert result is not None
-            assert "\n" not in result["description"]
-            assert result["description"] == (
-                "This is a long description that spans multiple lines "
-                "in the YAML frontmatter."
-            )
-
-    def test_parse_skill_file_falls_back_to_body(self):
-        """Should derive a description from the body when frontmatter lacks one."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skill_md = Path(tmpdir) / "SKILL.md"
-            skill_md.write_text("# First heading line\nMore body.")
-
-            result = _parse_skill_file(skill_md, "no-desc", "user")
-
-            assert result is not None
-            assert result["description"] == "First heading line"
-
-    def test_parse_skill_file_namespaced(self):
-        """Plugin skills should be namespaced plugin-name:skill-name."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skill_md = Path(tmpdir) / "SKILL.md"
-            skill_md.write_text("""---
-description: Plugin skill
----
-Body""")
-
-            result = _parse_skill_file(skill_md, "deploy", "plugin-id", namespace="my-plugin")
-
-            assert result is not None
-            assert result["name"] == "my-plugin:deploy"
-            assert result["display"] == "/my-plugin:deploy"
-
-    def test_parse_skill_file_read_error(self):
-        """Should return None when the file cannot be read."""
-        # Point at a directory so read_text raises
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = _parse_skill_file(Path(tmpdir), "broken", "user")
-            assert result is None
-
-
-class TestScanSkillsDirectory:
-    """Test scanning of a skills directory for SKILL.md folders."""
-
-    def test_scan_skills_directory_finds_skills(self):
-        """Should find <name>/SKILL.md entries."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir)
-            for name in ("alpha", "beta"):
-                d = skills_dir / name
-                d.mkdir()
-                (d / "SKILL.md").write_text(f"---\ndescription: {name} skill\n---\nBody")
-
-            result = _scan_skills_directory(skills_dir, "user")
-
-            names = sorted(s["name"] for s in result)
-            assert names == ["alpha", "beta"]
-
-    def test_scan_skills_directory_skips_folders_without_skill_md(self):
-        """Folders without a SKILL.md should be ignored."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir)
-            (skills_dir / "valid").mkdir()
-            (skills_dir / "valid" / "SKILL.md").write_text("---\ndescription: ok\n---\nBody")
-            (skills_dir / "empty").mkdir()  # no SKILL.md
-
-            result = _scan_skills_directory(skills_dir, "user")
-
-            assert len(result) == 1
-            assert result[0]["name"] == "valid"
-
-    def test_scan_skills_directory_skips_hidden(self):
-        """Folders starting with a dot should be skipped."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir)
-            hidden = skills_dir / ".hidden"
-            hidden.mkdir()
-            (hidden / "SKILL.md").write_text("---\ndescription: hidden\n---\nBody")
-
-            result = _scan_skills_directory(skills_dir, "user")
-
-            assert result == []
-
-    def test_scan_skills_directory_missing(self):
-        """Should return empty list for a non-existent directory."""
-        result = _scan_skills_directory(Path("/nonexistent/skills"), "user")
-        assert result == []
-
-    def test_scan_skills_directory_permission_error(self):
-        """Should handle permission errors gracefully."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir)
-            with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
-                result = _scan_skills_directory(skills_dir, "user")
-            assert result == []
-
-
-class TestDiscoverSkills:
-    """Test aggregated skill discovery with precedence and dedup."""
-
-    def test_discover_skills_project_and_user(self):
-        """Should include both project and user skills."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            proj_skill = Path(project_dir) / ".claude" / "skills" / "proj"
-            proj_skill.mkdir(parents=True)
-            (proj_skill / "SKILL.md").write_text("---\ndescription: proj\n---\nBody")
-
-            user_skill = Path(home_dir) / "skills" / "usr"
-            user_skill.mkdir(parents=True)
-            (user_skill / "SKILL.md").write_text("---\ndescription: usr\n---\nBody")
-
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)), \
-                    patch("app.core.slash_commands.discover_plugin_skills", return_value=[]):
-                result = discover_skills(project_dir)
-
-            by_name = {s["name"]: s for s in result}
-            assert by_name["proj"]["source"] == "project"
-            assert by_name["usr"]["source"] == "user"
-
-    def test_discover_skills_project_shadows_user(self):
-        """A project skill should shadow a same-named user skill."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            proj_skill = Path(project_dir) / ".claude" / "skills" / "dupe"
-            proj_skill.mkdir(parents=True)
-            (proj_skill / "SKILL.md").write_text("---\ndescription: from project\n---\nBody")
-
-            user_skill = Path(home_dir) / "skills" / "dupe"
-            user_skill.mkdir(parents=True)
-            (user_skill / "SKILL.md").write_text("---\ndescription: from user\n---\nBody")
-
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)), \
-                    patch("app.core.slash_commands.discover_plugin_skills", return_value=[]):
-                result = discover_skills(project_dir)
-
-            dupes = [s for s in result if s["name"] == "dupe"]
-            assert len(dupes) == 1
-            assert dupes[0]["source"] == "project"
-
-    def test_discover_skills_includes_plugin_skills(self):
-        """Plugin skills (namespaced) should be appended."""
-        plugin_skill = {
-            "name": "my-plugin:thing",
-            "display": "/my-plugin:thing",
-            "description": "Plugin skill",
-            "argument_hint": None,
-            "type": "skill",
-            "source": "plugin-id",
-        }
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)), \
-                    patch("app.core.slash_commands.discover_plugin_skills", return_value=[plugin_skill]):
-                result = discover_skills(project_dir)
-
-            assert any(s["name"] == "my-plugin:thing" for s in result)
-
-    def test_discover_skills_empty(self):
-        """Should return empty list when nothing is present."""
-        with tempfile.TemporaryDirectory() as project_dir, \
-                tempfile.TemporaryDirectory() as home_dir:
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)), \
-                    patch("app.core.slash_commands.discover_plugin_skills", return_value=[]):
-                result = discover_skills(project_dir)
-            assert result == []
-
-
-class TestDiscoverPluginSkills:
-    """Test plugin skill discovery."""
-
-    def test_discover_plugin_skills_with_plugin(self):
-        """Should discover namespaced skills from an enabled plugin."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = Path(tmpdir) / "my-plugin"
-            skill_dir = plugin_dir / "skills" / "deploy"
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text("---\ndescription: Deploy skill\n---\nBody")
-
-            mock_plugin = MagicMock()
-            mock_plugin.id = "my-plugin-id"
-            mock_plugin.name = "my-plugin"
-            mock_plugin.has_skills = True
-
-            mock_details = MagicMock()
-            mock_details.install_path = str(plugin_dir)
-
-            mock_service = MagicMock()
-            mock_service.get_installed_plugins.return_value = [mock_plugin]
-            mock_service.get_enabled_plugins.return_value = {"my-plugin-id": True}
-            mock_service.get_plugin_details.return_value = mock_details
-
-            with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-                result = discover_plugin_skills()
-
-            assert len(result) == 1
-            assert result[0]["name"] == "my-plugin:deploy"
-            assert result[0]["type"] == "skill"
-            assert result[0]["source"] == "my-plugin-id"
-
-    def test_discover_plugin_skills_disabled(self):
-        """Should skip disabled plugins."""
-        mock_plugin = MagicMock()
-        mock_plugin.id = "disabled"
-        mock_plugin.name = "disabled"
-        mock_plugin.has_skills = True
-
-        mock_service = MagicMock()
-        mock_service.get_installed_plugins.return_value = [mock_plugin]
-        mock_service.get_enabled_plugins.return_value = {"disabled": False}
-
-        with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-            assert discover_plugin_skills() == []
-
-    def test_discover_plugin_skills_no_skills_flag(self):
-        """Should skip plugins without has_skills."""
-        mock_plugin = MagicMock()
-        mock_plugin.id = "no-skills"
-        mock_plugin.name = "no-skills"
-        mock_plugin.has_skills = False
-
-        mock_service = MagicMock()
-        mock_service.get_installed_plugins.return_value = [mock_plugin]
-        mock_service.get_enabled_plugins.return_value = {"no-skills": True}
-
-        with patch("app.core.plugin_service.get_plugin_service", return_value=mock_service):
-            assert discover_plugin_skills() == []
-
-    def test_discover_plugin_skills_error_handling(self):
-        """Should handle errors gracefully."""
-        with patch("app.core.plugin_service.get_plugin_service", side_effect=Exception("boom")):
-            assert discover_plugin_skills() == []
-
 
 class TestGetAllCommandsIncludesSkills:
     """Test that get_all_commands surfaces skills."""
@@ -1531,9 +885,7 @@ class TestGetAllCommandsIncludesSkills:
             proj_skill.mkdir(parents=True)
             (proj_skill / "SKILL.md").write_text("---\ndescription: A skill\n---\nBody")
 
-            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)), \
-                    patch("app.core.slash_commands.discover_plugin_commands", return_value=[]), \
-                    patch("app.core.slash_commands.discover_plugin_skills", return_value=[]):
+            with patch("app.core.plugin_models._get_claude_dir", return_value=Path(home_dir)):
                 result = get_all_commands(project_dir)
 
             skill_cmd = next((c for c in result if c["name"] == "my-skill"), None)

@@ -31,7 +31,6 @@
 		url: hook?.url || '',
 		secret: hook?.secret || '',
 		toolMatcher: hook?.tool_matcher || '',
-		messageTemplate: hook?.message_template || '',
 		enabled: hook?.enabled ?? true,
 	}));
 
@@ -45,7 +44,6 @@
 	let url = $state(initial.url);
 	let secret = $state(initial.secret);
 	let toolMatcher = $state(initial.toolMatcher);
-	let messageTemplate = $state(initial.messageTemplate);
 	let enabled = $state(initial.enabled);
 
 	// Validation
@@ -59,7 +57,6 @@
 		if (!name.trim()) return false;
 		if (hookType === 'bash' && !command.trim()) return false;
 		if (hookType === 'webhook' && !url.trim()) return false;
-		if (hookType === 'message' && !messageTemplate.trim()) return false;
 		return true;
 	}
 
@@ -79,7 +76,6 @@
 			url: hookType === 'webhook' ? url.trim() : undefined,
 			secret: hookType === 'webhook' && secret.trim() ? secret.trim() : undefined,
 			tool_matcher: isToolEvent && toolMatcher.trim() ? toolMatcher.trim() : undefined,
-			message_template: hookType === 'message' ? messageTemplate.trim() : undefined,
 			enabled
 		};
 
@@ -98,7 +94,7 @@
 		Notification: 'Fires when Claude sends a notification'
 	};
 	let remoteChange = $state('');
-	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, messageTemplate, enabled]); }
+	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, enabled]); }
 	let baseline = snapshot();
 	export function refreshRemote(fresh: Hook | undefined, saving = false): boolean {
 		if (saving || snapshot() !== baseline) {
@@ -115,7 +111,6 @@
 		url = fresh.url || '';
 		secret = fresh.secret || '';
 		toolMatcher = fresh.tool_matcher || '';
-		messageTemplate = fresh.message_template || '';
 		enabled = fresh.enabled;
 		baseline = snapshot();
 		remoteChange = '';
@@ -165,12 +160,11 @@
 <div class="set-group">
 	<div class="set-grouphead"><h3><Zap />Action</h3><p>What this hook does when it runs.</p></div>
 	<div class="set-row">
-		<div class="lab"><h4>Type</h4><p>Run a command, call a webhook, or post a message.</p></div>
+		<div class="lab"><h4>Type</h4><p>Run a command or call a webhook.</p></div>
 		<div class="ctl">
 			<div class="seg">
 				<button type="button" class:on={hookType === 'bash'} onclick={() => hookType = 'bash'}>Bash</button>
 				<button type="button" class:on={hookType === 'webhook'} onclick={() => hookType = 'webhook'}>Webhook</button>
-				<button type="button" class:on={hookType === 'message'} onclick={() => hookType = 'message'}>Message</button>
 			</div>
 		</div>
 	</div>
@@ -200,19 +194,6 @@
 			<div class="lab"><h4>Secret</h4><p>Signs the payload via the X-Hook-Signature header. Optional.</p></div>
 			<div class="ctl"><input type="password" bind:value={secret} placeholder="HMAC secret for signature" class="inp" /></div>
 		</div>
-	{:else if hookType === 'message'}
-		<div class="set-row stack">
-			<div class="lab"><h4>Message template <span class="req">*</span></h4><p>Prompt sent as a new user message in the active chat when this hook fires.</p></div>
-			<div class="ctl">
-				<textarea
-					bind:value={messageTemplate}
-					placeholder="e.g., Summarize the work done in this session and list any remaining tasks."
-					class="fld"
-					rows="4"
-				></textarea>
-				<p class="var-hint">Available variables: <code>{'{event}'}</code> <code>{'{tool_name}'}</code> <code>{'{timestamp}'}</code> <code>{'{session_id}'}</code></p>
-			</div>
-		</div>
 	{/if}
 </div>
 
@@ -239,23 +220,5 @@
 	.req {
 		color: var(--destructive);
 		font-weight: 700;
-	}
-
-	.var-hint {
-		margin: 8px 0 0;
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 6px;
-	}
-	.var-hint code {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		padding: 1px 5px;
-		background: var(--muted);
-		border-radius: 5px;
-		color: var(--foreground);
 	}
 </style>

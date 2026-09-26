@@ -18,7 +18,8 @@ from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
 from app.core.session_modes import chat_uploads_dir
 from app.db import database
 
-from tests.api.test_chat_ws_v2_turns import _make_handler, _Patches, _sent
+from tests.api.test_chat_ws_v2_turns import _make_handler, _Patches
+from tests.helpers import sent_frames
 
 
 @pytest.fixture
@@ -53,7 +54,7 @@ async def _send(mode, upload_paths, prompt="what is in this?"):
 
 
 def _errors(handler):
-    return [f["message"] for f in _sent(handler, "error")]
+    return [f["message"] for f in sent_frames(handler, "error")]
 
 
 async def test_chat_session_with_uploads_and_no_project_is_created(
@@ -65,7 +66,7 @@ async def test_chat_session_with_uploads_and_no_project_is_created(
     handler = await _send("chat", [attachment])
 
     assert _errors(handler) == []
-    created = _sent(handler, "session_created")
+    created = sent_frames(handler, "session_created")
     assert len(created) == 1
     row = database.get_session(created[0]["session_id"])
     assert row["mode"] == "chat"
@@ -84,7 +85,7 @@ async def test_code_session_with_uploads_and_no_project_is_still_refused(
     handler = await _send("code", [attachment])
 
     assert _errors(handler) == [ATTACHMENTS_NEED_LOCAL_CHECKOUT]
-    assert _sent(handler, "session_created") == []
+    assert sent_frames(handler, "session_created") == []
 
 
 async def test_chat_session_with_a_path_outside_the_uploads_dir_is_refused(
@@ -99,7 +100,7 @@ async def test_chat_session_with_a_path_outside_the_uploads_dir_is_refused(
     handler = await _send("chat", [outside])
 
     assert _errors(handler) == [ATTACHMENTS_NEED_LOCAL_CHECKOUT]
-    assert _sent(handler, "session_created") == []
+    assert sent_frames(handler, "session_created") == []
 
 
 async def test_chat_session_refuses_when_only_one_attachment_escapes(
@@ -122,4 +123,4 @@ async def test_chat_session_without_uploads_is_unaffected(mock_db, chat_workspac
     handler = await _send("chat", [])
 
     assert _errors(handler) == []
-    assert len(_sent(handler, "session_created")) == 1
+    assert len(sent_frames(handler, "session_created")) == 1

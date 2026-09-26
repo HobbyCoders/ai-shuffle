@@ -2,7 +2,7 @@
 Unit tests for GitHub service module.
 
 Tests cover:
-- Authentication checking (is_authenticated, get_auth_info)
+- Authentication checking (is_authenticated)
 - Repository operations (get_repo_from_remote, get_repo_info)
 - Pull request operations (list_pulls, get_pull, create_pull, merge_pull, close_pull)
 - Workflow run operations (list_runs, get_run, rerun_workflow)
@@ -298,61 +298,6 @@ class TestIsAuthenticated:
             result = service.is_authenticated()
 
             assert result is False
-
-
-class TestGetAuthInfo:
-    """Test get_auth_info method."""
-
-    def test_authenticated_with_username(self, service, mock_completed_process):
-        """Should parse username from output."""
-        with patch('subprocess.run') as mock_run:
-            mock_run.return_value = mock_completed_process(
-                returncode=0,
-                stdout="Logged in to github.com account testuser (keyring)"
-            )
-
-            result = service.get_auth_info()
-
-            assert result['authenticated'] is True
-            assert result['username'] == 'testuser'
-
-    def test_authenticated_username_in_stderr(self, service, mock_completed_process):
-        """Should also check stderr for username."""
-        with patch('subprocess.run') as mock_run:
-            mock_run.return_value = mock_completed_process(
-                returncode=0,
-                stdout="",
-                stderr="Logged in to github.com account anotheruser"
-            )
-
-            result = service.get_auth_info()
-
-            assert result['authenticated'] is True
-            assert result['username'] == 'anotheruser'
-
-    def test_not_authenticated(self, service, mock_completed_process):
-        """Should return unauthenticated info when not logged in."""
-        with patch('subprocess.run') as mock_run:
-            mock_run.return_value = mock_completed_process(
-                returncode=1,
-                stderr="You are not logged in"
-            )
-
-            result = service.get_auth_info()
-
-            assert result['authenticated'] is False
-            assert result['username'] is None
-
-    def test_exception_returns_default_info(self, service):
-        """Should return default info on exception."""
-        with patch('subprocess.run') as mock_run:
-            mock_run.side_effect = Exception("Network error")
-
-            result = service.get_auth_info()
-
-            assert result['authenticated'] is False
-            assert result['username'] is None
-            assert result['scopes'] == []
 
 
 # =============================================================================

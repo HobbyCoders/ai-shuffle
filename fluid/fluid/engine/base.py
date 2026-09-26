@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any, Protocol
 
 from fluid.events.model import Event
@@ -21,6 +22,16 @@ class EngineCaps:
     # ``get_context_usage()`` returns a Claude-Code-parity context breakdown
     # (native computes it locally; delegated proxies the CLI's own numbers).
     context_usage: bool = False
+
+
+def matches_tool_pattern(name: str, patterns: Iterable[str]) -> bool:
+    """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
+
+    ``mcp__chrome-devtools__*`` is the motivating shape. The equality check is
+    kept so a name containing ``[`` (legal in MCP tool names, a character class
+    to fnmatch) still matches itself.
+    """
+    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 
 class ExecutionEngine(Protocol):

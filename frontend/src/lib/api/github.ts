@@ -26,17 +26,6 @@ export interface PullRequest {
     mergeable: boolean | null;
 }
 
-export interface WorkflowRun {
-    id: number;
-    name: string;
-    status: string;
-    conclusion: string | null;
-    branch: string;
-    event: string;
-    url: string;
-    created_at: string;
-}
-
 export interface GitHubStatus {
     authenticated: boolean;
     repo: string | null;
@@ -60,10 +49,6 @@ export interface CreatePullRequestRequest {
     base: string;
     draft?: boolean;
     session_id?: string;
-}
-
-export interface MergePullRequestRequest {
-    method?: 'merge' | 'squash' | 'rebase';
 }
 
 // ============================================================================
@@ -126,30 +111,4 @@ export async function closePullRequest(
     return api.delete<{ status: string; message: string }>(
         `${BASE}/${projectId}/github/pulls/${number}`
     ) as Promise<{ status: string; message: string }>;
-}
-
-// ============================================================================
-// GitHub Actions API
-// ============================================================================
-
-/**
- * List recent workflow runs
- */
-export async function getWorkflowRuns(
-    projectId: string,
-    limit: number = 10
-): Promise<WorkflowRun[]> {
-    return api.get<WorkflowRun[]>(`${BASE}/${projectId}/github/actions?limit=${limit}`);
-}
-
-/**
- * Re-run a workflow
- */
-export async function rerunWorkflow(
-    projectId: string,
-    runId: number
-): Promise<{ status: string; message: string }> {
-    return api.post<{ status: string; message: string }>(
-        `${BASE}/${projectId}/github/actions/${runId}/rerun`
-    );
 }

@@ -72,7 +72,8 @@ const preview: SettingsImportPreview = {
 		{
 			id: 'settings_plugins_inventory',
 			label: 'Settings and plugins',
-			description: 'Inventory only; unsupported behavior is not activated',
+			description:
+				'Hooks, enabled Claude plugins and Codex model/approval settings are copied; other settings are listed only',
 			items: [
 				{
 					id: 'inventory:mcp',
@@ -132,7 +133,7 @@ afterEach(() => {
 
 describe('SettingsImportDialog', () => {
 	it('selects providers before preview and exposes paths, provenance, inventory, and diagnostics', async () => {
-		const { getByRole, getByText, getAllByText } = render(SettingsImportDialog, {
+		const { getByRole, getByText, getAllByText, queryByText } = render(SettingsImportDialog, {
 			props: { onClose: vi.fn() }
 		});
 
@@ -149,6 +150,11 @@ describe('SettingsImportDialog', () => {
 		expect(getByText('/home/appuser/.fluid')).toBeTruthy();
 		expect(getAllByText('Codex').length).toBeGreaterThan(0);
 		expect(getByText('Settings and plugins')).toBeTruthy();
+		expect(
+			getByText(/Hooks, enabled Claude plugins and Codex model\/approval settings are copied/)
+		).toBeTruthy();
+		// The category description comes from the backend; no stale client-side note contradicts it.
+		expect(queryByText(/not activated/i)).toBeNull();
 		expect(getByText('Configured projects')).toBeTruthy();
 		expect(getByText(/Credentials and environment values were redacted/)).toBeTruthy();
 		expect(

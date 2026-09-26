@@ -13,7 +13,6 @@ import androidx.lifecycle.lifecycleScope
 import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
 import com.hobbycoders.aishuffle.data.ServerStore
-import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.presence.PresenceState
 import com.hobbycoders.aishuffle.presence.WorkerPresence
@@ -147,9 +146,6 @@ class ServerListActivity : NativeScreen() {
                     if (server.needsAccountAuthorization) {
                         menu.add("Retry authorization").setOnMenuItemClickListener { openWorker(server); true }
                     } else {
-                        menu.add("Start voice chat").setOnMenuItemClickListener {
-                            startActivity(Intent(this@ServerListActivity, VoiceCallActivity::class.java).putExtra("server_id", server.id)); true
-                        }
                         menu.add("Phone tools").setOnMenuItemClickListener {
                             startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true
                         }

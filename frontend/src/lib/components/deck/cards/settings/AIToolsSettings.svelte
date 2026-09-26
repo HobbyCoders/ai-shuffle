@@ -52,6 +52,11 @@
 		return catalogStore.catalogSize;
 	});
 
+	// Catalog tool types a browser pick can be saved to; anything else (the
+	// catalog's `generic` fallback for unmapped fal.ai categories) is shown but
+	// cannot be picked, since no tool here would use it.
+	const selectableToolTypes = AI_TOOL_CATEGORIES.flatMap(cat => cat.tools.map(tool => tool.catalogToolType));
+
 	// Map from modelSettingKey to catalog tool_type for browser selection
 	let selectedModelsForBrowser = $derived.by(() => {
 		const map: Record<string, string> = {};
@@ -160,6 +165,7 @@
 		<button
 			class="view-btn"
 			class:active={activeView === 'categories'}
+			aria-pressed={activeView === 'categories'}
 			onclick={() => (activeView = 'categories')}
 			type="button"
 		>
@@ -174,13 +180,14 @@
 		<button
 			class="view-btn"
 			class:active={activeView === 'browser'}
+			aria-pressed={activeView === 'browser'}
 			onclick={() => (activeView = 'browser')}
 			type="button"
 		>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
 			</svg>
-			Browse All{#if catalogSize > 0} ({catalogSize}){/if}
+			{catalogSize > 0 ? `Browse All (${catalogSize})` : 'Browse All'}
 		</button>
 	</div>
 
@@ -209,6 +216,7 @@
 		<div class="browser-wrapper">
 			<ModelBrowser
 				selectedModels={selectedModelsForBrowser}
+				{selectableToolTypes}
 				onselect={handleBrowserSelect}
 			/>
 		</div>

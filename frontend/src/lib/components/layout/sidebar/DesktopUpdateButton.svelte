@@ -4,7 +4,7 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 
-	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string };
+	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; workers: Worker[]; operation?: Operation | null };
 	type Receipt = { results: { device_name: string; accepted: boolean; reason: string }[] };
@@ -31,6 +31,8 @@
 	const downloading = $derived(eligible.some(w => ['checking', 'downloading'].includes(w.phase)));
 	const available = $derived(eligible.some(w => ['available', 'error'].includes(w.phase) && !!w.version));
 	const ready = $derived(!available && !downloading && eligible.some(w => w.phase === 'ready'));
+	// Release notes travel in the signed manifest; show the offered update's.
+	const offered = $derived(eligible.find(w => ['available', 'downloading', 'ready'].includes(w.phase) && !!w.notes?.trim()));
 	const operationError = $derived(operation?.phase === 'error' ? 'Update startup could not be confirmed. Check the affected workers before retrying.' : '');
 	const error = $derived(requestError || operationError || eligible.find(w => w.error)?.error || '');
 	const visible = $derived(!!snapshot?.allow_updates && (waiting || celebrating || ready || available || downloading || !!receipt || !!error));
@@ -122,6 +124,12 @@
 						<div class="worker-row"><span>{worker.device_name}</span><span class:verified={worker.status === 'verified'}>{worker.message}</span></div>
 					{/each}
 				{:else}<span>{status}</span>{/if}
+				{#if offered && !waiting && !celebrating}
+					<div class="release-notes">
+						<strong>What's new{offered.release ? ` in ${offered.release}` : ''}</strong>
+						<div class="notes-text">{offered.notes}</div>
+					</div>
+				{/if}
 				{#if waiting}<p>Checking that every worker included in this update has the new version.</p>{/if}
 			</div>
 		{/if}
@@ -156,6 +164,9 @@
 	.worker-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; }
 	.worker-row span:last-child { text-align: right; color: var(--muted-foreground); }
 	.worker-row .verified { color: var(--primary) !important; }
+	.release-notes { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+	.release-notes strong { margin-bottom: 4px; }
+	.notes-text { white-space: pre-line; color: var(--muted-foreground); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12; line-clamp: 12; overflow: hidden; }
 	.update-tooltip p { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
 	@keyframes update-spin { to { transform: rotate(360deg); } }
 	@keyframes ring-out { to { opacity: 0; transform: scale(.5) rotate(90deg); } }

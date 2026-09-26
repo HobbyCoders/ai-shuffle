@@ -7,8 +7,8 @@ query_engine.py / query_background.py); `HarnessAdapter.requires_reconnect` /
 latent correctness — see docs/MULTI_PROVIDER_PLAN.md R2/R3. These tests target
 the live path primarily, with a light mirror pass over the adapter methods.
 
-R3: the comparison is the named `PROVIDER_ENV_KEYS` constant (the set of
-overlay-controlled provider env keys), not full env-dict equality (would force
+R3: the comparison uses the named `PROVIDER_IDENTITY_ENV_KEYS` and
+`PROVIDER_OVERLAY_ENV_KEYS` constants, not full env-dict equality (would force
 respawns on benign env churn, killing background subagents) and not a
 narrower 3-key tuple (would miss provider config edits).
 """
@@ -16,10 +16,9 @@ narrower 3-key tuple (would miss provider config edits).
 from unittest.mock import MagicMock, patch
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
+from app.core.agent_types import AgentOptions
 
 from app.core.session_pool import (
-    PROVIDER_ENV_KEYS,
     PROVIDER_IDENTITY_ENV_KEYS,
     PROVIDER_OVERLAY_ENV_KEYS,
     SessionState,
@@ -33,12 +32,12 @@ def _make_state(env) -> SessionState:
     adapter = MagicMock()
     return SessionState(
         adapter=adapter,
-        connect_options=ClaudeAgentOptions(model="claude-sonnet-4-5", env=env),
+        connect_options=AgentOptions(model="claude-sonnet-4-5", env=env),
     )
 
 
-def _new_options(env) -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(model="claude-sonnet-4-5", env=env)
+def _new_options(env) -> AgentOptions:
+    return AgentOptions(model="claude-sonnet-4-5", env=env)
 
 
 # ─── session_pool.requires_reconnect (the live path) ────────────────────────
@@ -259,11 +258,6 @@ def test_identity_key_change_always_reconnects_even_native():
     assert requires_reconnect(state, new) is True
 
 
-def test_provider_env_keys_is_identity_plus_overlay():
-    """The union constant is preserved for existing importers."""
-    assert PROVIDER_ENV_KEYS == PROVIDER_IDENTITY_ENV_KEYS + PROVIDER_OVERLAY_ENV_KEYS
-
-
 def test_provider_env_requires_reconnect_helper_directly():
     """The extracted helper: identity always, overlay only for provider sessions."""
     # Identity delta → reconnect.
@@ -428,7 +422,7 @@ class TestProviderBindingReconnect:
 
     def test_unstamped_options_are_treated_as_native(self):
         """Options built by a path that never stamps the attribute (older pooled
-        state, a hand-built ClaudeAgentOptions) read as native on both sides —
+        state, a hand-built AgentOptions) read as native on both sides —
         no spurious respawn."""
         state = _make_state({})
         new = _new_options({})
@@ -466,15 +460,15 @@ def test_harness_adapter_native_both_sides_no_reconnect():
 
 
 def _tool_state(allowlist=None, disallowed=None) -> SessionState:
-    opts = ClaudeAgentOptions(
+    opts = AgentOptions(
         model="claude-sonnet-4-5", disallowed_tools=disallowed or []
     )
     opts.aih_tool_allowlist = allowlist
     return SessionState(adapter=MagicMock(), connect_options=opts)
 
 
-def _tool_options(allowlist=None, disallowed=None) -> ClaudeAgentOptions:
-    opts = ClaudeAgentOptions(
+def _tool_options(allowlist=None, disallowed=None) -> AgentOptions:
+    opts = AgentOptions(
         model="claude-sonnet-4-5", disallowed_tools=disallowed or []
     )
     opts.aih_tool_allowlist = allowlist

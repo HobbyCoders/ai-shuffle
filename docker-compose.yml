@@ -4,12 +4,9 @@
 # Requires Docker Compose >= 2.24 for the optional env_file.
 services:
   ai-shuffle:
-    # Use pre-built image from GitHub Container Registry
-    # Replace <your-username> with your GitHub username
-    # Or comment out 'image' and uncomment 'build' to build locally
-    # image: ghcr.io/<your-username>/ai-shuffle:latest
-
-    # Build locally (recommended for development)
+    # This file builds from source for development. Buyers use the compose file
+    # in docs/content/getting-started/install-docker-compose.md, which pulls the
+    # published image.
     build:
       context: .
       dockerfile: Dockerfile
@@ -29,14 +26,8 @@ services:
       # on a new install. See docs/network/migration.md.
       - INSTANCE_ID=${INSTANCE_ID:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
-      # Pull a new image for updates; startup needs no package downloads.
-      # The legacy GitHub CLI updater is bounded and explicit opt-in.
-      - AUTO_UPDATE=${AUTO_UPDATE:-false}
-      # Delegated Claude CLI stream-close timeout in ms.
-      - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
       # Git identity used for commits made inside the container. Seeded into
       # appuser's global gitconfig at startup ONLY when it is unset, so an
       # identity you set yourself in the mounted config always wins.
@@ -61,8 +52,10 @@ services:
       # Active Fluid settings. Kept separate from every provider import source so
       # preview/apply can remain copy-only and destination conflicts stay visible.
       - fluid-settings:/home/appuser/.fluid
-      # Preserve the historical named volume. Delegated Claude providers may still
-      # use its auth tokens; all other Claude settings here are legacy import input.
+      # The Claude Code CLI's own config directory (historical volume name). Run
+      # `claude auth login` in the AI Shuffle terminal (or
+      # `docker exec -it -u appuser <container> claude auth login`); the CLI keeps
+      # its login here. AI Shuffle never reads your Claude credentials.
       - claude-auth:/home/appuser/.claude
       # Optional external Claude/Codex home (Linux/macOS): mount it read-only with a
       # small override file, then enter /imports/provider-settings in the import dialog:
@@ -71,6 +64,10 @@ services:
       # Never mount an external provider home over /home/appuser/.fluid.
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
+      # Persist the Claude Code CLI that entrypoint installs with Anthropic's
+      # installer (~/.local/bin/claude and ~/.local/share/claude), so it keeps
+      # its self-updates across container recreation.
+      - local-home:/home/appuser/.local
       # Persist the browser-automation Chrome profile (logged-in sessions the
       # browser-mcp server drives). Non-default dir on purpose — Chrome 136+
       # disables the DevTools debug port on the default ~/.config/google-chrome
@@ -85,6 +82,15 @@ services:
     # The browser-automation Chromium needs more than Docker's default 64MB
     # /dev/shm.
     shm_size: '1gb'
+
+    # The code-mode sandbox (bubblewrap) around agents' Python code needs user
+    # namespaces and a fresh /proc mount, which Docker's default seccomp and
+    # AppArmor profiles and its /proc masking refuse. Same lines as the buyer
+    # compose file (docs/install/compose/compose.yaml); remove them to opt out.
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
 
     # Port mapping. The browser's CDP port stays loopback-only inside the
     # container (the browser-mcp server attaches to it in-process) — it is never
@@ -157,7 +163,7 @@ services:
 
     # Network
     networks:
-      - claude-network
+      - ai-shuffle
 
     # Enable TTY for interactive commands (like login)
     tty: true
@@ -167,12 +173,15 @@ volumes:
   # Named volume for active Fluid settings and imported copies.
   fluid-settings:
     driver: local
-  # Historical volume retained for delegated Claude auth and legacy import data.
+  # The Claude Code CLI's config directory (its own login and settings).
   # Do not rename: existing Docker/Unraid installs depend on this volume identity.
   claude-auth:
     driver: local
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
+    driver: local
+  # Named volume for ~/.local (the user-installed Claude Code CLI and its updates)
+  local-home:
     driver: local
   # Named volume for the browser-automation Chrome profile (persisted logins)
   browser-profile:
@@ -182,5 +191,5 @@ volumes:
     driver: local
 
 networks:
-  claude-network:
+  ai-shuffle:
     driver: bridge

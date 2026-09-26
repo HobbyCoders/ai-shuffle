@@ -17,27 +17,93 @@ Implementation is split across mixin modules for maintainability:
 
 import logging
 import os
+import re
 import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
-# Re-export cache class, TTL constants, and native reader for backward compatibility
-from app.core.git_cache import (  # noqa: F401
-    _GitResultCache,
+from app.core.scrub import redact_url_credentials, strip_url_userinfo
+
+# Cache primitives used below
+from app.core.git_cache import (
     _git_cache,
     _native_reader,
     STATUS_CACHE_TTL as _STATUS_CACHE_TTL,
-    DIFF_STATS_CACHE_TTL as _DIFF_STATS_CACHE_TTL,
-    DEFAULT_BRANCH_CACHE_TTL as _DEFAULT_BRANCH_CACHE_TTL,
     AHEAD_BEHIND_CACHE_TTL as _AHEAD_BEHIND_CACHE_TTL,
 )
 
-# Re-export mixin classes for backward compatibility
-from app.core.git_branch_ops import GitBranchMixin  # noqa: F401
-from app.core.git_worktree_ops import GitWorktreeMixin  # noqa: F401
-from app.core.git_diff_ops import GitDiffMixin  # noqa: F401
-from app.core.git_commit_ops import GitCommitMixin  # noqa: F401
+# Mixins composing GitService
+from app.core.git_branch_ops import GitBranchMixin
+from app.core.git_worktree_ops import GitWorktreeMixin
+from app.core.git_diff_ops import GitDiffMixin
+from app.core.git_commit_ops import GitCommitMixin
 
 logger = logging.getLogger(__name__)
+
+
+# Clone sources, read the way git reads them (connect.c / transport.c).
+_REMOTE_CLONE_SCHEMES = frozenset({"http", "https", "ssh", "git+ssh", "ssh+git"})
+_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*)://")
+# ``<transport>::<address>`` runs the remote helper git-remote-<transport>.
+_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
+# scp-like ssh: ``[user@]host:path``. Neither user nor host may start with a
+# dash (ssh would read it as an option).
+_SCP_LIKE_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~+][A-Za-z0-9._~+\-]*@)?"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][A-Za-z0-9.\-]*):\S+$"
+)
+
+
+# ``C:`` drive prefix (git's has_dos_drive_prefix).
+_DOS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def classify_clone_url(clone_url: str) -> Tuple[str, Optional[str]]:
+    """How git will read *clone_url* as a clone source.
+
+    Returns ``("remote", None)`` for an http(s) or ssh remote (``ssh://`` or
+    scp-like ``user@host:path``), ``("local", path)`` for a filesystem path or
+    a ``file://`` URL (*path* is the path git will open, possibly relative to
+    the clone's cwd), and ``("invalid", reason)`` for everything else: option
+    look-alikes, remote helpers (``ext::``, ``fd::``...), other URL schemes.
+    """
+    url = clone_url
+    if not url.strip() or url.lstrip().startswith("-"):
+        return "invalid", "Invalid clone URL (looks like a command-line option)"
+    if _REMOTE_HELPER_RE.match(url):
+        return "invalid", "Refusing unsafe clone URL scheme (remote helpers such as ext:: / file::)"
+    match = _URL_SCHEME_RE.match(url)
+    if match:
+        scheme = match.group(1).lower()
+        if scheme in _REMOTE_CLONE_SCHEMES:
+            return "remote", None
+        if scheme == "file":
+            path = url[match.end():]
+            # git percent-decodes file:// URLs; refuse encodings rather than
+            # guess, and refuse a host part (``file://host/path``).
+            if not path.startswith("/") or "%" in path:
+                return "invalid", "A file:// clone URL must name an absolute local path"
+            return "local", path
+        return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
+    # Windows paths, read before the scp-like test the way git for Windows
+    # does (connect.c url_is_local_not_ssh + has_dos_drive_prefix): a
+    # one-letter "host" followed by ':' is a drive letter, never ssh. Applied
+    # on every platform, since a POSIX server never has a one-letter ssh host
+    # worth the ambiguity. ``C:\\repo`` / ``C:/repo`` are absolute local
+    # paths; a drive-relative ``C:repo`` depends on that drive's cwd, so it is
+    # refused rather than guessed. UNC and ``\\?\`` device paths are local.
+    if _DOS_DRIVE_RE.match(url):
+        if len(url) > 2 and url[2] in "\\/":
+            return "local", url
+        return "invalid", "A Windows clone path must be absolute (C:\\path\\to\\repo)"
+    if url.startswith("\\\\"):
+        return "local", url
+    colon, slash = url.find(":"), url.find("/")
+    if colon != -1 and (slash == -1 or colon < slash):
+        # No ``/`` before the first ``:`` -> git reads it as scp-like ssh.
+        if _SCP_LIKE_RE.match(url):
+            return "remote", None
+        return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
+    return "local", url
 
 
 class GitService(
@@ -98,10 +164,16 @@ class GitService(
                 env=run_env,
             )
         except subprocess.TimeoutExpired:
-            logger.warning(f"Git command timed out: git {' '.join(args)}")
+            logger.warning(
+                "Git command timed out: git %s", redact_url_credentials(" ".join(args))
+            )
             raise
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Git command failed: git {' '.join(args)}: {e.stderr}")
+            logger.warning(
+                "Git command failed: git %s: %s",
+                redact_url_credentials(" ".join(args)),
+                redact_url_credentials(e.stderr or ""),
+            )
             raise
 
     # =========================================================================
@@ -180,16 +252,20 @@ class GitService(
             runs — matching the return-False guard style in git_branch_ops.py.
         """
         # Reject flag injection: a url beginning with '-' would be parsed by git
-        # as an option. Reject remote-helper schemes (ext::/file::) which can run
-        # arbitrary local commands. Fail closed with the tuple contract rather than
+        # as an option. Reject remote-helper schemes (ext::, file::, fd::...)
+        # which can run arbitrary local commands. Which sources a caller may
+        # clone at all (remote vs. local disk) is the route's decision; see
+        # classify_clone_url. Fail closed with the tuple contract rather than
         # raising, so callers surface a clean error instead of a 500.
         stripped = clone_url.strip()
+        safe_url = redact_url_credentials(clone_url)
         if stripped.startswith("-"):
-            logger.warning("Refusing clone URL that looks like an option: %s", clone_url[:50])
+            logger.warning("Refusing clone URL that looks like an option: %s", safe_url[:50])
             return False, "Invalid clone URL (looks like a command-line option)"
-        lowered = stripped.lower()
-        if lowered.startswith("ext::") or lowered.startswith("file::"):
-            logger.warning("Refusing unsafe clone URL scheme: %s", clone_url[:50])
+        # Any ``<transport>::`` remote helper: ext:: runs a command, fd:: blocks
+        # on a file descriptor, file:: reads the local disk.
+        if _REMOTE_HELPER_RE.match(stripped):
+            logger.warning("Refusing unsafe clone URL scheme: %s", safe_url[:50])
             return False, "Refusing unsafe clone URL scheme (ext:: / file::)"
 
         # Force-disable git's interactive credential prompt so a clone of a
@@ -208,18 +284,20 @@ class GitService(
                 env=clone_env,
             )
             if result.returncode == 0:
-                logger.debug(f"Cloned repository from {clone_url} into {working_dir}")
+                logger.debug("Cloned repository from %s into %s", safe_url, working_dir)
                 if _native_reader is not None:
                     _native_reader.invalidate_repo(working_dir)
                 return True, None
-            error = result.stderr.strip() or "Unknown error"
-            logger.warning(f"Failed to clone repo: {error}")
+            # git's stderr can echo the URL (and so its credentials) back.
+            error = redact_url_credentials(result.stderr.strip()) or "Unknown error"
+            logger.warning("Failed to clone repo: %s", error)
             return False, error
         except subprocess.TimeoutExpired:
             return False, f"Clone timed out after {timeout}s — the repository may be too large"
         except Exception as e:
-            logger.error(f"Error cloning repository: {e}")
-            return False, str(e)
+            error = redact_url_credentials(str(e))
+            logger.error("Error cloning repository: %s", error)
+            return False, error
 
     def get_remote_url(self, working_dir: str) -> Optional[str]:
         """Get the remote URL for origin."""
@@ -414,7 +492,7 @@ class GitService(
             - current_branch: Current branch name
             - is_detached: Whether HEAD is detached
             - head_commit: Current HEAD commit SHA
-            - remote_url: Origin remote URL
+            - remote_url: Origin remote URL, userinfo (a clone token) stripped
             - is_clean: True if no uncommitted changes
             - staged: List of staged files
             - modified: List of modified files
@@ -432,6 +510,9 @@ class GitService(
         if _native_reader is not None:
             try:
                 result = _native_reader.get_status(working_dir)
+                if result.get("remote_url"):
+                    # A clone URL's token stays in .git/config, not in status.
+                    result = {**result, "remote_url": strip_url_userinfo(result["remote_url"])}
                 _git_cache.put(cache_key, result)
                 return result
             except Exception as e:
@@ -460,12 +541,10 @@ class GitService(
             "conflicts": []
         }
 
-        # Use rev-parse --git-dir to check if it's a repo (avoids separate is_git_repo call)
-        try:
-            check = self._run_git(working_dir, ["rev-parse", "--git-dir"], timeout=5)
-            if check.returncode != 0:
-                return status
-        except (subprocess.SubprocessError, OSError):
+        # Only the repository root counts (as in git_native.get_status): a
+        # project folder nested inside another repo must not report — or let
+        # the UI act on — the enclosing repo's changes.
+        if not self._is_git_repo_cli(working_dir):
             return status
 
         status["is_git_repo"] = True
@@ -492,7 +571,7 @@ class GitService(
             # Get remote URL (single lightweight call)
             result = self._run_git(working_dir, ["remote", "get-url", "origin"], timeout=5)
             if result.returncode == 0:
-                status["remote_url"] = result.stdout.strip()
+                status["remote_url"] = strip_url_userinfo(result.stdout.strip())
 
             # Get ahead/behind relative to the default branch (main/master).
             # This is more useful for the PR workflow than comparing against
@@ -568,33 +647,50 @@ class GitService(
                             except ValueError:
                                 status["unpushed"] = None
 
-            # Get file status using porcelain format
-            result = self._run_git(working_dir, ["status", "--porcelain=v1"], timeout=10)
+            # Get file status using porcelain format. ``-z`` keeps paths
+            # verbatim: without it git C-quotes non-ASCII names and prints a
+            # rename as "old -> new", neither of which is a usable path.
+            result = self._run_git(
+                working_dir, ["status", "--porcelain=v1", "-z"], timeout=10
+            )
             if result.returncode == 0:
-                for line in result.stdout.split("\n"):
+                entries = iter(result.stdout.split("\0"))
+                for line in entries:
                     if not line or len(line) < 3:
                         continue
 
                     index_status = line[0]
                     worktree_status = line[1]
                     filename = line[3:]
+                    source = None
+                    if index_status in ("R", "C") or worktree_status in ("R", "C"):
+                        # -z emits the rename/copy source as the next entry,
+                        # for a worktree rename (intent-to-add) as well.
+                        source = next(entries, None)
 
                     # Check for conflicts (both sides modified)
-                    if index_status == "U" or worktree_status == "U":
+                    if (
+                        index_status == "U" or worktree_status == "U"
+                        or (index_status == "A" and worktree_status == "A")
+                        or (index_status == "D" and worktree_status == "D")
+                    ):
                         status["conflicts"].append(filename)
-                    elif index_status == "A" and worktree_status == "A":
-                        status["conflicts"].append(filename)
-                    elif index_status == "D" and worktree_status == "D":
-                        status["conflicts"].append(filename)
+                        continue
                     # Staged changes
-                    elif index_status in ["A", "M", "D", "R", "C"]:
+                    if index_status in ["A", "M", "D", "R", "C", "T"]:
                         status["staged"].append({
                             "file": filename,
                             "status": index_status
                         })
-                    # Worktree changes (not staged)
-                    if worktree_status == "M":
+                    # Worktree changes (not staged): an unstaged deletion,
+                    # type change or rename is a modification too, as in
+                    # git_native; a renamed file's source is gone from disk.
+                    # A worktree "A" is an intent-to-add entry (``git add -N``):
+                    # its content is not staged yet, so it is a worktree change.
+                    if worktree_status in ("M", "D", "T", "R", "A"):
                         status["modified"].append(filename)
+                        if worktree_status == "R" and source:
+                            status["modified"].append(source)
                     elif worktree_status == "?":
                         status["untracked"].append(filename)
 

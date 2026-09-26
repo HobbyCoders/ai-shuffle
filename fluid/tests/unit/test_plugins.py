@@ -423,7 +423,7 @@ async def test_skill_builtin_loads_an_enabled_plugin_skill(tmp_path, monkeypatch
 # ─── NativeLoop seam ─────────────────────────────────────────────────────────
 
 
-def _loop(cwd, *, mcp_servers=None, claude_plugins=True):
+def _loop(cwd, *, mcp_servers=None):
     from fluid.engine.native import NativeLoop
     from fluid.providers.base import ProviderCaps
     from fluid.store.base import MemoryStore
@@ -443,14 +443,12 @@ def _loop(cwd, *, mcp_servers=None, claude_plugins=True):
         model="m",
         ctx=ToolCtx(cwd=str(cwd)),
         mcp_servers=mcp_servers,
-        claude_plugins=claude_plugins,
     )
 
 
 def test_native_loop_does_not_merge_provider_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
     proj = _setup(tmp_path, monkeypatch)
     loop = _loop(proj)
-    assert loop.claude_plugins == []
     assert loop._mcp_connected is False
     assert loop._mcp_servers == {}
 
@@ -464,15 +462,7 @@ def test_host_supplied_server_wins_a_name_collision(tmp_path, monkeypatch, caplo
     assert not [r for r in caplog.records if "duplicate" in r.getMessage()]
 
 
-def test_native_loop_plugins_toggle_off(tmp_path, monkeypatch) -> None:
-    proj = _setup(tmp_path, monkeypatch)
-    loop = _loop(proj, claude_plugins=False)
-    assert loop.claude_plugins == []
-    assert loop._mcp_servers == {}
-
-
-def test_legacy_settings_keyword_cannot_enable_provider_plugins(tmp_path, monkeypatch) -> None:
-    """Deprecated constructor keywords are inert compatibility inputs."""
+def test_native_loop_never_reads_provider_settings(tmp_path, monkeypatch) -> None:
     from fluid.engine.native import NativeLoop
     from fluid.providers.base import ProviderCaps
     from fluid.store.base import MemoryStore
@@ -493,11 +483,9 @@ def test_legacy_settings_keyword_cannot_enable_provider_plugins(tmp_path, monkey
         store=MemoryStore(),
         model="m",
         ctx=ToolCtx(cwd=str(proj)),
-        claude_settings=False,
     )
-    assert loop.claude_settings == {}
     assert "settings_env" not in loop.ctx.extra
-    assert loop.claude_plugins == []
+    assert loop._mcp_servers == {}
 
 
 def test_build_engine_merges_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
@@ -518,7 +506,6 @@ def test_build_engine_merges_plugin_mcp_servers(tmp_path, monkeypatch) -> None:
 
     native = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(proj)}))
     engine = build_engine(native, MemoryStore(), provider=_Provider())
-    assert engine.claude_plugins == []
     # Enabled plugin servers join the lazy-connect set (sse is skipped).
     assert set(engine._mcp_servers) == {"myplug-local", "myplug-http"}
 

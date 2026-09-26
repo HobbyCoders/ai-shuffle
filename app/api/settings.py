@@ -1,11 +1,8 @@
 """
 Settings API routes - integration settings, API keys, and configuration.
 
-This module re-exports symbols from sub-modules for backward compatibility:
-- settings_crypto: API key encryption/decryption/masking
-- settings_audio: TTS/STT endpoints and model data
-- settings_media: Media model selection and generation settings
-- settings_credentials: Credential policy management
+Includes the sub-routers from settings_audio, stt_realtime, settings_media,
+settings_credentials and settings_updates.
 """
 
 import logging
@@ -19,7 +16,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
-from app.core.ai_tools import AI_TOOLS
+from app.core import encryption
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
 # Import from sub-modules
@@ -32,34 +29,12 @@ from app.api.settings_audio import (  # noqa: F401
     audio_router,
     TTS_MODELS,
     STT_MODELS,
-    AudioModelUpdateRequest,
-    TTSSettingsRequest,
-    TranscriptionResponse,
-    TTSGenerateRequest,
-    TTSGenerateResponse,
-    get_generated_audio_dir,
-    _build_tts_payload,
-    _extract_audio_url,
 )
 from app.api.stt_realtime import stt_stream_router  # noqa: F401
 from app.api.settings_media import (  # noqa: F401
     media_router,
-    ModelUpdateRequest,
-    ImageSettingsRequest,
-    VideoSettingsRequest,
-    STTSettingsRequest,
-    _update_model_setting,
 )
-from app.api.settings_credentials import (  # noqa: F401
-    credentials_router,
-    CredentialPolicyResponse,
-    UpdateCredentialPolicyRequest,
-    AllCredentialPoliciesResponse,
-    UserCredentialPolicyResponse,
-    SetUserCredentialPolicyRequest,
-    CREDENTIAL_POLICY_INFO,
-    _compute_effective_status,
-)
+from app.api.settings_credentials import credentials_router  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -71,31 +46,6 @@ router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
 router.include_router(updates_router)
-
-
-# ============================================================================
-# Internal API Key Access (for AI tools)
-# ============================================================================
-
-@router.get("/internal/api-keys/{key_name}")
-async def get_internal_api_key(key_name: str, _: str = Depends(require_admin)):
-    """
-    Internal endpoint for AI tools to get decrypted API keys.
-
-    Only allows specific key names to prevent arbitrary setting access.
-    Requires admin authentication to prevent unauthorized access.
-    """
-    allowed_keys = ["fal_api_key"]
-
-    if key_name not in allowed_keys:
-        raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
-
-    api_key = get_decrypted_api_key(key_name)
-
-    if not api_key:
-        raise HTTPException(status_code=404, detail=f"API key '{key_name}' not configured or encryption not ready")
-
-    return {"key": api_key}
 
 
 # ============================================================================
@@ -113,11 +63,13 @@ class IntegrationSettingsResponse(BaseModel):
     # Code uses the connected account / OAuth credentials.
     anthropic_api_key_set: bool = False
     anthropic_api_key_masked: str = ""
-    # Which auth method Claude Code is currently using:
-    #   "api_key"  — an anthropic_api_key is set (overrides the account)
-    #   "account"  — no key set; the connected Claude OAuth account is used
-    # Lets the UI surface the active method without a silent billing switch.
+    # Which credential Claude Code runs on, from the explicit auth mode
+    # (``claude_auth_mode``; see GET /settings/claude-auth):
+    #   "api_key"  — api_key mode: the stored key is injected
+    #   "account"  — subscription mode: the CLI's own sign-in is used
+    # Kept for older clients; ``claude_auth_mode`` carries the mode itself.
     claude_code_auth_method: str = "account"
+    claude_auth_mode: str = "subscription"
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     image_edit_model: Optional[str] = None
@@ -147,9 +99,78 @@ class FalAIKeyRequest(BaseModel):
 
 
 class FalAIKeyResponse(BaseModel):
-    """Response after setting fal.ai API key"""
+    """Response after setting fal.ai API key.
+
+    ``valid`` is ``True`` when fal.ai accepted the key and ``None`` when it
+    could not be checked (network error, timeout, rate limit or a fal.ai
+    fault); the key is saved either way. A key fal.ai rejects is not saved
+    (400). ``reason`` explains an unverified key.
+    """
     success: bool
     masked_key: str
+    valid: Optional[bool] = None
+    reason: Optional[str] = None
+
+
+# fal.ai's queue gateway checks the key before anything else, and a GET on a
+# model's queue URL submits nothing, so it costs nothing to ask.
+FAL_KEY_CHECK_URL = "https://queue.fal.run/fal-ai/fast-sdxl"
+# Answers that mean the gateway accepted the key: the probe itself asks for
+# nothing, so "not found" or "method not allowed" still prove authentication.
+_FAL_KEY_ACCEPTED = {200, 201, 202, 204, 404, 405, 422}
+
+
+def _require_credential_storage() -> None:
+    """409 with the recovery guidance when credential storage is locked.
+
+    Keys are only ever stored encrypted; a locked store used to surface as an
+    unhandled 500 from ``encrypt_value``.
+    """
+    if not encryption.is_encryption_ready():
+        raise HTTPException(status_code=409, detail=encryption.credential_storage_error())
+
+
+def _store_api_key(setting_name: str, api_key: str) -> None:
+    """Encrypt and store a key, or 409 when storage is (or becomes) locked.
+
+    Synchronous: call via ``run_sync``.
+    """
+    _require_credential_storage()
+    try:
+        set_encrypted_api_key(setting_name, api_key)
+    except RuntimeError:
+        # Locked between the check and the write.
+        if encryption.is_encryption_ready():
+            raise
+        raise HTTPException(status_code=409, detail=encryption.credential_storage_error()) from None
+
+
+async def _check_fal_key(api_key: str) -> tuple[Optional[bool], Optional[str]]:
+    """Ask fal.ai whether it accepts ``api_key``: ``(valid, reason)``.
+
+    ``False`` only for an explicit rejection (401/403); anything that does not
+    answer the question is ``None`` with a reason.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                FAL_KEY_CHECK_URL,
+                headers={"Authorization": f"Key {api_key}"}
+            )
+    except httpx.TimeoutException:
+        logger.warning("fal.ai API validation timed out, saving key anyway")
+        return None, "fal.ai did not answer in time; the key was saved without verification."
+    except Exception as e:
+        logger.warning(f"Error validating fal.ai key: {type(e).__name__}")
+        return None, "fal.ai could not be reached; the key was saved without verification."
+
+    if response.status_code in (401, 403):
+        return False, "fal.ai rejected the key."
+    if response.status_code in _FAL_KEY_ACCEPTED:
+        return True, None
+    if response.status_code == 429:
+        return None, "fal.ai rate-limited the check; the key was saved without verification."
+    return None, f"fal.ai answered the check with HTTP {response.status_code}; the key was saved without verification."
 
 
 @router.post("/integrations/fal-billing")
@@ -157,7 +178,7 @@ async def set_fal_billing_key(request: FalAIKeyRequest, token: str = Depends(req
     key = request.api_key.strip()
     if not key or len(key) > 4096 or any(c.isspace() for c in key):
         raise HTTPException(400, "Enter an Admin API key without whitespace")
-    await run_sync(set_encrypted_api_key, "fal_billing_api_key", key)
+    await run_sync(_store_api_key, "fal_billing_api_key", key)
     from app.core.provider_usage import FAL_BILLING_URL
     from app.core.usage_polling import UsageDeferred
     from app.network.usage_budget import resume_authentication
@@ -178,6 +199,9 @@ async def remove_fal_billing_key(token: str = Depends(require_admin)):
 class AnthropicKeyRequest(BaseModel):
     """Request to set Anthropic API key"""
     api_key: str
+    # True also switches Claude Code to API-key mode in the same call. Saving a
+    # key never changes the mode by itself.
+    use_for_claude_code: bool = False
 
 
 class AnthropicKeyResponse(BaseModel):
@@ -194,14 +218,15 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     Returns whether API keys are configured (without exposing the actual keys).
     """
     def _load() -> IntegrationSettingsResponse:
-        """Both key reads (+ decrypt) and all 19 setting reads in ONE hop.
+        """Both key reads (+ decrypt) and every setting read in ONE hop.
 
-        This endpoint made 21 blocking round trips on the event loop; the
-        whole body is straight-line synchronous work, so it collapses into a
-        single closure with the query order untouched.
+        The whole body is straight-line synchronous work, so it runs as a
+        single off-loop closure with the query order untouched.
         """
         fal_key = get_decrypted_api_key("fal_api_key")
         anthropic_key = get_decrypted_api_key("anthropic_api_key")
+        from app.core import claude_auth_mode
+        auth_mode = claude_auth_mode.current_mode()
         image_model = database.get_system_setting("image_model")
         image_edit_model = database.get_system_setting("image_edit_model")
         video_model = database.get_system_setting("video_model")
@@ -231,9 +256,9 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
-            # Key set → Claude Code authenticates with the API key (overrides the
-            # connected account). Key absent → connected OAuth account is used.
-            claude_code_auth_method="api_key" if anthropic_key else "account",
+            # The explicit mode decides, never the key's mere presence.
+            claude_code_auth_method="api_key" if auth_mode == "api_key" else "account",
+            claude_auth_mode=auth_mode,
             image_model=image_model,
             image_edit_model=image_edit_model,
             video_model=video_model,
@@ -273,33 +298,22 @@ async def set_fal_api_key(
 
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
+    # Before the network check: a locked store cannot save the key anyway.
+    _require_credential_storage()
 
-    # Validate the key by making a lightweight API call to fal.ai
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                "https://queue.fal.run/fal-ai/fast-sdxl",
-                headers={"Authorization": f"Key {api_key}"}
-            )
-            if response.status_code == 401:
-                raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
-    except httpx.TimeoutException:
-        # Don't fail on timeout - key might still be valid
-        logger.warning("fal.ai API validation timed out, saving key anyway")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Error validating fal.ai key: {e}")
-        # Don't fail on network errors - save the key
+    valid, reason = await _check_fal_key(api_key)
+    if valid is False:
+        raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
 
-    # Save to database (encrypted if encryption is ready). One hop: the fal.ai
-    # validation above is a real network await, so this cannot share a closure
-    # with anything before it.
-    await run_sync(set_encrypted_api_key, "fal_api_key", api_key)
+    # Save to database, always encrypted. One hop: the fal.ai validation above
+    # is a real network await, so this cannot share a closure with it.
+    await run_sync(_store_api_key, "fal_api_key", api_key)
 
     return FalAIKeyResponse(
         success=True,
-        masked_key=mask_api_key(api_key)
+        masked_key=mask_api_key(api_key),
+        valid=valid,
+        reason=reason,
     )
 
 
@@ -320,11 +334,11 @@ async def set_anthropic_api_key(
     """
     Set the Anthropic API key (admin only).
 
-    This key is a Claude Code AUTHENTICATION credential. When set, it is
-    injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
-    OVERRIDES the connected Claude account (API-key login wins, matching
-    claude.exe's native precedence). When unset, Claude Code uses the connected
-    account / OAuth credentials. Validated here before storage.
+    The key is a Claude Code credential used only in ``api_key`` auth mode,
+    where it is injected as ANTHROPIC_API_KEY into the CLI processes this
+    worker starts. Saving it does not change the mode unless
+    ``use_for_claude_code`` is true. It is stored encrypted on this worker
+    only. Validated here before storage.
 
     Get your API key from: https://console.anthropic.com/settings/keys
     """
@@ -339,6 +353,8 @@ async def set_anthropic_api_key(
     api_key = request.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
+    # Before the paid validation call: a locked store cannot save the key.
+    _require_credential_storage()
 
     # Validate the key by making a 1-token messages.create call. Cheapest
     # possible request to confirm auth works before committing the key to
@@ -362,9 +378,12 @@ async def set_anthropic_api_key(
         # Malformed / unexpected response — surface so the user can investigate
         raise HTTPException(status_code=400, detail=f"Anthropic API error: {e}")
 
-    # Save to database (encrypted if encryption is ready). One hop: the
-    # Anthropic validation above is a real network await.
-    await run_sync(set_encrypted_api_key, "anthropic_api_key", api_key)
+    # Save to database, always encrypted. One hop: the Anthropic validation
+    # above is a real network await.
+    await run_sync(_store_api_key, "anthropic_api_key", api_key)
+    if request.use_for_claude_code:
+        from app.core import claude_auth_mode
+        await run_sync(claude_auth_mode.set_mode, claude_auth_mode.MODE_API_KEY)
 
     return AnthropicKeyResponse(
         success=True,
@@ -377,69 +396,113 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     """
     Remove the Anthropic API key (admin only).
 
-    Reverts Claude Code authentication to the connected Claude account /
-    OAuth credentials. No effect on the OAuth login flow itself.
+    The auth mode is left as it is: in ``api_key`` mode new agent runs then
+    wait for a key (or for the user to choose subscription mode) instead of
+    falling back to the CLI's sign-in.
     """
     await run_sync(database.delete_system_setting, "anthropic_api_key")
     return {"success": True}
 
 
 # ============================================================================
-# AI Tools Configuration (for Profile Management)
+# Claude Code auth mode (subscription or API key)
 # ============================================================================
 
-# AI_TOOLS imported at top of file from app.core.ai_tools
+class ClaudeAuthModeRequest(BaseModel):
+    mode: str = Field(..., description="'subscription' or 'api_key'")
 
 
-@router.get("/ai-tools/available")
-async def get_available_ai_tools(token: str = Depends(require_auth)):
+async def claude_auth_payload(refresh: bool = False) -> dict:
+    """The mode, the CLI account from the probe, the key's last four, and the
+    credential gate (whether new agent runs can start, and why not)."""
+    from app.core import claude_auth_mode, claude_cli_status, credential_gate
+
+    status = await claude_cli_status.get_status_async(refresh)
+    cli = status.to_dict()
+
+    def _load() -> dict:
+        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli)}
+
+    return await run_sync(_load)
+
+
+@router.get("/claude-auth")
+async def get_claude_auth(refresh: bool = False, token: str = Depends(require_auth)):
+    """Which credential Claude Code runs on.
+
+    ``mode`` is ``subscription`` or ``api_key``; ``explicit`` is false only
+    before startup has recorded the default. ``cli`` is what `claude auth
+    status` reports (account shown only when signed in); ``api_key`` says
+    whether a key is stored and its last four characters; ``gate`` is the
+    credential gate (``ready``, ``reason``, ``license_allows_runs``...).
     """
-    Get list of AI tools available based on configured providers.
+    return await claude_auth_payload(refresh)
 
-    Returns tools grouped by category with availability status.
-    Used by the profile management UI to show only available tools.
-    """
-    fal_key = await run_sync(get_decrypted_api_key, "fal_api_key")
-    available_providers = {"fal-ai"} if fal_key else set()
 
-    # Build tools list with availability
-    tools = []
-    categories = {}
+@router.put("/claude-auth")
+async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
+    """Choose the mode (admin only). Takes effect for the next agent run."""
+    from app.core import claude_auth_mode
 
-    for tool_id, tool_info in AI_TOOLS.items():
-        # Check if any of the tool's providers are available
-        tool_providers = tool_info["providers"]
-        is_available = any(p in available_providers for p in tool_providers)
+    try:
+        await run_sync(claude_auth_mode.set_mode, request.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await claude_auth_payload()
 
-        # Active provider is fal-ai if available
-        active_provider = "fal-ai" if is_available else None
 
-        tool_data = {
-            "id": tool_id,
-            "name": tool_info["name"],
-            "description": tool_info["description"],
-            "category": tool_info["category"],
-            "available": is_available,
-            "providers": tool_providers,
-            "active_provider": active_provider
-        }
-        tools.append(tool_data)
+# ============================================================================
+# Subscription loop guard
+# ============================================================================
 
-        # Group by category
-        cat = tool_info["category"]
-        if cat not in categories:
-            categories[cat] = {
-                "id": cat,
-                "name": f"{cat.title()} Tools",
-                "tools": []
-            }
-        categories[cat]["tools"].append(tool_data)
+class LoopGuardUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    session_turns_per_hour: Optional[int] = None
+    install_turns_per_hour: Optional[int] = None
+    worker_max_minutes: Optional[int] = None
 
-    return {
-        "tools": tools,
-        "categories": list(categories.values()),
-        "available_providers": list(available_providers),
-    }
+
+@router.get("/loop-guard")
+async def get_loop_guard(token: str = Depends(require_auth)):
+    """The subscription loop guard: settings, defaults, whether it applies
+    (enabled and Claude Code in subscription mode), this hour's unattended
+    turn count, and the turns it holds for confirmation."""
+    from app.core import loop_guard
+
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.put("/loop-guard")
+async def set_loop_guard(request: LoopGuardUpdate, token: str = Depends(require_admin)):
+    """Change the loop guard settings (admin only)."""
+    from app.core import loop_guard
+
+    try:
+        await run_sync(lambda: loop_guard.update_config(**request.model_dump()))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await run_sync(loop_guard.status_payload)
+
+
+@router.post("/loop-guard/held/{held_id}/confirm")
+async def confirm_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Run a held turn now, past the budget (admin only)."""
+    from app.core import loop_guard
+
+    turn_id = await loop_guard.confirm_held(held_id)
+    if turn_id is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
+    return {"success": True, "turn_id": turn_id}
+
+
+@router.post("/loop-guard/held/{held_id}/dismiss")
+async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_admin)):
+    """Drop a held turn without running it (admin only)."""
+    from app.core import loop_guard
+
+    if await run_sync(loop_guard.take_held, held_id) is None:
+        raise HTTPException(status_code=404, detail="That held turn is gone")
+    return {"success": True}
 
 
 # ============================================================================
@@ -532,10 +595,10 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Voice mode (ruling VM13/VM17 — docs/VOICE_MODE_PLAN.md)
+# Voice mode
 # ============================================================================
 #
-# Six runtime-editable knobs stored as plain ``system_settings`` values (they
+# Runtime-editable knobs stored as plain ``system_settings`` values (they
 # are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
 # row the voice session is funded by, never here). Stored/read through the same
 # get_system_setting/set_system_setting helpers the security-instructions
@@ -548,17 +611,10 @@ from app.core.voice_models import (
 )
 DEFAULT_VOICE_MODEL = "gpt-live-1"
 
-# The voices the realtime models can speak with (ruling VM21). Same allowlist
-# discipline as the models: rejected on write, defaulted on read, so an unknown
-# name can never reach the mint. ``marin``/``cedar`` are the gpt-realtime
-# generation's recommended pair; the rest are the classic realtime set.
-VOICE_VOICES = (
-    "marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage",
-    "shimmer", "verse",
-)
+# Voice names are validated per model by ``voices_for(model)``.
 DEFAULT_VOICE_VOICE = "marin"
 # Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
-# bridged by reconnect (VM15); this is the separate "don't leave a call running
+# bridged by reconnect; this is the separate "don't leave a call running
 # all week" ceiling.
 DEFAULT_VOICE_MAX_CALL_MINUTES = 240
 
@@ -686,7 +742,7 @@ def get_voice_settings() -> dict:
 
 def _voice_settings_response(value: dict) -> VoiceSettingsResponse:
     from app.core.voice_models import model_details
-    from app.api.settings_audio import STT_MODELS, _model_provider
+    from app.api.settings_audio import _model_provider
     return VoiceSettingsResponse(
         **value,
         voice_input_models=[
@@ -836,7 +892,7 @@ async def update_text_generation_settings(
     """Update the text-generation model / effort. Admin only.
 
     A ``prov:<providerId>:<modelId>`` model is validated against the provider
-    row so a gateway model that the provider does not serve is refused here
+    row so a model that the provider does not serve is refused here
     rather than failing every commit-message generation afterwards. An empty
     string on either key clears it back to the default.
     """

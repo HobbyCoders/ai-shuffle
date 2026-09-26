@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
-from app.api.sessions_helpers import require_session
+from app.api.sessions_helpers import check_session_access
 from app.core.generation_options import VALID_EFFORTS
 from app.core.query_options import decode_provider_model
 from app.db import database
@@ -126,12 +126,17 @@ async def update_voice_session_context(
     token: str = Depends(require_auth),
 ):
     """Update the execution context used by workers dispatched from a live call."""
-    session = await require_session(request, session_id)
-    if session.get("mode") != "voice":
+    # 404 for a missing or non-voice session comes first, so a chat session
+    # never leaks as a 403; then the same rule as the call surface in
+    # app.api.voice: an API key may only edit the worker context (model,
+    # permission mode, ...) of a voice session it owns and has in scope.
+    session = await run_sync(database.get_session, session_id)
+    if not session or session.get("mode") != "voice":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Voice session not found.",
         )
+    check_session_access(request, session)
 
     _validate_patch(body)
     updated = await run_sync(_persist_patch, session_id, body)

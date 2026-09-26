@@ -18,22 +18,15 @@ Mirrors tests/db/test_model_providers_migration.py.
 """
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def test_fresh_db_has_provider_id_column_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries sessions.provider_id
     and the current schema version."""
     conn = mock_db
-    assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "provider_id" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v66_db(mock_db):
@@ -52,13 +45,13 @@ def test_init_upgrades_pre_v66_db(mock_db):
     )
     conn.commit()
 
-    assert "provider_id" not in _column_names(conn, "sessions")
+    assert "provider_id" not in column_names(conn, "sessions")
 
     # Real init path (65 < SCHEMA_VERSION) — must add the column without raising.
     database.init_database()
 
-    assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "provider_id" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION
     # Existing pre-migration row survived and its binding is NULL → native.
     row = conn.execute(
         "SELECT provider_id FROM sessions WHERE id = 's-legacy'"
@@ -72,8 +65,8 @@ def test_column_migration_is_idempotent(mock_db):
     conn = mock_db
     # First pass (column already present from the fresh schema) — no-op.
     database.init_database()
-    assert "provider_id" in _column_names(conn, "sessions")
+    assert "provider_id" in column_names(conn, "sessions")
     # Second boot — still a no-op.
     database.init_database()
-    assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "provider_id" in column_names(conn, "sessions")
+    assert schema_version(conn) == database.SCHEMA_VERSION

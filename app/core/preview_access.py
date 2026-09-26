@@ -4,15 +4,16 @@ Why this exists. The worker's UI sits behind
 :func:`app.core.owner_auth.local_access`, which admits only a direct LAN owner
 and rejects anything that looks proxied — including the branch's own Vite dev
 server proxying ``/api`` to the worker, and the agent browser when it runs on
-another host (the container's Chromium, a shared runner). Nine audited
-sessions hit "only accepts direct connections from its local network" /
-``local_access: false`` when they opened the worker's UI to verify a change,
-and five then built their own preview servers. This module is the narrow door.
+another host (the container's Chromium, a shared runner). Sessions that open
+the worker's UI to verify a change hit "only accepts direct connections from
+its local network" / ``local_access: false``. This module is the narrow door.
 
 Threat model, and what the token is NOT:
 
 * The token is minted by the harness for ONE app session and carries that
-  session id; it is never accepted for a session that does not exist. It
+  session id; it is never accepted for a session that does not exist, nor
+  for one that runs as an API key (a grant is the owner, see
+  :func:`_session_exists`). It
   expires (``DEFAULT_TTL``), and nothing renews it silently.
 * It is an HMAC over ``session_id.expires`` under a per-install key kept in
   the data dir (``preview-access.key``, created 0600). Any process sharing the
@@ -21,8 +22,8 @@ Threat model, and what the token is NOT:
   in-memory table that a second process cannot see.
 * It is honoured ONLY on the local ingress listener and ONLY from a private
   network peer (the same address families ``local_access`` trusts). Unlike
-  ``local_access`` it tolerates ``X-Forwarded-*`` headers: the audited
-  failures were the branch's Vite dev server proxying ``/api`` to the worker
+  ``local_access`` it tolerates ``X-Forwarded-*`` headers: the failing case
+  is the branch's Vite dev server proxying ``/api`` to the worker
   (it sets ``x-forwarded-host``), and here the TOKEN is the credential, not
   the transport. A public tunnel still cannot present it — it terminates on
   the remote listener, which refuses the cookie outright.
@@ -65,8 +66,8 @@ COOKIE_NAME = "ais_preview"
 QUERY_PARAM = "token"
 REDIRECT_PATH = "/api/v1/auth/preview-access"
 KEY_FILE = "preview-access.key"
-#: A long working session is still one session; the round-9 audit's longest
-#: ran 6.7 hours. Twenty-four hours covers it without outliving the day.
+#: A long working session is still one session. Twenty-four hours covers one
+#: without outliving the day.
 DEFAULT_TTL = 24 * 3600
 _VERSION = "v1"
 
@@ -88,13 +89,11 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/github",
     "/api/v1/settings",
     "/api/settings",
-    "/api/v1/export-import",
     "/api/v1/internal",
     "/api/v1/cluster",
     "/api/v1/network",
     "/api/v1/plugins",
     "/api/v1/connectors",
-    "/api/v1/webhooks",
     "/api/v1/computer-use",
     "/api/v1/chat-access",
 )
@@ -174,7 +173,14 @@ def mint(session_id: str, ttl_seconds: int = DEFAULT_TTL, *, now: Optional[float
 
 
 def _session_exists(session_id: str) -> bool:
-    """Whether the bound session is a real row. Fail closed on lookup errors.
+    """Whether the bound session is a real row the OWNER runs. Fail closed on
+    lookup errors.
+
+    A grant authenticates as the owner (``is_admin``, no ``api_user``), so a
+    session that runs as an API key (its own ``api_user_id`` or a worker under
+    one) never gets one: its agent would otherwise sign in as the owner and
+    undo every key limit (MCP masking, usage refusal, notes scoping). The
+    harness does not mint for such sessions; this refuses any token that was.
 
     Without a managed database (unit tests, isolated runs) there is no row to
     check and the signature alone decides.
@@ -184,9 +190,11 @@ def _session_exists(session_id: str) -> bool:
 
         if not settings.managed_database_available():
             return True
+        from app.core.api_user_scope import session_api_user_id
         from app.db.sessions import get_session
 
-        return get_session(session_id) is not None
+        row = get_session(session_id)
+        return row is not None and session_api_user_id(row) is None
     except Exception:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
         logger.debug("preview access: session lookup failed", exc_info=True)
         return False

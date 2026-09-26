@@ -16,10 +16,20 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote, urlencode
 
 from app.core.connectors.base import ActionDef
 
 logger = logging.getLogger(__name__)
+
+
+def search_path(query: str, search_type: str = "track", limit: int = 5) -> str:
+    """``/search`` path with the query URL-encoded.
+
+    Titles contain ``&`` and ``#`` often enough ("Simon & Garfunkel", "#1");
+    interpolated raw, ``&`` splits the query and ``#`` truncates it.
+    """
+    return "/search?" + urlencode({"q": query, "type": search_type, "limit": limit}, quote_via=quote)
 
 
 def _schema(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -363,7 +373,7 @@ async def _search(conn, params, ctx):
     if search_type not in ("track", "artist", "album", "playlist"):
         return _err("type must be one of: track, artist, album, playlist.")
     limit = _int(params.get("limit"), 10, 1, 50)
-    resp = await conn._api_get(f"/search?q={query}&type={search_type}&limit={limit}")
+    resp = await conn._api_get(search_path(query, search_type, limit))
     data = resp.json()
     items = data.get(f"{search_type}s", {}).get("items", []) or []
     results: List[Dict[str, Any]] = []

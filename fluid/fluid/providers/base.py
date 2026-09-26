@@ -31,8 +31,9 @@ class StreamChunk:
     """Normalized streaming event.
 
     kind ∈ {provider_request, message_start, block_start, text_delta, thinking_delta,
-            tool_args_delta, block_stop, usage, message_stop, rate_limit,
-            image_generation, image_generation_progress, provider_alive}
+            signature_delta, tool_args_delta, block_stop, usage, message_stop,
+            rate_limit, image_generation, image_generation_progress,
+            provider_alive, error}
 
     ``provider_alive`` (payload ``{"signal": ...}``) is a content-free sign
     that the accepted response is still streaming, for provider frames that
@@ -139,6 +140,19 @@ class ProviderRequest:
     # Per-loop, per-role routing state (see WireState). None for one-off
     # callers; a client that uses it reads and updates it in place.
     wire_state: WireState | None = field(default=None, compare=False, repr=False)
+
+
+def flatten_system(system: str | list[Any] | None) -> str | None:
+    """``ProviderRequest.system`` (str or text-block list) as one string."""
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "".join(
+            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
+        )
+    return str(system)
 
 
 class ProviderClient(Protocol):

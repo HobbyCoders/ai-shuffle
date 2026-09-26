@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -174,25 +172,6 @@ def get_api_users_by_ids(user_ids: list[str]) -> dict[str, dict]:
         for user in users:
             result[user['id']] = user
         return result
-
-
-def get_api_user_names_for_sessions(session_ids: list[str], sessions: list[dict]) -> dict[str, str]:
-    """Get API user display names for sessions that have an api_user_id.
-
-    Args:
-        session_ids: List of session IDs (used for result key alignment)
-        sessions: List of session dicts containing api_user_id fields
-
-    Returns {api_user_id: display_name} for all unique API user IDs found.
-    """
-    api_user_ids = list({s["api_user_id"] for s in sessions if s.get("api_user_id")})
-    if not api_user_ids:
-        return {}
-    users = get_api_users_by_ids(api_user_ids)
-    return {
-        uid: user.get("name") or user.get("username") or uid
-        for uid, user in users.items()
-    }
 
 
 def update_api_user_last_used(user_id: str):
@@ -483,17 +462,6 @@ def delete_user_credential(api_user_id: str, credential_type: str) -> bool:
             (api_user_id, credential_type)
         )
         return cursor.rowcount > 0
-
-
-def user_has_credential(api_user_id: str, credential_type: str) -> bool:
-    """Check if a user has a specific credential set"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT 1 FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
-            (api_user_id, credential_type)
-        )
-        return cursor.fetchone() is not None
 
 
 from app.core.resource_sync import install_database_mutations

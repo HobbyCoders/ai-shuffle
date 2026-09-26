@@ -1,15 +1,17 @@
-"""``fluid`` console entry — chat, run, sessions, config, and migration.
+"""``fluid`` console entry — chat, run, sessions, config, anchors, evolve, and migration.
 
   fluid chat [--tui]        interactive REPL (or Textual TUI)
   fluid run "<prompt>"      one-shot: stream the reply, then exit
   fluid sessions [--limit]  list persisted sessions from the JSONL store
+  fluid config              print the resolved layered config
+  fluid anchors ...         manage the replay-anchor retention set
+  fluid evolve ...          guarded harness evolution: propose, run, review
+  fluid import-settings     preview an explicit provider-to-Fluid migration
 
 ``chat`` and ``run`` accept ``--resume <session-id>`` to pick up an existing
 session, or ``--continue`` for the most recently active one. Both build the
 engine against the stored session, so the engine's own resume path (deferred
 catalog, compaction, background tasks) rehydrates on the first turn.
-  fluid config              print the resolved layered config
-  fluid import-settings     preview an explicit provider-to-Fluid migration
 
 The heavy lifting lives in ``fluid.cli.config`` (engine construction with the
 instruction stack injected) and ``fluid.cli.repl`` (rendering/permissions). The
@@ -39,11 +41,14 @@ from fluid.cli.repl import (
     SIGINT_EXIT_CODE,
     Repl,
     abandon_stdin_read,
+    auto_answer,
     auto_deny,
+    render_continual_update,
     request_interrupt,
     sigint_scope,
     stream_turn,
     tty_permission_responder,
+    tty_question_responder,
 )
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
@@ -81,10 +86,8 @@ async def run_once(
     prompt: str,
     *,
     provider: Any | None = None,
-    provider_name: str | None = None,
     out=None,
     on_permission=auto_deny,
-    on_question=None,
     session_id: str | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
@@ -96,7 +99,7 @@ async def run_once(
     out = out or sys.stdout
     meta = await open_session(store, session_id, cwd=config.cwd)
     engine = make_engine(
-        config, store, provider=provider, provider_name=provider_name,
+        config, store, provider=provider,
         session_id=meta.session_id, permission_responder=on_permission,
     )
     host = host_of(engine)
@@ -118,12 +121,10 @@ async def run_once(
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
         # nothing is in flight, so it never exits with workers running.
-        from fluid.cli.repl import auto_answer, tty_question_responder
-
         with sigint_scope(on_sigint):
             stop = await stream_turn(
                 engine, meta.session_id, prompt, out=out, on_permission=on_permission,
-                on_question=on_question or tty_question_responder() or auto_answer,
+                on_question=tty_question_responder() or auto_answer,
                 wait_background=True,
             )
     finally:
@@ -144,7 +145,6 @@ async def _close_and_flush_learning(engine, session_id: str, out) -> None:
     well not have happened; print those late events here. Everything
     published before close was already rendered by the stream loop.
     """
-    from fluid.cli.repl import render_continual_update
     from fluid.events.model import ContinualUpdate
 
     before = engine.bus.last_seq(session_id)
@@ -186,12 +186,11 @@ async def chat_session(
     config: HarnessConfig,
     store,
     *,
-    provider_name: str | None = None,
     use_tui: bool = False,
     session_id: str | None = None,
 ) -> int:
     meta = await open_session(store, session_id, cwd=config.cwd)
-    engine = make_engine(config, store, provider_name=provider_name, session_id=meta.session_id)
+    engine = make_engine(config, store, session_id=meta.session_id)
     try:
         if use_tui:
             from fluid.cli.tui import run_tui

@@ -10,49 +10,25 @@ session.
 
 The fix is a session_id-ONLY store purge wired into the delete endpoint's
 background cleanup (``_cleanup_session_artifacts``), covering single and batch
-delete. These tests run WITHOUT Postgres (FakeCursor records SQL).
+delete. These tests run WITHOUT Postgres (RecordingCursor records SQL).
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, List, Optional
+from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.core.pg_session_store as pss
+from tests.fakes.db import RecordingConn, RecordingCursor
 
 
-class FakeCursor:
-    def __init__(self, rowcounts: List[int]) -> None:
-        self._rowcounts = rowcounts
-        self.executed: List[tuple] = []
-        self.rowcount = 0
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((sql, params))
-        self.rowcount = self._rowcounts.pop(0) if self._rowcounts else 0
-
-    def fetchone(self) -> Optional[dict]:
-        return None
-
-    def fetchall(self) -> List[dict]:
-        return []
-
-
-class FakeConn:
-    def __init__(self, cursor: FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self) -> FakeCursor:
-        return self._cursor
-
-
-def _patch_db(monkeypatch, rowcounts: List[int]) -> FakeCursor:
-    cur = FakeCursor(rowcounts)
+def _patch_db(monkeypatch, rowcounts: List[int]) -> RecordingCursor:
+    cur = RecordingCursor(rowcounts=rowcounts)
 
     @contextmanager
     def _fake_get_db():
-        yield FakeConn(cur)
+        yield RecordingConn(cur)
 
     monkeypatch.setattr(pss, "get_db", _fake_get_db)
     return cur

@@ -1,12 +1,14 @@
 """
-Postgres-backed implementation of the Claude Agent SDK ``SessionStore`` protocol.
+Postgres tables for Claude-format transcript entries and their folded summaries.
 
-This adapter mirrors every session transcript line the SDK subprocess produces
-into a pair of Postgres tables so that Postgres becomes the single source of
-truth for session history — replacing the JSONL files under
-``~/.claude/projects``. The subprocess still writes locally (to a tmpfs
-``CLAUDE_CONFIG_DIR``), but the durable copy lives in Postgres and is the only
-thing the backend reads back for resume, listing, and summaries.
+:class:`PgSessionStore` keeps the ``SessionStore`` protocol shape of the retired
+Claude Agent SDK. ``query_options`` still attaches it as
+``AgentOptions.session_store``, but ``HarnessAdapter`` ignores that option, so
+:meth:`PgSessionStore.append` has no live caller. Rows are written by the lazy
+JSONL backfill (:func:`lazy_backfill_session_from_jsonl`, called on a store
+miss from the history read path), and read for session history, export,
+rewind and deletion. Native fluid sessions persist separately
+(``app.core.provider.fluid_pg_store``).
 
 Tables
 ------
@@ -15,7 +17,7 @@ Tables
     transcript; non-NULL is a subagent transcript (e.g. ``"subagents/agent-1"``).
     Per-session order is by the ``BIGSERIAL`` ``id`` column, which preserves
     append-call order within a single process and storage commit order across
-    concurrent processes — exactly what the SDK contract requires.
+    concurrent processes — exactly what the ``SessionStore`` contract requires.
 
 ``session_store_summaries``
     Incrementally-folded ``SessionSummaryEntry`` sidecar, one row per
@@ -24,14 +26,10 @@ Tables
     Updated by :func:`_fold_summary_sync` under a per-session
     ``SELECT ... FOR UPDATE``.
 
-    The fold is COALESCED (finding B4): the SDK flushes the transcript mirror
-    roughly every 100ms while a turn streams, and folding on every one of those
-    appends meant 4-5 statements + a commit ~10x/second per streaming session,
-    rewriting the whole summary JSONB row (one dead tuple per append) for a
-    sidecar nobody reads mid-turn. The fold now runs at most once per
+    The fold is COALESCED: it runs at most once per
     ``_SUMMARY_FOLD_INTERVAL_S`` inside the append path, and on demand from the
     two readers that actually consume summaries (``list_sessions`` /
-    ``list_session_summaries``).
+    ``list_session_summaries``) and from :func:`flush_summary_folds`.
 
     Correctness does not depend on the in-process timer: the summary is a pure
     fold of the entries and the watermark lives in the DATABASE, so whatever a
@@ -41,14 +39,9 @@ Tables
 
 Blocking I/O
 ------------
-The SDK calls :meth:`append`/:meth:`load` from an event loop. psycopg2 is
-synchronous, so every DB operation is dispatched to a worker thread via
-``asyncio.to_thread``. This matches the pattern used elsewhere in the backend
-(see ``app/core/startup.py``).
-
-Postgres is the only source of truth for session transcripts; the old
-SESSION_STORE_MODE feature flag ("disabled"/"mirror"/"postgres_only") was
-removed after the cutover.
+The :class:`PgSessionStore` methods are coroutines. psycopg2 is synchronous,
+so every DB operation is dispatched to a worker thread via
+``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -61,14 +54,14 @@ import time
 from contextlib import nullcontext
 from typing import Any
 
-from claude_agent_sdk.types import (
+from app.core.cli_sessions import (
     SessionKey,
     SessionListSubkeysKey,
     SessionStoreEntry,
     SessionStoreListEntry,
     SessionSummaryEntry,
 )
-from claude_agent_sdk import fold_session_summary
+from app.core.cli_sessions import fold_session_summary
 from psycopg2.extras import Json
 
 from app.db.base import get_db, transaction
@@ -92,14 +85,12 @@ def _subpath_of(key: SessionKey | SessionListSubkeysKey) -> str | None:
 # Postgres ``text``/``json``/``jsonb`` cannot store U+0000 (NUL) or lone UTF-16
 # surrogates (U+D800–U+DFFF): an INSERT carrying either fails with
 # "unsupported Unicode escape sequence: <0x00> cannot be converted to text" and
-# aborts the whole transaction. SDK transcript entries occasionally contain
+# aborts the whole transaction. Transcript entries occasionally contain
 # these — e.g. a tool result that echoed a binary or UTF-16-encoded file — and
-# ``psycopg2.extras.Json`` serializes them verbatim, so the mirror ``append``
-# raised and the SDK surfaced a ``mirror_error`` system message to the chat.
+# ``psycopg2.extras.Json`` serializes them verbatim, so the INSERT would fail.
 # JSON itself permits these code points, so the on-disk JSONL transcript is
 # unaffected; we sanitize only at the Postgres boundary. uuids (and every other
-# id field) never contain these code points, so the drift verifier — which
-# compares ``entry->>'uuid'`` — stays green.
+# id field) never contain these code points, so uuid lookups are unaffected.
 _PG_ILLEGAL_RE = re.compile("[\x00\ud800-\udfff]")
 
 
@@ -129,14 +120,13 @@ def _scrub_pg_illegal(value: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Coalesced summary fold (finding B4)
+# Coalesced summary fold
 # ---------------------------------------------------------------------------
 
 #: Minimum wall-clock gap between two summary folds for the same session inside
-#: the append path. The SDK mirrors the transcript roughly every 100ms while a
-#: turn streams; folding each time rewrote the whole summary JSONB row ~10x a
-#: second. Two seconds keeps the sidecar within the staleness window the SDK's
-#: mtime fast-path already tolerates, and readers flush on demand anyway.
+#: the append path. A streaming mirror appends many times a second, and folding
+#: on each append would rewrite the whole summary JSONB row every time. Readers
+#: flush on demand, so the delay is never visible to them.
 _SUMMARY_FOLD_INTERVAL_S = 2.0
 
 #: session_id -> {"project_key": str, "last_fold": monotonic, "pending": bool}.
@@ -394,7 +384,7 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
     """Insert entries and (for main transcripts) keep the summary sidecar fresh.
 
     The insert always happens. The summary fold is coalesced to at most one per
-    ``_SUMMARY_FOLD_INTERVAL_S`` per session (finding B4) — see the module
+    ``_SUMMARY_FOLD_INTERVAL_S`` per session — see the module
     docstring for why that is safe — and is serialized per
     (project_key, session_id) via ``SELECT ... FOR UPDATE`` on the summaries
     row, which is created on first append (INSERT ... ON CONFLICT DO NOTHING)
@@ -493,8 +483,7 @@ def _backfill_entries_sync(
 
     Returns the number of rows written. This deliberately reuses the exact
     column set / ``Json(dict(e))`` encoding ``_append_sync`` uses so backfilled
-    rows are shape-identical to live-mirrored rows and the drift verifier
-    (which compares ``entry->>'uuid'`` ordered by ``id``) passes unchanged.
+    rows are shape-identical to appended rows.
 
     Caller is responsible for the idempotency pre-check (see
     :func:`_count_entries_sync`) — this function unconditionally inserts.
@@ -567,7 +556,7 @@ def _load_entries_by_session_id_sync(
     unique (a live DB check confirmed 0 sessions span multiple project_keys),
     so matching on ``session_id`` alone is both correct and the only way to make
     resume work regardless of which (possibly-wrong) project_key the caller
-    reconstructs. This is the same strategy the drift verifier uses at 0 drift.
+    reconstructs.
     """
     with get_db() as conn:
         cur = conn.cursor()
@@ -833,11 +822,10 @@ def _lazy_backfill_from_jsonl_sync(
 ) -> int:
     """Backfill a session's store transcript from its local JSONL on a miss.
 
-    The postgres_only cutover assumed ``scripts/backfill_session_store.py`` had
-    populated the store first. Where it wasn't run, every pre-cutover session
-    has ZERO store rows, so reads render empty and SDK resume seeds a blank
-    context. This self-heals the store one session at a time, at read/resume
-    time, from the same JSONL the bulk script would have used.
+    A session whose transcript was never copied into the store has ZERO store
+    rows, so reads render empty and resume seeds a blank context. This
+    self-heals the store one session at a time, at read/resume time, from the
+    session's local JSONL.
 
     Guards (cheapest first — this sits on read paths):
       1. any main-transcript store rows → already recorded, skip;
@@ -992,7 +980,7 @@ def _list_sessions_sync(project_key: str) -> list[SessionStoreListEntry]:
 
     Flushes any deferred summary fold first: this listing is half of the SDK's
     freshness comparison, so it must not report entry mtimes newer than the
-    sidecars it is about to be compared against (finding B4).
+    sidecars it is about to be compared against.
     """
     flush_summary_folds()
     with get_db() as conn:
@@ -1012,7 +1000,7 @@ def _list_sessions_sync(project_key: str) -> list[SessionStoreListEntry]:
 def _list_session_summaries_sync(project_key: str) -> list[SessionSummaryEntry]:
     """Return every folded summary for ``project_key``.
 
-    The summary sidecar is folded lazily (finding B4), so this — the only place
+    The summary sidecar is folded lazily, so this — the only place
     the folded ``data`` is actually consumed — brings it current first: it
     flushes what this process still owes, then repairs anything a previous
     process left unfolded when it died mid-turn.
@@ -1082,7 +1070,7 @@ def _delete_session_data_by_session_id_sync(session_id: str) -> int:
 
     Used by the session-delete endpoint's background cleanup: ``sessions`` has
     NO foreign key into the store tables, so without this every deleted
-    session leaked its full transcript forever (Bug E).
+    session leaked its full transcript forever.
     """
     _forget_fold_state(session_id)
     with get_db() as conn:
@@ -1242,32 +1230,22 @@ async def main_transcript_is_empty(session_id: str) -> bool:
 
 
 class PgSessionStore:
-    """Postgres-backed :class:`claude_agent_sdk.SessionStore` implementation.
+    """Postgres-backed app-owned CLI transcript store implementation.
 
     See module docstring for the full design. Implements all four optional
     methods (``list_sessions``, ``list_session_summaries``, ``delete``,
-    ``list_subkeys``) so the SDK can use the fast-path resume + summary APIs
-    without falling back to per-session ``load()``.
+    ``list_subkeys``) for fast-path resume and summary reads without falling
+    back to per-session ``load()``.
 
     All methods are coroutines wrapping synchronous psycopg2 work via
-    ``asyncio.to_thread``. Exceptions raised by ``append`` are logged but
-    re-raised per the Protocol contract so the SDK's own error handling
-    (swallow + continue subprocess) applies.
+    ``asyncio.to_thread``. Exceptions raised by ``append`` are logged and
+    re-raised to the caller; persistence failures are never silently accepted.
     """
 
     async def append(
         self, key: SessionKey, entries: list[SessionStoreEntry]
     ) -> None:
         await asyncio.to_thread(_append_sync, key, entries)
-
-    async def flush_summaries(self, session_id: str | None = None) -> int:
-        """Fold any summary this process still owes (see :func:`flush_summary_folds`).
-
-        NOT part of the SDK SessionStore protocol. Exposed so a turn-end hook
-        can bring the sidecar current the moment a turn finishes instead of
-        waiting for the next reader.
-        """
-        return await asyncio.to_thread(flush_summary_folds, session_id)
 
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         return await asyncio.to_thread(_load_sync, key)
@@ -1287,7 +1265,7 @@ class PgSessionStore:
         return await asyncio.to_thread(_list_subkeys_sync, key)
 
     # ------------------------------------------------------------------
-    # App-facing read API (PR C.1 — postgres_only read cutover).
+    # App-facing read API.
     #
     # NOT part of the SDK SessionStore protocol. The backend has a
     # ``session_id`` (the SDK session UUID), not an SDK key dict, and must NOT
@@ -1343,50 +1321,6 @@ class PgSessionStore:
         """
         return await asyncio.to_thread(
             _list_subpaths_by_session_id_sync, session_id
-        )
-
-    # ------------------------------------------------------------------
-    # Backfill API (operational; used by scripts.backfill_session_store).
-    #
-    # NOT part of the SDK SessionStore protocol. The live mirror appends
-    # incrementally; these methods bulk-load a complete on-disk transcript
-    # into the SAME tables, in the SAME row shape, so backfilled history is
-    # indistinguishable from mirrored history to readers and the verifier.
-    # ------------------------------------------------------------------
-
-    async def count_entries(self, key: SessionKey) -> int:
-        """Rows already present for ``key`` (used for the idempotency check)."""
-        return await asyncio.to_thread(_count_entries_sync, key)
-
-    async def backfill(
-        self,
-        key: SessionKey,
-        entries: list[SessionStoreEntry],
-        *,
-        skip_if_present: bool = True,
-        batch_size: int = 500,
-    ) -> int:
-        """Bulk-insert a full transcript for ``key``, idempotently.
-
-        Idempotency: ``session_store_entries`` has no unique constraint
-        (BIGSERIAL PK only), so there is no ``ON CONFLICT`` target. When
-        ``skip_if_present`` is True (default) this first counts existing rows
-        for the exact (project_key, session_id, subpath) and returns ``0``
-        without writing if any exist — the on-disk JSONL is the complete,
-        append-only history, so partial overlap is not expected. Pass
-        ``skip_if_present=False`` only when you have already truncated the
-        target rows yourself.
-
-        Returns the number of rows written (``0`` when skipped or empty).
-        """
-        if not entries:
-            return 0
-        if skip_if_present:
-            existing = await asyncio.to_thread(_count_entries_sync, key)
-            if existing > 0:
-                return 0
-        return await asyncio.to_thread(
-            _backfill_entries_sync, key, entries, batch_size
         )
 
 

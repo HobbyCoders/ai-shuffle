@@ -1,19 +1,56 @@
-/** Main-branch source updates: signed metadata, local builds, atomic restart activation. */
+/** Signed source updates (stable releases, or edge for the owner): signed metadata, local builds, atomic restart activation. */
 import { createHash, verify } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { extractSource } from './source-archive';
-import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
+import { extractSource, type ExtractedFile } from './source-archive';
+import { isLeaseValue, isLicenseKeyValue, LEASE_HEADER, LICENSE_KEY_HEADER, publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
 
 const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
-const FEED = SOURCE_ORIGIN + '/v1/desktop/manifest';
 const MAX_SIZE = 512 * 1024 ** 2;
-export interface SourceManifest { format: 2; revision: string; sequence: number; sha256: string; size: number }
+const MAX_NOTES = 4000;
+/** An update.lock without a valid pid this old is left over from a crash, not held by a running updater. */
+export const STALE_LOCK_MS = 10 * 60_000;
+// "0.9.0" on a release, "0.9.0-dev.12+gabc1234" on an edge build (docker/application_updates.py).
+const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?$/;
+/**
+ * stable: tagged releases, signed only after the release image passed
+ * container verification. edge: every main revision, for the owner's own
+ * testing. The channel is inside the signed payload, so the hub cannot relabel
+ * an edge build as stable. See docs/ci/release-channels.md.
+ */
+export const CHANNELS = ['stable', 'edge'] as const;
+export type UpdateChannel = typeof CHANNELS[number];
+/** Owner-only override in the update root: {"channel": "edge"}. Absent means stable. */
+export const CHANNEL_FILE = 'update-channel.json';
+/**
+ * First-install license key in the update root: {"key": "ASH-..."}. Written
+ * when the owner enters their key because the hub asked for a license before
+ * any worker (and so any lease) existed; sent as X-Shuffle-License-Key only
+ * while there is no lease, and removed once a lease has opened the feed.
+ */
+export const LICENSE_KEY_FILE = 'license-key.json';
+/** The hub's gate answered 402: this install needs a lease or a license key. */
+export class LicenseRequiredError extends Error {
+  readonly code = 'license_required';
+  constructor(readonly keySent: boolean) {
+    super(keySent
+      ? 'The hub did not accept this license key for updates. Check the key, or that the license is active, at hobbycoders.com.'
+      : 'Updates need an active AI Shuffle license. Enter your license key, or add it in Settings > License.');
+  }
+}
+const FEEDS: Record<UpdateChannel, string> = { stable: SOURCE_ORIGIN + '/v1/desktop/manifest', edge: SOURCE_ORIGIN + '/v1/desktop/manifest/edge' };
+export interface SourceManifest {
+  format: 2; revision: string; sequence: number; sha256: string; size: number;
+  /** Added after format 2 shipped; older signed manifests (and installed release.json files) lack them. */
+  channel?: UpdateChannel; version?: string; notes?: string; tree?: string;
+}
 export interface SourceOptions {
   root: string;
+  /** Overrides the update-channel.json setting; tests and owner builds only. */
+  channel?: UpdateChannel;
   publicKey: string;
   bootstrapNode: string;
   /** Trusted revision included in the installer, before its first source update. */
@@ -34,7 +71,12 @@ export interface SourceApplication {
 }
 interface SourceState { active?: string; previous?: string; pending?: string; staged?: string; booting?: string; blocked?: boolean; failed?: string[] }
 export type SourceProgress = (percent: number | null, message: string) => void;
-export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string };
+/** The signed release name and notes shown beside the update button. */
+export interface ReleaseInfo { release?: string; notes?: string }
+export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string } & ReleaseInfo;
+function releaseOf(manifest: SourceManifest): ReleaseInfo {
+  return { ...(manifest.version ? { release: manifest.version } : {}), ...(manifest.notes ? { notes: manifest.notes } : {}) };
+}
 
 export function verifySourceManifest(text: string, publicKey: string): SourceManifest {
   const envelope = JSON.parse(text);
@@ -43,7 +85,32 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
   if (!verify(null, payload, publicKey, Buffer.from(envelope.signature, 'base64'))) throw new Error('Invalid source manifest signature');
   const m = JSON.parse(payload.toString('utf8')) as SourceManifest;
   if (m.format !== 2 || typeof m.revision !== 'string' || !REVISION.test(m.revision) || typeof m.sha256 !== 'string' || !DIGEST.test(m.sha256) || !Number.isSafeInteger(m.sequence) || m.sequence <= 0 || !Number.isSafeInteger(m.size) || m.size <= 0 || m.size > MAX_SIZE) throw new Error('Invalid source manifest');
+  // Optional release fields, checked as strictly as the container updater does.
+  if (('channel' in m && !(CHANNELS as readonly unknown[]).includes(m.channel))
+    || ('tree' in m && !(typeof m.tree === 'string' && DIGEST.test(m.tree)))
+    || ('version' in m && !(typeof m.version === 'string' && VERSION.test(m.version)))
+    || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))) throw new Error('Invalid source manifest release fields');
   return m;
+}
+
+/** A freshly downloaded manifest must be signed for this install's channel and carry a tree digest. */
+export function requireRelease(manifest: SourceManifest, channel: UpdateChannel): SourceManifest {
+  if (manifest.channel !== channel) throw new Error(`The update feed did not return a signed ${channel} release. No update was downloaded.`);
+  if (!manifest.tree) throw new Error('This update has no signed source tree digest. No update was downloaded.');
+  return manifest;
+}
+
+/**
+ * The signed source tree digest (scripts/source_archive.py): SHA-256 over one
+ * "path NUL sha256 LF" line per regular file below the archive root, sorted by
+ * path. Python compares str by code point, which UTF-8 byte order preserves.
+ */
+export function treeDigest(files: ExtractedFile[]): string {
+  const sorted = files.map(([file, digest]) => [Buffer.from(file, 'utf8'), digest] as const)
+    .sort((a, b) => Buffer.compare(a[0], b[0]) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  const hash = createHash('sha256');
+  for (const [file, digest] of sorted) hash.update(Buffer.concat([file, Buffer.from(`\0${digest}\n`, 'utf8')]));
+  return hash.digest('hex');
 }
 
 export class SourceUpdates {
@@ -68,7 +135,44 @@ export class SourceUpdates {
   }
   private writes: Promise<void> = Promise.resolve();
   private readonly request: typeof fetch;
-  constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => publicSourceFetch(String(url))); }
+  private lease: (() => Promise<string | null>) | null = null;
+  constructor(readonly options: SourceOptions) {
+    this.request = options.fetch ?? ((url, init) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      const lease = headers?.[LEASE_HEADER], key = headers?.[LICENSE_KEY_HEADER];
+      return lease ? publicSourceFetch(String(url), lease) : key ? publicSourceFetch(String(url), undefined, key) : publicSourceFetch(String(url));
+    });
+  }
+  /**
+   * Where to get the license lease sent as X-Shuffle-Lease with manifest and
+   * archive requests (the hub's gated feed, D8). Without it, or when it yields
+   * nothing, requests go out without the header exactly as before.
+   */
+  useLease(provider: () => Promise<string | null>): void { this.lease = provider; }
+  private async currentLease(): Promise<string | null> {
+    try { const lease = await this.lease?.(); return isLeaseValue(lease) ? lease : null; }
+    catch { return null; }
+  }
+  /** The first-install license key, or null when none was entered or the file is unreadable. */
+  async licenseKey(): Promise<string | null> {
+    try {
+      const key = JSON.parse(await fs.readFile(path.join(this.options.root, LICENSE_KEY_FILE), 'utf8'))?.key;
+      return isLicenseKeyValue(key) ? key : null;
+    } catch { return null; }
+  }
+  /** Keep the key the owner entered for the first download; owner-only file. */
+  async saveLicenseKey(key: string): Promise<void> {
+    const value = key.trim();
+    if (!isLicenseKeyValue(value)) throw new Error('That does not look like a license key. Keys look like ASH-XXXXX-XXXXX-XXXXX-XXXXX.');
+    await fs.mkdir(this.options.root, { recursive: true });
+    const file = path.join(this.options.root, LICENSE_KEY_FILE);
+    await fs.writeFile(file + '.tmp', JSON.stringify({ key: value }), { mode: 0o600 });
+    await fs.rename(file + '.tmp', file);
+  }
+  private async forgetLicenseKey(): Promise<void> {
+    try { await fs.unlink(path.join(this.options.root, LICENSE_KEY_FILE)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('Could not remove the first-install license key', error); }
+  }
   get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
   get pendingVersion(): string | null { return this.state.staged ?? this.state.pending ?? null; }
   get hasSourceState(): boolean { return !!(this.state.active || this.state.pending || this.state.blocked); }
@@ -102,6 +206,17 @@ export class SourceUpdates {
       delete this.state.pending;
       await this.save();
     }
+  }
+  /** The release channel this install follows: stable unless the owner opted into edge. */
+  async channel(): Promise<UpdateChannel> {
+    if (this.options.channel) return this.options.channel;
+    let text: string;
+    try { text = await fs.readFile(path.join(this.options.root, CHANNEL_FILE), 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'stable'; throw error; }
+    let channel: unknown;
+    try { channel = JSON.parse(text)?.channel; } catch { channel = undefined; }
+    if (!(CHANNELS as readonly unknown[]).includes(channel)) throw new Error(`${CHANNEL_FILE} must contain {"channel": "stable"} or {"channel": "edge"}. No update was checked.`);
+    return channel as UpdateChannel;
   }
   private async updatesAllowed(): Promise<boolean> {
     try {
@@ -142,8 +257,17 @@ export class SourceUpdates {
     try { const handle = await fs.open(file, 'wx'); await handle.writeFile(String(process.pid)); await handle.close(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const pid = Number(await fs.readFile(file, 'utf8'));
-      if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('An update lock needs attention; no files were changed');
+      const text = await fs.readFile(file, 'utf8');
+      const pid = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        // A crash between creating the lock and writing its pid leaves it empty.
+        // A fresh one may belong to an updater that is still writing it; once
+        // it is old enough no live updater can own it, so it is taken over.
+        const age = Date.now() - (await fs.stat(file)).mtimeMs;
+        if (age < STALE_LOCK_MS) throw new Error('An update lock needs attention; no files were changed');
+        console.warn(`Taking over an update lock without a process id, last changed ${Math.round(age / 60_000)} min ago: ${file}`);
+        await fs.unlink(file); return this.lock();
+      }
       try { process.kill(pid, 0); throw new Error('An application update is already running'); }
       catch (failure) { if ((failure as NodeJS.ErrnoException).code !== 'ESRCH') throw failure; }
       await fs.unlink(file); return this.lock();
@@ -151,18 +275,33 @@ export class SourceUpdates {
     return () => fs.unlink(file);
   }
   private async response(url: string): Promise<Response> {
-    const response = await this.request(url, { signal: AbortSignal.timeout(120_000), headers: { 'User-Agent': 'AI-Shuffle-Source-Updater' } });
+    // Only hub update URLs reach here (FEEDS and the hub's /v1/desktop/sources/<revision>).
+    if (!url.startsWith(SOURCE_ORIGIN + '/v1/desktop/')) throw new Error('Invalid source download endpoint');
+    // A lease from the worker wins; the first-install key is only for before one exists.
+    const lease = await this.currentLease();
+    const key = lease ? null : await this.licenseKey();
+    const headers: Record<string, string> = { 'User-Agent': 'AI-Shuffle-Source-Updater', ...(lease ? { [LEASE_HEADER]: lease } : key ? { [LICENSE_KEY_HEADER]: key } : {}) };
+    const response = await this.request(url, { signal: AbortSignal.timeout(120_000), headers });
+    if (response.status === 402) throw new LicenseRequiredError(!!key);
     if (!response.ok || !response.body) throw new Error(`Source update request failed (${response.status})`);
+    // The worker has a lease and the hub took it: the first-install key has done its job.
+    if (lease) await this.forgetLicenseKey();
     return response;
   }
   private async manifest(): Promise<{ signed: string; manifest: SourceManifest }> {
-    const response = await this.response(FEED);
+    const channel = await this.channel();
+    const response = await this.response(FEEDS[channel]);
     const chunks: Uint8Array[] = []; let size = 0;
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
       if ((size += chunk.length) > 32 * 1024) throw new Error('Source manifest exceeds limits'); chunks.push(chunk);
     }
     const signed = Buffer.concat(chunks).toString('utf8');
-    return { signed, manifest: verifySourceManifest(signed, this.options.publicKey) };
+    return { signed, manifest: requireRelease(verifySourceManifest(signed, this.options.publicKey), channel) };
+  }
+  /** Release name and notes of a downloaded revision, from its stored signed manifest; empty when unreadable. */
+  async releaseInfo(revision: string): Promise<ReleaseInfo> {
+    try { return releaseOf(verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey)); }
+    catch { return {}; }
   }
   async check(_progress: SourceProgress = () => {}, interactive = false): Promise<SourceCheck> {
     return this.update(false, () => {}, interactive);
@@ -174,7 +313,7 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
-    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12) };
+    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12), ...await this.releaseInfo(this.pendingVersion) };
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
     try {
@@ -188,10 +327,10 @@ export class SourceUpdates {
           : verifySourceManifest(await fs.readFile(path.join(this.directory(installed), 'release.json'), 'utf8'), this.options.publicKey);
         if (manifest.sequence <= old.sequence) return { kind: 'current' };
       }
-      if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer main-branch update. Previous files and data have been retained.');
-      if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12) };
+      if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer update. Previous files and data have been retained.');
+      if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
       await this.stage(manifest, signed, progress);
-      return { kind: 'ready', version: manifest.revision.slice(0, 12) };
+      return { kind: 'ready', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
     } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
   }
   private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress): Promise<void> {
@@ -199,20 +338,25 @@ export class SourceUpdates {
     await removeSourceDirectory(stage);
     await fs.mkdir(stage, { recursive: true });
     try {
-      progress(0, 'Downloading source from main…');
+      progress(0, 'Downloading verified source…');
       const response = await this.response(`${SOURCE_ORIGIN}/v1/desktop/sources/${manifest.revision}`);
       const archive = path.join(stage, 'source.zip');
       const file = await fs.open(archive, 'wx'); const hash = createHash('sha256'); let size = 0;
       try {
         for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
           size += chunk.length; if (size > manifest.size) throw new Error('Source archive exceeds signed size');
-          hash.update(chunk); await file.writeFile(chunk); progress(Math.floor(size / manifest.size * 100), 'Downloading source from main…');
+          hash.update(chunk); await file.writeFile(chunk); progress(Math.floor(size / manifest.size * 100), 'Downloading verified source…');
         }
       } finally { await file.close(); }
       if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) throw new Error('Source archive checksum or size mismatch');
-      const unpacked = path.join(stage, 'unpacked'); await extractSource(archive, unpacked);
+      const unpacked = path.join(stage, 'unpacked'); const extracted = await extractSource(archive, unpacked);
       const entries = await fs.readdir(unpacked);
       if (entries.length !== 1 || !new RegExp(`^(ai-shuffle-${manifest.revision}|HobbyCoders-ai-shuffle-${manifest.revision.slice(0, 7)}[a-f0-9]*)$`, "i").test(entries[0])) throw new Error('Unexpected source archive root');
+      // Recompute the signed tree digest over what was written, before any of it is built or run.
+      const prefix = entries[0] + '/';
+      if (extracted.some(([file]) => !file.startsWith(prefix)) || treeDigest(extracted.map(([file, digest]) => [file.slice(prefix.length), digest])) !== manifest.tree) {
+        throw new Error('Source files do not match the signed release. The update was not built; the running version is unchanged.');
+      }
       await fs.rename(path.join(unpacked, entries[0]), path.join(stage, 'source'));
       await fs.rmdir(unpacked); await fs.unlink(archive);
       const source = path.join(stage, 'source');
@@ -251,7 +395,6 @@ export class SourceUpdates {
     }
     return { revision, directory: dir, desktopDir, serverDir: path.join(dir, 'server'), resources, python, node: path.join(resources, 'worker/node/node.exe'), electron };
   }
-  async current(): Promise<SourceApplication | null> { return this.state.active ? this.application(this.state.active) : null; }
   async select(): Promise<SourceApplication> {
     const revision = this.state.pending ?? this.state.active;
     if (!revision || (this.state.blocked && !this.state.pending)) throw new Error('No healthy source build is available. Check for updates. Previous files and data have been retained.');

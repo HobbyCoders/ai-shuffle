@@ -20,7 +20,7 @@ async def test_normal_and_kill_share_claim(mock_db, kill_first):
     }])
     async def normal():
         await qp._persist_turn_results(
-            sid, "sdk", [], [], {"usage_settlement_key": key, "tokens_in": 17,
+            sid, "sdk", {"usage_settlement_key": key, "tokens_in": 17,
             "tokens_out": 4, "total_cost_usd": 0.01, "num_turns": 1},
             "default", interrupted=True,
         )
@@ -64,7 +64,7 @@ async def test_a_legitimate_continuation_books_separately(mock_db):
     key2 = await qp.capture_usage_identity(sid)
     assert key2 != qp.usage_settlement_key(sid, turn1)
     await qp._persist_turn_results(
-        sid, "sdk", [], [],
+        sid, "sdk",
         {"usage_settlement_key": key2, "tokens_in": 20, "tokens_out": 2,
          "total_cost_usd": 0.004, "num_turns": 1},
         "default", interrupted=False,
@@ -134,7 +134,7 @@ async def test_finalizer_without_terminal_leaves_coalesced_records_to_the_kill_p
         "payload": {"usage": {"input_tokens": 17, "output_tokens": 4}},
     }])
     await qp._persist_turn_results(
-        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        sid, "sdk", {"usage_settlement_key": key}, "default",
         interrupted=True,
     )
     assert mock_db.execute(
@@ -151,9 +151,62 @@ async def test_finalizer_without_terminal_or_turn_books_nothing(mock_db):
     key = await qp.capture_usage_identity(sid)
     assert qp.settlement_turn_id(key) is None
     await qp._persist_turn_results(
-        sid, "sdk", [], [], {"usage_settlement_key": key}, "default",
+        sid, "sdk", {"usage_settlement_key": key}, "default",
         interrupted=True,
     )
     assert mock_db.execute(
         "SELECT COUNT(*) FROM usage_log WHERE session_id=?", (sid,)
     ).fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_estimated_turn_is_flagged_on_its_ledger_row_by_both_finalizers(mock_db):
+    """The kill path recovers ``usage_estimated`` from the per-call ``turn.usage``
+    records, where fluid's per-field flags count as much as the adapter's
+    summary key; the finalizer books it from the terminal's metadata. Amounts
+    are booked unchanged either way."""
+    sid = "settlement-estimated"
+    database.create_session(session_id=sid, profile_id="default")
+
+    # Attempt 1: killed before its terminal; only fluid's per-field flag survives.
+    turn1 = turns.enqueue_turn(sid, "user", prompt="first")
+    turns.start_turn(turn1["id"], instance_id="inst-1")
+    session_events.append_events(sid, [{
+        "type": "turn.usage", "turn_id": turn1["id"],
+        "payload": {"usage": {"model_call_index": 1, "input_tokens": 10,
+                              "output_tokens": 3, "cost_usd": 0.001,
+                              "output_tokens_estimated": True}},
+    }])
+    assert await qp.settle_killed_session(sid) is True
+
+    # Attempt 2: a normal finalization whose terminal usage the adapter stamped.
+    turn2 = turns.enqueue_turn(sid, "user", prompt="second")
+    turns.start_turn(turn2["id"], instance_id="inst-2")
+    key2 = await qp.capture_usage_identity(sid)
+    await qp._persist_turn_results(
+        sid, "sdk",
+        {"usage_settlement_key": key2, "tokens_in": 40, "tokens_out": 8,
+         "total_cost_usd": 0.004, "num_turns": 1, "usage_estimated": True},
+        "default", interrupted=False,
+    )
+
+    # Attempt 3: a measured turn stays unflagged. Turn 2 is settled first so
+    # the identity capture binds to turn 3, not the still-open turn 2.
+    turns.settle_turn(turn2["id"], "completed")
+    turn3 = turns.enqueue_turn(sid, "user", prompt="third")
+    turns.start_turn(turn3["id"], instance_id="inst-3")
+    key3 = await qp.capture_usage_identity(sid)
+    await qp._persist_turn_results(
+        sid, "sdk",
+        {"usage_settlement_key": key3, "tokens_in": 5, "tokens_out": 1,
+         "total_cost_usd": 0.0005, "num_turns": 1, "usage_estimated": False},
+        "default", interrupted=False,
+    )
+
+    flags = [bool(r[0]) for r in mock_db.execute(
+        "SELECT usage_estimated FROM usage_log WHERE session_id=? ORDER BY id", (sid,)
+    ).fetchall()]
+    assert flags == [True, True, False]
+    row = database.get_session(sid)
+    assert row["total_tokens_in"] == 55
+    assert row["total_cost_usd"] == pytest.approx(0.0055)

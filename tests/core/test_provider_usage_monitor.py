@@ -12,6 +12,7 @@ import pytest
 
 from app.core.provider_usage import (
     ProviderUsageMonitor,
+    _openrouter_limit_resets_at,
     _openrouter_windows_and_credits,
 )
 
@@ -352,7 +353,9 @@ class TestPollProvider:
         assert provider_id == "prov-or-1"
         assert provider_type == "openrouter"
         assert plan_type is None
-        assert windows == [{"type": "credit_limit", "utilization": 30.0, "resets_at": None}]
+        # The key's monthly limit resets at the start of next month (UTC).
+        assert windows == [{"type": "credit_limit", "utilization": 30.0,
+                            "resets_at": _openrouter_limit_resets_at("monthly")}]
         assert credits["usage"] == 3.0
         assert credits["usage_monthly"] == 3.0
         assert fetched_at is not None
@@ -488,7 +491,8 @@ class TestPollProvider:
         upsert.assert_called_once()
         args = upsert.call_args[0]
         assert args[3] == [
-            {"type": "credit_limit", "utilization": 30.0, "resets_at": None}
+            {"type": "credit_limit", "utilization": 30.0,
+             "resets_at": _openrouter_limit_resets_at("monthly")}
         ]
         credits = args[4]
         assert credits["usage"] == 3.0

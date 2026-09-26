@@ -50,13 +50,6 @@ async def _collect_metrics() -> dict:
     metrics["browser_available_workspaces"] = sum(bool(b.state["available"]) for b in brokers)
     metrics["browser_tab_counts_are_last_reported"] = True
 
-    # --- WebSocket tracking dicts ---
-    try:
-        from app.api.websocket import _active_chat_sessions
-        metrics["ws_active_chat_sessions"] = len(_active_chat_sessions)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to collect websocket metrics: {e}")
-
     # --- Session Pool ---
     try:
         from app.core.session_pool import get_session_pool, _session_pool, is_subprocess_alive
@@ -117,10 +110,6 @@ async def _collect_metrics() -> dict:
             len(devices) for devices in sync_engine._connections.values()
         )
         metrics["sync_user_connections"] = len(sync_engine._user_connections)
-        metrics["sync_session_locks"] = len(sync_engine._session_locks)
-        metrics["sync_session_user_map"] = len(sync_engine._session_user_map)
-        metrics["sync_session_project_map"] = len(sync_engine._session_project_map)
-        metrics["sync_session_worktree_map"] = len(sync_engine._session_worktree_map)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect sync engine metrics: {e}")
 
@@ -192,7 +181,6 @@ async def _collect_metrics() -> dict:
 
     # --- Event loop responsiveness ---
     try:
-        loop = asyncio.get_running_loop()
         lag_start = time.monotonic()
         await asyncio.sleep(0)  # Yield to event loop
         lag = time.monotonic() - lag_start
@@ -250,13 +238,7 @@ async def _collect_metrics() -> dict:
     # --- Handler accumulation tracking ---
     try:
         from app.core.permission_handler import permission_handler
-        metrics["perm_pending_sessions"] = len(permission_handler._pending_requests)
         metrics["perm_session_rules"] = len(permission_handler._session_rules)
-    except Exception:
-        pass
-    try:
-        from app.core.user_question_handler import user_question_handler
-        metrics["question_pending_sessions"] = len(user_question_handler._pending_questions)
     except Exception:
         pass
 
@@ -307,8 +289,7 @@ def _check_warnings(metrics: dict) -> list[str]:
     # Session pool at capacity — the SUBPROCESS half of it, which is what
     # pool_max_size bounds. pool_max_size is reported by _collect_metrics
     # straight off the live pool; the fallback reads the CONFIGURED size rather
-    # than a hardcoded constant, which is what previously went stale when the
-    # default moved (it still said 3 long after the default was 8). If neither
+    # than a hardcoded constant, so it cannot go stale. If neither
     # is available the pool is not up yet — there is nothing to warn about.
     pool_size = metrics.get("pool_delegated", metrics.get("pool_size", 0))
     pool_max = metrics.get("pool_max_size")
@@ -388,7 +369,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
     # ``lru_force`` (hard-cap eviction of a busy session) and ``dead`` (subprocess
     # died) are the only reasons that can remove a session PARKED on in-flight
     # background work — normal ``lru``/``idle`` eviction skip parked sessions. In
-    # those two cases the pooled SDK client was just destroyed, so the parked
+    # those two cases the pooled adapter was just destroyed, so the parked
     # work can never deliver its terminal notification: the background-work
     # guard below would refuse teardown FOREVER, leaking the registry and
     # stranding the UI's task strip. Force the teardown so the orphaned tasks
@@ -407,7 +388,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 await persist_turn_end_state(session_id)
 
             if force:
-                # The SDK client is gone — in-flight background work can never
+                # The pooled adapter is gone — in-flight background work can never
                 # finish on its own. Reap it to "killed" so the taskbar shows
                 # the failure (the registry retains killed rows for a short
                 # window past clear_session — see task_registry.get_visible).
@@ -440,7 +421,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 task_registry.has_active_background_work(session_id)
                 or task_registry.has_running_monitor_shell(session_id)
             ):
-                # A session parked on SDK background work keeps its registry
+                # A session parked on background work keeps its registry
                 # until the work completes (a later turn end, eviction, or
                 # sweep clears it) — this only DEFERS removal, never blocks it.
                 # Monitor shells defer too: they are OS processes independent
@@ -461,15 +442,6 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                 # background-work guard, so without an explicit reap they
                 # strand: the subprocess keeps running and its reader leaks).
                 task_registry.clear_session(session_id)
-                # Drop the session's last-turn-recorder entry too — otherwise
-                # _last_turn_recorders grows one entry per dead session.
-                try:
-                    from app.core.turn_recorder import pop_last_turn_recorder
-                    pop_last_turn_recorder(session_id)
-                except Exception:
-                    logger.debug(
-                        f"{_PREFIX} last-turn-recorder pop failed", exc_info=True,
-                    )
                 try:
                     from app.mcp.builtin_tools import reap_session_background_shells
                     reap_session_background_shells(session_id)
@@ -495,7 +467,7 @@ async def _on_pool_eviction(session_id: str, reason: str) -> None:
 
     Fired from SessionPool._do_evict the moment an LRU or idle eviction removes a
     session, so the task registry + Monitor shells are torn down on the SAME
-    event that ends the pooled SDK client — one lifecycle, no separate timer.
+    event that ends the pooled adapter — one lifecycle, no separate timer.
     Dead-eviction does NOT route here (it bypasses _do_evict); the periodic
     sweep cleans those via _cleanup_evicted_sessions.
     """
@@ -508,27 +480,6 @@ async def _periodic_cleanup() -> dict:
     Returns a dict of cleanup actions taken (for logging).
     """
     cleaned = {}
-
-    # Sweep stale sync engine maps
-    try:
-        from app.core.sync_engine import sync_engine
-        count = await sync_engine.sweep_stale_maps()
-        if count:
-            cleaned["stale_sync_maps"] = count
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to sweep sync engine maps: {e}")
-
-    # Clean up done tasks from _active_chat_sessions
-    try:
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-        async with _active_sessions_lock:
-            done_ids = [sid for sid, task in _active_chat_sessions.items() if task.done()]
-            for sid in done_ids:
-                del _active_chat_sessions[sid]
-            if done_ids:
-                cleaned["done_chat_tasks"] = len(done_ids)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to clean up done chat tasks: {e}")
 
     # Evict dead subprocesses from the session pool
     try:
@@ -621,7 +572,7 @@ async def _periodic_cleanup() -> dict:
     # subprocesses that already exited and never signals a live session.
     try:
         from app.core.session_pool import reap_terminated_process_trees
-        reaped = reap_terminated_process_trees()
+        reaped = await reap_terminated_process_trees()
         if reaped:
             cleaned["reaped_orphan_processes"] = reaped
     except Exception as e:
@@ -755,12 +706,11 @@ async def _monitor_loop(interval_seconds: int):
             # sessions so the sweep stays cheap; the unbounded backfill runs once
             # at startup. Logs an ERROR per heal (recovery implies a prior crash).
             #
-            # F6: this is a RECOVERY sweep, not a hot path, so it runs on its own
+            # This is a RECOVERY sweep, not a hot path, so it runs on its own
             # (hourly by default) cadence rather than every monitor tick. New
             # orphans are prevented at the source by the persist-on-init write,
             # the startup pass covers the whole backlog, and the reconciler
-            # itself now memoizes inconclusive ids — so a 5-minute cadence bought
-            # nothing but a repeated aggregation over the session store.
+            # memoizes inconclusive ids.
             if _orphan_reconcile_due():
                 await reconcile_orphans_once(max_age_days=14)
 
@@ -783,19 +733,17 @@ async def start_resource_monitor(interval_seconds: int = 300) -> asyncio.Task:
     # Wire pool eviction → registry/shell cleanup. This makes LRU + idle
     # eviction (both funnel through SessionPool._do_evict) tear down the
     # per-session task registry and Monitor shells on the same event that ends
-    # the pooled SDK client — one lifecycle, no separate timer.
+    # the pooled adapter — one lifecycle, no separate timer.
     try:
         from app.core.session_pool import get_session_pool
         get_session_pool().set_eviction_callback(_on_pool_eviction)
     except Exception as e:
         logger.error(f"{_PREFIX} Failed to register pool eviction callback: {e}")
 
-    # Start the pool's deadline-driven idle watchdog (F1). Idle eviction used to
-    # ride THIS task's 5-minute tick, which added up to 5 minutes of latency on
-    # top of an already long flat timeout — ~35 minutes of parked subprocesses in
-    # the worst case. The watchdog wakes exactly on the next eviction deadline
-    # (and never while the pool is empty), so RAM comes back on time. The sweep
-    # in _periodic_cleanup stays as a belt in case the watchdog task dies.
+    # Start the pool's deadline-driven idle watchdog. It wakes exactly on the
+    # next eviction deadline (and never while the pool is empty), so RAM comes
+    # back on time instead of on this task's 5-minute tick. The sweep in
+    # _periodic_cleanup stays as a belt in case the watchdog task dies.
     try:
         from app.core.session_pool import get_session_pool
         get_session_pool().start_idle_watchdog()
@@ -820,20 +768,3 @@ async def stop_resource_monitor(task: asyncio.Task):
         await task
     except asyncio.CancelledError:
         pass
-
-
-async def log_snapshot_now(reason: str = "manual"):
-    """Take an immediate snapshot (useful for on-demand diagnostics)."""
-    global _snapshot_count
-    _snapshot_count += 1
-    uptime_minutes = round((time.monotonic() - _start_time) / 60, 1) if _start_time else 0
-
-    metrics = await _collect_metrics()
-    formatted = _format_metrics(metrics)
-    logger.info(f"{_PREFIX} snapshot={_snapshot_count} reason={reason} uptime={uptime_minutes}m {formatted}")
-
-    warnings = _check_warnings(metrics)
-    for warning in warnings:
-        logger.warning(f"{_PREFIX} {warning}")
-
-    return metrics

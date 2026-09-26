@@ -1,5 +1,5 @@
 /**
- * Golden tests for the V2 session reducer (docs/V2_PHASE1_DESIGN.md §6).
+ * Golden tests for the V2 session reducer.
  *
  * The reducer is PURE: `(state, event) -> state`, no I/O, no Date.now(). These
  * tests pin the message shapes MessageArea renders, the delta-segmentation

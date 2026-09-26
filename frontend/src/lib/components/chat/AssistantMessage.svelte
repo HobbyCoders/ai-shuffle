@@ -14,6 +14,7 @@
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
 	import HtmlPreviews from './HtmlPreviews.svelte';
+	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
 
 	interface Props {
@@ -22,15 +23,12 @@
 		/** Real-time WS stream buffer — updates every delta, not just every poll */
 		wsContent?: string;
 		timestamp?: Date | string;
-		messageIndex: number;
-		messageId: string;
-		messageUuid?: string | null;  // UUID from JSONL for direct rewind (may be same as messageId)
+		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		sessionId?: string | null;
 		streaming?: boolean;
 		hasPartialMessages?: boolean;
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		metadata?: Record<string, unknown>;
-		onCopy?: (content: string, messageId: string) => void;
 		onRewindComplete?: () => void;
 		/** Profile name to display in header (defaults to "Assistant") */
 		profileName?: string;
@@ -43,15 +41,12 @@
 		wsContent = '',
 		gallerySources,
 		timestamp,
-		messageIndex,
-		messageId,
 		messageUuid = null,  // UUID from JSONL for direct rewind
 		sessionId,
 		streaming = false,
 		hasPartialMessages = true,
 		fileCheckpointingEnabled = false,
 		metadata,
-		onCopy,
 		onRewindComplete,
 		profileName = 'Assistant',
 		modelLabel = null
@@ -516,6 +511,12 @@
 		{#if metadata && !streaming}
 			<div class="ameta">
 				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
+				{#if metadata.usage_estimated}
+					<!-- The turn's token counts (and so its cost) were estimated by
+					     the harness: the provider reported no usage, or the reply
+					     was stopped before it arrived. -->
+					<UsageEstimatedBadge />
+				{/if}
 				{#if metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
 				{:else if metadata.cost_usd}

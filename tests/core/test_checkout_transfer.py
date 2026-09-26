@@ -1,5 +1,4 @@
 import subprocess
-from pathlib import Path
 
 import pytest
 from app.core.checkout_transfer import export_checkout, import_checkout, fingerprint

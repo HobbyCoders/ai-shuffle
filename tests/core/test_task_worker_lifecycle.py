@@ -265,6 +265,10 @@ class TestFirstFrameWatchdog:
         monkeypatch.setattr(
             cfg.settings, "task_worker_first_frame_seconds", 0, raising=False
         )
+        # API key mode: the subscription loop guard's worker cap does not apply
+        # (tests/core/test_loop_guard.py covers it).
+        from app.core import claude_auth_mode
+        claude_auth_mode.set_mode("api_key")
         first, hard = pa._worker_deadlines(True, None, None)
         assert first == 0.0 and hard == 0.0
 
@@ -573,7 +577,11 @@ class TestSyncCap:
         assert "in the background" in outcome.error
         assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
 
-    def test_background_gets_no_hard_cap_by_default(self):
+    def test_background_gets_no_hard_cap_by_default(self, mock_db):
+        # In API key mode; on a Claude subscription the loop guard adds its
+        # default worker cap (tests/core/test_loop_guard.py).
+        from app.core import claude_auth_mode
+        claude_auth_mode.set_mode("api_key")
         first, hard = pa._worker_deadlines(True, None, None)
         assert hard == 0.0, "a parked parent can be woken; it needs no ceiling"
         assert first > 0

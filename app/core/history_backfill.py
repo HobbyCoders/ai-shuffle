@@ -8,7 +8,7 @@ converts that legacy transcript into typed contract events
 (:mod:`app.contract.events`) and appends them ONCE, so the event log carries the
 full history before any live event lands on top.
 
-Design (``docs/V2_CORE_REARCHITECTURE.md`` Part 1):
+Design:
 
 - Fast path: ``session_events.get_max_seq(session_id) > 0`` → already populated,
   return immediately. A 60s per-process memo suppresses repeated legacy loads
@@ -324,9 +324,9 @@ def _child_payload(kind: str, child: Dict[str, Any]) -> Dict[str, Any]:
 
     Legacy children carry v1 message keys (toolName/toolId/toolInput/
     toolResult/toolStatus), but the v2 reducer reads snake_case progress
-    payloads. Golden shape = the live progress events built by
-    ``team_transcript_watcher`` (tool_use: id/name/input; tool_result:
-    tool_use_id/output/is_error; chunk: content).
+    payloads (tool_use: id/name/input; tool_result: tool_use_id/output/
+    is_error; chunk: content), the shape the live subagent progress events
+    carry.
     """
     if kind == "tool_use":
         return {

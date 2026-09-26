@@ -4,6 +4,7 @@
   import { apiBase, withAuth } from '$lib/api/runtime';
   import { getNotesAutocomplete, getSubagentsForAutocomplete } from '$lib/api/client';
   import { extractAtMentionQuery } from '$lib/components/chat/tiptap/serialization';
+  import { formatBytes } from '$lib/utils/format-bytes';
   import './autocomplete/autocomplete-design-system.css';
 
   export interface FileItem {
@@ -521,13 +522,6 @@
     if (!selectionPending && filteredFiles.includes(file)) onSelect(file);
   }
 
-  function formatSize(size: number | null | undefined): string {
-    if (size === null || size === undefined) return '';
-    if (size < 1024) return `${size} B`;
-    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
   function goToRoot() {
     inChatHistoryFolder = false;
     inNotesFolder = false;
@@ -746,7 +740,7 @@
                     </span>
                   </div>
                   {#if file.type === 'file' && file.size}
-                    <span class="autocomplete-item-meta">{formatSize(file.size)}</span>
+                    <span class="autocomplete-item-meta">{formatBytes(file.size)}</span>
                   {/if}
                   {#if getBadgeText(file)}
                     <span class="autocomplete-badge {getBadgeClass(file)}">{getBadgeText(file)}</span>
@@ -826,7 +820,7 @@
                 <!-- Meta info -->
                 {#if file.type === 'file' && file.size}
                   <span class="autocomplete-item-meta">
-                    {formatSize(file.size)}
+                    {formatBytes(file.size)}
                   </span>
                 {:else if file.type === 'chat_history'}
                   <span class="autocomplete-item-meta">

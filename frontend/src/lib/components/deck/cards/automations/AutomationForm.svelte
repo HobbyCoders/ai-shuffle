@@ -23,6 +23,8 @@
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
+	import { onMount } from 'svelte';
+	import { getClaudeAuth, type ClaudeAuthMode } from '$lib/api/claude-auth';
 
 	interface Props {
 		currentView: 'create' | 'edit';
@@ -74,7 +76,6 @@
 		onToggleSection: (id: string) => void;
 		onToggleTriggerExpand: (idx: number) => void;
 		onToggleActionExpand: (idx: number) => void;
-		onSyncCronFields?: (expr: string) => void;
 	}
 
 	let {
@@ -126,9 +127,26 @@
 		onUpdateFormActionSteps,
 		onToggleSection,
 		onToggleTriggerExpand,
-		onToggleActionExpand,
-		onSyncCronFields
+		onToggleActionExpand
 	}: Props = $props();
+
+	// Subscription mode: an automation runs on the user's Claude plan while
+	// they are away. Recommend an API key before it is saved (the server adds
+	// the same notice to the save response).
+	let claudeMode = $state<ClaudeAuthMode | null>(null);
+	onMount(() => {
+		getClaudeAuth()
+			.then((summary) => (claudeMode = summary.mode))
+			.catch(() => {
+				// No notice when the mode cannot be read.
+			});
+	});
+	const scheduledRunNotice = $derived.by(() => {
+		if (claudeMode !== 'subscription') return '';
+		const profile = profiles.find((p) => p.id === formProfileId);
+		if (profile?.config?.provider) return '';
+		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude Code mode). The loop guard holds unattended turns past its budget until you confirm them.';
+	});
 
 	function addActionStep(type: ActionStepType = 'connector_action') {
 		const defaults: Record<ActionStepType, ActionStep> = {
@@ -192,6 +210,12 @@
 {#if formError}
 	<div transition:slide={{ duration: 150 }}>
 		<Banner severity="error" message={formError} dismissible onDismiss={() => onUpdateFormError('')} />
+	</div>
+{/if}
+
+{#if scheduledRunNotice}
+	<div data-testid="automation-api-key-notice">
+		<Banner severity="warning" message={scheduledRunNotice} />
 	</div>
 {/if}
 

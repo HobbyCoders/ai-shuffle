@@ -26,7 +26,7 @@ Components (v1):
 
   * skills   ``skills/*/SKILL.md``    → :class:`~fluid.context.instructions.Skill`
   * commands ``commands/*.md``        → :class:`~fluid.context.instructions.Command`
-  * agents   ``agents/**/*.md``       → :class:`PluginAgent` (body unread; W4 consumes)
+  * agents   ``agents/**/*.md``       → :class:`PluginAgent` (body read by ``agents.discover_agents``)
   * MCP      ``.mcp.json`` or the manifest's ``mcpServers`` key
 
 All three component kinds are namespaced ``<plugin>:<name>`` — Claude Code's own
@@ -58,7 +58,7 @@ from fluid.context.settings_stack import (
     load_settings_stack,
     mcp_toggles,
 )
-from fluid.context.instructions import Command, Skill, parse_frontmatter
+from fluid.context.instructions import Command, Skill, _read, parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class PluginAgent:
 
     Same progressive-disclosure shape as :class:`Skill`: the frontmatter's name
     and description are parsed at discovery time, the body (the agent's system
-    prompt) is left on disk for W4's agent loader to read.
+    prompt) is left on disk for :func:`fluid.context.agents.discover_agents`.
     """
 
     name: str  # namespaced: "<plugin>:<agent>"
@@ -129,6 +129,25 @@ def split_plugin_ref(ref: str) -> tuple[str, str]:
     name = name.strip()
     marketplace = marketplace.strip() if sep else ""
     return name, marketplace or DEFAULT_MARKETPLACE
+
+
+def _plain_component(value: str) -> bool:
+    """One ordinary path segment: no separators, no ``.``/``..``, no NUL, no ``:``.
+
+    Plugin and marketplace names come from ``enabledPlugins`` keys — a
+    project-scope settings file included — and are joined onto the plugins
+    root; a ``../`` in either would load a "plugin" (and start its MCP
+    servers) from anywhere on disk. On Windows a drive prefix (``D:x``)
+    replaces the root it is joined onto, so ``:`` is refused too.
+    """
+    return (
+        bool(value)
+        and value not in (".", "..")
+        and "/" not in value
+        and "\\" not in value
+        and "\0" not in value
+        and ":" not in value
+    )
 
 
 def _version_key(name: str) -> tuple[int, tuple[int, ...], str]:
@@ -186,6 +205,9 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
     a stale ``enabledPlugins`` entry must not break the session (CE11).
     """
     home = plugins_home() if home is None else home
+    if not (_plain_component(name) and _plain_component(marketplace)):
+        log.warning("refusing plugin ref %r@%r: not a plain name", name, marketplace)
+        return None
 
     cache = home / "cache" / marketplace / name
     if cache.is_dir():
@@ -293,13 +315,6 @@ def _md_files(root: Path, manifest: dict[str, Any], key: str, *, recursive: bool
                 seen.add(resolved)
                 found.append(path)
     return found
-
-
-def _read(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
 
 
 def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Skill]:
@@ -560,10 +575,6 @@ def plugin_skills(plugins: list[Plugin]) -> list[Skill]:
 
 def plugin_commands(plugins: list[Plugin]) -> list[Command]:
     return [c for p in plugins for c in p.commands]
-
-
-def plugin_agents(plugins: list[Plugin]) -> list[PluginAgent]:
-    return [a for p in plugins for a in p.agents]
 
 
 def plugin_mcp_servers(plugins: list[Plugin]) -> dict[str, dict[str, Any]]:

@@ -332,16 +332,43 @@ def require_managed_database(env: dict) -> bool:
     return True
 
 
-def check_claude_auth():
-    """Check if Claude is authenticated (credentials exist from in-app setup)"""
-    creds_file = Path.home() / ".claude" / ".credentials.json"
-    if creds_file.exists():
-        print_status("Claude credentials found", "success")
+def check_claude_cli():
+    """Check that the stock Claude Code CLI is on PATH.
+
+    Claude sessions run the ``claude`` binary installed by Anthropic's own
+    installer. The app never installs, bundles or falls back to another copy.
+    """
+    found = shutil.which("claude")
+    if found:
+        print_status(f"Claude Code CLI found: {found}", "success")
         return True
+    print_status("Claude Code CLI not found", "warning")
+    print_status("  Install it with Anthropic's installer, then run `claude auth login`:", "info")
+    if sys.platform == "win32":
+        print_status("    irm https://claude.ai/install.ps1 | iex   (PowerShell)", "info")
     else:
-        print_status("Claude not authenticated", "warning")
-        print_status("  You'll be guided through authentication on first launch", "info")
+        print_status("    curl -fsSL https://claude.ai/install.sh | bash", "info")
+    return False
+
+
+def check_claude_auth():
+    """Ask the Claude Code CLI whether it is signed in (`claude auth status`)."""
+    found = shutil.which("claude")
+    if not found:
         return False
+    try:
+        result = subprocess.run([found, "auth", "status"], capture_output=True, text=True,
+                                timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        print_status("Claude Code CLI is signed in", "success")
+        return True
+    print_status("Claude Code CLI is not signed in", "warning")
+    print_status("  Run `claude auth login` in the AI Shuffle terminal (Settings > Providers > Claude Code CLI)", "info")
+    print_status("  or any terminal on this machine, or add an Anthropic API key in Settings.", "info")
+    print_status("  AI Shuffle never reads your Claude credentials.", "info")
+    return False
 
 
 def run_setup():
@@ -375,6 +402,7 @@ def run_setup():
     if not build_browser_mcp() or not build_node_package("tools"):
         return False
 
+    check_claude_cli()
     check_claude_auth()
 
     print(f"\n{Colors.GREEN}Setup complete!{Colors.END}")
@@ -606,6 +634,7 @@ Examples:
 
     if args.check:
         ok = check_prerequisites()
+        check_claude_cli()
         check_claude_auth()
         sys.exit(0 if ok else 1)
 

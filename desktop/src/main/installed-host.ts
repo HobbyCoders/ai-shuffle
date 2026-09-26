@@ -11,7 +11,8 @@ export function installedLaunchArgs(args: string[], debuggingPort = ''): string[
   // Chromium consumes some switches before process.argv reaches the app.
   // The caller reads its explicit debugging port from app.commandLine.
   const candidates = [...args, ...(debuggingPort ? [`--remote-debugging-port=${debuggingPort}`] : [])];
-  return [...new Set(candidates.filter(arg => arg.startsWith('aishuffle:') || /^--remote-debugging-port=(?:0|[1-9]\d{0,4})$/.test(arg)))];
+  // No URL scheme is registered any more, so no aishuffle: argument is forwarded.
+  return [...new Set(candidates.filter(arg => /^--remote-debugging-port=(?:0|[1-9]\d{0,4})$/.test(arg)))];
 }
 export function validateInstalledHost(root: string, host: InstalledHost): InstalledHost {
   if (!host || !path.isAbsolute(host.executable ?? '') || !path.isAbsolute(host.userData ?? '') ||
@@ -20,10 +21,6 @@ export function validateInstalledHost(root: string, host: InstalledHost): Instal
     throw new Error('Invalid installed desktop host');
   }
   return host;
-}
-export async function readInstalledHost(root: string): Promise<InstalledHost | null> {
-  try { return validateInstalledHost(root, JSON.parse(await fs.readFile(path.join(root, 'installed-host.json'), 'utf8'))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
 export function readInstalledHostSync(root: string): InstalledHost | null {
   try { return validateInstalledHost(root, JSON.parse(readFileSync(path.join(root, 'installed-host.json'), 'utf8'))); }

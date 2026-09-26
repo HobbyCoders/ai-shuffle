@@ -21,7 +21,7 @@ and refuses with "Skill execution blocked by permission rules".
 """
 
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +29,7 @@ import app.core.query_options as qo
 from app.core import encryption
 from app.core import provider_agent as pa
 from app.db import database as db
+from tests.core.helpers import make_profile
 
 SKILL_RULE = "Skill(claude-api)"
 
@@ -59,15 +60,6 @@ def _mk_provider(provider_id, provider_type, *, models, token="gw-secret"):
     )
 
 
-def _mk_profile(profile_id, config):
-    return db.create_profile(
-        profile_id=profile_id,
-        name=profile_id,
-        description=None,
-        config=config,
-    )
-
-
 def _build(profile, *, session_id=None, overrides=None):
     with patch.object(qo, "get_security_instructions", return_value=""):
         with _stubbed_pa_server():
@@ -89,7 +81,7 @@ class TestNonClaudeProviderSessions:
     def test_openrouter_gpt_session_blocks_the_skill(self, mock_db, tmp_path):
         encryption.set_encryption_key("pw", db)
         _mk_provider("orp", "openrouter", models=[{"id": "openai/gpt-5.6"}])
-        _mk_profile(
+        make_profile(
             "prov", {"model": "openai/gpt-5.6", "provider": "orp", "cwd": str(tmp_path)}
         )
         db.create_session("s-gpt", profile_id="prov")  # stamps provider_id='orp'
@@ -114,7 +106,7 @@ class TestNonClaudeProviderSessions:
         loopback translator gateway."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("oai", "openai", models=[{"id": "gpt-5.6-sol"}])
-        _mk_profile(
+        make_profile(
             "gpt", {"model": "gpt-5.6-sol", "provider": "oai", "cwd": str(tmp_path)}
         )
         db.create_session("s-sol", profile_id="gpt")
@@ -142,7 +134,7 @@ class TestNonClaudeProviderSessions:
         (ruling A3), proving the two are independent."""
         encryption.set_encryption_key("pw", db)
         _mk_provider("oai", "openai", models=[{"id": "gpt-5.6-sol"}])
-        _mk_profile(
+        make_profile(
             "gpt", {"model": "gpt-5.6-sol", "provider": "oai", "cwd": str(tmp_path)}
         )
         db.create_session("w-1", profile_id="gpt")
@@ -163,14 +155,14 @@ class TestNonClaudeProviderSessions:
 
         denied = _denied(opts)
         assert SKILL_RULE in denied
-        assert qo.WORKER_DISALLOWED_TOOL in denied
+        assert qo.WORKER_DISALLOWED_TOOLS[0] in denied
 
     def test_profile_disallowed_tools_are_preserved_and_not_duplicated(
         self, mock_db, tmp_path
     ):
         encryption.set_encryption_key("pw", db)
         _mk_provider("orp", "openrouter", models=[{"id": "openai/gpt-5.6"}])
-        _mk_profile(
+        make_profile(
             "prov", {"model": "openai/gpt-5.6", "provider": "orp", "cwd": str(tmp_path)}
         )
         db.create_session("s-keep", profile_id="prov")
@@ -200,7 +192,7 @@ class TestNonClaudeProviderSessions:
 
 class TestClaudeSessionsUntouched:
     def test_native_session_keeps_the_skill(self, mock_db, tmp_path):
-        _mk_profile("nat", {"model": "opus", "cwd": str(tmp_path)})
+        make_profile("nat", {"model": "opus", "cwd": str(tmp_path)})
         db.create_session("s-native", profile_id="nat")
 
         opts = _build(
@@ -218,7 +210,7 @@ class TestClaudeSessionsUntouched:
         _mk_provider(
             "anth", "anthropic", models=[{"id": "claude-opus-4-5-20260101"}]
         )
-        _mk_profile(
+        make_profile(
             "cl",
             {
                 "model": "claude-opus-4-5-20260101",

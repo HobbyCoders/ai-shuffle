@@ -1,8 +1,10 @@
 name: Desktop source update checks
+# Desktop-only PRs already run the desktop unit tests in desktop.yml, so this
+# workflow triggers on hub-side changes, where it re-checks both halves of the
+# source-update protocol.
 on:
   pull_request:
     paths:
-      - 'desktop/**'
       - 'android/hub/**'
       - '.github/workflows/desktop-source*.yml'
       - 'Start AI Shuffle.cmd'

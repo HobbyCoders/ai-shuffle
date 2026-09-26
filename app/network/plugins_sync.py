@@ -1,11 +1,15 @@
 """Plugins: shared desired state, installed by each worker.
 
-The network carries what a plugin *should* be on every worker (id, version,
-enabled, config) in ``network_plugins_desired``; binaries are never a
-payload. Each worker reconciles its user-scope installation against that
-table: install what is desired and missing, enable or disable to match,
-uninstall what a tombstone removed. Project-scope plugins live with the
-checkout and stay local.
+The network carries what a plugin *should* be on every worker (id and
+enabled state) in ``network_plugins_desired``; binaries are never a payload.
+The table's ``config`` column is written as ``{}`` for a new row, never
+updated, and not applied to any worker. A worker
+publishes only a plugin new to the table or a change to its enabled state; the
+stored version is informational (the last publisher's) and is never enforced.
+Each worker reconciles its user-scope installation against that table:
+install what is desired and missing, enable or disable to match, uninstall
+what a tombstone removed. Project-scope plugins live with the checkout and
+stay local.
 """
 from __future__ import annotations
 
@@ -40,7 +44,8 @@ def _installed() -> Dict[str, dict]:
 
 
 def refresh_desired_from_installed() -> int:
-    """This worker's installed plugins become (or update) the desired state."""
+    """Publish this worker's installed plugins that are new to the desired state
+    or whose enabled state changed; a differing version alone is not published."""
     installed = _installed()
     changed = 0
     with get_db() as conn:
@@ -49,7 +54,10 @@ def refresh_desired_from_installed() -> int:
         desired = {r["id"]: dict(r) for r in cursor.fetchall()}
         for plugin_id, info in installed.items():
             current = desired.get(plugin_id)
-            if current and (current.get("version") or "") == (info["version"] or "") and bool(current.get("enabled")) == info["enabled"]:
+            # ``apply_desired`` never reinstalls to match a version, so workers
+            # holding different versions would overwrite each other's row on
+            # every scan. Only a new plugin or an enabled change is published.
+            if current and bool(current.get("enabled")) == info["enabled"]:
                 continue
             cursor.execute(
                 """INSERT INTO network_plugins_desired (id, version, enabled, config, updated_at)

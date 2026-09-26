@@ -24,9 +24,6 @@ interface AppDataState {
 	/** Origin-keyed catalog of projects available on approved online installs. */
 	clusterProjects: ClusterProject[];
 	sessions: Session[];
-	// Selection state for batch operations
-	selectedSessionIds: Set<string>;
-	selectionMode: boolean;
 	// Loading state
 	sessionsLoading: boolean;
 	// Tag filter state
@@ -78,8 +75,6 @@ let _state = $state<AppDataState>({
 	projects: [],
 	clusterProjects: [],
 	sessions: [],
-	selectedSessionIds: new Set<string>(),
-	selectionMode: false,
 	sessionsLoading: false,
 	sessionsTagFilter: null,
 	sessionsTotal: 0,
@@ -507,30 +502,6 @@ async function searchSessionsInternal(query: string) {
 	}
 }
 
-async function loadMoreSearchResultsInternal() {
-	if (_state.searchLoadingMore || !_state.searchHasMore || !_state.searchQuery) return;
-
-	_update(s => ({ ...s, searchLoadingMore: true }));
-	try {
-		const newOffset = _state.searchOffset + SEARCH_PAGE_SIZE;
-		const result = await searchSessionsPaginated(_state.searchQuery, {
-			adminOnly: true,
-			limit: SEARCH_PAGE_SIZE,
-			offset: newOffset,
-		});
-		_update(s => ({
-			...s,
-			searchResults: [...s.searchResults, ...result.items],
-			searchOffset: newOffset,
-			searchHasMore: result.has_more,
-			searchLoadingMore: false,
-		}));
-	} catch (e) {
-		console.error('Failed to load more search results:', e);
-		_update(s => ({ ...s, searchLoadingMore: false }));
-	}
-}
-
 async function loadApiUserSessionsInternal() {
 	_update(s => ({ ...s, apiUserSessionsLoading: true }));
 	try {
@@ -704,11 +675,6 @@ export const appData = {
 		await loadApiUserSessionsInternal();
 	},
 
-	setSessionsTagFilter(tagId: string | null) {
-		_update(s => ({ ...s, sessionsTagFilter: tagId }));
-		loadSessionsInternal(tagId);
-	},
-
 	async clearSession(sessionId: string) {
 		// Clear a session's conversation IN PLACE — the backend wipes its
 		// transcript/messages but KEEPS the session row, so (unlike deleteSession)
@@ -835,97 +801,10 @@ export const appData = {
 		}
 	},
 
-	async deleteSelectedSessions() {
-		const sessionIds = Array.from(_state.selectedSessionIds);
-		if (sessionIds.length === 0) return;
-
-		const idSet = new Set(sessionIds);
-		const prevSessions = _state.sessions;
-		const prevTotal = _state.sessionsTotal;
-
-		// Optimistic removal of all selected sessions.
-		recordLocalRemoval(sessionIds);
-		_update(s => ({
-			...s,
-			sessions: s.sessions.filter(x => !idSet.has(x.id)),
-			sessionsTotal: Math.max(0, s.sessionsTotal - idSet.size),
-			selectionMode: false,
-			selectedSessionIds: new Set<string>(),
-		}));
-
-		try {
-			await api.post('/sessions/batch-delete', { session_ids: sessionIds });
-			confirmLocalEdits(sessionIds);
-		} catch (err) {
-			discardLocalEdits(sessionIds);
-			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
-			await appData.loadSessions();
-			throw err;
-		}
-	},
-
 	// ── Search ──────────────────────────────────────────────────────────
 
 	async searchSessions(query: string) {
 		await searchSessionsInternal(query);
-	},
-
-	async loadMoreSearchResults() {
-		await loadMoreSearchResultsInternal();
-	},
-
-	clearSearch() {
-		_update(s => ({
-			...s,
-			searchQuery: '',
-			searchResults: [],
-			searchTotal: 0,
-			searchOffset: 0,
-			searchHasMore: false,
-			searchLoading: false,
-			searchLoadingMore: false,
-		}));
-	},
-
-	// ── Selection Mode ──────────────────────────────────────────────────
-
-	toggleSelectionMode() {
-		_update(s => ({
-			...s,
-			selectionMode: !s.selectionMode,
-			selectedSessionIds: new Set<string>(),
-		}));
-	},
-
-	exitSelectionMode() {
-		_update(s => ({
-			...s,
-			selectionMode: false,
-			selectedSessionIds: new Set<string>(),
-		}));
-	},
-
-	toggleSessionSelection(sessionId: string) {
-		_update(s => {
-			const newSet = new Set(s.selectedSessionIds);
-			if (newSet.has(sessionId)) {
-				newSet.delete(sessionId);
-			} else {
-				newSet.add(sessionId);
-			}
-			return { ...s, selectedSessionIds: newSet };
-		});
-	},
-
-	selectAllSessions() {
-		_update(s => {
-			const allIds = new Set(s.sessions.map(session => session.id));
-			return { ...s, selectedSessionIds: allIds };
-		});
-	},
-
-	deselectAllSessions() {
-		_update(s => ({ ...s, selectedSessionIds: new Set<string>() }));
 	},
 };
 

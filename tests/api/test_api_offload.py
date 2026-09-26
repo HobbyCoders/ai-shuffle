@@ -9,15 +9,12 @@ and must not have run on the loop thread — and the handlers whose DB work is
 contiguous must spend exactly ONE thread hop, so the stall is not simply traded
 for a hop (and a pool round-trip) per query.
 
-Companion behavioural coverage lives in ``tests/test_api_automations.py``,
-``tests/test_api_connectors.py`` and ``tests/api/test_import_export.py``; the
-handlers are driven here as plain coroutines, so the test owns the event loop
+Companion behavioural coverage lives in ``tests/test_api_automations.py`` and
+``tests/test_api_connectors.py``; the handlers are driven here as plain coroutines, so the test owns the event loop
 and can name its thread.
 """
 
-import asyncio
 import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,9 +23,8 @@ import pytest
 from app.api import automations as automations_api
 from app.api import connectors as connectors_api
 from app.api import hooks as hooks_api
-from app.api import import_export as ie_api
-from app.api.import_export import ExportData, ExportedProfile, ExportedSubagent
 from app.core.models import HookUpdate
+from tests.api.helpers import fake_request
 
 
 # ═══ harness ════════════════════════════════════════════════════════════════
@@ -89,13 +85,6 @@ class _HopCounter:
     def __exit__(self, *exc):
         self._patch.stop()
         return False
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — every DB call must land
-    somewhere else."""
-    return threading.get_ident()
 
 
 # ═══ automations ════════════════════════════════════════════════════════════
@@ -238,11 +227,16 @@ async def test_whatsapp_webhook_reads_every_connector_row_in_one_hop(loop_thread
     request = MagicMock()
     request.body = AsyncMock(return_value=b"{}")
     request.json = AsyncMock(return_value={"entry": [{}]})
-    request.headers = {}
+    # Webhooks must be signed with the connector's app secret.
+    import hashlib
+    import hmac
+    request.headers = {
+        "x-hub-signature-256": "sha256=" + hmac.new(b"s3cret", b"{}", hashlib.sha256).hexdigest()
+    }
 
     with patch.object(connectors_api, "database", db), \
          patch("app.core.connectors.manager.connector_manager", manager), \
-         patch("app.core.connector_service.decrypt_config", lambda c, t: {}), \
+         patch("app.core.connector_service.decrypt_config", lambda c, t: {"app_secret": "s3cret"}), \
          _HopCounter(connectors_api) as hops:
         result = await connectors_api.whatsapp_webhook_receive(request)
 
@@ -253,106 +247,7 @@ async def test_whatsapp_webhook_reads_every_connector_row_in_one_hop(loop_thread
     assert hops.count == 1, "four row reads, one hop"
 
 
-# ═══ import / export ════════════════════════════════════════════════════════
-
-
-def _export_payload(n):
-    return ExportData(
-        export_type="all",
-        exported_at="2026-08-28T00:00:00Z",
-        subagents=[
-            ExportedSubagent(id=f"a{i}", name=f"a{i}", description="d", prompt="p")
-            for i in range(n)
-        ],
-        profiles=[ExportedProfile(id=f"p{i}", name=f"p{i}") for i in range(n)],
-    )
-
-
-async def test_import_json_runs_the_whole_bulk_loop_in_one_hop(loop_thread):
-    """The worst case in this module: every item costs a read plus a write, so
-    on the loop an import of N items stalled the worker for 2N queries. One
-    offload for the whole loop — not one per item."""
-    db = _SpyDatabase(
-        get_subagent=None, get_profile=None, get_all_subagents=[]
-    )
-
-    with patch.object(ie_api, "database", db), _HopCounter(ie_api) as hops:
-        result = await ie_api.import_data_json(
-            data=_export_payload(5), overwrite_existing=False, token="t"
-        )
-
-    assert result.subagents_imported == 5
-    assert result.profiles_imported == 5
-    assert result.success is True
-    assert db.calls.count("create_subagent") == 5
-    assert db.calls.count("create_profile") == 5
-    assert len(db.threads) == 21  # 5*(get+create) x2 + one get_all_subagents
-    assert loop_thread not in db.threads
-    assert hops.count == 1
-
-
-async def test_import_json_per_item_errors_still_land_in_the_result(loop_thread):
-    """A failing item is recorded, not raised — the offload must not change
-    that."""
-    def _boom(*a, **k):
-        raise RuntimeError("nope")
-
-    db = _SpyDatabase(get_subagent=None, get_profile=None, get_all_subagents=[],
-                      create_subagent=_boom)
-
-    with patch.object(ie_api, "database", db):
-        result = await ie_api.import_data_json(
-            data=_export_payload(2), overwrite_existing=False, token="t"
-        )
-
-    assert result.success is False
-    assert len(result.errors) == 2
-    assert result.subagents_imported == 0
-    assert result.profiles_imported == 2
-
-
-async def test_import_offload_runs_concurrently_with_the_loop():
-    """The point of the offload: while a bulk import is running, other
-    coroutines keep running. A ~150 ms import must not stop a 10 ms ticker."""
-    ticks = 0
-
-    async def ticker():
-        nonlocal ticks
-        while True:
-            await asyncio.sleep(0.01)
-            ticks += 1
-
-    def _slow_create(*a, **k):
-        time.sleep(0.03)
-
-    db = _SpyDatabase(get_subagent=None, get_profile=None, get_all_subagents=[],
-                      create_subagent=_slow_create, create_profile=_slow_create)
-
-    with patch.object(ie_api, "database", db):
-        task = asyncio.create_task(ticker())
-        await ie_api.import_data_json(
-            data=_export_payload(3), overwrite_existing=False, token="t"
-        )
-        task.cancel()
-
-    assert ticks >= 5, f"the event loop was stalled during the import ({ticks} ticks)"
-
-
-async def test_export_all_reads_both_tables_in_one_hop(loop_thread):
-    db = _SpyDatabase(get_all_profiles=[], get_all_subagents=[])
-    with patch.object(ie_api, "database", db), _HopCounter(ie_api) as hops:
-        await ie_api.export_all(token="t")
-
-    assert db.calls == ["get_all_profiles", "get_all_subagents"]
-    assert loop_thread not in db.threads
-    assert hops.count == 1
-
-
 # ═══ hooks ══════════════════════════════════════════════════════════════════
-
-
-def _request(api_user=None):
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
 
 
 async def test_update_hook_keeps_read_authorise_write_in_one_hop(loop_thread):
@@ -361,7 +256,7 @@ async def test_update_hook_keeps_read_authorise_write_in_one_hop(loop_thread):
         await hooks_api.update_hook(
             hook_id="h1",
             hook_data=HookUpdate(enabled=False),
-            request=_request(),
+            request=fake_request(),
             token="t",
         )
 
@@ -373,7 +268,7 @@ async def test_update_hook_keeps_read_authorise_write_in_one_hop(loop_thread):
 async def test_delete_hook_keeps_read_authorise_delete_in_one_hop(loop_thread):
     db = _SpyDatabase(get_hook={"id": "h1", "project_id": None}, delete_hook=True)
     with patch.object(hooks_api, "database", db), _HopCounter(hooks_api) as hops:
-        await hooks_api.delete_hook(hook_id="h1", request=_request(), token="t")
+        await hooks_api.delete_hook(hook_id="h1", request=fake_request(), token="t")
 
     assert db.calls == ["get_hook", "delete_hook"]
     assert loop_thread not in db.threads
@@ -390,7 +285,7 @@ async def test_delete_hook_still_403s_for_a_foreign_project(loop_thread):
         with pytest.raises(HTTPException) as exc:
             await hooks_api.delete_hook(
                 hook_id="h1",
-                request=_request({"project_id": "proj-b"}),
+                request=fake_request({"project_id": "proj-b"}),
                 token="t",
             )
 
@@ -408,7 +303,7 @@ async def test_create_project_hook_checks_the_project_in_the_write_hop(loop_thre
             hook_data=HookCreate(
                 name="h", event="PreToolUse", hook_type="bash", command="echo hi"
             ),
-            request=_request(),
+            request=fake_request(),
             token="t",
         )
 

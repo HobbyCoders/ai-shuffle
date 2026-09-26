@@ -198,10 +198,11 @@ Early development, moving fast. Working today:
 - Five provider backends (Anthropic, OpenAI Responses, OpenRouter, local
   OpenAI-compatible servers, Claude subscription via the CLI).
 - The CLI: `fluid chat` (REPL and `--tui`), `fluid run`, `fluid sessions
-  --limit`, `fluid config`, `fluid import-settings`, `--version`;
-  `--resume <id>` and `--continue` rehydrate a stored session. REPL commands:
-  `/context` (`/usage`), `/tools`, `/skills`, `/tasks`, `/cancel`, `/model`,
-  `/fork`, `/rewind`, `/help`, plus user-defined `.md` commands.
+  --limit`, `fluid config`, `fluid anchors`, `fluid evolve`,
+  `fluid import-settings`, `--version`; `--resume <id>` and `--continue`
+  rehydrate a stored session. REPL commands: `/context` (`/usage`), `/tools`,
+  `/skills`, `/tasks`, `/cancel`, `/questions`, `/answer`, `/model`, `/fork`,
+  `/rewind`, `/help`, `/exit` (`/quit`), plus user-defined `.md` commands.
 - A shipped base prompt with an environment block; Git Bash on Windows.
 - Permissions with read-only Bash classification, program-scoped
   allow-always, last-match-wins rules, and actionable denial messages.

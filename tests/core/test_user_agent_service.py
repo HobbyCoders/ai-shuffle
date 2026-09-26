@@ -1,11 +1,11 @@
 """
 Unit tests for UserAgentService — discovery of user-global file-based agents
-in ~/.claude/agents/.
+in ~/.fluid/agents/.
 
-These agents are auto-loaded by the Claude Agent SDK at runtime (via a
-profile's ``setting_sources`` including ``"user"``) but were previously never
-surfaced in the app's autocomplete. UserAgentService roots ProjectAgentService's
-parsing/CRUD logic at <claude_dir>/agents instead of <project>/.claude/agents.
+These agents are loaded by Fluid at runtime (via a profile's
+``setting_sources`` including ``"user"``) and surfaced in the app's
+autocomplete. UserAgentService roots ProjectAgentService's parsing/CRUD logic
+at <fluid_dir>/agents instead of <project>/.fluid/agents.
 """
 
 import tempfile
@@ -95,7 +95,7 @@ class TestGetUserAgentServiceFactory:
             clear_agent_service_cache()
             try:
                 with patch(
-                    "app.core.plugin_models._get_claude_dir",
+                    "app.core.plugin_models._get_fluid_dir",
                     return_value=claude_dir,
                 ):
                     service = get_user_agent_service()
@@ -111,7 +111,7 @@ class TestGetUserAgentServiceFactory:
             clear_agent_service_cache()
             try:
                 with patch(
-                    "app.core.plugin_models._get_claude_dir",
+                    "app.core.plugin_models._get_fluid_dir",
                     return_value=claude_dir,
                 ):
                     first = get_user_agent_service()
@@ -127,7 +127,7 @@ class TestGetUserAgentServiceFactory:
             clear_agent_service_cache()
             try:
                 with patch(
-                    "app.core.plugin_models._get_claude_dir",
+                    "app.core.plugin_models._get_fluid_dir",
                     return_value=claude_dir,
                 ):
                     first = get_user_agent_service()

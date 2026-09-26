@@ -12,17 +12,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileConfig, ProfileCreate, ProfileUpdate,
+    Profile, ProfileCreate, ProfileUpdate,
     AgentExport, AgentExportData, AgentImportRequest
 )
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.api.common import check_project_access
 from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
-from app.core.config import settings
-from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +68,9 @@ def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
     Built-in subagents (general-purpose, Explore, Plan, frontend-designer)
-    compare against their code definitions in BUILTIN_SUBAGENTS; the
-    profile-defaults seam is kept for any future built-in profile.
+    compare against their code definitions in BUILTIN_SUBAGENTS.
     """
     if not profile.get("is_builtin"):
-        return
-    defaults = get_builtin_profile_defaults(profile["id"])
-    if defaults:
-        profile["is_modified"] = (
-            profile.get("name") != defaults["name"]
-            or profile.get("description") != defaults["description"]
-            or profile.get("config") != defaults["config"]
-        )
         return
     modified = database.builtin_subagent_is_modified(profile)
     if modified is not None:
@@ -89,7 +79,7 @@ def _check_profile_modified(profile: dict) -> None:
 
 @router.get("/templates")
 async def list_agent_templates(token: str = Depends(require_auth)):
-    """System-prompt templates for agent creation (ruling A12).
+    """System-prompt templates for agent creation.
 
     New agents start with an EMPTY prompt; the built-in subagent prompts are
     offered as selectable starting points — templates are the ceiling, nothing
@@ -192,9 +182,10 @@ async def get_profile_agents(
     """
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
@@ -254,7 +245,7 @@ async def get_all_available_subagents(
     Get all available subagents for autocomplete from multiple sources:
     1. Profile-enabled subagents (from database)
     2. Project agents (if project_id provided)
-    3. User-global agents (~/.claude/agents/, auto-loaded by the SDK)
+    3. User-global agents (~/.fluid/agents/, loaded by Fluid at runtime)
     4. Plugin file-based agents (from enabled plugins)
 
     Returns a unified list with source information for each agent.
@@ -271,6 +262,11 @@ async def get_all_available_subagents(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
             )
+
+    # A project-scoped API user may only read (and, through the legacy-agent
+    # migration, write into) its own project.
+    if project_id:
+        check_project_access(request, project_id)
 
     def _load() -> list[UnifiedSubagentItem]:
         """Every source of the autocomplete list, in ONE hop.
@@ -321,14 +317,23 @@ async def get_all_available_subagents(
         if project_id:
             project = database.get_project(project_id)
             if project:
+                worktree = None
                 if worktree_id:
-                    worktree = database.get_worktree(worktree_id)
-                    project_path = get_worktree_working_dir_as_path(worktree) if worktree else get_project_working_dir_as_path(project)
+                    # Only a worktree of this project; a foreign one is ignored.
+                    from app.api.git_worktrees import _require_worktree_for_project
+                    try:
+                        worktree = _require_worktree_for_project(worktree_id, project_id)
+                    except HTTPException:
+                        worktree = None
+                if worktree:
+                    project_path = get_worktree_working_dir_as_path(worktree)
                 else:
                     project_path = get_project_working_dir_as_path(project)
                 try:
                     project_agent_service = get_project_agent_service(project_path)
-                    for agent in project_agent_service.get_agents():
+                    # Legacy .claude/agents copies run for the base path only,
+                    # never inside a session worktree.
+                    for agent in project_agent_service.get_agents(migrate_legacy=worktree is None):
                         agent_id = f"project:{agent.name}"
 
                         # Skip if already seen
@@ -360,7 +365,7 @@ async def get_all_available_subagents(
                     # Log but don't fail if project agents can't be loaded
                     logging.warning(f"Failed to load project agents for {project_id}: {e}")
 
-        # 3. User-global agents (~/.claude/agents/) - auto-loaded by the SDK at
+        # 3. User-global agents (~/.fluid/agents/) - loaded by Fluid at
         #    runtime via setting_sources "user", surfaced here for discovery.
         #    Claude Code precedence is project > user, so a project (or profile)
         #    agent of the same name shadows the user one: dedupe by name against
@@ -396,7 +401,7 @@ async def get_all_available_subagents(
                     tools=agent.tools,
                     model=agent.model,
                     source="user",
-                    source_name="User (~/.claude)"
+                    source_name="User (~/.fluid)"
                 ))
         except Exception as e:
             # Log but don't fail if user-global agents can't be loaded
@@ -785,14 +790,11 @@ async def restore_profile_defaults(
 ):
     """Restore a built-in profile to its original default settings.
 
-    Only works for built-in profiles that have known seed defaults.
+    Only built-in subagents (defined in BUILTIN_SUBAGENTS) can be restored.
     Custom profiles cannot be restored (they have no defaults to restore to).
     """
     def _load() -> dict:
-        """Existence/built-in checks and the restoring update in ONE hop.
-
-        ``get_builtin_profile_defaults`` is pure (in-repo seed data).
-        """
+        """Existence/built-in checks and the restoring update in ONE hop."""
         existing = database.get_profile(profile_id)
         if not existing:
             raise HTTPException(
@@ -806,16 +808,7 @@ async def restore_profile_defaults(
                 detail="Only built-in profiles can be restored to defaults"
             )
 
-        defaults = get_builtin_profile_defaults(profile_id)
-        if defaults:
-            profile = database.update_profile(
-                profile_id=profile_id,
-                name=defaults["name"],
-                description=defaults["description"],
-                config=defaults["config"],
-                allow_builtin=True
-            )
-        elif database.revert_subagent_to_defaults(profile_id):
+        if database.revert_subagent_to_defaults(profile_id):
             # Built-in subagent: restore name/description/prompt/tools/model
             # from BUILTIN_SUBAGENTS, keeping user-owned skills/memory/MCP.
             profile = database.get_profile(profile_id)
@@ -845,9 +838,10 @@ async def get_enabled_agents(
     """Get the list of enabled subagent IDs for a profile"""
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
@@ -998,9 +992,10 @@ async def export_profile(
     """
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"
@@ -1018,7 +1013,7 @@ async def export_profile(
     system_prompt = config.get("system_prompt", {}) or {}
     ai_tools = config.get("ai_tools")
 
-    # Only the custom prompt content survives export (ruling A12) — a legacy
+    # Only the custom prompt content survives export — a legacy
     # preset-shaped config exports its append text as the custom content.
     if system_prompt.get("type") == "custom":
         prompt_content = system_prompt.get("content")
@@ -1180,7 +1175,7 @@ async def import_profile(
             if valid or not agent_data.setting_sources:
                 config["setting_sources"] = valid
 
-        # System prompt — custom content only (ruling A12). Legacy preset-shaped
+        # System prompt — custom content only. Legacy preset-shaped
         # exports map their append text onto the custom content.
         prompt_content = agent_data.system_prompt_content or agent_data.system_prompt_append
         if prompt_content:
@@ -1195,9 +1190,9 @@ async def import_profile(
             config["allowed_tools"] = agent_data.allowed_tools
         if agent_data.disallowed_tools:
             config["disallowed_tools"] = agent_data.disallowed_tools
-        # Ruling T2: an explicit mode in the file is authoritative. Absent, the
-        # runtime infers it from the lists exactly as the old editor did, so a
-        # pre-T2 export still imports with the intent its author saw.
+        # An explicit mode in the file is authoritative. Absent, the runtime
+        # infers it from the lists, so an older export still imports with the
+        # intent its author saw.
         from app.core.tool_access import TOOL_SELECTION_MODES
         if agent_data.tool_selection_mode in TOOL_SELECTION_MODES:
             config["tool_selection_mode"] = agent_data.tool_selection_mode

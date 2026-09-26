@@ -55,8 +55,8 @@ jobs:
     name: Export original signing key encrypted for Google
     needs: checks
     if: >-
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-      github.event.repository.private && inputs.confirm_existing_key_export
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.private && inputs.confirm_existing_key_export)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

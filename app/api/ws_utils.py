@@ -10,30 +10,10 @@ from fastapi.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on any single outbound WebSocket send. A half-open connection
-# (client vanished uncleanly — wifi switch, phone lock, NAT timeout) never
-# raises: frames just buffer in the kernel until the socket send buffer fills,
-# then the await blocks INDEFINITELY (uvicorn's protocol-level pings are
-# disabled in main.py, so the dead peer is never detected). An unbounded send
-# in the turn pump's broadcast leg freezes the pump — and with it the
-# TurnRecorder, so the session event log stalls and the transcript goes stale
-# for EVERY device (even a hard refresh backfills only the pre-stall events)
-# until TCP finally gives up on the zombie socket. Bounding the send converts
-# that hang into the normal dead-connection error path within seconds.
-#
-# W2: lowered 10.0 -> 2.5s. The device fan-out no longer awaits sockets at all
-# (``app.core.sync_engine`` gives every connection a bounded queue + writer
-# task), so this timeout governs only the ORIGIN socket passthrough in
-# ``SessionRuntime._default_broadcast``. There it is still a per-frame await in
-# the pump, which is exactly why it must be short: it is an eviction deadline
-# for a genuinely dead socket, not a budget for a slow one. Kept numerically in
-# sync with ``app.core.sync_engine._SEND_TIMEOUT_SECONDS`` (core must not import
-# the api layer, hence the duplication).
-#
-# The origin socket is queued too: ``ChatWebSocketHandler.send_json`` enqueues
-# synchronously onto a ``ConnectionWriter``, so no producer awaits a socket.
-# This timeout now governs only ``safe_ws_send``'s remaining direct users
-# (browser_panel, browser_stream).
+# Bound on a single direct send (browser_panel/browser_stream via safe_ws_send).
+# A half-open socket never raises (uvicorn pings are disabled in app/serve.py),
+# so an unbounded send would block forever. Kept equal to
+# ``app.core.sync_engine._SEND_TIMEOUT_SECONDS`` (core must not import the api layer).
 WS_SEND_TIMEOUT_SECONDS = 2.5
 
 
@@ -74,13 +54,12 @@ async def safe_ws_send(websocket: WebSocket, data: dict) -> None:
 
 async def ping_loop(
     websocket: WebSocket,
-    device_id: str,
     send_fn: Optional[Callable[[dict], Awaitable[bool]]] = None,
 ):
     """Send periodic pings to keep connection alive.
 
     When send_fn is provided (e.g. the chat endpoint's send_json), pings go
-    through the shared lock/health check. Otherwise falls back to direct
+    through it (a False return ends the loop). Otherwise falls back to direct
     websocket.send_json.
     """
     try:

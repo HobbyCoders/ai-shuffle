@@ -129,16 +129,41 @@ describe("classifyIp — default policy", () => {
     expect(classifyIp("::ffff:127.0.0.1", DEFAULT).blocked).toBe(true);
   });
 
+  it("classifies IPv4-compatible, IPv4-translated and NAT64 local-use forms by their IPv4 address", () => {
+    const denyPort = compilePolicy({ BROWSER_SSRF_DENY_PORTS: "8000" } as NodeJS.ProcessEnv);
+    for (const ip of ["::7f00:1", "::127.0.0.1", "::ffff:0:7f00:1", "::ffff:0:127.0.0.1", "64:ff9b:1::7f00:1", "64:ff9b:1::a9fe:a9fe", "::a9fe:a9fe", "::ffff:0:a00:1"]) {
+      expect(classifyIp(ip, DEFAULT).blocked, ip).toBe(true);
+      expect(classifyIp(ip, denyPort, 8000).blocked, ip).toBe(true);
+    }
+    expect(classifyIp("::a9fe:a9fe", DEFAULT).reason).toMatch(/metadata/i);
+    // Other layouts inside the local-use /48 are default-blocked.
+    expect(classifyIp("64:ff9b:1:7f00:0:100::", DEFAULT).blocked).toBe(true);
+    // Public IPv4 behind these forms stays public; :: and ::1 keep their IPv6 meaning.
+    expect(classifyIp("::ffff:0:5db8:d822", DEFAULT).blocked).toBe(false);
+    expect(normalizeIp("::7f00:1")).toBe("127.0.0.1");
+    const v6Loopback = compilePolicy({ BROWSER_SSRF_ALLOW: "::1/128" } as NodeJS.ProcessEnv);
+    expect(classifyIp("::1", v6Loopback).blocked).toBe(false);
+    expect(classifyIp("::", DEFAULT).reason).toMatch(/IPv6 unspecified/);
+  });
+
   it("BLOCKS 0.0.0.0/8 and IPv6 link-local by default", () => {
     expect(classifyIp("0.0.0.0", DEFAULT).blocked).toBe(true);
     expect(classifyIp("fe80::1", DEFAULT).blocked).toBe(true);
   });
 
-  it("ALLOWS RFC1918 private ranges by default", () => {
-    expect(classifyIp("10.0.0.5", DEFAULT).blocked).toBe(false);
-    expect(classifyIp("172.16.9.9", DEFAULT).blocked).toBe(false);
-    expect(classifyIp("192.168.1.10", DEFAULT).blocked).toBe(false);
-    expect(classifyIp("fc00::1234", DEFAULT).blocked).toBe(false); // IPv6 unique-local
+  it("BLOCKS RFC1918, carrier-grade NAT and IPv6 unique-local by default", () => {
+    for (const ip of ["10.0.0.1", "172.16.9.9", "192.168.1.10", "100.64.0.1", "fc00::1234", "::ffff:10.0.0.1"]) {
+      const v = classifyIp(ip, DEFAULT);
+      expect(v.blocked, ip).toBe(true);
+      expect(v.reason, ip).toContain("BROWSER_SSRF_ALLOW");
+    }
+    expect(classifyIp("100.64.0.1", DEFAULT).reason).toMatch(/Tailscale/);
+  });
+
+  it("an allow-list entry opens exactly that LAN host", () => {
+    const p = compilePolicy({ BROWSER_SSRF_ALLOW: "192.168.1.20/32" } as NodeJS.ProcessEnv);
+    expect(classifyIp("192.168.1.20", p).blocked).toBe(false);
+    expect(classifyIp("192.168.1.21", p).blocked).toBe(true);
   });
 
   it("ALLOWS public addresses", () => {
@@ -152,8 +177,11 @@ describe("classifyIp — default policy", () => {
 });
 
 describe("classifyIp — env overrides & precedence", () => {
-  it("BROWSER_SSRF_BLOCK adds a block for an otherwise-allowed range", () => {
-    const p = compilePolicy({ BROWSER_SSRF_BLOCK: "10.0.0.0/8" } as NodeJS.ProcessEnv);
+  it("BROWSER_SSRF_BLOCK adds a block that the allow-list cannot lift", () => {
+    const p = compilePolicy({
+      BROWSER_SSRF_BLOCK: "10.0.0.0/8",
+      BROWSER_SSRF_ALLOW: "10.0.0.0/8",
+    } as NodeJS.ProcessEnv);
     expect(classifyIp("10.1.2.3", p).blocked).toBe(true);
     expect(classifyIp("10.1.2.3", p).reason).toMatch(/BROWSER_SSRF_BLOCK/);
     // A public IP is still allowed.
@@ -261,12 +289,94 @@ describe("local-mode loopback default (as injected by app/core/mcp_config.py)", 
   });
 });
 
+describe("worker ports (BROWSER_SSRF_DENY_PORTS)", () => {
+  const p = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,172.17.0.5/32",
+    BROWSER_SSRF_DENY_PORTS: "8000,8001",
+  } as NodeJS.ProcessEnv);
+
+  it("keeps the worker's own ports closed on allowed internal addresses", () => {
+    expect(classifyIp("127.0.0.1", p, 8000).blocked).toBe(true);
+    expect(classifyIp("::1", p, 8001).blocked).toBe(true);
+    expect(classifyIp("172.17.0.5", p, 8000).blocked).toBe(true);
+    expect(classifyIp("127.0.0.1", p, 8000).reason).toMatch(/worker/);
+  });
+
+  it("leaves other loopback ports and public hosts alone", () => {
+    expect(classifyIp("127.0.0.1", p, 5173).blocked).toBe(false);
+    expect(classifyIp("8.8.8.8", p, 8000).blocked).toBe(false);
+  });
+});
+
 describe("describePolicy", () => {
   it("summarizes the effective policy on one line", () => {
     const p = compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.0/8" } as NodeJS.ProcessEnv);
     const s = describePolicy(p);
     expect(s).toContain("always-block=169.254.0.0/16");
     expect(s).toContain("env-allow=127.0.0.0/8");
-    expect(s).toContain("RFC1918/public=allow");
+    expect(s).toContain("public=allow");
+    expect(s).toContain("10.0.0.0/8");
+  });
+});
+
+describe("documented runtime defaults (docs/internal/DEVELOPMENT.md, .env.example)", () => {
+  // What app/core/mcp_config.py hands this server with nothing configured by the
+  // operator. Every runtime (Docker, native, desktop) gets loopback plus this
+  // host's own address (the loopback stand-in); BROWSER_SSRF_ALLOW_LOOPBACK=false
+  // injects no BROWSER_SSRF_ALLOW at all.
+  const DOCKER = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,172.17.0.5/32",
+    BROWSER_SSRF_DENY_PORTS: "8000,8001",
+  } as NodeJS.ProcessEnv);
+  const NATIVE = compilePolicy({
+    BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32",
+    BROWSER_SSRF_DENY_PORTS: "8000,8001",
+  } as NodeJS.ProcessEnv);
+  const LOOPBACK_OFF = compilePolicy({ BROWSER_SSRF_DENY_PORTS: "8000,8001" } as NodeJS.ProcessEnv);
+
+  it("Docker and native allow loopback dev servers and the stand-in", () => {
+    for (const p of [DOCKER, NATIVE]) {
+      expect(classifyIp("127.0.0.1", p, 5173).blocked).toBe(false);
+      expect(classifyIp("::1", p, 5173).blocked).toBe(false);
+      expect(classifyIp("::ffff:127.0.0.1", p, 5173).blocked).toBe(false);
+    }
+    expect(classifyIp("172.17.0.5", DOCKER, 5173).blocked).toBe(false);
+    expect(classifyIp("192.168.1.20", NATIVE, 5173).blocked).toBe(false);
+  });
+
+  it("the rest of the LAN stays refused in every runtime", () => {
+    for (const p of [DOCKER, NATIVE, LOOPBACK_OFF]) {
+      for (const ip of ["172.17.0.1", "192.168.1.21", "10.0.0.1", "100.64.0.1", "fd12::1"]) {
+        expect(classifyIp(ip, p, 80).blocked, ip).toBe(true);
+      }
+    }
+  });
+
+  it("BROWSER_SSRF_ALLOW_LOOPBACK=false refuses loopback and names the setting", () => {
+    for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "::", "172.17.0.5"]) {
+      expect(classifyIp(ip, LOOPBACK_OFF, 5173).blocked, ip).toBe(true);
+    }
+    expect(classifyIp("127.0.0.1", LOOPBACK_OFF, 5173).reason).toContain("BROWSER_SSRF_ALLOW_LOOPBACK");
+  });
+
+  it("every runtime refuses metadata and the worker and DevTools ports, and allows public hosts", () => {
+    for (const p of [DOCKER, NATIVE, LOOPBACK_OFF]) {
+      expect(classifyIp("169.254.169.254", p, 80).blocked).toBe(true);
+      expect(classifyIp("fd00:ec2::254", p, 80).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 8000).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 8001).blocked).toBe(true);
+      expect(classifyIp("127.0.0.1", p, 9221).blocked).toBe(true);
+      expect(classifyIp("8.8.8.8", p, 443).blocked).toBe(false);
+    }
+  });
+
+  it("BROWSER_SSRF_BLOCK removes loopback (or a public range) and wins over an allow", () => {
+    const p = compilePolicy({
+      BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,203.0.113.0/24",
+      BROWSER_SSRF_BLOCK: "203.0.113.0/24,127.0.0.1/32",
+    } as NodeJS.ProcessEnv);
+    expect(classifyIp("203.0.113.7", p).blocked).toBe(true);
+    expect(classifyIp("127.0.0.1", p).blocked).toBe(true);
+    expect(classifyIp("127.0.0.2", p).blocked).toBe(false);
   });
 });

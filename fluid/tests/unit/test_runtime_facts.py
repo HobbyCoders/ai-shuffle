@@ -2,7 +2,6 @@
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 from fluid.context import runtime_facts as runtime
 from fluid.context.environment import environment_note

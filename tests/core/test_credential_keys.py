@@ -1,10 +1,7 @@
 """Server key adoption preserves ciphertext and survives real custody failures."""
-import base64
 from contextlib import contextmanager
-import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
@@ -52,13 +49,12 @@ def seed():
         config={'bot_token': enc('connector-secret')}, events=[])
     db.create_api_user(user_id='u', name='u', api_key_hash='hash')
     db.set_user_credential('u', 'github_token', enc('integration-secret'))
-    db.create_claude_account(account_id='claude', name='Claude', credentials=enc('claude-secret'),
-        credential_fingerprint='unchanged', expires_at=123, has_refresh_token=True)
     db.create_model_provider(provider_id='p', name='p', provider_type='custom',
         base_url='https://example.com', auth_token=enc('provider-secret'))
     db.set_codex_token_bundle('p', access_token=enc('oauth-access'), refresh_token=enc('oauth-refresh'),
         account_id='account', id_token_expires_at='2030-01-01T00:00:00+00:00',
         last_refresh='2026-01-01T00:00:00+00:00')
+    db.update_model_provider('p', openai_admin_key=enc('openai-admin'))
 
 
 def test_fresh_local_database_needs_no_password_or_account_and_reloads():
@@ -92,7 +88,7 @@ def test_adopts_every_legacy_store_without_rewriting_ciphertext_or_metadata():
     assert encryption.initialize_server_key(db)
     assert {encryption.decrypt_value(value) for value in before} == {
         'settings-secret', 'old-trigger', 'new-trigger', 'connector-secret', 'integration-secret',
-        'claude-secret', 'provider-secret', 'oauth-access', 'oauth-refresh'}
+        'provider-secret', 'oauth-access', 'oauth-refresh', 'openai-admin'}
 
 
 def test_empty_encrypted_plaintext_is_valid_during_adoption_and_restart():
@@ -122,6 +118,16 @@ def test_legacy_failures_never_activate_or_rewrite(problem, test_db):
     assert metadata()['wrapped_dek'] is None
     assert stored_values() == before
     assert not (keys.settings.effective_data_dir / '.credential-keys').exists()
+
+
+def test_corrupt_openai_admin_key_refuses_adoption():
+    """The OpenAI Admin key is an encrypted provider column like the others;
+    one the adopted key cannot decrypt must block activation."""
+    seed()
+    db.update_model_provider('p', openai_admin_key='enc:invalid')
+    assert not encryption.initialize_server_key(db, PASSWORD)
+    assert metadata()['wrapped_dek'] is None
+    assert not encryption.is_encryption_ready()
 
 
 @pytest.mark.parametrize('table', [entry[0] for entry in keys._TABLES])
@@ -229,8 +235,7 @@ def test_legacy_key_changers_are_disabled_after_adoption(monkeypatch):
     assert encryption.initialize_server_key(db)
     monkeypatch.setenv('ADMIN_PASSWORD', 'unused-new-value')
     for call in (lambda: encryption.set_encryption_key('new', db),
-                 lambda: encryption.re_encrypt_all_secrets('old', 'new', db),
-                 lambda: encryption.init_encryption_from_env(db)):
+                 lambda: encryption.re_encrypt_all_secrets('old', 'new', db)):
         with pytest.raises(RuntimeError, match='cannot be password-rekeyed'):
             call()
     from scripts.rekey import rekey

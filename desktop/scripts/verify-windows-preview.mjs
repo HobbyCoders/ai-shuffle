@@ -13,6 +13,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { installPreview } from './install-preview.mjs';
 import { readPreviewRenderer } from './preview-renderer.mjs';
+import { configurePersistenceFixture, verifyOfflineSetup, workerJson } from '../../tests/integration/container_ui_smoke.mjs';
 
 const exec = promisify(execFile);
 assert(process.platform === 'win32' && process.env.CI === 'true', 'Windows CI only');
@@ -52,6 +53,8 @@ const childEnv = {
   DATABASE_MODE: 'external', DATABASE_URL: 'postgresql://never:never@127.0.0.1:9/never',
   POSTGRES_HOST: 'invalid.invalid', POSTGRES_PORT: '9', POSTGRES_USER: 'never',
   POSTGRES_PASSWORD: 'never', POSTGRES_DB: 'never',
+  // No person is here to acknowledge the first-launch agent access disclosure.
+  SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS: '1',
 };
 let application;
 let page;
@@ -157,7 +160,7 @@ try {
   const build = JSON.parse(await fs.readFile(path.join(worker, 'preview-build.json'), 'utf8'));
   assert.equal(build.sourceCommit, report.sourceCommit, 'Installer revision differs from checked-out candidate');
   for (const required of ['python/python.exe', 'node/node.exe', 'server/app/main.py',
-    'server/app/static/index.html', 'server/tools/dist/index.js', 'server/browser-mcp/dist/index.js']) {
+    'server/app/static/index.html', 'server/tools/dist/worker.js', 'server/browser-mcp/dist/index.js']) {
     assert(await exists(path.join(worker, required)), `Missing bundled resource: ${required}`);
   }
   await exec(path.join(worker, 'python', 'python.exe'), ['--version'], { timeout: 30000 });
@@ -223,23 +226,22 @@ try {
     'import json,sys,psycopg2; d=json.load(open(sys.argv[1])); c=psycopg2.connect(host=d["host"],port=d["port"],user=d["user"],password=d["password"],dbname=d["database"],connect_timeout=5); q=c.cursor(); q.execute("select count(*) from information_schema.tables where table_schema=\'public\'"); print(q.fetchone()[0]); c.close()', descriptorPath], { timeout: 30000 });
   assert(Number(probe.stdout.trim()) > 0, 'App did not create schema in its managed PostgreSQL');
   passed('Bundled PostgreSQL authenticates and contains the actual application schema; inherited DB env ignored');
-  // Start step: a clean install needs no account, invite or approval.
-  await page.getByRole('button', { name: 'Continue without an account', exact: true }).click();
-  await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
-  await page.getByLabel('Or type a path manually').fill(workspace);
-  const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: 'Continue', exact: true }).click();
-  const response = await saved;
-  assert.equal(response.status(), 200, 'Real workspace producer rejected onboarding');
-  const workspaceURL = response.url();
-  // Providers & GitHub is the last step; Claude Code is not asked for.
-  await page.getByText('Model providers', { exact: true }).waitFor();
-  assert.equal(await page.getByText(/Claude Code/).count(), 0, 'Setup must not ask for Claude Code');
+  // Drive the real first-run flow, stopping safely at its credential gate.
+  const completed = [];
+  page.on('request', request => {
+    if (request.url().endsWith('/auth/onboarding/complete')) completed.push(request.method());
+  });
+  await verifyOfflineSetup(page);
+  passed('Actual welcome/license/mode steps persist both modes; missing subscription/API credentials block Continue and first run');
+  // The workspace is a separate persistence fixture written through the real
+  // owner API. Never fake a credential or complete onboarding to reach it.
+  const workspaceURL = await configurePersistenceFixture(page, workspace);
   const originalNetwork = await networkStatus();
   assert(originalNetwork.networkId && originalNetwork.instanceId, 'Network producer did not persist identity');
   browserWasRunning = await canConnect(19221);
-  await screenshot('real-onboarding.png');
-  passed('Packaged UI prepares local settings and workspace without an account, recovery key, or remote worker');
+  assert.deepEqual(completed, [], 'No onboarding completion request is allowed without a credential');
+  await screenshot('credential-gate.png');
+  passed('Real owner APIs saved the workspace/network persistence fixture; onboarding remains blocked and unfinished');
 
   await closeApplication();
   await until(async () => !(await canConnect(8000)) && !(await canConnect(8001)) && !(await canConnect(databasePort)), 'Owned app/PostgreSQL listeners survived quit', 45000);
@@ -262,18 +264,17 @@ try {
   databasePort = nextDescriptor.port;
   await screenshot('restart-persistence.png');
   passed('Full relaunch preserves workspace, network, instance and PostgreSQL credentials');
-  // Resume the unfinished setup through its real UI, then finish without
-  // introducing provider credentials or an account link into this CI profile.
+  // Credentials are still absent after a real worker/DB restart: do not
+  // turn a persistence fixture into a claim that the first-run gate passed.
+  page.on('request', request => {
+    if (request.url().endsWith('/auth/onboarding/complete')) completed.push(request.method());
+  });
+  const credentials = await workerJson(page, '/api/v1/settings/claude-auth');
+  assert.equal(credentials.mode, 'api_key', 'The mode must persist across worker restart');
   await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
-  await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
-  assert.equal(await page.getByLabel('Or type a path manually').inputValue(), workspace);
-  await page.getByRole('button', { name: 'Continue', exact: true }).click();
-  await page.getByText('Model providers', { exact: true }).waitFor();
-  const completed = page.waitForResponse(response => response.url().endsWith('/auth/onboarding/complete') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: /^Finish/ }).click();
-  assert.equal((await completed).status(), 200, 'Standalone onboarding completion was rejected');
-  await page.waitForURL(url => url.origin === 'http://127.0.0.1:8000' && url.pathname !== '/setup');
-  passed('Interrupted local setup resumes and completes without account sign-in or provider credentials');
+  await verifyOfflineSetup(page);
+  assert.deepEqual(completed, [], 'Restart must not bypass onboarding completion');
+  passed('Interrupted setup resumes through license/mode and still blocks credential-free completion');
   // Navigate through the real native menu. Awaiting renderer IPC here would
   // destroy its own execution context while loadFile replaces the web app.
   await application.evaluate(({ Menu }) => {
@@ -296,7 +297,7 @@ try {
   assert.deepEqual(pageErrors, [], 'Installed UI raised JavaScript errors');
   passed('Stable sentinels unchanged after every lifecycle; no renderer errors');
   report.success = true;
-  report.gaps = ['No live provider credentials/account login, remote enrollment, physical handset, or user PC exercised. Local onboarding completed through the UI; no onboarding flags were seeded.'];
+  report.gaps = ['Offline welcome/license/mode and credential blocking were exercised, not completed onboarding. Workspace/network persistence used supported owner APIs without changing onboarding flags. No provider/account login, post-setup Settings UI, first streamed reply, live model, remote enrollment, physical handset or user PC was exercised.'];
 } catch (error) {
   // Do not serialize page DOM, runtime descriptors, or full process output.
   report.failure = String(error.message).slice(0, 2400);

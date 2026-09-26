@@ -1,6 +1,6 @@
 {
   "name": "ai-shuffle-frontend",
-  "version": "0.8.9",
+  "version": "0.8.19",
   "private": true,
   "type": "module",
   "overrides": {

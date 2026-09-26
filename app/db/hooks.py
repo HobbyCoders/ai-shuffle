@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -27,7 +25,6 @@ class HookRow(TypedDict):
     secret: Optional[str]
     enabled: bool
     tool_matcher: Optional[str]
-    message_template: Optional[str]
     created_at: str
     updated_at: str
     last_triggered_at: Optional[str]
@@ -74,17 +71,6 @@ def get_all_hooks_for_project(project_id: str) -> List[HookRow]:
         return rows_to_list(cursor.fetchall())
 
 
-def get_enabled_hooks_for_project(project_id: str) -> List[HookRow]:
-    """Get all enabled hooks for a project"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM project_hooks WHERE project_id = %s AND enabled = TRUE ORDER BY created_at DESC",
-            (project_id,)
-        )
-        return rows_to_list(cursor.fetchall())
-
-
 def get_hooks_for_project_and_event(project_id: str, event: str) -> List[HookRow]:
     """Get all enabled hooks for a project (+ app hooks) that match a specific event"""
     with get_db() as conn:
@@ -119,7 +105,6 @@ def create_hook(
     secret: Optional[str] = None,
     enabled: bool = True,
     tool_matcher: Optional[str] = None,
-    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
     """Create a new hook (project-scoped or app-level)"""
     now = datetime.now(timezone.utc).isoformat()
@@ -127,9 +112,9 @@ def create_hook(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO project_hooks
-               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, now, now)
+               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, now, now)
         )
     return get_hook(hook_id)
 
@@ -145,7 +130,6 @@ def update_hook(
     secret: Optional[str] = None,
     enabled: Optional[bool] = None,
     tool_matcher: Optional[str] = None,
-    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
     """Update a hook"""
     existing = get_hook(hook_id)
@@ -182,9 +166,6 @@ def update_hook(
     if tool_matcher is not None:
         updates.append("tool_matcher = %s")
         values.append(tool_matcher if tool_matcher else None)
-    if message_template is not None:
-        updates.append("message_template = %s")
-        values.append(message_template if message_template else None)
 
     if updates:
         updates.append("updated_at = %s")

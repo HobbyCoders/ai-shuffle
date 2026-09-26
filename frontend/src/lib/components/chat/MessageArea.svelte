@@ -79,8 +79,8 @@
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import CommandMessage from './CommandMessage.svelte';
-	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
-	// always merged into tool_use messages to prevent flickering during streaming
+	// tool_result messages are always merged into tool_use messages to prevent
+	// flickering during streaming, so they have no component of their own.
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
@@ -1736,6 +1736,9 @@
 </script>
 
 <div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2} class:has-long-turn-nav={turnNavigationItems.length > 30}>
+<!-- role="log" is a polite live region. aria-busy while a reply streams keeps
+     screen readers from announcing every streamed token; the settled turn is
+     read once the stream ends. -->
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
@@ -1744,6 +1747,7 @@
 	ontouchmove={handleTouchMove}
 	role="log"
 	aria-label="Conversation messages"
+	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if transcriptRender === 'skeleton'}
@@ -1958,7 +1962,6 @@
 		<ThinkingBlock
 			content={message.content}
 			streaming={message.streaming}
-			thinkingTokens={message.thinkingTokens}
 			profileName={getProfileName(message)}
 			subtype={message.thinkingSubtype}
 		/>
@@ -1976,8 +1979,6 @@
 				content={message.content}
 				{gallerySources}
 				timestamp={message.timestamp}
-				messageIndex={messageIndex}
-				messageId={message.id}
 				messageUuid={message.jsonlUuid}
 				sessionId={$activeSession.sessionId}
 				streaming={isStreamAnchor}
@@ -2074,7 +2075,7 @@
 	{:else if message.type === 'team_member'}
 		<div class="w-full">
 			<div class="min-w-0">
-				<TeamMemberMessage {message} parentSessionId={$activeSession.sessionId ?? ''} />
+				<TeamMemberMessage {message} />
 			</div>
 		</div>
 	{/if}

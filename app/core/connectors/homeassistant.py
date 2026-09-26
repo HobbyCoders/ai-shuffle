@@ -279,6 +279,7 @@ class HomeAssistantConnector(BaseConnector):
                         )
                     else:
                         consecutive_failures = 0
+                        await self._poll_recovered()
                         for entity in resp.json():
                             eid = entity.get("entity_id", "")
                             if not self._matches_filter(eid):
@@ -341,6 +342,20 @@ class HomeAssistantConnector(BaseConnector):
                 "HomeAssistantConnector %s poll task cancelled", self.connector_id
             )
 
+    async def _poll_recovered(self) -> None:
+        """Leave ERROR once a poll succeeds again after repeated failures."""
+        if self._status != ConnectorStatus.ERROR:
+            return
+        self._status = ConnectorStatus.CONNECTED
+        self._status_message = None
+        logger.info("HomeAssistantConnector %s recovered: polling succeeded again", self.connector_id)
+        try:
+            from app.db import database
+            from app.db.async_database import run_sync
+            await run_sync(database.update_connector_status, self.connector_id, ConnectorStatus.CONNECTED.value)
+        except Exception:
+            logger.debug("Failed to update DB status", exc_info=True)
+
     # ------------------------------------------------------------------
     # Outgoing — command parsing
     # ------------------------------------------------------------------
@@ -366,6 +381,10 @@ class HomeAssistantConnector(BaseConnector):
 
         text = message.text.strip()
         text_lower = text.lower()
+        # Commands match case-insensitively on the original text: entity
+        # references resolve case-insensitively anyway, but values must keep
+        # their case (input_select options and input_text are case-sensitive).
+        flags = re.IGNORECASE
 
         try:
             # --- list entities / entities / status ---
@@ -373,44 +392,48 @@ class HomeAssistantConnector(BaseConnector):
                 return await self._cmd_list_entities(message)
 
             # --- turn on {entity} ---
-            m = re.match(r"turn\s+on\s+(.+)", text_lower)
+            m = re.match(r"turn\s+on\s+(.+)", text, flags)
             if m:
                 return await self._cmd_service(
                     "homeassistant", "turn_on", m.group(1), message
                 )
 
             # --- turn off {entity} ---
-            m = re.match(r"turn\s+off\s+(.+)", text_lower)
+            m = re.match(r"turn\s+off\s+(.+)", text, flags)
             if m:
                 return await self._cmd_service(
                     "homeassistant", "turn_off", m.group(1), message
                 )
 
             # --- toggle {entity} ---
-            m = re.match(r"toggle\s+(.+)", text_lower)
+            m = re.match(r"toggle\s+(.+)", text, flags)
             if m:
                 return await self._cmd_service(
                     "homeassistant", "toggle", m.group(1), message
                 )
 
             # --- set {entity} to {value} ---
-            m = re.match(r"set\s+(.+?)\s+to\s+(.+)", text_lower)
+            m = re.match(r"set\s+(.+?)\s+to\s+(.+)", text, flags)
             if m:
                 return await self._cmd_set(m.group(1), m.group(2), message)
 
             # --- get {entity} / state {entity} ---
-            m = re.match(r"(?:get|state)\s+(.+)", text_lower)
+            m = re.match(r"(?:get|state)\s+(.+)", text, flags)
             if m:
                 return await self._cmd_get_state(m.group(1), message)
 
             # --- call service {domain}.{service} {entity_id} {json_data?} ---
             m = re.match(
                 r"call\s+service\s+([\w]+)\.([\w]+)\s+([\w.]+)(?:\s+(.+))?",
-                text_lower,
+                text,
+                flags,
             )
             if m:
+                # Domains, services and entity IDs are lower-case in Home
+                # Assistant; the JSON data keeps its case.
                 return await self._cmd_call_service(
-                    m.group(1), m.group(2), m.group(3), m.group(4), message
+                    m.group(1).lower(), m.group(2).lower(), m.group(3).lower(),
+                    m.group(4), message,
                 )
 
             # Unrecognised command
@@ -494,6 +517,7 @@ class HomeAssistantConnector(BaseConnector):
             return True
 
         domain = entity_id.split(".")[0]
+        wanted = value.strip().lower()
 
         # Map domains to services + data keys
         service_map: Dict[str, tuple] = {
@@ -507,7 +531,15 @@ class HomeAssistantConnector(BaseConnector):
             "number": ("number", "set_value", "value"),
         }
 
-        if domain in service_map:
+        if wanted in ("on", "off", "toggle"):
+            # "set X to off" is a power command whatever the domain; it must
+            # never fall through to turn_on.
+            service = {"on": "turn_on", "off": "turn_off", "toggle": "toggle"}[wanted]
+            resp = await self._api_post(
+                f"/api/services/homeassistant/{service}",
+                data={"entity_id": entity_id},
+            )
+        elif domain in service_map:
             svc_domain, svc_name, data_key = service_map[domain]
             # Try to convert to numeric if possible
             try:
@@ -522,11 +554,15 @@ class HomeAssistantConnector(BaseConnector):
                 f"/api/services/{svc_domain}/{svc_name}", data=payload
             )
         else:
-            # Fallback: try homeassistant.turn_on with the value as-is
-            resp = await self._api_post(
-                f"/api/services/homeassistant/turn_on",
-                data={"entity_id": entity_id},
+            # No value service is known for this domain; guessing a service
+            # could do the opposite of what was asked, so say so instead.
+            await self._send_reply(
+                original,
+                f"Don't know how to set {entity_id} to {value}. Use "
+                f"'turn on/off {entity_ref}' or "
+                f"'call service <domain>.<service> {entity_id} {{json}}'.",
             )
+            return True
 
         if 200 <= resp.status_code < 300:
             await self._send_reply(

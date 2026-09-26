@@ -16,9 +16,11 @@ import json
 import logging
 import threading
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from enum import Enum
+
+from fastapi import HTTPException
 
 from app.core.platform import is_docker_mode, get_claude_credentials_dir
 
@@ -47,6 +49,26 @@ def _normalize_disabled_servers(disabled: List[str]) -> List[str]:
         for name in dict.fromkeys(disabled)
         if _LEGACY_ALWAYS_ON_NAMES.get(name, name) not in _ALWAYS_ON_SERVERS
     ]
+
+
+class McpConfigUnreadable(HTTPException):
+    """An MCP config file exists but cannot be read, so it must not be rewritten.
+
+    Raised on the read of a read-modify-write: writing back what an
+    unreadable file "read as" (an empty object) would wipe it. The API
+    answers 409 with this message; the file is left exactly as it was.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        super().__init__(
+            status_code=409,
+            detail=(
+                f"{path} could not be read (it is not a valid JSON object, or another "
+                "program was writing it). It was left unchanged; fix or restore it, "
+                "then try again."
+            ),
+        )
 
 
 class McpScope(str, Enum):
@@ -163,21 +185,6 @@ class McpServerConfig:
         )
 
 
-@dataclass
-class McpConfig:
-    """Full MCP configuration from a file"""
-    servers: Dict[str, McpServerConfig] = field(default_factory=dict)
-
-    def to_mcp_json(self) -> Dict[str, Any]:
-        """Convert to .mcp.json format"""
-        return {
-            "mcpServers": {
-                name: server.to_mcp_json_format()
-                for name, server in self.servers.items()
-            }
-        }
-
-
 def _get_claude_dir() -> Path:
     """
     Get the Claude configuration directory based on deployment mode.
@@ -271,16 +278,33 @@ class McpService:
             return self.PROJECT_MCP_FILE
         return None
 
-    def _read_json_file(self, path: Path, default: Any = None) -> Any:
-        """Safely read a JSON file"""
+    def _read_json_file(self, path: Path, default: Any = None, *, for_update: bool = False) -> Any:
+        """Read a JSON object file.
+
+        A missing file reads as ``default`` (``{}``). An unreadable or corrupt
+        one (not UTF-8, not JSON, not an object, or caught mid-write by the
+        CLI) also reads as ``default`` for display, but with ``for_update``
+        it raises :class:`McpConfigUnreadable`: the caller is about to write
+        the result back, and writing an empty object would replace the whole
+        file (~/.claude.json is the CLI's entire state file).
+        """
+        fallback = default if default is not None else {}
         try:
-            if path.exists():
-                with open(path, 'r') as f:
-                    return json.load(f)
-            return default if default is not None else {}
-        except (json.JSONDecodeError, IOError) as e:
+            if not path.exists():
+                return fallback
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Every caller indexes the result as an object; a file holding
+            # ``null`` or a list would otherwise raise AttributeError.
+            if not isinstance(data, dict):
+                raise ValueError("top-level JSON is not an object")
+            return data
+        except (ValueError, OSError) as e:
+            # ValueError covers JSONDecodeError and a non-UTF-8 file.
             logger.error(f"Error reading {path}: {e}")
-            return default if default is not None else {}
+            if for_update:
+                raise McpConfigUnreadable(path) from e
+            return fallback
 
     def _write_json_file(self, path: Path, data: Any) -> bool:
         """Safely write a JSON file with atomic operation"""
@@ -354,7 +378,7 @@ class McpService:
         if not self.project_dir:
             raise ValueError("No project directory set")
 
-        data = self._read_json_file(self.USER_MCP_FILE, {})
+        data = self._read_json_file(self.USER_MCP_FILE, {}, for_update=True)
         projects = data.get("projects", {})
 
         # Find the project entry (try forward-slash then OS path)
@@ -455,7 +479,7 @@ class McpService:
         if not self.project_dir:
             raise ValueError("No project directory set")
 
-        data = self._read_json_file(self.USER_MCP_FILE, {})
+        data = self._read_json_file(self.USER_MCP_FILE, {}, for_update=True)
         project_key = self._ensure_project_entry(data)
 
         if "mcpServers" not in data["projects"][project_key]:
@@ -482,10 +506,10 @@ class McpService:
         if not self.project_dir:
             raise ValueError("No project directory set")
 
-        data = self._read_json_file(self.USER_MCP_FILE, {})
+        data = self._read_json_file(self.USER_MCP_FILE, {}, for_update=True)
         project_key, project_data = self._find_project_entry(data)
         if project_key is None or project_data is None:
-            raise ValueError(f"Project not found in ~/.claude.json")
+            raise ValueError("Project not found in ~/.claude.json")
 
         mcp_servers = project_data.get("mcpServers", {})
         if name not in mcp_servers:
@@ -513,7 +537,7 @@ class McpService:
         Returns:
             True if successful
         """
-        data = self._read_json_file(self.SETTINGS_FILE, {})
+        data = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         disabled = _normalize_disabled_servers(data.get("disabledMcpServers", []))
 
         # Always-on built-ins cannot be disabled (the browser suite has no
@@ -662,7 +686,7 @@ class McpService:
             raise ValueError(f"Scope {scope} is not available (no project directory)")
 
         # Read existing file (preserve all existing content)
-        data = self._read_json_file(mcp_file, {})
+        data = self._read_json_file(mcp_file, {}, for_update=True)
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
@@ -703,7 +727,7 @@ class McpService:
             raise ValueError(f"Scope {scope} is not available")
 
         # Read existing file (preserve all existing content)
-        data = self._read_json_file(mcp_file, {})
+        data = self._read_json_file(mcp_file, {}, for_update=True)
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
@@ -738,7 +762,7 @@ class McpService:
             raise ValueError(f"Scope {scope} is not available")
 
         # Read existing file (preserve all existing content)
-        data = self._read_json_file(mcp_file, {})
+        data = self._read_json_file(mcp_file, {}, for_update=True)
         if "mcpServers" not in data:
             return False
 
@@ -771,11 +795,6 @@ class McpService:
         """
         return self.get_builtin_servers() + list(self.get_servers_for_scope(McpScope.USER))
 
-    def get_server_count(self) -> int:
-        """Get total count of MCP servers across all scopes"""
-        all_servers = self.get_all_servers()
-        return sum(len(servers) for servers in all_servers.values())
-
     def validate_server_config(self, config: McpServerConfig) -> List[str]:
         """
         Validate an MCP server configuration.
@@ -786,7 +805,12 @@ class McpService:
 
         if not config.name:
             errors.append("Server name is required")
-        elif not config.name.replace("-", "").replace("_", "").isalnum():
+        elif not (
+            config.name.isascii()
+            and config.name.replace("-", "").replace("_", "").isalnum()
+        ):
+            # ASCII only: str.isalnum() accepts letters and digits from any
+            # script, which tool names (mcp__<server>__<tool>) cannot carry.
             errors.append("Server name must be alphanumeric with hyphens/underscores only")
 
         if config.type in [McpServerType.STDIO, "stdio"]:
@@ -821,13 +845,6 @@ def get_mcp_service(project_dir: Optional[Path] = None) -> McpService:
         if cache_key not in _mcp_services:
             _mcp_services[cache_key] = McpService(project_dir=project_dir)
         return _mcp_services[cache_key]
-
-
-def clear_mcp_service_cache():
-    """Clear the MCP service cache (useful for testing)"""
-    global _mcp_services
-    with _mcp_services_lock:
-        _mcp_services = {}
 
 
 from app.core.resource_sync import install_service_mutations as _install_resource_sync

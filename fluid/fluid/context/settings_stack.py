@@ -25,8 +25,9 @@ What is consumed (wired by ``fluid.config.loader``):
 
 * ``permissions.{allow,ask,deny}`` become rules evaluated before the
   ``config.toml`` ``[[permission.rules]]``, so a TOML rule outranks them.
-* ``permissions.defaultMode`` sets ``permission.approval_policy`` through
-  :data:`_MODE_POLICY` unless a config.toml/env/CLI layer sets one.
+* ``permissions.defaultMode`` sets ``permission.approval_policy`` (and, for
+  ``acceptEdits``, the edit-tool allow rules) through the mode table in
+  ``fluid.permissions.modes`` unless a config.toml/env/CLI layer sets one.
 * ``env`` is layered onto the Bash builtin's child environment and each MCP
   stdio server's spawn environment (under the server's own ``env``);
   ``os.environ`` is never mutated.
@@ -48,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.context.instructions import _git_root, _walk_up_dirs
+from fluid.permissions.modes import MODE_POLICY, PERMISSION_MODES, mode_rules
 from fluid.permissions.rules import Rule
 
 log = logging.getLogger(__name__)
@@ -73,20 +75,10 @@ _PATTERN_FIELD: dict[str, str] = {
 _DECISION_ORDER = ("allow", "ask", "deny")
 
 # ``permissions.defaultMode`` values fluid's SetPermissionMode op understands
-# verbatim (see NativeLoop.submit). Anything outside this set is refused rather
-# than approximated — see :func:`default_permission_mode`.
-_PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions")
-
-# defaultMode → fluid approval policy. ``plan`` has no policy of its own (plan
-# mode is a session flag), so it takes the policy that asks before everything;
-# ``acceptEdits`` is on_write plus allow rules for the file-editing builtins
-# (:data:`_ACCEPT_EDITS_TOOLS`), which is what the mode means in Claude Code.
-_MODE_POLICY = {
-    "default": "on_write",
-    "acceptEdits": "on_write",
-    "bypassPermissions": "never_ask",
-}
-_ACCEPT_EDITS_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# verbatim (see NativeLoop.submit): the mode table in
+# ``fluid.permissions.modes``. Anything outside it is refused rather than
+# approximated — see :func:`default_permission_mode`.
+_PERMISSION_MODES = PERMISSION_MODES
 
 
 # ─── loading ─────────────────────────────────────────────────────────────────
@@ -219,8 +211,8 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
     """``permissions.defaultMode`` as a fluid ``SetPermissionMode`` value.
 
     Claude Code and fluid already share this vocabulary — ``NativeLoop``'s
-    ``SetPermissionMode`` handler accepts ``default`` / ``plan`` /
-    ``acceptEdits`` / ``bypassPermissions`` verbatim — so a recognized value
+    ``SetPermissionMode`` handler accepts ``default`` / ``acceptEdits`` /
+    ``bypassPermissions`` verbatim — so a recognized value
     passes straight through.
 
     Anything else (``dontAsk``, a future mode, a typo) returns ``None`` with a
@@ -248,19 +240,15 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
 def default_mode_policy(settings: dict[str, Any]) -> tuple[str | None, list[Rule]]:
     """``permissions.defaultMode`` as ``(approval_policy, extra rules)``.
 
-    The policy comes from :data:`_MODE_POLICY`; the rules are the allow
-    entries ``acceptEdits`` implies for the file-editing builtins, empty for
-    every other mode. ``(None, [])`` when the mode is unset or unsupported.
+    The policy comes from ``fluid.permissions.modes.MODE_POLICY``; the rules
+    are the allow entries ``acceptEdits`` implies for the edit-class tools
+    (``ACCEPT_EDITS_TOOLS`` there), empty for every other mode. ``(None, [])``
+    when the mode is unset or unsupported.
     """
     mode = default_permission_mode(settings)
     if mode is None:
         return None, []
-    rules = (
-        [Rule(tool=tool, decision="allow") for tool in _ACCEPT_EDITS_TOOLS]
-        if mode == "acceptEdits"
-        else []
-    )
-    return _MODE_POLICY[mode], rules
+    return MODE_POLICY[mode], mode_rules(mode)
 
 
 def mcp_toggles(settings: dict[str, Any]) -> tuple[list[str], list[str]]:

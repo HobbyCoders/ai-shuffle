@@ -42,7 +42,9 @@ def info(device_id=DEVICE):
 
 
 def insert(key='aim_test'):
-    return store.enroll(identity(), info(), hash_api_key(key), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    device_id = store.enroll(identity(), info(), hash_api_key(key), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    store.confirm_device(store.ownership(device_id), True)
+    return device_id
 
 
 def active(*args, **kwargs):
@@ -371,15 +373,6 @@ def test_authoritative_owner_checked(setup, monkeypatch, result):
         account_hub.mobile_hub_ownership(database.get_mobile_device(DEVICE))
 
 
-def test_controller_cannot_become_admin(setup, monkeypatch):
-    from app.core.auth import auth_service
-    lookup = Mock(return_value={'token': 'injected'})
-    monkeypatch.setattr(database, 'get_auth_session', lookup)
-    assert not auth_service.validate_session('shc_injected')
-    assert not auth_service.validate_session('aim_injected')
-    lookup.assert_not_called()
-
-
 def test_enroll_requires_link_and_limited(setup):
     body = {'ticket': 'ticket', 'device_info': info().model_dump()}
     assert setup.post('/api/v1/mobile/hub/enroll', json=body).status_code == 403
@@ -445,7 +438,6 @@ def test_activation_outage_leaves_locked_inactive_binding(setup, monkeypatch):
 
 
 def test_schema_migration_idempotent(setup, test_db):
-    from tests.pg_shim import ShimConnection
     # Use the same adapter as production module tests, never a live pool.
     with database.get_db() as conn:
         store.create_schema(conn.cursor())
@@ -474,7 +466,7 @@ async def test_revoked_hub_websocket_handshake_denied(setup, monkeypatch, hub_st
 
 
 def test_direct_phone_deletion_revokes_derived_cookie(setup):
-    grant = database.create_pairing_grant(
+    database.create_pairing_grant(
         token_hash='direct-grant', purpose='controller',
         scopes=list(pairing.DEFAULT_MOBILE_SCOPES), target_install_id=None,
         endpoint_url=None, device_label=None, created_by='test',

@@ -6,47 +6,116 @@ order: 2
 
 # Hooks
 
-Hooks let you execute custom code at key points during an AI session. Use them to log tool usage, send notifications, post follow-up messages into the chat, or integrate with external systems.
+Hooks let you run your own code at key points during an AI session. Use them to check or block tool calls, log what agents do, or tell external systems when an agent finishes.
 
 ## Overview
 
-A hook is a piece of logic -- a shell command, a webhook call, or a chat message -- that AI Shuffle runs when a specific event occurs during Claude's workflow. Hooks are scoped to a project and can be enabled or disabled individually.
+A hook is a piece of logic -- a shell command or a webhook call -- that AI Shuffle runs when a specific event occurs during the agent's workflow. Each hook can be enabled or disabled individually. Manage hooks in **Build → Hooks** (App, Project and Plugin tabs) or through the API.
 
-Hooks run asynchronously (fire-and-forget): when an event fires, matching hooks are dispatched in the background and the session continues without waiting for them. A hook cannot block, approve, or modify a tool call -- its exit code or response is not consulted by the workflow. Failures are logged, not surfaced to the session.
+**What runs today:**
+
+- `PreToolUse` runs bash hooks before a tool and can block it. Webhook hooks on `PreToolUse` are skipped.
+- `Stop` runs bash and webhook hooks when the agent finishes its turn. A bash hook's output or a webhook's JSON response can keep it working.
+- The other seven events (`PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification`) run bash and webhook hooks in the background. They cannot block or change anything.
+- `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-wide hooks only).
+- Hooks that plugins contribute through `hooks.json` are not affected by these limits; see [Plugin-Contributed Hooks](#plugin-contributed-hooks).
 
 Key concepts:
 
-- **Per-project:** Each hook belongs to a specific project
-- **Three types:** Bash (run a shell command), Webhook (HTTP POST to a URL), and Message (post a prompt into the active chat)
-- **Nine event types:** Cover the full session lifecycle from start to finish
-- **Tool matching:** Optionally filter tool-related events by tool name pattern
+- **Project or app-wide:** A hook belongs to one project, or to the whole app (`/api/v1/hooks/app`) and runs for every project
+- **Types:** Bash (run a shell command) and Webhook (HTTP POST to a URL)
+- **Blocking:** Only a bash `PreToolUse` hook can block a tool. A bash or webhook `Stop` hook can keep the agent working. Hooks on every other event run in the background
+- **Tool matching:** Optionally filter tool events (`PreToolUse`, `PostToolUse`) by tool name pattern
 - **Plugin hooks:** Installed plugins can contribute read-only hooks
 
 ## Hook Types
 
 ### Bash Hooks
 
-Execute a shell command when the event fires. The command receives event data through environment variables.
+Run a shell command when the event fires. For `PreToolUse` and `Stop`, AI Shuffle waits for the command to finish. On the other events the command runs in the background and the session does not wait for it.
 
 | Field     | Type    | Description                                    |
 |-----------|---------|------------------------------------------------|
 | `command` | string  | Shell command to execute                        |
 | `timeout` | integer | Timeout in milliseconds (1000-300000, default 30000) |
 
-**Environment variables passed to bash hooks:**
+The `timeout` applies to each hook on its own. When several hooks match one `PreToolUse` or `Stop` event, they run one after another and each gets its full timeout. A hook that runs out of time is stopped, with everything it started.
+
+The event's hooks together also have a deadline: the sum of their timeouts plus 5 seconds per hook, never below 60 seconds. A running session keeps the deadline it computed when it started, so a timeout raised mid-session can still be cut short by the old deadline until the next session. When `PreToolUse` hooks pass that deadline, the tool call is denied (see [Blocking a Tool Call](#blocking-a-tool-call)). When `Stop` hooks pass it, the agent stops as usual.
+
+A `PreToolUse` hook receives the tool call as JSON on stdin and runs in the session's working directory:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "ls -la" },
+  "session_id": "...",
+  "cwd": "/workspace/my-project"
+}
+```
+
+**Environment variables passed to `PreToolUse` bash hooks:**
 
 | Variable         | Description                                      |
 |------------------|--------------------------------------------------|
-| `HOOK_EVENT`     | The event type (e.g., `PreToolUse`)               |
-| `HOOK_TIMESTAMP` | ISO 8601 timestamp of the event                   |
-| `HOOK_DATA`      | JSON-encoded event payload                         |
-| `HOOK_*`         | Additional event-specific variables                |
+| `HOOK_EVENT`     | `PreToolUse`                                      |
+| `HOOK_TOOL_NAME` | The tool about to run                             |
+| `HOOK_DATA`      | The same JSON as stdin, shortened when it is large (see [Size limits](#size-limits)) |
+
+**Environment variables passed to bash hooks on the other events** (no stdin):
+
+| Variable         | Description                                      |
+|------------------|--------------------------------------------------|
+| `HOOK_EVENT`     | The event type, for example `PostToolUse`         |
+| `HOOK_TIMESTAMP` | When the event fired (ISO 8601)                   |
+| `HOOK_DATA`      | The event's data as JSON                          |
+| `HOOK_<KEY>`     | One variable per top-level key of the event data, for example `HOOK_TOOL_NAME`. Values are plain text, not JSON |
+
+A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` holds the stop payload: `session_id`, `cwd`, `stop_hook_active`, `stop_reason`, the turn's final `text` (first 16,000 characters) and `project_id`.
+
+Only a `PreToolUse` hook runs in the session's working directory. `Stop` hooks and hooks on the other events run in the app's own working directory; the session's directory is the `cwd` field of `HOOK_DATA`.
+
+#### Size limits
+
+Each `HOOK_*` value is capped at 64 KiB. A longer `HOOK_<KEY>` value is cut and ends in `...[truncated]`. `HOOK_DATA` is always valid JSON: when it would be too long, its longest strings (for example a large `tool_input.content`) are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level.
+
+A `PreToolUse` guard should read the tool call from stdin, which always carries it in full. A guard that reads `HOOK_DATA` instead should block when `truncated` is `true`, because the part it looks for may have been cut.
+
+#### Environment
+
+Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets. Variables such as `DATABASE_*`, `PG*`, `POSTGRES_*`, `OWNER_PASSWORD`, `SECRET_KEY`, and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_KEY`, `_PRIVATE_KEY`, `_ACCESS_KEY` or `_CREDENTIALS` are removed. Model-provider keys (for example `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`), `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are kept. To pass another variable through, list it in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated) in the app's environment.
 
 **Example bash hook command:**
 
 ```bash
-echo "[$(date)] $HOOK_EVENT: $HOOK_DATA" >> /var/log/ai-shuffle-hooks.log
+echo "[$(date)] $HOOK_EVENT $HOOK_TOOL_NAME" >> /var/log/ai-shuffle-hooks.log
 ```
+
+### Blocking a Tool Call
+
+A bash `PreToolUse` hook decides what happens to the tool call:
+
+- **Exit code 2** denies the call. Anything the hook wrote to stderr is shown as the reason.
+- **JSON on stdout** such as `{"permissionDecision": "deny", "permissionDecisionReason": "..."}` denies it. `allow` and `ask` work the same way. `{"decision": "block", "reason": "..."}` also denies it.
+- **Exit code 0 with no output** has no opinion: the call goes through the normal permission flow.
+
+A single hook that times out, crashes or exits with another code does not block: it has no opinion, and the next hook runs. The call is denied instead when the guard gave no answer at all:
+
+- a hook cannot start (for example the shell is missing);
+- the `PreToolUse` hooks together run past their deadline (see [Bash Hooks](#bash-hooks)), or the hook runner itself fails;
+- on Claude subscription sessions, where the Claude CLI runs the tools, the `PreToolUse` hooks for one call have not decided within 570 seconds. The CLI is told to wait 600 seconds for them, so it never runs the call on its own after giving up.
+
+The deny carries the reason, and the agent sees the call as denied. Output that is not valid JSON is ignored, so a JSON decision with a typo does not block anything. When several hooks match, the first one that returns a decision wins. Only bash hooks can block a tool; webhook hooks on `PreToolUse` are skipped.
+
+### Stop Hooks
+
+A `Stop` hook runs when the agent finishes its turn. Either of these keeps the agent working instead of stopping, and the reason tells it why:
+
+- a bash `Stop` hook that exits with code 0 and prints `{"decision": "block", "reason": "..."}`;
+- a webhook `Stop` hook whose server answers with a 2xx status and the JSON body `{"decision": "block", "reason": "..."}`.
+
+Any other webhook response, including an error status, only notifies. The hooks run in order and the first block wins.
 
 ### Webhook Hooks
 
@@ -58,79 +127,21 @@ Send an HTTP POST request to a URL when the event fires. Optionally sign the pay
 | `secret` | string | Optional HMAC-SHA256 signing secret                   |
 | `timeout`| integer| Timeout in milliseconds (1000-300000, default 30000)  |
 
-When a `secret` is provided, the request includes an HMAC-SHA256 signature header that the receiving server can use to verify the request is authentic.
-
-### Message Hooks
-
-Post a prompt into the active chat session when the event fires. The rendered template is injected as a new user message, letting you trigger follow-up work automatically.
-
-| Field              | Type   | Description                                              |
-|--------------------|--------|----------------------------------------------------------|
-| `message_template` | string | Prompt template sent as a new user message in the active chat |
+The body is JSON describing the event: `{"event": ..., "timestamp": ..., "data": {...}}`. A `Stop` hook also sends `working_dir` and `project_id`, and its `data` holds the same stop payload a bash hook gets in `HOOK_DATA`. A `Stop` webhook can keep the agent working through its response (see [Stop Hooks](#stop-hooks)); on other events the response is ignored. Before sending, passwords in URLs anywhere in the body (for example `postgres://user:***@db/app`) are masked. Every request carries `X-Hook-Event` and `X-Hook-Timestamp` headers. When a `secret` is set, it also carries `X-Hook-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw body keyed by the secret, so the receiving server can check the request is authentic.
 
 ## Hook Events
 
-AI Shuffle supports 9 hook event types that cover the full lifecycle of an AI session.
+| Event | What runs |
+|-------|-----------|
+| `PreToolUse` | Bash hooks, before a tool. Can block it. Project sessions only. |
+| `Stop` | Bash and webhook hooks, when the agent finishes its turn. A bash hook's output or a webhook's JSON response can keep it working. Project sessions only. |
+| `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` | Bash and webhook hooks, in the background. Cannot block or change anything. Also run in sessions with no project (app-wide hooks). |
 
-### PreToolUse
-
-Fires **before** Claude executes a tool. Use this to observe or react to upcoming tool calls. Hooks run asynchronously and cannot approve, modify, or block the tool.
-
-- Supports `tool_matcher` to filter by tool name
-- Common use: log or alert on dangerous commands, record destructive operations before they run
-
-### PostToolUse
-
-Fires **after** Claude finishes executing a tool. Use this to log results, audit tool usage, or trigger follow-up actions.
-
-- Supports `tool_matcher` to filter by tool name
-- Common use: log all Bash command executions, track file modifications
-
-### SessionStart
-
-Fires when a new AI session begins.
-
-- Common use: initialize logging, set up monitoring, record session metadata
-
-### SessionEnd
-
-Fires when an AI session completes (successfully or with an error).
-
-- Common use: send completion notifications, generate session summaries, clean up resources
-
-### Stop
-
-Fires when Claude's response generation stops.
-
-- Common use: log stop reasons, trigger follow-up workflows
-
-### UserPromptSubmit
-
-Fires when a user submits a prompt to Claude.
-
-- Common use: audit user inputs, enforce content policies, log prompts
-
-### SubagentStop
-
-Fires when a subagent finishes its task.
-
-- Common use: log subagent results, chain subagent workflows
-
-### PreCompact
-
-Fires before a conversation context is compacted (trimmed for token limits).
-
-- Common use: save full context before compaction, log compaction events
-
-### Notification
-
-Fires when Claude generates a notification.
-
-- Common use: forward notifications to external channels (Slack, email, etc.)
+`Notification` fires when the session stops to wait for you, for example on a permission prompt. `SessionEnd` fires once, when the session closes. Both fire on Claude subscription sessions too.
 
 ## Tool Matcher
 
-The `tool_matcher` field is an optional regex pattern that filters `PreToolUse` and `PostToolUse` events to only fire for matching tool names.
+The `tool_matcher` field is an optional regex pattern that limits a tool hook (`PreToolUse`, `PostToolUse`) to matching tool names. The whole tool name must match. A pattern that is not a valid regex is compared as plain text, so it matches only a tool with exactly that name; other hooks on the event still run. A warning is logged once per pattern.
 
 **Examples:**
 
@@ -145,7 +156,14 @@ If `tool_matcher` is not set or is empty, the hook fires for all tools.
 
 ## Plugin-Contributed Hooks
 
-Installed plugins can contribute hooks that are automatically discovered. Plugin hooks are **read-only** -- you cannot edit or delete them through the hooks UI. They are managed by the plugin itself.
+Installed plugins can contribute hooks in their `hooks/hooks.json`, which are discovered automatically. Plugin hooks are **read-only** -- you cannot edit or delete them through the hooks UI (they appear on the **Plugin** tab). They are managed by the plugin itself.
+
+Plugin hooks follow the `hooks.json` format rather than the rules above:
+
+- A command hook gets the event as JSON on stdin, runs in the session's working directory, and finds its plugin folder in `CLAUDE_PLUGIN_ROOT`.
+- `timeout` is in seconds: 30 by default, 120 for `Stop` hooks.
+- A `matcher` is a case-insensitive regex matched at the start of the tool name, and `*` matches every tool. A matcher that is not a valid regex is compared as plain text (ignoring case) and a warning is logged once; the plugin's other hooks still run.
+- A plugin's `Stop` hooks run before the saved `Stop` hooks, and the first block wins.
 
 To view all plugin-contributed hooks:
 
@@ -174,6 +192,15 @@ curl http://localhost:8000/api/v1/hooks/events \
 
 Returns: `["PreToolUse", "PostToolUse", "Stop", "SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact", "SubagentStop", "Notification"]`
 
+### List and Create App-Wide Hooks
+
+```bash
+curl http://localhost:8000/api/v1/hooks/app \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+`POST /api/v1/hooks/app` takes the same body as a project hook (below) and creates a hook that runs for every project.
+
 ### List Hooks for a Project
 
 ```bash
@@ -189,7 +216,7 @@ curl -X POST http://localhost:8000/api/v1/hooks/project/{project_id} \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Log Bash Commands",
-    "event": "PostToolUse",
+    "event": "PreToolUse",
     "hook_type": "bash",
     "command": "echo \"[$(date)] Tool used: $HOOK_DATA\" >> /tmp/tool-log.txt",
     "timeout": 5000,
@@ -231,65 +258,49 @@ Returns a `HookTestResult` with `success`, `duration_ms`, `output`, and `error` 
 
 ### Log All Tool Usage
 
-Create a bash hook to log every tool invocation to a file:
+Create a bash hook that logs every tool call to a file. It prints nothing, so it never blocks:
 
 ```json
 {
   "name": "Tool Usage Logger",
-  "event": "PostToolUse",
+  "event": "PreToolUse",
   "hook_type": "bash",
-  "command": "echo \"{\\\"timestamp\\\": \\\"$HOOK_TIMESTAMP\\\", \\\"event\\\": \\\"$HOOK_EVENT\\\", \\\"data\\\": $HOOK_DATA}\" >> /var/log/tool-usage.jsonl",
+  "command": "cat >> /var/log/tool-usage.jsonl; echo >> /var/log/tool-usage.jsonl",
   "timeout": 5000,
   "enabled": true
 }
 ```
 
-### Warn on Dangerous Bash Commands
+### Block Dangerous Bash Commands
 
-Use a PreToolUse hook to detect and log potentially dangerous shell commands. Hooks run asynchronously and cannot block the tool, so use this to record or alert rather than to prevent execution:
+Use a PreToolUse hook to stop `rm -rf /` before it runs. The hook reads the tool call from stdin and exits with code 2 to block it:
 
 ```json
 {
-  "name": "Warn on rm -rf",
+  "name": "Block rm -rf /",
   "event": "PreToolUse",
   "hook_type": "bash",
-  "command": "echo \"$HOOK_DATA\" | grep -q 'rm -rf /' && echo \"[$(date)] WARNING: rm -rf detected: $HOOK_DATA\" >> /var/log/ai-shuffle-warnings.log",
+  "command": "grep -q 'rm -rf /' && { echo 'rm -rf / is not allowed' >&2; exit 2; } || exit 0",
   "timeout": 3000,
   "enabled": true,
   "tool_matcher": "Bash"
 }
 ```
 
-The hook's exit code is not consulted by the workflow, so the tool runs regardless of what the command returns.
+The agent sees the call as denied, with the stderr text as the reason.
 
-### Slack Notification on Session End
+### Notify a Server When the Agent Finishes
 
-Send a webhook notification when a session completes:
+Send a signed webhook each time the agent finishes its turn:
 
 ```json
 {
-  "name": "Session Complete Notification",
-  "event": "SessionEnd",
+  "name": "Turn Finished Notification",
+  "event": "Stop",
   "hook_type": "webhook",
-  "url": "https://hooks.slack.com/services/T00/B00/xxxx",
+  "url": "https://your-server.example.com/ai-shuffle/stop",
   "secret": "your-hmac-secret",
   "timeout": 10000,
-  "enabled": true
-}
-```
-
-### Audit User Prompts
-
-Log every user prompt for compliance auditing:
-
-```json
-{
-  "name": "Prompt Auditor",
-  "event": "UserPromptSubmit",
-  "hook_type": "webhook",
-  "url": "https://your-audit-service.example.com/api/log",
-  "secret": "audit-signing-key",
-  "timeout": 5000,
   "enabled": true
 }
 ```

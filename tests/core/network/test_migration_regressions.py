@@ -6,26 +6,9 @@ import pytest
 from app.core import artifact_store
 from app.db import artifacts, connectors, database
 from app.db import network as store
-from app.network import blobs, engine, tokens, transport
+from app.network import blobs, engine
 from scripts import network_migrate
-from tests.core.network.harness import Worker, join
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
+from tests.core.network.harness import join
 
 
 def test_migration_preserves_queued_prompts_connector_routes_and_upload_bytes(workers):

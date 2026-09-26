@@ -536,6 +536,28 @@ class TestUpdateProfileEndpoint:
             assert result["config"]["model"] == "opus"
 
     @pytest.mark.asyncio
+    async def test_update_config_is_full_replacement(self):
+        """PUT ``config`` replaces the stored config; it is not merged.
+
+        The agent editor (ProfileCard.svelte buildProfilePayload) always sends
+        the complete config and relies on replacement to clear fields, e.g.
+        switching tool access to 'all' drops ``allowed_tools`` by omitting it.
+        """
+        from app.api.agents import update_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+
+        profile = {**sample_profile(), "config": {"model": "sonnet", "allowed_tools": ["Read"]}}
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.update_profile.return_value = profile
+            await update_profile(
+                "test-profile", ProfileUpdate(config=ProfileConfig(model="opus")), token="t"
+            )
+        written = mock_db.update_profile.call_args.kwargs["config"]
+        assert written.get("model") == "opus"
+        assert "allowed_tools" not in written
+
+    @pytest.mark.asyncio
     async def test_update_builtin_profile(self):
         """Updating a builtin profile should work (allow_builtin=True)."""
         from app.api.agents import update_profile
@@ -780,7 +802,7 @@ class TestGetProfileAgentsEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"  # Different profile
+                    "profile_ids": ["other-profile"]  # Different profile
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -1209,7 +1231,7 @@ class TestGetEnabledAgentsEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"
+                    "profile_ids": ["other-profile"]
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -1555,7 +1577,7 @@ class TestExportProfileEndpoint:
             with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
-                    "profile_id": "other-profile"
+                    "profile_ids": ["other-profile"]
                 }
                 mock_db.get_profile.return_value = profile
 
@@ -1653,7 +1675,7 @@ class TestImportProfileEndpoint:
                 agent=AgentImportData(name="Imported Agent")
             )
 
-            result = await import_profile(request, token="test-token")
+            await import_profile(request, token="test-token")
 
             mock_db.create_profile.assert_called_once()
             call_kwargs = mock_db.create_profile.call_args[1]
@@ -1694,7 +1716,7 @@ class TestImportProfileEndpoint:
                 agent=AgentImportData(name="Imported Agent")
             )
 
-            result = await import_profile(request, token="test-token")
+            await import_profile(request, token="test-token")
 
             # Verify the profile was created with incremented ID
             call_kwargs = mock_db.create_profile.call_args[1]
@@ -2383,3 +2405,24 @@ class TestAgentInvokeMode:
 
             assert "agent_invoke_mode" not in result["config"]
             assert "enabled_agents" not in result["config"]
+
+
+# =============================================================================
+# API users' assigned agents (profile_ids) on the per-agent endpoints
+# =============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["get_profile_agents", "get_enabled_agents", "export_profile"])
+async def test_assigned_agent_passes_the_access_check(endpoint):
+    """An agent in the API user's ``profile_ids`` is reachable (here the
+    missing profile then 404s — past the 403 gate)."""
+    from fastapi import HTTPException
+    from app.api import agents
+
+    with patch("app.api.agents.database") as mock_db, \
+            patch("app.api.agents.get_api_user_from_request",
+                  return_value={"id": "u1", "profile_ids": ["other", "test-profile"]}):
+        mock_db.get_profile.return_value = None
+        with pytest.raises(HTTPException) as exc_info:
+            await getattr(agents, endpoint)(create_mock_request(), "test-profile", token="t")
+    assert exc_info.value.status_code == 404

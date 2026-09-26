@@ -846,7 +846,7 @@ class TestFinishEndpoint:
 
     def test_worktree_id_from_body_reaches_working_dir(self, op_client):
         """Regression: worktree_id is a BODY field (the frontend sends it in the
-        JSON body). It must reach get_working_dir so worktree ops run against the
+        JSON body). It must reach get_working_dir_async so worktree ops run against the
         worktree, not the main repo. (Previously declared as a query param → the
         body value was silently dropped and every op hit the main checkout.)
         """

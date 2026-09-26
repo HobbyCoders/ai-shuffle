@@ -1061,16 +1061,18 @@ async def _delete_channel(conn, params, ctx):
     if err:
         return err
     raw_id = str(params.get("channel_id") or "")
-    if raw_id == str(ctx.get("bound_chat_id") or ""):
-        return _err("Refusing to delete the channel this session is bound to.")
     try:
-        channel = guild.get_channel(int(raw_id))
+        channel_id = int(raw_id)
     except (TypeError, ValueError):
         return _err(f"Invalid channel id: {raw_id!r}")
+    # Compare the normalised id: " <id>" and "0<id>" name the same channel.
+    if str(channel_id) == str(ctx.get("bound_chat_id") or ""):
+        return _err("Refusing to delete the channel this session is bound to.")
+    channel = guild.get_channel(channel_id)
     if channel is None:
         return _err("Channel not found in this server.")
     await channel.delete(reason=params.get("reason") or None)
-    return _ok(deleted_channel_id=raw_id, name=channel.name)
+    return _ok(deleted_channel_id=str(channel_id), name=channel.name)
 
 
 # -- roles ------------------------------------------------------------------

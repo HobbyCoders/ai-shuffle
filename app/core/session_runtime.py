@@ -1,4 +1,4 @@
-"""app/core/session_runtime.py — the one spawn path (v2 core, Phase 2 A4).
+"""The one spawn path.
 
 A :class:`SessionRuntime` executes exactly one ``turns`` row end-to-end:
 
@@ -10,13 +10,13 @@ A :class:`SessionRuntime` executes exactly one ``turns`` row end-to-end:
    ``(run_id, fence_token, turn_id)`` (``create_for_run`` — no self-claim);
 5. run the pump by WRAPPING ``query_engine._stream_to_websocket_impl`` — its
    internals are untouched; the recorder observes every yielded event (SSE is the
-   delivery path) and a broadcast adapter carries the legacy WS frames;
+   delivery path) and a broadcast adapter carries the WS frames;
 6. **finalize** (always, in a ``finally``): decide ``completed | aborted |
    parked`` — the park gate is ``task_registry.get_active_background_work`` OR
-   ``get_background_launches`` — settle/park the turn, release the reader token,
-   and start the idle reader iff background work survives;
+   ``get_background_launches`` — settle/park the turn and release the reader
+   token;
 7. release the run lease in the outer ``finally`` and fire the injectable
-   ``on_turn_settled`` scheduler seam (the real scheduler is commit A5) — but
+   ``on_turn_settled`` scheduler seam (``turn_scheduler`` registers it) — but
    ONLY when finalize actually performed the DB transition (a racer that
    settled first already fired it). Special case: after an escalation-keep
    (``interrupt()`` flipped the turn to ``draining`` and cancelled the wedged
@@ -52,7 +52,7 @@ from app.db import turns as turns_db
 
 logger = logging.getLogger(__name__)
 
-# Lease timing — identical to the legacy TurnRecorder self-claim (Phase 1).
+# Lease timing — identical to the TurnRecorder self-claim.
 RUN_LEASE_TTL_SECONDS = 60
 RUN_LEASE_RENEW_SECONDS = 20
 
@@ -88,16 +88,15 @@ _SETTLE_POLL_SECONDS = 0.05
 # Reader token — per-session single-reader slot (Lock-guarded).
 # ---------------------------------------------------------------------------
 # The turn pump AND the idle reader both acquire the SAME per-session lock, so
-# the single-reader invariant (only one coroutine reads the pooled SDK client at
-# a time) is structural rather than enforced by call discipline. Kept here (not
-# ws_cleanup._drain_pumps) so the runtime owns it.
+# the single-reader invariant (only one coroutine reads the pooled adapter at
+# a time) is structural rather than enforced by call discipline.
 _reader_locks: Dict[str, asyncio.Lock] = {}
 # Running idle-reader task per session, so a starting turn can stop it first.
 _idle_readers: Dict[str, asyncio.Task] = {}
 
 # Live SessionRuntime per session — the command→runtime interrupt seam. A
 # runtime registers itself here the instant it WINS ``start_turn`` (so it owns
-# the SDK interrupt + evict/drain escalation), and self-guarded-pops in the
+# the adapter interrupt + evict/drain escalation), and self-guarded-pops in the
 # outer finally. ``turn_manager.interrupt`` flips the durable row first, then a
 # boot-wired executor routes to ``get_live_runtime(sid).interrupt(mode)``. No
 # live runtime (crash/other install) → the durable ``interrupting`` row stands
@@ -117,8 +116,8 @@ def live_turn_ids() -> Set[str]:
 
     The reap sweep reads only the DB, and a lease can lapse under a turn that
     is still running here (a stalled loop, a DB outage longer than the TTL).
-    Requeueing such a turn let the next claim pass start it a second time
-    while the first run was still going (#1444), so the sweep skips these.
+    Requeueing such a turn would let the next claim pass start it a second
+    time while the first run is still going, so the sweep skips these.
     Other processes still reap it, and fencing stops this runner's writes the
     moment one of them claims the session."""
     return {runtime.turn_id for runtime in _live_runtimes.values()}
@@ -133,7 +132,7 @@ _STEERABLE_SOURCES = ("user", "queue")
 # queued message asking for a different one of these is a request the live turn
 # cannot honor, so it waits and runs as its own turn instead of being folded in
 # under settings the user did not pick. ``fast`` and ``context_window`` are
-# deliberately NOT in this set (product ruling): they shape throughput and
+# deliberately NOT in this set: they shape throughput and
 # budget rather than which agent answers.
 _STEER_BINDING_KEYS = ("model", "effort", "permission_mode", "workspace_project_ids")
 
@@ -222,7 +221,7 @@ async def try_cancel_steer(session_id: str, turn_id: str) -> str:
       transcript.
 
     Never raises — an adjudication failure falls back to ``"not_submitted"``,
-    which preserves the pre-steering behavior of simply removing the row.
+    which simply removes the row.
     """
     runtime = _live_runtimes.get(session_id)
     if runtime is None:
@@ -240,7 +239,7 @@ async def try_cancel_steer(session_id: str, turn_id: str) -> str:
 def get_reader_lock(session_id: str) -> asyncio.Lock:
     """Return (creating on first use) the session's reader-token lock.
 
-    ``asyncio.Lock`` no longer binds to a loop at construction (3.10+), so lazy
+    ``asyncio.Lock`` does not bind to a loop at construction (3.10+), so lazy
     creation from any context is safe.
     """
     lock = _reader_locks.get(session_id)
@@ -250,13 +249,12 @@ def get_reader_lock(session_id: str) -> asyncio.Lock:
     return lock
 
 
-def start_idle_reader(session_id: str, *, drain_turn_id: Optional[str] = None) -> None:
-    """Start the between-turns idle reader for a session (replacing any existing).
+def start_idle_reader(session_id: str, *, drain_turn_id: str) -> None:
+    """Start the drain reader that settles ``drain_turn_id`` (a wedged runner
+    escalated to ``draining``) ``aborted`` once its client is safe to evict.
 
-    ``drain_turn_id`` puts the reader in *drain mode*: a stale ``ResultMessage``
-    for that turn settles it ``aborted`` (a wedged runner that was escalated to
-    ``draining``). The reader acquires the reader token itself, so it can never
-    race a turn pump.
+    Does nothing while one is already running. The reader acquires the reader
+    token itself, so it can never race a turn pump.
     """
     from app.core import idle_reader
 
@@ -295,7 +293,7 @@ def _drop_idle_reader_self(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler seam — on_turn_settled (real scheduler is commit A5).
+# Scheduler seam — on_turn_settled (the real handler is turn_scheduler's).
 # ---------------------------------------------------------------------------
 _on_turn_settled: Optional[Callable[..., Any]] = None
 
@@ -304,8 +302,8 @@ def register_scheduler(hook: Optional[Callable[[str, str, str], Any]]) -> None:
     """Register (or clear, with ``None``) the settlement callback.
 
     Called with ``(session_id, turn_id, outcome)`` after every settlement
-    (completed/aborted/parked). Commit A5 registers the real scheduler; tests
-    inject a spy. Default: no-op.
+    (completed/aborted/parked). ``turn_scheduler.install`` registers the real
+    one; tests inject a spy. Default: no-op.
     """
     global _on_turn_settled
     _on_turn_settled = hook
@@ -331,18 +329,18 @@ async def _fire_on_turn_settled(session_id: str, turn_id: str, outcome: str) -> 
 
 
 # ---------------------------------------------------------------------------
-# Broadcast adapter seam — the legacy-kept WS frames.
+# Broadcast adapter seam — the non-render WS frames.
 # ---------------------------------------------------------------------------
 # Render frames ride the recorder → session event log → SSE. The remaining
 # lifecycle/permission WS frames go through this adapter: to the origin socket
 # when the turn's ``source`` is ``user`` and the socket is alive, plus a fan-out
-# to the other registered devices via sync_engine. Injectable so the transport
-# commit (A6) can override the exact wire mechanics.
+# to the other registered devices via sync_engine. Injectable so a transport
+# can override the exact wire mechanics.
 _broadcaster: Optional[Callable[..., Awaitable[None]]] = None
 
 
 def register_broadcaster(hook: Optional[Callable[..., Awaitable[None]]]) -> None:
-    """Register (or clear) the broadcast adapter used for legacy WS frames."""
+    """Register (or clear) the broadcast adapter used for WS frames."""
     global _broadcaster
     _broadcaster = hook
 
@@ -383,13 +381,11 @@ async def _default_broadcast(
 
 
 # ---------------------------------------------------------------------------
-# Render-frame trim — faithful copy of chat_ws_handler (:72-94).
+# Render-frame trim.
 # ---------------------------------------------------------------------------
 # Raw RENDER frames ride the recorder → session event feed (SSE); only the
 # frames the frontend consumes for NON-render purposes may hit the WS/broadcast
-# path, or render content is double-delivered. Copied (not imported) so the
-# runtime never depends on the frozen legacy module; PR-B deletes the legacy
-# copy, making this the single source.
+# path, or render content is double-delivered.
 _WS_TRIMMED_RENDER_FRAMES = frozenset({
     "chunk",
     "stream_delta",
@@ -399,25 +395,25 @@ _WS_TRIMMED_RENDER_FRAMES = frozenset({
     "task_progress",
     "system",
     "usage_update",
-    # W3: the complete assistant text block and the thinking marker. The pump
+    # The complete assistant text block and the thinking marker. The pump
     # yields these AFTER the deltas that already carried the same content, and
     # they are pure render payload: the frontend WS dispatcher has no case for
-    # either (they fall through to `default: break`), so every byte was
+    # either (they fall through to `default: break`), so every byte would be
     # serialized, fanned out to every watching device, parsed and discarded.
     # The content still reaches every client on the SSE feed as coalesced
     # deltas — this only stops the duplicate on the WS leg.
     "text",
     "thinking_block",
     # Not a render frame, but no WS consumer either: provider liveness for the
-    # Task worker watchdog, which reads it from the event log (#1418).
+    # Task worker watchdog, which reads it from the event log.
     "provider_alive",
 })
 
-# W3: cap on the serialized size of a tool frame's ``input`` on the WS leg.
+# Cap on the serialized size of a tool frame's ``input`` on the WS leg.
 # The frontend's `tool_use` / `subagent_tool_use` handlers read ONLY
 # `session_id` and `id` (they just maintain the pendingTools set); the rendered
-# arguments come from the SSE feed. A multi-MB Write/Edit payload was therefore
-# being fanned out to every device for nothing. The frame itself must still be
+# arguments come from the SSE feed. A multi-MB Write/Edit payload would
+# otherwise be fanned out to every device for nothing. The frame itself must still be
 # delivered (it is correctness-bearing for the pendingTools set), so the frame
 # is kept and only its oversized input is replaced by a marker.
 _WS_MAX_TOOL_INPUT_CHARS = 4096
@@ -592,10 +588,8 @@ async def persist_turn_error_message(
     The gap: an ``error`` terminal reaches the live WebSocket and the ``turns``
     table, but never ``session_messages``. Reload the session and it shows the
     user's prompt followed by nothing — no banner, no explanation, no retry
-    affordance. One audited session was abandoned for twenty minutes because of
-    it; another recovered only because the user typed "resume" on a hunch.
-    Background-worker failures already write a system row (``chat_ws_handler``'s
-    terminal surface); turn failures now match.
+    affordance. Background-worker failures already write a system row
+    (``chat_ws_handler``'s terminal surface); this makes turn failures match.
 
     Never raises: a message that cannot be written must not change how the turn
     settles.
@@ -650,7 +644,9 @@ class SessionRuntime:
         self.origin_send = origin_send
         self.origin_device_id = origin_device_id
         # api_user_id / user_id are transport context; the turn row may carry
-        # them in payload (server-originated turns) — fall back to that.
+        # them in payload (server-originated turns) — fall back to that. A turn
+        # with no principal at all is resolved against the session row in
+        # ``execute`` (``_resolve_principal``) before anything runs.
         payload = turn_row.get("payload") or {}
         self.api_user_id = api_user_id if api_user_id is not None else payload.get("api_user_id")
         self.user_id = user_id if user_id is not None else payload.get("user_id")
@@ -660,12 +656,11 @@ class SessionRuntime:
         self._terminal: Optional[str] = None
         self._pending_done: Optional[Dict[str, Any]] = None
         # The 'error' terminal's message text, so an aborted settle records WHY
-        # (turns.error used to stay NULL — stop_reason='error' with nothing
+        # (otherwise turns.error stays NULL — stop_reason='error' with nothing
         # behind it, and the provider's own error body only in the event log).
         self._terminal_error: Optional[str] = None
-        # In-flight pump task — interrupt() escalation cancels it (legacy
-        # task.cancel() parity): the pump holds the reader token, so nothing
-        # else can read until it is gone.
+        # In-flight pump task — interrupt() escalation cancels it: the pump
+        # holds the reader token, so nothing else can read until it is gone.
         self._pump_task: Optional[asyncio.Task] = None
         # Set by interrupt()'s escalation-keep branch: execute() must run the
         # drain reader (under its still-live lease) instead of finalizing.
@@ -684,6 +679,14 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Set as ``_finalize`` starts: from then on nothing may be submitted into
+        # this turn. The runtime stays registered as live until ``execute``'s
+        # outer finally, so a send (or the start-window sweep) can still reach
+        # ``steer_pending`` after ``_steer_attempted`` was cleared — and would
+        # hand a still-queued row to an engine that is ending the turn (or has
+        # already started the next one on the same pooled client), or register
+        # a task notification after ``_strand_task_steers`` ran, losing it.
+        self._steering_closed = False
         # Queued rows this turn actually SWALLOWED: row id → (perf_counter absorb
         # time, the row as it was). Populated by ``_on_steer_delivered`` on the
         # transition that retires the row, read once by ``_finalize`` to decide
@@ -708,7 +711,7 @@ class SessionRuntime:
         # ``None`` means no interrupt was ever driven here (a plain error/crash
         # abort), in which case nothing gets re-queued.
         self._interrupt_requested_at: Optional[float] = None
-        # Idempotency guard for the interrupt-observe pass (V2 Phase 4, O4):
+        # Idempotency guard for the interrupt-observe pass:
         # once interrupt() has been driven for THIS turn, later observers
         # (claim-loop pass, duplicate executor fire) are no-ops. Per-turn by
         # construction — a SessionRuntime instance executes exactly one turn
@@ -719,8 +722,8 @@ class SessionRuntime:
         # ``start_turn`` lands, and its adapter is not steerable for a while
         # after that. A message sent inside that window therefore reads the
         # session as idle, skips ``try_steer_pending`` entirely, and runs as a
-        # turn of its own — which is how two near-identical messages seconds
-        # apart became two turns. The sweep below re-offers those rows to this
+        # turn of its own, so two near-identical messages seconds apart would
+        # become two turns. The sweep below re-offers those rows to this
         # turn the moment it is provably live. See ``_sweep_start_window_steers``.
         self._start_window_swept = False
         # The in-flight sweep, kept only so it has a strong reference (a bare
@@ -732,6 +735,33 @@ class SessionRuntime:
         self._last_progress_at: float = time.perf_counter()
         self._progress_watchdog: Optional[asyncio.Task] = None
         self._stop_generation: Optional[int] = None
+
+    def _resolve_principal(self, session_row: Optional[Dict[str, Any]]) -> None:
+        """Settle who this turn runs as. Synchronous (DB reads): run off-loop.
+
+        The single fallback point for every submit path: a turn that arrives
+        without ``api_user_id`` on an API key's session runs as that key (its
+        tool surface and credentials), not as the owner, unless it is the
+        owner's own chat-socket message (``api_user_scope.turn_api_user_id``).
+        """
+        if self.api_user_id:
+            return
+        from app.core import api_user_scope
+
+        if session_row is None:
+            from app.db import database as database_mod
+
+            session_row = database_mod.get_session(self.session_id)
+        resolved = api_user_scope.turn_api_user_id(
+            self.turn.get("payload") or {}, self.source, session_row,
+        )
+        if resolved:
+            logger.info(
+                "SessionRuntime: %s turn %s (source=%s) carried no API user; "
+                "running as the session's key %s",
+                self.session_id, self.turn_id, self.source, resolved,
+            )
+        self.api_user_id = resolved
 
     # ------------------------------------------------------------------
     # execute
@@ -751,7 +781,7 @@ class SessionRuntime:
             await asyncio.to_thread(turns_db.remove_queued_turn, tid)
             return None
 
-        # 0. Placement gate (V2 Phase 4). A session explicitly placed on ANOTHER
+        # 0. Placement gate. A session explicitly placed on ANOTHER
         #    runner must not be executed here even if this install's kick fired
         #    first — leave the turn queued for that runner's claim loop.
         #    FAIL-OPEN: a resolver error must never block local execution (the
@@ -783,6 +813,17 @@ class SessionRuntime:
             logger.info(
                 "SessionRuntime: no capable runner for session %s (%s) — turn %s "
                 "stays queued", sid, decision.reason, tid,
+            )
+            return None
+
+        # 0a. Principal. Fail-closed: a turn whose principal cannot be settled
+        #     stays queued rather than running as the owner.
+        try:
+            await asyncio.to_thread(self._resolve_principal, session_row)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: could not resolve the principal for %s turn %s — "
+                "it stays queued", sid, tid, exc_info=True,
             )
             return None
 
@@ -908,11 +949,11 @@ class SessionRuntime:
             broadcast_task = asyncio.create_task(_broadcast_queue_after_start(sid))
             broadcast_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
-            # 3. Sticky pin (V2 Phase 4, OD-6/OD-9): the FIRST winner of an
+            # 3. Sticky pin: the FIRST winner of an
             #    "anywhere"/capability placement pins the session to itself
-            #    (placement + legacy instance_id dual-write) so every later
+            #    (placement + instance_id dual-write) so every later
             #    turn lands on this runner's disk-resident CLI state. NULL
-            #    placement stays NULL (the local-default, A9) and an existing
+            #    placement stays NULL (the local-default) and an existing
             #    runner pin is never rewritten. Best-effort: a pin failure
             #    must not kill the turn (the lease already makes us exclusive).
             try:
@@ -924,7 +965,7 @@ class SessionRuntime:
                     "SessionRuntime: sticky pin failed for %s", sid, exc_info=True
                 )
 
-            # 3b. Working-set restore (V2 Phase 4, Q6): the session's dirty
+            # 3b. Working-set restore: the session's dirty
             #     working tree may have been snapshotted to a scratch ref by
             #     a PRIOR turn on ANOTHER runner. Bring it onto this runner's
             #     clean checkout before the pump starts. Best-effort — a git
@@ -936,7 +977,7 @@ class SessionRuntime:
             self._reset_started_this_turn(sid)
             await stop_idle_reader(sid)
 
-            # 4b. LEG 2 self-heal: settle any STALE parked turn rows for this
+            # 4b. Self-heal: settle any STALE parked turn rows for this
             #     session (excluding the turn we are about to run). 'parked' is
             #     terminal and nothing else transitions a row out of it, so a
             #     session that parked on now-finished background work would show
@@ -947,9 +988,8 @@ class SessionRuntime:
             #     A queued turn intentionally starts while a PRIOR turn is parked
             #     on RUNNING work (turn_scheduler starts the next turn without
             #     waiting for the park to resolve), and that parked row is the
-            #     signal ``_cli_owns_at_rest_wake`` / ``_latest_context_turn``
-            #     rely on — settling it early risks a duplicate wake and wrong
-            #     context attribution. We do NOT also gate on unresolved launches:
+            #     signal ``_latest_context_turn`` and the held-peer gate rely
+            #     on — settling it early risks wrong context attribution. We do NOT also gate on unresolved launches:
             #     a launch that never materializes a registry record must not
             #     block the self-heal (that would re-introduce the stuck-parked
             #     stick this heal exists to clear). Best-effort: a settle failure
@@ -958,12 +998,11 @@ class SessionRuntime:
             #     "stale" is the exceptional case, not the common one: the
             #     ORDINARY unpark passes through here with its parked row just
             #     resolved, and settling it is the normal hand-off, not a
-            #     repair. (An audit read the old "self-healed N stale parked
-            #     turn(s)" line as evidence of a fault because it fires on
-            #     essentially every unpark.) The Stop path now settles parked
-            #     rows itself (``query_session_lifecycle.enter_user_stop``), so
-            #     a session the user stopped no longer waits for its next turn
-            #     to stop reporting itself parked.
+            #     repair — so the log line says "resolved", not "stale". The
+            #     Stop path settles parked rows itself
+            #     (``query_session_lifecycle.enter_user_stop``), so a session the
+            #     user stopped does not wait for its next turn to stop reporting
+            #     itself parked.
             try:
                 from app.core.task_registry import task_registry
 
@@ -1031,8 +1070,8 @@ class SessionRuntime:
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
             #    settles ``aborted``) rather than re-raised, so finalize AND the
             #    settlement callback still run. The pump runs as a CHILD task so
-            #    interrupt() escalation can cancel it (legacy task.cancel()
-            #    parity) without cancelling execute() itself.
+            #    interrupt() escalation can cancel it without cancelling
+            #    execute() itself.
             try:
                 async with get_reader_lock(sid):
                     # Pooled engines do not reconnect. Their Swarm recovery
@@ -1112,7 +1151,7 @@ class SessionRuntime:
                 # The pump ending does not prove the session is finished: the
                 # park gate above may still find background work. Deliver the
                 # WS completion only once its outcome is known. A turn aborted
-                # because recording failed (#1124) never completes.
+                # because recording failed never completes.
                 await self._broadcast({
                     **self._pending_done,
                     "session_id": sid,
@@ -1160,7 +1199,7 @@ class SessionRuntime:
 
     async def _run_pump(self, recorder: TurnRecorder) -> None:
         """Drive the wrapped pump: recorder observes every event (SSE delivery),
-        the broadcast adapter carries the legacy WS frames. Never rebuilds the
+        the broadcast adapter carries the WS frames. Never rebuilds the
         impl — it is called verbatim.
         """
         from app.core.query_engine import _stream_to_websocket_impl
@@ -1189,7 +1228,7 @@ class SessionRuntime:
         # gains only the answer the failed turn never produced.
         resume = self.source == "resume"
         # A message the composer deferred (sent while a turn was live) was never
-        # written to the legacy ``session_messages`` store at send time — the
+        # written to the ``session_messages`` store at send time — the
         # transcript must show it where the model actually receives it, which is
         # here. The event log gets its ``message.user`` from ``recorder.start``
         # below, as it does for any non-resume turn.
@@ -1229,9 +1268,9 @@ class SessionRuntime:
                 # The wake turn is the claimed completions' delivery point, so this
                 # is where the event log — and with it the frontend card — learns
                 # the task is done. A task that finished BETWEEN turns produces no
-                # terminal frame inside this turn's stream, and the frontend no
-                # longer force-settles background shells at turn end (#991), so
-                # without this append the card runs forever.
+                # terminal frame inside this turn's stream, and the frontend does
+                # not force-settle background shells at turn end, so without this
+                # append the card runs forever.
                 try:
                     await recorder.record_task_terminal(completion_frames)
                     if self._abort_reason == "recording_failed":
@@ -1294,23 +1333,26 @@ class SessionRuntime:
                 resume=resume,
                 session_id=self.session_id,
                 profile_id=self.turn.get("profile_id"),
-                # The LEGACY project id deliberately stays live here — it still
+                # The legacy project id deliberately stays live here — it still
                 # keys the project-existence gate, the app-config/builtins MCP
                 # servers, the DB project hooks, and agent-memory sync, none of
-                # which are project_v2-keyed yet (OD-7 amended; that migration is
-                # post-V2 backlog).
+                # which are project_v2-keyed yet.
                 project_id=self.turn.get("project_id"),
                 overrides=turn_overrides or None,
                 broadcast_func=self._broadcast,
                 api_user_id=self.api_user_id,
                 user_id=self.user_id,
-                # Cross-install uploads (D8). The lifting install put the blob
+                # Cross-install uploads. The lifting install put the blob
                 # ids on the turn payload; the pump materializes them into the
                 # resolved working dir and rewrites the prompt. Absent for every
                 # locally-sent turn (the files are already on this disk).
                 upload_blob_ids=(self.turn.get("payload") or {}).get(
                     "upload_blob_ids"
                 ),
+                # The subscription loop guard counts unattended sources and
+                # keeps the row when it holds the turn for confirmation.
+                turn_source=self.source,
+                loop_guard_turn=self.turn,
             ):
                 engine_started = True
                 etype = event.get("type") if isinstance(event, dict) else None
@@ -1342,16 +1384,16 @@ class SessionRuntime:
                             str(message) if message else None
                         )
                 # Render frames ride the recorder → SSE path; only the kept
-                # lifecycle/tool frames hit the WS/broadcast leg (legacy :4155
-                # parity — without the trim, render content double-delivers).
+                # lifecycle/tool frames hit the WS/broadcast leg (without the
+                # trim, render content double-delivers).
                 if etype == "done":
                     self._pending_done = dict(event)
                 elif not _is_trimmed_render_frame(etype):
                     ws_event = event
                     if isinstance(event, dict):
-                        # FE cross-session guard tag (legacy :4148 parity).
+                        # FE cross-session guard tag.
                         event["session_id"] = self.session_id
-                        # W3: keep the frame, drop a multi-MB tool input that no
+                        # Keep the frame, drop a multi-MB tool input that no
                         # WS consumer reads (copies rather than mutating, so the
                         # recorder's already-handed-over dict is untouched).
                         ws_event = _cap_ws_tool_input(event)
@@ -1412,9 +1454,8 @@ class SessionRuntime:
         The failure it exists for: a host tool call (a browser automation step,
         an MCP round-trip) that blocks forever. The code cell's own timeout
         cannot interrupt a blocked ``__host_call__``, nothing above it bounds
-        the turn, and the session presents as ``running`` indefinitely — one
-        audited session sat wedged for three hours with the user's last request
-        unanswered and no signal that anything was wrong.
+        the turn, and the session presents as ``running`` indefinitely with the
+        user's last request unanswered and no signal that anything is wrong.
 
         Two things are deliberately NOT killed:
 
@@ -1521,6 +1562,8 @@ class SessionRuntime:
 
         Returns how many rows were submitted.
         """
+        if self._steering_closed:
+            return 0
         adapter = self._live_adapter()
         if adapter is None:
             return 0
@@ -1545,6 +1588,9 @@ class SessionRuntime:
 
         submitted = 0
         for row in rows:
+            if self._steering_closed:
+                # The turn began finalizing during an await above.
+                break
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
             if not self._steer_eligible(row):
@@ -1560,7 +1606,11 @@ class SessionRuntime:
                 await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
-                # the rest of this turn.
+                # the rest of this turn. Nothing was sent, so the row is not
+                # "attempted": left in the set, ``cancel_steer`` would ask the
+                # engine to recall it, the inert default would say False, and
+                # the user's × would read as "delivered" and keep the chip.
+                self._steer_attempted.discard(row_id)
                 logger.debug(
                     "SessionRuntime: adapter cannot steer %s — leaving the "
                     "queue to the drain", self.session_id,
@@ -1622,6 +1672,10 @@ class SessionRuntime:
                 "SessionRuntime: %s is being interrupted — leaving the task "
                 "notification to the at-rest wake", self.session_id,
             )
+            return False
+        if self._steering_closed:
+            # ``_strand_task_steers`` already ran: registered now, the
+            # notification would never be handed back. The wake owns it.
             return False
         self._task_steers[notification_id] = {
             "frames": list(frames or []),
@@ -1837,7 +1891,7 @@ class SessionRuntime:
                 # this is where the scheduler latches terminal_notified and
                 # where the event log learns the task is done — the same
                 # ``task.updated`` append the wake turn makes, so the frontend
-                # card settles mid-turn instead of running forever (#991).
+                # card settles mid-turn instead of running forever.
                 delivered = await self._on_task_notification_delivered(
                     recorder, self._task_steers[row_id]
                 )
@@ -2109,6 +2163,7 @@ class SessionRuntime:
         # this runtime submitted but never saw receipted was dropped by the
         # engine at turn end; its row is still ``queued`` and the settle-drain
         # below runs it as an ordinary turn.
+        self._steering_closed = True
         self._steer_attempted.clear()
         # A task notification is the exception: it has no queue row behind it,
         # so an undelivered one has to be handed back to the scheduler or the
@@ -2116,8 +2171,8 @@ class SessionRuntime:
         # already in the queue when the settle-drain looks.
         await self._strand_task_steers()
 
-        # Absorb turn_finalize.persist_turn_end_state (durable parked marker +
-        # unpark-latch backstop). Legacy stays intact — we CALL it.
+        # turn_finalize.persist_turn_end_state: durable parked marker, branch
+        # resync, summary flush.
         try:
             from app.core.turn_finalize import persist_turn_end_state
 
@@ -2125,13 +2180,12 @@ class SessionRuntime:
         except Exception:
             logger.debug("SessionRuntime: persist_turn_end_state failed for %s", sid, exc_info=True)
 
-        # Turn-lifetime binding for ProviderAgent workers (multi-provider phase
-        # 3, plan §2 C.4). This is the ONLY teardown in the runtime and it is
-        # deliberately NARROW: it can only see workers that
+        # Turn-lifetime binding for ProviderAgent workers. This is the ONLY
+        # teardown in the runtime and it is deliberately NARROW: it can only see
+        # workers that
         # ``provider_agent.dispatch_worker`` itself registered, so ordinary
         # CLI-native background sub-agents are untouched and the park gate below
-        # keeps parking them exactly as before (RULING 2026-07-25 — that parking
-        # is a feature, not a bug).
+        # keeps parking them (that parking is a feature, not a bug).
         #
         # Placed HERE, after the durable end-of-turn state is persisted and
         # BEFORE the park-gate read, because every normal, aborted and crashed
@@ -2149,11 +2203,10 @@ class SessionRuntime:
                 sid, exc_info=True,
             )
 
-        # Engine pending-set hygiene (2026-09-05 audit F1). fluid rebuilds its
+        # Engine pending-set hygiene. fluid rebuilds its
         # ``_background_pending`` from the SubagentEvent log alone and lists
         # whatever is left on every ``SessionParked``, so a completion that
-        # never reached the engine is listed forever — seven such ids poisoned
-        # 35 of one session's 38 parks, one of them for twenty-one hours.
+        # never reached the engine is listed forever.
         # Reconciling at turn end (cheap: fluid's rehydrate is latched, and
         # nothing is submitted unless the app can prove a pending id is over)
         # means the NEXT park names only work that is genuinely outstanding.
@@ -2167,17 +2220,15 @@ class SessionRuntime:
                 exc_info=True,
             )
 
-        # Park gate — the legacy predicate (chat_ws_handler :4461-4462), amended
-        # 2026-08-08: the launch-set arm now counts only UNRESOLVED launches.
-        # ``_background_launches`` itself stays CUMULATIVE and untouched (PR #765
-        # ruling intact — the set is still cleared only by ``clear_session``);
-        # only the GATE ignores launches whose task already reached a terminal
-        # registry status. The prior form ORed the raw cumulative set, so a
-        # launch left behind after its task finished re-parked EVERY subsequent
-        # turn forever (``turn.parked task_ids=[]`` with zero running work — the
-        # stuck-parked bug). Known benign residual: a launch that never
-        # materializes a registry record at all (e.g. an admission refusal) keeps
-        # the gate armed; the post-fix consequence is a single spurious park that
+        # Park gate: active background work OR UNRESOLVED launches.
+        # ``_background_launches`` itself stays CUMULATIVE (it is cleared only
+        # by ``clear_session``); only the GATE ignores launches whose task
+        # already reached a terminal registry status. ORing the raw cumulative
+        # set would re-park EVERY subsequent turn forever once a launch was left
+        # behind after its task finished (``turn.parked task_ids=[]`` with zero
+        # running work). Known benign residual: a launch that never
+        # materializes a registry record at all (e.g. an admission refusal)
+        # keeps the gate armed; the consequence is a single spurious park that
         # the turn-start self-heal settles, not a permanent stick.
         bg_work: List[Dict[str, Any]] = []
         has_unresolved_launches = False
@@ -2189,12 +2240,10 @@ class SessionRuntime:
         except Exception:
             logger.debug("SessionRuntime: park-gate read failed for %s", sid, exc_info=True)
 
-        # Third arm (2026-09-05 audit F9): the durable mirror. The two arms
-        # above read the IN-MEMORY registry, so a sub-agent whose record never
-        # landed there — or was cleared out from under a live worker — ended
-        # the turn as a bare ``end_turn`` with a worker still running, and the
-        # audited session produced exactly that (an Explore outstanding, no
-        # park, while the same situation parked correctly three turns later).
+        # Third arm: the durable mirror. The two arms above read the IN-MEMORY
+        # registry, so a sub-agent whose record never landed there — or was
+        # cleared out from under a live worker — would end the turn as a bare
+        # ``end_turn`` with a worker still running.
         # ``kind == "agent"`` only, deliberately: a Monitor shell can be a
         # ``serves`` process meant to stay up, and parking on one of those
         # would pin the session forever — the same exclusion fluid makes.
@@ -2219,8 +2268,8 @@ class SessionRuntime:
 
         task_ids = [w.get("id") for w in bg_work if w.get("id")]
         task_ids.extend(t for t in durable_agent_ids if t not in task_ids)
-        # Re-check against durable truth in the same breath as the park (audit
-        # F7): the registry's running view can be a beat behind a completion
+        # Re-check against durable truth in the same breath as the park: the
+        # registry's running view can be a beat behind a completion
         # that has already written its row, and a park naming a task which
         # settled four seconds ago buys a no-op wake turn when its terminal
         # frame finally lands. Only ids with a durable TERMINAL row are
@@ -2251,7 +2300,7 @@ class SessionRuntime:
         # nothing — the stuck-parked shape the launch-set arm was narrowed to
         # avoid. The unresolved-LAUNCH arm still parks with an empty list on
         # purpose: that is the launched-but-not-yet-registered race.
-        # A turn aborted because recording failed (#1124) never parks: the
+        # A turn aborted because recording failed never parks: the
         # transcript is holed and the row must settle, not wait on work.
         if (
             (task_ids or has_unresolved_launches)
@@ -2268,9 +2317,13 @@ class SessionRuntime:
                     await record_parked(sid, task_ids)
                 except Exception:
                     logger.debug("SessionRuntime: record_parked failed for %s", sid, exc_info=True)
-            # Reader token already released (pump's ``async with`` exited); start
-            # the idle reader to catch surviving background work's terminals.
-            start_idle_reader(sid)
+            if self._terminal != "done":
+                # An interrupted or errored turn with background work parks
+                # instead of aborting, but it swallowed a steer just the same:
+                # put it back so it runs next (a queued turn starts while a
+                # prior one is parked) rather than sitting unanswered until
+                # the background work finishes.
+                await self._requeue_stranded_steers(sid)
             return "parked", parked is not None
 
         # A runner that lost its lease settles the row only while it is still
@@ -2286,7 +2339,7 @@ class SessionRuntime:
             try:
                 # Record the pump's error text on the row (an 'error' terminal
                 # carries the provider's own message) — a bare
-                # stop_reason='error' with error=NULL made every abort
+                # stop_reason='error' with error=NULL would make every abort
                 # undiagnosable from the turns table alone.
                 settled = await asyncio.to_thread(
                     turns_db.settle_turn, tid, "aborted", stop_reason,
@@ -2296,10 +2349,9 @@ class SessionRuntime:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
             # A turn that died on a provider error has to leave a DURABLE trace.
             # The error frame reaches the live WebSocket and the ``turns`` row,
-            # but neither survives a reload: an audited session showed the
-            # user's prompt and then nothing at all, and was abandoned for
-            # twenty minutes because the failure was invisible. Worker failures
-            # already write a system row; turn failures now do too.
+            # but neither survives a reload, which would show the user's prompt
+            # and then nothing at all. Worker failures already write a system
+            # row; turn failures do too.
             if self._terminal == "error":
                 await persist_turn_error_message(
                     sid, tid, self._terminal_error, source=self.source,
@@ -2308,7 +2360,7 @@ class SessionRuntime:
             # the queue — BEFORE the scheduler seam fires, so it runs as the
             # very next turn.
             await self._requeue_stranded_steers(sid)
-            # Working-set snapshot (V2 Phase 4, Q6): a turn that ended (even
+            # Working-set snapshot: a turn that ended (even
             # aborted) may leave in-progress edits the next runner needs. NEVER
             # on the parked arm above (the session is still working here).
             await self._snapshot_working_set(sid)
@@ -2353,11 +2405,9 @@ class SessionRuntime:
         actually READ the interjection. A steer arrives folded into a tool result,
         so any model output after its absorb stamp means the model was round-
         tripped with the text in context and worked on it. Re-running such a row
-        shows the model the same sentence twice — the audit watched an
-        interjection arrive on a tool result and then again, minutes later, as a
-        standalone user turn, because a long turn that eventually errored replayed
-        every steer it had ever absorbed. A row the model demonstrably consumed
-        stays consumed.
+        shows the model the same sentence twice — once on a tool result and
+        again, minutes later, as a standalone user turn. A row the model
+        demonstrably consumed stays consumed.
 
         The re-run carries ``user_message_already_recorded`` so it adds nothing
         to the transcript: the ``message.user`` is up there already, written by
@@ -2441,10 +2491,10 @@ class SessionRuntime:
         """React to this turn having been flipped to ``interrupting`` (the
         ``turns.interrupt_turn`` guarded transition ran at the command layer).
 
-        Emits ``turn.interrupting``, signals the SDK via ``interrupt_session``,
-        and waits for the turn to settle. On escalation timeout the legacy
-        ``_should_evict_after_escalation`` decision is kept, and — legacy
-        ``task.cancel()`` parity — the wedged pump is CANCELLED in BOTH
+        Emits ``turn.interrupting``, signals the adapter via ``interrupt_session``,
+        and waits for the turn to settle. On escalation timeout the
+        ``_should_evict_after_escalation`` decision is kept, and the wedged
+        pump is CANCELLED in BOTH
         branches, because it holds the reader token and nothing else can read
         until it is gone:
 
@@ -2459,9 +2509,9 @@ class SessionRuntime:
         (``completed|aborted|parked|draining``) — best-effort on the
         escalation paths, where settlement is asynchronous.
 
-        Idempotent per turn (O4): the durable ``interrupting`` flip can be
+        Idempotent per turn: the durable ``interrupting`` flip can be
         observed by BOTH the in-process executor and the cross-runner
-        turn_claim observe pass — the second driver must not re-signal the SDK
+        turn_claim observe pass — the second driver must not re-signal the adapter
         or start a second escalation clock. The check-and-set below runs
         synchronously before the first ``await``, so two same-loop callers
         cannot both pass it.
@@ -2534,8 +2584,8 @@ class SessionRuntime:
             logger.debug("SessionRuntime: record_interrupting failed for %s", sid, exc_info=True)
 
         # Stop must also release anything BLOCKED ON THE USER. A pending
-        # tool-approval prompt is awaited inside a DETACHED SDK task sitting in
-        # ``interaction_wait.await_interaction``; the SDK-level interrupt below
+        # tool-approval prompt is awaited inside a DETACHED task sitting in
+        # ``interaction_wait.await_interaction``; the adapter interrupt below
         # cannot reach it, so without this the session keeps a live waiter (and
         # a prompt on screen) until the 5-minute TTL sweeps it — the turn looks
         # unstoppable. ``cancel_all_requests`` is the ONE correct unblock: it
@@ -2565,9 +2615,9 @@ class SessionRuntime:
             await asyncio.sleep(_SETTLE_POLL_SECONDS)
 
         # Escalation: the turn did not settle — the runner is wedged. The wedged
-        # pump holds the reader token, so it MUST be cancelled (legacy
-        # task.cancel() parity) or the drain reader deadlocks on the token while
-        # the lease heartbeat keeps reap_expired at bay forever. Settlement (and
+        # pump holds the reader token, so it MUST be cancelled or the drain
+        # reader deadlocks on the token while the lease heartbeat keeps
+        # reap_expired at bay forever. Settlement (and
         # the on_turn_settled fire) stays with execute()'s finalize (evict) or
         # the drain reader (keep) — exactly once.
         if _should_evict_after_escalation(sid):
@@ -2619,7 +2669,7 @@ class SessionRuntime:
         self._stop_unowned("fence_superseded")
 
     def _on_lease_lost(self) -> None:
-        """The heartbeat could not keep this turn's run lease (#1444).
+        """The heartbeat could not keep this turn's run lease.
 
         Nothing holds the reap sweep off an unleased turn, and another runner
         may claim the session at any moment, so the turn stops rather than
@@ -2636,7 +2686,7 @@ class SessionRuntime:
     def _stop_unowned(self, reason: str) -> None:
         """Stop a turn this runner no longer owns: cancel the pump through the
         escalation cancel path (finalize then settles ``aborted`` with
-        ``reason``) and ask the SDK to interrupt the turn so the pooled client
+        ``reason``) and ask the adapter to interrupt the turn so the pooled client
         stops generating for a run nobody owns."""
         sid = self.session_id
         self._unowned = True
@@ -2670,19 +2720,19 @@ class SessionRuntime:
         session_row: Optional[Dict[str, Any]],
     ) -> None:
         """Sticky-pin an "anywhere"/capability-placed session to this runner
-        (V2 Phase 4, OD-6) — sync, called via ``to_thread``.
+        — sync, called via ``to_thread``.
 
-        Pin rules (A9 + OD-6):
-          * NULL/blank placement  → leave alone (stays NULL; the resolver's A11
-            fallback treats the row's ``instance_id`` as an implicit pin at
+        Pin rules:
+          * NULL/blank placement  → leave alone (stays NULL; the resolver's
+            ``instance_id`` fallback treats the row's ``instance_id`` as an implicit pin at
             read time, so no explicit pin is invented here).
           * ``runner:<id>`` pin   → leave alone (already pinned; the placement
             gate + resolver ensured it points here or we would not be running).
           * anything else ("anywhere", a capability token, bare constraints)
             → pin to ``runner_id`` via the dual-write helper. Any capability
-            ``constraints`` are INTENTIONALLY dropped by the pin (rF3): per
-            OD-6 a pin means "the CLI conversation state lives here", and per
-            A10 pins are re-validated by online + capability only at resolve
+            ``constraints`` are INTENTIONALLY dropped by the pin: a pin means
+            "the CLI conversation state lives here", and pins are re-validated
+            by online + capability only at resolve
             time — the constraint set has served its purpose (electing this
             winner) and carrying it forward would add nothing.
         ``session_row`` is the row the placement gate already fetched; when the
@@ -2699,8 +2749,8 @@ class SessionRuntime:
                 return
         placement = placement_mod._normalize_placement(row.get("placement"))
         if not placement:
-            # NULL placement stays NULL (A9): never invent an explicit pin —
-            # the resolver's A11 instance_id fallback covers routing.
+            # NULL placement stays NULL: never invent an explicit pin —
+            # the resolver's instance_id fallback covers routing.
             return
         where = (placement.get("where") or "").strip()
         if where.startswith("runner:"):
@@ -2714,7 +2764,7 @@ class SessionRuntime:
             )
 
     # ------------------------------------------------------------------
-    # working-set sync (V2 Phase 4, Q6)
+    # working-set sync
     # ------------------------------------------------------------------
 
     async def _snapshot_working_set(self, sid: str) -> None:

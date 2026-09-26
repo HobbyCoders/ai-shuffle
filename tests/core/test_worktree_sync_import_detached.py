@@ -3,7 +3,7 @@ Regression tests for issue #568: importing an external detached-HEAD worktree.
 
 Root cause: git's porcelain worktree listing carries no ``branch`` line for a
 detached worktree, and list_worktrees() fills the key with None (setdefault) —
-so ``git_wt.get("branch", "unknown")`` at both sync-import sites still yielded
+so ``git_wt.get("branch", "unknown")`` at the sync-import site still yielded
 None and the insert violated the ``branch_name TEXT NOT NULL`` schema
 constraint. The per-item try/except then silently skipped the worktree on every
 sync. The fix derives a ``detached-<short-sha>`` sentinel from the HEAD SHA.
@@ -162,25 +162,9 @@ def test_sync_worktrees_for_project_imports_detached(manager, tmp_path):
     assert kwargs["status"] == WorktreeStatus.ACTIVE
 
 
-def test_sync_worktrees_imports_detached(manager, tmp_path):
-    mgr, db = manager
-    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
-    db.get_git_repository_by_project.return_value = {"id": "repo-1", "default_branch": "main"}
-    db.get_worktrees_for_repository.return_value = []
-    mgr.git_service.list_worktrees.return_value = _detached_git_listing(tmp_path)
-
-    result = mgr.sync_worktrees("proj-1")
-
-    assert result["imported"] == 1
-    assert result["errors"] == []
-    db.create_worktree.assert_called_once()
-    kwargs = db.create_worktree.call_args.kwargs
-    assert kwargs["branch_name"] == f"detached-{DETACHED_SHA[:12]}"
-
-
 # ---------------------------------------------------------------------------
 # V2 placement checkouts (tracked in the ``checkouts`` table) must NEVER be
-# imported as legacy ``worktrees`` rows by either sync path.
+# imported as legacy ``worktrees`` rows by the sync path.
 # ---------------------------------------------------------------------------
 
 from app.db import checkouts as checkouts_db
@@ -222,7 +206,7 @@ def _stub_db(db, tmp_path):
     db.get_worktrees_for_repository.return_value = []
 
 
-@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project"])
 def test_v2_checkout_with_active_row_is_not_imported(manager, tmp_path, workspace_root, v2_project, sync_fn):
     mgr, db = manager
     _stub_db(db, tmp_path)
@@ -238,7 +222,7 @@ def test_v2_checkout_with_active_row_is_not_imported(manager, tmp_path, workspac
     db.create_worktree.assert_not_called()
 
 
-@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project"])
 def test_dir_under_checkout_root_without_row_is_not_imported(manager, tmp_path, workspace_root, sync_fn):
     mgr, db = manager
     _stub_db(db, tmp_path)
@@ -252,7 +236,7 @@ def test_dir_under_checkout_root_without_row_is_not_imported(manager, tmp_path, 
     db.create_worktree.assert_not_called()
 
 
-@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project"])
 def test_genuine_external_worktree_outside_checkout_root_still_imports(
     manager, tmp_path, workspace_root, v2_project, sync_fn
 ):

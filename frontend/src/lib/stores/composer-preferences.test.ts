@@ -21,6 +21,17 @@ it('applies account snapshots and explicit clears without echoing saves', async 
  expect(mocks.save).toHaveBeenCalledExactlyOnceWith('composer.profile','agent-a');
 });
 
+it('never remembers bypass as the default, from storage or from another device', async () => {
+ localStorage.setItem('aihub_lastPermissionMode','bypassPermissions');
+ const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.current.permissionMode).toBe('default');
+ mocks.adapters.get('composer.permissionMode')!.apply('bypassPermissions');
+ expect(p.current.permissionMode).toBe('default');
+ expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('default');
+ p.set('permissionMode','bypassPermissions');
+ expect(mocks.save).toHaveBeenCalledWith('composer.permissionMode','default');
+});
+
 it('resolves only the stable project UUID and never copies a foreign path or guesses by name', async () => {
  const {resolveComposerProject} = await import('./composer-preferences');
  const pick={projectId:'host-a-project',projectV2Id:'shared-repo'};

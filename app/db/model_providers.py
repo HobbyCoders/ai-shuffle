@@ -7,22 +7,22 @@ session. The provider list is shared across installs on a shared database.
 
 ``auth_token`` stores an ``enc:``-prefixed Fernet blob of the gateway key and is
 NEVER returned on a normal read — it is fetched only when ``include_token=True``
-(mirroring ``claude_accounts.credentials`` / ``include_credentials``). The
+(secrets are never on a default read). The
 ``models_json`` (a curated ``[{id, label}]`` list) and ``extra_env_json`` (an
 extra-env map) columns are TEXT-encoded JSON, serialized/parsed via
 ``json.dumps`` / ``json.loads`` (same convention as ``db/profiles.py``).
 
-Codex/ChatGPT-subscription OAuth (phase-2, plan amendment A1 — one account per
-provider, stored 1:1 on this same row, NOT a separate pool table):
+Codex/ChatGPT-subscription OAuth (one account per provider, stored 1:1 on
+this same row, NOT a separate pool table):
 ``codex_access_token`` / ``codex_refresh_token`` are two MORE ``enc:``-prefixed
 write-only blobs handled exactly like ``auth_token`` — excluded from the public
 columns, returned only under ``include_token=True``, and re-keyed on a password
 change (see ``app/core/encryption.py`` locations 7 & 8). The non-secret Codex
 fields (``auth_mode``, ``codex_account_id``, ``codex_id_token_expires_at``,
 ``codex_last_refresh``, ``needs_reauth``) ARE public. :func:`set_codex_token_bundle`
-persists the whole rotated bundle in one atomic UPDATE (a later refresh worker
-relies on that atomicity because the Codex refresh token rotates); there is no
-public API write path for the token blobs in this chunk.
+persists the whole rotated bundle in one atomic UPDATE (the refresh worker,
+``app.core.codex_token_refresh``, relies on that atomicity because the Codex
+refresh token rotates).
 """
 
 from __future__ import annotations
@@ -257,7 +257,7 @@ def count_configured_model_providers() -> int:
     Rows that are disabled, or that were created without any credential, do
     not count. Deliberately reads only the presence of the blobs — no
     decryption, no network validation — so this stays a cheap gate for
-    "does this install have any way to run a model at all" (PA10).
+    "does this install have any way to run a model at all".
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -426,14 +426,14 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
 
 
 # ---------------------------------------------------------------------------
-# Codex/ChatGPT-subscription OAuth token bundle (phase-2, amendment A1).
+# Codex/ChatGPT-subscription OAuth token bundle.
 #
 # Stored 1:1 on the provider's single-credential row. The token blobs are
 # ENCRYPTED WRITE-ONLY (``enc:``-prefixed Fernet, encryption happens at the call
 # site — mirroring ``auth_token``) and are returned only via the explicit
-# include-token reader below, never on a public read. There is NO public API
-# write path for the blobs in this chunk; these are internal setters/readers a
-# later device-code enrollment flow + refresh worker call.
+# include-token reader below, never on a public read. Written by the
+# enrollment routes in ``app.api.model_providers`` and the refresh worker
+# (``app.core.codex_token_refresh``).
 # ---------------------------------------------------------------------------
 
 def set_codex_token_bundle(

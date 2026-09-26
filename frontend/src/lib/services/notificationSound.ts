@@ -98,10 +98,6 @@ class NotificationSound {
 		if (value) this.unlock();
 	}
 
-	setVolume(value: number): void {
-		this.volume = Math.max(0, Math.min(1, value));
-	}
-
 	// ── Autoplay unlock ───────────────────────────────────────────────────────
 
 	private attachGestureListeners(): void {

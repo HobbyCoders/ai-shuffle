@@ -9,7 +9,7 @@ import { api } from './client';
 // ============================================================================
 
 export interface ConnectorConfig {
-	[key: string]: any;
+	[key: string]: unknown;
 }
 
 export interface ConnectorCreate {
@@ -63,21 +63,21 @@ export interface ConnectorTriggerInfo {
 	id: string;
 	name: string;
 	description: string;
-	payload_schema: Record<string, any>;
+	payload_schema: Record<string, unknown>;
 }
 
 export interface ConnectorActionInfo {
 	id: string;
 	name: string;
 	description: string;
-	input_schema: Record<string, any>;
+	input_schema: Record<string, unknown>;
 }
 
 export interface ConnectorToolInfo {
 	id: string;
 	name: string;
 	description: string;
-	input_schema: Record<string, any>;
+	input_schema: Record<string, unknown>;
 }
 
 export interface ConnectorTypeInfo {
@@ -130,7 +130,7 @@ export interface ConnectorEventLog {
 	connector_id: string;
 	event_type: string;
 	direction: string;
-	payload: any;
+	payload: Record<string, unknown> | null;
 	status: string;
 	error: string | null;
 	created_at: string;
@@ -147,18 +147,45 @@ export async function getConnectors(): Promise<Connector[]> {
 	return api.get<Connector[]>('/connectors');
 }
 
+/** Chat connectors: every incoming message runs an agent turn. */
+const CHAT_CONNECTOR_TYPES = new Set(['telegram', 'discord', 'whatsapp', 'slack', 'line', 'signal', 'imessage', 'msteams', 'bluebubbles']);
+
+/**
+ * Whether a new connection of this type runs an agent on incoming messages or
+ * requests. The backend refuses those until the connection's API user has an
+ * agent, so the create form asks for one. Webhooks default to outbound.
+ */
+export function connectorNeedsAgent(type: string, config: ConnectorConfig): boolean {
+	if (type === 'webhook') {
+		const mode = String(config.mode ?? '').trim().toLowerCase() || 'outbound';
+		return mode !== 'outbound';
+	}
+	return CHAT_CONNECTOR_TYPES.has(type);
+}
+
+/**
+ * Build the create payload. An existing API user keeps its own agents; a new
+ * API user is created with the chosen agent.
+ */
+export function buildConnectorCreate(input: {
+	name: string;
+	type: ConnectorCreate['type'];
+	config: ConnectorConfig;
+	events: string[];
+	apiUserId?: string;
+	profileId?: string;
+}): ConnectorCreate {
+	const data: ConnectorCreate = { name: input.name, type: input.type, config: input.config, events: input.events };
+	if (input.apiUserId) data.api_user_id = input.apiUserId;
+	else if (input.profileId) data.profile_ids = [input.profileId];
+	return data;
+}
+
 /**
  * Create a new connector
  */
 export async function createConnector(data: ConnectorCreate): Promise<Connector> {
 	return api.post<Connector>('/connectors', data);
-}
-
-/**
- * Get a single connector by ID
- */
-export async function getConnector(id: string): Promise<Connector> {
-	return api.get<Connector>(`/connectors/${id}`);
 }
 
 /**
@@ -208,14 +235,6 @@ export async function deactivateConnector(id: string): Promise<Connector> {
 }
 
 /**
- * Restart a connector
- * TODO: Wire up to ConnectorManager UI (restart button)
- */
-export async function restartConnector(id: string): Promise<Connector> {
-	return api.post<Connector>(`/connectors/${id}/restart`);
-}
-
-/**
  * Get all available connector types with config field definitions
  */
 export async function getConnectorTypes(): Promise<ConnectorTypeInfo[]> {
@@ -245,50 +264,4 @@ export async function discoverDiscord(body: {
  */
 export async function getConnectorLogs(id: string): Promise<ConnectorEventLog[]> {
 	return api.get<ConnectorEventLog[]>(`/connectors/${id}/logs`);
-}
-
-/**
- * Get current status for a connector
- * TODO: Wire up to ConnectorManager UI (status display)
- */
-export async function getConnectorStatus(id: string): Promise<any> {
-	return api.get<any>(`/connectors/${id}/status`);
-}
-
-// ============================================================================
-// Variant API Functions (Triggers, Actions, Tools)
-// TODO: Wire up to ConnectorManager UI — backend endpoints exist and are functional
-// ============================================================================
-
-/**
- * Get available triggers for a connector
- */
-export async function getConnectorTriggers(id: string): Promise<ConnectorTriggerInfo[]> {
-	return api.get<ConnectorTriggerInfo[]>(`/connectors/${id}/triggers`);
-}
-
-/**
- * Get available actions for a connector
- */
-export async function getConnectorActions(id: string): Promise<ConnectorActionInfo[]> {
-	return api.get<ConnectorActionInfo[]>(`/connectors/${id}/actions`);
-}
-
-/**
- * Get available tools for a connector
- */
-export async function getConnectorTools(id: string): Promise<ConnectorToolInfo[]> {
-	return api.get<ConnectorToolInfo[]>(`/connectors/${id}/tools`);
-}
-
-/**
- * Execute a connector action directly
- * TODO: Wire up to ConnectorManager UI (action executor)
- */
-export async function executeConnectorAction(
-	id: string,
-	actionId: string,
-	params: Record<string, any> = {}
-): Promise<any> {
-	return api.post<any>(`/connectors/${id}/actions/${actionId}/execute`, params);
 }

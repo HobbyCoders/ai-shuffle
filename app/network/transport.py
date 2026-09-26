@@ -31,7 +31,7 @@ import httpx
 from app.core.config import settings
 from app.db import network as store
 from app.network import engine, identity as identity_mod, membership, policy, tokens
-from app.network.endpoints import validate_endpoints
+from app.network.endpoints import dial_endpoints, peer_endpoints, validate_endpoints
 from app.network.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,10 @@ _full_scan_requested = False
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _last_contact: Dict[str, float] = {}
+# Our own advertised addresses as of the last sync pass; a change (the
+# account tunnel appearing or going away) is announced to peers at once
+# instead of at the next presence interval.
+_advertised: Optional[List[str]] = None
 
 
 class PeerError(RuntimeError):
@@ -70,12 +74,17 @@ class PeerTokenRejected(PeerError):
 
 
 class PeerLink:
-    """One peer: endpoint candidates, a cached token, and an HTTP client."""
+    """One peer: endpoint candidates, a cached token, and an HTTP client.
+
+    ``endpoints`` is what ``dial_endpoints`` selects from the addresses the
+    peer is known at: its https tunnel alone when it advertises one, its
+    plain-http LAN address only when it does not.
+    """
 
     def __init__(self, device_id: str, endpoints: list[str]):
         self.device_id = device_id
-        # Member-advertised addresses are dialed: keep only usable http(s) URLs.
-        self.endpoints = validate_endpoints(endpoints)
+        # Member-advertised addresses are dialed: usable http(s) URLs, https only when present.
+        self.endpoints = dial_endpoints(endpoints)
         self.base_url: str | None = None
         self.token: str | None = None
         self.token_expires = 0.0
@@ -85,13 +94,22 @@ class PeerLink:
         self._sync_lock = asyncio.Lock()
 
     def update_endpoints(self, endpoints: list[str]) -> None:
-        """Learn endpoints without dropping the one that is answering right now."""
-        merged: list[str] = [self.base_url] if self.base_url else []
-        for url in validate_endpoints(endpoints) + self.endpoints:
-            url = (url or "").rstrip("/")
-            if url and url not in merged:
-                merged.append(url)
-        self.endpoints = merged
+        """Rebuild the dial list from the peer's current addresses.
+
+        The address answering right now stays a candidate (a peer does not
+        always list the address it was reached at, such as the invite address
+        against Docker's guessed bridge IP); the rest is what the peer
+        announced, or what its stored row and presence record say now, not
+        what this link remembered, so an address the peer withdrew stops being
+        dialed. ``dial_endpoints`` then applies the https rule to all of them:
+        when the peer's tunnel appears, the plain-http connection is dropped
+        and the next request authenticates over the tunnel.
+        """
+        candidates = ([self.base_url] if self.base_url else []) + list(endpoints)
+        self.endpoints = dial_endpoints(candidates)
+        if self.base_url is not None and self.base_url not in self.endpoints:
+            self.base_url = None
+            self.token = None
 
     async def _request(self, client: httpx.AsyncClient, method: str, path: str, *, json_body=None,
                        params=None, auth: bool = True, timeout: float = REQUEST_TIMEOUT) -> Any:
@@ -192,12 +210,20 @@ class PeerLink:
             marks = current
         if await self._check_rollback(client, ctx, theirs):
             ctx = engine.require_context()
-        their_endpoints = exchange.get("endpoints") or []
-        await asyncio.to_thread(store.touch_member, self.device_id, capabilities=exchange.get("capabilities"),
+        # Stored addresses follow the same rule as dialed ones (``endpoints``).
+        their_endpoints = exchange.get("endpoints")
+        their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
+        capabilities = exchange.get("capabilities")
+        await asyncio.to_thread(store.touch_member, self.device_id,
+                                capabilities=capabilities if isinstance(capabilities, dict) else None,
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
                                 incarnation=exchange.get("incarnation"))
         if their_endpoints:
             self.update_endpoints(their_endpoints)
+            if self.base_url is None:
+                # The peer's tunnel appeared: the plain-http connection is
+                # dropped and the push below already goes over the tunnel.
+                await self.authenticate(client, ctx)
         # Push what the peer lacks, in bounded batches.
         while True:
             outbound, _, snapshot = await asyncio.to_thread(
@@ -328,10 +354,7 @@ async def _refresh_links(ctx: engine.NetworkContext) -> None:
         device_id = row["device_id"]
         if device_id == ctx.device_id:
             continue
-        endpoints = list(row.get("endpoints") or [])
-        for url in (presence.get(device_id) or {}).get("endpoints") or []:
-            if url not in endpoints:
-                endpoints.append(url)
+        endpoints = peer_endpoints(row, presence.get(device_id))
         link = _links.get(device_id)
         if link is None:
             _links[device_id] = PeerLink(device_id, endpoints)
@@ -381,10 +404,35 @@ def forward_pushed(sender: str) -> None:
 # Loops
 # ---------------------------------------------------------------------------
 
+async def _announce_own_endpoints_if_changed() -> None:
+    """Publish presence now when this worker's own addresses changed.
+
+    Peers select the tunnel as soon as they learn of it and stop dialing it
+    once it is withdrawn; both should not wait for the presence interval.
+    The exchange carries the same list on every pass, but only to peers this
+    worker reaches; the presence record also reaches peers that reach us.
+    """
+    global _advertised
+    current = await asyncio.to_thread(engine._own_endpoints)
+    if _advertised is None:
+        _advertised = current
+        return
+    if current == _advertised:
+        return
+    _advertised = current
+    capabilities = await asyncio.to_thread(_capabilities)
+    await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version,
+                            endpoints=current)
+
+
 async def sync_pass(client: httpx.AsyncClient) -> dict:
     ctx = engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return {}
+    try:
+        await _announce_own_endpoints_if_changed()
+    except Exception:  # noqa: BLE001 — the presence loop publishes the change later
+        logger.debug("Could not announce changed addresses", exc_info=True)
     await _refresh_links(ctx)
     results: Dict[str, Any] = {}
     now = time.monotonic()
@@ -636,8 +684,9 @@ def forget_peers() -> None:
 
 
 def reset_for_tests() -> None:
-    global _full_scan_requested, _dirty_sessions
+    global _full_scan_requested, _dirty_sessions, _advertised
     forget_peers()
+    _advertised = None
     with _scan_requests_lock:
         _dirty_collections.clear()
         _dirty_sessions = set()

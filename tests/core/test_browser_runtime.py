@@ -358,6 +358,28 @@ def test_cold_config_uses_session_project_profile_policy_and_direct_mode(monkeyp
     assert result["cwd"] == str(tmp_path)
 
 
+def test_cold_config_runs_a_worker_as_its_parents_key(monkeypatch, tmp_path):
+    """R10-28: a legacy worker row with no ``api_user_id`` got the owner's
+    AI-tools env (``ANTHROPIC_*`` among it) in the browser-mcp child."""
+    from app.core import environment, mcp_config, profiles, project_resolver
+    from app.db import database
+    rows = {
+        "worker": {"id": "worker", "profile_id": "p", "provider_id": None, "api_user_id": None,
+                   "is_worker": True, "parent_session_id": "parent"},
+        "parent": {"id": "parent", "profile_id": "p", "api_user_id": "key-1"},
+    }
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {"env": {}, "ai_tools": {}}})
+    monkeypatch.setattr(project_resolver, "resolve_cwd", lambda session: str(tmp_path))
+    seen = []
+    monkeypatch.setattr(environment, "_build_env_with_ai_tools",
+                        lambda base, ai, user, provider: seen.append(user) or {})
+    monkeypatch.setattr(mcp_config, "_build_mcp_servers_dict",
+                        lambda project, env, sid: {"browser": {"command": "node", "env": {}}})
+    runtime.resolve_config("worker")
+    assert seen == ["key-1"]
+
+
 def test_proxy_mode_only_with_session_wiring():
     from app.core.mcp_config import _build_browser_server_env
     assert "AIS_BROWSER_MODE" not in _build_browser_server_env({}, None)
@@ -595,3 +617,60 @@ def test_call_timeout_defaults_and_rejects_nonsense(monkeypatch):
         assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
     monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", "12.5")
     assert runtime.call_timeout() == 12.5
+
+
+@pytest.mark.asyncio
+async def test_first_connect_env_sees_native_browser_behind_egress_proxy(fake, monkeypatch):
+    # The server env is built after the native supervisor starts, so the very
+    # first runtime already carries BROWSER_EGRESS_PROXY=1.
+    from app.core import mcp_config, native_chrome
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: False)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", None)
+    supervisor = asyncio.get_running_loop().create_future()
+
+    async def ensure_started():
+        native_chrome._supervisor_task = supervisor
+
+    monkeypatch.setattr(native_chrome, "ensure_started", ensure_started)
+    monkeypatch.setattr(
+        runtime, "resolve_config",
+        lambda sid: {"env": mcp_config._build_browser_server_env({}, None)},
+    )
+    seen = []
+    client_type = runtime.RawMcpClient
+
+    def client(name, config):
+        seen.append(dict(config["env"]))
+        return client_type(name, config)
+
+    monkeypatch.setattr(runtime, "RawMcpClient", client)
+    try:
+        await runtime.start("runtime-test")
+    finally:
+        supervisor.cancel()
+    assert len(seen) == 1
+    assert seen[0].get("BROWSER_EGRESS_PROXY") == "1"
+
+
+def test_cold_config_default_cwd_is_effective_workspace(monkeypatch, tmp_path):
+    """With no project cwd and no profile cwd the browser runtime runs in the
+    workspace chosen during setup, not the start-up ``settings.workspace_dir``."""
+    from app.core import config as config_module
+    from app.core import environment, mcp_config, profiles, project_resolver
+    from app.db import database
+    startup, chosen = tmp_path / "startup-workspace", tmp_path / "chosen-workspace"
+    startup.mkdir()
+    chosen.mkdir()
+    monkeypatch.setattr(config_module.settings, "workspace_dir", startup)
+    monkeypatch.setitem(config_module._runtime_overrides, "workspace_dir", chosen)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"id": sid, "profile_id": "p"})
+    monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {"env": {}, "ai_tools": {}}})
+    monkeypatch.setattr(project_resolver, "resolve_cwd", lambda session: None)
+    monkeypatch.setattr(project_resolver, "resolve_project_v2", lambda session: None)
+    monkeypatch.setattr(environment, "_build_env_with_ai_tools", lambda base, ai, user, provider: {})
+    seen = []
+    monkeypatch.setattr(mcp_config, "_build_mcp_servers_dict",
+                        lambda project, env, sid: seen.append(project) or {"browser": {"command": "node", "env": {}}})
+    result = runtime.resolve_config("orphan")
+    assert seen == [chosen]
+    assert result["cwd"] == str(chosen)

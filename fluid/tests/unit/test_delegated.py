@@ -21,7 +21,14 @@ from pathlib import Path
 import pytest
 
 from fluid.engine.base import EngineCaps
-from fluid.engine.delegated import DelegatedLoop
+import fluid.engine.delegated as delegated_mod
+from fluid.engine.delegated import (
+    CLAUDE_CLI_MISSING_MESSAGE,
+    ClaudeCliMissingError,
+    DelegatedLoop,
+    _cli_permission_mode,
+    _version_at_least,
+)
 from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
 from fluid.events import (
     BlockStart,
@@ -41,7 +48,7 @@ from fluid.events import (
     UserTurn,
 )
 from fluid.events.model import event_from_dict, event_to_dict
-from fluid.events.ops import Interrupt, Steer
+from fluid.events.ops import Interrupt, SetPermissionMode, Steer
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -71,6 +78,81 @@ def test_setting_sources_reaches_cli_even_when_empty(sources, expected):
         assert "--setting-sources" not in argv
     else:
         assert argv[argv.index("--setting-sources") + 1] == expected
+
+
+# ─── CLI version gates ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("version,minimum,expected", [
+    ("2.1.280 (Claude Code)", "2.1.280", True),
+    ("2.1.281 (Claude Code)", "2.1.280", True),
+    ("2.1.279 (Claude Code)", "2.1.280", False),
+    ("2.1.280", "2.1.99", True),  # numeric, not lexical
+    ("10.0.0", "9.9.9", True),
+    ("claude 2.0.0 (fake-fluid)", "2.0.0", True),
+    ("v2.2.0", "2.1.280", True),
+    ("2.1.280-beta.1", "2.1.280", False),  # a pre-release is below its release
+    ("2.1.280-beta.1", "2.1.279", True),
+    ("2.1.280-beta.2", "2.1.280-beta.1", True),
+    ("2.1.280-beta.10", "2.1.280-beta.2", True),  # numeric identifiers
+    ("2.1.280-beta", "2.1.280-beta.1", False),  # fewer identifiers sort first
+    ("2.1.280-rc.1", "2.1.280-beta.9", True),
+    ("2.1.280-1", "2.1.280-alpha", False),  # numeric below alphanumeric
+    ("2.1.280+build.5", "2.1.280", True),  # build metadata ignored
+    ("2.1.280", "2.1.280+build.5", True),
+    (None, "2.1.280", False),
+    ("", "2.1.280", False),
+    ("Claude Code", "2.1.280", False),
+    ("2.1", "2.1.0", False),
+    ("2.1.280", "not a version", False),
+])
+def test_version_at_least(version, minimum, expected) -> None:
+    assert _version_at_least(version, minimum) is expected
+
+
+def test_permission_mode_is_default_for_every_cli_until_the_threshold_is_set() -> None:
+    # No CLI is known to reject "default" yet: the switch ships off.
+    assert delegated_mod.CLI_MANUAL_PERMISSION_MODE_SINCE is None
+    for version in ("2.1.280 (Claude Code)", "99.0.0", None, "garbage"):
+        assert _cli_permission_mode("default", version) == "default"
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("3.0.0 (Claude Code)", "manual"),  # at the threshold
+    ("3.0.1 (Claude Code)", "manual"),  # above
+    ("3.1.0-beta.1", "manual"),  # a pre-release of a later version
+    ("2.1.280 (Claude Code)", "default"),  # below
+    ("3.0.0-rc.1", "default"),  # a pre-release of the threshold is below it
+    (None, "default"),  # version unknown
+    ("Claude Code (dev build)", "default"),  # unparsable
+])
+def test_permission_mode_mapping_around_the_threshold(monkeypatch, caplog, version, expected) -> None:
+    monkeypatch.setattr(delegated_mod, "CLI_MANUAL_PERMISSION_MODE_SINCE", "3.0.0")
+    with caplog.at_level("INFO", logger=delegated_mod.logger.name):
+        assert _cli_permission_mode("default", version) == expected
+    assert ("sending permission mode 'default' as 'manual'" in caplog.text) is (expected == "manual")
+    # Only "default" is renamed; every other mode goes through as is.
+    for mode in ("acceptEdits", "bypassPermissions", "dontAsk", "auto"):
+        assert _cli_permission_mode(mode, version) == mode
+
+
+async def test_permission_mode_mapping_reaches_argv_and_control(monkeypatch) -> None:
+    monkeypatch.setattr(delegated_mod, "CLI_MANUAL_PERMISSION_MODE_SINCE", "3.0.0")
+    loop = DelegatedLoop(store=MemoryStore(), model="fake", permission_mode="plan")
+    sent: list[dict] = []
+
+    async def send_control(request: dict) -> None:
+        sent.append(request)
+
+    loop._apply_setting = send_control  # type: ignore[method-assign]
+    for version, wire in (("2.1.280 (Claude Code)", "default"), ("3.0.0 (Claude Code)", "manual")):
+        loop.cli_version = version
+        argv = loop._build_argv()
+        assert argv[argv.index("--permission-mode") + 1] == wire
+        await loop.submit(SetPermissionMode(mode="default"))
+        assert sent[-1] == {"subtype": "set_permission_mode", "mode": wire}
+        # The loop keeps fluid's name; only the wire spelling changes.
+        assert loop.permission_mode == "default"
 
 
 def _cmd() -> list[str]:
@@ -252,6 +334,18 @@ async def test_simple_text_turn() -> None:
         assert path[-1].message.text() == "Hello from fake."
     finally:
         await loop.aclose()
+
+
+async def test_pid_tracks_the_live_cli_process() -> None:
+    loop = _make_loop("a")
+    try:
+        assert loop.pid is None  # spawned lazily by the first turn
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        assert loop.pid is not None and loop.pid == loop._proc.pid
+    finally:
+        await loop.aclose()
+    assert loop.pid is None
 
 
 async def test_store_persistence_reloadable() -> None:
@@ -1634,9 +1728,8 @@ async def test_delegated_turns_feed_the_continual_journal() -> None:
 
 
 def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) -> None:
-    """The loader used to return the delegated engine before any continual
-    wiring: no journal, no Recall, no Remember. Now the leg gets all three,
-    and a synthesizer only when a native provider is named for it."""
+    """The delegated leg gets the journal plus Recall/Remember wiring, and a
+    synthesizer only when a native provider is named for it."""
     from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
     from fluid.config.model import HarnessConfig
 
@@ -1647,7 +1740,7 @@ def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) 
     engine = build_engine(config, MemoryStore(), provider_name="claude")
     assert isinstance(engine, DelegatedLoop)
     assert engine._journal is not None and engine._journal._synthesizer is None
-    assert "recall_store" in engine.ctx.extra and "continual_journal" in engine.ctx.extra
+    assert "recall_store" in engine.ctx.extra and "memory_store" in engine.ctx.extra
 
     with_provider = HarnessConfig.from_dict(deep_merge(
         BUILTIN_DEFAULTS, {**base, "continual_provider": "anthropic"},
@@ -1807,3 +1900,339 @@ async def test_a_system_origin_steer_reaches_the_cli_in_the_notice_marker() -> N
         assert receipt.steers[0]["origin"] == "system"
     finally:
         await loop.aclose()
+
+
+# ─── Missing CLI ─────────────────────────────────────────────────────────────
+
+
+async def test_missing_cli_raises_typed_setup_error() -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake",
+        claude_cmd=["/definitely/missing/claude"],
+    )
+    with pytest.raises(ClaudeCliMissingError) as caught:
+        await loop._version_guard()
+    assert str(caught.value) == CLAUDE_CLI_MISSING_MESSAGE
+    await loop.aclose()
+
+
+async def test_missing_cli_turn_reports_setup_message() -> None:
+    """A turn against a missing binary ends with the setup message as its
+    error event, not a ``spawn failed: FileNotFoundError(...)`` repr."""
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake",
+        claude_cmd=["/definitely/missing/claude"],
+    )
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=5)
+        errors = [e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent)]
+        assert [e.message for e in errors] == [CLAUDE_CLI_MISSING_MESSAGE]
+    finally:
+        await loop.aclose()
+
+
+# ─── Requests the CLI blocks on are always answered ──────────────────────────
+
+
+def test_permission_grants_join_allowed_tools_without_narrowing_the_bridge() -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="fake",
+        permission_grants=["mcp__fluid_bundled__mcp__builtins__Task", "mcp__browser"],
+    )
+    argv = loop._build_argv()
+    assert argv[argv.index("--allowed-tools") + 1] == (
+        "mcp__fluid_bundled__mcp__builtins__Task,mcp__browser"
+    )
+    # A grant is not a surface: every bridge tool is still served.
+    assert loop._bridge_tool_permitted("mcp__builtins__Remember")
+
+    surfaced = DelegatedLoop(
+        store=MemoryStore(), model="fake", allowed_tools=["Read"], permission_grants=["mcp__browser"],
+    )
+    argv = surfaced._build_argv()
+    assert argv[argv.index("--allowed-tools") + 1] == "Read,mcp__browser"
+    assert not surfaced._bridge_tool_permitted("mcp__builtins__Remember")
+
+
+def test_an_unknown_control_request_is_mapped_for_an_answer() -> None:
+    mapped = _mapper().feed({
+        "type": "control_request", "request_id": "cli_9",
+        "request": {"subtype": "elicitation", "message": "?"},
+    })
+    assert mapped.unsupported_request == ("cli_9", "elicitation")
+    assert mapped.permission is None and not mapped.events
+
+
+async def test_an_unanswered_permission_prompt_is_denied_after_the_timeout(monkeypatch) -> None:
+    from fluid.engine import delegated
+
+    monkeypatch.setattr(delegated, "PERMISSION_TIMEOUT", 0.2)
+    loop = _make_loop("b")
+    frames = _spy_on_frames(loop)
+    try:
+        events = await asyncio.wait_for(_run_one_turn(loop, "weather in Paris?"), 10)
+        denial = next(
+            f["response"]["response"] for f in frames
+            if f.get("type") == "control_response" and f["response"]["request_id"] == "cli_req_1"
+        )
+        assert denial["behavior"] == "deny" and "timed out" in denial["message"]
+        assert next(e for e in events if isinstance(e, ToolResult)).is_error
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()
+
+
+_UNKNOWN_CONTROL_CLI = r'''
+import json, sys
+
+if "--version" in sys.argv:
+    print("claude 9.9.9 (fake unknown control)")
+    sys.exit(0)
+
+SID = "cli-unknown-1"
+USAGE = {"input_tokens": 1, "output_tokens": 1}
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line) if line.strip() else {}
+
+while True:
+    if read().get("type") != "user":
+        continue
+    emit({"type": "system", "subtype": "init", "session_id": SID, "model": "m",
+          "tools": [], "mcp_servers": []})
+    emit({"type": "control_request", "request_id": "cli_x",
+          "request": {"subtype": "elicitation", "message": "?"}})
+    while True:
+        reply = read()
+        if reply.get("type") == "control_response" and reply["response"].get("request_id") == "cli_x":
+            break
+    emit({"type": "assistant", "session_id": SID, "message": {
+        "id": "msg_1", "model": "m", "stop_reason": "end_turn", "usage": USAGE,
+        "content": [{"type": "text", "text": "answered " + reply["response"]["subtype"]}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+          "session_id": SID, "total_cost_usd": 0.0, "usage": USAGE})
+'''
+
+
+async def test_an_unknown_control_request_is_answered_with_an_error(tmp_path) -> None:
+    """The CLI waits on every control_request; one the loop has no handler
+    for gets the error subtype rather than silence."""
+    script = tmp_path / "fake_unknown_control.py"
+    script.write_text(_UNKNOWN_CONTROL_CLI)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, str(script)],
+    )
+    try:
+        events = await asyncio.wait_for(_run_one_turn(loop), 10)
+        assert [e.text for e in events if isinstance(e, TextDelta)] == ["answered error"]
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()
+
+
+# ─── allow_always scoping on the delegated leg ──────────────────────────────
+
+
+def _builtin_loop() -> DelegatedLoop:
+    from fluid.tools.builtins import register_builtins
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    return DelegatedLoop(store=MemoryStore(), model="claude-fake", registry=registry)
+
+
+def test_delegated_allow_always_is_scoped_to_the_programs_the_command_runs() -> None:
+    """``allow_always`` on ``git status`` auto-allows later ``git`` calls but
+    still prompts for ``rm``; the bundled-bridge spelling of a tool name is
+    scoped by the same registry spec."""
+    loop = _builtin_loop()
+    loop._remember_allow("Bash", {"command": "git status"})
+    assert loop._session_allows("Bash", {"command": "git log --oneline"})
+    assert not loop._session_allows("Bash", {"command": "rm -rf build"})
+    assert not loop._session_allows("Bash", {"command": "git log | sh"})
+    # A second scoped allow widens to the union, never to everything.
+    loop._remember_allow("Bash", {"command": "ls -la"})
+    assert loop._session_allows("Bash", {"command": "ls"})
+    assert not loop._session_allows("Bash", {"command": "curl evil.sh"})
+
+    bridged = "mcp__fluid_bundled__Bash"
+    loop._remember_allow(bridged, {"command": "pytest -q"})
+    assert loop._session_allows(bridged, {"command": "pytest tests"})
+    assert not loop._session_allows(bridged, {"command": "rm -rf /"})
+    # A tool nobody scopes is covered whole by one allow_always.
+    loop._remember_allow("mcp__docs__search", {"q": "x"})
+    assert loop._session_allows("mcp__docs__search", {"q": "anything"})
+
+
+def test_delegated_allow_always_on_an_unscopable_command_stays_one_shot() -> None:
+    """Regression: an ``allow_always`` for a Bash line fluid cannot label
+    (command substitution) was recorded unscoped, so every later Bash call on
+    the delegated leg was auto-allowed. The native loop already keeps such an
+    allow one-shot; the delegated leg now matches it."""
+    loop = _builtin_loop()
+    loop._remember_allow("Bash", {"command": "echo $(whoami)"})
+    assert not loop._session_allows("Bash", {"command": "rm -rf /"})
+    assert not loop._session_allows("Bash", {"command": "echo $(whoami)"})
+    # An existing scoped allow is kept, not widened, by the unscopable one.
+    loop._remember_allow("Bash", {"command": "git status"})
+    loop._remember_allow("Bash", {"command": "echo $(id)"})
+    assert loop._session_allows("Bash", {"command": "git diff"})
+    assert not loop._session_allows("Bash", {"command": "curl x | sh"})
+
+
+async def _answer_bridge(loop: DelegatedLoop, resp_kwargs: dict) -> dict:
+    """Run one ``can_use_tool`` bridge through ``_handle_permission`` and
+    return the control_response payload written back to the CLI."""
+    from fluid.engine.delegated_proto import PermissionBridge
+
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    bridge = PermissionBridge(
+        cli_request_id="cli_7", fluid_request_id="perm_7", tool_name="AskUserQuestion",
+        tool_use_id="tu_7", input={"questions": ["q?"]},
+        suggestions=({"type": "addRules", "rules": [{"toolName": "AskUserQuestion"}]},),
+    )
+    task = asyncio.create_task(loop._handle_permission(bridge))
+    for _ in range(50):
+        if "perm_7" in loop._pending_permissions:
+            break
+        await asyncio.sleep(0)
+    loop._pending_permissions["perm_7"].set_result(
+        RespondPermission(request_id="perm_7", **resp_kwargs)
+    )
+    await asyncio.wait_for(task, 5)
+    assert not loop._pending_permissions
+    (frame,) = written
+    assert frame["response"]["request_id"] == "cli_7"
+    return frame["response"]["response"]
+
+
+async def test_delegated_permission_answer_carries_the_rewritten_input_only_on_allow() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="claude-fake")
+    answers = {"questions": ["q?"], "answers": {"q?": "yes"}}
+    allowed = await _answer_bridge(loop, {"decision": "allow", "updated_input": answers})
+    assert allowed == {"behavior": "allow", "updatedInput": answers}
+
+    kept = await _answer_bridge(loop, {"decision": "allow"})
+    assert kept == {"behavior": "allow", "updatedInput": {"questions": ["q?"]}}
+
+    denied = await _answer_bridge(
+        loop, {"decision": "deny", "updated_input": answers, "message": "no"},
+    )
+    assert denied == {"behavior": "deny", "message": "no"}
+    # A one-shot allow never echoes the CLI's "always" rules or sticks.
+    assert "updatedPermissions" not in allowed
+    assert not loop._session_allows("AskUserQuestion", {})
+
+
+# ─── stream-json edge cases (delegated_proto) ────────────────────────────────
+
+
+def test_streamed_tool_use_with_truncated_arguments_yields_empty_input() -> None:
+    """A tool_use block streamed via partial messages whose argument JSON is
+    cut off must not raise out of the stream consumer: the ToolUse carries
+    ``{}``. Well-formed fragments are joined across deltas."""
+    m = _mapper()
+
+    def se(event: dict) -> list:
+        return m.feed({"type": "stream_event", "event": event}).events
+
+    se({"type": "message_start", "message": {"id": "msg_s", "usage": {}}})
+    started = se({"type": "content_block_start", "index": 0, "content_block": {
+        "type": "tool_use", "id": "tu_ok", "name": "Read", "input": {}}})
+    assert isinstance(started[0], BlockStart) and started[0].tool_use_id == "tu_ok"
+    for part in ('{"file_', 'path": "a.py"}'):
+        assert se({"type": "content_block_delta", "index": 0, "delta": {
+            "type": "input_json_delta", "partial_json": part}}) == []
+    stopped = se({"type": "content_block_stop", "index": 0})
+    assert isinstance(stopped[0], BlockStop)
+    assert isinstance(stopped[1], ToolUse) and stopped[1].input == {"file_path": "a.py"}
+    assert m.tool_inputs["tu_ok"] == {"file_path": "a.py"}
+
+    se({"type": "content_block_start", "index": 1, "content_block": {
+        "type": "tool_use", "id": "tu_cut", "name": "Bash", "input": {}}})
+    se({"type": "content_block_delta", "index": 1, "delta": {
+        "type": "input_json_delta", "partial_json": '{"command": "ls -'}})
+    # A delta for an index with no open tool block is dropped, not a KeyError.
+    assert se({"type": "content_block_delta", "index": 9, "delta": {
+        "type": "input_json_delta", "partial_json": "junk"}}) == []
+    stopped = se({"type": "content_block_stop", "index": 1})
+    tool_use = next(e for e in stopped if isinstance(e, ToolUse))
+    assert tool_use.tool_use_id == "tu_cut" and tool_use.input == {}
+
+    # The whole-message assistant frame for streamed blocks is not re-emitted.
+    mapped = m.feed({"type": "assistant", "message": {"id": "msg_s", "content": [
+        {"type": "tool_use", "id": "tu_ok", "name": "Read", "input": {"file_path": "a.py"}},
+        {"type": "tool_use", "id": "tu_cut", "name": "Bash", "input": {}},
+    ]}})
+    assert not [e for e in mapped.events if isinstance(e, (ToolUse, BlockStart))]
+
+
+def test_malformed_and_unknown_frames_are_ignored_without_side_effects() -> None:
+    from fluid.engine.delegated_proto import flatten_tool_content, parse_hook_callback
+
+    m = _mapper()
+    for frame in (
+        {"type": "future_frame_kind", "payload": 1},
+        {},
+        {"type": "user", "message": {"content": "plain text, not blocks"}},
+        {"type": "user", "message": {"content": ["str", {"type": "text", "text": "x"}]}},
+        {"type": "stream_event", "event": {"type": "no_such_sse"}},
+        {"type": "stream_event"},
+        {"type": "system", "subtype": "status"},
+        {"type": "rate_limit_event", "rate_limit_info": {"utilization": 0.9}},
+        {"type": "rate_limit_event", "rate_limit_info": None},
+        {"type": "control_response", "response": {"subtype": "success"}},
+    ):
+        mapped = m.feed(frame)
+        assert not mapped.events and mapped.message is None, frame
+        assert mapped.permission is None and mapped.control_reply is None, frame
+    assert not m.produced_nodes
+
+    # Non-dict content blocks inside an assistant frame are skipped.
+    mapped = m.feed({"type": "assistant", "message": {"content": [
+        "stray", None, {"type": "text", "text": "ok"}]}})
+    assert [e.text for e in mapped.events if isinstance(e, TextDelta)] == ["ok"]
+
+    assert parse_hook_callback({"type": "control_request", "request": {
+        "subtype": "can_use_tool"}}) is None
+    assert parse_hook_callback({"type": "control_request", "request": "x"}) is None
+    assert flatten_tool_content(None) == ""
+    assert flatten_tool_content([
+        {"type": "text", "text": "a"}, {"type": "image", "source": {}},
+        {"type": "note", "v": 1}, 7,
+    ]) == 'a{"type": "note", "v": 1}7'
+    assert flatten_tool_content({"k": 1}) == '{"k": 1}'
+
+
+def test_tool_result_images_are_kept_and_the_text_flattened() -> None:
+    m = _mapper()
+    m.feed({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tu_img", "name": "Screenshot", "input": {}}]}})
+    mapped = m.feed({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tu_img", "is_error": False, "content": [
+            {"type": "text", "text": "shot"},
+            {"type": "image", "source": {"media_type": "image/jpeg", "data": "QUJD"}},
+            {"type": "image", "source": {"data": ""}},
+        ]},
+        {"type": "text", "text": "ignored sibling"},
+    ]}})
+    (result,) = mapped.events
+    assert isinstance(result, ToolResult) and result.name == "Screenshot"
+    assert result.output == "shot"
+    (block,) = mapped.message.content
+    kinds = [type(b).__name__ for b in block.content]
+    assert kinds == ["Text", "Image"]
+    assert block.content[1].media_type == "image/jpeg"

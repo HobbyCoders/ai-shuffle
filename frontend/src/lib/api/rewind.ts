@@ -8,23 +8,6 @@ import { api } from './client';
 // Rewind Types
 // ============================================================================
 
-export interface RewindCheckpoint {
-	uuid: string;
-	index: number;
-	message_preview: string;
-	full_message: string;
-	role: 'user' | 'assistant';
-	timestamp: string | null;
-}
-
-export interface RewindCheckpointsResponse {
-	success: boolean;
-	session_id: string;
-	sdk_session_id: string | null;
-	checkpoints: RewindCheckpoint[];
-	error: string | null;
-}
-
 export interface RewindExecuteResponse {
 	success: boolean;
 	message: string;
@@ -39,13 +22,6 @@ export interface RewindExecuteResponse {
 // ============================================================================
 // Rewind API Functions
 // ============================================================================
-
-/**
- * Get available rewind checkpoints for a session
- */
-export async function getRewindCheckpoints(sessionId: string): Promise<RewindCheckpointsResponse> {
-	return api.get<RewindCheckpointsResponse>(`/commands/rewind/checkpoints/${sessionId}`);
-}
 
 /**
  * Execute a rewind operation to a specific checkpoint

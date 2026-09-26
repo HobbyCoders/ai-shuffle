@@ -8,11 +8,11 @@ order: 5
 
 ## Overview
 
-The LINE connector integrates your AI Shuffle agent with LINE, one of the most popular messaging platforms in Japan, Taiwan, Thailand, and Indonesia with over 200 million monthly active users. Through the LINE Messaging API, your agent can send text messages and quick-reply buttons, and post permission prompts as rich Flex Messages to LINE users.
+The LINE connector integrates your AI Shuffle agent with LINE, one of the most popular messaging platforms in Japan, Taiwan, Thailand, and Indonesia with over 200 million monthly active users. Through the LINE Messaging API, AI Shuffle can send text messages, stickers and images to LINE users.
 
 The connector uses the LINE Messaging API to send messages. Outbound delivery uses push messages (sent proactively, which may incur costs depending on your plan). Setting up requires creating a channel in the LINE Developers Console and configuring its credentials in AI Shuffle.
 
-> **Note:** The current connector implementation handles **outbound** messages only. The inbound webhook handler exists in the code (`handle_webhook_payload`) but the AI Shuffle API does not yet expose a LINE webhook route, so incoming LINE messages are not delivered to the agent. The steps below describe configuring credentials and disabling auto-reply; the webhook section documents where inbound support is headed once a route is added.
+> **Note:** The LINE connector does not receive messages. AI Shuffle has no LINE webhook URL, so messages users send to the bot never reach your agent. Because no LINE chat reaches your agent, your agent does not get LINE actions in its sessions either. You can send LINE messages from an [automation](/docs/features/automations) with a **Connector Action** step.
 
 ## Prerequisites
 
@@ -61,15 +61,13 @@ After creating the channel, navigate to the channel settings:
    Example: eyJhbGciOiJIUzI1NiJ9.exampleTokenContent...
    ```
 
-### Step 5: Webhook (inbound) — not yet available
+### Step 5: Leave the Webhook Unset
 
-AI Shuffle does not currently expose a LINE webhook route, so there is no AI Shuffle URL to register here and inbound LINE messages are not delivered to the agent yet. You can leave the **Webhook settings** section unconfigured.
-
-The connector's other API endpoints live under the `/api/v1/connectors` prefix (for example, the WhatsApp webhook is served at `/api/v1/connectors/whatsapp/webhook`). If LINE inbound support is added in a future release, the route would follow the same `/api/v1/connectors/...` scheme.
+AI Shuffle has no LINE webhook URL, so there is nothing to register here. Leave the **Webhook settings** section unconfigured.
 
 ### Step 6: Disable Auto-Reply Messages
 
-By default, LINE Official Accounts send automatic greeting and away messages. These interfere with the AI agent responses:
+By default, LINE Official Accounts send automatic greeting and away messages. Turn them off if you do not want users to receive them:
 
 1. On the **Messaging API** tab, click the link to open the **LINE Official Account Manager**.
 2. Go to **Settings > Response settings**.
@@ -78,31 +76,31 @@ By default, LINE Official Accounts send automatic greeting and away messages. Th
 
 ### Step 7: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **LINE**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **LINE**.
+2. Click **Install LINE** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Channel Access Token**: Paste the token from Step 4
    - **Channel Secret**: Paste the secret from Step 4
-   - **Allowed User IDs** (optional): A list of LINE user IDs; when set, only messages from these users are processed
-   - **Allowed Group IDs** (optional): A list of LINE group IDs; when set, only group messages from these groups are processed
-4. Click **Save** and then **Enable** the connector.
+   - **Allowed User IDs**: At least one LINE user ID. The connector will not start without one. Your own user ID is shown as **Your user ID** on the channel's **Basic settings** tab.
+   - **Allowed Group IDs** (optional): A list of LINE group IDs
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
 
 ### Step 8: Add the Bot as a Friend
 
-To test the bot:
+Users need to add the bot as a friend before it can send them messages:
 
 1. On the **Messaging API** tab in the LINE Developers Console, find the **QR code** section.
 2. Scan the QR code with the LINE app on your phone.
-3. Add the bot as a friend and start chatting.
+3. Add the bot as a friend.
 
 ## Configuration Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `channel_access_token` | string | Yes | The long-lived channel access token from the LINE Developers Console. Used to authenticate all Messaging API calls (sending messages, getting user profiles, etc.). |
-| `channel_secret` | string | Yes | The channel secret from the LINE Developers Console. Used to validate the signature of incoming webhook requests to ensure they originate from LINE's servers. |
-| `allowed_user_ids` | list | No | If set, only messages from these LINE user IDs are processed; messages from other users are ignored. |
-| `allowed_group_ids` | list | No | If set, only group messages from these LINE group IDs are processed; messages from other groups are ignored. |
+| `channel_secret` | string | Yes | The channel secret from the LINE Developers Console. |
+| `allowed_user_ids` | list | Yes (to enable) | LINE user IDs the connector is allowed to work with. `allowed_user_ids` is required; `allowed_group_ids` alone does not satisfy the requirement. |
+| `allowed_group_ids` | list | No | LINE group IDs the connector is allowed to work with. |
 
 ## Capabilities
 
@@ -112,31 +110,25 @@ The LINE connector supports the following capabilities:
 |------------|-----------|-------|
 | Typing indicator | No | The connector does not send a loading/typing indicator while the agent processes a response |
 | Reactions | No | LINE does not support bot reactions on messages via the Messaging API |
-| Rich text | Partial | The connector declares rich-text support and uses LINE Flex Messages for permission prompts. Regular agent replies are sent as plain text messages; Markdown is not converted to Flex layouts. |
-| File upload | No | The connector sends text and quick-reply buttons only; it does not send images, video, audio, or files. (Incoming media messages, if inbound support is added later, are surfaced to the agent as a text placeholder such as `[Image]`.) |
+| Rich text | No | Text is sent as plain text messages; Markdown is not converted |
+| File upload | No | The `send_sticker` and `send_image` actions can send stickers and images. Video, audio and files are not supported. |
 | Buttons | Yes | Buttons attached to an outgoing message are rendered as LINE quick-reply items (up to 13 per message); labels are truncated to 20 characters |
 | Threads | No | LINE does not have a thread model |
 
 **Message Length Limit:** 5,000 characters per text message. Messages exceeding this limit are automatically split into multiple text messages. LINE also limits the number of message objects in a single API call to 5 "bubbles".
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a LINE chat get two MCP tools instead of one tool per feature:
+LINE has 7 actions: send text, sticker and image messages, get user profile, get group summary, leave a group, and get message quota.
 
-- **`line_actions`** — discovery. Returns the action catalog (7 actions: send text/sticker/image messages, get user profile, get group summary, leave a group, get message quota), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`line_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
-
-Safety rails:
-
-- Message-level actions only work on the session's bound chat and the connector's `allowed_user_ids` / `allowed_group_ids`.
-- The **destructive** action (`leave_group`) posts a Flex Message **Approve/Deny** prompt and only runs after a human taps Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+Your agent does not get these actions in its sessions, because no LINE chat ever reaches it. You can run them from an [automation](/docs/features/automations) with a **Connector Action** step. Actions run this way, including `leave_group`, do not ask for approval.
 
 ## Troubleshooting
 
 ### Bot does not respond to messages
 
-- **Inbound delivery is not yet wired up.** AI Shuffle does not currently expose a LINE webhook route, so messages a user sends to the bot are not delivered to the agent. The connector can send (push) messages but cannot receive them yet. See the note in the Overview.
-- **Auto-reply is intercepting messages.** If the LINE Official Account has auto-reply enabled, it may be responding on its own. Disable auto-reply in the LINE Official Account Manager (Step 6).
+- **LINE messages are not received.** AI Shuffle has no LINE webhook URL, so messages users send to the bot never reach your agent. The connector can send (push) messages only. See the note in the Overview.
+- **Auto-reply is answering instead.** If the LINE Official Account has auto-reply enabled, it responds on its own. Disable auto-reply in the LINE Official Account Manager (Step 6).
 
 ### Connector fails to connect or send
 
@@ -145,7 +137,7 @@ Safety rails:
 
 ### Messages from the bot appear as plain text (no formatting)
 
-- LINE does not support Markdown natively, and the connector sends regular agent replies as plain text messages. Rich formatting on LINE requires Flex Messages, which the connector only uses for permission prompts, so Markdown in agent responses renders as plain text.
+- LINE does not render Markdown, and the connector sends text as plain text messages, so Markdown shows up as raw characters.
 
 ### "Exceeds the rate limit" errors
 

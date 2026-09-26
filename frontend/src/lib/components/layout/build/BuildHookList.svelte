@@ -10,7 +10,7 @@
 	import type { Hook, PluginHookInfo, HookTestResult } from '$lib/api/hooks';
 	import Banner from '$lib/components/Banner.svelte';
 	import {
-		Search, Plus, Terminal, Globe, MessageSquare, Zap, Play, Trash2,
+		Search, Plus, Terminal, Globe, Zap, Play, Trash2,
 		AlertCircle, X, Loader2, FileCode
 	} from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
@@ -139,14 +139,12 @@
 	// Icon by hook delivery type.
 	function typeIcon(t: string) {
 		if (t === 'webhook') return Globe;
-		if (t === 'message') return MessageSquare;
 		if (t === 'bash') return Terminal;
 		return Zap;
 	}
 	function detailText(h: Hook): string {
 		if (h.hook_type === 'bash') return h.command ?? '';
 		if (h.hook_type === 'webhook') return h.url ?? '';
-		if (h.hook_type === 'message') return h.message_template ?? '';
 		return '';
 	}
 

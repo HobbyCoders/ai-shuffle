@@ -42,13 +42,6 @@ The old Google/Meshy integration-card instructions and retexture3D, rig3D,
 animate3D, getTask3D, textToSpeech and speechToText tool examples no longer describe
 this tool surface. Voice input/read-aloud are separate app features.
 
-## Compatibility modules
-
-`client.ts` and the `ai-collaborate/` / `providers/chat/` modules remain for existing
-external imports. They are not dispatched by the app's media worker. Their separate
-credentials and APIs are not configured by the fal.ai media setup. Prefer the app's
-current provider/agent mechanisms for new integrations.
-
 ## Scripts
 
 `scripts/verify-network-vectors.mjs` checks the worker network's crypto test

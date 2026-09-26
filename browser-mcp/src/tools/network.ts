@@ -11,6 +11,7 @@
  */
 
 import type { Session } from "../session.js";
+import { raceWithTimeout } from "../session.js";
 import { jsonResult, errorResult, capText, type McpToolResult } from "./result.js";
 import { compileMatcher } from "../match.js";
 
@@ -23,6 +24,22 @@ export const NETWORK_BODY_MAX_CHARS = 20000;
  * Bodies with no declared length still fall through to the read-then-cap path.
  */
 export const NETWORK_BODY_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * Ceiling for reading a recorded body. `response.text()` waits for the body to
+ * finish, which an event stream or a long poll never does; unbounded, one such
+ * request id would hold the session's queue (and every later tool call) forever.
+ */
+export const NETWORK_BODY_TIMEOUT_MS = 5000;
+const BODY_TIMEOUT_MESSAGE = "body read timed out";
+
+/**
+ * A body sent without a content-type is read as text; a NUL in its first
+ * characters says it is binary (images, archives, wasm), which would reach the
+ * model as mojibake instead of the non-text note typed bodies get.
+ */
+function looksBinary(raw: string): boolean {
+  return raw.slice(0, 4096).includes("\u0000");
+}
 
 export interface NetworkInput {
   url_pattern?: string;
@@ -88,10 +105,28 @@ export async function runNetwork(session: Session, input: NetworkInput): Promise
 
     let raw: string;
     try {
-      raw = await entry.response.text();
+      raw = await raceWithTimeout(entry.response.text(), NETWORK_BODY_TIMEOUT_MS, BODY_TIMEOUT_MESSAGE);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (msg === BODY_TIMEOUT_MESSAGE) {
+        return errorResult(
+          `response body not complete after ${NETWORK_BODY_TIMEOUT_MS / 1000}s — the response is ` +
+            "still streaming (an event stream or long poll) or stalled; its body cannot be read here",
+          { id: entry.id, url: entry.url, mimeType: contentType || null },
+        );
+      }
       return errorResult(`response body unavailable (${msg}) — it may have been evicted after navigation`);
+    }
+
+    if (!contentType && looksBinary(raw)) {
+      return jsonResult({
+        ok: true,
+        id: entry.id,
+        url: entry.url,
+        note: "non-text body not returned",
+        mimeType: null,
+        size: declaredSize,
+      });
     }
 
     const { text, truncated, fullChars } = capText(raw, NETWORK_BODY_MAX_CHARS);

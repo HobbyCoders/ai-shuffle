@@ -27,7 +27,7 @@
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
 	import { profiles } from '$lib/stores/app-data.svelte';
-	import { anyCredential } from '$lib/stores/auth.svelte';
+	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
@@ -206,11 +206,12 @@
 		const observe = () => composerSuggestion.observe({
 			sessionId: session.sessionId, mode: session.mode, enabled,
 			turnId: session.liveTurnId, streaming: session.isStreaming,
-			blocked: hasComposerDraft(session.draft) || !!session.error
+			blocked: hasComposerDraft(session.draft) || !!session.error,
+			connected: session.wsConnected
 		});
 		const stopSession = activeSession.subscribe(value => { session = value; observe(); });
 		const stopPrefs = chatPreferences.subscribe(value => { enabled = value.suggestNextResponse; observe(); });
-		return () => { stopSession(); stopPrefs(); composerSuggestion.reset(); };
+		return () => { stopSession(); stopPrefs(); composerSuggestion.detach(); };
 	});
 	$effect(() => {
 		if (hasComposerDraft(inputValue) || uploadedFiles.length || isUploading) composerSuggestion.invalidate();
@@ -811,9 +812,7 @@
 		isUploading = true;
 		try {
 			for (const file of Array.from(files)) {
-				console.debug(`[Upload] Uploading file: "${file.name}" (${file.size} bytes)`);
 				const result = await uploadComposerFile(file);
-				console.debug(`[Upload] Response for "${file.name}": filename="${result.filename}", path="${result.path}"`);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
 				}
@@ -982,6 +981,12 @@
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
 		{/if}
 
+		<!-- Agents cannot start here yet (no license, or no credential for the
+		     chosen Claude Code mode): say what is missing instead of failing later. -->
+		{#if $agentGate && !$agentGate.ready && $agentGate.reason && (!$anyCredential || $agentGate.license_allows_runs === false)}
+			<Banner severity="warning" message={$agentGate.reason} />
+		{/if}
+
 		<!-- Worktree Error Message -->
 		{#if $activeSession.worktreeError}
 			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
@@ -1051,7 +1056,6 @@
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
-								composerSuggestion.invalidate();
 								inputValue = text;
 								// Also update plain text for autocomplete (without chip @path serialization)
 								plainTextValue = editorRef?.getText() ?? '';

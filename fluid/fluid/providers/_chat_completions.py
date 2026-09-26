@@ -11,6 +11,7 @@ provider's ``serialize.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -33,21 +34,28 @@ from fluid.messages import (
     UnknownBlock,
 )
 from fluid.providers._retry import (
-    RETRIABLE_STATUSES,
+    SYMBOLIC_CODE_STATUS,
     RetryPolicy,
+    billing_error_code,
     coerce_status,
     is_retriable_status,
 )
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
     DEFAULT_STREAM_DEADLINE_S,
     StreamDiagnostics,
     StreamDeadlineExceeded,
     deadline_error_payload,
+    first_byte_note,
     is_closed_client_error,
+    billing_summary,
     is_usable_client,
+    open_stream,
+    provider_error_summary,
+    refusal_payload,
 )
-from fluid.providers.base import StreamChunk
+from fluid.providers.base import StreamChunk, flatten_system
 
 log = logging.getLogger(__name__)
 
@@ -56,16 +64,9 @@ log = logging.getLogger(__name__)
 
 def system_message(system: Any) -> dict[str, Any] | None:
     """Flatten fluid's ``system`` (str or block list) into one system message."""
-    if system is None:
+    text = flatten_system(system)
+    if text is None:
         return None
-    if isinstance(system, str):
-        text = system
-    elif isinstance(system, list):
-        text = "".join(
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
-        )
-    else:
-        text = str(system)
     return {"role": "system", "content": text}
 
 
@@ -262,6 +263,8 @@ class ChatCompletionsNormalizer:
         self._order: list[str] = []
         self._next_index = 0
         self._stop_reason = "end_turn"
+        # A choice carried a finish_reason: the model said it was done.
+        self._finish_seen = False
         self._content_filtered = False
         self._response_meta: dict[str, Any] = {}
         # Tool calls keyed without an ``index`` (some servers omit it): the
@@ -304,48 +307,14 @@ class ChatCompletionsNormalizer:
             )
         ]
 
-    def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
-        data = data or {}
-        for source, target in (
-            ("id", "generation_id"), ("model", "effective_model"),
-            ("provider", "effective_provider"),
-        ):
-            if isinstance(data.get(source), str) and data[source]:
-                self._response_meta[target] = data[source]
+    def _consume_choices(
+        self, choices: list[Any], *, failed: bool = False
+    ) -> list[StreamChunk]:
+        """Content deltas and finish state of one chunk's ``choices``. A
+        chunk that reports a failure still delivers the deltas it carries,
+        but its finish_reason ("error") does not finish the reply."""
         out: list[StreamChunk] = []
-        if not self._started:
-            self._started = True
-            out.append(StreamChunk("message_start", {"usage": {}, "message": {}}))
-
-        # OpenRouter (and some proxies) answer upstream failures and rate
-        # limits with HTTP 200 and a chunk carrying only ``{"error": ...}``.
-        # Without this the turn would end silently with zero usage.
-        err = data.get("error")
-        if err and not data.get("choices"):
-            if isinstance(err, dict):
-                message = str(err.get("message") or err)
-                code = err.get("code")
-                if coerce_status(code) is None and err.get("status") is not None:
-                    code = err["status"]
-            else:
-                message, code = str(err), None
-            self.errored = True
-            # The embedded code decides retriability, exactly as a non-200
-            # status would: a Cloudflare 520 from the upstream provider is a
-            # blip worth another attempt, an auth or validation failure is not.
-            out.append(
-                StreamChunk(
-                    "error",
-                    {
-                        "status": code,
-                        "message": message[:2000],
-                        "retriable": is_retriable_status(code),
-                    },
-                )
-            )
-            return out
-
-        for choice in data.get("choices") or []:
+        for choice in choices:
             delta = choice.get("delta") or {}
             content = delta.get("content")
             if content:
@@ -382,12 +351,79 @@ class ChatCompletionsNormalizer:
                             {"index": self._index_of[key], "partial_json": args},
                         )
                     )
-            if choice.get("finish_reason"):
+            if choice.get("finish_reason") and not failed:
+                self._finish_seen = True
                 self._stop_reason = map_stop_reason(choice["finish_reason"])
                 if choice["finish_reason"] == "content_filter":
                     self._content_filtered = True
             if choice.get("native_finish_reason"):
                 self.native_stop_reason = str(choice["native_finish_reason"])
+        return out
+
+    @staticmethod
+    def _error_payload(err: Any) -> dict[str, Any]:
+        """The ``error`` chunk for an in-stream error object (or none)."""
+        if isinstance(err, dict):
+            message = str(err.get("message") or err)
+            code = err.get("code")
+            if coerce_status(code) is None and err.get("status") is not None:
+                code = err["status"]
+        elif err:
+            message, code = str(err), None
+        else:
+            message, code = "the provider ended the stream with an error", None
+        # The embedded code decides retriability, exactly as a non-200 status
+        # would: a Cloudflare 520 from the upstream provider is a blip worth
+        # another attempt, an auth or validation failure is not. A symbolic
+        # code with an unambiguous HTTP twin ("server_error") reads as that
+        # status; a billing code is a 402 whatever status came with it.
+        status = coerce_status(code)
+        if status is None and isinstance(code, str):
+            status = SYMBOLIC_CODE_STATUS.get(code)
+        summary = provider_error_summary(message)
+        billing = billing_error_code(err)
+        if billing is not None:
+            status = 402
+            summary = billing_summary(billing, summary)
+        return {
+            # A symbolic code ("rate_limit_exceeded") is kept for logs;
+            # ``status`` is only ever an HTTP status.
+            "status": status,
+            "code": code,
+            "message": message[:2000],
+            "provider_message": summary,
+            "retriable": is_retriable_status(status),
+        }
+
+    def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
+        data = data or {}
+        for source, target in (
+            ("id", "generation_id"), ("model", "effective_model"),
+            ("provider", "effective_provider"),
+        ):
+            if isinstance(data.get(source), str) and data[source]:
+                self._response_meta[target] = data[source]
+        out: list[StreamChunk] = []
+        if not self._started:
+            self._started = True
+            out.append(StreamChunk("message_start", {"usage": {}, "message": {}}))
+
+        # OpenRouter (and some proxies) answer upstream failures and rate
+        # limits with HTTP 200 and a chunk carrying ``{"error": ...}``. Before
+        # any content it comes alone; a failure after streaming began comes as
+        # OpenRouter documents it, next to ``choices`` whose finish_reason is
+        # "error". Either way the reply is not finished: without this the
+        # turn would end as a normal answer holding the cut-off text.
+        err = data.get("error")
+        choices = data.get("choices") or []
+        failed = bool(err) or any(
+            isinstance(c, dict) and c.get("finish_reason") == "error" for c in choices
+        )
+        out += self._consume_choices(choices, failed=failed)
+        if failed:
+            self.errored = True
+            out.append(StreamChunk("error", self._error_payload(err)))
+            return out
 
         # The terminal chunk (include_usage) carries usage with empty choices —
         # close every open block, then emit usage + message_stop.
@@ -440,6 +476,35 @@ class ChatCompletionsNormalizer:
             self.finished = True
         return out
 
+    def finish_without_usage(self) -> list[StreamChunk]:
+        """Terminal chunks for a stream that ended on ``[DONE]`` after a
+        ``finish_reason`` but never sent the ``include_usage`` chunk.
+
+        Servers that ignore ``stream_options`` (some local and self-hosted
+        OpenAI-compatible builds) end every reply this way. The reply is
+        complete, the usage is just unknown, so it closes like any other
+        response with an empty usage object. Empty when the stream is not in
+        that state; also empty when the provider gave its own upstream verdict
+        (``native_finish_reason``) or a content filter fired, which keep the
+        truncated-stream error.
+        """
+        if (
+            self.finished or self.errored or not self._finish_seen
+            or self.native_stop_reason is not None or self._content_filtered
+        ):
+            return []
+        out = [
+            StreamChunk("block_stop", {"index": self._index_of[key]})
+            for key in self._order
+        ]
+        usage: dict[str, Any] = {}
+        if self._response_meta:
+            usage["provider_response"] = dict(self._response_meta)
+        out.append(StreamChunk("usage", {"usage": usage, "stop_reason": self._stop_reason}))
+        out.append(StreamChunk("message_stop", {}))
+        self.finished = True
+        return out
+
 
 # ─── streaming POST loop (shared by OpenRouter + local clients) ──────────────
 
@@ -447,7 +512,9 @@ class ChatCompletionsNormalizer:
 # A dead upstream replica can answer 200 and then emit nothing but SSE keepalive
 # comments (": OPENROUTER PROCESSING") indefinitely. Deadline the FIRST data
 # event so the engine's empty-completion retry gets a chance to route around it
-# instead of the caller staring at dead air.
+# instead of the caller staring at dead air. It applies after the headers
+# whatever ``first_byte_timeout`` says; the first-byte budget (headers plus the
+# first data event) can only shorten that wait, never lengthen it.
 FIRST_DATA_TIMEOUT = 30.0
 
 
@@ -461,6 +528,7 @@ async def stream_chat_completions(
     retry: RetryPolicy,
     track_provider_requests: bool = False,
     stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+    first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
     """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks.
 
@@ -470,6 +538,13 @@ async def stream_chat_completions(
     has been closed by its owner — a client is created and closed per call.
     ``stream_deadline`` bounds one whole call in wall-clock seconds, above the
     per-read ``timeout``; None disables it.
+
+    ``first_byte_timeout`` bounds the wait for the response headers plus the
+    first data event (None or 0 disables it), as on the Anthropic client:
+    headers that never arrive raise ``FirstByteTimeout``, a pre-content
+    transport failure retried on ``retry.transport_retries``; a 200 followed
+    by silence is reported as a truncated stream (the engine's empty-completion
+    retry decides whether to re-send).
     """
     injected = http_client
     owned: httpx.AsyncClient | None = None
@@ -518,9 +593,13 @@ async def stream_chat_completions(
             )
             try:
                 trace_request("chat_completions", body)
-                async with client.stream(
-                    "POST", url, json=body, headers=request_headers
-                ) as resp:
+                sent_at = time.monotonic()
+                async with contextlib.AsyncExitStack() as scope:
+                    resp = await open_stream(
+                        scope, client, "POST", url,
+                        first_byte_timeout=first_byte_timeout,
+                        json=body, headers=request_headers,
+                    )
                     diagnostics.received_headers(resp)
                     attempt_meta = {
                         "attempt": attempt + 1,
@@ -549,26 +628,45 @@ async def stream_chat_completions(
                         )
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
-                        retriable = resp.status_code in RETRIABLE_STATUSES
-                        if retriable and attempt < retry.max_retries:
+                        refusal = refusal_payload(resp.status_code, text)
+                        if refusal["retriable"] and attempt < retry.max_retries:
                             await asyncio.sleep(
                                 retry.delay(attempt, resp.headers.get("retry-after"))
                             )
                             attempt += 1
                             continue
-                        yield StreamChunk(
-                            "error",
-                            with_request_evidence({
-                                "status": resp.status_code,
-                                "message": text[:2000],
-                                "retriable": retriable,
-                            }),
-                        )
+                        yield StreamChunk("error", with_request_evidence(refusal))
                         return
                     normalizer = ChatCompletionsNormalizer()
-                    events = sse_events(diagnostics.lines()).__aiter__()
+                    # ``[DONE]`` is the server's own end-of-stream sentinel.
+                    # sse_events drops it (it is not JSON), so it is noted on
+                    # the way through: a stream that reached it was not cut.
+                    done_seen = [False]
+
+                    async def _lines(
+                        source: AsyncIterator[str] = diagnostics.lines(),
+                        seen: list[bool] = done_seen,
+                    ) -> AsyncIterator[str]:
+                        async for line in source:
+                            if line.strip().replace(" ", "") == "data:[DONE]":
+                                seen[0] = True
+                            yield line
+
+                    events = sse_events(_lines()).__aiter__()
                     starved = False
                     awaiting_first = True
+                    # The first-data wait: the fixed watchdog, cut to what the
+                    # headers left of the first-byte budget (never less than
+                    # a sliver, so a slow header does not fail the read).
+                    first_data_wait = FIRST_DATA_TIMEOUT
+                    first_byte_bound = False
+                    if first_byte_timeout and first_byte_timeout > 0:
+                        left = max(
+                            first_byte_timeout - (time.monotonic() - sent_at), 0.05
+                        )
+                        if left < first_data_wait:
+                            first_data_wait = left
+                            first_byte_bound = True
                     # message_start is held until the first chunk after it,
                     # so an error the provider sends in place of content can
                     # be retried without the engine having seen a message
@@ -585,7 +683,7 @@ async def stream_chat_completions(
                         # it touches. sse_events drops comment lines, so a
                         # keepalive heartbeat satisfies neither.
                         budget: float | None = (
-                            FIRST_DATA_TIMEOUT if awaiting_first else None
+                            first_data_wait if awaiting_first else None
                         )
                         # Which clock owns the budget decides how a timeout is
                         # reported. Comparing the wall clock afterwards is not
@@ -652,6 +750,25 @@ async def stream_chat_completions(
                         await asyncio.sleep(retry.delay(attempt))
                         attempt += 1
                         continue
+                    if done_seen[0] and not starved and not overran:
+                        closing = normalizer.finish_without_usage()
+                        if closing and pending_start is not None:
+                            yielded = True
+                            yield pending_start
+                            pending_start = None
+                        for chunk in closing:
+                            if chunk.kind == "usage" and track_provider_requests:
+                                payload = dict(chunk.payload)
+                                payload["usage"] = {
+                                    **payload["usage"],
+                                    "provider_requests": {
+                                        "logical_call_id": logical_call_id,
+                                        "attempts": list(attempts),
+                                    },
+                                }
+                                chunk = StreamChunk("usage", payload)
+                            yielded = True
+                            yield chunk
                     if pending_start is not None:
                         yielded = True
                         yield pending_start
@@ -678,7 +795,9 @@ async def stream_chat_completions(
                             "stream ended before the provider sent "
                             "a terminal usage chunk (empty or truncated response)"
                         )
-                        if starved:
+                        if starved and first_byte_bound:
+                            message += first_byte_note(float(first_byte_timeout or 0))
+                        elif starved:
                             message += f" (no data within {FIRST_DATA_TIMEOUT:g}s)"
                         truncated: dict[str, Any] = {
                             "message": message,

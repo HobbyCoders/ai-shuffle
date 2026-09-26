@@ -8,8 +8,8 @@ Matching is a cascade. An exact match wins; failing that, two shapes of
 model transcription error are corrected rather than refused — a copied
 ``lineno<TAB>`` display prefix from Read, and a uniform leading-whitespace
 offset (typically one extra tab, again from Read's separator). Anything else
-fails with a diagnostic that names the line and the difference, because the
-old terse "old_string not found in file" left models guessing.
+fails with a diagnostic that names the line and the difference, because a
+terse "old_string not found in file" leaves models guessing.
 
 A Python target gets one more gate before the bytes land: the result must
 still parse. Edit tells the model not to Read the file back, so a botched
@@ -110,9 +110,8 @@ SPEC = ToolSpec(
 # rendered line back into old_string.
 _LINE_PREFIX = re.compile(r"^\d+\t")
 
-# Lands as the result's FIRST line, not a trailing aside. A twelve-repair
-# session shows the aside being skimmed past: the same indented triple-quoted
-# old_string kept coming back, and three of those attempts failed outright.
+# Lands as the result's FIRST line, not a trailing aside, which models skim
+# past and then repeat the same mis-indented old_string.
 _FALLBACK_NOTE = (
     "NOTE: old_string did not match the file as written — it matched only "
     "after correcting a uniform indentation offset / a copied line-number "
@@ -403,12 +402,10 @@ def _result(path: Path, n: int, note: str) -> ToolOutcome:
 
 # ─── read-window gate ────────────────────────────────────────────────────────
 # ``ctx.read_files`` proves the file was Read; the windows prove WHICH LINES
-# were. An audited code-mode cell ran ``_ = Read(path, limit=5)`` to unlock the
-# gate and then edited from memory; the edit missed, and the turn went on a
-# diagnosis a real Read would have made unnecessary. So the lines an edit
-# replaces must fall inside a delivered window — where windows are on record
-# at all (a resumed history from before they existed still passes on the
-# file-level ledger alone).
+# were (see :mod:`fluid.tools.read_window`). The lines an edit replaces must
+# fall inside a delivered window — where windows are on record at all (a
+# resumed history from before they existed still passes on the file-level
+# ledger alone).
 
 
 def _line_count(text: str) -> int:
@@ -504,6 +501,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     content, newline = read_text_preserving(path)
     old = old.replace("\r\n", "\n")
     new = new.replace("\r\n", "\n")
+    if not old and content:
+        # "" occurs between every pair of characters: with replace_all it
+        # would splice new_string through the whole file. An empty file is
+        # the one place an empty old_string has a meaning (fill it).
+        return ToolOutcome(
+            text=(
+                "old_string is empty — Edit replaces existing text, so quote "
+                "the lines to change (use Write to replace a whole file)."
+            ),
+            is_error=True,
+        )
 
     # 1. Exact match.
     count = content.count(old)
@@ -558,10 +566,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     old_lines = old.split("\n")
     new_lines = new.split("\n")
     # A triple-quoted old_string ends at a newline, so ``split`` leaves a
-    # phantom "" element that matches no real file line — which used to fail
-    # _find_runs' body check and kill this recovery even when a uniform
-    # indentation drift was the only thing wrong. Dropped from both sides
-    # together, so the replacement keeps the same trailing newline it had.
+    # phantom "" element that matches no real file line and would fail
+    # _find_runs' body check even when a uniform indentation drift is the
+    # only thing wrong. Dropped from both sides together, so the replacement
+    # keeps the same trailing newline it had.
     if _ends_blank(old_lines) and _ends_blank(new_lines):
         old_lines, new_lines = old_lines[:-1], new_lines[:-1]
     runs = _find_runs(file_lines, old_lines)
@@ -588,15 +596,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return _result(path, len(chosen), _FALLBACK_NOTE)
 
     # 4. No match — say why.
-    # The phantom trailing element goes here too: reported as content it read
-    # as `your old_string has ""` and sent the model hunting for a difference
-    # that was really just indentation.
+    # The phantom trailing element goes here too: reported as content it
+    # reads as `your old_string has ""` and hides an indentation difference.
     diag_lines = _strip_trailing_blank(
         (stripped_old if stripped_old is not None else old).split("\n")
     )
-    # Soft in code mode (round 9): "old_string not found" is a result the
-    # cell can read and react to; aborting the cell lost every later call in
-    # it. The text says the edit did NOT land; nothing on disk changed.
+    # Soft in code mode: "old_string not found" is a result the cell can read
+    # and react to, where aborting the cell would lose every later call in it.
+    # The text says the edit did NOT land; nothing on disk changed.
     return ToolOutcome(
         text="Edit NOT applied — " + _diagnose(file_lines, diag_lines),
         is_error=True, soft_error=True,

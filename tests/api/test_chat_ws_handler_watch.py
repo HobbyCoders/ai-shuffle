@@ -11,9 +11,7 @@ tests/api/test_ws_closure_characterization.py (section H):
 * happy path: sync_engine registration + current_session_id binding,
 * queued-message restore frame (``sync``/``queue_updated``) only when nonempty,
 * sibling sockets sharing a device ID each register and restore their queue;
-  re-watching the same socket is idempotent in the sync engine,
-* (V2 A7: the headless websocket=None watcher-guard test was removed with
-  headless_query_runner.py; the guard itself remains in the class.)
+  re-watching the same socket is idempotent in the sync engine.
 
 Part B — deferred-permissions shapes where the CLASS is the intended winner
 (plan section "Divergences where the class is the intended winner"). These pin
@@ -408,12 +406,6 @@ async def test_watch_session_same_ws_rewatch_proceeds():
     assert _queue_frames(h.ws), "same-socket re-watch still restores the queue"
 
 
-# NOTE (V2 A7): the headless-never-watches test is GONE — A7 deleted
-# headless_query_runner.py, so no ChatWebSocketHandler is built with
-# websocket=None. The ``self.websocket is None`` early-return guard in
-# handle_watch_session remains in the class.
-
-
 # ═══ B1. get_pending_permissions — class shape is canonical ════════════════════
 #
 # Plan: the closure replies with key ``requests``; the CLASS replies with
@@ -453,11 +445,13 @@ async def test_get_pending_permissions_carries_deferred_even_when_empty():
     assert frame["deferred"] == []
 
 
-async def test_get_pending_permissions_without_session_is_silent():
+async def test_get_pending_permissions_without_session_replies_empty():
     with _HandlerHarness() as h:
         await h.make_handler().handle_get_pending_permissions({})
 
-    assert h.ws.sent == []
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions", "session_id": None, "pending": [], "deferred": [],
+    }]
     h.perm.get_pending_requests.assert_not_called()
 
 

@@ -321,7 +321,7 @@ def test_user_image_estimates_flat_and_is_consumed_after_one_call() -> None:
 
 async def test_note_add_recites_and_persists(tmp_path) -> None:
     ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
-    first = await note_handler({"action": "add", "text": "step 1: build"}, ctx)
+    await note_handler({"action": "add", "text": "step 1: build"}, ctx)
     second = await note_handler({"action": "add", "text": "step 2: ship"}, ctx)
     assert "step 1: build" in second.text and "step 2: ship" in second.text
 

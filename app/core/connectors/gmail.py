@@ -201,7 +201,21 @@ class GmailConnector(BaseConnector):
         mime_msg["References"] = message_id
 
         raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode("ascii")
-        return {"raw": raw, "threadId": thread_id}
+        body: Dict[str, Any] = {"raw": raw}
+        if thread_id:
+            body["threadId"] = thread_id
+        return body
+
+    @staticmethod
+    def _gmail_thread_id(platform_chat_id: str) -> str:
+        """The Gmail thread to send in, or "" when the chat id is an address.
+
+        ``platform_chat_id`` is a thread id for threaded chats and an e-mail
+        address for direct sends; Gmail rejects an address as ``threadId``.
+        """
+        if platform_chat_id and "@" not in platform_chat_id:
+            return platform_chat_id
+        return ""
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -289,6 +303,7 @@ class GmailConnector(BaseConnector):
                 try:
                     await self._check_for_new_messages()
                     consecutive_failures = 0
+                    await self._poll_recovered()
                 except Exception as exc:
                     consecutive_failures += 1
                     logger.exception(
@@ -311,6 +326,20 @@ class GmailConnector(BaseConnector):
             self._status = ConnectorStatus.ERROR
             self._status_message = str(exc)
             logger.exception("GmailConnector %s polling fatal error", self.connector_id)
+
+    async def _poll_recovered(self) -> None:
+        """Leave ERROR once a poll succeeds again after repeated failures."""
+        if self._status != ConnectorStatus.ERROR:
+            return
+        self._status = ConnectorStatus.CONNECTED
+        self._status_message = None
+        logger.info("GmailConnector %s recovered: polling succeeded again", self.connector_id)
+        try:
+            from app.db import database
+            from app.db.async_database import run_sync
+            await run_sync(database.update_connector_status, self.connector_id, ConnectorStatus.CONNECTED.value)
+        except Exception:
+            logger.debug("Failed to update DB status", exc_info=True)
 
     async def _check_for_new_messages(self) -> None:
         """List unread messages and process any new ones."""
@@ -381,7 +410,8 @@ class GmailConnector(BaseConnector):
             return False
 
         try:
-            thread_id = message.platform_chat_id
+            chat_id = message.platform_chat_id
+            thread_id = self._gmail_thread_id(chat_id)
             text = message.text
 
             # --- Reply mode ---
@@ -396,6 +426,7 @@ class GmailConnector(BaseConnector):
                     orig_from = self._get_header(orig_headers, "From")
                     orig_subject = self._get_header(orig_headers, "Subject")
                     orig_message_id = self._get_header(orig_headers, "Message-ID")
+                    thread_id = original.get("threadId") or thread_id
 
                     _, to_email = self._parse_sender(orig_from)
                 except Exception as exc:
@@ -403,7 +434,7 @@ class GmailConnector(BaseConnector):
                         "GmailConnector: could not fetch original message for reply: %s",
                         exc,
                     )
-                    to_email = thread_id
+                    to_email = chat_id
                     orig_subject = ""
                     orig_message_id = ""
 
@@ -426,7 +457,9 @@ class GmailConnector(BaseConnector):
                         raw = base64.urlsafe_b64encode(
                             mime_msg.as_bytes()
                         ).decode("ascii")
-                        body = {"raw": raw, "threadId": thread_id}
+                        body = {"raw": raw}
+                        if thread_id:
+                            body["threadId"] = thread_id
 
                     self._service.users().messages().send(
                         userId="me", body=body
@@ -440,8 +473,11 @@ class GmailConnector(BaseConnector):
             subject: str = ""
             email_body: str = text
 
+            # To and Subject are single header lines; only the body may span
+            # lines (a greedy DOTALL match would fold a body's blank line
+            # into the subject).
             match = re.match(
-                r"^To:\s*(.+)\nSubject:\s*(.*)\n\n(.*)",
+                r"^To:[ \t]*([^\n]+)\nSubject:[ \t]*([^\n]*)\n\n(.*)",
                 text,
                 re.DOTALL,
             )
@@ -451,14 +487,14 @@ class GmailConnector(BaseConnector):
                 email_body = match.group(3)
             else:
                 # platform_chat_id might be an email address
-                if "@" in thread_id:
-                    to_addr = thread_id
+                if "@" in chat_id:
+                    to_addr = chat_id
                     subject = ""
                 else:
                     logger.error(
                         "GmailConnector: cannot determine recipient from "
                         "platform_chat_id=%s and message text",
-                        thread_id,
+                        chat_id,
                     )
                     return False
 
@@ -472,8 +508,7 @@ class GmailConnector(BaseConnector):
                     mime_msg.as_bytes()
                 ).decode("ascii")
                 send_body: Dict[str, Any] = {"raw": raw}
-                # If thread_id looks like a Gmail thread ID, include it
-                if thread_id and "@" not in thread_id:
+                if thread_id:
                     send_body["threadId"] = thread_id
 
                 self._service.users().messages().send(

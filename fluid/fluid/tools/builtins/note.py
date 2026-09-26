@@ -150,9 +150,9 @@ def _outcome(path: Path, prefix: str = "") -> ToolOutcome:
     return ToolOutcome(text=f"{prefix}\n{body}" if prefix else body)
 
 
-# ``remove`` used to drop every note *containing* the text, which turned one
-# imprecise call into a deleted checklist. It matches whole notes now, and a
-# miss lists the near ones instead of guessing.
+# ``remove`` matches whole notes, not every note *containing* the text, so one
+# imprecise call cannot delete a checklist; a miss lists the near ones instead
+# of guessing.
 _CANDIDATES_SHOWN = 5
 
 
@@ -169,8 +169,7 @@ def _no_match(needles: list[str], existing: list[str]) -> ToolOutcome:
 
     ``soft_error`` because removing a note that is already gone is an
     idempotent no-op, not a failed step: on the code-mode surface a hard error
-    raises inside the cell and throws away every call after it — one audited
-    session lost a 35s passing test run to exactly this.
+    raises inside the cell and throws away every call after it.
     """
     wanted = _quoted(needles)
     near = [
@@ -223,8 +222,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         except OSError as exc:
             return ToolOutcome(text=f"failed to write notes: {exc}", is_error=True)
     elif action == "remove":
-        # Same batch forms as add: retiring a finished checklist used to cost
-        # one call per note.
+        # Same batch forms as add, so retiring a finished checklist is one call.
         needles = _notes_from_payload(input)
         if not needles:
             return ToolOutcome(

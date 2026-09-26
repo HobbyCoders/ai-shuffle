@@ -464,7 +464,7 @@ export function isRemovedDeviceSession(s: Session): boolean {
 }
 
 /** Internal worker/command sessions never belong in the sidebar navigator. */
-export function isSidebarSession(s: Session): boolean {
+function isSidebarSession(s: Session): boolean {
 	return !s.hidden;
 }
 

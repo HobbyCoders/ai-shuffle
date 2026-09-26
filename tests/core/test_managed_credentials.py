@@ -73,7 +73,6 @@ def test_cleared_process_keys_reconnect_and_check_phone_authorization_without_ad
     assert mobile_hub.get_binding()['active']
     encryption.clear_encryption_key()
     monkeypatch.setattr(encryption, '_key_salt', None)
-    assert encryption.init_encryption_from_env(database) is False
     # No process key cache exists: this reloads the persistent installation key.
     assert managed_connection._credentials() == ('connector-token' * 8, 'https://worker.example.com')
     assert conn.request.call_args.args[0:2] == ('POST', '/v1/servers/' + SERVER + '/connector')
@@ -271,7 +270,6 @@ settings = SimpleNamespace(effective_instance_id='this-install', effective_data_
 config.settings = managed_connection.settings = managed_credentials.settings = settings
 assert encryption._encryption_key is None and encryption._key_salt is None
 assert 'ADMIN_PASSWORD' not in os.environ
-assert encryption.init_encryption_from_env(database) is False
 database.get_system_setting = lambda key: state['stored'] if key == managed_credentials._setting_key() else None
 def setting_write(key, value):
     assert key == managed_connection._key() and value == ''

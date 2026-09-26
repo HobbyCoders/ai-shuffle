@@ -17,6 +17,7 @@ import pytest
 from app.core import checkout_manager
 from app.db import checkouts as checkouts_db
 from app.db import projects_v2
+from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
 
 RUNNER = "runnerA"
 
@@ -24,22 +25,6 @@ RUNNER = "runnerA"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    conn.execute("PRAGMA foreign_keys = OFF")
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
-
 
 @pytest.fixture
 def workspace_root(tmp_path, monkeypatch):
@@ -410,7 +395,6 @@ def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root
         if remnant == "nonempty":
             (dest / "keep.txt").write_text("do not remove", encoding="utf-8")
 
-    from app.db.sessions import latest_pr_number_for_branch
     from unittest.mock import patch
 
     with patch(
@@ -930,6 +914,59 @@ def test_branch_checkout_path_collision_guard_for_reserved_name(project, base_ch
     p = checkout_manager._branch_checkout_path(str(base_checkout), checkout_manager._BASE_DIR_NAME)
     assert p.name != checkout_manager._BASE_DIR_NAME
     assert p.name == f"{checkout_manager._BASE_DIR_NAME}-branch"
+
+
+def _commit_fluid_symlink(repo: Path, target: Path) -> None:
+    """Commit a ``.fluid`` symlink in *repo* that points at *target* (outside it)."""
+    target.mkdir(parents=True, exist_ok=True)
+    (repo / ".fluid").symlink_to(target, target_is_directory=True)
+    _git(repo, "add", ".fluid")
+    _git(repo, "commit", "-m", "add .fluid link")
+
+
+def test_branch_checkout_path_refuses_fluid_symlink_outside_base(tmp_path):
+    from app.core.worktree_manager import WorktreeError
+    repo = _make_base_repo(tmp_path)
+    outside = tmp_path / "outside"
+    _commit_fluid_symlink(repo, outside)
+
+    with pytest.raises(WorktreeError, match="outside the project checkout"):
+        checkout_manager._branch_checkout_path(str(repo), "feature-x")
+    assert list(outside.iterdir()) == []
+
+
+def test_ensure_checkout_refuses_fluid_symlink_outside_base(
+    project, base_checkout, tmp_path, workspace_root
+):
+    outside = tmp_path / "outside"
+    _commit_fluid_symlink(base_checkout, outside)
+
+    path = checkout_manager.ensure_checkout(
+        project, branch="feature-x", runner_id=RUNNER, create_new_branch=True
+    )
+
+    assert path is None
+    assert list(outside.iterdir()) == []  # git never materialized anything there
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="feature-x") is None
+
+
+@pytest.mark.parametrize("branch", ["", ".", ".."])
+def test_branch_checkout_path_refuses_degenerate_branch_names(tmp_path, branch):
+    from app.core.worktree_manager import WorktreeError
+    repo = _make_base_repo(tmp_path)
+    with pytest.raises(WorktreeError, match="Invalid branch name"):
+        checkout_manager._branch_checkout_path(str(repo), branch)
+
+
+@pytest.mark.parametrize("branch", [".", ".."])
+def test_ensure_checkout_refuses_degenerate_branch_names(
+    project, base_checkout, workspace_root, branch
+):
+    path = checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER, create_new_branch=True
+    )
+    assert path is None
+    assert not (base_checkout / ".fluid").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,8 @@ Key concepts:
 - **Multiple scopes:** USER (global), LOCAL (project root config), PROJECT (project-scoped config), and INSTALLED (per-project entries in `~/.claude.json`)
 - **Built-in servers:** AI Shuffle ships managed integrations (e.g. `browser`) that appear alongside configured servers
 - **Tool discovery:** MCP tools are automatically discovered and namespaced
-- **Admin-only management:** Creating, updating, deleting, and toggling servers requires admin privileges
+- **Owner-only management:** Creating, updating, deleting, and toggling servers requires the owner
+- **Secrets stay with the owner:** API keys and paired devices that are not the owner's can list servers, but environment and header values, URL credentials and secret-looking arguments read `********` (see [the API reference](/docs/api-reference/mcp#get-apiv1mcpservers))
 
 ## Server Types
 
@@ -49,6 +50,8 @@ Best for: remote services, shared team tools, cloud-hosted integrations.
 | `url`     | string | Server URL (e.g., `http://host:port/sse`) |
 | `headers` | dict   | HTTP headers (e.g., authorization)        |
 
+SSE servers currently work only in Claude Code sessions. Sessions on other providers skip them, so their tools are missing there. Prefer HTTP where the server offers it.
+
 ### HTTP
 
 Connects to a remote MCP server using standard HTTP request/response.
@@ -68,21 +71,21 @@ MCP servers can be configured at several levels:
 
 ### USER (Global)
 
-Available across all projects. Managed through the global MCP settings page. Only admins can add, update, or remove global servers.
+Available across all projects. Managed from **Build → MCP Servers**. Only the owner can add, update, or remove global servers.
 
 Use for: tools you want available everywhere, such as a database explorer or a documentation search server.
 
 ### LOCAL
 
-Configured at the project root level. Stored in the project's local configuration. Available when working within that specific project directory.
+Stored in `<project>/.claude/.mcp.json` and kept out of git. Available when working within that specific project directory. Project scopes are managed on the project's **MCP Servers** tab (**Projects**, then select the project).
 
 Use for: project-specific development tools, local database connections, test fixtures.
 
 ### PROJECT
 
-Scoped to a specific project in AI Shuffle's database. Similar to LOCAL but managed through the project settings rather than filesystem config files.
+Stored in the project's `.mcp.json` at the repository root, so it is shared with anyone who clones the repo.
 
-Use for: project-level integrations managed through the AI Shuffle UI.
+Use for: project-level integrations the whole team should get.
 
 ### INSTALLED
 
@@ -124,7 +127,7 @@ curl http://localhost:8000/api/v1/mcp/tools \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-To force a refresh from the Claude CLI cache:
+Tools are discovered live from each server and cached for 10 minutes. To bypass the cache:
 
 ```bash
 curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
@@ -241,7 +244,7 @@ The `scope` query parameter accepts `local`, `project`, `installed`, or `user`.
 
 #### Toggle a Project Server
 
-Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`):
+Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`). Built-in servers have no per-project setting: toggling one here changes the global setting.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}/toggle \

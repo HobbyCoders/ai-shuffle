@@ -50,20 +50,6 @@ def _signed_in(fake, worker):
     fake.servers["current"] = "server-" + worker.name
 
 
-def _set_pref(worker, key, value):
-    with worker.active():
-        from app.core import owner_auth
-        database.set_user_preference("admin", owner_auth.preference_identity(), key, value)
-        engine.scan_all()
-
-
-def _pref(worker, key):
-    with worker.active():
-        from app.core import owner_auth
-        row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
-        return row["value"] if row else None
-
-
 async def test_worker_rename_retries_registration_and_survives_restart(workers, fake, monkeypatch):
     a = workers("a")
     with a.active():

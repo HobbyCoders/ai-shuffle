@@ -228,6 +228,7 @@ class SpotifyConnector(BaseConnector):
                 try:
                     response = await self._api_get("/me/player")
                     consecutive_failures = 0
+                    await self._poll_recovered()
                     if response.status_code == 200:
                         data = response.json()
                         is_playing = data.get("is_playing", False)
@@ -305,6 +306,20 @@ class SpotifyConnector(BaseConnector):
         except asyncio.CancelledError:
             logger.info("SpotifyConnector %s polling cancelled", self.connector_id)
 
+    async def _poll_recovered(self) -> None:
+        """Leave ERROR once a poll succeeds again after repeated failures."""
+        if self._status != ConnectorStatus.ERROR:
+            return
+        self._status = ConnectorStatus.CONNECTED
+        self._status_message = None
+        logger.info("SpotifyConnector %s recovered: polling succeeded again", self.connector_id)
+        try:
+            from app.db import database
+            from app.db.async_database import run_sync
+            await run_sync(database.update_connector_status, self.connector_id, ConnectorStatus.CONNECTED.value)
+        except Exception:
+            logger.debug("Failed to update DB status", exc_info=True)
+
     # ------------------------------------------------------------------
     # Outgoing
     # ------------------------------------------------------------------
@@ -356,7 +371,7 @@ class SpotifyConnector(BaseConnector):
             if lower.startswith("play "):
                 query = text[5:].strip()
                 search_resp = await self._api_get(
-                    f"/search?q={query}&type=track&limit=1"
+                    spotify_actions.search_path(query, "track", 1)
                 )
                 search_data = search_resp.json()
                 tracks = search_data.get("tracks", {}).get("items", [])
@@ -463,7 +478,7 @@ class SpotifyConnector(BaseConnector):
             if lower.startswith("search "):
                 query = text[7:].strip()
                 resp = await self._api_get(
-                    f"/search?q={query}&type=track&limit=5"
+                    spotify_actions.search_path(query, "track", 5)
                 )
                 tracks = resp.json().get("tracks", {}).get("items", [])
                 if not tracks:
@@ -560,7 +575,7 @@ class SpotifyConnector(BaseConnector):
 
     async def _search_tracks_api(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Search Spotify for tracks and return structured results."""
-        resp = await self._api_get(f"/search?q={query}&type=track&limit={limit}")
+        resp = await self._api_get(spotify_actions.search_path(query, "track", limit))
         items = resp.json().get("tracks", {}).get("items", [])
         if not items:
             return {"success": True, "results": [], "message": f"No results found for: {query}"}
@@ -585,7 +600,7 @@ class SpotifyConnector(BaseConnector):
             await self._api_put("/me/player/play", json={"uris": [query]})
             return {"success": True, "message": f"Playing URI: {query}"}
 
-        search_resp = await self._api_get(f"/search?q={query}&type=track&limit=1")
+        search_resp = await self._api_get(spotify_actions.search_path(query, "track", 1))
         tracks = search_resp.json().get("tracks", {}).get("items", [])
         if not tracks:
             return {"success": False, "error": f"No tracks found for: {query}"}

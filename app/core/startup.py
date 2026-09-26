@@ -7,6 +7,7 @@ into focused, testable functions.
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from typing import List, Optional
@@ -20,6 +21,67 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 logger = logging.getLogger(__name__)
+
+
+PR_SET_DUMPABLE = 4
+
+
+def harden_process_introspection(*, force: bool = False) -> bool:
+    """Make this process non-dumpable on Linux; True when it now is.
+
+    Every model-run child (code-mode kernel, hooks, the CLI, MCP servers) runs
+    as the app's uid, and a same-uid process may read ``/proc/<pid>/environ``,
+    ``maps`` and ``mem`` of a dumpable one, so scrubbing secrets out of the
+    children's own environment would not keep the app's start-up secrets from
+    them. ``prctl(PR_SET_DUMPABLE, 0)`` restricts those files to root. Children
+    are unaffected: ``execve`` makes them dumpable again. Best effort: a
+    failure is logged once and startup continues. ``ALLOW_PROCESS_INTROSPECTION
+    =true`` skips it, keeping core dumps and same-uid debugging.
+
+    Under the test suite (``TESTING=1``) it is skipped too: tests that run the
+    app lifespan would otherwise make the pytest process itself non-dumpable
+    for the rest of the session (no ``py-spy dump`` of a hung worker, no
+    reading its own ``/proc/self/io`` or ``environ``). ``force=True`` applies
+    it anyway, for the test that checks the hardening.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    if not force and os.environ.get("TESTING") == "1":
+        logger.debug("TESTING=1: the process stays dumpable")
+        return False
+    if settings.allow_process_introspection:
+        logger.info("ALLOW_PROCESS_INTROSPECTION is set: this process stays dumpable")
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+        if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0) failed")
+    except Exception as exc:
+        logger.warning(
+            "Could not mark the app process non-dumpable (%s); same-uid child "
+            "processes can read its /proc environ", exc,
+        )
+        return False
+    return True
+
+
+def prewarm_code_mode_sandbox() -> None:
+    """Run the code-mode OS sandbox self-test in the background.
+
+    ``run_python`` is rated ``safe`` only once a self-test has passed in this
+    process, so warming it here keeps Ask mode from prompting for the first
+    cell on a host where the sandbox works. Best effort.
+    """
+    if not settings.fluid_code_mode:
+        return
+    try:
+        from fluid.codemode import os_sandbox
+        os_sandbox.prewarm(settings.code_mode_os_sandbox, sys.executable)
+    except Exception:
+        logger.debug("Code-mode OS sandbox prewarm skipped", exc_info=True)
 
 
 def _reject_legacy_sqlite() -> None:
@@ -79,10 +141,10 @@ def _adopt_orphaned_instance_data() -> None:
     separate named instances.
 
     Runs synchronously at boot, before the server accepts traffic, so it stays
-    ONE round trip: the two ``SELECT DISTINCT instance_id`` scans it used to
-    issue are unioned into a single statement, and both columns are now indexed
+    ONE round trip: the two ``SELECT DISTINCT instance_id`` scans are unioned
+    into a single statement, and both columns are indexed
     (``idx_projects_instance`` / ``idx_sessions_instance``) so each side is an
-    index scan rather than a sequential scan of the table (finding B11).
+    index scan rather than a sequential scan of the table.
     """
     import re
     from app.db.base import get_db
@@ -151,76 +213,62 @@ def init_core() -> None:
         max_conn=settings.db_pool_max,
     )
 
-    init_database()
-    run_migrations()
+    # One worker at a time from here to the end of seeding: two workers
+    # booting on one database would otherwise race the seeds below.
+    with database.boot_init_lock():
+        init_database()
+        run_migrations()
 
-    from app.db import mobile_tools, mobile_tool_identity
-    mobile_tools.init_schema()
-    mobile_tool_identity.init_schema()
+        from app.db import mobile_tools, mobile_tool_identity
+        mobile_tools.init_schema()
+        mobile_tool_identity.init_schema()
 
-    # Adopt orphaned projects/sessions from previous Docker containers.
-    # Before this fix, instance_id fell back to socket.gethostname() which
-    # returns the Docker container ID — a value that changes on every rebuild.
-    # This left projects and sessions invisible after a rebuild.
-    _adopt_orphaned_instance_data()
+        # Adopt orphaned projects/sessions from previous Docker containers.
+        # Before this fix, instance_id fell back to socket.gethostname() which
+        # returns the Docker container ID — a value that changes on every rebuild.
+        # This left projects and sessions invisible after a rebuild.
+        _adopt_orphaned_instance_data()
 
-    # Materialize notes as physical markdown files
-    from app.core.note_files import materialize_all_notes, get_notes_dir
-    notes_dir = get_notes_dir()
-    unmaterialized = database.get_notes_without_file_path()
-    if unmaterialized:
-        logger.info(f"Materializing {len(unmaterialized)} notes as markdown files...")
-        path_updates = materialize_all_notes(unmaterialized)
-        database.bulk_update_note_file_paths(path_updates)
-        logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
+        # Materialize notes as physical markdown files
+        from app.core.note_files import materialize_all_notes, get_notes_dir
+        notes_dir = get_notes_dir()
+        unmaterialized = database.get_notes_without_file_path()
+        if unmaterialized:
+            logger.info(f"Materializing {len(unmaterialized)} notes as markdown files...")
+            path_updates = materialize_all_notes(unmaterialized)
+            database.bulk_update_note_file_paths(path_updates)
+            logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
 
-    # Backfill attachment bytes into the shared database. Attachments uploaded
-    # before bytes were stored in the DB only exist on the machine that uploaded
-    # them; this pass copies any local file into the DB so installs sharing the
-    # database can serve it. Runs on every machine — whichever holds the file
-    # wins, and missing files are simply skipped.
-    _backfill_attachment_data()
+        # Backfill attachment bytes into the shared database. Attachments uploaded
+        # before bytes were stored in the DB only exist on the machine that uploaded
+        # them; this pass copies any local file into the DB so installs sharing the
+        # database can serve it. Runs on every machine — whichever holds the file
+        # wins, and missing files are simply skipped.
+        _backfill_attachment_data()
 
-    # Seed built-in subagents
-    from app.core.builtin_subagents import seed_builtin_subagents
-    seed_results = seed_builtin_subagents()
-    created = [k for k, v in seed_results.items() if v == "created"]
-    promoted = [k for k, v in seed_results.items() if v == "promoted"]
-    if created:
-        logger.info(f"Created built-in subagents: {', '.join(created)}")
-    if promoted:
-        logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
+        # Seed built-in subagents
+        from app.core.builtin_subagents import seed_builtin_subagents
+        seed_results = seed_builtin_subagents()
+        created = [k for k, v in seed_results.items() if v == "created"]
+        promoted = [k for k, v in seed_results.items() if v == "promoted"]
+        if created:
+            logger.info(f"Created built-in subagents: {', '.join(created)}")
+        if promoted:
+            logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
 
-    # Retire the chat-history-summarizer builtin (superseded by fluid's
-    # session-search tool). Seeding no longer prunes removed builtins, so
-    # drop the stale row explicitly — once; later boots find nothing.
-    from app.core.builtin_subagents import get_builtin_subagent_ids
-    if "chat-history-summarizer" not in get_builtin_subagent_ids():
-        if database.delete_subagent("chat-history-summarizer"):
-            logger.info("Removed retired built-in subagent: chat-history-summarizer")
+        # Retire the chat-history-summarizer builtin (superseded by fluid's
+        # session-search tool). Seeding does not prune removed builtins, so
+        # drop the stale row explicitly — once; later boots find nothing.
+        from app.core.builtin_subagents import get_builtin_subagent_ids
+        if "chat-history-summarizer" not in get_builtin_subagent_ids():
+            if database.delete_subagent("chat-history-summarizer"):
+                logger.info("Removed retired built-in subagent: chat-history-summarizer")
 
 
 def init_encryption_and_sessions() -> None:
     """Phase 2: Initialize encryption key and manage sessions."""
-    # Register the multi-account sync-back hook so a rotated credentials file
-    # (login/refresh/switch) is persisted back into the active account row. The
-    # hook is defensive and can never fail a credential write.
-    try:
-        from app.core.oauth import set_post_write_hook
-        from app.core.claude_accounts import sync_back_active_account
-        set_post_write_hook(sync_back_active_account)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not register Claude account post-write hook: {e}")
-
     if encryption.initialize_server_key(database):
         logger.info("Credential storage initialized from private server key custody")
-        # Encryption is available — seed the default account from any existing
-        # credentials file (idempotent, no-op if accounts already exist).
-        try:
-            from app.core.claude_accounts import seed_from_credentials_file
-            seed_from_credentials_file()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Claude account seed on startup failed (ignored): {e}")
     else:
         # Keep the local UI available for an honest recovery status. Auth and
         # secret writers must fail closed; sign-in cannot unlock server custody.
@@ -236,10 +284,34 @@ def init_workspace() -> None:
 
 def check_prerequisites() -> None:
     """Phase 4: Verify external dependencies are available."""
-    if auth_service.is_claude_authenticated():
-        logger.info("Claude CLI: Authenticated")
+    # Ask the CLI itself (`claude auth status`); this also warms the probe
+    # cache that /health and the runner capabilities read.
+    from app.core import claude_cli_status
+    cli = claude_cli_status.get_status(force=True)
+    if cli.signed_in:
+        logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")
+    elif cli.installed:
+        logger.warning("Claude Code CLI: not signed in. Sign in from Settings or run `claude auth login` on this worker")
     else:
-        logger.warning("Claude CLI: Not authenticated - run 'claude login' in container")
+        logger.warning("Claude Code CLI: %s", cli.error or "not installed")
+    from app.core import claude_relogin_notice
+    claude_relogin_notice.mark_if_needed()
+
+    # Record the Claude Code auth mode once for an install that has none, so a
+    # later change in credentials can never switch it silently.
+    from app.core import claude_auth_mode
+    try:
+        mode = claude_auth_mode.ensure_mode_recorded(cli.signed_in)
+        logger.info("Claude Code auth mode: %s", mode)
+    except Exception:
+        logger.warning("Could not record the Claude Code auth mode", exc_info=True)
+
+    # The one credential gate (license plus the active mode's credential). With
+    # neither a CLI sign-in nor a stored key the worker stays in a blocking
+    # setup state: every new agent run is refused with the setup message, and
+    # nothing falls back to any other credential.
+    from app.core import credential_gate
+    credential_gate.record_startup(cli)
 
     if auth_service.is_setup_required():
         logger.info("Local setup required - visit /setup on this computer or your LAN")
@@ -254,7 +326,7 @@ def _warn_removed_env_vars() -> None:
     """Log names (never values) of removed application environment flags."""
     import os
 
-    for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT"):
+    for removed in ("SESSION_STORE_MODE",):
         if os.environ.get(removed):
             logger.warning(
                 "%s is set but no longer read — the flag was removed. "
@@ -483,7 +555,7 @@ def start_background_tasks() -> List[asyncio.Task]:
         f"(every {int(streaming_status.SWEEP_INTERVAL_SECONDS)}s)"
     )
 
-    # Durable wakeups (#598): rehydrate this install's persisted pending wakeups
+    # Durable wakeups: rehydrate this install's persisted pending wakeups
     # (ScheduleWakeup + idle-watchdog nudges dropped by the restart) and re-arm
     # their timers. Fire-and-forget: claim-on-fire makes a double-arm harmless,
     # so this never needs to block boot.
@@ -491,7 +563,7 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(wakeup_service.rehydrate_pending()))
     logger.info("Durable-wakeup rehydrate scheduled")
 
-    # Idle-at-edge watchdog (#598): periodic sweep that nudges sessions sitting
+    # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
     # idle above the context-window edge so the CLI runs its deferred compaction
     # instead of parking forever. Flag-gated (IDLE_WATCHDOG_ENABLED).
     if settings.idle_watchdog_enabled:
@@ -504,11 +576,16 @@ def start_background_tasks() -> List[asyncio.Task]:
     else:
         logger.info("Idle-at-edge watchdog disabled (IDLE_WATCHDOG_ENABLED=false)")
 
+    # License lease renewal (daily, jittered backoff). Idle in beta mode.
+    from app.core import license as licensing
+    tasks.append(asyncio.create_task(licensing.refresh_loop(), name="license-refresh"))
+    logger.info("License mode: %s", "beta" if licensing.beta_mode() else "licensed")
+
     return tasks
 
 
 def install_v2_turns_wiring() -> None:
-    # V2 turns wiring (Phase 2): install the scheduler seams (kick /
+    # V2 turns wiring: install the scheduler seams (kick /
     # on_turn_settled / on_task_terminal) and route turn_manager's interrupt
     # executor to the live SessionRuntime — turn_manager must not import
     # session_runtime, so the routing closure lives here.
@@ -524,12 +601,12 @@ def install_v2_turns_wiring() -> None:
         runtime = session_runtime.get_live_runtime(session_id)
         if runtime is None:
             return
-        # #585: a turn-scoped stop only signals the live runtime when it is
+        # A turn-scoped stop only signals the live runtime when it is
         # actually executing the targeted turn. Belt-and-suspenders behind the
         # DB guard (the durable flip already required id=turn_id, so a mismatch
         # would not have fired the executor); guards the rare window where this
         # process's runtime has already advanced past turn_id. turn_id=None
-        # (legacy session-scoped callers) keeps today's unconditional signal.
+        # (session-scoped callers) keeps the unconditional signal.
         if turn_id is not None and runtime.turn_id != turn_id:
             return
         await runtime.interrupt(mode)
@@ -537,7 +614,7 @@ def install_v2_turns_wiring() -> None:
     turn_manager.register_interrupt_executor(_route_interrupt)
     logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
 
-    # Cross-runner turn-claim loop (V2 Phase 4, Q3). Started here (not
+    # Cross-runner turn-claim loop. Started here (not
     # start_background_tasks) so it is alive BEFORE the boot reconcile sweep:
     # turns recovered on boot for sessions placed on THIS runner are claimed
     # on the first tick instead of waiting out the reconcile's kicks.
@@ -545,15 +622,15 @@ def install_v2_turns_wiring() -> None:
 
     turn_claim.start()
 
-    # Cross-install git-ops claim loop (D5). Poll-only (no NOTIFY wiring — the
-    # spawn path's inline claim covers the one latency-critical case), so it is
-    # a separate loop from turn_claim rather than a second pass inside it.
+    # Cross-install git-ops claim passes. Poll-only (no NOTIFY wiring — the
+    # spawn path's inline claim covers the one latency-critical case); they
+    # register on turn_claim's shared sweep driver.
     from app.core import git_ops_runner
 
     git_ops_runner.start()
 
-    # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
-    # loop that flips lapsed permission/question rows to ``expired`` and wakes
+    # Pending-interaction expiry sweeper — a ~10s pass on the shared sweep
+    # driver that flips lapsed permission/question rows to ``expired`` and wakes
     # their waiters. Belt to the in-process waiter's own local deadline
     # (interaction_wait).
     from app.core import interaction_sweeper
@@ -618,7 +695,7 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
-    # Stop the pending-interaction sweeper (Q4-4) alongside the claim loop.
+    # Stop the pending-interaction sweeper alongside the claim loop.
     # Looked up via sys.modules so a flag-OFF process stays import-free.
     try:
         sweeper_mod = sys.modules.get("app.core.interaction_sweeper")
@@ -635,7 +712,7 @@ async def shutdown_services() -> None:
     except Exception:
         logger.exception("Failed to stop sessions during shutdown")
 
-    # Shutdown SDK session pool (disconnect all live subprocesses)
+    # Shutdown the session pool (disconnect all live adapters)
     try:
         from app.core.session_pool import get_session_pool
         await get_session_pool().shutdown()

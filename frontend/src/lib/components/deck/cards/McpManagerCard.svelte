@@ -24,7 +24,6 @@
 	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
-		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less rows list
 		 *  while keeping the same editor form. */
 		embedded?: boolean;
@@ -34,7 +33,6 @@
 	}
 
 	let {
-		mobile = false,
 		embedded = false,
 		initialSelectedId,
 		onDetailChange
@@ -66,7 +64,8 @@
 
 	// Load data on mount
 	onMount(() => {
-		mcp.loadGlobalServers();
+		// A failed load is shown through $mcpError; don't leave the rejection unhandled.
+		mcp.loadGlobalServers().catch(() => {});
 	});
 
 	let consumedItemId: string | null = null;
@@ -260,7 +259,7 @@
 			<div class="set-row">
 				<div class="lab"><h4>Type</h4><p>Local subprocess or a remote endpoint.</p></div>
 				<div class="ctl">
-					<select bind:value={formType} class="sel">
+					<select bind:value={formType} class="sel" aria-label="Transport type">
 						<option value="stdio">Local Process (stdio)</option>
 						<option value="sse">SSE (Remote)</option>
 						<option value="http">HTTP (Remote)</option>

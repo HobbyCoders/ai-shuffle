@@ -62,12 +62,34 @@ class CrossAppOverlayTest {
         down.source = android.view.InputDevice.SOURCE_TOUCHSCREEN; up.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
         assertTrue(automation.injectInputEvent(down, true)); assertTrue(automation.injectInputEvent(up, true)); down.recycle(); up.recycle()
     }
-    private fun request(name: String, args: JSONObject, ttl: Long = 20_000): Pair<CountDownLatch, AtomicReference<JSONObject>> {
+    private fun request(name: String, args: JSONObject, ttl: Long = 20_000,
+                        trace: AtomicReference<JSONObject>? = null): Pair<CountDownLatch, AtomicReference<JSONObject>> {
         val result = AtomicReference<JSONObject>(); val done = CountDownLatch(1)
         lastResult = result
         CoroutineScope(Dispatchers.Main).launch {
-            try { result.set(DeviceToolExecutor(context).execute(name, args, System.currentTimeMillis() + ttl)) }
-            finally { done.countDown() }
+            try {
+                // Read-only diagnostic of the real cancellation fence; never resolve
+                // consent or alter service state to make the expiry case pass.
+                val service = ShuffleAccessibilityService.current
+                val revision = if (trace != null) ShuffleAccessibilityService::class.java
+                    .getDeclaredField("revision").apply { isAccessible = true } else null
+                val before = service?.let { revision?.getLong(it) }
+                val started = System.currentTimeMillis()
+                val elapsedStarted = android.os.SystemClock.elapsedRealtime()
+                val deadline = started + ttl
+                val reply = DeviceToolExecutor(context).execute(name, args, deadline)
+                val finished = System.currentTimeMillis()
+                val elapsed = android.os.SystemClock.elapsedRealtime() - elapsedStarted
+                trace?.set(JSONObject().put("deadline_ms", deadline).put("finished_ms", finished)
+                    .put("wall_elapsed_ms", finished - started)
+                    .put("monotonic_elapsed_ms", elapsed)
+                    .put("revision_before", before ?: JSONObject.NULL)
+                    .put("revision_after", service?.let { revision?.getLong(it) } ?: JSONObject.NULL)
+                    .put("same_service", service === ShuffleAccessibilityService.current)
+                    .put("cross_app_enabled", ToolsPreferences(context).crossAppEnabled)
+                    .put("accessibility_enabled", ToolsPreferences(context).accessibilityEnabled))
+                result.set(reply)
+            } finally { done.countDown() }
         }
         return done to result
     }
@@ -129,15 +151,19 @@ class CrossAppOverlayTest {
                 assertEquals("stale_ref", result(request("tap_node", JSONObject().put("ref", play.getString("ref")))).getString("status"))
                 val denied = request("read_screen", JSONObject()); localPress(automation, "Deny")
                 assertEquals("denied", result(denied).getString("status"))
-                val expiryStarted = System.currentTimeMillis()
-                val expiring = request("read_screen", JSONObject(), 2_000)
+                val expiryTrace = AtomicReference<JSONObject>()
+                val expiring = request("read_screen", JSONObject(), 2_000, expiryTrace)
                 awaitCondition("Expiring cross-app consent was never presented") {
                     automation.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }
                         .any { it.root?.findAccessibilityNodeInfosByText("Allow once")?.any { node -> node.isVisibleToUser && node.isClickable } == true }
                 }
                 assertEquals(1L, expiring.first.count)
                 assertEquals("denied", result(expiring).getString("status"))
-                assertTrue("Cross-app request rejected before expiry", System.currentTimeMillis() >= expiryStarted + 2_000)
+                // Use the executor's actual deadline/completion, not the later
+                // assertion time (diagnostic collection must not hide early denial).
+                val completion = requireNotNull(expiryTrace.get())
+                assertTrue("Cross-app request rejected before expiry: $completion",
+                    completion.getLong("finished_ms") >= completion.getLong("deadline_ms"))
                 localPress(automation, "Show protected content")
                 awaitCondition("Protected screen fixture did not update") { automation.rootInActiveWindow?.findAccessibilityNodeInfosByText("Payment method")?.isNotEmpty() == true }
                 // Let both accessibility consumers observe the changed target before

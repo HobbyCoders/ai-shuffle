@@ -26,7 +26,7 @@ import { runFind } from "../src/tools/find.js";
 import { runReadText } from "../src/tools/read_text.js";
 import { runEval } from "../src/tools/eval.js";
 import { runConsole } from "../src/tools/console.js";
-import { runNetwork } from "../src/tools/network.js";
+import { runNetwork, NETWORK_BODY_TIMEOUT_MS } from "../src/tools/network.js";
 import { runTabs } from "../src/tools/tabs.js";
 import { runResize } from "../src/tools/resize.js";
 import { runUpload } from "../src/tools/upload.js";
@@ -72,6 +72,17 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
     if (req.url === "/login") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end('<title>Sign in</title><button>Sign in</button>');
+      return;
+    }
+    if (req.url === "/stream-page") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<title>stream</title><p>streaming</p><script>fetch("/stream").then(r => r.body.getReader().read())</script>');
+      return;
+    }
+    if (req.url === "/stream") {
+      // An event stream that never ends: headers and one event, then silence.
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      res.write("data: first\n\n");
       return;
     }
     if (req.url === "/api/data") {
@@ -620,6 +631,39 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(missing.isError).toBe(true);
   });
 
+  it("network: the body of a never-ending event stream is a bounded error, not a hung session", async () => {
+    await runNavigate(session, { url: `${httpUrl}stream-page` });
+    let streamId: string | undefined;
+    for (let i = 0; i < 30 && !streamId; i++) {
+      const listed = JSON.parse(firstText(await runNetwork(session, { url_pattern: "/stream$" })));
+      streamId = listed.requests[0]?.id;
+      if (!streamId) await delay(100);
+    }
+    expect(streamId).toBeTruthy();
+    const t0 = Date.now();
+    const res = await session.runExclusive(() => runNetwork(session, { request_id: streamId! }));
+    expect(Date.now() - t0).toBeLessThan(NETWORK_BODY_TIMEOUT_MS + 3000);
+    expect(res.isError).toBe(true);
+    expect(firstText(res)).toContain("still streaming");
+    // The session queue is free again.
+    const after = await session.runExclusive(() => runEval(session, { code: "1 + 1" }));
+    expect(JSON.parse(firstText(after)).value).toBe("2");
+  });
+
+  it("act(type) on a ref types a long value in full instead of timing out as stale_ref", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const snap = await runSnapshot(session, { filter: "interactive" });
+    const snapText = snap.content[1] && snap.content[1].type === "text" ? snap.content[1].text : "";
+    const boxRef = /textbox[^\n]*\[ref=(e\d+)\]/.exec(snapText)?.[1];
+    expect(boxRef).toBeTruthy();
+    const value = "x".repeat(3000);
+    const res = await runAct(session, { kind: "type", ref: boxRef!, value });
+    expect(firstText(res)).not.toContain("stale_ref");
+    expect(JSON.parse(firstText(res)).ok).toBe(true);
+    const page = await session.ensurePage();
+    expect((await page.inputValue("#name")).length).toBe(3000);
+  }, 60_000);
+
   it("tabs: create/list/select/close lifecycle, cannot close the last tab", async () => {
     await runNavigate(session, { url: fixtureUrl });
     const firstTab = session.currentTabId()!;
@@ -773,7 +817,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       else process.env.BROWSER_UPLOAD_DIR = previousDir;
       rmSync(path, { force: true });
     }
-  }, 45000);
+    // Outlive the scaled setInputFiles timeout (84 s for 27 MiB) so a slow host fails with its message.
+  }, 120000);
 
   it("batch runs sequentially and stops on the first error", async () => {
     await runNavigate(session, { url: fixtureUrl });
@@ -847,6 +892,91 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await guarded.cleanup().catch(() => {});
     }
   });
+  it("SSRF: a redirect hop to a blocked host is refused (navigation and fetch), and preflights reach the server", async () => {
+    // 127.0.0.2 stands in for an internal service: this manager allows only
+    // 127.0.0.1, so the redirect target is blocked while the origin is not.
+    const hits: string[] = [];
+    const internal = createHttpServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<title>INTERNAL SECRET</title>");
+    });
+    await new Promise<void>((resolve) => internal.listen(0, "127.0.0.2", resolve));
+    const internalPort = (internal.address() as { port: number }).port;
+    const origin = createHttpServer((req, res) => {
+      if (req.url === "/hop") {
+        res.writeHead(302, { location: `http://127.0.0.2:${internalPort}/meta` });
+        res.end();
+        return;
+      }
+      hits.push(`origin ${req.method} ${req.url}`);
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<title>origin</title><p>origin page</p>");
+    });
+    await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+    const originUrl = `http://127.0.0.1:${(origin.address() as { port: number }).port}`;
+    const guarded = new BrowserManager({
+      endpoint: cdpEndpoint,
+      ssrfPolicy: compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.1/32" } as NodeJS.ProcessEnv),
+    });
+    const guardedSession = new Session(guarded);
+    try {
+      const failure = await runNavigate(guardedSession, { url: `${originUrl}/hop` }).then(
+        () => undefined,
+        (err: Error) => err,
+      );
+      expect(failure?.message ?? "").toMatch(/127\.0\.0\.2/);
+      const page = await guardedSession.ensurePage();
+      // The blocked navigation commits Chromium's error page asynchronously;
+      // a goto racing it is "interrupted by another navigation".
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await page.goto(`${originUrl}/`);
+          break;
+        } catch (err) {
+          if (attempt >= 3) throw err;
+          await delay(200);
+        }
+      }
+      const fetched = await page.evaluate(
+        (url) => fetch(url).then((r) => `status ${r.status}`, (e) => `error ${e}`),
+        `${originUrl}/hop`,
+      );
+      expect(fetched).toMatch(/^error/);
+      expect(hits.filter((h) => !h.startsWith("origin"))).toEqual([]);
+
+      // A non-simple cross-origin request must be preceded by a real preflight
+      // at the server (Playwright's context.route used to fake a permissive one).
+      const crossOrigin = originUrl.replace("127.0.0.1", "localhost");
+      await page.evaluate(
+        (url) => fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null),
+        `${crossOrigin}/api/put`,
+      );
+      expect(hits).toContain("origin OPTIONS /api/put");
+      expect(hits).not.toContain("origin PUT /api/put");
+    } finally {
+      await guarded.cleanup().catch(() => {});
+      internal.closeAllConnections?.();
+      origin.closeAllConnections?.();
+      await new Promise<void>((resolve) => internal.close(() => resolve()));
+      await new Promise<void>((resolve) => origin.close(() => resolve()));
+    }
+  });
+
+  it("masks password field values in snapshots", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<label>User <input value="alice"></label><label>Pass <input type="password" id="pw"></label>');
+    await page.fill("#pw", "hunter2-integration");
+    const snap = await session.snapshot();
+    expect(snap.text).toContain("alice");
+    expect(snap.text).not.toContain("hunter2-integration");
+  });
+
   it("shared workspace: real tabs, viewport, CDP input, stale coordinates, waits and returned control", async () => {
     const ws = new BrowserWorkspace(session);
     let n = 0;

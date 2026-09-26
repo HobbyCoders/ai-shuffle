@@ -50,9 +50,6 @@ export class SettingsStore {
 		this.loaded = true;
 	}
 
-	get configured(): boolean { return this.postgres() !== null; }
-	get passwordStoredPlain(): boolean { return !!this.data.postgres?.password && 'plain' in this.data.postgres.password; }
-
 	postgres(): PostgresConfig | null {
 		const stored = this.data.postgres;
 		if (!stored) return null;

@@ -11,7 +11,6 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
-	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
@@ -123,11 +122,12 @@
 	let transitioningFromEmpty = $state(false);
 	let previousIsEmpty = $state(true);
 
+	// Depends only on `isEmptyState`; reading any other store here would re-run
+	// the effect (clearing the timer via teardown) without resetting the flag.
 	$effect(() => {
 		const isEmpty = isEmptyState;
 		const wasEmpty = untrack(() => previousIsEmpty);
 		if (wasEmpty === isEmpty) return;
-		console.debug(`[ChatView] isEmptyState changed: ${wasEmpty} → ${isEmpty}, sessionId=${$activeSession.sessionId}, msgs=${$activeSession.messages.length}`);
 		previousIsEmpty = isEmpty;
 
 		if (wasEmpty && !isEmpty) {
@@ -136,7 +136,10 @@
 			const timer = setTimeout(() => {
 				transitioningFromEmpty = false;
 			}, 450);
-			return () => clearTimeout(timer);
+			return () => {
+				clearTimeout(timer);
+				transitioningFromEmpty = false;
+			};
 		} else {
 			// Active → empty transition: clear the animation class immediately.
 			// Without this, the class gets stuck if the effect cleanup (clearTimeout)
@@ -279,9 +282,6 @@
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</div>
-				{/if}
-				{#if $activeSession.sessionId}
-					<TeamStatusBar sessionId={$activeSession.sessionId} />
 				{/if}
 				<!-- No call surface here any more (VM18): the call controls live in the
 				     composer slot below, so the transcript column looks the same during
@@ -597,28 +597,9 @@
 	   MESSAGE STYLING (inherited from ChatCard)
 	   ======================================== */
 
-	.chat-view :global(.user-message) {
-		background: color-mix(in oklch, var(--primary) 15%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
-		border-radius: var(--radius, 0.75rem);
-		padding: 12px 16px;
-		box-shadow: var(--shadow-s);
-		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
-	}
-
-	.chat-view :global(.user-message:hover) {
-		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--primary) 20%, var(--card));
-	}
-
-	.chat-view :global(.user-message p),
 	.chat-view :global(.prose) {
 		color: var(--foreground);
 		line-height: 1.6;
-	}
-
-	.chat-view :global(.user-message p) {
-		font-size: 0.9375rem;
 	}
 
 	.chat-view :global(.prose a) {

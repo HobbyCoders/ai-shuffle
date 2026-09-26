@@ -37,14 +37,19 @@ export interface ShortcutRegistration {
 // Check if running on Mac
 const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 
-// Store registered shortcuts
-const shortcuts: Map<string, KeyboardShortcut> = new Map();
+// Registered shortcuts per key combo, newest last. Only the newest fires, and
+// unregistering removes exactly that registration: two owners of one combo
+// (e.g. a user-chosen voice hotkey that matches an app shortcut) can no longer
+// delete each other's binding on teardown.
+const shortcuts: Map<string, KeyboardShortcut[]> = new Map();
+
+/** The registration that currently owns each combo. */
+function activeShortcuts(): KeyboardShortcut[] {
+	return Array.from(shortcuts.values(), (stack) => stack[stack.length - 1]);
+}
 
 // Track if the global listener is attached
 let listenerAttached = false;
-
-// Track if shortcuts are enabled (can be disabled temporarily)
-let shortcutsEnabled = true;
 
 /**
  * Generate a unique key for matching shortcuts
@@ -98,8 +103,6 @@ function isInputElement(target: EventTarget | null): boolean {
  * Handle keydown events
  */
 function handleKeyDown(e: KeyboardEvent): void {
-	if (!shortcutsEnabled) return;
-
 	// Auto-repeat is never what a shortcut wants: every registered shortcut here
 	// is a one-shot action or a toggle. Holding the voice-input hotkey used to
 	// fire ~30 toggles a second, so the recording was cancelled the instant it
@@ -108,8 +111,8 @@ function handleKeyDown(e: KeyboardEvent): void {
 
 	const eventKey = getShortcutKey(e);
 
-	// Find matching shortcut
-	const shortcut = shortcuts.get(eventKey);
+	// Find matching shortcut (the newest registration for this combo)
+	const shortcut = shortcuts.get(eventKey)?.at(-1);
 	if (shortcut) {
 		// Check if we should ignore when in input fields
 		if (!shortcut.allowInInput && isInputElement(e.target)) {
@@ -160,12 +163,21 @@ export function registerShortcut(shortcut: KeyboardShortcut): ShortcutRegistrati
 	attachListener();
 
 	const key = getDefinitionKey(shortcut);
-	shortcuts.set(key, shortcut);
+	const stack = shortcuts.get(key) ?? [];
+	stack.push(shortcut);
+	shortcuts.set(key, stack);
 
+	let registered = true;
 	return {
 		id: shortcut.id,
 		unregister: () => {
-			shortcuts.delete(key);
+			if (!registered) return;
+			registered = false;
+			const current = shortcuts.get(key);
+			const index = current?.lastIndexOf(shortcut) ?? -1;
+			if (!current || index < 0) return;
+			current.splice(index, 1);
+			if (current.length === 0) shortcuts.delete(key);
 			if (shortcuts.size === 0) {
 				detachListener();
 			}
@@ -174,33 +186,10 @@ export function registerShortcut(shortcut: KeyboardShortcut): ShortcutRegistrati
 }
 
 /**
- * Unregister a shortcut by ID
- */
-export function unregisterShortcut(id: string): void {
-	let keyToDelete: string | null = null;
-	shortcuts.forEach((shortcut, key) => {
-		if (shortcut.id === id) {
-			keyToDelete = key;
-		}
-	});
-	if (keyToDelete) {
-		shortcuts.delete(keyToDelete);
-	}
-
-	if (shortcuts.size === 0) {
-		detachListener();
-	}
-}
-
-/**
  * Get all registered shortcuts (for help display)
  */
 export function getShortcuts(): KeyboardShortcut[] {
-	const result: KeyboardShortcut[] = [];
-	shortcuts.forEach((shortcut) => {
-		result.push(shortcut);
-	});
-	return result;
+	return activeShortcuts();
 }
 
 /**
@@ -214,34 +203,13 @@ export function getShortcutsByCategory(): Record<string, KeyboardShortcut[]> {
 		general: []
 	};
 
-	shortcuts.forEach((shortcut) => {
+	activeShortcuts().forEach((shortcut) => {
 		if (byCategory[shortcut.category]) {
 			byCategory[shortcut.category].push(shortcut);
 		}
 	});
 
 	return byCategory;
-}
-
-/**
- * Temporarily disable all shortcuts
- */
-export function disableShortcuts(): void {
-	shortcutsEnabled = false;
-}
-
-/**
- * Re-enable shortcuts
- */
-export function enableShortcuts(): void {
-	shortcutsEnabled = true;
-}
-
-/**
- * Check if shortcuts are currently enabled
- */
-export function areShortcutsEnabled(): boolean {
-	return shortcutsEnabled;
 }
 
 /**
@@ -297,20 +265,6 @@ export function formatShortcut(shortcut: KeyboardShortcut): string {
 	parts.push(keyDisplay);
 
 	return parts.join('+');
-}
-
-/**
- * Get the modifier key name for the current platform
- */
-export function getModifierKey(): string {
-	return isMac ? 'Cmd' : 'Ctrl';
-}
-
-/**
- * Check if we're on a Mac
- */
-export function isMacPlatform(): boolean {
-	return isMac;
 }
 
 /**

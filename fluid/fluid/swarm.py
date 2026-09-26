@@ -97,7 +97,7 @@ def dependency_results(rows, dependencies):
     if len(encoded) <= RESULT_LIMIT:
         return encoded
     # Reserve the keys and JSON punctuation, then share the remaining space.
-    # Slicing the combined JSON used to drop later dependencies entirely.
+    # Slicing the combined JSON would drop later dependencies entirely.
     overhead = len(json.dumps(dict.fromkeys(dependencies, "")))
     budget = (RESULT_LIMIT - overhead) // len(dependencies) + 2
     marker = " [truncated; consult worker report]"

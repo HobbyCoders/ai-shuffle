@@ -56,6 +56,8 @@ def enroll(client):
     result = client.post('/api/v1/mobile/hub/enroll', json={'ticket': 'one-use-ticket',
         'device_info': DeviceInfo(device_id=PHONE, device_name='Phone', platform='android', capabilities={}).model_dump()})
     assert result.status_code == 200, result.text
+    device = database.get_mobile_device_by_api_key_hash(hash_api_key(result.json()['api_key']))
+    store.confirm_device(store.ownership(device['device_id']), True)
     return result.json()['api_key']
 
 
@@ -87,12 +89,6 @@ def test_same_phone_enrolls_both_workers_without_replacing_credentials(client, m
     assert get_paired_client_from_token(first_session) is None
     with pytest.raises(HTTPException):
         mobile.get_device_from_api_key(request(first_key))
-    # Existing Android sends its account phone ID. The API updates only the row
-    # selected by this worker's API key, never the other worker's phone row.
-    result = client.post('/api/v1/mobile/capabilities', headers={'Authorization': 'Bearer ' + second_key},
-                        json={'device_id': PHONE, 'capabilities': {'supports_push': True}})
-    assert result.status_code == 200, result.text
-    assert database.get_mobile_device_by_api_key_hash(hash_api_key(first_key))['capabilities']['supports_push'] is False
     monkeypatch.setattr(settings, 'instance_id', 'first')
     assert get_paired_client_from_token(first_session)
     assert mobile.get_device_from_api_key(request(first_key))['device_id'] != second_device['device_id']
@@ -180,6 +176,7 @@ def test_same_account_phone_coexists_with_legacy_unraid_authorization(client, mo
     identity = {'device_id': PHONE, 'server_id': FIRST, 'account_id': ACCOUNT, 'device_name': 'Phone'}
     store.enroll(identity, DeviceInfo(device_id=PHONE, device_name='Phone', platform='android', capabilities={}),
                  hash_api_key('aim_legacy'), datetime.now(timezone.utc) + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES))
+    store.confirm_device(store.ownership(PHONE), True)
     monkeypatch.setattr(settings, 'instance_id', 'second')
     bind(SECOND)
     key = enroll(client)

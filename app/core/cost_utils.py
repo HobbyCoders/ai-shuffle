@@ -158,7 +158,9 @@ def append_usage_entry(
     duration_ms: int,
     tokens_in: int,
     tokens_out: int,
-    model: Optional[str]
+    model: Optional[str],
+    *,
+    usage_estimated: bool = False,
 ) -> None:
     """
     Append a new usage entry to the in-memory cache.
@@ -183,7 +185,8 @@ def append_usage_entry(
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "model": model,
-            "turn_index": len(cached)
+            "turn_index": len(cached),
+            "usage_estimated": bool(usage_estimated),
         })
         _usage_cache.move_to_end(session_id)
 
@@ -482,6 +485,10 @@ def attach_cost_metadata(
                 "tokens_out": usage.get("tokens_out", 0),
                 "is_final_message": is_absolute_final
             }
+            # The footer marks estimated turns with a badge; absent when the
+            # counts are the provider's own so old clients see no change.
+            if usage.get("usage_estimated"):
+                metadata["usage_estimated"] = True
             # Only add cumulative cost to the absolute final message
             if is_absolute_final:
                 metadata["total_cost_usd"] = usage["cumulative_cost_usd"]

@@ -1,19 +1,19 @@
 /**
  * Usage-limits store — per-INSTALL buckets of Claude subscription usage.
  *
- * The 5-hour usage window is scoped to a Claude ACCOUNT, and in a clustered
- * deployment (primary + worker sharing one Postgres) each install is logged into
- * a DIFFERENT account. A session can be offloaded to the worker, so the usage a
- * viewer cares about is the usage of the install that actually RUNS the viewed
- * session — not necessarily the local install's account. This store therefore
+ * The usage windows belong to whichever Claude login an install's CLI uses, and
+ * in a clustered deployment (primary + worker sharing one Postgres) each install
+ * may be signed in differently. A session can be offloaded to the worker, so the
+ * usage a viewer cares about is the usage of the install that actually RUNS the
+ * viewed session — not necessarily the local install's. This store therefore
  * keeps one `UsageBucket` PER install (keyed by `instance_id`) rather than a
  * single global window set. The widget resolves which bucket to show from the
  * currently viewed/composed session (see `usage-target.ts`).
  *
  * Fed by BOTH:
- *   1. A polled snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
- *      endpoint) — authoritative full sets of windows per install, from the
- *      backend usage poller. Utilization is already 0–100 percent. The modern
+ *   1. A snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
+ *      endpoint) — the windows each install's CLI has reported so far, as the
+ *      backend persisted them. Utilization is already 0–100 percent. The modern
  *      payload carries a `snapshots` array (one entry per install) plus
  *      `self_instance_id`; a legacy payload carries only top-level windows for
  *      the LOCAL install, which we fold into a self bucket.
@@ -25,12 +25,12 @@
  *
  * Windows key on the window-type string (`five_hour`, `seven_day`,
  * `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
- * `overage`). Buckets are persisted to localStorage so the header pill/popover
+ * `overage`). Buckets are persisted to localStorage so the usage pill/popover
  * stay populated across reloads.
  *
- * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
+ * Plain `.ts` (no $state runes) so it can be imported before component init.
  *
- * Consumers: `UsageLimitIndicator.svelte` (header pill + popover) resolves a
+ * Consumers: `ContextUsageBar.svelte` (chat-toolbar pill + popover) resolves a
  * bucket via `resolveBucket`; `ws-message-handlers.ts` calls `applyLiveEvent` /
  * `applySnapshot`; `usage-target.ts` derives which install to show.
  */
@@ -43,29 +43,24 @@ export interface UsageWindow {
 	/** 0–100 percent. */
 	utilization: number;
 	resets_at: string | null;
-	/** Wall-clock (ms since epoch) when we last updated this window. */
+	/**
+	 * Epoch ms this window was last observed: the live event's arrival, or the
+	 * backend's per-window `observed_at` (falling back to the snapshot's
+	 * `fetched_at`). Staleness is per window, since one event dates one window.
+	 */
 	received_at: number;
 	source: 'poll' | 'live';
 }
 
-/**
- * One install's usage snapshot: its window set plus who/where it belongs to.
- * `accountId`/`accountEmail` identify the Claude account so the popover can
- * dedupe two installs that happen to share one account.
- */
+/** One install's usage snapshot: its window set plus where it belongs. */
 export interface UsageBucket {
 	/** Keyed by window type. */
 	windows: Record<string, UsageWindow>;
 	/** Epoch ms the backend last fetched this install's usage (staleness). */
 	fetchedAt: number | null;
-	/** Whether this install currently has a usable Claude credential. */
+	/** Whether this install's CLI has reported any usage window yet. */
 	available: boolean;
-	accountId?: string | null;
-	accountEmail?: string | null;
-	accountName?: string | null;
 	deviceName?: string | null;
-	/** Claude subscription tier of that install's account (e.g. `'max'`). */
-	planType?: string | null;
 	/** Owning install seen recently (heartbeat). null = unknown. */
 	online?: boolean | null;
 	/** Monotonic generation tag from the backend for THIS install (see below). */
@@ -121,6 +116,8 @@ export interface ProviderUsageBucket {
 	sourceInfo?: UsageSourceInfo | null;
 	/** Epoch ms of the last attempt; later than `fetchedAt` after a failure. */
 	lastAttemptAt?: number | null;
+	/** Epoch ms before which a refresh serves this cached reading. */
+	cooldownUntil?: number | null;
 	status?: ProviderUsageStatus;
 	lastErrorKind?: ProviderUsageErrorKind | null;
 	providerId: string;
@@ -157,6 +154,7 @@ export const SELF_BUCKET_KEY = '__self__';
 
 /** Live SDK `rate_limit` event payload (utilization is a 0–1 fraction). */
 export interface LiveRateLimitEvent {
+	/** The CLI's verdict: `allowed`, `allowed_warning` or `rejected` (exhausted). */
 	status?: string;
 	rate_limit_type: string;
 	resets_at?: string | null;
@@ -172,6 +170,8 @@ export interface SnapshotWindow {
 	type: string;
 	utilization: number;
 	resets_at?: string | null;
+	/** Epoch ms the CLI last reported this window (Claude windows only). */
+	observed_at?: number | null;
 }
 
 /** One install's entry in the modern `snapshots` array. */
@@ -179,15 +179,6 @@ export interface SnapshotInstance {
 	instance_id: string;
 	device_name?: string | null;
 	online?: boolean | null;
-	account_id?: string | null;
-	account_email?: string | null;
-	account_name?: string | null;
-	/**
-	 * Claude subscription tier for that install's account, joined from
-	 * `claude_accounts.subscription_type`. Null when the install has no account
-	 * row or its plan isn't known yet.
-	 */
-	plan_type?: string | null;
 	windows: SnapshotWindow[];
 	/** Epoch MILLISECONDS (the legacy top-level `fetched_at` is seconds). */
 	fetched_at?: number | null;
@@ -206,6 +197,7 @@ export interface ProviderUsageEntry {
 	source_info?: UsageSourceInfo | null;
 	last_success_at?: number | null;
 	last_attempt_at?: number | null;
+	cooldown_until?: number | null;
 	status?: ProviderUsageStatus;
 	last_error_kind?: ProviderUsageErrorKind | null;
 	provider_id: string;
@@ -246,8 +238,8 @@ export interface UsageSnapshot {
 	/** Non-Claude provider usage. Full-replaces `providerBuckets` when present;
 	 *  when the key is ABSENT the store leaves the existing map untouched (so a
 	 *  WS-only payload without providers can't wipe it). Additive; empty for old
-	 *  or provider-less installs. */
-	providers?: ProviderUsageEntry[];
+	 *  or provider-less installs; null when the backend could not read them. */
+	providers?: ProviderUsageEntry[] | null;
 }
 
 // Bumped to v3 when the backend started reporting Claude window utilization as
@@ -258,7 +250,7 @@ const STORAGE_KEY_V3 = 'usage-limit-buckets-v3';
 const LEGACY_STORAGE_KEY = 'usage-limit-windows';
 
 // Human labels per known window type. Unknown types get a humanized fallback.
-export const WINDOW_LABELS: Record<string, string> = {
+const WINDOW_LABELS: Record<string, string> = {
 	five_hour: '5-hour limit',
 	seven_day: 'Weekly (all models)',
 	seven_day_opus: 'Weekly Opus',
@@ -282,7 +274,7 @@ export const WINDOW_LABELS: Record<string, string> = {
 };
 
 // Display order for the popover / headline selection tie-breaks.
-export const WINDOW_ORDER = [
+const WINDOW_ORDER = [
 	'five_hour',
 	'seven_day',
 	'seven_day_opus',
@@ -315,9 +307,9 @@ function _clampPct(u: number): number {
 	return Math.min(100, Math.max(0, u));
 }
 
-/** Normalise an SDK fraction (0–1, defensively 0–100) to a 0–100 percent. */
+/** Normalise an SDK used fraction (0–1, above 1 when over the limit) to a 0–100 percent. */
 function _fractionToPct(u: number): number {
-	return _clampPct(u <= 1 ? u * 100 : u);
+	return _clampPct(u * 100);
 }
 
 /** Parse `resets_at` (ISO string, epoch seconds, or epoch ms) into epoch ms. */
@@ -332,37 +324,53 @@ export function parseResetMs(resetsAt: string | number | null | undefined): numb
 		const n = Number(trimmed);
 		return n < 1e12 ? n * 1000 : n;
 	}
-	const parsed = Date.parse(trimmed);
+	// Backend timestamps are UTC. `Date.parse` reads a zone-less date-time as
+	// the browser's LOCAL time, which would shift the reset by the UTC offset.
+	const naive = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(trimmed);
+	const parsed = Date.parse(naive ? `${trimmed.replace(' ', 'T')}Z` : trimmed);
 	return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * Round a 0–100 percent for display without claiming an edge it has not
+ * reached: 0.4 shows as 1 (not "0% left" while quota remains) and 99.6 as 99
+ * (not "100% left" once some was used). Exact 0 and 100 stay as they are.
+ */
+function _displayPct(value: number): number {
+	const pct = _clampPct(value);
+	const rounded = Math.round(pct);
+	if (rounded === 0 && pct > 1e-6) return 1;
+	if (rounded === 100 && pct < 100 - 1e-6) return 99;
+	return rounded;
 }
 
 /** Effective utilization for a window, accounting for a rolled-over window. */
 export function effectivePct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 0; // window rolled over
-	return Math.round(w.utilization);
+	return _displayPct(w.utilization);
 }
 
 /** Reported remaining quota, returning a fresh window after rollover. */
 export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 100;
-	return Math.round(w.utilization);
+	return _displayPct(w.utilization);
 }
 
 /** Convert reported used quota to remaining, returning a fresh window after rollover. */
 export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
 	const resetMs = parseResetMs(w.resets_at);
 	if (resetMs != null && resetMs <= nowMs) return 100;
-	return Math.round(100 - w.utilization);
+	return _displayPct(100 - _clampPct(w.utilization));
 }
 
-/** Format a countdown like "3h 12m" / "12m 4s" / "now". */
+/** Format a countdown like "3h 12m" / "12m 4s"; '' once the reset has passed. */
 export function formatCountdown(resetsAt: string | null | undefined, nowMs: number): string {
 	const target = parseResetMs(resetsAt);
 	if (target == null) return '';
 	const diffMs = target - nowMs;
-	if (diffMs <= 0) return 'now';
+	if (diffMs <= 0) return '';
 	const totalSec = Math.ceil(diffMs / 1000);
 	const d = Math.floor(totalSec / 86400);
 	const h = Math.floor((totalSec % 86400) / 3600);
@@ -392,7 +400,7 @@ export function formatAsOf(fetchedAt: number | null | undefined, nowMs: number):
 export const BUCKET_STALE_MS = 5 * 60_000;
 
 /** Windows as an array, ordered by WINDOW_ORDER then any extras alphabetically. */
-export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
+function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
 	const known = WINDOW_ORDER.filter((t) => t in windows).map((t) => windows[t]);
 	const extra = Object.keys(windows)
 		.filter((t) => !WINDOW_ORDER.includes(t))
@@ -448,9 +456,37 @@ export function resolveBucketKey(state: RateLimitState, instanceId: string | nul
 	return state.buckets[key] ? key : null;
 }
 
-/** Whether a bucket's polled data has aged past `BUCKET_STALE_MS` (needs a refresh). */
+/**
+ * When the bucket's OLDEST window was last observed (epoch ms), or the bucket's
+ * `fetchedAt` when it has no windows. A live event dates only its own window,
+ * so the other windows keep their age.
+ */
+export function bucketObservedAt(bucket: UsageBucket): number | null {
+	const times = Object.values(bucket.windows ?? {})
+		.map((w) => w.received_at)
+		.filter((t) => typeof t === 'number' && Number.isFinite(t));
+	return times.length > 0 ? Math.min(...times) : bucket.fetchedAt;
+}
+
+/**
+ * A provider row's status as of `nowMs`. The backend dates `fresh` when it
+ * answers, but rows also come from localStorage and outlive a failed refresh,
+ * so a `fresh` reading older than its source's interval (the backend's own
+ * threshold, 300 s by default) is shown as `stale`.
+ */
+export function providerStatusAt(
+	pb: Pick<ProviderUsageBucket, 'status' | 'fetchedAt' | 'sourceInfo'>,
+	nowMs: number
+): ProviderUsageStatus | undefined {
+	if (pb.status !== 'fresh' || pb.fetchedAt == null) return pb.status;
+	const intervalMs = (pb.sourceInfo?.min_interval_seconds || 300) * 1000;
+	return nowMs - pb.fetchedAt > intervalMs ? 'stale' : 'fresh';
+}
+
+/** Whether any of a bucket's windows has aged past `BUCKET_STALE_MS` (needs a refresh). */
 export function isBucketStale(bucket: UsageBucket, now: number): boolean {
-	return bucket.fetchedAt != null && now - bucket.fetchedAt > BUCKET_STALE_MS;
+	const observedAt = bucketObservedAt(bucket);
+	return observedAt != null && now - observedAt > BUCKET_STALE_MS;
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -549,8 +585,15 @@ function _legacyFetchedMs(sec: number | null | undefined): number | null {
 	return Math.round(sec * 1000);
 }
 
-/** Build a window map from raw snapshot windows. */
-function _windowsFromSnapshot(raw: SnapshotWindow[] | undefined, now: number): Record<string, UsageWindow> {
+/**
+ * Build a window map from raw snapshot windows. Each window is dated by its own
+ * `observed_at`, else by the snapshot's `fetchedAt` (epoch ms), else `now`.
+ */
+function _windowsFromSnapshot(
+	raw: SnapshotWindow[] | undefined,
+	now: number,
+	fetchedAt: number | null | undefined = null
+): Record<string, UsageWindow> {
 	const windows: Record<string, UsageWindow> = {};
 	for (const w of raw ?? []) {
 		if (!w?.type || typeof w.utilization !== 'number') continue;
@@ -558,7 +601,7 @@ function _windowsFromSnapshot(raw: SnapshotWindow[] | undefined, now: number): R
 			type: w.type,
 			utilization: _clampPct(w.utilization),
 			resets_at: w.resets_at ?? null,
-			received_at: now,
+			received_at: w.observed_at ?? fetchedAt ?? now,
 			source: 'poll',
 		};
 	}
@@ -579,17 +622,22 @@ export const rateLimit = {
 	 *  self install when the event carries none (legacy backend). */
 	applyLiveEvent(event: LiveRateLimitEvent): void {
 		const { rate_limit_type, utilization } = event;
+		if (!rate_limit_type) return;
+		// `rejected` means the CLI cut this window off: exhausted, whether or not
+		// the event carries a utilization.
+		const rejected = event.status === 'rejected';
 		// A data-less event (utilization null) must NOT create/wipe a window —
 		// the CLI emits these before any usage is recorded.
-		if (!rate_limit_type || utilization == null || typeof utilization !== 'number') return;
+		if (!rejected && (utilization == null || typeof utilization !== 'number')) return;
+		const now = Date.now();
 		const win: UsageWindow = {
 			type: rate_limit_type,
 			// SDK events report the USED fraction; the polled Claude feed — and every
 			// consumer, e.g. `reportedRemainingPct` — treats a window's utilization as
 			// quota REMAINING, so convert at ingest.
-			utilization: 100 - _fractionToPct(utilization),
+			utilization: rejected ? 0 : 100 - _fractionToPct(utilization as number),
 			resets_at: event.resets_at ?? null,
-			received_at: Date.now(),
+			received_at: now,
 			source: 'live',
 		};
 		_store.update((s) => {
@@ -598,6 +646,8 @@ export const rateLimit = {
 			const bucket: UsageBucket = {
 				...(prev ?? { windows: {}, fetchedAt: null, available: true }),
 				windows: { ...(prev?.windows ?? {}), [rate_limit_type]: win },
+				// `received_at` dates this window only: an unchanged reading is still
+				// current, but the bucket's other windows keep their own age.
 				available: true,
 			};
 			const buckets = { ...s.buckets, [key]: bucket };
@@ -654,12 +704,13 @@ export const rateLimit = {
 						scope: p.scope ?? null,
 						sourceInfo: p.source_info ?? null,
 						lastAttemptAt: p.last_attempt_at ?? p.fetched_at ?? null,
+						cooldownUntil: p.cooldown_until ?? null,
 						status: p.status,
 						lastErrorKind: p.last_error_kind ?? null,
 						providerName: p.provider_name ?? null,
 						providerType: p.provider_type ?? null,
 						planType: p.plan_type ?? null,
-						windows: _windowsFromSnapshot(p.windows, now),
+						windows: _windowsFromSnapshot(p.windows, now, p.fetched_at),
 						credits: p.credits ?? null,
 						fetchedAt: p.fetched_at ?? null,
 					};
@@ -690,11 +741,13 @@ export const rateLimit = {
 					// null generation is accepted but must NOT lower the high-water
 					// mark (that would re-admit older out-of-order snapshots).
 					const gen = entry.generation;
+					let sameGeneration = false;
 					if (gen != null) {
 						if (gen < (_lastGenByInstance[key] ?? -1)) {
 							if (prev) buckets[key] = prev;
 							continue;
 						}
+						sameGeneration = gen === _lastGenByInstance[key];
 						_lastGenByInstance[key] = gen;
 					}
 
@@ -702,11 +755,7 @@ export const rateLimit = {
 					staleByInstance[key] = false;
 
 					const meta = {
-						accountId: entry.account_id ?? null,
-						accountEmail: entry.account_email ?? null,
-						accountName: entry.account_name ?? null,
 						deviceName: entry.device_name ?? null,
-						planType: entry.plan_type ?? null,
 						online: entry.online ?? null,
 						generation: gen ?? null,
 						fetchedAt: entry.fetched_at ?? null,
@@ -721,11 +770,15 @@ export const rateLimit = {
 							available: false,
 						};
 					} else {
-						buckets[key] = {
-							...meta,
-							windows: _windowsFromSnapshot(entry.windows, now),
-							available: true,
-						};
+						const windows = _windowsFromSnapshot(entry.windows, now, entry.fetched_at);
+						// An unchanged generation means nothing changed server-side since
+						// the last snapshot, so a live window received since is newer.
+						if (sameGeneration) {
+							for (const w of Object.values(prev?.windows ?? {})) {
+								if (w.source === 'live') windows[w.type] = w;
+							}
+						}
+						buckets[key] = { ...meta, windows, available: true };
 					}
 				}
 
@@ -795,7 +848,7 @@ export const rateLimit = {
 				// data fields the legacy payload actually carries.
 				bucket = {
 					...(prev ?? {}),
-					windows: _windowsFromSnapshot(snapshot.windows, now),
+					windows: _windowsFromSnapshot(snapshot.windows, now, _legacyFetchedMs(snapshot.fetched_at)),
 					fetchedAt: _legacyFetchedMs(snapshot.fetched_at),
 					available: true,
 					generation: gen ?? null,

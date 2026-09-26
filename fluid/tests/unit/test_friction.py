@@ -305,8 +305,7 @@ def test_friction_does_not_make_a_pass_due_immediately(tmp_path) -> None:
 def _nudge_loop(provider, *, dispatch=None, tmp_path=None, store=None):
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolCtx(extra={"continual_journal": lambda *a, **k: None,
-                         "memory_store": SkillStore(tmp_path)})
+    ctx = ToolCtx(extra={"memory_store": SkillStore(tmp_path)})
     if dispatch is not None:
         ctx.extra["task_dispatch"] = dispatch
     skills = SkillStore(tmp_path) if tmp_path is not None else None
@@ -489,7 +488,7 @@ async def test_a_clean_cell_journals_no_friction(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_nudge_without_a_continual_journal(tmp_path) -> None:
+async def test_no_nudge_without_a_tool_journal(tmp_path) -> None:
     """Nothing to record a lesson into ⇒ do not ask for one."""
     missing = str(tmp_path / "nope.py")
     provider = ScriptedProvider([
@@ -510,7 +509,7 @@ def test_nudge_is_silent_when_remember_is_off_the_surface(tmp_path) -> None:
         model="test-model",
         registry=registry,
         permissions=PermissionEngine("never_ask"),
-        ctx=ToolCtx(),  # no continual_journal ⇒ Remember has no capability
+        ctx=ToolCtx(),  # no memory_store ⇒ Remember has no capability
         journal=ToolJournal(SkillStore(tmp_path), None),
     )
     loop._begin_friction_turn()

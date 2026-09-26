@@ -24,8 +24,8 @@ import pytest
 import app.api.agents as agents_api
 import app.api.settings as settings_api
 import app.api.settings_audio as audio_api
-import app.api.settings_credentials as creds_api
 import app.api.settings_media as media_api
+from tests.api.helpers import fake_request
 
 
 class _ThreadSpy:
@@ -38,17 +38,6 @@ class _ThreadSpy:
     def __call__(self, *args, **kwargs):
         self.threads.append(threading.get_ident())
         return self._fn(*args, **kwargs)
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — nothing blocking may run here."""
-    return threading.get_ident()
-
-
-def _request(api_user=None):
-    """The bare shape ``get_api_user_from_request`` reads off a Request."""
-    return SimpleNamespace(state=SimpleNamespace(api_user=api_user))
 
 
 def _assert_one_worker_hop(loop_thread, *spies):
@@ -70,7 +59,7 @@ async def test_list_profiles_reads_off_the_loop_in_one_hop(mock_db, loop_thread)
 
     with patch.object(agents_api.database, "get_all_profile_session_counts", counts), \
          patch.object(agents_api.database, "get_all_profiles", listing):
-        profiles = await agents_api.list_profiles(_request(), token="t")
+        profiles = await agents_api.list_profiles(fake_request(), token="t")
 
     assert any(p["id"] == "default" for p in profiles), "the seeded profile is still returned"
     _assert_one_worker_hop(loop_thread, counts, listing)
@@ -86,7 +75,7 @@ async def test_list_profiles_for_a_restricted_api_user_is_still_one_hop(
     with patch.object(agents_api.database, "get_all_profile_session_counts", counts), \
          patch.object(agents_api.database, "get_profile", get_profile):
         profiles = await agents_api.list_profiles(
-            _request({"profile_ids": ["default", "default", "default"]}), token="t"
+            fake_request({"profile_ids": ["default", "default", "default"]}), token="t"
         )
 
     assert [p["id"] for p in profiles] == ["default"] * 3
@@ -100,7 +89,7 @@ async def test_get_profile_reads_row_and_count_off_the_loop(mock_db, loop_thread
 
     with patch.object(agents_api.database, "get_profile", row), \
          patch.object(agents_api.database, "get_profile_session_count", count):
-        profile = await agents_api.get_profile(_request(), "default", token="t")
+        profile = await agents_api.get_profile(fake_request(), "default", token="t")
 
     assert profile["id"] == "default"
     assert profile["session_count"] == 0
@@ -112,7 +101,7 @@ async def test_get_profile_still_404s_from_inside_the_offload(mock_db):
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await agents_api.get_profile(_request(), "no-such-profile", token="t")
+        await agents_api.get_profile(fake_request(), "no-such-profile", token="t")
     assert exc.value.status_code == 404
 
 
@@ -135,7 +124,7 @@ async def test_get_profile_agents_fans_out_in_one_hop(mock_db, loop_thread):
 
     with patch.object(agents_api.database, "get_profile", row), \
          patch.object(agents_api.database, "get_subagent", sub):
-        agents = await agents_api.get_profile_agents(_request(), "default", token="t")
+        agents = await agents_api.get_profile_agents(fake_request(), "default", token="t")
 
     assert [a.id for a in agents] == ["a", "b", "c"]
     _assert_one_worker_hop(loop_thread, row, sub)
@@ -268,7 +257,9 @@ async def test_get_audio_models_reads_key_and_models_in_one_hop(mock_db, loop_th
 
     with patch.object(audio_api.database, "get_system_setting", setting), \
          patch.object(audio_api, "get_decrypted_api_key", key):
-        payload = await audio_api.get_audio_models(token="t")
+        # The owner: no API user on the request state.
+        owner_request = SimpleNamespace(state=SimpleNamespace())
+        payload = await audio_api.get_audio_models(owner_request, token="t")
 
     assert payload["current_tts"] == "fal-ai/kokoro/american-english"
     assert payload["current_stt"] == "fal-ai/whisper"
@@ -309,61 +300,6 @@ async def test_update_tts_settings_keeps_the_pre_validation_writes(mock_db):
 
     assert exc.value.status_code == 400
     assert written == [("tts_model", "m"), ("tts_voice", "v")]
-
-
-# ═══ settings_credentials.py ════════════════════════════════════════════════
-
-
-async def test_credential_policies_summary_probes_admin_keys_off_the_loop(
-    mock_db, loop_thread
-):
-    """One listing plus one admin-key probe per policy — each probe is itself a
-    settings read and a decrypt."""
-    policies = [
-        {"id": "fal_api_key", "policy": "optional", "description": "",
-         "updated_at": "2026-08-28T00:00:00+00:00"},
-    ]
-    listing = _ThreadSpy(lambda: [dict(p) for p in policies])
-    probe = _ThreadSpy(creds_api.get_decrypted_api_key)
-
-    with patch.object(creds_api.database, "get_all_credential_policies", listing), \
-         patch.object(creds_api, "get_decrypted_api_key", probe):
-        payload = await creds_api.get_credential_policies_summary(token=None)
-
-    assert payload["policies"][0]["effective_status"] == "optional_no_fallback"
-    _assert_one_worker_hop(loop_thread, listing, probe)
-
-
-async def test_set_user_credential_policy_keeps_check_and_write_atomic(
-    mock_db, loop_thread
-):
-    """The user lookup gates the write; both must share one hop."""
-    lookup = _ThreadSpy(lambda uid: {"id": uid, "name": "u"})
-    write = _ThreadSpy(lambda *a: True)
-
-    with patch.object(creds_api.database, "get_api_user", lookup), \
-         patch.object(creds_api.database, "set_user_credential_policy", write):
-        result = await creds_api.set_user_credential_policy(
-            "user-1", "fal_api_key",
-            creds_api.SetUserCredentialPolicyRequest(policy="user_provided"),
-            token=None,
-        )
-
-    assert result["success"] is True
-    _assert_one_worker_hop(loop_thread, lookup, write)
-
-
-async def test_set_user_credential_policy_404s_for_an_unknown_user(mock_db):
-    from fastapi import HTTPException
-
-    with patch.object(creds_api.database, "get_api_user", lambda _uid: None), \
-            pytest.raises(HTTPException) as exc:
-        await creds_api.set_user_credential_policy(
-            "nobody", "fal_api_key",
-            creds_api.SetUserCredentialPolicyRequest(policy="user_provided"),
-            token=None,
-        )
-    assert exc.value.status_code == 404
 
 
 # ═══ settings_media.py ══════════════════════════════════════════════════════

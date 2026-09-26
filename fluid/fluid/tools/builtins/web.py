@@ -8,9 +8,11 @@ Design constraints:
 * **Untrusted by construction.** Every result body is wrapped in the same
   data-not-instructions fence MCP results get (fluid.tools.hardening) — web
   content is the canonical injection vector.
-* **SSRF-guarded.** http/https only, and hosts that resolve to loopback,
-  private, or link-local addresses are refused — an agent must not be able to
-  probe the user's internal network via a crafted URL. Cross-host redirects
+* **SSRF-guarded.** http/https only, and hosts that resolve to any
+  non-public address (loopback, private, carrier-grade NAT, link-local) are
+  refused — an agent must not be able to probe the user's internal network
+  via a crafted URL. The request connects to the address that passed the
+  check, so DNS rebinding cannot swap it afterwards. Cross-host redirects
   are reported back instead of silently followed, so the model (and the
   transcript) always knows which host was actually fetched.
 * **Bounded.** Text is extracted from HTML (scripts/styles dropped, links kept
@@ -42,6 +44,46 @@ _USER_AGENT = "fluid-agent/0.1 (+https://github.com/Quickkill0/fluid)"
 # ─── URL guarding ────────────────────────────────────────────────────────────
 
 
+def _blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for anything that is not a public internet address.
+
+    ``is_global`` rather than ``is_private``: it also covers 100.64.0.0/10
+    (carrier-grade NAT, which Tailscale uses), link-local, reserved and
+    documentation ranges. Multicast and IPv4-mapped IPv6 are checked
+    explicitly because ``is_global`` does not treat them as internal.
+    """
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return not address.is_global or address.is_multicast
+
+
+def resolve_public(host: str) -> tuple[str | None, str | None]:
+    """``(address, None)`` for a host whose every address is public, else
+    ``(None, reason)``. The address is what the request must connect to."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None, f"cannot resolve host {host!r}"
+    chosen: str | None = None
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if _blocked_address(address):
+            return None, (
+                f"host {host!r} resolves to a private/loopback address — "
+                "fetching internal network targets is not allowed"
+            )
+        if chosen is None:
+            chosen = str(address)
+    if chosen is None:
+        return None, f"cannot resolve host {host!r}"
+    return chosen, None
+
+
 def check_url(url: str) -> str | None:
     """Refusal reason for ``url``, or None when it is fetchable."""
     parsed = urlparse(url)
@@ -50,24 +92,62 @@ def check_url(url: str) -> str | None:
     host = parsed.hostname
     if not host:
         return "URL has no host"
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return f"cannot resolve host {host!r}"
-    for info in infos:
-        try:
-            address = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            continue
-        if (
-            address.is_loopback or address.is_private or address.is_link_local
-            or address.is_reserved or address.is_unspecified
-        ):
-            return (
-                f"host {host!r} resolves to a private/loopback address — "
-                "fetching internal network targets is not allowed"
-            )
-    return None
+    _address, reason = resolve_public(host)
+    return reason
+
+
+def _proxy_configured() -> bool:
+    from urllib.request import getproxies
+
+    proxies = getproxies()
+    return bool(proxies.get("https") or proxies.get("http") or proxies.get("all"))
+
+
+class BlockedAddress(Exception):
+    """The connection target failed the SSRF check at connect time."""
+
+
+class PinnedTransport:
+    """httpx transport that connects only to the address it vetted.
+
+    ``check_url`` resolves once to decide; a second resolution inside the
+    HTTP client could return a different (internal) address — DNS
+    rebinding. This transport resolves each request's host itself, refuses
+    any non-public answer, and sends the request to that exact address,
+    keeping the original Host header and TLS server name so virtual hosting
+    and certificate checks still see the real host name.
+    """
+
+    def __init__(self, inner: Any = None, resolver: Any = None) -> None:
+        if inner is None:
+            import httpx
+
+            inner = httpx.AsyncHTTPTransport()
+        self._inner = inner
+        self._resolve = resolver or resolve_public
+
+    async def handle_async_request(self, request: Any) -> Any:
+        import asyncio
+
+        host = request.url.host
+        address, reason = await asyncio.to_thread(self._resolve, host)
+        if address is None:
+            raise BlockedAddress(reason or f"host {host!r} is not allowed")
+        if address != host:
+            request.url = request.url.copy_with(host=address)
+            if request.url.scheme == "https":
+                request.extensions = {**request.extensions, "sni_hostname": host}
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+    async def __aenter__(self) -> PinnedTransport:
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self._inner.__aexit__(*exc)
 
 
 # ─── HTML → text ─────────────────────────────────────────────────────────────
@@ -173,12 +253,9 @@ def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
 # ─── navigation-page diagnostic ──────────────────────────────────────────────
 #
 # A doc-site index fetches as a wall of link text with almost no prose, and the
-# model gets no signal that the page it just paid for is a table of contents.
-# Two audited sessions ended there: one fetched a docs index, reported "mainly
-# navigation and internal indexes", and handed the question back to the user
-# without trying a single one of the links it had just been handed; another
-# spent unnecessary calls and money re-deriving a fact the linked page held. The
-# footer below turns that dead end into a next move.
+# model gets no signal that the page it just paid for is a table of contents,
+# so it may stop there instead of following a link. The footer below turns that
+# dead end into a next move.
 
 #: Link text this share (or more) of the extracted text ⇒ a navigation page.
 NAV_LINK_RATIO = 0.55
@@ -252,6 +329,12 @@ def navigation_note(extractor: _TextExtractor, text: str, url: str) -> str:
 async def _get(url: str, *, transport: Any = None) -> Any:
     import httpx
 
+    if transport is None and not _proxy_configured():
+        # Production path: pin every connection to the address that passed
+        # the SSRF check (see PinnedTransport). Tests inject a mock instead.
+        # Behind an HTTP proxy the proxy does the resolving, so httpx's own
+        # proxy-aware transport is kept and only check_url applies.
+        transport = PinnedTransport()
     async with httpx.AsyncClient(
         timeout=_TIMEOUT_S,
         follow_redirects=False,
@@ -260,18 +343,40 @@ async def _get(url: str, *, transport: Any = None) -> Any:
     ) as client:
         current = url
         for _ in range(_MAX_SAME_HOST_REDIRECTS):
-            response = await client.get(current)
-            if response.status_code in (301, 302, 303, 307, 308):
-                target = urljoin(current, response.headers.get("location", ""))
-                if urlparse(target).hostname != urlparse(current).hostname:
-                    return ("redirect", target)
-                reason = check_url(target)
-                if reason is not None:
-                    return ("blocked", reason)
-                current = target
-                continue
-            return response
+            # Streamed so the body cap bounds what is READ, not just what is
+            # kept: ``client.get`` would buffer a multi-gigabyte response in
+            # full before any slice applied.
+            async with client.stream("GET", current) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    target = urljoin(current, response.headers.get("location", ""))
+                    if urlparse(target).hostname != urlparse(current).hostname:
+                        return ("redirect", target)
+                    reason = check_url(target)
+                    if reason is not None:
+                        return ("blocked", reason)
+                    current = target
+                    continue
+                body = bytearray()
+                truncated = False
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if len(body) > _MAX_RESPONSE_BYTES:
+                        truncated = True
+                        del body[_MAX_RESPONSE_BYTES:]
+                        break
+                return _Fetched(response, bytes(body), truncated)
         return ("error", "too many redirects")
+
+
+class _Fetched:
+    """A final (non-redirect) response plus its size-capped body."""
+
+    __slots__ = ("response", "body", "truncated")
+
+    def __init__(self, response: Any, body: bytes, truncated: bool) -> None:
+        self.response = response
+        self.body = body
+        self.truncated = truncated
 
 
 # ─── WebFetch ────────────────────────────────────────────────────────────────
@@ -354,11 +459,13 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         url = "https://" + url[len("http://"):]  # upgrade, like the big harnesses
     transport = (ctx.extra or {}).get("web_transport")  # test seam
     try:
-        response = await _get(url, transport=transport)
+        fetched = await _get(url, transport=transport)
+    except BlockedAddress as exc:
+        return ToolOutcome(text=f"WebFetch refused: {exc}", is_error=True)
     except Exception as exc:
         return ToolOutcome(text=f"WebFetch failed: {type(exc).__name__}: {exc}", is_error=True)
-    if isinstance(response, tuple):
-        kind, detail = response
+    if isinstance(fetched, tuple):
+        kind, detail = fetched
         if kind == "redirect":
             return ToolOutcome(
                 text=(
@@ -368,15 +475,19 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 )
             )
         return ToolOutcome(text=f"WebFetch failed: {detail}", is_error=True)
+    response = fetched.response
     if response.status_code >= 400:
         return ToolOutcome(
             text=f"WebFetch failed: HTTP {response.status_code} for {url}",
             is_error=True,
         )
-    body = response.content[:_MAX_RESPONSE_BYTES]
+    body = fetched.body
     content_type = (response.headers.get("content-type") or "").lower()
     charset = response.charset_encoding or "utf-8"
-    text = body.decode(charset, errors="replace")
+    try:
+        text = body.decode(charset, errors="replace")
+    except LookupError:  # a charset label Python does not know
+        text = body.decode("utf-8", errors="replace")
     title = ""
     extractor: _TextExtractor | None = None
     if "html" in content_type or re.search(r"<html[\s>]", text[:2048], re.IGNORECASE):
@@ -389,7 +500,7 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     text, _ = strip_invisible(text)
 
     offset = max(0, int(input.get("offset") or 0))
-    max_chars = min(MAX_FETCH_CHARS, int(input.get("max_chars") or DEFAULT_FETCH_CHARS))
+    max_chars = max(1, min(MAX_FETCH_CHARS, int(input.get("max_chars") or DEFAULT_FETCH_CHARS)))
     window = text[offset : offset + max_chars]
     header = f"{url}" + (f" — {title}" if title else "")
     footer = ""
@@ -397,6 +508,11 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         footer = (
             f"\n[{len(text)} chars total; showing {offset}..{offset + len(window)} "
             f"— continue with offset={offset + len(window)}]"
+        )
+    if fetched.truncated:
+        footer += (
+            f"\n[response body exceeded {_MAX_RESPONSE_BYTES // (1024 * 1024)} MiB; "
+            "only its beginning was read]"
         )
     if extractor is not None:
         # Rides after the offset marker, never instead of it: a long index page
@@ -471,10 +587,10 @@ def _strip_tags(html: str) -> str:
 
 def _result_url(href: str) -> str:
     # DuckDuckGo wraps result URLs as //duckduckgo.com/l/?uddg=<encoded>.
-    from urllib.parse import parse_qs, unquote, urlparse as _urlparse
+    from urllib.parse import parse_qs, unquote
 
     if "uddg=" in href:
-        query = parse_qs(_urlparse(href).query)
+        query = parse_qs(urlparse(href).query)
         target = query.get("uddg", [""])[0]
         if target:
             return unquote(target)

@@ -3,7 +3,7 @@ Tests for automation service — prompt rendering, budget checking, CRUD operati
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 from app.core.automation_service import (
     render_prompt,
@@ -554,3 +554,273 @@ class TestShouldRunScheduledHere:
             should_run, _ = should_run_scheduled_here(auto)
         assert should_run is False
         svc_env.update_automation.assert_not_called()
+
+
+# =============================================================================
+# Rendering edge cases
+# =============================================================================
+
+
+class TestRenderEdgeCases:
+    def test_dot_path_through_a_scalar_stays_literal(self):
+        assert render_prompt("{{payload.repo.name}}", {"payload": {"repo": "shuffle"}}) == "{{payload.repo.name}}"
+
+    def test_falsy_values_render(self):
+        assert render_prompt("{{n}}/{{flag}}/{{s}}", {"n": 0, "flag": False, "s": ""}) == "0/False/"
+
+    def test_action_params_render_strings_and_pass_other_types(self):
+        from app.core.automation_service import render_action_params
+
+        params = {"text": "{{payload.ref}}: {{response}}", "count": 3, "tags": ["{{x}}"], "on": True}
+        rendered = render_action_params(params, {"payload": {"ref": "main"}}, "shipped")
+        assert rendered == {"text": "main: shipped", "count": 3, "tags": ["{{x}}"], "on": True}
+        assert params["text"] == "{{payload.ref}}: {{response}}"  # input untouched
+
+
+# =============================================================================
+# Budget: daily cost limit
+# =============================================================================
+
+
+class TestDailyCostLimit:
+    def _seed_spend(self, cost):
+        from app.db import database
+        database.create_automation(
+            automation_id="auto-1", name="T", trigger_type="webhook", trigger_config={},
+            prompt="t", profile_id="default",
+        )
+        database.create_automation_run(run_id="run-1", automation_id="auto-1", status="completed")
+        database.update_automation_run("run-1", cost_usd=cost)
+
+    def test_daily_cost_limit_reached(self, mock_db):
+        self._seed_spend(0.6)
+        ok, reason = check_budget({"id": "auto-1", "total_cost_used": 0.6, "max_cost_per_day": 0.5})
+        assert ok is False
+        assert "Daily cost limit" in reason
+
+    def test_daily_cost_under_limit(self, mock_db):
+        self._seed_spend(0.2)
+        ok, _ = check_budget({"id": "auto-1", "total_cost_used": 0.2, "max_cost_per_day": 0.5})
+        assert ok is True
+
+
+# =============================================================================
+# Runner election: network ownership and no-runner bookkeeping
+# =============================================================================
+
+
+class TestElectionOwnership:
+    def test_network_ownership_decision_wins(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+
+        with patch("app.network.ownership.decide_automation", return_value=(False, "owned by dev-2")):
+            assert should_run_scheduled_here({"id": "auto-1"}) == (False, "owned by dev-2")
+        svc_env.get_installs_map.assert_not_called()
+
+    def test_network_ownership_error_fails_closed(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+
+        with patch("app.network.ownership.decide_automation", side_effect=RuntimeError("no network state")):
+            assert should_run_scheduled_here({"id": "auto-1"}) == (False, "network ownership unavailable")
+        svc_env.get_installs_map.assert_not_called()
+
+    def test_record_no_runner_write_failure_is_swallowed(self, svc_env):
+        from app.core.automation_service import _record_no_runner
+
+        svc_env.update_automation.side_effect = RuntimeError("db down")
+        _record_no_runner({"id": "auto-1"}, {"id": "proj-A", "name": "Repo"})  # must not raise
+        svc_env.update_automation.assert_called_once()
+
+
+# =============================================================================
+# Webhook secret helpers: failure paths and reveal
+# =============================================================================
+
+
+@pytest.fixture
+def enc_prefix():
+    with patch("app.core.encryption.encrypt_value", side_effect=lambda v: f"enc:{v[::-1]}"), \
+         patch("app.core.encryption.decrypt_value", side_effect=lambda v: v[len("enc:"):][::-1]), \
+         patch("app.core.encryption.is_encryption_ready", return_value=True) as ready:
+        yield ready
+
+
+class TestWebhookSecretFailures:
+    def test_encrypt_failure_refuses_to_store_plaintext(self):
+        with patch("app.core.encryption.encrypt_value", side_effect=RuntimeError("no key")):
+            with pytest.raises(ValueError, match="local recovery"):
+                encrypt_webhook_secret({"secret": "plain"})
+
+    def test_decrypt_failure_leaves_ciphertext(self, enc_prefix):
+        with patch("app.core.encryption.decrypt_value", side_effect=RuntimeError("bad key")):
+            assert decrypt_webhook_secret({"secret": "enc:abc"}) == {"secret": "enc:abc"}
+
+    def test_decrypt_when_key_unavailable_leaves_ciphertext(self, enc_prefix):
+        enc_prefix.return_value = False
+        assert decrypt_webhook_secret({"secret": "enc:abc"}) == {"secret": "enc:abc"}
+
+    def test_reveal_decrypts_webhook_triggers_only(self, enc_prefix):
+        from app.core.automation_service import reveal_webhook_secrets
+
+        automation = {
+            "trigger_type": "webhook",
+            "trigger_config": {"secret": "enc:terces"},
+            "triggers": [
+                {"type": "webhook", "config": {"secret": "enc:terces"}},
+                {"type": "cron", "config": {"expression": "0 9 * * *", "secret": "enc:untouched"}},
+                "not-a-dict",
+            ],
+        }
+        revealed = reveal_webhook_secrets(automation)
+        assert revealed["trigger_config"] == {"secret": "secret"}
+        assert revealed["triggers"][0]["config"] == {"secret": "secret"}
+        assert revealed["triggers"][1]["config"]["secret"] == "enc:untouched"
+        assert revealed["triggers"][2] == "not-a-dict"
+        assert automation["triggers"][0]["config"]["secret"] == "enc:terces"  # input untouched
+
+    def test_reveal_passes_non_dicts_through(self):
+        from app.core.automation_service import reveal_webhook_secrets
+        assert reveal_webhook_secrets(None) is None
+
+
+# =============================================================================
+# create / update / delete: validation and scheduler hand-off
+# =============================================================================
+
+
+class TestCreateUpdateDeleteService:
+    async def test_create_rejects_unknown_project(self, mock_db):
+        from app.core.automation_service import create_automation
+
+        with pytest.raises(ValueError, match="Project not found"):
+            await create_automation(
+                name="t", trigger_type="interval", trigger_config={"seconds": 60},
+                profile_id="default", project_id="proj-missing",
+            )
+
+    async def test_create_raises_when_insert_returns_nothing(self, mock_db):
+        from app.core.automation_service import create_automation
+
+        with patch("app.db.database.create_automation", return_value=None):
+            with pytest.raises(RuntimeError, match="Failed to create automation"):
+                await create_automation(
+                    name="t", trigger_type="interval", trigger_config={"seconds": 60},
+                    profile_id="default",
+                )
+
+    async def test_create_enabled_survives_a_scheduling_failure(self, mock_db):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import create_automation
+
+        with patch.object(automation_manager, "schedule_automation",
+                          new=AsyncMock(side_effect=RuntimeError("scheduler down"))) as sched:
+            auto = await create_automation(
+                name="t", trigger_type="interval", trigger_config={"seconds": 60},
+                profile_id="default", enabled=True,
+            )
+        sched.assert_awaited_once_with(auto["id"])
+        assert auto["is_enabled"]
+
+    async def test_create_enabled_event_trigger_is_not_scheduled(self, mock_db, enc_prefix):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import create_automation
+
+        with patch.object(automation_manager, "schedule_automation", new=AsyncMock()) as sched:
+            auto = await create_automation(
+                name="t", trigger_type="webhook", trigger_config={},
+                profile_id="default", enabled=True,
+            )
+        sched.assert_not_awaited()
+        # A secret was generated and stored encrypted.
+        assert auto["triggers"][0]["config"]["secret"].startswith("enc:")
+
+    async def _seed(self, **kwargs):
+        from app.db import database
+        return database.create_automation(
+            automation_id="auto-u", name="U", trigger_type="interval",
+            trigger_config={"seconds": 600}, prompt="p", profile_id="default", **kwargs,
+        )
+
+    async def test_update_missing_returns_none(self, mock_db):
+        from app.core.automation_service import update_automation
+        assert await update_automation("auto-missing", name="x") is None
+
+    @pytest.mark.parametrize("kwargs,match", [
+        ({"profile_id": "nope"}, "Profile not found"),
+        ({"project_id": "nope"}, "Project not found"),
+        ({"triggers": [{"type": "sometimes", "config": {}}]}, "Invalid trigger type"),
+        ({"triggers": [{"type": "interval", "config": {"seconds": 59}}]}, "at least 60 seconds"),
+    ])
+    async def test_update_validation(self, mock_db, kwargs, match):
+        from app.core.automation_service import update_automation
+
+        await self._seed()
+        with pytest.raises(ValueError, match=match):
+            await update_automation("auto-u", **kwargs)
+        from app.db import database
+        assert database.get_automation("auto-u")["triggers"] == [{"type": "interval", "config": {"seconds": 600}}]
+
+    async def test_update_webhook_trigger_generates_and_encrypts_secret(self, mock_db, enc_prefix):
+        from app.core.automation_service import update_automation
+
+        await self._seed()
+        updated = await update_automation("auto-u", triggers=[{"type": "webhook", "config": {}}])
+        secret = updated["triggers"][0]["config"]["secret"]
+        assert secret.startswith("enc:") and len(secret) > len("enc:") + 20
+
+    async def test_update_legacy_webhook_trigger_config_is_encrypted(self, mock_db, enc_prefix):
+        from app.core.automation_service import update_automation
+
+        await self._seed()
+        updated = await update_automation(
+            "auto-u", trigger_type="webhook", trigger_config={"secret": "plain"},
+        )
+        assert updated["trigger_config"] == {"secret": "enc:nialp"}
+
+    @pytest.mark.parametrize("kwargs,reschedules", [
+        ({"triggers": [{"type": "interval", "config": {"seconds": 900}}]}, True),
+        ({"trigger_config": {"seconds": 900}}, True),
+        ({"trigger_type": "interval"}, True),
+        ({"name": "renamed", "prompt": "new"}, False),
+    ])
+    async def test_update_reschedules_only_on_trigger_changes(self, mock_db, kwargs, reschedules):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import update_automation
+
+        await self._seed(enabled=True)
+        with patch.object(automation_manager, "schedule_automation", new=AsyncMock()) as sched:
+            await update_automation("auto-u", **kwargs)
+        assert sched.await_count == (1 if reschedules else 0)
+
+    async def test_update_reschedule_failure_still_returns_the_row(self, mock_db):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import update_automation
+
+        await self._seed(enabled=True)
+        with patch.object(automation_manager, "schedule_automation",
+                          new=AsyncMock(side_effect=RuntimeError("scheduler down"))):
+            updated = await update_automation("auto-u", triggers=[{"type": "interval", "config": {"seconds": 900}}])
+        assert updated["triggers"][0]["config"] == {"seconds": 900}
+
+    @pytest.mark.parametrize("enabled,unschedules", [(True, 1), (False, 0)])
+    async def test_delete_unschedules_enabled_automations(self, mock_db, enabled, unschedules):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import delete_automation
+        from app.db import database
+
+        await self._seed(enabled=enabled)
+        with patch.object(automation_manager, "unschedule_automation", new=AsyncMock()) as unsched:
+            assert await delete_automation("auto-u") is True
+        assert unsched.await_count == unschedules
+        assert database.get_automation("auto-u") is None
+
+    async def test_delete_proceeds_when_unschedule_fails(self, mock_db):
+        from app.core.automation_manager import automation_manager
+        from app.core.automation_service import delete_automation
+        from app.db import database
+
+        await self._seed(enabled=True)
+        with patch.object(automation_manager, "unschedule_automation",
+                          new=AsyncMock(side_effect=RuntimeError("scheduler down"))):
+            assert await delete_automation("auto-u") is True
+        assert database.get_automation("auto-u") is None

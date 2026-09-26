@@ -81,6 +81,8 @@ async def update_api_user_endpoint(
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
     if "is_active" in kwargs:
+        if not kwargs["is_active"]:
+            _close_key_sockets(user_id)
         event = (audit_service.AuditEventType.API_KEY_ENABLED if kwargs["is_active"]
                  else audit_service.AuditEventType.API_KEY_DISABLED)
         await _audit_key_change(request, event, result)
@@ -98,6 +100,7 @@ async def delete_api_user_endpoint(user_id: str, token: str = Depends(require_ad
     user = await run_sync(_delete)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API user not found")
+    _close_key_sockets(user_id)
     await _audit_key_change(request, audit_service.AuditEventType.API_KEY_DELETED, user)
 
 
@@ -124,9 +127,27 @@ async def rotate_api_user_key(user_id: str, token: str = Depends(require_admin),
         return user
 
     user = await run_sync(_rotate)
+    _close_key_sockets(user_id)
     await _audit_key_change(request, audit_service.AuditEventType.API_KEY_ROTATED, user)
 
     return {"id": user_id, "api_key": api_key}
+
+
+def _close_key_sockets(user_id: str) -> None:
+    """Make the key's open sockets re-check it now; a revoked key's close with 4001.
+
+    Chat sockets (``chat_ws_handler``) and every other key socket
+    (``ws_key_watch``: sync, browser panel, voice, transcription). Without
+    this an idle socket would only notice at its periodic re-check, up to
+    30 seconds later.
+    """
+    from app.api import ws_key_watch
+    from app.api.chat_ws_handler import recheck_api_user_sockets
+    for signal in (recheck_api_user_sockets, ws_key_watch.recheck):
+        try:
+            signal(user_id)
+        except Exception:  # noqa: BLE001 — the change is committed; the periodic re-check still runs
+            logger.warning("Could not signal the API key's open sockets", exc_info=True)
 
 
 async def _audit_key_change(request: Request, event_type: str, user: dict) -> None:

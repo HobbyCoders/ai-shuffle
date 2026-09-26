@@ -115,3 +115,19 @@ def join(inviter: Worker, joiner: Worker, *, name: str = None, legacy_instance_i
             engine.apply_snapshot_chunk(chunk)
         engine.adopt_watermarks(manifest["watermarks"])
         engine.finish_bootstrap()
+
+
+def set_owner_pref(worker, key, value):
+    """Write an owner preference on ``worker`` and scan it into the outbox."""
+    with worker.active():
+        from app.core import owner_auth
+        database.set_user_preference("admin", owner_auth.preference_identity(), key, value)
+        engine.scan_all()
+
+
+def owner_pref(worker, key):
+    """Read an owner preference value on ``worker`` (None when unset)."""
+    with worker.active():
+        from app.core import owner_auth
+        row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
+        return row["value"] if row else None

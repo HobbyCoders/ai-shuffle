@@ -28,20 +28,12 @@ import pytest
 import app.api.sessions_worktree as swt
 from app.api.sessions_helpers import CreateWorktreeSessionRequest
 from app.core import placement as placement_mod
-from app.core.config import settings
 from app.db import checkouts as checkouts_db
 from app.db import database, git_ops as git_ops_db
 from app.db import turns as turns_db
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-install-1"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
 
 
 @pytest.fixture
@@ -161,9 +153,7 @@ def _body(**kw) -> CreateWorktreeSessionRequest:
 
 
 async def _create(project, body):
-    return await swt._create_v2_branch_session(
-        MagicMock(name="request"), body, project["legacy"], None
-    )
+    return await swt._create_v2_branch_session(body, project["legacy"], None)
 
 
 # ═══ preflight refusals (nothing created) ════════════════════════════════════
@@ -430,9 +420,7 @@ async def test_remote_create_by_project_v2_id_without_a_local_projects_row(
 
     body = _body(project_id=None, project_v2_id=pv2["id"])
     with _Patches():
-        resp = await swt._create_v2_branch_session(
-            MagicMock(name="request"), body, None, None
-        )
+        resp = await swt._create_v2_branch_session(body, None, None)
 
     row = _row(resp.session_id)
     assert row["project_id"] is None
@@ -467,9 +455,7 @@ async def test_remote_v2_only_refuses_attachments(mock_db, tmp_path):
     )
     with _Patches():
         with pytest.raises(HTTPException) as exc:
-            await swt._create_v2_branch_session(
-                MagicMock(name="request"), body, None, None
-            )
+            await swt._create_v2_branch_session(body, None, None)
 
     assert exc.value.status_code == 400
     assert exc.value.detail == ATTACHMENTS_NEED_LOCAL_CHECKOUT

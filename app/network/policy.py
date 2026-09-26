@@ -77,9 +77,10 @@ _LOCAL_SETTING_PATTERNS = [
         r"^mobile_",
         r"^credential_key_state",
         r"^chat_connection:",
-        r"^claude_active_account(:|$)",
+        r"^claude_cli_relogin_notice(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",
+        r"^owner_auth_",
         r"^schema_migrations_fingerprint$",
         r"^migration:",
         r"^installation_configured$",
@@ -108,7 +109,7 @@ def is_shared_setting_key(key: str) -> bool:
 
 def _looks_like_instance_suffix(key: str) -> bool:
     prefix = key.split(":", 1)[0]
-    return prefix in {"workspace_path", "claude_active_account", "cluster_advertise_url",
+    return prefix in {"workspace_path", "cluster_advertise_url",
                       "mobile_account_hub_secret", "mobile_managed_pending", "mobile_managed_credential"}
 
 
@@ -197,13 +198,6 @@ _register(Collection(
     notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
 
 _register(Collection(
-    name="claude_accounts", table="claude_accounts", keys=("id",),
-    fields=("id", "name", "email", "subscription_type", "credentials", "credential_fingerprint",
-            "expires_at", "has_refresh_token", "sync_pending", "created_at", "updated_at"),
-    encrypted=("credentials",), resource="settings", priority=30,
-    notes="OAuth bundles. Whether a restored bundle is usable is decided at use time."))
-
-_register(Collection(
     name="api_users", table="api_users", keys=("id",),
     fields=("id", "name", "username", "password_hash", "api_key_hash", "project_id", "profile_id",
             "is_active", "web_login_allowed", "description", "model", "effort", "created_at", "updated_at"),
@@ -246,12 +240,7 @@ _register(Collection(
 _register(Collection(
     name="project_hooks", table="project_hooks", keys=("id",),
     fields=("id", "project_id", "name", "event", "hook_type", "command", "timeout", "url", "secret",
-            "enabled", "tool_matcher", "message_template", "created_at", "updated_at"),
-    local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
-
-_register(Collection(
-    name="webhooks", table="webhooks", keys=("id",),
-    fields=("id", "url", "secret", "events", "is_active", "created_at"), json_fields=("events",),
+            "enabled", "tool_matcher", "created_at", "updated_at"),
     local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
 
 _register(Collection(
@@ -262,8 +251,9 @@ _register(Collection(
 
 _register(Collection(
     name="notes", table="notes", keys=("id",),
-    fields=("id", "title", "content", "tags", "is_pinned", "created_at", "updated_at"),
-    json_fields=("tags",), local_fields=("file_path",), resource="notes", priority=70))
+    fields=("id", "title", "content", "tags", "is_pinned", "api_user_id", "created_at", "updated_at"),
+    json_fields=("tags",), local_fields=("file_path",), resource="notes", priority=70,
+    notes="api_user_id travels (like sessions/connectors): a key's note stays that key's on every device."))
 
 _register(Collection(
     name="note_attachments", table="note_attachments", keys=("id",),
@@ -347,6 +337,15 @@ _register(Collection(
     fields=("hash", "size", "mime", "filename", "created_by_session", "owner_device_id", "created_at"),
     local_fields=("runner_id",), resource="artifacts", priority=96,
     notes="Content-addressed; bytes fetched from any holder."))
+
+
+#: Collections this build no longer syncs but peers on older builds may still
+#: publish. Their ops are consumed without being stored or forwarded, their
+#: snapshot pages are skipped, and a publisher still serves an empty page for
+#: each so a joiner on an older build (which expects every collection it
+#: knows) completes its copy. ``claude_accounts`` held the retired in-app
+#: Claude sign-in's credentials.
+RETIRED_COLLECTIONS = frozenset({"claude_accounts"})
 
 
 def collection(name: str) -> Collection:

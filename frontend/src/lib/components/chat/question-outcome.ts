@@ -20,9 +20,6 @@
 export const QUESTION_DISMISS_MESSAGE =
 	'User dismissed the question dialog without answering.';
 
-/** Mirrors `SKIP_ANSWER_TEXT` (app/core/user_question_handler.py). */
-export const QUESTION_SKIP_ANSWER_TEXT = 'User skipped this question.';
-
 /** Card label for a dismissed question. */
 export const QUESTION_DISMISSED_LABEL = 'Dismissed — user closed the question dialog';
 

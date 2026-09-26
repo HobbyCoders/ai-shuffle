@@ -37,13 +37,12 @@ internal object TestScreenshots {
             assertTrue("Windows did not commit a rendered frame for $name", rendered.await(5, TimeUnit.SECONDS))
         }
         // Verify the actual window-produced insets on every captured Shuffle surface
-        // (native forms, chat, QR and voice), including rotation and keyboard captures.
+        // (native forms, chat and QR), including rotation and keyboard captures.
         if (android.os.Build.VERSION.SDK_INT >= 35) instrumentation.runOnMainSync {
             val activities = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
                 .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)
             activities.filter { it is com.hobbycoders.aishuffle.ui.NativeScreen ||
-                it is com.hobbycoders.aishuffle.ui.QrCaptureActivity ||
-                it is com.hobbycoders.aishuffle.voice.VoiceCallActivity }.forEach { activity ->
+                it is com.hobbycoders.aishuffle.ui.QrCaptureActivity }.forEach { activity ->
                 val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
                 val child = content.getChildAt(0)
                 val insets = requireNotNull(androidx.core.view.ViewCompat.getRootWindowInsets(content))

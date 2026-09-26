@@ -45,11 +45,6 @@ const _cache = new Map<string, ModelSchema | null>();
 const _inflight = new Map<string, Promise<ModelSchema | null>>();
 
 export const modelSchemaStore = {
-	/** Synchronously read a cached schema, or undefined if not yet fetched. */
-	peek(endpointId: string): ModelSchema | null | undefined {
-		return _cache.get(endpointId);
-	},
-
 	/**
 	 * Fetch (and cache) the normalized schema for a model. Resolves to null
 	 * when the model has no discoverable schema, so callers fall back to a

@@ -1,5 +1,5 @@
 """
-AI Hub - Claude Code Web Interface and API
+AI Shuffle web interface and API.
 Main FastAPI application entry point
 """
 
@@ -18,9 +18,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.core.cors import configured_origins
+# Takes the desktop listener token out of the environment before anything can
+# spawn a child process that would inherit it.
+from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
-from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import voice_context
 from app.api import tools as tools_api
 from app.api import events as events_api
@@ -86,10 +89,17 @@ log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messa
 root_logger = logging.getLogger()
 root_logger.setLevel(log_level)
 
-# Only add handlers if not already present (prevents duplicates on re-import)
-if not root_logger.handlers:
-    # Console handler (for docker logs)
+# Console handler (for docker logs), added once. Found by name, not by "root
+# has no handlers": importing app.api.logs above already attached its ring
+# buffer to the root logger, so that check never added this handler and the
+# console carried no application logs at all. Test runs (TESTING=1) keep the
+# console quiet, as they always have since then.
+CONSOLE_HANDLER_NAME = "ai-shuffle-console"
+if os.environ.get("TESTING") != "1" and not any(
+    handler.get_name() == CONSOLE_HANDLER_NAME for handler in root_logger.handlers
+):
     console_handler = logging.StreamHandler()
+    console_handler.set_name(CONSOLE_HANDLER_NAME)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
@@ -134,7 +144,8 @@ async def lifespan(app: FastAPI):
     from app.core.startup import (
         init_core, init_encryption_and_sessions, init_workspace,
         check_prerequisites, start_services, start_background_tasks,
-        shutdown_services,
+        shutdown_services, harden_process_introspection,
+        prewarm_code_mode_sandbox,
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
@@ -158,11 +169,32 @@ async def lifespan(app: FastAPI):
     install_asyncio_exception_handler()
 
     logger.info("=" * 60)
-    logger.info(f"Starting AI Hub v{settings.version}")
+    logger.info(f"Starting AI Shuffle v{settings.version}")
     logger.info("=" * 60)
+
+    # Before any child is spawned: same-uid children must not be able to read
+    # this process's /proc environ (its start-up secrets).
+    harden_process_introspection()
+    prewarm_code_mode_sandbox()
 
     # Startup phases
     init_core()
+    # OWNER_PASSWORD seeds the owner password on first boot only; it is taken
+    # out of the environment either way so agents never inherit it.
+    from app.core import owner_auth
+    try:
+        if owner_auth.seed_password_from_env() == 'seeded':
+            logger.info("Owner password set from OWNER_PASSWORD (first boot)")
+    except Exception:
+        logger.exception("Could not apply OWNER_PASSWORD (non-fatal)")
+    # LICENSE_KEY (Docker, Unraid) is likewise taken out of the environment
+    # now; the license refresh task activates it once in the background.
+    from app.core import license as licensing
+    try:
+        if licensing.capture_env_key():
+            logger.info("License key found in LICENSE_KEY; it is activated in the background")
+    except Exception:
+        logger.exception("Could not read LICENSE_KEY (non-fatal)")
     # A network database and its device keys belong together. Do not start
     # schedulers/connector workers against another device's private database.
     from app.network import startup as network_startup
@@ -217,7 +249,8 @@ async def lifespan(app: FastAPI):
     init_workspace()
     check_prerequisites()
     # Sync, scan and presence loops need unlocked credential storage (secrets
-    # travel decrypted under the network key), so they start after phase 2.
+    # travel decrypted under the network key), so they start after
+    # ``init_encryption_and_sessions``.
     network_tasks = []
     try:
         from app.network import startup as network_startup
@@ -253,7 +286,8 @@ async def lifespan(app: FastAPI):
         from app.core.resource_monitor import reconcile_orphans_once
         orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
 
-    logger.info(f"API docs: http://localhost:{settings.port}/docs")
+    if settings.api_docs_enabled:
+        logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     from app.core.provider_usage import provider_usage_monitor
@@ -294,14 +328,9 @@ async def lifespan(app: FastAPI):
     if monitor_task is not None:
         await stop_resource_monitor(monitor_task)
     stop_loop_watchdog()
-    try:
-        from app.core.team_transcript_watcher import team_transcript_watcher
-        await team_transcript_watcher.stop_all()
-    except Exception:
-        logger.exception("team_transcript_watcher.stop_all failed")
     from app.core import browser_runtime
     await browser_runtime.shutdown()
-    # Close any live voice sideband (VW3): the socket belongs to this process,
+    # Close any live voice sideband: the socket belongs to this process,
     # so a restart must hang up rather than leak a half-open realtime call.
     try:
         from app.core import voice_bridge
@@ -322,19 +351,22 @@ async def lifespan(app: FastAPI):
         uninstall_error_log_handler()
     except Exception:
         pass
-    logger.info("Shutting down AI Hub...")
+    logger.info("Shutting down AI Shuffle...")
     from app.core.file_logging import log_shutdown_banner
     log_shutdown_banner()
 
 
 # Create FastAPI application
 app = FastAPI(
-    title="AI Hub",
-    description="Claude Code Web Interface and OpenAI-compatible API",
+    title="AI Shuffle",
+    description="AI Shuffle web interface and OpenAI-compatible API",
     version=settings.version,
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
+    # Off unless API_DOCS_ENABLED=true: these routes are unauthenticated and
+    # map the whole API for anyone who can reach the port.
+    docs_url="/docs" if settings.api_docs_enabled else None,
+    redoc_url="/redoc" if settings.api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.api_docs_enabled else None,
 )
 
 # Global exception handler — surface actual error details instead of generic
@@ -383,7 +415,6 @@ class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
                         body_chunk = message.get("body", b"")
                         bytes_read += len(body_chunk)
                         if bytes_read > max_size:
-                            from fastapi.responses import JSONResponse
                             raise ValueError(
                                 f"Request body too large. Maximum size is {settings.max_request_body_mb}MB"
                             )
@@ -487,10 +518,16 @@ else:
         allow_headers=["*"],
     )
 
+# Desktop listener token (outermost): when the desktop app launched this
+# worker with one, local requests without it are refused.
+from app.middleware.desktop_listener import DesktopListenerGate
+app.add_middleware(DesktopListenerGate)
+
 # Include API routers
 app.include_router(system.router)
 app.include_router(auth.router)
-app.include_router(claude_accounts.router)
+from app.api import owner_login
+app.include_router(owner_login.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)
 app.include_router(projects.router)
@@ -503,9 +540,6 @@ app.include_router(query.router)
 app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
-app.include_router(teams.router)
-app.include_router(permission_rules.router)
-app.include_router(import_export.router)
 app.include_router(settings_api.router)
 app.include_router(settings_import.router)
 app.include_router(generated_images.router)
@@ -515,7 +549,6 @@ app.include_router(shared_files.router)
 app.include_router(tags.router)
 app.include_router(analytics.router)
 app.include_router(templates.router)
-app.include_router(webhooks.router)
 app.include_router(connectors.router)
 app.include_router(api_users.router)
 app.include_router(automations.router)
@@ -552,6 +585,8 @@ app.include_router(voice.router)
 app.include_router(voice_context.router)
 app.include_router(events_api.router)
 app.include_router(artifacts_api.router)
+from app.api import license as license_api
+app.include_router(license_api.router)
 
 # Preview is opt-in and authenticates branch-specific assets on this listener.
 from app.preview import install_preview

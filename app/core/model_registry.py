@@ -135,22 +135,9 @@ def normalize_model(value: Optional[str]) -> str:
     return value
 
 
-def is_preset_model(value: Optional[str]) -> bool:
-    """True when ``value`` maps to one of the selectable presets."""
-    return normalize_model(value) in _BY_VALUE
-
-
 def get_model(value: Optional[str]) -> Optional[ModelOption]:
     """Look up the ``ModelOption`` for a stored value, honouring legacy slugs."""
     return _BY_VALUE.get(normalize_model(value))
-
-
-def get_model_label(value: Optional[str]) -> str:
-    """Human-readable label; falls back to the raw value, then 'Default'."""
-    match = get_model(value)
-    if match is not None:
-        return match.label
-    return value if value else "Default"
 
 
 def display_provider_model_label(
@@ -441,29 +428,29 @@ def _claude_payload() -> Dict[str, object]:
     Mirrors ``_providers_payload``'s ``auth_kind``/``plan_type`` pair for the
     Anthropic side, which has no ``model_providers`` row to carry them:
 
-      * a stored ``anthropic_api_key`` wins over any connected account (see
-        ``environment.inject_claude_code_auth``) → ``auth_kind = "api"``, no plan;
-      * otherwise the connected OAuth account is used → ``auth_kind =
-        "subscription"`` with the account's ``subscription_type`` ("max"/"pro")
-        when known, else null.
+      * the explicit auth mode decides (``app.core.claude_auth_mode``):
+        ``api_key`` mode with a stored key → ``auth_kind = "api"``, no plan;
+      * ``subscription`` mode, when the Claude Code CLI reports a login
+        (``claude auth status``) → ``auth_kind = "subscription"`` with the plan
+        the CLI printed, if any.
 
-    Lazily imported and fully degrading: ANY failure yields nulls rather than
-    500-ing ``GET /api/models`` app-wide (same contract as ``_providers_payload``).
+    Reads the last probe result only (never runs the CLI on this request path)
+    and degrades to nulls on any failure.
     """
     try:
-        from app.api.settings_crypto import get_decrypted_api_key
+        from app.core import claude_auth_mode
 
-        if get_decrypted_api_key("anthropic_api_key"):
-            return {"auth_kind": "api", "plan_type": None}
-
-        from app.core import claude_accounts
-        from app.db import database
-
-        account_id = claude_accounts.get_active_account_id()
-        row = database.get_claude_account(account_id, include_credentials=True) if account_id else None
-        if not row or not row.get("credentials"):
+        if claude_auth_mode.current_mode() == claude_auth_mode.MODE_API_KEY:
+            if claude_auth_mode.has_stored_api_key():
+                return {"auth_kind": "api", "plan_type": None}
             return {"auth_kind": None, "plan_type": None}
-        return {"auth_kind": "subscription", "plan_type": row.get("subscription_type")}
+
+        from app.core import claude_cli_status
+
+        status = claude_cli_status.peek()
+        if status is None or not status.signed_in:
+            return {"auth_kind": None, "plan_type": None}
+        return {"auth_kind": "subscription", "plan_type": status.plan}
     except Exception as e:  # noqa: BLE001 — display metadata is never fatal
         logger.warning("Could not resolve Claude auth metadata for registry: %s", e)
         return {"auth_kind": None, "plan_type": None}

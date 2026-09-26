@@ -15,6 +15,8 @@
 	 *     onConfirm={doDelete}
 	 *     onCancel={() => (pending = null)} />
 	 */
+	import { focusTrap } from './focus-trap';
+
 	interface Props {
 		open: boolean;
 		title?: string;
@@ -72,6 +74,10 @@
 			e.stopPropagation();
 			onCancel();
 		} else if (e.key === 'Enter') {
+			// Enter on a focused button or link is that control's own activation
+			// (e.g. Cancel), not a confirm.
+			const target = e.target instanceof Element ? e.target : null;
+			if (target?.closest('button, a[href]')) return;
 			e.stopPropagation();
 			onConfirm();
 		}
@@ -83,6 +89,7 @@
 {#if open}
 	<div
 		use:portal
+		use:focusTrap={{ initial: '[data-confirm-action]' }}
 		class="fixed inset-0 z-200 flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"
@@ -92,6 +99,7 @@
 		<button
 			class="absolute inset-0 bg-black/60 backdrop-blur-xs"
 			onclick={onCancel}
+			tabindex="-1"
 			aria-label={cancelLabel}
 		></button>
 
@@ -117,6 +125,7 @@
 				</button>
 				<button
 					onclick={onConfirm}
+					data-confirm-action
 					class="px-5 py-2.5 rounded-xl text-sm font-medium transition-all min-w-[96px]
 						{danger
 							? 'bg-destructive text-destructive-foreground hover:opacity-90'

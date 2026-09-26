@@ -8,13 +8,14 @@ poll/result routes independently enforce the current aim_ credential and scope.
 import asyncio
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Callable
 from urllib.parse import urlsplit
 
 from app.db import mobile_tools as queue
 from app.db import mobile
 from app.db import pairing
+from app.core.device_keys import key_expiry
 
 # Trusted application integration only; not a tool argument or an HTTP endpoint.
 from app.core.mobile_tool_identity import authorized_device_ids
@@ -83,7 +84,14 @@ def validate_arguments(name, arguments):
         if type(value) is not fields[key] or (isinstance(value, str) and (not value.strip() or len(value) > 2048)):
             raise CommandError('invalid_arguments')
     if name == 'open_url':
-        url = urlsplit(arguments['url'])
+        # urlsplit raises ValueError (not CommandError) on an unterminated IPv6
+        # host, and .port on a non-numeric or out-of-range port; execute()
+        # only converts CommandError, so either used to escape the tool call.
+        try:
+            url = urlsplit(arguments['url'])
+            _ = url.port
+        except ValueError:
+            raise CommandError('invalid_url') from None
         if url.scheme not in ('https', 'http') or not url.hostname or url.username or url.password:
             raise CommandError('invalid_url')
     if name == 'open_app':
@@ -125,11 +133,10 @@ def authorized_devices(session_id):
         device = mobile.get_mobile_device(device_id)
         if not device or device.get('revoked_at') or 'mobile:actions' not in device.get('scopes', []):
             continue
-        expiry = _date(device.get('api_key_expires_at'))
-        if expiry is None:
-            created = _date(device.get('created_at'))
-            expiry = created + timedelta(days=365) if created else None
-        if expiry is None or expiry <= at:
+        # The canonical rule (explicit expiry, else created_at + the legacy
+        # lifetime, else expired), always UTC-aware: a naive stored timestamp
+        # used to raise TypeError against the aware ``at``.
+        if key_expiry(device) <= at:
             continue
         if device.get('paired_client_id'):
             client = pairing.get_paired_client(device['paired_client_id'])

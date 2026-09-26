@@ -1,13 +1,11 @@
 """Memory lifecycle contracts: exercise writes before retrieval, never seed consumers."""
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
-import time
 
 import pytest
 
 from fluid.codemode import facts
-from fluid.codemode.skills import SkillStore, MAX_MEMORIES, project_key_for
+from fluid.codemode.skills import SkillStore, MAX_MEMORIES
 from fluid.codemode.continual import Synthesizer
 from fluid.tools.builtins import remember, recall, forget
 from fluid.tools.registry import ToolCtx

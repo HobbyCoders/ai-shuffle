@@ -2,7 +2,11 @@
 Project Agent Service - Manages file-based agents in project directories.
 
 This service discovers, creates, updates, and deletes agent .md files
-in a project's .claude/agents/ directory.
+in a project's .fluid/agents/ directory, where Fluid's agent discovery
+(``fluid.context.agents.discover_agents``) finds them for both the native and
+the delegated leg. Fluid never reads ``.claude/agents``; legacy definitions
+there are copied (never moved) into ``.fluid/agents`` the first time the
+project's agents are listed for its base path.
 
 Agent files use YAML frontmatter for metadata:
 ---
@@ -16,6 +20,7 @@ System prompt content here...
 
 import logging
 import re
+import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -23,6 +28,9 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+# Written to .fluid/agents once the legacy .claude/agents copy has run.
+_LEGACY_MIGRATED_MARKER = ".legacy-claude-agents-copied"
 
 
 @dataclass
@@ -67,7 +75,7 @@ class ProjectAgentService:
     """
     Service for managing file-based agents in project directories.
 
-    Agents are stored as .md files in <project>/.claude/agents/ with
+    Agents are stored as .md files in <project>/.fluid/agents/ with
     YAML frontmatter for metadata and markdown content for the system prompt.
     """
 
@@ -79,7 +87,9 @@ class ProjectAgentService:
             project_path: Path to the project directory
         """
         self.project_path = project_path
-        self.agents_dir = project_path / ".claude" / "agents"
+        self.agents_dir = project_path / ".fluid" / "agents"
+        # Where UI-created agents were written before they moved to .fluid.
+        self.legacy_agents_dir: Optional[Path] = project_path / ".claude" / "agents"
 
     def _ensure_agents_dir(self) -> Path:
         """Ensure the agents directory exists"""
@@ -194,14 +204,89 @@ class ProjectAgentService:
             return False
         return bool(re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name))
 
-    def get_agents(self) -> List[ProjectAgent]:
+    def _agents_dir_confined(self) -> bool:
+        """True when ``.fluid/agents`` is a real directory path inside the project."""
+        if self.agents_dir.parent.is_symlink() or self.agents_dir.is_symlink():
+            return False
+        try:
+            root = Path(self.project_path).resolve()
+            return self.agents_dir.resolve().is_relative_to(root)
+        except (OSError, RuntimeError):
+            return False
+
+    def _migrate_legacy_agents(self) -> None:
+        """Copy legacy ``.claude/agents/*.md`` files into ``.fluid/agents``.
+
+        ``.claude/agents`` is Claude Code's own project-agents folder and is
+        often committed, so the source files are always kept. A file whose name
+        already exists in ``.fluid/agents`` is skipped: the existing definition
+        wins and is never overwritten. Symlinks are left alone, matching the
+        settings import. A marker in ``.fluid/agents`` makes this run once per
+        project, so an agent deleted from ``.fluid/agents`` is not copied back.
+        Nothing is written when ``.fluid`` or ``.fluid/agents`` is a symlink or
+        resolves outside the project: a cloned repo could otherwise point it at
+        the user-global agents folder and plant agents in every project.
         """
-        Discover all agents in the project's .claude/agents/ directory.
+        legacy_dir = self.legacy_agents_dir
+        if legacy_dir is None or legacy_dir.is_symlink() or not legacy_dir.is_dir():
+            return
+        if not self._agents_dir_confined():
+            logger.warning(
+                f"Skipping legacy agent copy: {self.agents_dir} is a symlink or "
+                f"resolves outside {self.project_path}"
+            )
+            return
+        marker = self.agents_dir / _LEGACY_MIGRATED_MARKER
+        if marker.exists():
+            return
+        found = failed = False
+        for legacy_file in sorted(legacy_dir.glob("*.md")):
+            target = self.agents_dir / legacy_file.name
+            if legacy_file.is_symlink() or not legacy_file.is_file():
+                continue
+            found = True
+            if target.exists():
+                continue
+            created = False
+            try:
+                data = legacy_file.read_bytes()
+                self._ensure_agents_dir()
+                with open(target, "xb") as out:  # exclusive: never overwrite
+                    created = True
+                    out.write(data)
+                shutil.copystat(legacy_file, target)
+            except FileExistsError:
+                continue
+            except OSError as e:
+                if created:
+                    target.unlink(missing_ok=True)
+                logger.warning(f"Failed to copy legacy agent {legacy_file}: {e}")
+                failed = True
+                continue
+            logger.info(f"Copied legacy project agent {legacy_file} to {target}")
+        if not found or failed:  # nothing to remember, or retry next listing
+            return
+        try:
+            self._ensure_agents_dir()
+            marker.touch(exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Failed to mark legacy agents copied in {self.agents_dir}: {e}")
+
+    def get_agents(self, migrate_legacy: bool = False) -> List[ProjectAgent]:
+        """
+        Discover all agents in the project's .fluid/agents/ directory.
+
+        Args:
+            migrate_legacy: Copy legacy ``.claude/agents`` definitions first.
+                Pass True only for the project's base path, never for a
+                session worktree, so listing never adds files to a worktree.
 
         Returns:
             List of ProjectAgent objects
         """
         agents = []
+        if migrate_legacy:
+            self._migrate_legacy_agents()
 
         if not self.agents_dir.exists():
             return agents
@@ -460,22 +545,22 @@ class ProjectAgentService:
 
 class UserAgentService(ProjectAgentService):
     """
-    Discovers user-global file-based agents in ~/.claude/agents/.
+    Discovers user-global file-based agents in ~/.fluid/agents/.
 
-    These agents are auto-loaded by the Claude Agent SDK at runtime whenever a
-    profile's ``setting_sources`` includes ``"user"`` (the default), but they
-    were never surfaced in the app's autocomplete. This service exposes them
-    for discovery, reusing all of ``ProjectAgentService``'s parsing/CRUD logic
-    but rooted at the user-global Claude config dir instead of a project's
-    ``.claude`` directory.
+    Fluid loads these at runtime whenever a profile's ``setting_sources``
+    includes ``"user"`` (the default). This service exposes them for
+    discovery, reusing all of ``ProjectAgentService``'s parsing/CRUD logic but
+    rooted at the user-global Fluid dir instead of a project's ``.fluid``
+    directory.
     """
 
     def __init__(self, claude_dir: Path):
         # Intentionally bypass ProjectAgentService.__init__ (which appends
-        # ".claude/agents"); user-global agents live directly under
+        # ".fluid/agents"); user-global agents live directly under
         # <claude_dir>/agents.
         self.project_path = claude_dir
         self.agents_dir = claude_dir / "agents"
+        self.legacy_agents_dir = None
 
 
 # Service instance cache (keyed by project_path)
@@ -504,18 +589,18 @@ def get_project_agent_service(project_path: Path) -> ProjectAgentService:
 
 def get_user_agent_service() -> UserAgentService:
     """
-    Get the cached user-global agent service that scans ~/.claude/agents/.
+    Get the cached user-global agent service that scans ~/.fluid/agents/.
 
     The directory is resolved per deployment mode (Docker uses the appuser
-    home), so this mirrors what the SDK loads via ``setting_sources: ["user"]``.
+    home), so this mirrors what Fluid loads via ``setting_sources: ["user"]``.
     """
     global _user_agent_service
 
     with _agent_services_lock:
         if _user_agent_service is None:
             # Imported lazily to avoid pulling plugin machinery at module load.
-            from app.core.plugin_models import _get_claude_dir
-            _user_agent_service = UserAgentService(_get_claude_dir())
+            from app.core.plugin_models import _get_fluid_dir
+            _user_agent_service = UserAgentService(_get_fluid_dir())
         return _user_agent_service
 
 

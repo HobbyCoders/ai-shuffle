@@ -6,7 +6,7 @@
 	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
 	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
 	 *
-	 * - View agents in .claude/agents/
+	 * - View agents in .fluid/agents/
 	 * - Delete agents (inline confirm)
 	 * - Search/filter
 	 */
@@ -58,7 +58,8 @@
 	// Load agents when project changes
 	$effect(() => {
 		if (projectId) {
-			projectAgents.loadAgents(projectId);
+			// A failed load is shown through $projectAgentsError.
+			projectAgents.loadAgents(projectId).catch(() => {});
 		}
 	});
 
@@ -129,7 +130,7 @@
 			<div class="set-group">
 				<div class="set-grouphead">
 					<h3><Bot />Agents</h3>
-					<p>Custom sub-agents available to this project, from <code>.claude/agents/</code>.</p>
+					<p>Custom sub-agents available to this project, from <code>.fluid/agents/</code>.</p>
 				</div>
 				{#each filteredAgents() as agent (agent.name)}
 					{#if deletingAgent === agent.name}

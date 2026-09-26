@@ -134,8 +134,8 @@
 		<header class="detail-head"><h2>{selected.name}</h2><p>{selected.description}</p><span class="muted">Official connector plugin · Installed on this host</span></header>
 		<div class="runtime-controls">
 			{#if !selectedApp?.installed}
-				<p>Download the official connector runtime. Its code is pinned and integrity-checked, and runs in its own process and dependency environment, with AI Shuffle's OS permissions. Only first-party runtimes are supported. This distribution uses a private GitHub source; sign in to GitHub in Settings with repository access before installing.</p>
-				{#if selectedApp?.count}<p>Your existing connections keep working with the bundled runtime. Installing preserves their IDs and automations; running connections use the downloaded runtime after their next restart.</p>{/if}
+				<p>Install the official connector runtime included with this AI Shuffle version. Its code is pinned and integrity-checked, and runs in its own process and dependency environment, with AI Shuffle's OS permissions. Only first-party runtimes are supported. No GitHub account or repository access is needed. Installation still needs access to PyPI for Python dependencies.</p>
+				{#if selectedApp?.count}<p>Your existing connections keep working with the bundled runtime. Installing preserves their IDs and automations; running connections use the installed runtime after their next restart.</p>{/if}
 				<button disabled={!!busy} onclick={() => changeRuntime('install')}>{busy ? 'Installing runtime and dependencies…' : `Install ${selected.name}`}</button>
 			{:else}
 				<p>{selectedApp.enabled ? 'Runtime installed and enabled.' : 'Runtime installed but disabled.'} Remove dependent connections before disabling or uninstalling; automation references protect those connections too.</p>
@@ -145,7 +145,7 @@
 				{#if selectedApp.type?.plugin_rollback_available}<button disabled={!!busy} onclick={() => changeRuntime('rollback')}>Roll back runtime</button>{/if}
 				<p>Version {selectedApp.type?.plugin_version}. Pause dependent automations and disable connections before updating or rolling back. Account IDs and settings are kept.</p>
 				{#if pendingRemoval}
-					<div role="alert"><p>Uninstall this runtime? Connected accounts must be removed first. Downloaded versions remain cached on this host.</p><button disabled={!!busy} onclick={() => changeRuntime('uninstall')}>Confirm uninstall</button><button onclick={() => pendingRemoval = false}>Cancel</button></div>
+					<div role="alert"><p>Uninstall this runtime? Connected accounts must be removed first. Installed versions remain cached on this host.</p><button disabled={!!busy} onclick={() => changeRuntime('uninstall')}>Confirm uninstall</button><button onclick={() => pendingRemoval = false}>Cancel</button></div>
 				{/if}
 			{/if}
 			{#if runtimeRefs.length}

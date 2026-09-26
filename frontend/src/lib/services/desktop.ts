@@ -40,18 +40,15 @@ export interface DesktopUpdateState {
 	error: string | null;
 	checkedAt: string | null;
 	message?: string | null;
+	/** Release name and notes from the update's signed manifest; absent on older desktop builds. */
+	release?: string | null;
+	notes?: string | null;
 }
 
-export interface DesktopWorkerState {
-	phase: 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
-	port: number;
-	url: string;
-	pid: number | null;
-	external: boolean;
-	error: string | null;
-	exitCode: number | null;
-	startedAt: string | null;
-	logPath: string;
+/** Release notes flattened to one short line for a notification. */
+export function notesSummary(notes: string | null | undefined, limit = 280): string {
+	const text = (notes ?? '').replace(/\s+/g, ' ').trim();
+	return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
 }
 
 export type DesktopCommand =
@@ -63,40 +60,39 @@ export type DesktopCommand =
 	| 'find'
 	| 'open-docs';
 
+/** The desktop app's "agents run as you" disclosure, shown on first launch. */
+export interface DesktopAgentAccess {
+	title: string;
+	message: string;
+	points: string[];
+	footer: string;
+}
+
+/**
+ * The part of the preload bridge (desktop/src/preload/index.ts) the web UI
+ * uses. The preload has a few more members for the desktop CI scripts.
+ */
 export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
-	titleBarHeight: number;
+	/** Older shells lack it. */
+	agentAccess?: DesktopAgentAccess | null;
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;
-		minimize(): void;
-		toggleMaximize(): void;
-		close(): void;
-		focus(): void;
 		setTitleBarTheme(theme: { background: string; symbol: string }): void;
 	};
 	shell: {
-		openExternal(url: string): void;
-		setBadge(count: number): void;
-		notify(payload: { title: string; body?: string; tag?: string; silent?: boolean }): void;
-		onNotificationClick(listener: (payload: { tag: string | null }) => void): () => void;
 		onCommand(listener: (command: DesktopCommand | string) => void): () => void;
-		onNativeTheme(listener: (payload: { dark: boolean }) => void): () => void;
 	};
-	/** The local worker this window belongs to. */
-	worker: {
-		getState(): Promise<DesktopWorkerState>;
-		onState(listener: (state: DesktopWorkerState) => void): () => void;
-		restart(): Promise<void>;
-		openLogs(): void;
-		openStatus(): void;
-	};
+	/**
+	 * Checking and downloading go through the worker's update bridge (the
+	 * shell polls the worker for requests), so the page only reads the state
+	 * and asks for the install.
+	 */
 	updates: {
 		getState(): Promise<DesktopUpdateState>;
 		onState(listener: (state: DesktopUpdateState) => void): () => void;
-		check(): Promise<void>;
-		download(): Promise<void>;
 		install(): Promise<void>;
 	};
 }
@@ -113,20 +109,6 @@ export const desktop: ShuffleDesktopBridge | null =
 
 export const isDesktop = desktop !== null;
 
-/** Command handlers the page registers; the menu looks them up by name. */
-const commandHandlers = new Map<string, () => void>();
-
-/**
- * Lets a page own a menu command. The default handler (below) already routes
- * commands to registered keyboard shortcuts, so most pages need nothing.
- */
-export function onDesktopCommand(command: DesktopCommand, handler: () => void): () => void {
-	commandHandlers.set(command, handler);
-	return () => {
-		if (commandHandlers.get(command) === handler) commandHandlers.delete(command);
-	};
-}
-
 const SHORTCUT_FOR_COMMAND: Record<string, string> = {
 	'new-session': 'new-chat',
 	'command-palette': 'spotlight',
@@ -134,12 +116,8 @@ const SHORTCUT_FOR_COMMAND: Record<string, string> = {
 	find: 'advanced-search'
 };
 
+/** Menu and tray commands are routed to the matching keyboard shortcut or store action. */
 async function runCommand(command: string): Promise<void> {
-	const own = commandHandlers.get(command);
-	if (own) {
-		own();
-		return;
-	}
 	if (command === 'toggle-sidebar') {
 		const { layout } = await import('$lib/stores/layout.svelte');
 		layout.toggleSidebar();
@@ -196,7 +174,8 @@ async function announceUpdate(state: DesktopUpdateState): Promise<void> {
 	announcedUpdateVersion = version;
 	const { notify } = await import('$lib/stores/notifications');
 	const shell = desktop;
-	notify.info(`AI Shuffle Desktop ${version} has downloaded. Restart to finish installing it.`, {
+	const summary = notesSummary(state.notes);
+	notify.info(`AI Shuffle Desktop ${state.release || version} has downloaded. Restart to finish installing it.${summary ? ` What's new: ${summary}` : ''}`, {
 		title: 'Update ready',
 		category: 'desktop-update',
 		persist: false,

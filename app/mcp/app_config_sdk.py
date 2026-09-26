@@ -21,29 +21,13 @@ Module layout (split for maintainability):
   - config_mcp_servers.py  — MCP server management tools
   - config_profiles.py     — profile CRUD tools
   - config_connectors.py   — connector status/toggle tools
+  - config_subagents.py    — subagent CRUD tools
 """
 
-import json
 import logging
-import secrets as _secrets
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
-# Re-export constants and helpers for backward compatibility
-from app.mcp.config_helpers import (
-    VALID_HOOK_EVENTS,
-    VALID_HOOK_TYPES,
-    VALID_TRIGGER_TYPES,
-    _tool_result,
-    _error,
-    _sanitize_hook,
-    _sanitize_automation,
-    _sanitize_connector,
-    _hook_summary,
-    _automation_summary,
-)
-
-# Re-export tool factory functions for backward compatibility
+from app.mcp.config_helpers import _tool_result
 from app.mcp.config_hooks import _create_hook_tools
 from app.mcp.config_automations import _create_automation_tools
 from app.mcp.config_mcp_servers import _create_mcp_tools
@@ -103,7 +87,7 @@ to manage hooks, automations, MCP servers, profiles, and connectors.
 
 def _create_discovery_tools() -> list:
     """Create the getConfigCapabilities discovery tool."""
-    from claude_agent_sdk import tool
+    from app.mcp.inproc import tool
     from app.db import database
     from app.db.async_database import run_sync
 
@@ -197,7 +181,7 @@ def _create_discovery_tools() -> list:
 # Server Factory
 # ============================================================================
 
-def get_app_config_tool_names(is_admin: bool = True) -> List[str]:
+def get_app_config_tool_names() -> List[str]:
     """
     Return the list of MCP tool names for allowed_tools registration.
 
@@ -261,9 +245,9 @@ def collect_app_config_tools(
     empty list when the SDK is unavailable — the caller degrades, never fails.
     """
     try:
-        import claude_agent_sdk  # noqa: F401 — the tool factories need @tool
+        import app.mcp.inproc  # noqa: F401 — the tool factories need @tool
     except ImportError:
-        logger.debug("claude_agent_sdk not available — app-config tools disabled")
+        logger.debug("Fluid tool helpers not available — app-config tools disabled")
         return []
 
     all_tools: list = []
@@ -295,12 +279,12 @@ def create_app_config_server(
                   path, not an identifier — do not pass project_id here.
 
     Returns:
-        McpSdkServerConfig from create_sdk_mcp_server(), or None on failure.
+        McpSdkServerConfig from create_tool_server(), or None on failure.
     """
     try:
-        from claude_agent_sdk import create_sdk_mcp_server
+        from app.mcp.inproc import create_tool_server
     except ImportError:
-        logger.debug("claude_agent_sdk not available — app-config tools disabled")
+        logger.debug("Fluid tool helpers not available — app-config tools disabled")
         return None
 
     all_tools = collect_app_config_tools(is_admin, project_id, project_dir)
@@ -313,7 +297,7 @@ def create_app_config_server(
     )
 
     from app.mcp.sdk_compat import patch_sdk_server
-    return patch_sdk_server(create_sdk_mcp_server(
+    return patch_sdk_server(create_tool_server(
         name="app-config",
         version="1.0.0",
         tools=all_tools,

@@ -33,6 +33,7 @@ from app.core import session_runtime
 from app.core.task_registry import task_registry
 from app.db import session_events as se
 from app.db import turns as turns_db
+from tests.core.helpers import make_pump
 
 
 PARENT = "parent-session"
@@ -82,13 +83,6 @@ def _clean_state():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_pump(events):
-    async def _impl(**kwargs):
-        for e in events:
-            yield e
-    return _impl
-
-
 def _recorder_mock():
     rec = MagicMock(name="recorder")
     rec.start = AsyncMock()
@@ -114,7 +108,7 @@ def _runtime_env():
     with ExitStack() as stack:
         stack.enter_context(patch(
             "app.core.query_engine._stream_to_websocket_impl",
-            new=_make_pump([{"type": "done", "metadata": {}}]),
+            new=make_pump([{"type": "done", "metadata": {}}]),
         ))
         stack.enter_context(patch.object(
             session_runtime.TurnRecorder, "create_for_run",
@@ -318,9 +312,8 @@ class TestOrdinarySubagentParkingIsUnchanged:
         assert outcome == "parked"
         assert turns_db.get_turn(turn["id"])["state"] == "parked"
         assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["ordinary-1"]
-        # Still running, still idle-read — untouched by this chunk.
+        # Still running — untouched by this chunk.
         assert task_registry.get_task(PARENT, "ordinary-1")["status"] == "running"
-        env["start_idle"].assert_called_once_with(PARENT)
         spies["pool"].remove_broken.assert_not_awaited()
         spies["interrupt"].assert_not_called()
 
@@ -627,7 +620,7 @@ class TestNestingGuardWiring:
             )
 
         assert pa.is_worker_session("worker-q") is False
-        assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
+        assert qo.WORKER_DISALLOWED_TOOLS[0] in (opts.disallowed_tools or [])
 
     async def test_task_dispatch_refuses_beyond_max_depth(self, db, monkeypatch):
         """(P2c) The depth gate replaced the old one-level handler refusal:

@@ -6,26 +6,20 @@ Tests cover:
 - Client IP extraction from request headers
 - User-Agent extraction
 - log_event function with all code paths
-- All convenience logging functions
+- The log_logout convenience helper
 - Error handling when database fails
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
+from app.core.config import settings
 
 from app.core.audit_service import (
     AuditEventType,
     get_client_ip,
     get_user_agent,
     log_event,
-    log_login_success,
-    log_login_failure,
     log_logout,
-    log_password_changed,
-    log_password_change_failed,
-    log_api_key_created,
-    log_api_key_deleted,
-    log_admin_setup,
 )
 
 
@@ -117,10 +111,31 @@ class TestGetClientIp:
         mock_request.headers = {"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"}
         assert get_client_ip(mock_request) == "8.8.4.4"
 
-    def test_get_client_ip_from_x_forwarded_for(self, mock_request_with_proxy_headers):
-        """Should extract first IP from X-Forwarded-For header."""
+    def test_get_client_ip_from_x_forwarded_for(self, mock_request_with_proxy_headers, monkeypatch):
+        """Behind a configured proxy, the nearest untrusted hop is the client.
+
+        Earlier entries were written by the client itself and are not believed.
+        """
+        monkeypatch.setattr(settings, "trusted_proxies", "10.0.0.0/8")
         ip = get_client_ip(mock_request_with_proxy_headers)
-        assert ip == "203.0.113.195"
+        assert ip == "150.172.238.178"
+
+    def test_get_client_ip_skips_every_trusted_proxy_hop(self, mock_request, monkeypatch):
+        monkeypatch.setattr(settings, "trusted_proxies", "10.0.0.0/8, 172.18.0.2")
+        mock_request.client.host = "172.18.0.2"
+        mock_request.headers = {"X-Forwarded-For": "1.2.3.4, 203.0.113.9, 10.1.1.1"}
+        assert get_client_ip(mock_request) == "203.0.113.9"
+
+    def test_private_peer_is_not_a_proxy_unless_configured(self, mock_request, monkeypatch):
+        """A LAN host cannot choose its own rate-limit key or audit address."""
+        monkeypatch.setattr(settings, "trusted_proxies", "")
+        for host in ("10.0.0.1", "192.168.1.66", "172.17.0.1", "fd00::5"):
+            mock_request.client.host = host
+            mock_request.headers = {"X-Forwarded-For": "203.0.113.1", "X-Real-IP": "203.0.113.2"}
+            assert get_client_ip(mock_request) == host
+        monkeypatch.setattr(settings, "trusted_proxies", "not-an-address,192.168.1.0/24")
+        mock_request.client.host = "192.168.1.66"
+        assert get_client_ip(mock_request) == "203.0.113.1"
 
     def test_get_client_ip_from_x_forwarded_for_single(self, mock_request):
         """Should handle single IP in X-Forwarded-For."""
@@ -130,7 +145,7 @@ class TestGetClientIp:
 
     def test_get_client_ip_from_x_forwarded_for_with_spaces(self, mock_request):
         """Should trim whitespace from X-Forwarded-For."""
-        mock_request.headers = {"X-Forwarded-For": "  192.168.1.100  , 10.0.0.1"}
+        mock_request.headers = {"X-Forwarded-For": "  192.168.1.100  ,  127.0.0.1 "}
         ip = get_client_ip(mock_request)
         assert ip == "192.168.1.100"
 
@@ -215,7 +230,7 @@ class TestLogEvent:
         mock_request.headers = {"User-Agent": "TestAgent/1.0"}
         mock_request.client.host = "192.168.1.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGIN_SUCCESS,
             request=mock_request,
             user_id="test-user"
@@ -230,7 +245,7 @@ class TestLogEvent:
         mock_request.headers = {"User-Agent": "RequestAgent"}
         mock_request.client.host = "10.0.0.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGIN_SUCCESS,
             request=mock_request,
             user_id="test-user",
@@ -268,7 +283,7 @@ class TestLogEvent:
 
     def test_log_event_without_request(self, mock_db_create_audit_log):
         """Should work without request object."""
-        result = log_event(
+        log_event(
             event_type=AuditEventType.LOGOUT,
             user_id="test-user",
             ip_address="1.2.3.4",
@@ -334,60 +349,6 @@ class TestLogEvent:
 # Test Convenience Logging Functions
 # =============================================================================
 
-class TestLogLoginSuccess:
-    """Test log_login_success function."""
-
-    def test_log_login_success_basic(self, mock_request, mock_db_create_audit_log):
-        """Should log successful login."""
-        result = log_login_success(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.LOGIN_SUCCESS
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["user_type"] == "admin"
-        assert call_kwargs["details"]["method"] == "password"
-
-    def test_log_login_success_with_custom_method(self, mock_request, mock_db_create_audit_log):
-        """Should log login with custom method."""
-        log_login_success(mock_request, "user-123", method="api_key")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["method"] == "api_key"
-
-    def test_log_login_success_with_user_type(self, mock_request, mock_db_create_audit_log):
-        """Should log login with custom user type."""
-        log_login_success(mock_request, "user-123", user_type="api_user")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["user_type"] == "api_user"
-
-
-class TestLogLoginFailure:
-    """Test log_login_failure function."""
-
-    def test_log_login_failure_basic(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login."""
-        result = log_login_failure(mock_request)
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.LOGIN_FAILURE
-        assert call_kwargs["details"]["reason"] == "invalid_credentials"
-
-    def test_log_login_failure_with_username(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login with attempted username."""
-        log_login_failure(mock_request, username="baduser")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["user_id"] == "baduser"
-        assert call_kwargs["details"]["attempted_username"] == "baduser"
-
-    def test_log_login_failure_with_reason(self, mock_request, mock_db_create_audit_log):
-        """Should log failed login with custom reason."""
-        log_login_failure(mock_request, reason="account_locked")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["reason"] == "account_locked"
-
 
 class TestLogLogout:
     """Test log_logout function."""
@@ -409,72 +370,6 @@ class TestLogLogout:
         assert call_kwargs["user_type"] == "api_user"
 
 
-class TestLogPasswordChanged:
-    """Test log_password_changed function."""
-
-    def test_log_password_changed(self, mock_request, mock_db_create_audit_log):
-        """Should log password change."""
-        log_password_changed(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.PASSWORD_CHANGED
-        assert call_kwargs["user_id"] == "user-123"
-
-
-class TestLogPasswordChangeFailed:
-    """Test log_password_change_failed function."""
-
-    def test_log_password_change_failed(self, mock_request, mock_db_create_audit_log):
-        """Should log failed password change."""
-        log_password_change_failed(mock_request, "user-123", reason="weak_password")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.PASSWORD_CHANGE_FAILED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["reason"] == "weak_password"
-
-
-class TestLogApiKeyCreated:
-    """Test log_api_key_created function."""
-
-    def test_log_api_key_created(self, mock_request, mock_db_create_audit_log):
-        """Should log API key creation."""
-        log_api_key_created(mock_request, "user-123", "My API Key", "key-456")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.API_KEY_CREATED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["api_key_name"] == "My API Key"
-        assert call_kwargs["details"]["api_key_id"] == "key-456"
-
-
-class TestLogApiKeyDeleted:
-    """Test log_api_key_deleted function."""
-
-    def test_log_api_key_deleted(self, mock_request, mock_db_create_audit_log):
-        """Should log API key deletion."""
-        log_api_key_deleted(mock_request, "user-123", "Old API Key", "key-789")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.API_KEY_DELETED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["api_key_name"] == "Old API Key"
-        assert call_kwargs["details"]["api_key_id"] == "key-789"
-
-
-class TestLogAdminSetup:
-    """Test log_admin_setup function."""
-
-    def test_log_admin_setup(self, mock_request, mock_db_create_audit_log):
-        """Should log admin account setup."""
-        log_admin_setup(mock_request, "admin")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.ADMIN_SETUP
-        assert call_kwargs["user_id"] == "admin"
-        assert call_kwargs["details"]["action"] == "initial_setup"
-
-
 # =============================================================================
 # Integration-style Tests
 # =============================================================================
@@ -487,7 +382,7 @@ class TestLogEventIntegration:
         mock_request.headers = {"User-Agent": "Integration/Test"}
         mock_request.client.host = "10.0.0.1"
 
-        result = log_event(
+        log_event(
             event_type=AuditEventType.SETTINGS_CHANGED,
             request=mock_request,
             user_id="admin-user",

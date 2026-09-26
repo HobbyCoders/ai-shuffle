@@ -122,8 +122,10 @@ def capability_env(monkeypatch):
     """Drive `_resolve_capability` by setting the model and key it reads."""
     state = {"model": "openai/gpt-4o-transcribe", "key": "sk-test"}
 
+    from app.db import database
+
     monkeypatch.setattr(
-        stt_realtime.database,
+        database,
         "get_or_create_system_setting",
         lambda name, default_factory: state["model"] or default_factory(),
     )

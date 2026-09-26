@@ -1,205 +1,64 @@
-"""HarnessAdapter — concrete ProviderAdapter backed by the ``fluid`` harness.
+"""HarnessAdapter: the app's only ProviderAdapter, backed by the ``fluid`` harness.
 
-This is the app's only provider backend. It wraps a fluid execution engine (``NativeLoop`` for direct-API providers, or
-``DelegatedLoop`` for the Claude-subscription ``claude`` CLI) and translates the
-fluid ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
-so the rest of AI-Shuffle never sees a fluid type.
+``factory.make_adapter()`` returns it for every spawn path. Each connect builds a
+``DelegatedLoop`` (the stock ``claude`` CLI on PATH) or a ``NativeLoop`` (provider
+APIs). ``_translate`` emits the app's ``ProviderEvent`` types; no fluid type leaks out.
 
-``factory.make_adapter()`` returns it unconditionally for every spawn path.
+Leg selection (``_decide_provider_kind``, first match wins): ``extra["fluid_engine"]``;
+``extra["fluid_provider"]`` or env ``AIH_FLUID_PROVIDER``; the bound provider row
+(``_provider_row_kind``, where subscription-auth Anthropic rows always go
+delegated); then the model string. Claude aliases and ``claude*`` go delegated,
+``gpt``/``o1``/``o3``/``o4``/``codex`` go to openai_responses, ``vendor/model`` goes
+to openrouter, and anything else goes to anthropic.
 
-The adapter provides a connect/disconnect/health/reconnect lifecycle,
-send_query/receive_events for streaming, and interrupt/respond/set_* controls.
+Both legs:
+  * fluid session id = ``session_id or resume_session_id``. The delegated
+    ``--resume`` handle is the stored ``cli_session_id`` (``_resolve_cli_session_id``).
+  * ``permission_mode`` sets the PermissionEngine policy (native turns ``auto``
+    into ``default``; ``acceptEdits`` lets the app's approver allow only the edit
+    tools, after the user's saved rules); ``effort`` (``_valid_effort``),
+    ``setting_sources`` and ``hooks``
+    (one shared ``HookBus``, ``sdk_hook_bridge``) reach both engines.
+  * in-proc ``type="sdk"`` MCP servers are bridged onto the ToolRegistry
+    (``fluid_tool_bridge``). The prompt carries the merged agents index
+    (``_agent_context``), and Task dispatch goes through ``app.core.task_dispatch``.
+  * store: ``PgFluidStore``, else a test-installed factory, else connect raises.
+    Escape hatches: ``extra["fluid_registry"]`` (used as-is), ``fluid_inproc_servers``.
+  * chat lane (``extra["session_mode"] == "chat"``): Read is the handle-confined
+    attachment reader, ``_chat_mode_rules`` join the PermissionEngine, no code mode.
 
-Provider-kind decision (from SessionOptions):
-  * ``extra["fluid_engine"] == "delegated"``  → DelegatedLoop (claude CLI)
-  * ``extra["fluid_provider"]`` / env ``AIH_FLUID_PROVIDER`` in
-    {anthropic, openai_responses, openrouter} → NativeLoop with that client
-  * otherwise inferred from the model string:
-      - "claude*" or any model-registry alias ("fable"/"opus"/"sonnet"/"haiku")
-                             → DelegatedLoop (subscription default)
-      - "gpt*"/"o1*"/"o3*"/"codex*" → NativeLoop + OpenAIResponsesClient
-      - "vendor/model" slug  → NativeLoop + OpenRouterClient
-      - else                 → NativeLoop + AnthropicClient (direct API key)
+Native legs:
+  * always run the fluid-compiled prompt (``_compile_prompt_sections``) and take
+    credentials from the bound row (``fluid_credentials``).
+  * connect external MCP servers via ``_normalize_mcp_config_for_fluid`` (``http``
+    becomes ``streamable_http``, ``sse`` is skipped, and the input is never mutated).
+  * ``tool_allowlist`` / ``disallowed_tools`` become ``NativeLoop``'s allow/deny lists,
+    enforced at the schema, the ToolSearch catalog and dispatch; deny beats allow.
+  * ``max_turns`` becomes ``max_model_calls_per_turn`` (None = unlimited).
+    ``env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]`` becomes ``max_tokens``, and no other
+    ``env`` key is read. ``thinking`` goes only to Claude models on the anthropic
+    lane. ``fast`` becomes ``service_tier: priority`` only on openai_responses.
+  * code mode and the continual learner need an app session id and fail open to
+    JSON tool calls; the prompt describes what actually started.
 
-SessionOptions field support
-----------------------------
-HONORED:
-  * ``model``                → engine model (native: request model; delegated: --model)
-  * ``system_prompt`` (str)  → engine ``system`` (dict system prompts are stringified)
-  * ``cwd``                  → ToolCtx.cwd (native) / DelegatedLoop cwd
-  * ``resume_session_id``    → fluid session id (both engines). For the delegated
-    engine the CLI's ``--resume`` handle is NOT this id — it is read off the
-    stored session meta (``cli_session_id``), which DelegatedLoop writes back
-    from the CLI's init frame. See ``_resolve_cli_session_id``.
-  * ``session_id``           → explicit fluid session id
-  * ``permission_mode``      → fluid PermissionEngine approval policy
-  * ``env``                  → delegated child env / native provider (via os.environ).
-    On native legs one variable is additionally consumed directly:
-    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (positive int) becomes ``NativeLoop
-    (max_tokens=...)``, the interim escape hatch from fluid's 8192 default
-    until the reasoning/output config wave lands (plan wave W0a).
-  * ``max_turns``            → native ``NativeLoop(max_model_calls_per_turn=...)``
-    when positive; unlimited otherwise. The delegated leg's CLI enforces its
-    own turn budget, so nothing is passed there.
-  * ``mcp_servers``          → fluid ``registry.connect_mcp`` (external stdio/http).
-    App configs are SDK-shaped (``{"type": "http"|"sse", "url", "headers"}``)
-    while fluid's client dispatches on ``transport``, so configs are normalized
-    at the seam (``_normalize_mcp_config_for_fluid``): ``http`` →
-    ``streamable_http``; stdio passes through; ``sse`` is skipped with a loud
-    warning and ``headers`` are dropped with one, both pending upstream fluid
-    support (ruling PA5).
-  * ``include_partial_messages`` → fluid always streams deltas (native); delegated
-    passes ``--include-partial-messages`` (``extra["fluid_partial"]`` overrides)
-  * session store: DERIVED, not configured — PgFluidStore when the app has a
-    database (always, in real deployments), MemoryStore in DB-less unit tests
-  * ``extra["fluid_inproc_servers"]`` → fluid in-process tool servers (see fluid_tool_bridge)
-  * ``extra["fluid_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
-  * ``extra["provider_id"]``         → the session's bound ``model_providers`` row;
-    its decrypted credentials authenticate the native client (API key, or a
-    Codex OAuth auth object for a ChatGPT-subscription row). Threaded from
-    ``query_options`` via ``ClaudeAgentOptions.aih_provider_id``. Absent → the
-    fluid client's env-var fallback (see ``fluid_credentials``).
+Delegated leg:
+  * a preset profile keeps Claude Code's prompt plus ``_delegated_append_text``.
+    A plain-string prompt replaces it and is compiled if ``prompt_full_replace``.
+  * external MCP servers go to ``--mcp-config``; ``add_dirs``, ``env``, ``fast``
+    (``--settings``) and partial messages pass through. In-proc app tools reach
+    the CLI through fluid's bundled bridge (``mcp__fluid_bundled__``).
+  * ``--disallowed-tools`` = ``_delegated_disallowed``; ``--allowed-tools`` =
+    ``_delegated_allowed`` plus ``_delegated_permission_grants``, which grants
+    only the in-proc tools the native leg rates ``safe`` (none in plan mode).
+  * prompts reach ``can_use_tool`` via ``_bridge_permission``; with no callback,
+    ``_answer_without_approver`` denies in ``default``/``plan`` and allows otherwise.
+    PreToolUse applies ``_delegated_tool_policy`` in every mode.
 
-  * in-proc SDK servers in ``mcp_servers`` (type="sdk": builtins, app-config,
-    ai-tools, computer-use, provider-agent) → auto-bridged onto the fluid
-    ToolRegistry with per-tool risk maps (see fluid_tool_bridge.
-    register_recorded_sdk_servers; tools recorded by sdk_compat.patch_sdk_server).
-
-  * ``effort``               → delegated: CLI ``--effort``; native: fluid
-    serializers map it per provider (Anthropic ``output_config.effort``
-    verbatim, OpenAI-shaped ``reasoning.effort`` verbatim). Model/route
-    capabilities are validated app-side; changes force reconnect.
-
-  * ``disallowed_tools``     → native ``NativeLoop(disallowed_tools=...)``, which
-    filters the tool at the provider schema, the deferred/ToolSearch catalog and
-    dispatch (ruling CE12) — the profile blocklist is now a wall, not just a
-    permission-callback denial. Delegated: the CLI's ``--disallowed-tools``,
-    unioned with the banned-tool set (Task/Agent/wake family, ruling A6).
-  * code-mode + the continual harness → native ``NativeLoop(codemode=...)``
-    (and ``journal=`` when code mode is not carrying the journal).
-    Both are ON by default for every native leg (the delegated CLI leg caps
-    ``code_mode`` off and is not touched). Four app settings drive it, mirroring
-    fluid's own ``config/loader.py`` wiring: ``fluid_code_mode`` builds the
-    ``SkillStore`` + ``CodeModeSession``, ``fluid_continual`` attaches the
-    ``Synthesizer`` that distills journaled cells into saved skills,
-    ``fluid_continual_model`` pins synthesis to one model (None = the session's
-    model), and ``fluid_skills_dir`` relocates the skill/journal root (None =
-    ``<data_dir>/fluid/skills``, so nothing lands in fluid's ``~/.fluid``
-    default). The synthesizer is scoped with ``project_key_for(cwd)`` so a
-    project-tagged Remember lands as that project's fact, not an install-global
-    one — the same key the prompt compiler renders the ``# Memory`` snapshot
-    under. The loader's ctx handles ride along: ``recall_store`` (the Recall
-    builtin's store) and ``memory_store`` (the Remember builtin's ONLY write
-    path — it commits to the store directly; the pre-#1185 journal-based
-    ``continual_journal`` path is gone so the two cannot diverge again). With
-    continual on but no live ``CodeModeSession`` — code mode off, no
-    registry, or a failed construction — a ``ToolJournal`` takes over the
-    episodic recording, so the learner keeps seeing turns instead of silently
-    starving behind a frozen ``# Memory`` snapshot. Construction is
-    best-effort: any failure degrades to ``codemode=None`` rather than failing
-    the turn. ``NativeLoop.aclose()`` already closes the session (draining the
-    journal's synthesizer), so there is no teardown here. When the session
-    really came up (fail-open, so never on the setting alone) the compiled
-    prompt gains a trailing ``# Code mode`` section and its skills/agents
-    headers are rewritten to say that Skill and Task are imported inside
-    run_python — fluid itself puts nothing about code mode in the prompt.
-  * ``tool_allowlist``       → native ``NativeLoop(allowed_tools=...)``: the
-    session's ENTIRE tool surface when set, None = unrestricted (CE12 + T3).
-    ``query_options`` composes two sources into it — the AGENT's own ``allow``
-    list (ruling T2/T3) and, for a worker dispatched onto a file/plugin agent
-    whose definition carries a ``tools:`` list, that definition's list
-    (``app.core.task_dispatch`` → ``overrides["tool_allowlist"]``). When both
-    exist the surface is their INTERSECTION; an empty intersection becomes a
-    ``["*"]`` deny instead of an empty list, which would mean "unrestricted".
-    Both reach here as ``ClaudeAgentOptions.aih_tool_allowlist``. On the
-    delegated leg it rides
-    ``--allowed-tools``; because the claude CLI reads that flag as PERMISSION
-    rules, this leg ALSO passes the complement as ``--disallowed-tools`` so the
-    restriction is real there too (ruling T4 — see ``_delegated_disallowed``).
-  * ``extra["session_mode"]`` → the session's sidepanel lane
-    (``ClaudeAgentOptions.aih_session_mode``). Only the chat lane reads it, and
-    it reads it for things a tool LIST cannot say: a ``Read`` fenced to a
-    directory. Native → a ``PermissionEngine`` rule pair (``_chat_mode_rules``);
-    delegated → that tool held back from the CLI's bare grant
-    (``_delegated_allowed``), which is what makes the call reach the app's
-    permission callback at all. It also suppresses the code-mode kernel for the
-    lane, since fluid exempts code mode's own tools from the CE12 allowlist.
-
-DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``thinking`` — forwarded (with ``thinking_display``) on the native
-    anthropic lane only, and only to new sessions; fluid fits it to the model
-    (``_native_thinking``). The openai_responses and openrouter lanes ignore it.
-  * ``include_hook_events`` — ignored. ``hooks`` (the SDK callbacks
-    ``hook_service.attach_hooks_to_options`` builds: DB hooks, plugin
-    hooks.json scripts, the Stop handler) run on fluid's HookBus: every
-    connect hands both legs the adapter's one bus
-    (:attr:`HarnessAdapter.hooks`), and ``sdk_hook_bridge`` registers each
-    callback on it with Claude Code's hook input and output shapes. The
-    native loop emits into the bus itself; the delegated loop registers
-    Claude Code hook callbacks with the CLI and forwards each one into the
-    same bus event, so a callback on the bus sees both legs alike. The
-    delegated leg's PreToolUse also applies :func:`_delegated_tool_policy`,
-    so a deny there wins over any allow, and a CLI that does not register
-    the hooks does not get a turn (fail closed).
-  * ``extra_args`` — SDK/CLI-specific, ignored. (``setting_sources`` is now
-    HONORED on native legs: it maps onto fluid's own scope filter — see
-    ``_fluid_setting_sources`` — gating instruction files, skills, agents, and
-    plugin discovery; None keeps every scope on, the historical behavior.)
-  * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
-    concepts; fluid persistence is the Pg/Memory store chosen above.
-  * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
-  * MCP ``headers`` (remote servers) and the ``sse`` transport — fluid's MCP
-    client supports neither yet; both are warned about at connect time.
-
-HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
-  * ``add_dirs`` — projected onto SessionOptions and passed to the delegated
-    leg as repeated ``--add-dir`` flags (native-leg fluid tools are not
-    path-sandboxed, so no equivalent is needed there).
-  * system prompts on native legs (and, under PROMPT_FULL_REPLACE, a
-    plain-string profile prompt on the delegated leg) run through
-    ``fluid.context.compiler`` — instruction files, skills index, and
-    environment are fluid-gathered (ruling A1). A preset profile on the
-    delegated leg keeps Claude Code's own prompt and gets the app's text
-    appended (decision D6, see ``_delegated_append_text``).
-
-SUPPLIED BY FLUID ITSELF, WITH NO WIRING HERE (Claude-ecosystem compat, CE1):
-  fluid's discovery is filesystem-native and defaults ON, so a native leg picks
-  the user's existing Claude Code setup up for free. Nothing below is passed by
-  this adapter — the only lever it would have is turning a piece OFF:
-  * ``plugins`` — enabled plugins (``enabledPlugins`` in the settings stack) are
-    resolved from ``~/.fluid/plugins``; their skills and commands join the
-    compiled prompt namespaced ``<plugin>:<name>``, their agents join the agent
-    registry, and their MCP servers join ``NativeLoop``'s lazy-connect set
-    (``fluid.context.plugins``, ruling CE5). App-configured servers of the same
-    name always win — see ``_prune_duplicate_plugin_mcp_servers``.
-  * ``settings.json`` — the user/project/local stack is merged and applied:
-    ``permissions.{allow,ask,deny,defaultMode}`` become PermissionEngine rules
-    placed BEFORE the app's (last match wins, so the app keeps the final say),
-    and ``env`` becomes a child-process overlay for the Bash builtin and stdio
-    MCP spawns — never an ``os.environ`` mutation (``fluid.context.
-    claude_settings``, ruling CE4).
-  * instruction files — the ``AGENTS.md`` conventions (``AGENTS.md`` /
-    ``AGENT.md`` / ``.agents/AGENTS.md`` per scope, ``AGENTS.override.md``
-    replacing the root slot, ``~/.fluid/AGENTS.md`` globally) are collected
-    with ``@path`` imports expanded by the instruction gatherer (rulings
-    CE2/CE3) — so the compiled prompt this adapter builds already contains
-    them. ``CLAUDE.md``/``CLAUDE.local.md`` are no longer read directly; an
-    explicit settings import copies them over instead.
-  * ``agents`` (subagents) — ``.claude/agents/**/*.md`` plus plugin agents are
-    read into ``ctx.extra["agent_registry"]`` by ``NativeLoop`` (ruling CE6).
-    The prompt's agents index is assembled by THIS module instead of fluid's
-    compiler (``_agent_context``), because the app's own DB agents belong in the
-    same list: the profile's context-declared agents (2026-08-17 ruling —
-    ``enabled_agents``/``agent_invoke_mode`` decide what is DECLARED, never what
-    may be dispatched) are merged with the discovered ones, name+description
-    only. BOTH legs get the block: native legs through the compiled prompt, the
-    delegated leg through whichever prompt part the CLI reads (the appended
-    text for a preset profile, the plain-string prompt otherwise — see
-    ``_with_agents_index``), so a Claude-subscription caller can name a
-    cross-provider agent too. Dispatch stays ours: the Task dispatcher injected
-    below resolves app agents first and falls back to that registry
-    (``app.core.task_dispatch``), with no allowlist between it and any agent
-    that resolves.
+Ignored: ``tools``, ``task_budget``, ``session_store*``,
+``enable_file_checkpointing``, ``stderr``, ``user``, and every ``extra_args`` key
+except ``thinking-display``. Native discovery reads only fluid's
+``.fluid``/``.agents`` trees, never ``~/.claude``; fluid's settings.json stack and
+plugin MCP servers are not wired into NativeLoop.
 """
 
 from __future__ import annotations
@@ -227,6 +86,7 @@ from app.core.provider.fluid_credentials import (
     resolve_provider_credentials,
 )
 from app.core.provider.protocol import ProviderAdapter
+from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
 # from here — but a session replayed through this adapter must be decodable,
@@ -239,9 +99,8 @@ from app.core.provider.types import (
     mcp_servers_equivalent,
 )
 # The streaming loops dispatch on the provider mirror vocabulary (identical
-# names/shapes to the SDK message classes — see events.py). _translate
-# synthesizes these from the fluid Event stream so a flag-on session flows
-# through the exact same loop branches as the SDK path.
+# names/shapes to the SDK message classes, see events.py). _translate
+# synthesizes these from the fluid Event stream.
 from app.core.provider.events import (
     AssistantMessage,
     RateLimitEvent,
@@ -265,11 +124,10 @@ from app.core.provider.events import (
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.journal import ToolJournal
 from fluid.codemode.session import CodeModeSession
-from fluid.codemode.skills import SkillStore, project_key_for
 from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.hooks.bus import HookBus
 from fluid.events.ops import (
     BackgroundTaskFinished,
@@ -283,6 +141,7 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.modes import MODE_POLICY
 from fluid.permissions.rules import Rule
 from fluid.providers.anthropic.client import AnthropicClient
 from fluid.providers.openai_responses.client import (
@@ -292,7 +151,7 @@ from fluid.providers.openai_responses.client import (
 )
 from fluid.providers.openrouter.client import OpenRouterClient
 from fluid.providers._retry import RetryPolicy
-from fluid.store.base import MemoryStore
+from fluid.store.base import MemoryStore  # noqa: F401 — re-exported for tests/conftest.py
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB import below is
@@ -308,8 +167,8 @@ _ENGINE_CLOSE_GRACE_SECONDS = 5.0
 def _extra_opt(options: SessionOptions, key: str, default: Any = None) -> Any:
     """Read ``extra["fluid_<key>"]``, falling back to the legacy ``omni_<key>``.
 
-    The harness was renamed omni -> fluid (2026-08); pre-rename callers and
-    scripts that still pass the old key keep working.
+    Callers and scripts that still pass the pre-rename ``omni_`` key keep
+    working.
     """
     val = options.extra.get(f"fluid_{key}")
     if val is None:
@@ -338,12 +197,51 @@ def fluid_turn_source(app_source: Optional[str]) -> str:
     return _FLUID_TURN_SOURCES.get(str(app_source or ""), "user")
 
 
-# app permission_mode → fluid PermissionEngine approval policy
-_PERMISSION_POLICY = {
-    "bypassPermissions": "never_ask",
-    "acceptEdits": "on_write",
-    "default": "on_write",
-}
+# app permission_mode → fluid PermissionEngine approval policy: fluid's own
+# mode table, policy only. The app's native leg deliberately does NOT install
+# fluid's ``acceptEdits`` edit-tool allow rules (``fluid.permissions.modes``):
+# the engine keeps asking for every write-class call and the app's approver
+# decides each one with the mode (``mode_approves_without_prompt``) AFTER the
+# user's saved rules, so a remembered Deny on Write still wins under Accept
+# Edits and a rule saved mid-session applies to the next call. That is why
+# ``set_permission_mode`` sends the engine the POLICY name on this leg.
+_PERMISSION_POLICY = MODE_POLICY
+
+
+def _prompt_enrichment(tool_name: str, ev: PermissionRequestEvent) -> Dict[str, str]:
+    """``title``/``display_name``/``description`` for a native tool's prompt.
+
+    The can_use_tool callback reads these off its context the way the SDK's
+    ``ToolPermissionContext`` carries them. Only ``run_python`` has any: a
+    readable title and the cell's code as plain text instead of the raw tool
+    name and a JSON-escaped 100-character cut of the input.
+    """
+    if tool_name != "run_python":
+        return {}
+    try:
+        from fluid.codemode.session import run_python_prompt
+
+        return run_python_prompt(ev.input, sandboxed=ev.risk == "safe")
+    except Exception:  # noqa: BLE001 — a prettier prompt is never worth a denial
+        logger.debug("run_python prompt enrichment failed", exc_info=True)
+        return {}
+
+
+def _usage_has_estimate(usage: Dict[str, Any]) -> bool:
+    """True when fluid flagged a token count in this usage record as a guess.
+
+    ``input_tokens_estimated`` / ``output_tokens_estimated`` come from the
+    native engine's ``_estimate_partial_usage`` (chars/4 over the request and
+    the streamed reply, used when the provider sent no usage or the reply was
+    interrupted). ``usage_estimated`` is the adapter's own summary key, kept
+    so a record that already carries it stays flagged when re-read. The
+    Claude CLI leg never estimates, so its records never match.
+    """
+    return bool(
+        usage.get("usage_estimated")
+        or usage.get("input_tokens_estimated")
+        or usage.get("output_tokens_estimated")
+    )
 
 
 class HarnessAdapter(ProviderAdapter):
@@ -355,6 +253,16 @@ class HarnessAdapter(ProviderAdapter):
         self._registry: Optional[ToolRegistry] = None
         self._connected: bool = False
         self._options: Optional[SessionOptions] = None
+        # The SDK-shaped options this adapter was connected with. The session
+        # pool keeps the same object as ``SessionState.connect_options``, and a
+        # reused client's turn compares its model and permission mode against
+        # it to decide whether to call ``set_model`` / ``set_permission_mode``
+        # (the only two options hot-swapped there). So every applied change is
+        # written back here (``_record_applied``): left at the connect-time
+        # value, a switch Ask -> Bypass -> Ask (or model A -> B -> A) would
+        # compare the final value against the original one, skip the call,
+        # and leave the engine on the middle value.
+        self._sdk_options: Optional[Any] = None
         self._sdk_session_id: Optional[str] = None
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
@@ -395,10 +303,13 @@ class HarnessAdapter(ProviderAdapter):
         # summary of it — so the UI can label the summary as the provider's
         # voice instead of the model's.
         self._block_subtypes: Dict[int, Optional[str]] = {}
-        # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
+        # App-side permission callback (AgentOptions.can_use_tool). When
         # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
-        # surface in-stream as PermissionRequestEvent.
+        # are answered from the permission mode: the delegated leg decides
+        # every one; the native leg approves what the mode approves on its
+        # own and lets the rest surface in-stream as PermissionRequestEvent
+        # (fluid denies those after ``permission_timeout``).
         self._can_use_tool: Optional[Any] = None
         self._perm_bridge_tasks: set = set()
         # httpx client injected into the native provider client purely to
@@ -413,9 +324,14 @@ class HarnessAdapter(ProviderAdapter):
         # It exists for the ErrorEvent branch: fluid's catch-all ErrorEvent
         # carries neither ``usage`` nor ``cost_usd`` (only TurnComplete and
         # Interrupted roll the turn up), so an errored turn billed the session
-        # $0 no matter how many calls it had already paid for. An audit found
-        # real spend missing across several errored turns in one session.
+        # $0 no matter how many calls it had already paid for.
         self._turn_usage_totals: Dict[str, float] = {}
+        # True once any call this turn carried a token count fluid estimated
+        # (``input_tokens_estimated`` / ``output_tokens_estimated`` in
+        # ``Usage.raw``: the provider reported no usage, or the reply was
+        # interrupted). Stamped on the turn's terminal usage as
+        # ``usage_estimated`` so the booking can mark the row.
+        self._turn_usage_estimated: bool = False
         self._turn_model_calls: int = 0
         # Prompt-cache misses on this adapter's engine, counted by class (see
         # app.core.provider.cache_miss_classes). get_context_usage() reports
@@ -435,6 +351,11 @@ class HarnessAdapter(ProviderAdapter):
         # registered on it keeps observing across the reconnects that rebuild
         # the engine.
         self._hooks: HookBus = HookBus()
+        # Every call a fluid gate lets through, whatever allowed it (a prompt
+        # answer, a hook's allow, a rule, a mode, a remembered allow), is
+        # reported here before it runs; computer-use request_access records
+        # its one-shot approval from it (_on_tool_allowed).
+        self._hooks.on_tool_allowed(self._on_tool_allowed)
         # The app's Agent SDK hooks (``options.hooks``: DB hooks, plugin
         # hooks.json scripts, the Stop handler) on their own bus, rebuilt at
         # every connect. One dispatcher per event on ``self._hooks`` runs it
@@ -449,7 +370,7 @@ class HarnessAdapter(ProviderAdapter):
 
     @property
     def engine(self) -> Optional[Any]:
-        """Direct access to the underlying fluid engine (parallels sdk_client)."""
+        """Direct access to the underlying fluid engine."""
         return self._engine
 
     @property
@@ -508,10 +429,11 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
-        if not self._is_delegated and options.permission_mode == 'auto':
-            # Legacy Auto selections on native routes use Ask. Only the
-            # delegated Claude CLI implements the classifier-backed mode.
-            options.permission_mode = 'default'
+        # Legacy Auto selections on native routes use Ask. Only the
+        # delegated Claude CLI implements the classifier-backed mode.
+        options.permission_mode = effective_permission_mode(
+            options.permission_mode, delegated=self._is_delegated
+        )
         options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
@@ -522,17 +444,16 @@ class HarnessAdapter(ProviderAdapter):
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
-            # Decision D6 (reverses ruling A3 for preset profiles): a preset
-            # profile keeps Claude Code's own system prompt and gets the app's
-            # text appended. The CLI gathers env, instruction files and its
-            # skill listing itself, so none of that is compiled here. Only a
-            # profile with its own plain-string prompt replaces the preset,
-            # and PROMPT_FULL_REPLACE decides whether that prompt is compiled.
+            # A preset profile keeps Claude Code's own system prompt; the app's
+            # text (profile append, agents index, fluid instruction files and
+            # skills, guidance: see _delegated_append_text) is appended. A
+            # plain-string profile prompt replaces the preset, compiled when
+            # PROMPT_FULL_REPLACE is on.
             from app.core.config import settings
 
             if system is None:
-                # discover_agents walks .claude/agents + plugin dirs (rglob)
-                # — disk IO, so it runs in a worker thread.
+                # discover_agents walks .fluid/agents, .agents/agents and
+                # plugin dirs (rglob): disk IO, so it runs in a worker thread.
                 delegated_system = None
                 delegated_append = await asyncio.to_thread(
                     _delegated_append_text, append_system, options, self._registry
@@ -554,7 +475,8 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
-            # shutil.which + the bundled-CLI resolver stat the filesystem.
+            # shutil.which stats the filesystem. A missing CLI raises
+            # ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
             self._engine = DelegatedLoop(
@@ -588,7 +510,7 @@ class HarnessAdapter(ProviderAdapter):
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
                 setting_sources=_fluid_setting_sources(options),
-                # Per-session fast mode (v81) → the CLI's ``fastMode`` setting,
+                # Per-session fast mode → the CLI's ``fastMode`` setting,
                 # handed over as a --settings JSON blob. Only sent when the user
                 # turned it on: an explicit ``{"fastMode": false}`` would be the
                 # same as the default, and a missing --settings keeps the CLI on
@@ -598,21 +520,23 @@ class HarnessAdapter(ProviderAdapter):
                     if getattr(options, "fast", None)
                     else None
                 ),
-                # Ruling A6's ban set, the agent's own blocklist, and (ruling
-                # T4) the CLI-surface complement of an ``allow``-mode surface.
+                # The banned CLI tools, the agent's own blocklist, and the
+                # CLI-surface complement of an ``allow``-mode surface.
                 # The bridged app builtin mcp__builtins__ScheduleWakeup
                 # (wakeup_service-backed) is the one supported wake path on this
                 # leg. See _delegated_disallowed for the full derivation.
                 disallowed_tools=delegated_blocked,
-                # The session's tool surface: the agent's ``allow`` list (T3)
+                # The session's tool surface: the agent's ``allow`` list
                 # intersected with a file-agent worker's definition list (CE12).
-                # The CLI reads --allowed-tools as PERMISSION rules, so on this
-                # leg the list grants rather than restricts — the restriction
-                # comes from the complement passed as --disallowed-tools above.
-                # That is also why the chat lane's fenced Read is held back from
-                # it (see _delegated_allowed): a bare grant here would approve
-                # the tool before the app's permission callback is consulted.
+                # The CLI reads --allowed-tools as permission grants, so the
+                # surface wall is the complement in --disallowed-tools above.
+                # On the chat lane the CLI's Read is banned outright and reads
+                # go through the bundled attachment reader.
                 allowed_tools=_delegated_allowed(options),
+                # The app's safe MCP tools run unprompted: the SDK permission
+                # allowlist's in-proc entries the native leg rates ``safe``,
+                # in the CLI's spelling.
+                permission_grants=_delegated_permission_grants(options),
                 claude_cmd=claude_cmd,
                 # The CLI's hooks, forwarded into the same bus the native leg
                 # emits into; PreToolUse also enforces the deny policy, so a
@@ -625,7 +549,7 @@ class HarnessAdapter(ProviderAdapter):
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
             # fluid's bare Task builtin needs the app's dispatcher injected
-            # (ruling A13: fluid owns the shape, the app owns the spawning).
+            # (fluid owns the shape, the app owns the spawning).
             # UNCONDITIONAL + late-binding: this ctx is built once per connect
             # and then lives for the whole pooled life of the engine, while the
             # app session id may not be knowable here at all (a brand-new
@@ -638,10 +562,13 @@ class HarnessAdapter(ProviderAdapter):
             # GetUsage is deliberately cache-only: the tool may inspect the
             # app's last observed snapshot, but a model call must never start
             # provider billing/subscription polling or touch credentials.
+            # Bound to this session: an API key's session reads no owner usage.
             try:
-                from app.api.usage import get_cached_usage_payload
+                from app.api.usage import session_usage_callback
 
-                native_ctx.extra["usage_snapshot"] = get_cached_usage_payload
+                native_ctx.extra["usage_snapshot"] = session_usage_callback(
+                    self._resolve_app_session_id
+                )
             except Exception:  # noqa: BLE001 — standalone Fluid still reports unavailable
                 logger.debug("usage snapshot injection unavailable", exc_info=True)
             # This ctx also accompanies delayed Swarm dependency launches. Keep
@@ -670,7 +597,7 @@ class HarnessAdapter(ProviderAdapter):
                     "unavailable on this native leg",
                     fluid_session_id, options.cwd, exc_info=True,
                 )
-            # Same A13 split for fluid's bare Monitor builtin: shape in fluid,
+            # Same split for fluid's bare Monitor builtin: shape in fluid,
             # spawning here. The spawner reuses the app's detached-shell task
             # manager and its unpark wake path.
             try:
@@ -790,7 +717,7 @@ class HarnessAdapter(ProviderAdapter):
                         # the # Memory snapshot under) instead of leaking into
                         # every other project's sessions. Passes are background
                         # and best-effort (see fluid/codemode/continual.py).
-                        # Phase 2: ``session_model``/``guidance_snapshot`` open
+                        # ``session_model``/``guidance_snapshot`` open
                         # fluid's guidance-proposal channel. ``session_model``
                         # is ``options.model`` — NOT the resolved api id above
                         # — because it must be the same string the guidance
@@ -880,8 +807,8 @@ class HarnessAdapter(ProviderAdapter):
                 "append_system": append_system,
                 "code_mode": codemode is not None,
                 "codemode": codemode,
-                # The session's real tool registry — the name set the T9 prompt
-                # filter is computed from (MCP bridge names included).
+                # The session's real tool registry: the name set the prompt's
+                # tool filter is computed from (MCP bridge names included).
                 "registry": self._registry,
                 # The capabilities this leg actually wired: a builtin whose
                 # host injection is missing (SendMessage without agent
@@ -917,12 +844,13 @@ class HarnessAdapter(ProviderAdapter):
                 # get_context_usage() breakdown; None when unresolvable, which
                 # fluid reports as an unknown window instead of guessing.
                 context_window=_native_context_window(kind, options),
-                # Consult rates from the bound provider catalog before the harness fallback table. Catalog-
-                # sourced per-token rates price supported models; retain unknown cost when neither source has a
-                # matching rate.
+                # Rates from the bound provider row's catalog, consulted before
+                # fluid's own table. A catalog that carries a rate (OpenRouter
+                # publishes per-token prices) prices the turn; fluid's sourced
+                # table covers the rest.
                 pricing=_catalog_pricing_resolver(options),
-                # Per-session fast mode (v81). Only the OpenAI Responses lane
-                # has a wire-level expedited service in v1 — ``service_tier:
+                # Per-session fast mode. Only the OpenAI Responses lane
+                # has a wire-level expedited service: ``service_tier:
                 # priority``, merged into the request body by fluid's
                 # ``request_extra``. The anthropic and openrouter native lanes
                 # have no equivalent knob and ignore ``fast`` entirely.
@@ -937,7 +865,7 @@ class HarnessAdapter(ProviderAdapter):
                 # promotion decisions, and keeps every original node available to
                 # HistorySearch/HistoryExpand, rewind, forks, and audit.
                 compaction=_compaction_config(),
-                # Turn watchdog (round 9): a turn whose node never produces a
+                # Turn watchdog: a turn whose node never produces a
                 # result is ended by fluid after this many seconds of silence
                 # instead of dying silently. Passed only when the vendored
                 # fluid has the seam.
@@ -961,7 +889,7 @@ class HarnessAdapter(ProviderAdapter):
                 system_sections=compiled_prompt,
                 # Agent-definition descriptors behind get_context_usage()'s
                 # "Custom agents" row: the profile's context-declared DB agents
-                # (name+description, ruling of 2026-08-17) plus the file/plugin
+                # (name+description) plus the file/plugin
                 # definitions fluid discovered — passing this list at all
                 # suppresses fluid's own auto-fill, so it has to carry both.
                 agents=declared_agent_descriptors or None,
@@ -987,24 +915,18 @@ class HarnessAdapter(ProviderAdapter):
                 # native-agent discovery (the Task registry) sees the same
                 # sources the agents index advertised.
                 setting_sources=_fluid_setting_sources(options),
-                # Tool restriction, ENFORCED (ruling CE12): fluid filters the
+                # Tool restriction, ENFORCED (CE12): fluid filters the
                 # request schemas, the deferred/ToolSearch catalog AND dispatch,
                 # so a filtered tool is invisible, unloadable and uncallable.
                 # ``allowed_tools`` is the whole surface when set (None = every
-                # registered tool); ``disallowed_tools`` — the profile's own
-                # blocklist, previously honored only by the app's permission
-                # callback — subtracts afterwards, deny beating allow. Both
+                # registered tool); ``disallowed_tools`` (the profile's own
+                # blocklist) subtracts afterwards, deny beating allow. Both
                 # accept fnmatch patterns (``mcp__chrome-devtools__*``).
                 allowed_tools=_tool_allowlist(options),
                 disallowed_tools=list(options.disallowed_tools or ()) or None,
-                # fluid's folding of the host's ~/.claude settings stack is left
-                # ON (its default) deliberately, per ruling CE4 — see the
-                # settings.json bullet in the module docstring: the user's
-                # permission rules are prepended (last match wins, so the app's
-                # own rules keep the final say) and ``env`` rides as a
-                # child-process overlay, never an os.environ mutation.
             )
-            # Ruling T9 again, on the pricing side: when the compiled prompt
+            # The prompt never describes a tool the session cannot call; the
+            # same holds on the pricing side: when the compiled prompt
             # carries no agents index (``Task`` not permitted, or a compiler
             # failure that fell back to the raw prompt parts), the "Custom
             # agents" usage row must price ZERO — there is no section to pay
@@ -1019,16 +941,6 @@ class HarnessAdapter(ProviderAdapter):
             )
             if not prompt_has_agents_index:
                 self._engine.agents = []
-            # An enabled plugin may declare an MCP server under a name the app
-            # also configures. fluid's own host-wins check only sees servers
-            # passed as ``NativeLoop(mcp_servers=...)``, and the app connects
-            # its servers itself (``_build_registry`` → ``registry.connect_mcp``,
-            # already done above) — so without this the same name would be
-            # connected twice onto the same registry: two child processes, the
-            # second overwriting the first's catalog entries and orphaning it.
-            _prune_duplicate_plugin_mcp_servers(
-                self._engine, _external_mcp_servers(options.mcp_servers)
-            )
 
         # Prime the session so ``session_id`` and ``events()`` are usable
         # immediately (both engines lazily create it inside the first turn task,
@@ -1100,11 +1012,10 @@ class HarnessAdapter(ProviderAdapter):
     async def connect_with_sdk_options(self, sdk_options: Any) -> None:
         """Accept SDK-shaped options at the compatibility boundary.
 
-        Callers that still build ``ClaudeAgentOptions`` directly (query_engine,
-        query_background) can hand them here; the fields fluid can honor are
-        projected onto a SessionOptions. This lets ``make_adapter()`` be a
-        drop-in at those sites. Fields fluid cannot honor are ignored (see the
-        module docstring's degraded list).
+        Callers that build ``AgentOptions`` (query_engine, query_background)
+        hand them here; the fields fluid can honor are projected onto a
+        SessionOptions. Fields fluid cannot honor are ignored (see the module
+        docstring's "Ignored" list).
         """
         opts = SessionOptions(
             model=getattr(sdk_options, "model", None) or DEFAULT_MODEL,
@@ -1118,6 +1029,9 @@ class HarnessAdapter(ProviderAdapter):
                 getattr(sdk_options, "include_partial_messages", False)
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
+            # The SDK permission allowlist (the app's MCP tool names). Only the
+            # delegated leg reads it, as CLI grants (_delegated_permission_grants).
+            allowed_tools=getattr(sdk_options, "allowed_tools", None),
             disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
             # CE12 tool-surface restriction, stamped by query_options as
             # ``aih_tool_allowlist``. NOT ``sdk_options.allowed_tools``: that is
@@ -1136,7 +1050,7 @@ class HarnessAdapter(ProviderAdapter):
             # by query_options._build_thinking_config (None for "default").
             # Only the native anthropic lane reads it (_native_thinking).
             thinking=getattr(sdk_options, "thinking", None),
-            # Per-session fast mode (v81), stamped by query_options as
+            # Per-session fast mode, stamped by query_options as
             # ``aih_fast`` (override for this turn, else the session row).
             fast=getattr(sdk_options, "aih_fast", None),
             # Profile scope filter (user/project/local). Native legs map it
@@ -1149,7 +1063,7 @@ class HarnessAdapter(ProviderAdapter):
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
-        # ``query_options.build_options_from_profile``; inert on the SDK path).
+        # ``query_options.build_options_from_profile``).
         # It is what lets _build_provider_client authenticate a native leg from
         # the app's encrypted ``model_providers`` row.
         provider_id = getattr(sdk_options, "aih_provider_id", None)
@@ -1157,7 +1071,7 @@ class HarnessAdapter(ProviderAdapter):
             opts.extra["provider_id"] = provider_id
             # The bound row's SHAPE, stamped alongside the id by query_options
             # so ``_decide_provider_kind`` can pick the leg from the provider
-            # row instead of sniffing the model string (PA13). Only forwarded
+            # row instead of sniffing the model string. Only forwarded
             # when present — a missing type makes the adapter look the row up.
             provider_type = getattr(sdk_options, "aih_provider_type", None)
             if provider_type:
@@ -1190,11 +1104,10 @@ class HarnessAdapter(ProviderAdapter):
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
-        # The session's sidepanel lane (``app.core.session_modes``). The chat
-        # lane's ceiling has a PATH half the tool lists cannot express, and both
-        # of its real enforcement points live on this side of the boundary — the
-        # fluid permission rule and the delegated CLI's bare-name grant — so the
-        # lane has to travel with the options rather than be inferred from them.
+        # The sidepanel lane (``app.core.session_modes``). The chat lane's path
+        # fence cannot be expressed as a tool list, so the lane travels with the
+        # options: the PermissionEngine adds _chat_mode_rules, and both legs swap
+        # Read for the attachment reader.
         session_mode = getattr(sdk_options, "aih_session_mode", None)
         if session_mode:
             opts.extra["session_mode"] = str(session_mode)
@@ -1205,8 +1118,8 @@ class HarnessAdapter(ProviderAdapter):
         github_connected = getattr(sdk_options, "aih_github_connected", None)
         if github_connected:
             opts.extra["github_connected"] = True
-        # The DB agents the profile declares into its model's context (2026-08-17
-        # ruling, superseding A10) — ``[{"name", "description"}]`` resolved by
+        # The DB agents the profile declares into its model's context:
+        # ``[{"name", "description"}]`` resolved by
         # query_options from agent_invoke_mode/enabled_agents. Merged into the
         # compiled prompt's agents index; never a dispatch restriction.
         declared_agents = getattr(sdk_options, "aih_declared_agents", None)
@@ -1221,14 +1134,16 @@ class HarnessAdapter(ProviderAdapter):
         if turn_env:
             opts.extra["turn_env"] = dict(turn_env)
         # The app's permission prompt flow rides on this callback (see
-        # _bridge_permission) — same wiring the SDK path uses.
+        # _bridge_permission). Without it, the delegated leg answers prompts
+        # from the permission mode (_answer_without_approver).
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
+        self._sdk_options = sdk_options
         await self.connect(opts)
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
         )
         await self.reconcile_user_questions()
-        # Rehydrate reconcile (2026-09-05 audit F1). Fluid rebuilds its pending
+        # Rehydrate reconcile. Fluid rebuilds its pending
         # set from the SubagentEvent log alone, so a completion that never
         # reached the engine is re-created as a phantom on every resume and
         # listed on every later park. Ask the freshly rehydrated engine what it
@@ -1348,6 +1263,16 @@ class HarnessAdapter(ProviderAdapter):
     def is_connected(self) -> bool:
         return self._connected and self._engine is not None
 
+    def subprocess_pid(self) -> Optional[int]:
+        """PID of the delegated leg's claude CLI while it runs; None otherwise.
+
+        The native leg runs in-process and owns no child. The delegated CLI is
+        spawned by the first turn, so this is None until then.
+        """
+        if not self._is_delegated or self._engine is None:
+            return None
+        return getattr(self._engine, "pid", None)
+
     # ─── Query Execution ──────────────────────────────────────────────
 
     async def prepare_background_completions(self, frames: Any) -> None:
@@ -1358,12 +1283,9 @@ class HarnessAdapter(ProviderAdapter):
         ``wake=False``: the app's already-claimed ``source=unpark`` turn is the
         continuation, so allowing Fluid to start another would double-run it.
 
-        ``report_path`` rides along. Fluid declares the field on the op and
-        forwards it onto every ``SubagentEvent`` it emits, but the app used to
-        omit it, so EVERY agent wake arrived with ``report_path: null`` and the
-        first act of the woken turn was a ``TaskGet`` round-trip purely to learn
-        the path of a report that already existed — one wasted model call per
-        agent completion, in every session.
+        ``report_path`` rides along. Fluid forwards it onto every
+        ``SubagentEvent`` it emits; without it the woken turn would spend a
+        ``TaskGet`` round-trip just to learn the report's path.
         """
         if self._engine is None or self._is_delegated or not frames:
             return
@@ -1509,13 +1431,34 @@ class HarnessAdapter(ProviderAdapter):
         source, self._next_turn_source = self._next_turn_source, "user"
         return source
 
+    @staticmethod
+    def _session_runs_as_owner(session_id: str) -> bool:
+        """Whether ``session_id`` runs as the owner, not an API key.
+
+        A preview grant signs in as the owner, so an API key's session (or a
+        worker under one) must never see a token in its prompt. Blocking DB
+        read: called from :meth:`_build_workspace_card`, which runs off the
+        loop. Fails closed.
+        """
+        try:
+            from app.core.api_user_scope import session_api_user_id
+            from app.db import database
+
+            row = database.get_session(session_id)
+            return row is not None and session_api_user_id(row) is None
+        except Exception:  # noqa: BLE001 — no token is the safe answer
+            logger.debug("[HarnessAdapter] preview owner check failed", exc_info=True)
+            return False
+
     def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
         """The "# Workspace facts" card for this native session, or None.
 
         Native legs only. Runs the cheap probes in
         :func:`app.core.environment.workspace_facts_card` and mints the
         session-scoped preview-access URL (:mod:`app.core.preview_access`)
-        that lets the agent browser open this worker's own UI. Never raises.
+        that lets the agent browser open this worker's own UI. An API key's
+        session gets no URL: the grant would sign it in as the owner. Never
+        raises.
         """
         if self._is_delegated:
             return None
@@ -1528,7 +1471,7 @@ class HarnessAdapter(ProviderAdapter):
             browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
             preview_url = None
             session_id = self._resolve_app_session_id()
-            if session_id and browser_host:
+            if session_id and browser_host and self._session_runs_as_owner(session_id):
                 try:
                     preview_url = preview_access.preview_url(
                         session_id, browser_host, int(settings.port)
@@ -1548,11 +1491,9 @@ class HarnessAdapter(ProviderAdapter):
     async def _refresh_task_roster(self) -> bool:
         """Re-read the subagent roster at turn start; re-install it if changed.
 
-        Round-9 finding F6: the Task contract and the "# Available agent
-        types" index were computed once at connect, so a user who enabled a
-        subagent mid-session got "No subagents are configured and runnable"
-        on every later turn of that session (aa7e2c10, a wasted inline turn).
-        The roster is a DB/provider question, so it is re-asked here — off
+        The Task contract and the "# Available agent types" index are built
+        at connect, so a subagent enabled mid-session would otherwise stay
+        invisible. The roster is a DB/provider question, so it is re-asked here, off
         the loop — and only a CHANGED answer touches anything: the registry's
         Task spec (what read_tool_docs and the schema show) and the compiled
         prompt (the ``# Tools`` catalog entry). An unchanged roster leaves
@@ -1689,6 +1630,7 @@ class HarnessAdapter(ProviderAdapter):
         self._turn_floor = floor
         # New turn → new usage roll-up (see _turn_usage_totals).
         self._turn_usage_totals = {}
+        self._turn_usage_estimated = False
         self._turn_model_calls = 0
         self._turn_call_indices = set()
 
@@ -1701,8 +1643,8 @@ class HarnessAdapter(ProviderAdapter):
         text in fluid's steering marker, which carries the user's authority;
         ``"system"`` delivers a harness notice — a task completion, a watcher
         firing — in the harness-notice marker, which says it is not the user
-        and asks for nothing. Audited sessions had task notifications, whose
-        summaries are text a sub-agent wrote, arriving in the user's marker.
+        and asks for nothing. Task-notification summaries are text a sub-agent
+        wrote, so they must never arrive in the user's marker.
 
         Both legs accept it and both receipt it with ``SteerDelivered`` (mirrored
         to :class:`SteerDeliveredEvent`), but they deliver differently: the
@@ -1781,6 +1723,30 @@ class HarnessAdapter(ProviderAdapter):
                     self._perm_bridge_tasks.add(task)
                     task.add_done_callback(self._perm_bridge_tasks.discard)
                     continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
+                    and self._is_delegated
+                    and getattr(translated, "risk", None) != "question"
+                ):
+                    # No approver is wired on this path (REST, background,
+                    # execute_query, failover), and the claude CLI blocks on
+                    # every prompt until it is answered.
+                    await self._answer_without_approver(translated)
+                    continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
+                    and getattr(translated, "risk", None) != "question"
+                    and mode_approves_without_prompt(
+                        self.permission_mode,
+                        self._permission_tool_name(translated.name),
+                    )
+                ):
+                    # Native leg, no approver: the modes that approve on their
+                    # own allow here too, as they do in a watched session.
+                    # Only a call Ask would put to a person still surfaces,
+                    # and fluid denies it after ``permission_timeout``.
+                    await self._allow_without_approver(translated)
+                    continue
                 if isinstance(translated, ResultMessage) and not self._is_live(event):
                     # A terminal from before this turn was submitted: history
                     # being replayed, not this turn ending. Dropping it (rather
@@ -1801,14 +1767,9 @@ class HarnessAdapter(ProviderAdapter):
     async def _announce_continual(self, changes: list) -> None:
         """Publish a ``ContinualUpdate`` for a synthesis pass — and persist it.
 
-        This used to call ``bus.publish`` directly. The bus assigns the seq and
-        bumps its counter, but only the engines' ``_emit`` writes to the store,
-        so every announcement burned a seq that never reached
-        ``fluid_session_events`` — a permanent hole in the durable log, one per
-        changing pass. (There are zero ``ContinualUpdate`` rows in production to
-        show for hundreds of sessions run with continual on.) Holes are no
-        longer fatal — :meth:`_anchor_replay_cursor` reads past them — but a
-        durable log that silently disagrees with the bus is worth not creating.
+        Not ``bus.publish``: the bus assigns the seq, but only the engines'
+        ``_emit`` writes to the store, so a bare publish would burn a seq that
+        never reaches ``fluid_session_events`` (a hole in the durable log).
 
         Routing through the engine's ``_emit`` keeps ONE writer for the whole
         stream. The direct publish stays as the fallback for an engine that has
@@ -1884,9 +1845,7 @@ class HarnessAdapter(ProviderAdapter):
         reconstructible deltas for long-idle sessions without renumbering, so
         most resumed sessions are non-contiguous from seq 3 onwards. Anchoring
         at the first hole makes every later turn replay everything after it, and
-        since the hole never heals the session never catches up — which is what
-        stranded a live session on 2026-09-03 and what stranded every session
-        resumed after a retention pass.
+        since the hole never heals the session never catches up.
 
         Event NUMBERING is fluid's own job: ``_ensure_session`` already seeds
         the bus from the store's maximum (``NativeLoop._seed_bus_seq``) before
@@ -1945,6 +1904,94 @@ class HarnessAdapter(ProviderAdapter):
                 seed(session_id, head)  # never moves numbering backwards
         self._event_cursor = max(self._event_cursor, head)
 
+    @property
+    def permission_mode(self) -> Optional[str]:
+        """The session's live permission mode (tracks ``set_permission_mode``)."""
+        return self._options.permission_mode if self._options is not None else None
+
+    @property
+    def has_permission_callback(self) -> bool:
+        """True when permission prompts reach an app approver (the WS path)."""
+        return self._can_use_tool is not None
+
+    async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Decide a delegated prompt from the session's permission mode, by the
+        rule a watched session follows (``mode_approves_without_prompt``): Ask
+        denies with the reason, and so does every mode short of Bypass for the
+        computer-use access request; everything else is allowed."""
+        allow = mode_approves_without_prompt(
+            self.permission_mode, self._permission_tool_name(ev.name),
+        )
+        if not allow:
+            logger.info(
+                "[HarnessAdapter] denying %s: no interactive approver on this path",
+                ev.name,
+            )
+        try:
+            await self.respond_to_permission(
+                ev.tool_use_id, allow, message=None if allow else _NO_APPROVER_DENIAL,
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit permission decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
+
+    async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Approve a native prompt the session's mode approves on its own —
+        unless a saved Deny rule names the call. The same order the watched
+        approver keeps: saved rules first, then the mode (Bypass never gets
+        here). Session rules are keyed by the app session id, the agent's by
+        ``extra["profile_id"]``; an adapter without either sees no rules."""
+        allow = True
+        message: Optional[str] = None
+        if self.permission_mode != "bypassPermissions":
+            from app.core.permission_handler import (
+                PermissionDecision,
+                permission_handler,
+            )
+
+            def _saved_denial() -> bool:
+                extra = (self._options.extra or {}) if self._options is not None else {}
+                rule = permission_handler.saved_rule(
+                    self._resolve_app_session_id(), extra.get("profile_id"),
+                    self._permission_tool_name(ev.name), ev.input or {},
+                )
+                return rule is not None and rule.decision == PermissionDecision.DENY
+
+            try:
+                if await asyncio.to_thread(_saved_denial):
+                    allow, message = False, "Denied by saved rule"
+            except Exception:  # noqa: BLE001 — a rule lookup failure must not turn into an allow-by-accident
+                logger.warning(
+                    "[HarnessAdapter] saved-rule lookup failed for %s — asking the engine "
+                    "to hold the call", ev.name, exc_info=True,
+                )
+                return
+        try:
+            await self.respond_to_permission(ev.tool_use_id, allow, message=message)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit permission decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
+
+    async def _on_tool_allowed(self, payload: Dict[str, Any]) -> None:
+        """Record the one-shot approval computer-use request_access spends.
+
+        Fluid reports every call its gates let through just before dispatch,
+        so this is the one place an allow is recorded, whichever path decided
+        it; the permission callback records nothing itself, so no allow is
+        counted twice. A denied or undecided call never reaches here.
+        """
+        name = self._permission_tool_name(str(payload.get("name") or ""))
+        if name != "mcp__computer-use__request_access":
+            return
+        from app.mcp.computer_use import access
+
+        # The fallback leg of the id lookup is a blocking DB read.
+        access.approve_request(await asyncio.to_thread(self._resolve_app_session_id))
+
     def _permission_tool_name(self, name: str) -> str:
         """Resolve a bundled CLI alias only through this engine's registry.
 
@@ -1975,10 +2022,17 @@ class HarnessAdapter(ProviderAdapter):
             # Only reached from receive_events(), which spawns this bridge under
             # an ``and self._can_use_tool`` guard — non-None by construction.
             can_use_tool = cast(Any, self._can_use_tool)
+            tool_name = self._permission_tool_name(ev.name)
             result = await can_use_tool(
-                self._permission_tool_name(ev.name),
+                tool_name,
                 ev.input,
-                SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
+                # ``delegated`` lets the approver read the session's mode
+                # the way this leg runs it (``effective_permission_mode``).
+                SimpleNamespace(
+                    tool_use_id=ev.tool_use_id, agent_id=None,
+                    delegated=self._is_delegated,
+                    **_prompt_enrichment(tool_name, ev),
+                ),
             )
             allow = type(result).__name__ == "PermissionResultAllow"
             if allow:
@@ -2123,7 +2177,22 @@ class HarnessAdapter(ProviderAdapter):
 
     # ─── Runtime Configuration ────────────────────────────────────────
 
+    def _record_applied(self, field: str, value: Any) -> None:
+        """Write an applied runtime change back to the connect options, the
+        record a reused client's next turn compares against. See
+        ``_sdk_options`` in ``__init__``."""
+        if self._sdk_options is None:
+            return
+        try:
+            setattr(self._sdk_options, field, value)
+        except Exception:  # noqa: BLE001 — a frozen options object
+            logger.warning(
+                "[HarnessAdapter] could not record %s=%s on the connect options",
+                field, value, exc_info=True,
+            )
+
     async def set_model(self, model: str) -> None:
+        requested = model
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         if self._provider_kind == "anthropic":
@@ -2135,39 +2204,48 @@ class HarnessAdapter(ProviderAdapter):
         except NotImplementedError:
             # NativeLoop reads self.model per request; hot-swap by attribute.
             self._engine.model = model
+        # The id as the caller sent it (before canonicalization), since that
+        # is what its next turn compares against.
+        self._record_applied("model", requested)
 
     async def set_permission_mode(self, mode: str) -> None:
-        if not self._is_delegated and mode == 'auto':
-            mode = 'default'
+        requested = mode
+        mode = effective_permission_mode(mode, delegated=self._is_delegated)
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        # The CLI speaks mode names. fluid's NativeLoop gets the policy: given
+        # the mode name it would install the ``acceptEdits`` edit-tool allow
+        # rules itself, ahead of the app's saved Deny rules (``_PERMISSION_POLICY``).
+        policy = _PERMISSION_POLICY.get(mode, "on_write")
         try:
-            await self._engine.submit(SetPermissionMode(mode=mode))
+            await self._engine.submit(
+                SetPermissionMode(mode=mode if self._is_delegated else policy)
+            )
         except NotImplementedError:
-            # NativeLoop: adjust the permission engine in place.
-            policy = _PERMISSION_POLICY.get(mode, "on_write")
+            # An engine without the op: adjust the permission engine in place.
             perms = getattr(self._engine, "permissions", None)
             if perms is not None:
                 perms.approval_policy = policy
         if self._options is not None:
             self._options.permission_mode = mode
+        # The mode as the caller asked for it (before ``auto`` -> Ask on a
+        # native leg), since that is what its next turn compares against.
+        self._record_applied("permission_mode", requested)
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.
 
-        SDK parity (see ClaudeAdapter.get_context_usage): every caller —
-        ``shielded_get_context_usage`` in query_persistence, the
-        ``/context-usage`` endpoint, and compact_continue's live check —
+        Every caller (``shielded_get_context_usage`` in query_persistence, the
+        ``/context-usage`` endpoint, and compact_continue's live check)
         tolerates None and falls back to stored usage. Returning None is the
         contract for "the backend can't answer", not an error.
 
-        BOTH fluid legs answer this now (vendored a6957a1), in the same
-        SDK-parity shape, so this forwards verbatim:
+        BOTH fluid legs answer this in the same SDK-parity shape, so this
+        forwards verbatim:
 
         * ``DelegatedLoop`` proxies the claude CLI's own ``/context``
           breakdown over the ``{"subtype": "get_context_usage"}`` control
-          request (the leg gained request/response correlation for control
-          frames, which is what used to make this impossible).
+          request.
         * ``NativeLoop`` computes the same shape itself from the compiled
           prompt sections, the tool schemas and the trimmed history. Its
           ``maxTokens``/``percentage`` come from the ``context_window`` the
@@ -2186,7 +2264,7 @@ class HarnessAdapter(ProviderAdapter):
             return None
         try:
             result = await get_usage()
-        except Exception as exc:  # pragma: no cover — defensive, mirrors the SDK adapter
+        except Exception as exc:  # pragma: no cover — defensive
             logger.warning(f"[HarnessAdapter] get_context_usage() failed: {exc}")
             return None
         if isinstance(result, dict):
@@ -2301,7 +2379,7 @@ class HarnessAdapter(ProviderAdapter):
             return True
         if (old.tools or []) != (new_options.tools or []):
             return True
-        # Tool restriction is session-STATIC by design (ruling CE12): fluid
+        # Tool restriction is session-STATIC by design (CE12): fluid
         # freezes allowed/disallowed at construction and never renegotiates them
         # mid-session, so a changed surface can only be honored by a rebuild.
         if _tool_allowlist(old) != _tool_allowlist(new_options):
@@ -2327,7 +2405,7 @@ class HarnessAdapter(ProviderAdapter):
             getattr(new_options, "fast", None)
         ):
             return True
-        # Resolved provider binding (PA13 / W-R4) — mirrors
+        # Resolved provider binding: mirrors
         # ``session_pool.requires_reconnect``. The engine and its credentials are
         # built once in ``connect()`` from this id, so a cross-provider switch
         # can never be a ``set_model`` hot-swap. Compared directly (no
@@ -2595,7 +2673,7 @@ class HarnessAdapter(ProviderAdapter):
                         event.session_id, event.turn_id, json.dumps(failure, sort_keys=True),
                         extra={"session_id": self._resolve_app_session_id()},
                     )
-            # Per-call context breakdown (fluid >= baf8be0). Set after ``raw``
+            # Per-call context breakdown. Set after ``raw``
             # so a stray raw key cannot shadow the real snapshot. Absent rather
             # than None when the engine could not take one, so downstream
             # ``.get("context_usage")`` checks stay a simple presence test.
@@ -2603,6 +2681,11 @@ class HarnessAdapter(ProviderAdapter):
             if context_usage:
                 usage["context_usage"] = context_usage
             self._record_cache_miss(usage)
+            # One key for "a count in this record was guessed", so the durable
+            # ``turn.usage`` row and the recovery paths need not know fluid's
+            # per-field flags.
+            if _usage_has_estimate(usage):
+                usage["usage_estimated"] = True
             # Roll this call into the turn total so an ErrorEvent terminal (which
             # fluid emits with no usage and no cost at all) can still bill what
             # the turn actually spent. Cheap: one dict walk per model call.
@@ -2640,10 +2723,9 @@ class HarnessAdapter(ProviderAdapter):
             return []
 
         if cls == "DelegatedSurface":
-            # fluid >= 5248b2e: the claude CLI announced its own tool surface in
-            # its ``init`` frame and DelegatedLoop republished it. This is the
-            # ingest point ruling T4 documented but nothing used to call — feed
-            # the cache so the NEXT delegated connect can subtract the surface
+            # The claude CLI announced its own tool surface in its ``init``
+            # frame and DelegatedLoop republished it. Feed the cache so the
+            # NEXT delegated connect can subtract the surface
             # in allow mode (see ``_delegated_disallowed``). ``getattr`` because
             # a stale vendor may carry a differently-shaped event; a surface we
             # cannot read is simply not recorded.
@@ -2668,9 +2750,9 @@ class HarnessAdapter(ProviderAdapter):
             )]
 
         if cls == "HookEvent":
-            # fluid >= 483e750: a configured hook denied a tool call ("deny")
-            # or misbehaved and was ignored ("warning"). Never terminal; shown
-            # the same way the legacy safety warnings were.
+            # A configured hook denied a tool call ("deny") or misbehaved and
+            # was ignored ("warning"). Never terminal; shown like the safety
+            # warnings above.
             return [SystemMessage(
                 subtype="hook_deny" if event.level == "deny" else "hook_warning",
                 data={
@@ -2700,7 +2782,7 @@ class HarnessAdapter(ProviderAdapter):
             # open, during a stretch that may stream nothing else (encrypted-
             # only reasoning). Not content. The pump turns it into a
             # ``provider_alive`` frame that only the turn recorder keeps, as
-            # liveness evidence for the Task worker watchdog (#1418).
+            # liveness evidence for the Task worker watchdog.
             return [self._stream_event(event, {
                 "type": "provider_alive",
                 "signal": getattr(event, "signal", None) or "accepted",
@@ -2710,7 +2792,9 @@ class HarnessAdapter(ProviderAdapter):
             return [
                 RateLimitEvent(
                     rate_limit_info=RateLimitInfo(
-                        status="allowed",
+                        # The CLI's verdict (``allowed`` / ``allowed_warning`` /
+                        # ``rejected``); older fluid builds did not forward it.
+                        status=getattr(event, "status", None) or "allowed",
                         resets_at=event.resets_at,
                         rate_limit_type=event.kind,
                         utilization=event.utilization,
@@ -2728,8 +2812,8 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "SubagentEvent":
             if str(getattr(event, "task_id", "") or "").startswith("peer:"):
-                # A peer message fluid queued while the session was parked
-                # (round 9): persisted as ``kind="progress"`` with a ``peer:``
+                # A peer message fluid queued while the session was parked:
+                # persisted as ``kind="progress"`` with a ``peer:``
                 # id so the engine can rehydrate it. Engine-internal — never a
                 # task card, never a registry row.
                 return []
@@ -2802,7 +2886,7 @@ class HarnessAdapter(ProviderAdapter):
                     # leg on subscription auth); the sessions row and the
                     # response model both require a float, so coerce here.
                     total_cost_usd=event.cost_usd if event.cost_usd is not None else 0.0,
-                    usage=dict(event.usage),
+                    usage=self._stamp_usage_estimated(dict(event.usage)),
                     uuid=self._uuid(event),
                     terminal_reason=terminal_reason,
                 )
@@ -2839,7 +2923,9 @@ class HarnessAdapter(ProviderAdapter):
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     total_cost_usd=cost if cost is not None else 0.0,
-                    usage=dict(getattr(event, "usage", None) or {}),
+                    usage=self._stamp_usage_estimated(
+                        dict(getattr(event, "usage", None) or {})
+                    ),
                     uuid=self._uuid(event),
                     terminal_reason="aborted_streaming",
                 )
@@ -2853,9 +2939,8 @@ class HarnessAdapter(ProviderAdapter):
             # UNLIKE Interrupted, fluid's catch-all ErrorEvent rolls nothing up:
             # it is constructed with a message and a call count and no usage or
             # cost at all. ``_persist_turn_results`` bills the session off this
-            # ResultMessage, so an errored turn used to add $0 however many
-            # calls it had already paid for (one audited session was short
-            # unrecorded spend across several such turns). Fall back to the turn's own
+            # ResultMessage, so an errored turn would add $0 however many
+            # calls it had already paid for. Fall back to the turn's own
             # accumulated Usage roll-up, which is the same spend the durable
             # ``turn.usage`` rows already record.
             cost = getattr(event, "cost_usd", None)
@@ -2868,17 +2953,31 @@ class HarnessAdapter(ProviderAdapter):
                 cost = rollup.get("cost_usd") or cost
             if not isinstance(calls, int) or calls < self._turn_model_calls:
                 calls = self._turn_model_calls if self._turn_model_calls else calls
+            # The HTTP status the provider refused the call with, when it gave
+            # one: the field the CLI leg's result carries, so a native 429
+            # reaches the same rate-limited notice and "provider returned
+            # HTTP N" handling. Read defensively (a vendor without the field
+            # keeps None). With a status, the message is the provider's own
+            # short explanation rather than the raw response body.
+            status = getattr(event, "status", None)
+            if isinstance(status, bool) or not isinstance(status, int):
+                status = None
+            message = event.message
+            short = getattr(event, "provider_message", None)
+            if status is not None and isinstance(short, str) and short:
+                message = f"provider returned HTTP {status}: {short}"
             return [
                 ResultMessage(
                     subtype="error_during_execution",
                     is_error=True,
                     num_turns=calls if isinstance(calls, int) else 0,
                     session_id=getattr(event, "session_id", "") or "",
-                    result=event.message,
-                    errors=[event.message],
+                    result=message,
+                    errors=[message],
                     total_cost_usd=float(cost) if cost is not None else 0.0,
-                    usage=usage,
+                    usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
+                    api_error_status=status,
                 )
             ]
 
@@ -2919,6 +3018,8 @@ class HarnessAdapter(ProviderAdapter):
             if index is not None:
                 self._turn_call_indices.add(index)
             self._turn_model_calls += 1
+            if _usage_has_estimate(usage):
+                self._turn_usage_estimated = True
             for key in self._ROLLUP_USAGE_KEYS:
                 value = usage.get(key)
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -2931,7 +3032,22 @@ class HarnessAdapter(ProviderAdapter):
 
     def _turn_usage_snapshot(self) -> Dict[str, Any]:
         """This turn's accumulated usage so far (a copy; zero keys dropped)."""
-        return {k: v for k, v in self._turn_usage_totals.items() if v}
+        snapshot: Dict[str, Any] = {k: v for k, v in self._turn_usage_totals.items() if v}
+        if self._turn_usage_estimated:
+            snapshot["usage_estimated"] = True
+        return snapshot
+
+    def _stamp_usage_estimated(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark a turn's terminal usage when any of its calls guessed a count.
+
+        fluid sums only numbers into the turn total, so the per-call estimate
+        flags never reach ``TurnComplete.usage``; the adapter's own roll-up
+        remembers them. The key is absent, never False, so a turn whose
+        counts are all the provider's own looks exactly as before.
+        """
+        if self._turn_usage_estimated or _usage_has_estimate(usage):
+            usage["usage_estimated"] = True
+        return usage
 
     # ─── Internal builders ────────────────────────────────────────────
 
@@ -2972,7 +3088,8 @@ class HarnessAdapter(ProviderAdapter):
         blob — the same source-by-source split Claude Code's ``/context`` shows.
 
         The AGENTS section is the app's, not the compiler's: fluid's own
-        ``agents_index`` can only see disk (``.claude/agents`` + plugin agents),
+        ``agents_index`` can only see disk (``.fluid/agents``, ``.agents/agents``
+        and plugin agents),
         and the profile's context-declared DB agents belong in the same index.
         ``include_agents=False`` turns the compiler's version off and
         :func:`_agent_context` supplies the merged one, slotted where the
@@ -2996,17 +3113,9 @@ class HarnessAdapter(ProviderAdapter):
         this same compiler also builds a plain-string profile's prompt on
         the DELEGATED leg, which gets none of them.
 
-        The ``# Memory`` snapshot is no longer compiled in at all — it is a
-        per-turn block on the user message now (:meth:`_memory_snapshot` and
-        :meth:`send_query`), because an install-global store that any session
-        can write must not sit inside every session's cached prefix.
-
-        The old ``# Project memory`` section (ruling MEM3) is gone (2026-08-31
-        decision, see docs/MEMORY_ARCHITECTURE.md): its write path — the
-        Memory tool — was removed in PR #997, and a standing instruction the
-        model cannot follow poisons trust in the rest of the prompt. Durable
-        facts now travel through the continual learner (Remember → journal →
-        synthesizer → the ``# Memory`` snapshot).
+        The ``# Memory`` snapshot is not part of this prompt; it rides each
+        user message (:meth:`_memory_snapshot`) so a store any session can
+        write stays out of the cached prefix.
         """
         try:
             from fluid.context.compiler import (
@@ -3017,7 +3126,7 @@ class HarnessAdapter(ProviderAdapter):
             # app's <env> block (which knows worktree/execution mode fluid
             # doesn't) — skip fluid's env section rather than injecting twice.
             has_app_env = bool(system) and "<env>" in system
-            # Ruling T9: the prompt never describes a tool the session cannot
+            # The prompt never describes a tool the session cannot
             # call. ``tools`` is the permitted name set; fluid drops its skills
             # index when ``Skill`` is missing from it and its agents index when
             # ``Task`` is. None is fluid's own "no filter" value, so an
@@ -3099,8 +3208,8 @@ class HarnessAdapter(ProviderAdapter):
                 # model to distrust — so fluid pairs the marker with a prompt
                 # block that grants that exact marker user authority. fluid
                 # carries the block in its own composed base prompt, which the
-                # app replaces wholesale with the agent's configured prompt
-                # (ruling A12), so without this the marker would read as
+                # app replaces wholesale with the agent's configured prompt,
+                # so without this the marker would read as
                 # suspected injection and be ignored.
                 #
                 # The delegated leg needs nothing: its steers are real ``user``
@@ -3113,19 +3222,19 @@ class HarnessAdapter(ProviderAdapter):
                 )
                 # fluid's tool-result, denial, destructive-git and
                 # irreversible-action rules live in its composed base prompt,
-                # which ruling A12 replaces with the profile's prompt. Every
+                # which the app replaces with the profile's prompt. Every
                 # native session gets them back here, whatever the model.
                 # Fixed text, so the prefix stays cache-stable.
                 sections.append(PromptSection(kind="extra", text=SAFETY_BLOCK))
                 # fluid's model-family guidance ("Act, don't narrate",
                 # "## Execution discipline"). fluid only ever emits these from
                 # its own ``compose_base_prompt``, which the app replaces with
-                # the profile's prompt (ruling A12) — so without this they
+                # the profile's prompt, so without this they
                 # reach no session at all. Claude-family models get none; the
                 # text is fixed per model, so the prefix stays cache-stable.
                 for block in _model_guidance_blocks(options.model):
                     sections.append(PromptSection(kind="extra", text=block))
-                # Learned guidance (Phase 2), appended AFTER the shipped
+                # Learned guidance, appended AFTER the shipped
                 # blocks in fluid's own order. The shipped blocks are factory
                 # defaults in code; these are the evolvable half — the files
                 # the commit gate writes when a proposal survives it. Reading
@@ -3141,13 +3250,13 @@ class HarnessAdapter(ProviderAdapter):
                 # Harness-owned "when to recall" guidance (see RECALL_BLOCK).
                 # Gated the same way the tools themselves are: a DB-less build
                 # has no recall backend, and a restricted surface without the
-                # tools must not be told to call them (ruling T9).
+                # tools must not be told to call them.
                 sections.append(
                     PromptSection(kind="extra", text=RECALL_BLOCK)
                 )
                 if permitted is None or {"Remember", "Recall"} <= permitted:
                     # ... and WHEN to save/recall a fact (see MEMORY_BLOCK),
-                    # gated on the memory builtins the same way (ruling T9).
+                    # gated on the memory builtins the same way.
                     sections.append(
                         PromptSection(kind="extra", text=MEMORY_BLOCK)
                     )
@@ -3157,7 +3266,7 @@ class HarnessAdapter(ProviderAdapter):
                 # The install's gh CLI is signed in, so say so once instead of
                 # letting the model rebuild PR/CI state from git plumbing or ask
                 # the user. Gated on Bash for the same reason the agents index is
-                # gated on Task (ruling T9): a block about a command-line tool is
+                # gated on Task: a block about a command-line tool is
                 # a description of something a Bash-less agent cannot call.
                 # Before the code-mode section, which stays last.
                 sections.append(
@@ -3170,9 +3279,9 @@ class HarnessAdapter(ProviderAdapter):
                 # What "verified" has to mean (see VERIFICATION_BLOCK). Code
                 # lane only: the chat lane cannot change anything the user
                 # sees, and the voice lane never reaches this compilation.
-                # Gated on a write tool for the same reason as the blocks above
-                # (ruling T9) — an agent that cannot edit is never the one
-                # reporting a change as shipped.
+                # Gated on a write tool for the same reason as the blocks above:
+                # an agent that cannot edit is never the one reporting a change
+                # as shipped.
                 sections.append(
                     PromptSection(kind="extra", text=VERIFICATION_BLOCK)
                 )
@@ -3219,7 +3328,7 @@ class HarnessAdapter(ProviderAdapter):
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
         ``system`` (a custom/plain-string profile prompt) is the base — the
-        agent's configured prompt, ruling A12. ``append_system`` (the preset
+        agent's configured prompt. ``append_system`` (the preset
         shape's security+instructions text) rides as an extra block. The
         compiler adds fluid's own gathering: instruction files, skills index,
         environment. Never raises — a compiler failure falls back to the
@@ -3242,14 +3351,11 @@ class HarnessAdapter(ProviderAdapter):
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
-        # Derived, not configured (2026-08-13 ruling: no permanent flags — the
-        # retired AIH_OMNI_STORE/AIH_OMNI_STORE_DIR env vars are ignored).
-        # Whenever the app has a database — which every real deployment does,
-        # a DB connection is required to boot — fluid sessions persist in
-        # Postgres, exactly like the SDK path's PgSessionStore: cross-restart
-        # resume, fork, and event replay from any app instance sharing the DB.
-        # The only DB-less environments are unit tests, which get MemoryStore.
-        # Only a validated supervisor descriptor enables the managed store.
+        # Fluid sessions always persist in Postgres (cross-restart resume,
+        # fork, replay from any install sharing the DB). Only a validated
+        # supervisor descriptor enables the managed store; without one only a
+        # test-installed factory is accepted, and anything else refuses to run
+        # on an in-memory store.
         from app.core.config import settings
 
         if settings.managed_database_available():
@@ -3300,7 +3406,7 @@ class HarnessAdapter(ProviderAdapter):
             )
             # Specialize builtin descriptions to this session's permitted
             # surface (fluid's cross-tool routing clauses collapse to the
-            # tools that actually exist — ruling T9 for descriptions).
+            # tools that actually exist).
             try:
                 from fluid.tools.builtins import refine_builtin_descriptions
 
@@ -3315,7 +3421,7 @@ class HarnessAdapter(ProviderAdapter):
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
             self._task_roster_signature = _amend_native_task_spec(registry, options)
-            # Same A13 split for Monitor: fluid owns its shape, the app owns
+            # Same split for Monitor: fluid owns its shape, the app owns
             # its supervision — and `wait_seconds` (the inline settle window)
             # is supervision, so the parameter is spliced onto the vendor spec
             # here, after the description refinement above.
@@ -3340,7 +3446,7 @@ class HarnessAdapter(ProviderAdapter):
             register_recorded_sdk_servers,
         )
         # Native legs run fluid's bare-named Task and Monitor builtins
-        # (ruling A13) and its ToolSearch (the functional deferred-schema
+        # and its ToolSearch (the functional deferred-schema
         # loader for THIS registry) — the bridged mcp__builtins__ copies are
         # excluded so the model sees ONE of each. The delegated leg keeps the
         # MCP copies (the CLI can only receive external tools via
@@ -3377,7 +3483,7 @@ class HarnessAdapter(ProviderAdapter):
 
         for server in inproc_servers:
             registry.register_inproc(server)
-        # External MCP servers are a NATIVE-leg concern only (ruling PA5). The
+        # External MCP servers are a NATIVE-leg concern only. The
         # delegated leg hands the same server map to the claude CLI via
         # --mcp-config (DelegatedLoop.mcp_servers), and the CLI spawns/connects
         # them itself inside the child; nothing on that leg ever reads the
@@ -3402,6 +3508,12 @@ class HarnessAdapter(ProviderAdapter):
         return registry
 
     def _build_permissions(self, options: SessionOptions):
+        """The native leg's PermissionEngine for ``options.permission_mode``.
+
+        Policy plus the chat-lane rules, and no mode rules: under Accept Edits
+        the engine still asks for a file edit and the app's approver allows it
+        unless a saved Deny rule names it (see ``_PERMISSION_POLICY``).
+        """
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
         return PermissionEngine(
@@ -3412,29 +3524,36 @@ class HarnessAdapter(ProviderAdapter):
 # ─── Module-level helpers ─────────────────────────────────────────────────────
 
 
-def _resolve_claude_cmd() -> Optional[list]:
-    """Command for the delegated ``claude`` CLI, or None for PATH default.
+def _is_vendored_cli(path: str) -> bool:
+    """True for a ``claude`` binary that lives inside a Python package dir.
 
-    In the Docker image the CLI is not on PATH — only the copy bundled inside
-    the claude_agent_sdk package files exists — so fall back to the shared
-    resolver in ``app.core.claude_cli_path`` (the same one the interrupt patcher
-    uses to locate the binary it patches). Returning None lets DelegatedLoop try
-    bare ``claude`` (dev machines with a global install).
+    That is where the copy bundled in the ``claude_agent_sdk`` wheel sits
+    (``site-packages/claude_agent_sdk/_bundled``). It is vendored and
+    version-frozen, so it must never run, even when a PATH entry points at it.
+    """
+    parts = {part.lower() for part in Path(path).resolve().parts}
+    return bool(parts & {"site-packages", "dist-packages"})
+
+
+def _resolve_claude_cmd() -> list:
+    """Command for the delegated ``claude`` CLI: the one on PATH, nothing else.
+
+    The CLI must be the stock binary from Anthropic's installer, found on PATH.
+    There is deliberately no fallback to the copy bundled inside the
+    ``claude_agent_sdk`` wheel, and a PATH entry that points into a Python
+    package dir is skipped for the same reason. A missing CLI raises
+    :class:`ClaudeCliMissingError`, whose message tells the user how to
+    install it.
     """
     import shutil
 
-    found = shutil.which("claude")
-    if found:
-        return [found]
-    try:
-        from app.core.claude_cli_path import resolve_bundled_cli_path
-
-        bundled = resolve_bundled_cli_path()
-        if bundled is not None:
-            return [str(bundled)]
-    except Exception:  # pragma: no cover — resolver is best-effort
-        logger.debug("bundled claude CLI resolution failed", exc_info=True)
-    return None
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        found = shutil.which("claude", path=entry)
+        if found and not _is_vendored_cli(found):
+            return [found]
+    raise ClaudeCliMissingError()
 
 
 def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:
@@ -3469,38 +3588,6 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
     return out
 
 
-def _prune_duplicate_plugin_mcp_servers(
-    engine: Any, app_servers: Optional[Dict[str, Any]]
-) -> list:
-    """Drop plugin-discovered MCP servers the app already owns. App wins.
-
-    fluid merges an enabled plugin's ``.mcp.json`` servers into ``NativeLoop``'s
-    lazy-connect set (ruling CE5), skipping any name the HOST passed as
-    ``mcp_servers=``. This adapter passes none — it connects the app's external
-    servers eagerly onto the shared ``ToolRegistry`` inside ``_build_registry``
-    — so fluid cannot see the collision and both would connect under one name.
-
-    Name-keyed, app wins (the app's server is the one its profile/config
-    deliberately configured, and its tools are what the prompt advertises).
-    Returns the dropped names, for tests and logging.
-    """
-    if not app_servers:
-        return []
-    servers = getattr(engine, "_mcp_servers", None)
-    if not isinstance(servers, dict) or not servers:
-        return []
-    dropped = [name for name in servers if name in app_servers]
-    for name in dropped:
-        servers.pop(name, None)
-        logger.warning(
-            "[HarnessAdapter] a Claude Code plugin declares MCP server %r, which "
-            "this session already configures — keeping the app's server and "
-            "skipping the plugin's",
-            name,
-        )
-    return dropped
-
-
 def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
     """Translate an SDK-shaped external MCP config into fluid's client dialect.
 
@@ -3508,19 +3595,13 @@ def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str
     carry ``command`` (+ optional ``args``/``env``) and no type marker, remote
     entries carry ``{"type": "sse"|"http", "url", "headers"}``. fluid's client
     (``fluid/tools/mcp/client.py``) dispatches on ``config["transport"]``
-    defaulting to ``"stdio"``, and implements only ``stdio`` and
-    ``http``/``streamable_http``. So an SDK ``{"type": "http", ...}`` entry used
-    to fall into the stdio branch and die on the missing ``command`` key, with
-    the failure swallowed by the best-effort warning at the call site — remote
-    MCP servers silently never connected on native legs.
+    defaulting to ``"stdio"``, and implements ``stdio`` and
+    ``http``/``streamable_http``, with headers.
 
-    Returns the config to hand ``connect_mcp``, or ``None`` when the server
-    cannot be connected on a fluid leg at all. The input dict is never mutated:
-    the delegated leg JSON-serializes the same objects into its ``--mcp-config``
-    file, which must keep the SDK shape the CLI expects.
-
-    Gaps warned about here (upstream fluid work, ruling PA5 / plan wave W0a):
-    SSE transport and per-server HTTP headers.
+    Returns the config to hand ``connect_mcp``, or ``None`` for SSE, which fluid
+    cannot connect. The input dict is never mutated: the delegated leg
+    JSON-serializes the same objects into its ``--mcp-config`` file, which must
+    keep the SDK shape the CLI expects.
     """
     if not isinstance(config, dict):
         return config
@@ -3547,13 +3628,6 @@ def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str
         normalized = dict(config)
         normalized.pop("type", None)
         normalized["transport"] = "streamable_http"
-        if config.get("headers"):
-            logger.warning(
-                "[HarnessAdapter] MCP server %r defines HTTP headers, which the fluid "
-                "MCP client does not support yet — connecting WITHOUT them. Requests "
-                "needing those headers (e.g. auth) will fail.",
-                name,
-            )
         return normalized
 
     logger.warning(
@@ -3584,7 +3658,7 @@ def _accepts_kwarg(callable_obj: Any, name: str) -> bool:
 def _registry_bound_kwargs(registry_cls: Any = None) -> Dict[str, Any]:
     """``external_call_timeout`` for :class:`ToolRegistry`, when it takes one.
 
-    fluid (round 9) bounds every MCP/inproc call under this timeout; its
+    fluid bounds every MCP/inproc call under this timeout; its
     default is 75s. The app raises it above any legitimate long block it
     knows of: ``browser_batch`` can chain twenty 15s waits, Monitor's inline
     ``wait_seconds`` runs to 120s, and computer-use screenshots on a busy
@@ -3717,11 +3791,13 @@ def _valid_effort(value: Any) -> Optional[str]:
     return None
 
 
-# Ruling A6: the CLI's native subagent tools are BANNED — the app's Task tool
+# The CLI's native subagent tools are BANNED: the app's Task tool
 # (mcp__builtins__Task) is the one orchestration surface. The CLI's native
-# session-cron/wake tools are banned for the same reason: the CLI fires those
-# wake turns between queries, so the delegated client never reads them and they
-# vanish from app history and cost accounting.
+# session-cron/wake tools and background-job tools are banned for the same
+# reason: the CLI fires their wake turns between queries, so the delegated
+# client never reads them and they vanish from app history and cost
+# accounting. The bridged mcp__builtins__ copies (Monitor, TaskOutput,
+# TaskStop, ScheduleWakeup) stay; the app owns their wakes.
 DELEGATED_BANNED_TOOLS = frozenset({
     "Task",
     "Agent",
@@ -3730,33 +3806,47 @@ DELEGATED_BANNED_TOOLS = frozenset({
     "CronCreate",
     "CronDelete",
     "CronList",
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
 })
+
+# The denial a delegated prompt gets on a path with no approver wired.
+_NO_APPROVER_DENIAL = (
+    "Permission denied: this session has no one to approve tool calls "
+    "(it is running without an interactive approver)."
+)
+
+# How the delegated claude CLI names a tool served by fluid's bundled bridge.
+_BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 
 
 def _delegated_disallowed(options: SessionOptions) -> list:
-    """``--disallowed-tools`` for the delegated (claude CLI) leg — ruling T4.
+    """``--disallowed-tools`` for the delegated (claude CLI) leg.
 
-    Three sources, unioned:
+    Four sources, unioned:
 
-    1. ``DELEGATED_BANNED_TOOLS`` (ruling A6), always.
-    2. ``options.disallowed_tools`` — the agent's own blocklist. In ``none``
-       mode this is ``["*"]``, which the pinned CLI honors: its deny rules are
-       glob-matched, so one entry denies every tool. (Verified by reading the
-       bundled binary rather than guessing — see ``app.core.cli_tool_surface``
-       for the exact call chain.)
-    3. For ``allow`` mode only: the CLI's own surface MINUS the allowed set.
+    1. ``DELEGATED_BANNED_TOOLS``, always.
+    2. ``options.disallowed_tools``: the agent's own blocklist. In ``none``
+       mode this is ``["*"]``; the CLI glob-matches deny rules, so one entry
+       denies every tool (verified against the CLI once bundled with
+       claude-agent-sdk 0.2.126; re-check on CLI upgrades, see
+       ``app.core.cli_tool_surface``).
+    3. The chat lane: the CLI's file, shell and delegation tools, so only the
+       bundled attachment reader can read.
+    4. For ``allow`` mode only: the CLI's own surface MINUS the allowed set.
        The CLI reads ``--allowed-tools`` as a permission GRANT, so without this
        subtraction "allow only selected" would merely stop prompting for the
        selected tools while leaving every other one callable.
 
-    Source 3 needs the CLI's surface, which the CLI announces only in its
-    ``init`` frame — i.e. after this connect already went out. (fluid >= 5248b2e
-    republishes that frame as ``DelegatedSurface``; ``_translate`` feeds it to
-    the cache.) Rather than reconnect, which would kill the CLI session and
-    re-prime its prompt cache, the subtraction reads the last-seen surface from
-    that module-level cache; on a cold cache it is skipped and only
-    ``--allowed-tools`` goes out for that connect. The app's ``can_use_tool`` permission callback runs on this leg
-    either way, so a cold cache degrades the surface wall, never the gate.
+    Source 4 needs the CLI's surface, which the CLI announces only in its
+    ``init`` frame (republished as ``DelegatedSurface``; ``_translate`` feeds
+    it to the cache), i.e. after this connect already went out. Rather than
+    reconnect, which would kill the CLI session and re-prime its prompt cache,
+    the subtraction reads the last-seen surface from that module-level cache;
+    on a cold cache it is skipped for that connect. PreToolUse's
+    ``_delegated_tool_policy`` still refuses any call outside the surface, so a
+    cold cache degrades the surface wall, never the gate.
     """
     from app.core.cli_tool_surface import cached_cli_tools
     from app.core.tool_access import tool_permitted
@@ -3840,16 +3930,15 @@ def _compaction_config() -> CompactionConfig:
 
 
 def _codemode_kernel_config() -> KernelConfig:
-    """Kernel limits for this app's sessions — fluid's defaults, unchanged.
+    """Kernel limits for this app's sessions: fluid's defaults, unchanged.
 
-    ``stdout_cap`` (16,384 chars per cell) was briefly raised to fit a whole
-    subagent report in one print. That bought one narrow case and taxed every
-    other cell: audited sessions flooded 120KB of grep/read output per cell
-    because the cap no longer corrected them. Sync Task results now carry a
-    bounded head plus a ``report_path`` (see ``app.core.task_dispatch``), so
-    nothing legitimate needs a cell to print more than the default allows.
+    Do not raise ``stdout_cap`` to fit subagent reports: sync Task results
+    already carry a bounded head plus ``report_path`` (``app.core.task_dispatch``).
+    The OS sandbox mode comes from the app setting so a value in the .env
+    file reaches the kernel (the env var alone would not).
     """
-    return KernelConfig()
+    from app.core.config import settings
+    return KernelConfig(os_sandbox=settings.code_mode_os_sandbox)
 
 
 def _session_mode(options: SessionOptions) -> str:
@@ -3900,6 +3989,77 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
     return granted or None
 
 
+def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
+    """The SDK permission allowlist's in-proc MCP entries, spelled for the CLI.
+
+    Only tools the native leg classifies ``safe`` are granted: the risk comes
+    from ``fluid_tool_bridge.SERVER_RISK_MAPS`` / ``SERVER_DEFAULT_RISK``, the
+    same tables ``register_recorded_sdk_servers`` hands the PermissionEngine.
+    ``write`` and ``destructive`` tools (createHook, addMcpServer,
+    request_access, CronCreate, Remember, Task, generation tools, ...) stay
+    ungranted, so Ask mode prompts for them exactly as on the native leg.
+    Plan mode grants nothing.
+
+    Only the app's own in-proc servers (``type == "sdk"`` in
+    ``options.mcp_servers``) are granted. The bundled bridge serves them, so
+    the CLI calls their tools ``mcp__fluid_bundled__mcp__<server>__<tool>``.
+    A server-level entry becomes ``mcp__fluid_bundled__mcp__<server>__*``
+    (the CLI glob-matches the tool part of an MCP allow rule; verified against
+    claude 2.1.280) only when every tool the server serves is safe; otherwise
+    it is expanded to its safe tools. External servers (the browser server,
+    user MCP servers) are never granted, and neither are bare CLI tool names,
+    so Ask mode still prompts for them. In ``allow`` mode only entries on the
+    surface are granted, as ``_delegated_allowed`` does.
+    """
+    if (options.permission_mode or "default") == "plan":
+        return None
+    from app.core.provider.fluid_tool_bridge import (
+        SERVER_DEFAULT_RISK,
+        SERVER_RISK_MAPS,
+    )
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.core.tool_access import tool_permitted
+
+    def _safe(server: str, tool: str) -> bool:
+        risk_map = SERVER_RISK_MAPS.get(server) or {}
+        return risk_map.get(tool, SERVER_DEFAULT_RISK.get(server, "write")) == "safe"
+
+    surface = _tool_allowlist(options)
+    inproc = {
+        name: cfg
+        for name, cfg in (options.mcp_servers or {}).items()
+        if isinstance(cfg, dict) and cfg.get("type") == "sdk"
+    }
+    grants: list = []
+    for entry in options.allowed_tools or ():
+        if not isinstance(entry, str) or not entry.startswith("mcp__"):
+            continue
+        if surface and not tool_permitted(entry, surface, None):
+            continue
+        server, _, tool = entry[len("mcp__"):].partition("__")
+        if server not in inproc:
+            continue
+        if tool:
+            if _safe(server, tool):
+                grants.append(_BUNDLED_CLI_PREFIX + entry)
+            continue
+        recorded = recorded_sdk_server_tools(inproc[server])
+        names = (
+            [str(getattr(t, "name", "")) for t in recorded]
+            if recorded
+            else list(SERVER_RISK_MAPS.get(server) or ())
+        )
+        if recorded and all(_safe(server, name) for name in names):
+            grants.append(f"{_BUNDLED_CLI_PREFIX}{entry}__*")
+            continue
+        grants.extend(
+            f"{_BUNDLED_CLI_PREFIX}{entry}__{name}"
+            for name in names
+            if name and _safe(server, name)
+        )
+    return list(dict.fromkeys(grants)) or None
+
+
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     """This session's ENTIRE tool surface, or None for "unrestricted" (CE12).
 
@@ -3933,13 +4093,11 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def _native_max_output_tokens(options: SessionOptions) -> Optional[int]:
-    """Interim per-response output cap for native legs, from profile env.
+    """Optional per-response output cap for native legs, from the profile env.
 
-    ``NativeLoop`` otherwise runs at its ``max_tokens=8192`` default, silently
-    truncating long responses with no app-side control. Until the reasoning /
-    output-config wave lands, the profile env var the app already exposes
-    (``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, honored by the delegated CLI child) acts
-    as the escape hatch here too.
+    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (the variable the delegated CLI also
+    honors) becomes ``NativeLoop(max_tokens=...)``. Unset keeps fluid's
+    per-model default; a non-positive or junk value is ignored with a warning.
     """
     env = getattr(options, "env", None)
     if not isinstance(env, dict):
@@ -4238,8 +4396,8 @@ def _code_mode_section() -> str:
 # The four code-mode tools describe themselves in the model's own schema, so
 # re-documenting them in the catalog would be dead prompt. ``save_skill`` and
 # ``delete_skill`` are NOT in this set on purpose: they are projected into the
-# kernel, not the schema, and the round-9 audit found no session had ever
-# called save_skill because nothing the model could read named it.
+# kernel, not the schema, so the catalog is the only place the model can
+# read their names.
 _CODE_MODE_CATALOG_SKIP = frozenset({
     "run_python", "list_tools", "search_tools", "read_tool_docs",
 })
@@ -4273,7 +4431,7 @@ def _tool_predicate(options: SessionOptions):
 
     None means "no restriction" — callers skip the filtering work entirely.
     The two channels are the ones the engines already enforce: the surface
-    (``tool_allowlist``, T3) and the blocklist (``disallowed_tools``, T2).
+    (``tool_allowlist``) and the blocklist (``disallowed_tools``).
     """
     from app.core.tool_access import tool_permitted
 
@@ -4287,7 +4445,7 @@ def _tool_predicate(options: SessionOptions):
 def _permitted_tool_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:
     """The names this session may actually call, or None when unrestricted.
 
-    Ruling T9: the compiled prompt must not describe a tool the session cannot
+    The compiled prompt must not describe a tool the session cannot
     call, so fluid's ``compile_prompt`` takes the permitted set and drops the
     skills index when ``Skill`` is missing from it and the agents index when
     ``Task`` is. The set is the REGISTRY's names run through the predicate —
@@ -4392,14 +4550,12 @@ def _code_mode_tool_sections(
     One section per tool — not one blob — so fluid's context-usage breakdown
     can price each block under "System tools"/"MCP tools" by ``tool_name``,
     exactly where the equivalent JSON schema would sit on the direct-tool path.
-    The FIRST section carries the ``# Tools`` heading; the joined text is
-    byte-identical to the single-section form this used to build.
+    The FIRST section carries the ``# Tools`` heading.
 
-    Ruling of 2026-08-21. A code-mode schema carries four tools, so the model
-    never sees the descriptions the JSON-tool path sends — a live run guessed
-    parameter names because nothing in the prompt held the real ones. This is
-    that missing text: same descriptions, same parameter docs, keyed to the
-    Python call shape the kernel actually exposes.
+    A code-mode schema carries four tools, so the model never sees the
+    descriptions the JSON-tool path sends. This is that text: same
+    descriptions, same parameter docs, keyed to the Python call shape the
+    kernel actually exposes.
 
     Built from the session's own projection (the snapshot behind ``list_tools``
     and the VFS stubs), so the catalog and the importable modules can never
@@ -4407,7 +4563,7 @@ def _code_mode_tool_sections(
     double, a future refactor) returns [] and the section is simply skipped
     rather than failing the prompt.
 
-    ``permit`` is this session's tool predicate (ruling T9), and it is load
+    ``permit`` is this session's tool predicate, and it is load
     bearing here rather than merely belt-and-braces: ``NativeLoop.__init__``
     installs the session's ``tool_filter`` onto the code-mode session, but the
     prompt is compiled BEFORE the engine is constructed (the code-mode rewrites
@@ -4439,8 +4595,8 @@ def _code_mode_tool_sections(
         return []
     # The skill-store pair is registered by NativeLoop (``register_code_mode_
     # tools``), which runs AFTER this compile — so at connect the projection
-    # has no ``save_skill`` leaf and the catalog silently lacked it (round-9
-    # finding S1). Take the specs from fluid's public accessor instead.
+    # has no ``save_skill`` leaf. Take the specs from fluid's public accessor
+    # instead.
     late_specs = (
         _skill_store_tool_specs(codemode) if "save_skill" not in leaves else {}
     )
@@ -4509,8 +4665,7 @@ def _code_mode_tool_sections(
         )
     if not blocks:
         return []
-    # The heading rides the first tool's section, so the joined text is
-    # byte-identical to the old single-blob catalog.
+    # The heading rides the first tool's section.
     blocks[0] = ("# Tools\n" + blocks[0][0], blocks[0][1])
     return blocks
 
@@ -4520,7 +4675,7 @@ def _code_mode_tool_sections(
 # how to drive gh, it just has no way to know the binary is there and
 # authenticated, and without that it falls back to raw git or to asking.
 # Harness-owned recall guidance. Agent profiles replace fluid's base prompt
-# wholesale (ruling A12), so fluid's own "search past sessions" bullets never
+# wholesale, so fluid's own "search past sessions" bullets never
 # reach an AI Shuffle session — and recall is a harness capability the user
 # should never have to explain in an agent prompt. Appended to every native
 # compilation whose surface carries the recall tools; the tool descriptions
@@ -4537,8 +4692,10 @@ couple of quick lookups beat asking the user to repeat themselves. Recalled \
 content is history, not live state: verify against the current files before \
 acting on it."""
 
-# Append fixed, cache-stable harness memory guidance wherever RECALL_BLOCK appears, including before the first
-# saved fact makes a Memory snapshot available.
+# Harness-owned memory guidance, appended wherever RECALL_BLOCK is. Without it
+# the only memory prose the model sees is the two tool descriptions, and the
+# "# Memory" reminder does not render at all until a fact exists. Fixed text,
+# so the prefix stays cache-stable.
 _MEMORY_BLOCK_CORE = """# Durable memory
 Remember saves a durable fact for every later session on every worker of this \
 install. Save environment facts the moment you establish them: how the tests \
@@ -4658,7 +4815,7 @@ them before you hand the work back."""
 
 # fluid's safety rules, restated for app sessions. fluid carries them in the
 # "## Tools" and "## Permissions and safety" sections of ``compose_base_prompt``
-# (fluid/fluid/cli/prompt.py), which the profile's prompt replaces (ruling A12),
+# (fluid/fluid/cli/prompt.py), which the profile's prompt replaces,
 # so without this block a native session never sees them. The last bullet has
 # no fluid counterpart: an unrequested fork, PR, issue and comment on a
 # third-party repository is the incident it answers. Fixed text for every
@@ -4821,6 +4978,9 @@ def _with_agents_index(
 # bundled bridge. The CLI sees each one as ``mcp__fluid_bundled__`` + this.
 _DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
 _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
+# The app's own Task and background tools; the CLI's tools of these names are
+# banned on this leg (DELEGATED_BANNED_TOOLS).
+_DELEGATED_TASK_TOOLS = ("Task", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
 
 
 def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
@@ -4830,7 +4990,7 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     and its skill listing, so none of that is repeated. What it cannot know
     is the app's memory store, its session recall and that ``gh`` is signed
     in, so those blocks ride here, each gated the way the native leg gates
-    it: on the tools actually being on this session's surface (ruling T9).
+    it: on the tools actually being on this session's surface.
     The text depends only on connect-time inputs, so it is identical on
     every turn of the session.
     """
@@ -4850,19 +5010,30 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
 
     recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
     memory = all(offered(t) for t in ("Remember", "Recall"))
+    tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
+    notes: List[str] = []
     if recall or memory:
         shown = [
             t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)
             if offered(t)
         ]
         suffixes = ", ".join(f"__{t}" for t in shown)
-        blocks.append(
-            "# App tools on this session\n"
+        notes.append(
             "The app's memory and recall tools reach you as MCP tools whose "
             f"names end in {suffixes}. The sections below call them by those "
             "short names."
         )
+    if tasks:
+        suffixes = ", ".join(f"__{t}" for t in tasks)
+        notes.append(
+            f"{', '.join(tasks)} in this prompt mean the app's MCP tools whose "
+            f"names end in {suffixes}. Claude Code's own tools of those names "
+            "are not available here, and Bash cannot run a command in the "
+            "background: hand long-running work to the app's Monitor or Task."
+        )
+    if notes:
+        blocks.append("# App tools on this session\n" + "\n".join(notes))
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:
@@ -4896,7 +5067,7 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
     ``.fluid/AGENTS.md``, ``.agents/AGENTS.md``) or the skills under
     ``.fluid/skills``, ``.agents/skills`` and ``~/.fluid/skills``. Under
     full replace the compiled prompt carried them; with Claude Code's preset
-    kept (D6) they ride the appended text instead, gated by the profile's
+    kept they ride the appended text instead, gated by the profile's
     ``setting_sources`` the way the compiler gates them. Never raises.
     """
     sources = _fluid_setting_sources(options)
@@ -4933,8 +5104,8 @@ def _delegated_append_text(
 ) -> Optional[str]:
     """``--append-system-prompt`` for a preset profile on the delegated leg.
 
-    Decision D6: Claude Code keeps its own preset prompt and this text is
-    appended to it. In order: the profile's append (security and media
+    Claude Code keeps its own preset prompt and this text is appended to
+    it. In order: the profile's append (security and media
     rules, the profile's instructions, app-config text), the merged agents
     index, fluid's AGENTS.md-family files and skills
     (:func:`_delegated_fluid_context`), the model's learned guidance, then
@@ -4961,7 +5132,7 @@ def _agent_context(
     """``(agents index text, host-declared descriptors)`` for a fluid leg.
 
     fluid's own ``compiler.agents_index`` only knows what it can find on disk
-    (``.claude/agents`` + plugin agents, ruling CE6), and its ``agents=`` engine
+    (``.fluid/agents``, ``.agents/agents`` and plugin agents, CE6), and its ``agents=`` engine
     input feeds the context-usage breakdown, not the prompt. The app's DB agents
     have to join that index for the model to know they exist, so the index is
     assembled HERE from both sources and the compiler's own agents section is
@@ -5161,12 +5332,6 @@ def _amend_native_task_spec(
         return None
 
 
-# NOTE: the former ``_amend_native_mutation_specs`` (which overwrote fluid's
-# Bash/Write/Edit descriptions with one-line summaries) is gone: fluid's own
-# tool contracts now carry richer guidance than the amendments did, including
-# the invoke-immediately mutation rule and the environment-block Shell pointer,
-# so amending here would only downgrade them.
-
 
 def _decide_provider_kind(options: SessionOptions) -> str:
     """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter'."""
@@ -5188,7 +5353,7 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     if provider_hint == "delegated":
         return "delegated"
 
-    # The BOUND PROVIDER ROW outranks the model-string sniff below (PA13/W-R4).
+    # The BOUND PROVIDER ROW outranks the model-string sniff below.
     # The sniff reads a model id in isolation, so every cross-provider pick it
     # can't see the provider for lands on the wrong leg: "anthropic/claude-3.5"
     # on an OpenRouter row sniffs as an OpenRouter slug only by luck, a bare
@@ -5211,11 +5376,10 @@ def _decide_provider_kind(options: SessionOptions) -> str:
 
     model = (options.model or "").lower()
     # The app selects Claude models by SHORT ALIAS ("fable"/"opus"/"sonnet"/
-    # "haiku"), which does not start with "claude" — those sessions used to fall
-    # through to the plain `return "anthropic"` below, i.e. the raw Anthropic API
-    # client with no API key, which 401s instantly and kills the turn. Resolve
-    # the alias through the model registry first, then keep the raw "claude-*"
-    # id check for full model ids.
+    # "haiku"), which does not start with "claude"; the plain `return
+    # "anthropic"` below would put them on the raw API client with no key.
+    # Resolve the alias through the model registry first, then keep the raw
+    # "claude-*" id check for full model ids.
     from app.core.model_registry import get_model_family
 
     if get_model_family(options.model) is not None or model.startswith("claude"):
@@ -5230,10 +5394,10 @@ def _decide_provider_kind(options: SessionOptions) -> str:
 
 
 def provider_kind_for_sdk_options(sdk_options: Any) -> str:
-    """Leg decision for a built ``ClaudeAgentOptions``, WITHOUT connecting.
+    """Leg decision for a built ``AgentOptions``, WITHOUT connecting.
 
     Callers outside the adapter (memory_sync, which has to pick the leg's
-    project-memory dir before the turn starts — ruling MEM2) need the same
+    project-memory dir before the turn starts) need the same
     answer ``connect()`` will reach. Rather than copy the decision table, this
     projects the same ``aih_*`` fields ``connect_with_sdk_options`` forwards
     onto a throwaway ``SessionOptions`` and defers to
@@ -5295,6 +5459,84 @@ def _require_env_credential(env_var: str, kind: str) -> None:
     )
 
 
+def _provider_read_timeout() -> float:
+    """Per-read HTTP timeout for native provider clients (``PROVIDER_READ_TIMEOUT``).
+
+    fluid's clients take a plain float here, so a zero or negative value keeps
+    fluid's own 600 s instead of disabling the bound.
+    """
+    from app.core.config import settings
+
+    seconds = float(getattr(settings, "provider_read_timeout", 600.0) or 0)
+    return seconds if seconds > 0 else 600.0
+
+
+_LOCAL_HOST_NAMES = frozenset({"localhost", "host.docker.internal", "host.containers.internal"})
+
+
+def _is_local_base_url(base_url: Optional[str]) -> bool:
+    """True when ``base_url`` names a server on this machine or the local network.
+
+    Loopback, private and link-local addresses, ``localhost`` (and
+    ``*.localhost``), ``*.local`` mDNS names, and the Docker/Podman host
+    aliases a containerised app uses to reach a server on its host.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not base_url:
+        return False
+    text = base_url.strip()
+    try:
+        host = urlsplit(text if "//" in text else f"//{text}").hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.rstrip(".").lower()
+    if host in _LOCAL_HOST_NAMES or host.endswith((".localhost", ".local")):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
+def _provider_timeout_kwargs(base_url: Optional[str] = None) -> Dict[str, Any]:
+    """Timeout keyword arguments for a fluid provider client.
+
+    ``timeout`` (per read), ``stream_deadline`` (whole call) and
+    ``first_byte_timeout`` (headers plus first event) go to every client kind
+    the app builds (Anthropic, OpenRouter/OpenAI-format chat, Responses). A
+    deadline or first-byte value of 0 (or below) becomes ``None``, which fluid
+    reads as "disabled". Env: PROVIDER_READ_TIMEOUT, PROVIDER_STREAM_DEADLINE,
+    PROVIDER_FIRST_BYTE_TIMEOUT.
+
+    A row whose ``base_url`` is a local server (:func:`_is_local_base_url`:
+    Ollama, vLLM, LM Studio, a local proxy) takes its first-byte bound from
+    PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL instead, 0 (disabled) by default: such a
+    server may hold its headers while it loads a model, which is why fluid's
+    own LocalClient leaves the bound off.
+    """
+    from app.core.config import settings
+
+    def _optional(name: str, default: float) -> Optional[float]:
+        seconds = float(getattr(settings, name, default) or 0)
+        return seconds if seconds > 0 else None
+
+    first_byte = (
+        _optional("provider_first_byte_timeout_local", 0.0)
+        if _is_local_base_url(base_url)
+        else _optional("provider_first_byte_timeout", 60.0)
+    )
+    return {
+        "timeout": _provider_read_timeout(),
+        "stream_deadline": _optional("provider_stream_deadline", 900.0),
+        "first_byte_timeout": first_byte,
+    }
+
+
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
     records upstream rate limits.
@@ -5308,25 +5550,18 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 
     Deliberately no status-code guard on the capture: ``capture_*`` already
     no-ops when no allowlisted header is present, and error responses (notably
-    429) carry the freshest quota headers of all. ``timeout=600.0`` matches the
-    vendored fluid client's own default, which it bypasses whenever a client is
-    injected.
+    429) carry the freshest quota headers of all. Its timeout is the configured
+    per-read one (``_provider_read_timeout``), since the fluid client only
+    applies its own ``timeout`` to a client it creates.
 
-    RATE-LIMIT BREAKER (ruling D2, 2026-08-12). This hook is also the app's
-    replacement seam for the retired translator gateway's 429 detection: it sees
-    every native-leg response, and ``provider_id`` — the session's bound
-    ``model_providers`` row id, i.e. the exact key the breaker is scoped on — is
-    already in scope here. An HTTP 429 trips
-    :mod:`app.core.rate_limit_breaker` install-wide for that provider, honouring
-    ``Retry-After``, exactly as the gateway's ``_note_rate_limit`` did. ONLY 429
-    trips it (401 is a credential/rotation signal, 5xx a transient fault).
-    ACCEPTED GAP: the delegated (claude CLI) leg makes its HTTP calls inside the
-    CLI child process and is therefore not covered.
+    Rate-limit breaker: an HTTP 429 trips :mod:`app.core.rate_limit_breaker`
+    for ``provider_id`` (install-wide, honouring ``Retry-After``). Only 429
+    trips it (401 is a credential/rotation signal, 5xx a transient fault). The
+    delegated leg's HTTP happens inside the CLI child and is not observed here.
 
-    Both side effects are best-effort and swallow every exception — neither
+    Both side effects are best-effort and swallow every exception: neither
     capture nor breaker bookkeeping may ever break a turn. ``provider_usage`` is
-    imported inside the hook (mirroring the legacy call sites) to keep the
-    module import graph cycle-free.
+    imported inside the hook to keep the module import graph cycle-free.
     """
 
     async def _on_response(resp: httpx.Response) -> None:
@@ -5350,7 +5585,9 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
             except Exception:  # noqa: BLE001 — bookkeeping must never break a turn
                 pass
 
-    return httpx.AsyncClient(timeout=600.0, event_hooks={"response": [_on_response]})
+    return httpx.AsyncClient(
+        timeout=_provider_read_timeout(), event_hooks={"response": [_on_response]}
+    )
 
 
 async def _build_provider_client(
@@ -5380,6 +5617,10 @@ async def _build_provider_client(
     creds = None
     if provider_id:
         creds = await resolve_provider_credentials(kind, str(provider_id))
+    # Read timeout, whole-call deadline and first-byte bound from PROVIDER_*
+    # settings; provider rows carry no timeout override, but a row on a local
+    # server gets the local first-byte bound (off by default).
+    timeouts = _provider_timeout_kwargs(creds.base_url if creds is not None else None)
 
     if kind == "openai_responses":
         if creds is not None:
@@ -5397,10 +5638,11 @@ async def _build_provider_client(
                 auth=creds.auth,
                 base_url=base_url,
                 http_client=http_client,
+                **timeouts,
             )
             return client, http_client
         _require_env_credential("OPENAI_API_KEY", kind)
-        return OpenAIResponsesClient(), None
+        return OpenAIResponsesClient(**timeouts), None
     if kind == "openrouter":
         # fluid's OpenRouterClient is the generic OpenAI chat/completions
         # client — a row-level base_url redirects it (custom rows with
@@ -5422,17 +5664,19 @@ async def _build_provider_client(
                         base_url=_chat_completions_url(creds.base_url),
                         pricing=pricing,
                         retry=RetryPolicy(),
+                        **timeouts,
                     ),
                     None,
                 )
             return (
                 OpenRouterClient(
-                    api_key=creds.api_key, pricing=pricing, retry=RetryPolicy()
+                    api_key=creds.api_key, pricing=pricing, retry=RetryPolicy(),
+                    **timeouts,
                 ),
                 None,
             )
         _require_env_credential("OPENROUTER_API_KEY", kind)
-        return OpenRouterClient(pricing=pricing, retry=RetryPolicy()), None
+        return OpenRouterClient(pricing=pricing, retry=RetryPolicy(), **timeouts), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
     # credentials refuses such a row outright. A row-level ``base_url`` (every
@@ -5447,7 +5691,7 @@ async def _build_provider_client(
             # the Bearer header too so either scheme works. Returned as the
             # second element — the adapter owns closing an injected client.
             bearer_http = httpx.AsyncClient(
-                timeout=600.0,
+                timeout=timeouts["timeout"],
                 headers={"Authorization": f"Bearer {creds.api_key}"},
             )
             return (
@@ -5455,12 +5699,13 @@ async def _build_provider_client(
                     api_key=creds.api_key,
                     base_url=creds.base_url.rstrip("/") + "/v1/messages",
                     http_client=bearer_http,
+                    **timeouts,
                 ),
                 bearer_http,
             )
-        return AnthropicClient(api_key=creds.api_key), None
+        return AnthropicClient(api_key=creds.api_key, **timeouts), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
-    return AnthropicClient(), None
+    return AnthropicClient(**timeouts), None
 
 
 def _catalog_pricing_resolver(options: SessionOptions) -> Optional[Any]:

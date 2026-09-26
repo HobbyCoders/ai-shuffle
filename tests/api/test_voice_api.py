@@ -26,9 +26,9 @@ import httpx
 import pytest
 
 from app.core import encryption
-from app.core.voice_options import validate_options
 from app.core import voice_bridge
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 VOICE_SETTINGS = "/api/v1/settings/voice"
@@ -45,10 +45,6 @@ def _isolate_native_services(monkeypatch):
 
     monkeypatch.setattr(native_chrome, "ensure_started", AsyncMock())
     monkeypatch.setattr(cluster, "_primary_lan_ip", lambda: "127.0.0.1")
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider(
@@ -161,7 +157,7 @@ class TestVoiceSettings:
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
-        pid = _make_provider()
+        _make_provider()
         resp = authenticated_client.put(VOICE_SETTINGS, json={
             "voice_mode_enabled": True,
             "voice_model": "gpt-live-1",
@@ -373,7 +369,7 @@ class TestVoicePreview:
     def test_happy_path_streams_live_audio_without_enable_flag(self, authenticated_client, mock_db, monkeypatch, voice):
         from app.core import voice_preview
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         generate = AsyncMock(return_value=b"RIFF-live-wave")
         monkeypatch.setattr(voice_preview, "generate_live_preview", generate)
@@ -540,7 +536,7 @@ class TestCreateVoiceSession:
         pv2 = project_resolver.resolve_project_v2({"project_id": "proj-auto"})
         captured = {}
 
-        async def _create(request, body, project, api_user_id, pv2_row, **kwargs):
+        async def _create(body, project, api_user_id, pv2_row, **kwargs):
             captured.update(body=body, project=project, pv2=pv2_row, kwargs=kwargs)
             return WorktreeSessionResponse(
                 session_id="voice-auto", branch_name=body.branch_name,
@@ -567,25 +563,17 @@ class TestCreateVoiceSession:
         assert overrides["is_active"] is True
         assert overrides["voice_config"]["provider_id"] == "prov-openai"
 
-    def test_command_mode_creates_a_hidden_session(
-        self, authenticated_client, mock_db, monkeypatch
-    ):
-        """A wake-word command session is BORN list-hidden (v75) — it never
-        exists in a visible state — but stays fetchable by id."""
+    def test_command_mode_is_refused(self, authenticated_client, mock_db):
+        """The wake-word "command" mode has no client left (the Android app
+        only sends "chat"), so it is an invalid mode, not a hidden session."""
         _enable_voice()
         _make_provider()
-        _install_mock_transport(monkeypatch, _secret_handler())
-
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions", json={"session_mode": "command", "model": "sonnet"}
         )
-        assert resp.status_code == 200, resp.text
-        session_id = resp.json()["session_id"]
-
-        row = db.get_session(session_id)
-        assert row is not None
-        assert row["hidden"] in (True, 1)
-        assert session_id not in {s["id"] for s in db.get_sessions()}
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"] == "session_mode must be 'chat'."
+        assert db.get_sessions(limit=50) == []
 
     def test_chat_mode_session_stays_visible(
         self, authenticated_client, mock_db, monkeypatch
@@ -615,6 +603,25 @@ class TestCreateVoiceSession:
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
         assert resp.status_code == 400 and "composer" in resp.json()["detail"]
         assert db.get_sessions(limit=50) == []
+
+    def test_api_user_is_bound_to_its_assigned_agents(self, client, mock_db, monkeypatch):
+        from app.api.auth import hash_api_key
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        db.create_api_user("voice-restricted", "Restricted", hash_api_key("aih_voice_r"),
+                           profile_ids=["default"])
+        headers = {"Authorization": "Bearer aih_voice_r"}
+
+        denied = client.post(f"{VOICE_ROOT}/sessions", headers=headers,
+                             json={"model": "gpt-5.6", "profile_id": "other-agent"})
+        assert denied.status_code == 403, denied.text
+        assert db.get_sessions(limit=50) == []
+
+        resp = client.post(f"{VOICE_ROOT}/sessions", headers=headers, json={"model": "gpt-5.6"})
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["profile_id"] == "default"
 
 # ============================================================================
 # VW3 — call surface (re-mint / attach / hangup / state)
@@ -710,7 +717,7 @@ class TestVoiceSecretRemint:
     def test_remint_uses_the_sessions_own_provider(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice(voice_model="gpt-realtime-2.1-mini")
         _make_provider("prov-a", name="A", auth_token=encryption.encrypt_value(RAW_KEY))
         _make_provider("prov-b", name="B", auth_token=encryption.encrypt_value("sk-other"))
@@ -773,7 +780,7 @@ class TestVoiceCallAttach:
     def test_attach_opens_the_sideband_and_configures_it(
         self, authenticated_client, mock_db, sidebands
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -900,62 +907,31 @@ class TestVoiceCallAttach:
         ]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
-    def test_command_attach_hides_the_session(
-        self, authenticated_client, mock_db, sidebands, monkeypatch
+    def test_command_attach_is_refused(
+        self, authenticated_client, mock_db, sidebands
     ):
-        """The shipped app declares session_mode only at attach time — a
-        "command" attach backfills hidden=TRUE on the already-visible row AND
-        broadcasts the flip, so a list that rendered the card during the
-        create→attach window drops it live."""
-        _unlock(mock_db)
+        """No client declares "command" at attach any more; it is refused
+        before a sideband opens and the row stays visible."""
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
-        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
-
-        from app.core.sync_engine import sync_engine
-        broadcasts = []
-
-        async def _record(user_id, session_id, updates, source_device_id=None):
-            broadcasts.append((user_id, session_id, updates))
-
-        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", _record)
 
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
             json={"call_id": "rtc_1", "session_mode": "command"},
         )
-        assert resp.status_code == 200, resp.text
-
-        assert SESSION_ID not in {s["id"] for s in db.get_sessions()}
-        # Still fully fetchable and attachable — list-visibility only.
-        assert db.get_session(SESSION_ID) is not None
-        assert len(sidebands) == 1
-        assert broadcasts == [
-            ("admin", SESSION_ID, {"hidden": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-        ]
-
-        # A reconnect re-declaring "command" finds the row already hidden —
-        # no redundant hidden write/broadcast. Successful attaches still
-        # refresh active membership for connected devices.
-        resp = authenticated_client.post(
-            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
-            json={"call_id": "rtc_2", "session_mode": "command"},
-        )
-        assert resp.status_code == 200, resp.text
-        assert broadcasts == [
-            ("admin", SESSION_ID, {"hidden": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-            ("admin", SESSION_ID, {"is_active": True}),
-        ]
-
-        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+        assert resp.status_code == 400, resp.text
+        assert "session_mode" in resp.json()["detail"]
+        assert sidebands == []
+        assert SESSION_ID in {s["id"] for s in db.get_sessions()}
+        assert not hasattr(voice_bridge, "DEFAULT_COMMAND_INSTRUCTIONS")
+        assert set(voice_bridge.DEFAULT_MODE_INSTRUCTIONS) == {"chat"}
 
     def test_chat_attach_leaves_the_session_visible(
         self, authenticated_client, mock_db, sidebands
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -980,7 +956,7 @@ class TestVoiceCallAttach:
         """
         from app.api import voice as voice_api
 
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _enable_voice()
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
         _mk_voice_session()
@@ -1290,7 +1266,7 @@ class TestStreamingVoiceModels:
         from app.api import voice
         from app.core.voice_models import FAL_PROVIDER_ID, PERSONAPLEX_MODEL
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.set_system_setting("fal_api_key", encryption.encrypt_value("test-fal-key"))
         _enable_voice(voice_model=PERSONAPLEX_MODEL, voice_provider_id=FAL_PROVIDER_ID, voice_voice="NATF2")
         current = authenticated_client.get(VOICE_SETTINGS).json()
@@ -1307,7 +1283,7 @@ class TestStreamingVoiceModels:
     def test_live_uses_client_delegation_and_persists_selected_model(self, authenticated_client, mock_db, monkeypatch):
         from app.api import voice
         from unittest.mock import AsyncMock
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         _enable_voice(voice_model="gpt-live-1", voice_voice="marin")
         mint = AsyncMock(side_effect=AssertionError("Live is not Realtime"))
@@ -1324,9 +1300,501 @@ class TestStreamingVoiceModels:
 
     def test_invalid_cross_provider_pair_does_not_write(self, authenticated_client, mock_db):
         from app.core.voice_models import FAL_PROVIDER_ID
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         db.set_system_setting("fal_api_key", encryption.encrypt_value("test-fal-key"))
         before = authenticated_client.get(VOICE_SETTINGS).json()
         response = authenticated_client.put(VOICE_SETTINGS, json={"voice_provider_id": FAL_PROVIDER_ID, "voice_model": "gpt-live-1"})
         assert response.status_code == 400
         assert authenticated_client.get(VOICE_SETTINGS).json() == before
+
+
+KEY_A = {"Authorization": "Bearer aih_voice_key_a"}
+KEY_B = {"Authorization": "Bearer aih_voice_key_b"}
+
+# (method, route suffix, JSON body). Hangup last: it ends the call.
+CALL_ROUTES = [
+    ("post", "secret", None),
+    ("post", "call", {"call_id": "rtc_owned"}),
+    ("get", "state", None),
+    ("get", "config", None),
+    ("patch", "context", {"fast": True}),
+    ("post", "hangup", None),
+]
+
+
+def _make_keys():
+    from app.api.auth import hash_api_key
+
+    db.create_api_user("key-a", "Key A", hash_api_key("aih_voice_key_a"))
+    db.create_api_user("key-b", "Key B", hash_api_key("aih_voice_key_b"))
+
+
+# ============================================================================
+# Access — an API key may only operate the voice sessions it owns
+# ============================================================================
+
+OWNER_KEY = "aih_voice_owner_key"
+OTHER_KEY = "aih_voice_other_key"
+
+# Every session-scoped voice route, with the body that would be a valid call.
+# ``call`` carries a call_id so a 403 there provably happens BEFORE validation
+# and before any sideband is opened.
+CALL_SURFACE = [
+    ("post", "secret", {}),
+    ("post", "call", {"call_id": "rtc_x"}),
+    ("post", "hangup", {}),
+    ("get", "state", None),
+    ("get", "config", None),
+    ("patch", "context", {"effort": "high"}),
+]
+
+
+def _api_user(user_id, raw_key, **kwargs):
+    """Create an API user and return the headers that authenticate as it."""
+    from app.api.auth import hash_api_key
+
+    db.create_api_user(user_id, user_id, hash_api_key(raw_key), **kwargs)
+    return {"Authorization": f"Bearer {raw_key}"}
+
+
+def _mk_owned_voice_session(session_id, api_user_id, *, mode="voice", project_id=None):
+    db.create_session(
+        session_id=session_id, profile_id="default", title="Voice session",
+        provider_id="prov-openai", mode=mode, api_user_id=api_user_id,
+        project_id=project_id,
+        voice_config={"model": "gpt-realtime-2.1", "voice": "marin", "provider_id": "prov-openai"},
+
+    )
+    return session_id
+
+
+def _hit(client, method, session_id, leaf, body, headers=None):
+    kwargs = {"headers": headers} if headers else {}
+    if body is not None:
+        kwargs["json"] = body
+    return getattr(client, method)(f"{VOICE_ROOT}/sessions/{session_id}/{leaf}", **kwargs)
+
+
+
+class TestVoiceSessionOwnership:
+    def test_key_drives_its_own_session_on_every_route(
+        self, client, mock_db, sidebands, monkeypatch
+    ):
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        sid = _mk_owned_voice_session("voice-key-a", "key-a")
+
+        for method, suffix, body in CALL_ROUTES:
+            resp = _hit(client, method, sid, suffix, body, KEY_A)
+            assert resp.status_code == 200, (suffix, resp.text)
+
+        assert [s.call_id for s in sidebands] == ["rtc_owned"]
+        assert sidebands[0].closed is True
+        assert bool(db.get_session(sid)["fast"]) is True
+
+    @pytest.mark.parametrize("owner", ["key-b", None], ids=["other-key", "owner"])
+    def test_foreign_session_is_refused_on_every_route(
+        self, client, mock_db, sidebands, monkeypatch, owner
+    ):
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        captured = {}
+        _install_mock_transport(monkeypatch, _secret_handler(captured))
+        sid = _mk_owned_voice_session("voice-foreign", owner)
+        if owner == "key-b":
+            # A live call on B's session that A must not be able to end.
+            assert client.post(
+                f"{VOICE_ROOT}/sessions/{sid}/call", headers=KEY_B,
+                json={"call_id": "rtc_b"},
+            ).status_code == 200
+        db.set_session_active(sid, True)
+
+        for method, suffix, body in CALL_ROUTES:
+            resp = _hit(client, method, sid, suffix, body, KEY_A)
+            assert resp.status_code == 403, (suffix, resp.text)
+            assert resp.json()["detail"] == "Access denied to this session"
+
+        assert "request" not in captured            # no secret was minted for A
+        assert [s.call_id for s in sidebands] == (["rtc_b"] if owner else [])
+        assert all(not s.closed for s in sidebands)  # B's call survives
+        row = db.get_session(sid)
+        assert bool(row["is_active"]) is True
+        assert bool(row["fast"]) is False
+        if owner == "key-b":
+            assert voice_bridge.registry.get(sid) is not None
+            client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup", headers=KEY_B)
+
+    def test_missing_and_chat_sessions_stay_404_for_a_key(self, client, mock_db):
+        _enable_voice()
+        _make_keys()
+        db.create_session(session_id="chat-a", profile_id="default",
+                          mode="code", api_user_id="key-a")
+        for sid in ("nope", "chat-a"):
+            resp = client.get(f"{VOICE_ROOT}/sessions/{sid}/state", headers=KEY_A)
+            assert resp.status_code == 404, resp.text
+
+    def test_owner_is_unrestricted_on_a_key_session(
+        self, authenticated_client, mock_db, sidebands, monkeypatch
+    ):
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        sid = _mk_owned_voice_session("voice-key-a", "key-a")
+
+        for method, suffix, body in CALL_ROUTES:
+            resp = _hit(authenticated_client, method, sid, suffix, body)
+            assert resp.status_code == 200, (suffix, resp.text)
+        assert [s.call_id for s in sidebands] == ["rtc_owned"]
+
+    def test_key_started_session_is_owned_by_the_key(
+        self, client, mock_db, monkeypatch
+    ):
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        _install_mock_transport(monkeypatch, _secret_handler())
+
+        created = client.post(f"{VOICE_ROOT}/sessions", headers=KEY_A,
+                              json={"model": "gpt-5.6"})
+        assert created.status_code == 200, created.text
+        sid = created.json()["session_id"]
+        assert db.get_session(sid)["api_user_id"] == "key-a"
+
+        resp = client.patch(f"{VOICE_ROOT}/sessions/{sid}/context", headers=KEY_A,
+                            json={"effort": "high"})
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(sid)["effort"] == "high"
+        for suffix in ("state", "config"):
+            assert client.get(f"{VOICE_ROOT}/sessions/{sid}/{suffix}",
+                              headers=KEY_A).status_code == 200
+        assert client.post(f"{VOICE_ROOT}/sessions/{sid}/secret",
+                           headers=KEY_A).status_code == 200
+
+        # ...and it is still out of reach of every other key.
+        assert client.patch(f"{VOICE_ROOT}/sessions/{sid}/context", headers=KEY_B,
+                            json={"effort": "low"}).status_code == 403
+        assert client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup",
+                           headers=KEY_B).status_code == 403
+        assert db.get_session(sid)["effort"] == "high"
+        assert client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup",
+                           headers=KEY_A).status_code == 200
+
+
+DISPATCH_ONLY_TOOLS = [
+    "dispatch_agent", "check_agent", "list_agents", "message_agent",
+    "stop_agent", "respond_approval", "WebSearch", "WebFetch",
+]
+
+
+class TestVoiceKeyToolSurface:
+    """R6-1 residual: whatever row a key reaches, its call gets dispatch only."""
+
+    @staticmethod
+    def _tool_names(sock):
+        return [t["name"] for t in sock.sent[0]["session"]["tools"]]
+
+    def test_key_attaching_its_own_session_gets_dispatch_tools_only(
+        self, client, mock_db, sidebands
+    ):
+        # New calls run on the live model's audio stream, which exposes no
+        # tools; a session pinned to a Realtime model is the sideband path.
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        sid = _mk_owned_voice_session("voice-key-own", "key-a")
+        resp = client.post(f"{VOICE_ROOT}/sessions/{sid}/call", headers=KEY_A,
+                           json={"call_id": "rtc_key"})
+        assert resp.status_code == 200, resp.text
+        assert self._tool_names(sidebands[0]) == DISPATCH_ONLY_TOOLS
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
+        client.post(f"{VOICE_ROOT}/sessions/{sid}/hangup", headers=KEY_A)
+
+    def test_key_reaching_an_unattributed_worker_row_gets_dispatch_tools_only(
+        self, client, mock_db, sidebands
+    ):
+        """A worker row carries no api_user_id and belongs to its parent's key;
+        the grant follows the caller, not the row's empty column."""
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        db.create_session(session_id="parent-a", profile_id="default", api_user_id="key-a")
+        db.create_session(
+            session_id="voice-worker-a", profile_id="default", title="Voice worker",
+            provider_id="prov-openai", mode="voice", api_user_id=None,
+            parent_session_id="parent-a", is_worker=True,
+            voice_config={"model": "gpt-realtime-2.1", "voice": "marin",
+                          "provider_id": "prov-openai"},
+        )
+        resp = client.post(f"{VOICE_ROOT}/sessions/voice-worker-a/call", headers=KEY_A,
+                           json={"call_id": "rtc_worker"})
+        assert resp.status_code == 200, resp.text
+        assert self._tool_names(sidebands[0]) == DISPATCH_ONLY_TOOLS
+        client.post(f"{VOICE_ROOT}/sessions/voice-worker-a/hangup", headers=KEY_A)
+
+    @pytest.mark.parametrize("owner", [None, "key-b"], ids=["owner", "other-key"])
+    def test_key_cannot_join_a_foreign_session_audio_stream(self, client, mock_db, owner):
+        """The live-model audio socket is the path new calls take."""
+        from starlette.websockets import WebSocketDisconnect
+
+        _enable_voice()
+        _make_provider()
+        _make_keys()
+        db.create_session(
+            session_id="voice-live-foreign", profile_id="default", title="Voice session",
+            provider_id="prov-openai", mode="voice", api_user_id=owner,
+            voice_config={"model": "gpt-live-1", "voice": "marin", "provider_id": "prov-openai"},
+        )
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(
+                f"{VOICE_ROOT}/sessions/voice-live-foreign/audio?token=aih_voice_key_a"
+            ):
+                pass
+        assert refused.value.code == 4403
+        assert refused.value.reason == "Access denied to this session"
+
+
+# ============================================================================
+# fal.ai key policy — a key spends only the fal key its credential policy allows
+# ============================================================================
+#
+# Same resolution as /transcribe and /tts/stream (app.api.settings_audio):
+# the owner and paired devices spend the owner's fal key; an API user gets its
+# own stored key under ``user_provided`` (the default), and is refused with the
+# same 403 when it has none. Regression: the fal voice path (PersonaPlex audio
+# stream) handed the owner's fal key to any caller.
+
+OWNER_FAL_KEY = "fal-owner-key-0123456789abcdefghijklmn"
+USER_FAL_KEY = "fal-user-own-key-0123456789abcdefghijkl"
+FAL_SESSION = "voice-fal-key-a"
+
+
+@pytest.fixture
+def fal_streams(monkeypatch):
+    """Capture the key each PersonaPlex audio stream is built with; no network."""
+    from app.core import voice_stream
+
+    seen = []
+
+    class _FakeStream:
+        def __init__(self, websocket, row, config, key, max_minutes):
+            seen.append(key)
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(voice_stream, "VoiceStream", _FakeStream)
+    return seen
+
+
+def _fal_voice_setup(mock_db, *, policy=None, user_key=None, api_user_id="key-a"):
+    from app.core.voice_models import FAL_PROVIDER_ID, PERSONAPLEX_MODEL
+
+    unlock_encryption(mock_db)
+    _enable_voice()
+    _make_keys()
+    db.set_system_setting("fal_api_key", encryption.encrypt_value(OWNER_FAL_KEY))
+    if policy:
+        db.set_user_credential_policy("key-a", "fal_api_key", policy)
+    if user_key:
+        db.set_user_credential("key-a", "fal_api_key", encryption.encrypt_value(user_key))
+    db.create_session(
+        session_id=FAL_SESSION, profile_id="default", title="Voice session",
+        provider_id=FAL_PROVIDER_ID, mode="voice", api_user_id=api_user_id,
+        voice_config={"model": PERSONAPLEX_MODEL, "voice": "NATF2",
+                      "provider_id": FAL_PROVIDER_ID, "options": {}},
+    )
+
+
+class TestVoiceFalKeyPolicy:
+    @pytest.mark.parametrize("policy", [None, "user_provided"])
+    def test_key_without_its_own_fal_key_is_refused(
+        self, client, mock_db, fal_streams, policy
+    ):
+        from starlette.websockets import WebSocketDisconnect
+        from app.api.settings_audio import FAL_KEY_USER_PROVIDED
+
+        _fal_voice_setup(mock_db, policy=policy)
+
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(
+                f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+            ):
+                pass
+        assert refused.value.code == 4403
+        assert refused.value.reason == FAL_KEY_USER_PROVIDED[:120]
+        assert fal_streams == []  # the owner's key never reached a stream
+
+        resp = client.post(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/secret", headers=KEY_A)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == FAL_KEY_USER_PROVIDED
+        assert OWNER_FAL_KEY not in resp.text
+
+        providers = client.get(f"{VOICE_ROOT}/providers", headers=KEY_A).json()
+        assert "__fal_voice__" not in [p["id"] for p in providers]
+
+    def test_key_with_its_own_fal_key_spends_that_key_never_the_owners(
+        self, client, mock_db, fal_streams
+    ):
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+
+        with client.websocket_connect(
+            f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+        ):
+            pass
+        assert fal_streams == [USER_FAL_KEY]
+
+        resp = client.post(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/secret", headers=KEY_A)
+        assert resp.status_code == 200, resp.text
+        assert OWNER_FAL_KEY not in resp.text and USER_FAL_KEY not in resp.text
+        providers = client.get(f"{VOICE_ROOT}/providers", headers=KEY_A).json()
+        assert "__fal_voice__" in [p["id"] for p in providers]
+
+    def test_key_with_its_own_fal_key_works_when_the_owner_has_none(
+        self, client, mock_db, fal_streams
+    ):
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+        db.delete_system_setting("fal_api_key")
+
+        with client.websocket_connect(
+            f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"
+        ):
+            pass
+        assert fal_streams == [USER_FAL_KEY]
+
+    def test_owner_still_spends_the_owner_fal_key(
+        self, client, mock_db, fal_streams, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+        from app.api import ws_auth
+
+        _fal_voice_setup(mock_db, api_user_id=None)
+        # The owner / paired-device contract of authenticate_websocket.
+        monkeypatch.setattr(
+            ws_auth, "authenticate_websocket", AsyncMock(return_value=(True, None))
+        )
+        with client.websocket_connect(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio"):
+            pass
+        assert fal_streams == [OWNER_FAL_KEY]
+
+
+class TestVoiceSessionAccess:
+    @pytest.fixture(autouse=True)
+    def _voice_ready(self, mock_db, monkeypatch, sidebands):
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        self.sidebands = sidebands
+
+    # -- creation stamps the owner -------------------------------------------
+
+    @pytest.mark.parametrize("execution_mode", ["local", None])
+    def test_api_key_creation_records_the_creator_as_owner(self, client, execution_mode):
+        owner = _api_user("api-owner", OWNER_KEY)
+        body = {"model": "sonnet"}
+        if execution_mode:
+            body["execution_mode"] = execution_mode
+        resp = client.post(f"{VOICE_ROOT}/sessions", json=body, headers=owner)
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["api_user_id"] == "api-owner"
+
+    def test_owner_creation_leaves_the_row_admin_owned(self, authenticated_client):
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["api_user_id"] is None
+
+    def test_creator_can_use_the_session_it_just_created(self, client):
+        owner = _api_user("api-owner", OWNER_KEY)
+        created = client.post(
+            f"{VOICE_ROOT}/sessions", json={"model": "sonnet"}, headers=owner,
+        )
+        assert created.status_code == 200, created.text
+        session_id = created.json()["session_id"]
+        # Transport-agnostic routes (a fresh session is GPT Live, so no sideband).
+        for method, leaf, body in [
+            ("post", "secret", {}), ("get", "state", None), ("get", "config", None),
+            ("patch", "context", {"effort": "high"}), ("post", "hangup", {}),
+        ]:
+            resp = _hit(client, method, session_id, leaf, body, owner)
+            assert resp.status_code == 200, (leaf, resp.text)
+
+    # -- the owner keeps working ----------------------------------------------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_owning_api_key_operates_its_session(self, client, method, leaf, body):
+        owner = _api_user("api-owner", OWNER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        resp = _hit(client, method, "voice-owned", leaf, body, owner)
+        assert resp.status_code == 200, (leaf, resp.text)
+        if leaf == "call":
+            assert len(self.sidebands) == 1
+            _hit(client, "post", "voice-owned", "hangup", {}, owner)
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_admin_operates_an_api_users_session(
+        self, authenticated_client, method, leaf, body
+    ):
+        _api_user("api-owner", OWNER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        resp = _hit(authenticated_client, method, "voice-owned", leaf, body)
+        assert resp.status_code == 200, (leaf, resp.text)
+        if leaf == "call":
+            _hit(authenticated_client, "post", "voice-owned", "hangup", {})
+
+    # -- everyone else is refused ---------------------------------------------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    @pytest.mark.parametrize(
+        "owner_id", ["api-owner", None], ids=["api-user-owned", "admin-owned"],
+    )
+    def test_other_api_key_is_denied(self, client, method, leaf, body, owner_id):
+        if owner_id:
+            _api_user(owner_id, OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("voice-owned", owner_id)
+
+        resp = _hit(client, method, "voice-owned", leaf, body, other)
+
+        assert resp.status_code == 403, (leaf, resp.text)
+        assert self.sidebands == []
+        # Nothing was touched: the row is untouched and no secret was minted.
+        row = db.get_session("voice-owned")
+        assert row["effort"] is None
+        assert row["is_active"] in (False, 0)
+        from app.api import voice as voice_api
+        assert "voice-owned" not in voice_api._SESSION_CLIENT_SECRETS
+
+    def test_denied_hangup_leaves_the_owners_call_running(self, client):
+        owner = _api_user("api-owner", OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("voice-owned", "api-owner")
+        assert _hit(client, "post", "voice-owned", "call", {"call_id": "rtc_1"}, owner).status_code == 200
+
+        assert _hit(client, "post", "voice-owned", "hangup", {}, other).status_code == 403
+        assert _hit(client, "post", "voice-owned", "call", {"call_id": "rtc_2"}, other).status_code == 403
+
+        state = _hit(client, "get", "voice-owned", "state", None, owner).json()
+        assert state["active"] is True and state["connected"] is True
+        assert len(self.sidebands) == 1 and not self.sidebands[0].closed
+        _hit(client, "post", "voice-owned", "hangup", {}, owner)
+
+    def test_project_restricted_key_needs_project_access_too(self, client, tmp_path):
+        db.create_project("proj-a", "A", None, str(tmp_path / "a"))
+        db.create_project("proj-b", "B", None, str(tmp_path / "b"))
+        # Owns the session, but its key was since restricted to another project.
+        restricted = _api_user("api-owner", OWNER_KEY, project_id="proj-b")
+        _mk_owned_voice_session("voice-owned", "api-owner", project_id="proj-a")
+        assert _hit(client, "get", "voice-owned", "state", None, restricted).status_code == 403
+
+    # -- the 404 contract is unchanged, and precedes the access check ---------
+
+    @pytest.mark.parametrize("method,leaf,body", CALL_SURFACE)
+    def test_chat_or_missing_session_is_404_for_any_api_key(self, client, method, leaf, body):
+        _api_user("api-owner", OWNER_KEY)
+        other = _api_user("api-other", OTHER_KEY)
+        _mk_owned_voice_session("chat-owned", "api-owner", mode="chat")
+        assert _hit(client, method, "chat-owned", leaf, body, other).status_code == 404
+        assert _hit(client, method, "nope", leaf, body, other).status_code == 404

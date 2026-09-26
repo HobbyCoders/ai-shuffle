@@ -50,7 +50,7 @@ function localFeed(profile) {
     const target = new URL(String(url));
     if (target.origin !== 'https://hobbycoders.com' || target.search || target.hash) throw Error('Unexpected test feed request');
     const revision = target.pathname.match(/^\/v1\/desktop\/sources\/([a-f0-9]{40})$/)?.[1];
-    const name = target.pathname === '/v1/desktop/manifest' ? 'latest.json' : revision ? `${revision}.zip` : null;
+    const name = ['/v1/desktop/manifest', '/v1/desktop/manifest/edge'].includes(target.pathname) ? 'latest.json' : revision ? `${revision}.zip` : null;
     if (!name) throw Error('Unexpected test feed request');
     try { return new Response(await fs.promises.readFile(path.join(profile.feedDirectory, name))); }
     catch (error) { if (error.code === 'ENOENT') return new Response('Unpublished test revision', { status: 404 }); throw error; }

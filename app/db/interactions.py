@@ -16,20 +16,9 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from app.db.base import get_db, rows_to_list
+from app.db.base import get_db, parse_jsonb as _parse_json, rows_to_list
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _parse_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -126,17 +115,6 @@ def cancel_interaction(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def expire_due_interactions() -> int:
-    """Expire every pending interaction past its TTL. Returns the count."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pending_interactions SET state='expired' "
-            "WHERE state='pending' AND expires_at < NOW()"
-        )
-        return cursor.rowcount
-
-
 def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
     """Expire every pending interaction past its TTL, returning the swept rows
     (id, session_id, kind, parsed payload) so the sweeper can NOTIFY each
@@ -183,7 +161,7 @@ def get_answered_interactions(session_id: str, kind: Optional[str] = None) -> Li
 def mark_interaction_requeued(interaction_id: str) -> bool:
     """Stamp ``requeued: true`` into an answered interaction's answer JSON.
 
-    Requeue of a deferred permission (Q4-2 ruling, option a) creates a NEW
+    Requeue of a deferred permission creates a NEW
     pending row carrying the same FE request_id; this stamp on the OLD
     answered-defer row keeps it out of the derived deferred set so the FE
     never sees the same request as both deferred and pending. Read-modify-write

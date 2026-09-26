@@ -263,7 +263,7 @@ class WebhookConnector(BaseConnector):
 
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "AI-Hub-Webhook/1.0",
+            "User-Agent": "AI-Shuffle-Webhook/1.0",
             "X-Webhook-Event": event_type,
             "X-Webhook-Delivery-Id": f"{self.connector_id}-{int(time.time() * 1000)}",
         }
@@ -349,7 +349,7 @@ class WebhookConnector(BaseConnector):
         body = params.get("body")
 
         headers.setdefault("Content-Type", "application/json")
-        headers.setdefault("User-Agent", "AI-Hub-Webhook/1.0")
+        headers.setdefault("User-Agent", "AI-Shuffle-Webhook/1.0")
 
         secret = self.config.get("secret")
         if secret and body is not None:
@@ -404,7 +404,7 @@ class WebhookConnector(BaseConnector):
 
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "AI-Hub-Webhook/1.0",
+            "User-Agent": "AI-Shuffle-Webhook/1.0",
             "X-Webhook-Event": "test",
             "X-Webhook-Delivery-Id": f"{self.connector_id}-test-{int(time.time() * 1000)}",
         }

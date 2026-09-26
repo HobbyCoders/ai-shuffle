@@ -18,6 +18,7 @@ from fastapi import HTTPException, status
 from app.core.git_service import git_service
 from app.core.github_service import CACHE_MISS, TTLCache
 from app.core.project_utils import get_worktree_working_dir
+from app.core.scrub import strip_url_userinfo
 from app.db import database
 from app.api.common import resolve_project_path
 
@@ -146,10 +147,7 @@ async def stage_and_commit(
 
 
 def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[str]:
-    """Get the filesystem path for a project.
-
-    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
-    """
+    """Get the filesystem path for a project, honouring the worker checkout scope."""
     scoped = _worker_checkout_scope.get()
     if scoped is not None:
         if scoped[0] != project_id:
@@ -166,7 +164,7 @@ def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[s
 # ---------------------------------------------------------------------------
 # Resolving (project_id, worktree_id, session_id) -> checkout path costs 1-2
 # synchronous DB round trips plus a filesystem stat, and every hot git endpoint
-# does it on every poll (~2s cadence per open tab, finding G9). The mapping is
+# does it on every poll (~2s cadence per open tab). The mapping is
 # stable for the lifetime of a session, so it is cached with a short TTL and an
 # explicit invalidation hook for the flows that change it.
 _WORKING_DIR_TTL = 30.0
@@ -202,6 +200,15 @@ def _resolve_working_dir(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Worktree not found: {worktree_id}"
+            )
+        # The access check covers project_id only; a worktree of another
+        # project must not be reachable through it. Same check and error as
+        # the worktree routes (git_worktrees._require_worktree_for_project).
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo or worktree.get("repository_id") != repo["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found in this project: {worktree_id}",
             )
         return get_worktree_working_dir(worktree), True
 
@@ -239,7 +246,7 @@ def _store_working_dir(key, value: str, resolved_from_checkout: bool) -> None:
     )
 
 
-def get_working_dir(
+async def get_working_dir_async(
     project_id: str,
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -254,36 +261,9 @@ def get_working_dir(
     3. ``session_id`` — the session resolver's existing checkout.
     Otherwise returns the main project path.
 
-    Results are memoized for a few seconds (see :data:`_WORKING_DIR_TTL`).
-
-    This is the **synchronous** variant, kept for sync callers. Async handlers
-    should await :func:`get_working_dir_async`, which does the same thing but
-    hands the uncached resolution to a worker thread instead of blocking the
-    event loop.
-    """
-    if _worker_checkout_scope.get() is not None:
-        if worktree_id or session_id:
-            raise HTTPException(400, "Mixed worker and session checkout scope")
-        return get_project_path(project_id)
-    key = _working_dir_cache_key(project_id, worktree_id, session_id)
-    cached = _working_dir_cache.get_or_miss(key)
-    if cached is not CACHE_MISS:
-        return cached
-
-    value, from_checkout = _resolve_working_dir(project_id, worktree_id, session_id)
-    _store_working_dir(key, value, from_checkout)
-    return value
-
-
-async def get_working_dir_async(
-    project_id: str,
-    worktree_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-) -> str:
-    """Non-blocking :func:`get_working_dir` for async handlers.
-
-    A cache hit never touches a thread; a miss resolves in a worker so the DB
-    round trip and the filesystem stat stay off the event loop.
+    Results are memoized (see :data:`_WORKING_DIR_TTL`). A cache hit never
+    touches a thread; a miss resolves in a worker so the DB round trip and the
+    filesystem stat stay off the event loop.
     """
     if _worker_checkout_scope.get() is not None:
         if worktree_id or session_id:
@@ -391,7 +371,8 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
 
     # Create a new record
     repo_id = f"repo-{uuid.uuid4().hex[:12]}"
-    remote_url = git_service.get_remote_url(working_dir)
+    # The row (and the 60 s cache the UI reads) never holds a clone token.
+    remote_url = strip_url_userinfo(git_service.get_remote_url(working_dir))
     default_branch = git_service.get_default_branch(working_dir)
 
     # Try to extract GitHub repo name from URL

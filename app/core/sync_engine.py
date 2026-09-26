@@ -12,10 +12,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
-    Any, Awaitable, Callable, Coroutine, Deque, Dict, List, Optional, Set, Tuple,
+    Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple,
 )
 
 from fastapi import WebSocket
+
+from app.core.detached_tasks import spawn_detached
 
 logger = logging.getLogger(__name__)
 
@@ -78,32 +80,21 @@ _OUTBOUND_QUEUE_MAXSIZE = 256
 _COALESCABLE_SESSION_EVENTS = frozenset({"queue_updated"})
 _COALESCABLE_USER_FRAMES = frozenset({"usage_snapshot", "tabs_sync"})
 
-# Detached teardown tasks (socket close + registry reap) spawned from the
-# non-blocking enqueue path. Held so they are not garbage-collected mid-flight.
-_background_tasks: Set["asyncio.Task[Any]"] = set()
-
-
-def _spawn_detached(coro: Coroutine[Any, Any, None], name: str) -> None:
-    """Run ``coro`` as a fire-and-forget task, keeping a strong reference.
-
-    Used from synchronous, non-blocking code paths (``ConnectionWriter.enqueue``)
-    that must not await anything.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:  # no loop (interpreter teardown / sync unit context)
-        coro.close()  # don't leave a "never awaited" coroutine behind
-        return
-    task = loop.create_task(coro, name=name)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
 def _session_coalesce_key(event_type: str, session_id: str) -> Optional[Tuple[Any, ...]]:
     """Coalescing key for a session-scoped SyncEvent, or None if it must not drop."""
     if event_type in _COALESCABLE_SESSION_EVENTS:
         return ("session", event_type, session_id)
     return None
+
+
+def _is_owner_user_id(user_id: str) -> bool:
+    """Whether a user-level socket registration belongs to the owner.
+
+    The chat socket registers as ``"admin"`` for the owner, ``"paired:<id>"``
+    for a device paired to the owner, and the API key's id for a key
+    (app/api/websocket.py). Owner-only broadcasts skip the last kind.
+    """
+    return user_id == "admin" or user_id.startswith("paired:")
 
 
 def _user_coalesce_key(message: Dict[str, Any]) -> Optional[Tuple[Any, ...]]:
@@ -208,7 +199,7 @@ class ConnectionWriter:
         self._pending.clear()
         self._coalescable.clear()
         if close_socket:
-            _spawn_detached(self._close_socket(), f"ws-writer-close:{self._label}")
+            spawn_detached(self._close_socket(), name=f"ws-writer-close:{self._label}")
 
     async def _close_socket(self) -> None:
         try:
@@ -229,7 +220,7 @@ class ConnectionWriter:
         self._pending.clear()
         self._coalescable.clear()
         self._wakeup.set()
-        _spawn_detached(self._teardown(), f"ws-writer-teardown:{self._label}")
+        spawn_detached(self._teardown(), name=f"ws-writer-teardown:{self._label}")
 
     async def _teardown(self) -> None:
         await self._close_socket()
@@ -338,11 +329,6 @@ class SyncEvent:
         }
 
 
-
-# Back-compat alias: this writer is shared with the API layer
-# (chat_ws_handler reuses it for the origin socket), so the public name
-# is canonical and the underscored one is retained for older references.
-_ConnectionWriter = ConnectionWriter
 
 @dataclass
 class DeviceConnection:
@@ -456,7 +442,6 @@ class SyncEngine:
     - Track device connections per session
     - Broadcast non-render events to all devices watching a session
     - Exclude source device from broadcasts (to avoid echo)
-    - Enforce single active device per session (session locking)
 
     V2: this engine carries NO streaming state. Render frames ride the
     session event feed (SSE); busy truth is the durable runs table
@@ -468,8 +453,6 @@ class SyncEngine:
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
-        # Session locks: session_id -> device_id that owns the lock
-        self._session_locks: Dict[str, str] = {}
         # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
         self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
         # Lock for user connection management
@@ -592,114 +575,6 @@ class SyncEngine:
         """
         return any(conn.device_id == device_id
                    for conn in self._connections.get(session_id, {}).values())
-
-    async def sweep_stale_maps(self) -> int:
-        """Sweep orphaned session locks.
-
-        A lock becomes orphaned when its owning device disconnects abnormally
-        without releasing it: with no device left connected, nothing can ever
-        release the lock. Sessions with an ACTIVE run (durable runs table) are
-        spared — their device may reconnect mid-turn.
-
-        Returns:
-            Number of orphaned locks removed.
-        """
-        from app.core import streaming_status
-
-        async with self._lock:
-            candidates = [
-                sid for sid in self._session_locks
-                if sid not in self._connections
-            ]
-        stale_lock_ids = [
-            sid for sid in candidates
-            if not await asyncio.to_thread(streaming_status.has_active_run, sid)
-        ]
-
-        removed = 0
-        async with self._lock:
-            for sid in stale_lock_ids:
-                # Re-check: a device may have (re)connected while we were
-                # checking the runs table off-lock.
-                if sid in self._session_locks and sid not in self._connections:
-                    del self._session_locks[sid]
-                    removed += 1
-        if removed:
-            logger.info(
-                "Swept %d orphaned session lock(s). Remaining: session_locks=%d",
-                removed, len(self._session_locks),
-            )
-        return removed
-
-    async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
-        """Acquire exclusive lock on a session for a device.
-
-        Only one device can hold the lock for a session at a time.
-        If the same device already holds the lock, it succeeds (idempotent).
-
-        Args:
-            session_id: The session to lock
-            device_id: The device requesting the lock
-
-        Returns:
-            Tuple of (success, current_owner_device_id)
-            - (True, None) if lock acquired successfully
-            - (False, owner_device_id) if another device holds the lock
-        """
-        async with self._lock:
-            if session_id in self._session_locks:
-                current_owner = self._session_locks[session_id]
-                if current_owner != device_id:
-                    logger.debug(
-                        "Session %s lock denied for device %s, owned by %s",
-                        session_id, device_id, current_owner,
-                    )
-                    return False, current_owner
-                # Same device already owns it
-                return True, None
-
-            self._session_locks[session_id] = device_id
-            logger.debug(
-                "Session %s lock acquired by device %s", session_id, device_id
-            )
-            return True, None
-
-    async def release_session_lock(self, session_id: str, device_id: str) -> bool:
-        """Release the lock on a session.
-
-        Only the device that holds the lock can release it.
-
-        Args:
-            session_id: The session to unlock
-            device_id: The device releasing the lock
-
-        Returns:
-            True if lock was released, False if device didn't hold the lock
-        """
-        async with self._lock:
-            if session_id not in self._session_locks:
-                return True  # No lock exists, consider it released
-
-            if self._session_locks[session_id] != device_id:
-                logger.warning(
-                    "Device %s tried to release lock on session %s owned by %s",
-                    device_id, session_id, self._session_locks[session_id],
-                )
-                return False
-
-            del self._session_locks[session_id]
-            logger.debug(
-                "Session %s lock released by device %s", session_id, device_id
-            )
-            return True
-
-    def get_session_lock_owner(self, session_id: str) -> Optional[str]:
-        """Get the device ID that currently holds the lock on a session."""
-        return self._session_locks.get(session_id)
-
-    def is_session_locked(self, session_id: str) -> bool:
-        """Check if a session is currently locked by any device."""
-        return session_id in self._session_locks
 
     async def broadcast_event(
         self,
@@ -1307,9 +1182,15 @@ class SyncEngine:
         self,
         snapshot: Dict[str, Any],
     ):
-        """Fan a Claude usage-limits snapshot out to EVERY connected device.
+        """Fan a Claude usage-limits snapshot out to every OWNER device.
 
-        Cluster-level (not session- or user-scoped): the 5-hour Claude window is
+        Only the owner's sockets receive it: the web app/desktop (``"admin"``)
+        and devices paired to the owner (``"paired:<id>"``). An API key's chat
+        socket registers under the key's id and gets nothing: the snapshot is
+        the owner's Claude windows, install names and instance id, which REST
+        already refuses a key (``/usage/limits`` returns it an empty reading).
+
+        Cluster-level (not session-scoped): the 5-hour Claude window is
         PER-ACCOUNT, and on a shared database two installs may run different
         Claude accounts, so the numbers are NOT identical everywhere. The
         broadcast carries the enriched cluster shape — the local install's legacy
@@ -1325,6 +1206,7 @@ class SyncEngine:
             targets = [
                 (user_id, did, conn)
                 for user_id, devices in self._user_connections.items()
+                if _is_owner_user_id(user_id)
                 for did, conn in devices.items()
             ]
 

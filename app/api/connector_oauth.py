@@ -160,8 +160,8 @@ async def _credentials(pending: dict, code: str) -> dict:
 def _callback_page(state: str, origin: str, *, connector_id: str | None = None, error: str | None = None):
     # No code, access token, refresh token, or client secret enters this page.
     message = {"type": "connector-oauth", "flow_id": state, "connector_id": connector_id, "error": error}
-    payload = json.dumps(message).replace("<", "\u003c")
-    target = json.dumps(origin).replace("<", "\u003c")
+    payload = json.dumps(message).replace("<", "\\u003c")
+    target = json.dumps(origin).replace("<", "\\u003c")
     title = "Google account connected" if connector_id else "Google sign-in did not complete"
     response = HTMLResponse(f'<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>{title}</title><h1>{title}</h1><p>You can close this window and return to Plugins.</p><a href="/">Return to AI Shuffle</a><script>if(window.opener){{window.opener.postMessage({payload},{target});window.close();}}</script>')
     response.delete_cookie("gmail_oauth_" + state[:16], path=CALLBACK)

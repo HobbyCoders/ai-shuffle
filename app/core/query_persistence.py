@@ -14,7 +14,6 @@ from typing import Any, Deque, Optional, Callable, Set
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +36,10 @@ async def shielded_get_context_usage(adapter: Any) -> Optional[dict]:
     """Run ``adapter.get_context_usage()`` bounded, without cancelling it midflight.
 
     This is the SINGLE copy of the pattern shared by the turn-end capture and
-    the GET context-usage endpoint. The SDK control call runs on a DETACHED task
+    the GET context-usage endpoint. The control call runs on a DETACHED task
     guarded by a SHIELD: on timeout we must NOT cancel the in-flight control
-    request — cancelling it mid-flight leaks the entry in the SDK client's
-    pending_control_responses, which can wedge later control calls. Shielding
+    request — cancelling it mid-flight can leave its entry in the delegated
+    loop's pending-control map, which can wedge later control calls. Shielding
     lets the ``wait_for`` time out while the underlying call keeps running to
     completion in the background.
 
@@ -147,25 +146,31 @@ def _extract_connection_error(
     """Extract the most useful error message from a connection failure.
 
     Priority order:
+    0. A missing ``claude`` CLI: its setup message, verbatim
     1. Captured CLI stderr lines (real subprocess output)
     2. ProcessError.stderr attribute (if not a placeholder)
     3. Exception message as-is
     """
+    from fluid.engine.delegated import ClaudeCliMissingError
+
+    if isinstance(exc, ClaudeCliMissingError):
+        return str(exc)
+
     # 1. Prefer captured stderr lines — these are the real subprocess output
     if cli_stderr_lines:
         stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
         if stderr_msg:
             return stderr_msg
 
-    # 2. Check ProcessError.stderr attribute from the SDK
-    from claude_agent_sdk._errors import ProcessError
-    if isinstance(exc, ProcessError) and exc.stderr:
+    # 2. Check stderr retained by a failed subprocess invocation
+    from subprocess import CalledProcessError
+    if isinstance(exc, CalledProcessError) and exc.stderr:
         # Skip the SDK's useless placeholder
         if exc.stderr != "Check stderr output for details":
-            return f"Connection failed (exit code {exc.exit_code}): {exc.stderr}"
+            return f"Connection failed (exit code {exc.returncode}): {exc.stderr}"
         # Placeholder stderr — build message from exit code alone
-        if exc.exit_code is not None:
-            return f"Connection failed: CLI process exited with code {exc.exit_code}"
+        if exc.returncode is not None:
+            return f"Connection failed: CLI process exited with code {exc.returncode}"
 
     # 3. Fall back to raw exception message
     return f"Connection failed: {exc}"
@@ -182,12 +187,9 @@ def log_captured_cli_stderr(
     ``_extract_connection_error`` (it lands in the user-facing error message and
     an ERROR log line). But a subprocess that dies MID-STREAM — the common case
     behind a background task that silently vanishes — raises from
-    ``receive_response()`` where ``cli_stderr_lines`` was previously out of
-    scope. The real reason (exit code, the stack trace the CLI printed before
-    dying) was therefore only ever logged at DEBUG by the stderr callback, and
-    the SDK reader-task error otherwise leaked as "Task exception was never
-    retrieved". Persisting the capture list on ``SessionState`` lets the
-    streaming exception handlers call this so the next exit-1 records WHY.
+    ``receive_events()``, where the connect-scoped ``cli_stderr_lines`` is out
+    of scope. Persisting the capture list on ``SessionState`` lets the
+    streaming exception handlers call this so an exit-1 records WHY.
 
     Best-effort and never raises — a logging helper must not mask the original
     error it is trying to explain.
@@ -212,131 +214,6 @@ def log_captured_cli_stderr(
         pass
 
 
-_SUBAGENT_TOOLS = {"Task", "Agent"}
-
-
-def _row_for_tool_use(session_id: str, tool_msg: dict, profile_id: Optional[str],
-                      subagent_children: Optional[dict] = None) -> dict:
-    """Build a DB row for a tool_use entry. Task/Agent stored with role=subagent."""
-    tool_name = tool_msg.get("name", "unknown")
-    tool_id = tool_msg.get("tool_id")
-    tool_input = tool_msg.get("input") or {}
-    jsonl_uuid = tool_msg.get("uuid")
-
-    if tool_name in _SUBAGENT_TOOLS:
-        # Embed collected subagent children into the parent's metadata so
-        # reload rebuilds the full nested display.
-        children = (subagent_children or {}).get(tool_id, [])
-        return {
-            "session_id": session_id,
-            "role": "subagent",
-            "content": tool_input.get("description", ""),
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "metadata": {
-                "tool_id": tool_id,
-                "agent_type": (
-                    tool_input.get("subagent_type")
-                    or tool_input.get("description")
-                    or "Agent"
-                ),
-                "agent_description": tool_input.get("description", ""),
-                "agent_prompt": tool_input.get("prompt", ""),
-                "agent_status": "completed",
-                "agent_children": children,
-            },
-            "profile_id": profile_id,
-            "jsonl_uuid": jsonl_uuid,
-        }
-
-    return {
-        "session_id": session_id,
-        "role": "tool_use",
-        "content": f"Using tool: {tool_name}",
-        "tool_name": tool_name,
-        "tool_input": tool_input,
-        "metadata": {"tool_id": tool_id},
-        "profile_id": profile_id,
-        "jsonl_uuid": jsonl_uuid,
-    }
-
-
-def _row_for_tool_result(session_id: str, tool_msg: dict, profile_id: Optional[str]) -> dict:
-    return {
-        "session_id": session_id,
-        "role": "tool_result",
-        "content": tool_msg.get("output", ""),
-        "tool_name": tool_msg.get("name", "unknown"),
-        "metadata": {"tool_id": tool_msg.get("tool_id")},
-        "profile_id": profile_id,
-        "jsonl_uuid": tool_msg.get("uuid"),
-    }
-
-
-def _row_for_thinking(session_id: str, tb: dict, profile_id: Optional[str], model: Optional[str]) -> dict:
-    metadata: Dict[str, Any] = {"model": model}
-    # "reasoning_summary" marks the provider's own summary of its reasoning
-    # (OpenAI Responses / xAI); the UI labels it as the provider's voice.
-    if tb.get("subtype"):
-        metadata["subtype"] = tb["subtype"]
-    return {
-        "session_id": session_id,
-        "role": "thinking",
-        "content": tb.get("content", ""),
-        "metadata": metadata,
-        "profile_id": profile_id,
-        "jsonl_uuid": tb.get("uuid"),
-    }
-
-
-def _row_for_text(session_id: str, payload: dict, profile_id: Optional[str],
-                  metadata: Optional[dict] = None) -> dict:
-    """Build an assistant text row from an ordered turn event.
-
-    The closing turn metadata (cost/duration/usage) is attached only to the
-    last text row of the turn (passed as `metadata`); intermediate text rows
-    carry just the model so the frontend renders cost/duration on the final
-    assistant bubble exactly as the legacy single-row path did.
-    """
-    return {
-        "session_id": session_id,
-        "role": "assistant",
-        "content": payload.get("content", ""),
-        "metadata": metadata if metadata is not None else {},
-        "profile_id": profile_id,
-        "jsonl_uuid": payload.get("uuid"),
-    }
-
-
-def _row_for_system(session_id: str, sm: dict, profile_id: Optional[str]) -> dict:
-    return {
-        "session_id": session_id,
-        "role": "system",
-        "content": sm.get("content", ""),
-        "metadata": {
-            "subtype": sm.get("subtype", ""),
-            "system_data": sm.get("data", {}),
-        },
-        "profile_id": profile_id,
-        "jsonl_uuid": sm.get("uuid"),
-    }
-
-
-def _row_for_plugin(session_id: str, pm: dict, profile_id: Optional[str]) -> dict:
-    return {
-        "session_id": session_id,
-        "role": "system",
-        "content": pm.get("message", ""),
-        "metadata": {
-            "subtype": "plugin_warning",
-            "plugin_name": pm.get("plugin", ""),
-            "severity": pm.get("severity", "info"),
-        },
-        "profile_id": profile_id,
-        "jsonl_uuid": pm.get("uuid"),
-    }
-
-
 def usage_settlement_key(session_id: str, turn: dict) -> str:
     """Identity includes the lease attempt: a requeued turn is new paid work."""
     return json.dumps(
@@ -359,61 +236,24 @@ async def capture_usage_identity(session_id: str) -> str:
 async def _persist_turn_results(
     session_id: str,
     sdk_session_id: Optional[str],
-    tool_messages: list,
-    response_text: list,
     metadata: dict,
     profile_id: Optional[str],
     interrupted: bool = False,
     log_prefix: str = "",
-    thinking_blocks: Optional[list] = None,
-    system_messages: Optional[list] = None,
-    plugin_messages: Optional[list] = None,
-    turn_events: Optional[list] = None,
-    subagent_children: Optional[dict] = None,
-    prompt: Optional[str] = None,
-    working_dir: Optional[str] = None,
-) -> Optional[dict]:
-    """Persist a completed turn's data to the database in batched writes.
+) -> None:
+    """Persist a completed turn's session-row metadata and settle its usage.
 
-    Combines tool messages + assistant response + thinking blocks + system
-    messages into a single transaction (one DB connection, one commit)
-    instead of N+1 individual writes.
-
-    Ordering:
-    - When turn_events is provided, rows are emitted in the exact order the
-      events occurred during streaming (thinking, tool_use, tool_result,
-      subagent, system, plugin, asst_text-last). This preserves the visual
-      flow of the turn on session reload.
-    - Legacy path (no turn_events): rows are bucketed thinking → tools →
-      system → plugin → asst_text.
-
-    Subagent handling:
-    - Task/Agent tool_use entries are stored with role="subagent".
-    - Their child tool_use/tool_result entries are embedded into the
-      parent's metadata.agent_children (NOT emitted as top-level rows) so
-      the nested display reconstructs correctly on reload.
-
-    Returns the assistant message dict if one was stored, else None.
+    The transcript itself is written by the session store, not here.
     """
-    # Normalise optional lists
-    thinking_blocks = thinking_blocks or []
-    system_messages = system_messages or []
-    plugin_messages = plugin_messages or []
-    subagent_children = subagent_children or {}
-
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
     #
-    # This runs in ALL modes — including postgres_only. The `sessions` row is
-    # canonical session state that the transcript store does NOT replace: it
-    # holds the cost/token/turn aggregates AND, critically, the
-    # `sdk_session_id` that links an app session to its SDK transcript. The
-    # postgres_only READ path (GET /{session_id}) looks the session_store
+    # The `sessions` row is canonical session state that the transcript store
+    # does NOT replace: it holds the cost/token/turn aggregates AND,
+    # critically, the `sdk_session_id` that links an app session to its
+    # transcript. The READ path (GET /{session_id}) looks the session_store
     # entries up by `sessions.sdk_session_id`; if this write is skipped the
-    # column stays NULL, the store lookup keys on NULL, and a session that
-    # streamed and stored its turn correctly reads back EMPTY on reload (the
-    # "messages disappear after sending a second message" bug). Only the
-    # per-message legacy `session_messages` batch in step 3 belongs behind the
-    # postgres_only gate — not this sessions-row metadata update.
+    # column stays NULL and a session that streamed and stored its turn
+    # correctly reads back EMPTY on reload.
     #
     # Context-window columns must store the LAST API call's per-call usage,
     # not ResultMessage aggregates. SDK's ResultMessage.usage sums every API
@@ -455,136 +295,6 @@ async def _persist_turn_results(
     except Exception as e:
         logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
 
-    # 2. Build batch of messages to insert in one transaction
-    full_response = "\n".join(response_text) if response_text else ""
-    batch: list[dict] = []
-
-    # Index of the last assistant-text row appended via the ordered path.
-    # The turn-closing metadata (cost/duration/usage) is attached to this row
-    # after the loop so the frontend renders cost on the final assistant bubble.
-    last_text_batch_idx = -1
-
-    if turn_events:
-        # Ordered path — preserves stream order, skips subagent children
-        # (they're embedded in their parent subagent's metadata).
-        model = metadata.get("model")
-        for ev in turn_events:
-            kind = ev.get("kind")
-            payload = ev.get("payload") or {}
-            if kind == "thinking":
-                batch.append(_row_for_thinking(session_id, payload, profile_id, model))
-            elif kind == "text":
-                # Ordered assistant text block. Intermediate blocks carry only
-                # the model; the closing metadata is attached to the LAST text
-                # row after the loop (see below).
-                batch.append(_row_for_text(
-                    session_id, payload, profile_id,
-                    metadata={"model": model} if model else {},
-                ))
-                last_text_batch_idx = len(batch) - 1
-            elif kind == "tool_use":
-                # Skip subagent children — they go inside the parent's metadata
-                if payload.get("parent_tool_id"):
-                    continue
-                batch.append(_row_for_tool_use(session_id, payload, profile_id, subagent_children))
-            elif kind == "subagent":
-                batch.append(_row_for_tool_use(session_id, payload, profile_id, subagent_children))
-            elif kind == "tool_result":
-                if payload.get("parent_tool_id"):
-                    continue
-                batch.append(_row_for_tool_result(session_id, payload, profile_id))
-            elif kind == "system":
-                batch.append(_row_for_system(session_id, payload, profile_id))
-            elif kind == "plugin":
-                batch.append(_row_for_plugin(session_id, payload, profile_id))
-    else:
-        # Legacy bucketed path (for call sites that don't pass turn_events)
-        for tb in thinking_blocks:
-            batch.append(_row_for_thinking(session_id, tb, profile_id, metadata.get("model")))
-
-        for tool_msg in tool_messages:
-            # Skip children of subagents — parent row embeds them
-            if tool_msg.get("parent_tool_id"):
-                continue
-            msg_type = tool_msg.get("type")
-            if msg_type == "tool_use":
-                batch.append(_row_for_tool_use(session_id, tool_msg, profile_id, subagent_children))
-            elif msg_type == "tool_result":
-                batch.append(_row_for_tool_result(session_id, tool_msg, profile_id))
-
-        for sm in system_messages:
-            batch.append(_row_for_system(session_id, sm, profile_id))
-
-        for pm in plugin_messages:
-            batch.append(_row_for_plugin(session_id, pm, profile_id))
-
-    # Assistant text response — closes the turn.
-    assistant_msg = None
-    assistant_uuid = metadata.get("jsonl_uuid") or metadata.get("last_assistant_uuid")
-
-    if last_text_batch_idx >= 0:
-        # Ordered path already emitted the assistant text as one or more rows in
-        # their true stream position (around tool cards). Don't append a second,
-        # merged trailing row — that's exactly what reordered the turn on reload.
-        # Instead, attach the turn-closing metadata to the LAST text row so cost/
-        # duration render on the final bubble, and fold the interrupted marker in.
-        final_row = batch[last_text_batch_idx]
-        final_row["metadata"] = metadata
-        if not final_row.get("jsonl_uuid"):
-            final_row["jsonl_uuid"] = assistant_uuid
-        if interrupted:
-            final_row["content"] = (final_row.get("content", "") or "") + "\n[Interrupted]"
-    elif full_response or interrupted or tool_messages:
-        # No ordered text rows (legacy bucketed path, tool-only turn, or an
-        # interrupt before any text). Emit a single closing assistant row, as
-        # before, so the turn still has a final assistant bubble.
-        # Capture the assistant message's JSONL uuid so rewind can map a
-        # DB row back to its transcript entry for truncation.
-        batch.append({
-            "session_id": session_id,
-            "role": "assistant",
-            "content": full_response + ("\n[Interrupted]" if interrupted else ""),
-            "metadata": metadata,
-            "profile_id": profile_id,
-            "jsonl_uuid": assistant_uuid,
-        })
-
-    # 3. (removed) Legacy session_messages batch insert. The Postgres session
-    # store is the single source of truth for the transcript, so the legacy
-    # write was dead weight and is gone along with the SESSION_STORE_MODE flag.
-
-    # 3b. (removed) App-level durable write to PgSessionStore.
-    #
-    # An earlier iteration wrote the turn to session_store_entries here on the
-    # premise that the SDK's --session-mirror was not producing durable rows
-    # under postgres_only. Direct inspection of the store proved that premise
-    # false: the mirror DOES write complete, rich transcript rows (entrypoint
-    # "sdk-py", full usage.iterations, requestId, etc.) for every live turn.
-    # The real reason postgres_only sessions read back EMPTY was that the
-    # sessions-row `sdk_session_id` linkage (step 1) was gated off, so the read
-    # path looked the store up by NULL. With step 1 now running in all modes,
-    # the mirror's rows are found directly — an app-level write here only
-    # duplicated every user/assistant message on reload, so it has been removed.
-    # The SDK mirror is the single durable writer; the read transform is shared.
-
-    # 4. Log sync event for polling fallback
-    if assistant_msg:
-        try:
-            await run_sync(
-                database.add_sync_log,
-                session_id=session_id,
-                event_type="stream_end",
-                entity_type="message",
-                entity_id=str(assistant_msg["id"]),
-                data={
-                    "message": assistant_msg,
-                    "metadata": metadata,
-                    "interrupted": interrupted
-                }
-            )
-        except Exception as e:
-            logger.error(f"{log_prefix}Failed to add sync log for session {session_id}: {e}")
-
     # Counters and ledger must share one durable claim, including errors.
     settlement_key = metadata.get("usage_settlement_key")
     if settlement_key:
@@ -608,8 +318,6 @@ async def _persist_turn_results(
     else:
         logger.warning("%sUsage not settled: missing producer identity for %s",
                        log_prefix, session_id)
-
-    return assistant_msg
 
 
 def settlement_turn_id(settlement_key: str) -> Optional[str]:
@@ -649,6 +357,7 @@ async def _turn_end_booking(
             "model_calls": metadata.get("num_turns") or 0,
             "turn_increment": 0 if interrupted or metadata.get("error")
             or metadata.get("is_error") else 1,
+            "usage_estimated": bool(metadata.get("usage_estimated")),
         }
     turn_id = settlement_turn_id(settlement_key)
     if turn_id is None:
@@ -673,6 +382,7 @@ async def _turn_end_booking(
         "cost_usd": totals["cost_usd"],
         "model_calls": totals["model_calls"],
         "turn_increment": 0,
+        "usage_estimated": totals["usage_estimated"],
     }
 
 
@@ -721,8 +431,11 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
     count — a partial flush is best-effort evidence recovery, not a second
     accounting system.
 
-    ``cost_usd`` rides the per-call record too (fluid folds an estimate in when
-    the provider reports none), so the spend lands with the tokens.
+    ``cost_usd`` rides the per-call record too (fluid folds a table price in
+    when the provider reports none), so the spend lands with the tokens. A
+    record whose token counts the harness guessed carries ``usage_estimated``
+    (or fluid's per-field ``*_tokens_estimated`` flags); one such record marks
+    the whole booking as an estimate.
     """
     from app.core.turn_outcome import load_session_events
 
@@ -734,6 +447,7 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
         "cost_usd": 0.0,
         "model_calls": 0,
         "model": None,
+        "usage_estimated": False,
     }
     seen_indices: Set[Any] = set()
     unindexed = 0
@@ -765,6 +479,12 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
             totals["cost_usd"] += float(cost)
         if usage.get("model"):
             totals["model"] = usage["model"]
+        if (
+            usage.get("usage_estimated")
+            or usage.get("input_tokens_estimated")
+            or usage.get("output_tokens_estimated")
+        ):
+            totals["usage_estimated"] = True
 
     totals["model_calls"] = len(seen_indices) or unindexed
     totals["unindexed_records"] = unindexed
@@ -846,6 +566,7 @@ async def settle_killed_session(
                     cost_usd=totals["cost_usd"],
                     model_calls=totals["model_calls"],
                     turn_increment=0,
+                    usage_estimated=totals["usage_estimated"],
                 )
             except Exception:
                 logger.warning(

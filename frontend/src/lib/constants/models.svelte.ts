@@ -81,7 +81,7 @@ const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
 };
 
 /** Sentinel value meaning "inherit from parent" (used by subagents). */
-export const INHERIT_VALUE = '';
+const INHERIT_VALUE = '';
 
 /** Sentinel value meaning "custom free-text entry" (used by the `Custom…` dropdown option). */
 export const CUSTOM_VALUE = '__custom__';
@@ -324,13 +324,13 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 // ---------------------------------------------------------------------------
 
 /** Brand name for the native Claude group/section. */
-export const CLAUDE_BRAND = 'Claude';
+const CLAUDE_BRAND = 'Claude';
 
 /** Subtext used for any API-key-authenticated row. */
-export const API_SUBTEXT = 'API';
+const API_SUBTEXT = 'API';
 
 /** Fallback subtext for a subscription row whose plan string isn't known yet. */
-export const SUBSCRIPTION_SUBTEXT = 'Subscription';
+const SUBSCRIPTION_SUBTEXT = 'Subscription';
 
 /** Brand overrides keyed by `provider_type` — rows whose stored name is not the
  *  brand we want to show (both OpenAI rows display as "OpenAI"). */
@@ -518,7 +518,7 @@ export function getModelFamily(value: string | null | undefined): ModelFamily | 
  * lowercased base model string. Returns `null` for truly custom/unknown
  * models (no family substring present).
  */
-export function inferModelFamily(value: string | null | undefined): ModelFamily | null {
+function inferModelFamily(value: string | null | undefined): ModelFamily | null {
 	const registryFamily = getModelFamily(value);
 	if (registryFamily) return registryFamily;
 	const base = normalizeModel(value).toLowerCase();

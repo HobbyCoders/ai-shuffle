@@ -4,7 +4,6 @@ REST API for slash commands and rewind operations.
 Provides endpoints for:
 - Listing available commands (for autocomplete)
 - Getting command details
-- Executing non-interactive custom commands
 - Rewind operations (list checkpoints, execute rewind)
 
 Rewind uses persisted transcript/checkpoint services rather than terminal parsing.
@@ -13,9 +12,10 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 import asyncio
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
+from app.core.detached_tasks import spawn_detached
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
@@ -23,9 +23,7 @@ from app.api.sessions import check_session_access
 from app.api.common import resolve_project_path
 from app.api.command_context import command_context, command_provider_kind, command_setting_sources
 from app.core.slash_commands import (
-    get_command_by_name, get_all_commands,
-    is_interactive_command, is_rest_api_command, get_rest_api_command_info,
-    parse_command_input, expand_command_prompt
+    get_command_by_name, get_all_commands, is_interactive_command,
 )
 # Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
@@ -46,8 +44,6 @@ from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse
 )
-# SDK client for file rewind operations
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 
 logger = logging.getLogger(__name__)
 
@@ -90,20 +86,6 @@ class CommandDetailResponse(BaseModel):
     is_interactive: bool = False
 
 
-class ExecuteCommandRequest(BaseModel):
-    """Request to execute a custom command"""
-    command: str  # Command with arguments, e.g., "/fix-issue 123 high"
-    session_id: str
-
-
-class ExecuteCommandResponse(BaseModel):
-    """Response from command execution"""
-    success: bool
-    message: str
-    expanded_prompt: Optional[str] = None
-    is_interactive: bool = False
-
-
 def get_working_dir_for_project(
     project_id: Optional[str],
     worktree_id: Optional[str] = None,
@@ -111,8 +93,6 @@ def get_working_dir_for_project(
 ) -> str:
     """Get the working directory for a project, its worktree, or a v2 branch
     session's own checkout (sessions.branch + project_v2_id).
-
-    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
     """
     if not worktree_id and session_id:
         from app.core.project_resolver import resolve_existing_cwd
@@ -224,189 +204,6 @@ async def get_command(
     )
 
 
-class ExecuteCommandResponseV2(BaseModel):
-    """Enhanced response from command execution with REST API support"""
-    success: bool
-    message: str
-    expanded_prompt: Optional[str] = None
-    is_interactive: bool = False
-    is_rest_api: bool = False
-    api_endpoint: Optional[str] = None
-
-
-@router.post("/execute", response_model=ExecuteCommandResponse)
-async def execute_command(request: ExecuteCommandRequest, http_request: Request = None):
-    """
-    Execute a custom slash command.
-
-    For custom commands, this expands the prompt with arguments
-    and returns the expanded prompt for the client to send as a query.
-
-    For interactive commands (like /resume), this returns is_interactive=True
-    and the client should use the CLI WebSocket endpoint instead.
-
-    For REST API commands (like /rewind), this returns is_rest_api=True
-    and the client should use the dedicated REST API endpoints.
-    """
-    # Parse command input
-    command_name, arguments = parse_command_input(request.command)
-
-    if not command_name:
-        raise HTTPException(status_code=400, detail="Invalid command format")
-
-    working_dir, session = await run_sync(
-        command_context, http_request, None, None, request.session_id
-    )
-    kind = await run_sync(command_provider_kind, http_request, session, None, None, None)
-    sources = await run_sync(command_setting_sources, http_request, session, None)
-
-    # Check if it's an interactive command (like /resume)
-    if kind == "delegated" and is_interactive_command(command_name):
-        return ExecuteCommandResponse(
-            success=True,
-            message=f"Command /{command_name} requires interactive terminal",
-            is_interactive=True
-        )
-
-    # Check if it's a REST API command (like /rewind)
-    if is_rest_api_command(command_name):
-        info = get_rest_api_command_info(command_name)
-        api_endpoint = info.get("api_endpoint", "").replace("{session_id}", request.session_id)
-        return ExecuteCommandResponse(
-            success=True,
-            message=f"Command /{command_name} uses REST API - use {api_endpoint}",
-            is_interactive=False
-        )
-
-    cmd = await run_sync(
-        get_command_by_name, working_dir, command_name,
-        provider_kind=kind, setting_sources=sources,
-    )
-    if not cmd:
-        raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
-
-    # Check if arguments are required but not provided
-    if cmd.argument_hint and not arguments:
-        return ExecuteCommandResponse(
-            success=False,
-            message=f"Command requires arguments: {cmd.argument_hint}",
-            expanded_prompt=None
-        )
-
-    # Expand the prompt
-    expanded_prompt = expand_command_prompt(cmd, arguments)
-
-    return ExecuteCommandResponse(
-        success=True,
-        message="Command expanded successfully",
-        expanded_prompt=expanded_prompt,
-        is_interactive=False
-    )
-
-
-@router.post("/sync-after-rewind")
-async def sync_after_rewind(
-    session_id: str = Query(..., description="Session ID"),
-    checkpoint_message: str = Query(..., description="The user message text at the checkpoint"),
-    restore_option: int = Query(..., description="Restore option (1-4)"),
-    http_request: Request = None,
-):
-    """
-    Sync our chat database after a rewind operation completes.
-
-    This is called by the frontend after the user completes a /rewind
-    in the CLI terminal. It deletes messages after the selected checkpoint
-    to keep our chat in sync with Claude's context.
-
-    Options:
-    1 = Restore code and conversation - delete messages after checkpoint
-    2 = Restore conversation - delete messages after checkpoint
-    3 = Restore code - don't delete messages (code-only revert)
-    4 = Never mind - don't delete anything
-    """
-    if restore_option not in [1, 2, 3, 4]:
-        raise HTTPException(status_code=400, detail="Invalid restore option")
-
-    # Option 3 and 4 don't require chat sync
-    if restore_option in [3, 4]:
-        return {
-            "success": True,
-            "message": "No chat sync needed for this option",
-            "deleted_count": 0
-        }
-
-    def _sync():
-        """Load the transcript, locate the checkpoint and delete past it.
-
-        READ-DECIDE-WRITE, kept atomic in ONE hop: the message list read, the
-        checkpoint search over that exact list, and the N deletes derived from
-        its indices are a single logical operation. Splitting them across thread
-        hops would let a concurrent write land between the read and the deletes,
-        so the row ids computed from the stale snapshot would delete the wrong
-        tail — a race that does not exist today. It also collapses what was
-        2 + N blocking calls into one hop.
-
-        Returns the response body, or None when the checkpoint is not found.
-        """
-        # Get session
-        session = database.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
-        # Get all messages for this session
-        messages = database.get_session_messages(session_id)
-
-        # Find the checkpoint message (user message matching the checkpoint text)
-        checkpoint_index = -1
-        for i, msg in enumerate(messages):
-            if msg["role"] == "user" and checkpoint_message in msg["content"]:
-                checkpoint_index = i
-                break
-
-        if checkpoint_index == -1:
-            # Try partial match
-            for i, msg in enumerate(messages):
-                if msg["role"] == "user" and (
-                    msg["content"].startswith(checkpoint_message[:50]) or
-                    checkpoint_message.startswith(msg["content"][:50])
-                ):
-                    checkpoint_index = i
-                    break
-
-        if checkpoint_index == -1:
-            logger.warning(f"Could not find checkpoint message: {checkpoint_message[:50]}...")
-            return {
-                "success": False,
-                "message": "Could not find checkpoint message in chat history",
-                "deleted_count": 0
-            }
-
-        # Delete all messages after the checkpoint
-        messages_to_delete = messages[checkpoint_index + 1:]
-        deleted_count = 0
-
-        for msg in messages_to_delete:
-            try:
-                database.delete_session_message(session_id, msg["id"])
-                deleted_count += 1
-            except Exception as e:
-                logger.error(f"Failed to delete message {msg['id']}: {e}")
-
-        logger.debug(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
-
-        return {
-            "success": True,
-            "message": f"Deleted {deleted_count} messages after checkpoint",
-            "deleted_count": deleted_count,
-            "checkpoint_index": checkpoint_index
-        }
-
-    return await run_sync(_sync)
-
-
 # =============================================================================
 # Rewind API V2 - Direct JSONL manipulation (bulletproof)
 # =============================================================================
@@ -434,7 +231,7 @@ class RewindRequestV2(BaseModel):
     """V2 Rewind request using message UUID instead of index"""
     target_uuid: str = ""  # UUID of the message to rewind to ("" when using target_content)
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
-    restore_files: bool = False  # Restore files to checkpoint state (requires file checkpointing enabled)
+    restore_files: bool = False  # Not supported: reported as an error; the chat rewind still runs
     include_response: bool = True  # Keep Claude's response to target message
     target_role: str = "user"  # Role of target message ("user" or "assistant")
     # v2 event-log affordance: a live v2 message rendered from the event log may
@@ -478,58 +275,6 @@ def _get_checkpoints(sdk_session_id: str, working_dir: str):
     if is_fluid_session(sdk_session_id):
         return get_fluid_checkpoints(sdk_session_id)
     return jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
-
-
-async def rewind_files_via_sdk(
-    sdk_session_id: str,
-    target_uuid: str,
-    working_dir: str
-) -> tuple[bool, Optional[str]]:
-    """
-    Rewind files to a checkpoint using the Claude SDK.
-
-    This creates a temporary SDK client, resumes the session with an empty prompt,
-    and calls rewind_files() within the response loop per the SDK's documented pattern.
-
-    IMPORTANT: This requires that the session was originally created with
-    enable_file_checkpointing=True in ClaudeAgentOptions. If file checkpointing
-    was not enabled when the session started, this operation will fail.
-
-    Args:
-        sdk_session_id: The SDK session ID to resume
-        target_uuid: UUID of the user message to rewind files to
-        working_dir: Working directory for the project
-
-    Returns:
-        Tuple of (success, error_message)
-    """
-    try:
-        # Create options for file rewind - must include enable_file_checkpointing
-        # even when resuming to ensure SDK knows about the checkpointing state
-        options = ClaudeAgentOptions(
-            resume=sdk_session_id,
-            cwd=working_dir,
-            enable_file_checkpointing=True,  # Required for rewind_files() operation
-        )
-
-        logger.debug(f"Rewinding files for session {sdk_session_id} to UUID {target_uuid}")
-
-        # Per SDK docs: resume the session with an empty prompt, then call
-        # rewind_files() inside the receive_response() loop. The CLI subprocess
-        # needs an active query/response cycle for control requests to work.
-        async with ClaudeSDKClient(options) as client:
-            await client.query("")  # Empty prompt opens the connection
-            async for message in client.receive_response():
-                await client.rewind_files(target_uuid)
-                break
-
-        logger.debug(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
-        return True, None
-
-    except Exception as e:
-        error_msg = f"File rewind failed: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return False, error_msg
 
 
 @router.get("/rewind/checkpoints/{session_id}")
@@ -653,7 +398,7 @@ def _is_prompt_event(row: dict) -> bool:
     computed against the SAME population on both sides.
 
     Task-notification wake prompts (synthetic user rows containing a
-    ``<task-notification>`` block) are likewise excluded: since #658 the UI
+    ``<task-notification>`` block) are likewise excluded: the UI
     renders them as system Task cards, not user bubbles, so they must never
     resolve as rewind checkpoints. Reuses ``jsonl_parser._is_task_notification``
     — the shared ``<task-notification>`` substring convention used across
@@ -803,13 +548,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     How it works:
     1. Truncates the JSONL file at the target message UUID
-    2. Optionally rewinds files via SDK (if enable_file_checkpointing was enabled)
+    2. Refuses file restore (file checkpoints are not supported)
     3. Syncs our local database
-    4. Next SDK resume will use truncated context
+    4. The next resume uses the truncated context
 
     Options:
     - restore_chat: Truncate JSONL (rewind conversation context)
-    - restore_files: Restore files to checkpoint state (requires file checkpointing)
+    - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
     # Authorize and route before inspecting local provider state or resolving a
@@ -924,21 +669,18 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     files_rewound = False
     messages_removed = 0
     errors = []
-    # Set by the fluid branch below (ruling R5): the outcome of re-seeding the
+    # Set by the fluid branch below: the outcome of re-seeding the
     # delegated CLI from fluid's post-rewind context. None = never attempted.
     reseed_result = None
 
     # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
-    # touch the transcript. A pooled ``ClaudeSDKClient`` keeps the JSONL file
-    # open and appends to it; a concurrent SDK resume (``rewind_files_via_sdk``)
-    # opens the *same* transcript too. If we truncate/rewrite the file underneath
+    # touch the transcript. A pooled adapter's CLI subprocess keeps the JSONL
+    # file open and appends to it. If we truncate/rewrite the file underneath
     # a live process, its next write lands past the new (shorter) EOF — leaving a
     # gap of NUL bytes — or flushes a stale buffer, producing duplicate/partial
-    # lines. That corrupts the JSONL, breaks the next resume, and (because the
-    # CLI runs with ``--session-mirror``) propagates the garbage into the
-    # Postgres session store the UI reads. Removing the pool entry first
-    # guarantees the transcript is quiescent; the next turn resumes a fresh
-    # client from the truncated file. Best-effort: an eviction hiccup must not
+    # lines. That corrupts the JSONL and breaks the next resume. Removing the
+    # pool entry first guarantees the transcript is quiescent; the next turn
+    # resumes a fresh client from the truncated file. Best-effort: an eviction hiccup must not
     # abort a rewind the user explicitly requested.
     if request.restore_chat or request.restore_files:
         try:
@@ -955,28 +697,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 exc_info=True,
             )
 
-    # IMPORTANT: File rewind must happen BEFORE chat rewind.
-    # Chat rewind truncates the JSONL file, which can remove the target message UUID.
-    # The SDK needs that UUID present in the JSONL to find the file checkpoint.
-    if request.restore_files and fluid_session:
-        # File checkpoints are an SDK feature keyed to a CLI transcript uuid;
-        # ``rewind_files_via_sdk`` would resume the SDK on a fluid ``ses_...``
-        # id it cannot find. Refuse explicitly instead of surfacing a confusing
-        # SDK error — the chat rewind below still runs (partial success).
+    # File restore is not supported. It relied on the Agent SDK resuming the
+    # session to replay file checkpoints, and nothing drives the CLI through the
+    # SDK any more. Refuse for every session so the chat rewind below still runs
+    # (partial success) and the user gets a clear reason.
+    if request.restore_files:
         errors.append(
-            "File restore is not available for fluid-harness sessions "
-            "(no SDK file checkpoints)"
+            "File restore is not available (file checkpoints are not supported)"
         )
-    elif request.restore_files:
-        file_success, file_error = await rewind_files_via_sdk(
-            sdk_session_id=sdk_session_id,
-            target_uuid=request.target_uuid,
-            working_dir=working_dir
-        )
-        if file_success:
-            files_rewound = True
-        else:
-            errors.append(file_error or "File rewind failed")
 
     # Chat rewind, fluid (flag-on) sessions. The transcript is fluid's node tree,
     # so the rewind is fluid's NATIVE one: move ``fluid_sessions.head_node_id``
@@ -1057,14 +785,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                     f"Fluid rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}"
                 )
-            # Ruling R5: fluid owns the context, so the DELEGATED (claude CLI)
+            # Fluid owns the context, so the DELEGATED (claude CLI)
             # engine must not be left resuming its own pre-rewind history.
             # Materialize the post-rewind path as a CLI session file under a
             # fresh uuid and store it as the session's --resume handle; the
             # adapter's _resolve_cli_session_id picks it up on the next turn
             # with no further plumbing. A no-op for native-engine sessions
             # (nothing stored to re-seed). Best-effort: a failure downgrades to
-            # the #815 divergence warning below, it never fails the rewind.
+            # the divergence warning below, it never fails the rewind.
             reseed_result = await asyncio.to_thread(
                 reseed_delegated_cli_session, sdk_session_id, working_dir
             )
@@ -1279,7 +1007,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Chat rewind is the primary operation - if it succeeds, the operation is successful
     # File rewind failure is a partial success, not a total failure
     chat_success = not request.restore_chat or chat_rewound
-    file_success = not request.restore_files or files_rewound
 
     # Success if chat rewind worked (or wasn't requested)
     success = chat_success
@@ -1295,10 +1022,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Honesty guard for fluid sessions running the DELEGATED (claude CLI) engine.
     # The CLI keeps its OWN conversation history and fluid cannot truncate it
     # (``DelegatedLoop.caps`` declares rewind=False; ``--resume`` is its only
-    # history control), so before ruling R5 every fluid rewind carried a warning
-    # that the model might still recall the removed turns.
+    # history control), so without the re-seed above the model could still
+    # recall the removed turns.
     #
-    # The re-seed above now removes that divergence at the source: the session's
+    # The re-seed removes that divergence at the source: the session's
     # ``--resume`` handle points at a freshly materialized transcript that ends
     # at the checkpoint (or is dropped entirely when the rewind emptied the
     # conversation), and a native-engine session never had CLI history to begin
@@ -1355,7 +1082,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     # Broadcast rewind event to all connected devices for this session
     if chat_rewound and messages_removed > 0:
-        asyncio.create_task(
+        spawn_detached(
             sync_engine.broadcast_session_rewound(
                 session_id=session_id,
                 target_uuid=request.target_uuid,
@@ -1466,33 +1193,3 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
         restore_option=request.restore_option,
         error=v2_response.error
     )
-
-
-@router.get("/rewind/status")
-async def get_rewind_status():
-    """
-    Get current rewind status.
-
-    V2: No longer uses pending rewind configuration.
-    Returns info about rewind capability.
-    """
-    return {
-        "version": "v2",
-        "method": "direct_jsonl",
-        "description": "Rewind via direct JSONL truncation - no PTY/CLI bridge needed",
-        "has_pending": False,
-        "pending_rewind": None
-    }
-
-
-@router.post("/rewind/clear")
-async def clear_pending_rewind():
-    """
-    Clear any pending rewind configuration.
-
-    V2: No-op since we no longer use pending rewind config.
-    """
-    return {
-        "success": True,
-        "message": "V2 rewind doesn't use pending configuration"
-    }

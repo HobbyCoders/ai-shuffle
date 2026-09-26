@@ -1,4 +1,3 @@
-import hashlib
 import json
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock

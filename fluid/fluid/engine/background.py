@@ -49,6 +49,24 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     host worker itself.
     """
 
+    async def _seed_bus_seq(self, sid: str) -> None:
+        """Continue event numbering after the rows already persisted.
+
+        A fresh bus counts from 1, so a resumed session would re-issue seqs
+        the events file already holds and ``events_since`` would skip the
+        resumed run's first events. A store may offer ``last_event_seq``;
+        otherwise the maximum is taken from a full ``events_since`` read.
+        """
+        last_event_seq = getattr(self.store, "last_event_seq", None)
+        # Failure must abort resume: starting at zero would silently collide
+        # with durable events in stores that deduplicate by (session_id, seq).
+        if callable(last_event_seq):
+            last = int(await last_event_seq(sid))
+        else:
+            events = await self.store.events_since(sid, 0)
+            last = max((e.seq for e in events), default=0)
+        self.bus.seed(sid, last)
+
     def _init_background_lifecycle(self) -> None:
         self._init_questions()
         self._background_pending: dict[str, BackgroundTaskReceipt] = {}
@@ -128,7 +146,12 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
             for op in await recover_host(tuple(self._background_pending)):
-                if op.task_id in self._background_pending:
+                # A non-terminal status would be recorded as "terminal" here
+                # but replay as still pending after the next restart.
+                if (
+                    op.task_id in self._background_pending
+                    and op.status in _TERMINAL_TASK_KINDS
+                ):
                     await self._finalize_background_task_unlocked(op)
 
     def _park_pending_ids(self) -> tuple[str, ...]:
@@ -137,8 +160,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         A ``serves`` receipt (a dev server, a tunnel — see
         ``BackgroundTaskReceipt.serves``) is tracked and surfaced like any
         other background task, but it is not work whose result the session
-        wants: its only "completion" is its own death. Counting it parked the
-        session on every turn that had a server running, so it is excluded
+        wants: its only "completion" is its own death. Counting it would park
+        the session on every turn that had a server running, so it is excluded
         here — the one place park accounting is decided. A turn whose only
         live tasks are serving ones therefore parks on nothing and emits no
         ``SessionParked`` at all.
@@ -168,8 +191,6 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     description=receipt.description,
                     worker_session_id=receipt.worker_session_id,
                     # A task that has only just started owes nobody a wake yet.
-                    # The default wake=True here was the dataclass default, not
-                    # a claim about anything.
                     wake_disposition=WAKE_NOT_APPLICABLE,
                     serves=receipt.serves,
                 ))
@@ -393,12 +414,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     ) -> str:
         """The synthetic user turn a completed background worker wakes into.
 
-        A *synchronous* Task hands the model the worker's report directly. A
-        background one used to hand it whatever summary the host chose to
-        include, with no way back to the rest — so a report that arrived elided
-        cost two HistoryExpand round-trips to recover text that had never been
-        in history. When the host names a report file, this carries the same
-        contract the sync path does: a head of the report plus the handle that
+        When the host names a report file, this carries the same contract the
+        synchronous Task path does: a head of the report plus the handle that
         opens the whole of it.
         """
         sections = [

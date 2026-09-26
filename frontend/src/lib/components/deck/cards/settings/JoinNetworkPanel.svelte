@@ -66,6 +66,7 @@
 			<button type="button" class="btn sm" onclick={cancel} disabled={busy}><X size={13} /> Cancel</button>
 		</div>
 	{:else}
+		<p>Invite codes are for a worker on your home network or a VPN such as Tailscale; workers signed in to the same Shuffle account find each other and always talk over the encrypted tunnel.</p>
 		{#if failed && enrollment}
 			<div class="fail" role="alert">
 				<ShieldAlert size={14} />

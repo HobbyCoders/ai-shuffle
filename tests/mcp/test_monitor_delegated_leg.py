@@ -13,32 +13,29 @@ MCP copy had neither. Two audited consequences:
 """
 
 import asyncio
-import json
 from unittest.mock import patch
 
 import pytest
 
+from tests.mcp.tool_helpers import tool_result_json
+
 
 def _builtin_tools(session_id="session-1", cwd=None):
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     from app.mcp import builtin_tools
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         builtin_tools.create_builtin_tools_server(session_id=session_id, cwd=cwd)
 
     return {tool.name: tool for tool in captured["tools"]}
-
-
-def _body(result):
-    return json.loads(result["content"][0]["text"])
 
 
 class _FakeTask:
@@ -135,7 +132,7 @@ def test_a_command_that_finishes_in_the_wait_settles_inline(mock_db, fake_shell)
     fake_shell.lines = ["4 passed in 5.91s"]
     monitor = _builtin_tools()["Monitor"]
 
-    body = _body(asyncio.run(monitor.handler(
+    body = tool_result_json(asyncio.run(monitor.handler(
         {"command": "pytest -q", "wait_seconds": 30}
     )))
 
@@ -153,7 +150,7 @@ def test_an_inline_failure_is_reported_as_one(mock_db, fake_shell):
     fake_shell.lines = ["FAILED tests/test_a.py::test_b"]
     monitor = _builtin_tools()["Monitor"]
 
-    body = _body(asyncio.run(monitor.handler(
+    body = tool_result_json(asyncio.run(monitor.handler(
         {"command": "pytest -q", "wait_seconds": 30}
     )))
 
@@ -174,7 +171,7 @@ def test_a_command_still_running_after_the_wait_parks_as_before(
 
     monitor = _builtin_tools()["Monitor"]
 
-    body = _body(asyncio.run(monitor.handler(
+    body = tool_result_json(asyncio.run(monitor.handler(
         {"command": "npm run build", "wait_seconds": 1}
     )))
 
@@ -190,7 +187,7 @@ def test_no_wait_means_the_old_behaviour_exactly(mock_db, fake_shell):
 
     monitor = _builtin_tools()["Monitor"]
 
-    body = _body(asyncio.run(monitor.handler({"command": "npm run build"})))
+    body = tool_result_json(asyncio.run(monitor.handler({"command": "npm run build"})))
 
     assert body["message"].startswith(monitor_receipt_text(fake_shell.task_id))
     assert "time budget" in body["message"]

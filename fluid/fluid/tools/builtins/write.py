@@ -82,10 +82,10 @@ def _blocking_file(path: Path) -> Path | None:
 def _write_failure(path: Path, exc: OSError) -> str:
     """Translate a raw OSError into something a model can act on.
 
-    The audited case: a scratch file written under a git worktree's ``.git``
-    failed with a bare ``[WinError 183] Cannot create a file when that file
-    already exists`` — nonsense unless you know that in a worktree (and a
-    submodule) ``.git`` is a FILE holding a ``gitdir:`` pointer, so
+    The motivating case: a file written under a git worktree's ``.git`` fails
+    with a bare ``[WinError 183] Cannot create a file when that file already
+    exists`` — nonsense unless you know that in a worktree (and a submodule)
+    ``.git`` is a FILE holding a ``gitdir:`` pointer, so
     ``mkdir(parents=True)`` hits a file where it wants a directory.
     """
     detail = exc.strerror or str(exc)

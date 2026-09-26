@@ -918,6 +918,52 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('100% left');
+		expect(container.textContent).not.toContain('resets in now');
+		expect(container.querySelector('.popover-row .row-reset-inline')?.textContent?.trim()).toBe(
+			'reset · awaiting next report'
+		);
+	});
+
+	it('says when a stale Claude reading was last updated', async () => {
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: Date.now() - 2 * 86_400_000,
+				windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] }],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
+	});
+
+	it('keeps the as-of line when a live event refreshes only one window', async () => {
+		const twoDaysAgo = Date.now() - 2 * 86_400_000;
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: twoDaysAgo,
+				windows: [
+					{ type: 'five_hour', utilization: 42, resets_at: future(), observed_at: twoDaysAgo },
+					{ type: 'seven_day', utilization: 60, resets_at: future(), observed_at: twoDaysAgo },
+				] }],
+		});
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.5, resets_at: future(), instance_id: 'self' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		// The weekly window is still two days old.
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
+	});
+
+	it('keeps a stale provider reading on screen with when it can next refresh', async () => {
+		const fetched = Date.now() - 10 * 60_000;
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'or', provider_type: 'openrouter', provider_name: 'Router', status: 'stale',
+				last_error_kind: 'unavailable', credits: { usage: 2, limit: 10 }, fetched_at: fetched,
+				cooldown_until: Date.now() + 125_000 },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-as-of')?.textContent).toMatch(
+			/^Updated 10m ago · next check in 2m \d+s$/
+		);
 	});
 
 	it('lists all windows with humanised labels on open', async () => {
@@ -954,14 +1000,12 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
 				{
 					instance_id: 'worker',
 					device_name: 'Worker',
-					account_email: 'b@example.com',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
 				},
@@ -991,8 +1035,6 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					device_name: 'Studio',
-					account_email: 'a@example.com',
-					account_name: 'Personal',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
@@ -1042,53 +1084,6 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('50%');
 	});
 
-	it('subtexts the Claude header with the resolved install snapshot plan', async () => {
-		rateLimit.applySnapshot({
-			available: true,
-			windows: [],
-			self_instance_id: 'primary',
-			snapshots: [
-				{
-					instance_id: 'primary',
-					device_name: 'Studio',
-					plan_type: 'max',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
-				},
-			],
-		});
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		// The plan WINS over the device-name fallback — it is the more useful
-		// disambiguator, and it is what the model dropdown shows too.
-		expect(container.querySelector('.section-account')?.textContent).toBe('max');
-	});
-
-	it("prefers the resolved install's snapshot plan over the local registry's", async () => {
-		// The snapshot is per-install (it can describe a remote worker on a
-		// different account); the registry block only ever describes self. When
-		// both carry a plan, the snapshot wins.
-		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
-		rateLimit.applySnapshot({
-			available: true,
-			windows: [],
-			self_instance_id: 'primary',
-			snapshots: [
-				{
-					instance_id: 'primary',
-					device_name: 'Studio',
-					plan_type: 'max',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
-				},
-			],
-		});
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.querySelector('.section-account')?.textContent).toBe('max');
-	});
-
 	it('subtexts the self Claude header "API" when the registry reports API-key auth', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		rateLimit.applySnapshot({
@@ -1111,7 +1106,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.section-account')?.textContent).toBe('API');
 	});
 
-	it("subtexts the self Claude header with the registry's plan when no snapshot plan exists", async () => {
+	it("subtexts the self Claude header with the plan the CLI reports", async () => {
 		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: 'pro' };
 		rateLimit.applySnapshot({
 			available: true,
@@ -1866,18 +1861,30 @@ describe('ContextUsageBar — usage source details', () => {
 	it('keeps only the Claude dashboard link below subscription usage', async () => {
 		rateLimit.applySnapshot({
 			windows: [{ type: 'five_hour', utilization: 80, resets_at: future() }],
-			available: true, fetched_at: 100, attempted_at: 200, last_error_kind: 'billing_access_denied',
-			claude_source: { ...grokSource, id: 'claude_oauth_usage', label: 'Claude subscription usage endpoint',
-				scope_label: "Active Claude account's plan usage windows; not API credit",
+			available: true, fetched_at: 100, attempted_at: null, last_error_kind: null,
+			claude_source: { ...grokSource, id: 'claude_rate_limit_events', label: 'Claude Code rate-limit events',
+				scope_label: 'Single plan window refreshed from the running session', collection: 'passive',
+				support: 'response_metadata', support_label: 'Metadata on inference responses',
 				dashboard_url: 'https://claude.ai/settings/usage', unavailable: [] },
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-source')?.textContent?.trim())
-			.toBe('Compare on the provider dashboard');
-		expect(container.textContent).not.toMatch(/Source:|Unofficial|Last attempt:|Reports:|Last successful update:/);
-		expect(screen.getByRole('link', { name: 'Compare on the provider dashboard' }).getAttribute('href'))
+		expect(container.textContent).not.toMatch(/Source:|Reports:|Last successful update:/);
+		expect(container.textContent).not.toContain('Unofficial');
+		expect(container.textContent).not.toContain('Last attempt');
+		expect(screen.getByRole('link', { name: 'See all usage on claude.ai' }).getAttribute('href'))
 			.toBe('https://claude.ai/settings/usage');
-		expect(container.textContent).not.toContain('Not reported by this source');
+		// One link to the usage page, not a second "compare" link for Claude.
+		expect(screen.queryByRole('link', { name: 'Compare on the provider dashboard' })).toBeNull();
+	});
+
+	it('links the claude.ai usage page even before the CLI has reported usage', async () => {
+		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: null };
+		mocks.claudeAuthenticated = true;
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('No usage data yet');
+		expect(screen.getByRole('link', { name: 'See all usage on claude.ai' }).getAttribute('href'))
+			.toBe('https://claude.ai/settings/usage');
 	});
 });

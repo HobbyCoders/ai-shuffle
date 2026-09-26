@@ -58,11 +58,9 @@ DEFAULT_ALLOWLIST = frozenset({
 # ─── names that will never be under ``tools`` ────────────────────────────────
 
 # The catalog tools. They are TOP-LEVEL tool calls, siblings of run_python, so
-# nothing under ``tools`` will ever answer to them. Reaching for one from
-# inside a cell was the most expensive small mistake in the audited code-mode
-# sessions: seven of nine wrote ``from tools.read_tool_docs import
-# read_tool_docs`` at the top of a batched cell and lost the whole cell to a
-# bare ModuleNotFoundError with nothing in it to correct from.
+# nothing under ``tools`` will ever answer to them. Importing one inside a
+# cell (``from tools.read_tool_docs import read_tool_docs``) gets an error that
+# says so, rather than a bare ModuleNotFoundError with nothing to correct from.
 # ``save_skill``/``delete_skill`` are deliberately absent: those ARE projected
 # into the kernel, so ``from tools import save_skill`` is the right spelling.
 TOP_LEVEL_TOOL_NAMES = frozenset({
@@ -448,8 +446,8 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             # A plain ImportError, deliberately NOT ModuleNotFoundError:
             # ``from tools import read_tool_docs`` swallows a
             # ModuleNotFoundError raised for the submodule and then reports its
-            # own generic "cannot import name", which is what left seven
-            # audited cells with nothing to correct from. A plain ImportError
+            # own generic "cannot import name", with nothing to correct from.
+            # A plain ImportError
             # propagates, so the correction reaches the model whichever
             # spelling it used.
             if leaf in TOP_LEVEL_TOOL_NAMES or leaf in CAPABILITY_TOOL_REASONS:

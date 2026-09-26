@@ -8,18 +8,18 @@ order: 7
 
 ## Overview
 
-The Microsoft Teams connector integrates your AI Shuffle agent with Microsoft Teams, the enterprise collaboration platform used by millions of organizations worldwide. Through the Azure Bot Framework, your agent can send rich-text messages with buttons and file attachments to Teams channels and one-on-one chats -- all within the Teams interface your users already know.
+The Microsoft Teams connector registers an AI Shuffle bot with Microsoft Teams, the enterprise collaboration platform used by millions of organizations worldwide, through the Azure Bot Framework.
 
-Setting up the Teams connector involves registering an application in Azure Active Directory (Azure AD), creating a Bot Framework registration, and configuring the bot for the Teams channel. The connector authenticates with the Bot Framework REST API using the OAuth2 client-credentials flow (`app_id` + `app_password`) and sends proactive messages back to Teams. This connector supports both multi-tenant deployments (accessible to any organization) and single-tenant deployments (restricted to a specific Azure AD tenant).
+Setting up the Teams connector involves registering an application in Azure Active Directory (Azure AD), creating a Bot Framework registration, and configuring the bot for the Teams channel. The connector authenticates with the Bot Framework REST API using the OAuth2 client-credentials flow (`app_id` + `app_password`). This connector supports both multi-tenant deployments (accessible to any organization) and single-tenant deployments (restricted to a specific Azure AD tenant).
 
-> **Note:** Inbound message delivery is not yet wired up. The connector includes an activity handler for incoming Bot Framework messages, but AI Shuffle does not currently expose an HTTP route that Teams can post to. As a result, the messaging-endpoint and Teams-channel steps below prepare the bot for future use, but the agent will not yet receive messages sent from Teams. Outbound (proactive) messaging works once the connector is configured.
+> **Note:** The Microsoft Teams connector cannot send or receive messages. AI Shuffle has no route for Teams to deliver messages to, so messages sent from Teams never reach your agent. The connector can only send in a conversation after receiving a message from it, so it cannot send either. You can register the bot and save its credentials, but it does not carry messages.
 
 ## Prerequisites
 
 - A [Microsoft Azure account](https://azure.microsoft.com/) (free tier is sufficient)
 - A Microsoft 365 tenant with Teams enabled (a [developer tenant](https://developer.microsoft.com/en-us/microsoft-365/dev-program) is available for free)
 - Admin access to the Azure portal for app registration (or have an admin perform the registration)
-- AI Shuffle backend running with a **publicly reachable HTTPS URL** (required for Bot Framework webhook delivery)
+- An HTTPS URL for the bot's messaging endpoint (Azure requires one to register the bot)
 - A verified domain or tunneling service (e.g., ngrok) for development
 
 ## Setup Guide
@@ -75,7 +75,7 @@ Setting up the Teams connector involves registering an application in Azure Acti
    ```
    https://your-domain.com/api/v1/connectors
    ```
-   > **Note:** AI Shuffle does not yet expose a dedicated inbound route for Teams activities, so messages sent from Teams will not be delivered to the agent. This step is included to complete the bot registration; outbound messaging from the agent works regardless.
+   > **Note:** AI Shuffle has no route for Teams activities, so messages sent from Teams are not delivered to your agent. This step only completes the bot registration.
 4. Click **Apply**.
 
 ### Step 5: Enable the Teams Channel
@@ -136,13 +136,14 @@ Setting up the Teams connector involves registering an application in Azure Acti
 
 ### Step 7: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **Microsoft Teams**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Microsoft Teams**.
+2. Click **Install Microsoft Teams** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
-   - **App ID**: The Application (client) ID from Step 1
-   - **App Password**: The client secret from Step 2
+   - **Application (Client) ID**: The Application (client) ID from Step 1
+   - **Client Secret**: The client secret from Step 2
    - **Tenant ID** (optional): The Directory (tenant) ID, required for single-tenant deployments
-4. Click **Save** and then **Enable** the connector.
+   - **Allowed User IDs**: Azure AD user IDs allowed to use the bot (required to enable)
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
 
 ## Configuration Reference
 
@@ -151,8 +152,7 @@ Setting up the Teams connector involves registering an application in Azure Acti
 | `app_id` | string | Yes | The Application (client) ID from the Azure AD app registration. This identifies the bot to the Bot Framework. |
 | `app_password` | string | Yes | The client secret value from the Azure AD app registration. Used to authenticate the bot with the Bot Framework. Keep this value secure and rotate it before expiration. |
 | `tenant_id` | string | No | The Azure AD Directory (tenant) ID, used when requesting the Bot Framework access token. Set this to your Directory (tenant) ID for single-tenant deployments. If omitted, it defaults to `botframework.com`, which is appropriate for multi-tenant bots. |
-| `webhook_port` | integer | No | Port for the connector's incoming webhook server. Defaults to `3978`. |
-| `allowed_user_ids` | list of strings | No | If set, only messages from these Azure AD user IDs will be processed. Leave empty to accept messages from all users. |
+| `allowed_user_ids` | list of strings | Yes (to enable) | Azure AD user IDs allowed to use the bot. At least one entry is required before the connector can be enabled. |
 
 ## Capabilities
 
@@ -163,30 +163,24 @@ The Microsoft Teams connector supports the following capabilities:
 | Typing indicator | No | The connector does not send a typing indicator while the agent processes a response |
 | Reactions | No | Teams reactions use a different mechanism than standard Bot Framework activities |
 | Rich text | Yes | Supports Adaptive Cards, HTML subset, and Markdown formatting in messages |
-| File upload | Yes | Send files as attachments. File size limits depend on the Teams/SharePoint configuration (default 250 MB). |
+| File upload | No | Only Adaptive Cards are sent |
 | Threads | No | The connector does not maintain threaded replies to specific channel messages |
 | Buttons | Yes | Messages can include interactive buttons via Adaptive Cards |
-| Mentions | Yes | The bot can @mention users in its responses |
+| Mentions | No | |
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a Teams conversation get two MCP tools instead of one tool per feature:
+Teams has 6 actions: send message, send Adaptive Card, update message, delete message, typing indicator, and list conversation members.
 
-- **`msteams_actions`** — discovery. Returns the action catalog (6 actions: send message, send Adaptive Card, update message, delete message, typing indicator, list conversation members), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`msteams_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
-
-Safety rails:
-
-- All actions are proactive Bot Framework calls, so they only work in a conversation the bot has already received an inbound message in (the connector caches the `ConversationReference` from the last inbound activity).
-- The **destructive** action (`delete_message`) posts an in-channel Adaptive Card **Approve/Deny** prompt and only runs after a human clicks Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+Every action only works in a conversation the bot has received a message from. Because Teams messages are never received, every action fails, and your agent does not get these actions in its sessions.
 
 ## Troubleshooting
 
 ### Bot does not respond to messages in Teams
 
-- **Inbound delivery is not yet wired up.** AI Shuffle does not currently expose an HTTP route for incoming Teams activities, so messages sent from Teams will not reach the agent. The connector supports outbound (proactive) messaging only. The checks below apply to the bot registration and outbound authentication.
+- **Teams messages are not received.** AI Shuffle has no route for incoming Teams activities, so messages sent from Teams never reach your agent, and the connector cannot send either. See the note in the Overview. The checks below only apply to the bot registration and its credentials.
 - **Messaging endpoint not configured.** Verify the messaging endpoint URL is set correctly in the Azure Bot Configuration (Step 4). The URL must be publicly reachable over HTTPS.
 - **App ID or password mismatch.** Ensure the `app_id` and `app_password` in the connector configuration exactly match the Azure AD app registration values.
 - **Teams channel not enabled.** Verify that the Microsoft Teams channel is enabled in the Azure Bot Channels settings (Step 5).
@@ -207,19 +201,6 @@ Safety rails:
 
 - Teams has strict requirements for message formatting. If using Adaptive Cards, validate your card JSON against the [Adaptive Card Designer](https://adaptivecards.io/designer/). Ensure all required fields are present and properly formatted.
 - HTML formatting in Teams messages supports only a subset of HTML tags. Unsupported tags are stripped. Stick to basic tags: `<b>`, `<i>`, `<a>`, `<pre>`, `<code>`, and `<br>`.
-
-### Webhook validation fails during setup
-
-- The messaging endpoint must respond to Bot Framework authentication challenges. Ensure:
-  - The URL uses HTTPS with a valid (non-self-signed) SSL certificate.
-  - The AI Shuffle backend is running and the Teams connector is enabled before setting the endpoint URL.
-  - There are no firewall rules blocking incoming requests from Azure IP ranges.
-
-### Bot is slow to respond
-
-- The Bot Framework expects a response within 15 seconds. If the agent takes longer to process, the connector sends a typing indicator and holds the connection. For very long operations:
-  - The connector will send an initial acknowledgment and follow up with the full response.
-  - If the 15-second window is consistently exceeded, consider optimizing agent response times or implementing proactive messaging.
 
 ### Tenant restrictions prevent bot installation
 

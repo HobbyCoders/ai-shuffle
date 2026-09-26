@@ -23,10 +23,7 @@ from app.core.provider.fluid_transcript import (
     fluid_transcript_entries,
     load_fluid_path,
 )
-
-
-def _msg(role, blocks):
-    return {"role": role, "content": blocks, "provider_meta": {}}
+from tests.helpers import fluid_message
 
 
 def _insert_nodes(session_id, nodes):
@@ -105,17 +102,17 @@ CELL_CODE = {"code": "from tools.grep import grep\ngrep('needle')"}
 def _seed_cell(session_id="ses_code", events=None):
     """One code-mode turn: prompt, run_python cell, its result, final text."""
     _insert_nodes(session_id, [
-        ("n1", None, _msg("user", [{"kind": "text", "text": "find the needle"}])),
-        ("n2", "n1", _msg("assistant", [{
+        ("n1", None, fluid_message("user", [{"kind": "text", "text": "find the needle"}])),
+        ("n2", "n1", fluid_message("assistant", [{
             "kind": "tooluseblock", "id": "rp1", "name": "run_python",
             "input": CELL_CODE,
         }])),
-        ("n3", "n2", _msg("user", [{
+        ("n3", "n2", fluid_message("user", [{
             "kind": "toolresultblock", "tool_use_id": "rp1",
             "content": [{"kind": "text", "text": "=> 2 hits"}],
             "is_error": False,
         }])),
-        ("n4", "n3", _msg("assistant", [{"kind": "text", "text": "found it"}])),
+        ("n4", "n3", fluid_message("assistant", [{"kind": "text", "text": "found it"}])),
     ])
     if events is None:
         events = [
@@ -240,20 +237,20 @@ def test_two_cells_in_one_message_keep_their_own_inner_calls(mock_db):
     # Attribution follows the oldest OPEN block, not the last one seen.
     session_id = "ses_two_cells"
     _insert_nodes(session_id, [
-        ("n1", None, _msg("user", [{"kind": "text", "text": "do both"}])),
-        ("n2", "n1", _msg("assistant", [
+        ("n1", None, fluid_message("user", [{"kind": "text", "text": "do both"}])),
+        ("n2", "n1", fluid_message("assistant", [
             {"kind": "tooluseblock", "id": "rp1", "name": "run_python",
              "input": CELL_CODE},
             {"kind": "tooluseblock", "id": "rp2", "name": "run_python",
              "input": {"code": "read()"}},
         ])),
-        ("n3", "n2", _msg("user", [
+        ("n3", "n2", fluid_message("user", [
             {"kind": "toolresultblock", "tool_use_id": "rp1",
              "content": [{"kind": "text", "text": "=> 2 hits"}], "is_error": False},
             {"kind": "toolresultblock", "tool_use_id": "rp2",
              "content": [{"kind": "text", "text": "=> ok"}], "is_error": False},
         ])),
-        ("n4", "n3", _msg("assistant", [{"kind": "text", "text": "done"}])),
+        ("n4", "n3", fluid_message("assistant", [{"kind": "text", "text": "done"}])),
     ])
     _insert_events(session_id, [
         _tool_use("rp1", "run_python", CELL_CODE),
@@ -296,20 +293,20 @@ def test_a_sibling_non_cell_tool_gets_no_inner_calls(mock_db):
     # still be attributed to the cell, and the Read must get no splice at all.
     session_id = "ses_cell_and_read"
     _insert_nodes(session_id, [
-        ("n1", None, _msg("user", [{"kind": "text", "text": "grep and read"}])),
-        ("n2", "n1", _msg("assistant", [
+        ("n1", None, fluid_message("user", [{"kind": "text", "text": "grep and read"}])),
+        ("n2", "n1", fluid_message("assistant", [
             {"kind": "tooluseblock", "id": "rp1", "name": "run_python",
              "input": CELL_CODE},
             {"kind": "tooluseblock", "id": "r1", "name": "Read",
              "input": {"file_path": "/y"}},
         ])),
-        ("n3", "n2", _msg("user", [
+        ("n3", "n2", fluid_message("user", [
             {"kind": "toolresultblock", "tool_use_id": "rp1",
              "content": [{"kind": "text", "text": "=> 2 hits"}], "is_error": False},
             {"kind": "toolresultblock", "tool_use_id": "r1",
              "content": [{"kind": "text", "text": "y body"}], "is_error": False},
         ])),
-        ("n4", "n3", _msg("assistant", [{"kind": "text", "text": "done"}])),
+        ("n4", "n3", fluid_message("assistant", [{"kind": "text", "text": "done"}])),
     ])
     _insert_events(session_id, [
         _tool_use("rp1", "run_python", CELL_CODE),
@@ -336,12 +333,12 @@ def test_a_sibling_non_cell_tool_gets_no_inner_calls(mock_db):
 def test_a_session_without_cells_never_reads_the_event_log(mock_db, monkeypatch):
     session_id = "ses_plain"
     _insert_nodes(session_id, [
-        ("n1", None, _msg("user", [{"kind": "text", "text": "read it"}])),
-        ("n2", "n1", _msg("assistant", [{
+        ("n1", None, fluid_message("user", [{"kind": "text", "text": "read it"}])),
+        ("n2", "n1", fluid_message("assistant", [{
             "kind": "tooluseblock", "id": "t1", "name": "Read",
             "input": {"file_path": "/x"},
         }])),
-        ("n3", "n2", _msg("user", [{
+        ("n3", "n2", fluid_message("user", [{
             "kind": "toolresultblock", "tool_use_id": "t1",
             "content": [{"kind": "text", "text": "file body"}],
             "is_error": False,

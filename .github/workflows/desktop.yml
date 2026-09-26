@@ -2,6 +2,7 @@ name: Desktop CI
 
 # Validate native desktop packaging and the preview installer; ordinary application checks have separate
 # coverage.
+
 on:
   pull_request:
     # Add ci:full when ready to merge. Keeping it applied rechecks every push;
@@ -105,7 +106,7 @@ jobs:
             const client = "worker/" + m.cloudflared.path;
             const digest = require("crypto").createHash("sha256").update(fs.readFileSync(client)).digest("hex");
             if (digest !== m.cloudflared.sha256) throw new Error("cloudflared checksum mismatch");
-            for (const f of ["worker/python/bin/python3", "worker/node/bin/node", "worker/server/app/main.py", "worker/server/app/static/index.html", "worker/server/tools/dist/index.js", "worker/server/browser-mcp/dist/index.js"]) {
+            for (const f of ["worker/python/bin/python3", "worker/node/bin/node", "worker/server/app/main.py", "worker/server/app/static/index.html", "worker/server/tools/dist/worker.js", "worker/server/browser-mcp/dist/index.js"]) {
               if (!fs.existsSync(f)) throw new Error("missing " + f);
             }
             console.log("runtime ok", m.python.version, m.node.version);

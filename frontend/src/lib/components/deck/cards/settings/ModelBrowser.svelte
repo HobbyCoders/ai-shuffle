@@ -17,9 +17,17 @@
 		selectedModels?: Record<string, string>;
 		/** Callback when a model is selected as default */
 		onselect?: (model: CatalogModel, toolType: string) => void;
+		/**
+		 * Tool types a pick can be saved to. When given, a model whose tool type
+		 * is not in it (e.g. the catalog's `generic` fallback for unmapped fal.ai
+		 * categories) is shown greyed out and cannot be picked.
+		 */
+		selectableToolTypes?: readonly string[];
 	}
 
-	let { selectedModels = {}, onselect }: Props = $props();
+	let { selectedModels = {}, onselect, selectableToolTypes }: Props = $props();
+
+	const NO_TOOL_REASON = 'No tool uses this model';
 
 	let models = $state<CatalogModel[]>([]);
 	let categories = $state<CatalogCategory[]>([]);
@@ -117,7 +125,12 @@
 		}
 	}
 
+	function isUnusable(model: CatalogModel): boolean {
+		return !!selectableToolTypes && !(model.tool_type && selectableToolTypes.includes(model.tool_type));
+	}
+
 	function selectModel(model: CatalogModel) {
+		if (isUnusable(model)) return;
 		const toolType = model.tool_type || model.output_type || 'image_generation';
 		onselect?.(model, toolType);
 	}
@@ -148,10 +161,11 @@
 					type="text"
 					class="search-input"
 					placeholder="Search {catalogSize} models..."
+					aria-label="Search models"
 					bind:value={searchQuery}
 				/>
 				{#if searchQuery}
-					<button class="clear-search" onclick={() => searchQuery = ''}>✕</button>
+					<button class="clear-search" onclick={() => searchQuery = ''} aria-label="Clear search">✕</button>
 				{/if}
 			</div>
 			<button class="refresh-btn" onclick={refreshCatalog} disabled={loading} title="Refresh catalog from fal.ai">
@@ -169,6 +183,7 @@
 			<button
 				class="category-chip"
 				class:active={activeCategory === null}
+				aria-pressed={activeCategory === null}
 				onclick={() => activeCategory = null}
 			>
 				All ({catalogSize})
@@ -177,6 +192,7 @@
 				<button
 					class="category-chip"
 					class:active={activeCategory === cat.category}
+					aria-pressed={activeCategory === cat.category}
 					onclick={() => activeCategory = activeCategory === cat.category ? null : cat.category}
 				>
 					{getCategoryLabel(cat.category)} ({cat.count})
@@ -211,17 +227,20 @@
 		</div>
 		<div class="model-grid">
 			{#each filteredModels as model (model.endpoint_id)}
+				{@const unusable = isUnusable(model)}
 				<button
 					class="model-card"
 					class:selected={isSelected(model)}
+					class:unusable
+					aria-disabled={unusable ? 'true' : undefined}
 					onclick={() => selectModel(model)}
-					title={model.endpoint_id}
+					title={unusable ? `${model.endpoint_id} — ${NO_TOOL_REASON}` : model.endpoint_id}
 				>
 					<div class="model-thumb" class:placeholder={!model.thumbnail_url}>
 						{#if model.thumbnail_url}
 							<img
 								src={model.thumbnail_url}
-								alt={model.display_name}
+								alt=""
 								loading="lazy"
 								referrerpolicy="no-referrer"
 								onerror={(e) => {
@@ -246,6 +265,8 @@
 					</div>
 					{#if isSelected(model)}
 						<div class="selected-badge">✓ Default</div>
+					{:else if unusable}
+						<div class="unusable-badge">{NO_TOOL_REASON}</div>
 					{/if}
 				</button>
 			{/each}
@@ -442,6 +463,21 @@
 		box-shadow: 0 0 0 2px var(--primary-20);
 	}
 
+	.model-card.unusable {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.model-card.unusable:hover {
+		border-color: var(--border);
+		box-shadow: none;
+		transform: none;
+	}
+
+	.model-card.unusable:hover .model-thumb img {
+		transform: none;
+	}
+
 	.model-thumb {
 		width: 100%;
 		height: 100px;
@@ -550,6 +586,18 @@
 		padding: 2px 8px;
 		background: var(--primary);
 		color: var(--primary-foreground);
+		font-size: 0.6875rem;
+		font-weight: 600;
+		border-radius: 9999px;
+	}
+
+	.unusable-badge {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		padding: 2px 8px;
+		background: var(--muted);
+		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 600;
 		border-radius: 9999px;

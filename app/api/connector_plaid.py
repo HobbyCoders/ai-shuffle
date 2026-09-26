@@ -99,7 +99,13 @@ async def start(request: Request, token: str = Depends(require_admin)):
         except Exception:
             _pending.pop(flow_id, None)
             raise
-        response = JSONResponse({"flow_id": flow_id, "link_token": result["link_token"]})
+        link_token = result.get("link_token") if isinstance(result, dict) else None
+        if not link_token or not isinstance(link_token, str):
+            # An upstream reply without a token is Plaid's failure, not ours:
+            # free the reserved slot and report a bad gateway.
+            _pending.pop(flow_id, None)
+            raise HTTPException(502, "Plaid did not return a link token. Check the Plaid app settings and try again.")
+        response = JSONResponse({"flow_id": flow_id, "link_token": link_token})
         response.set_cookie("plaid_link_" + flow_id[:16], browser, httponly=True, secure=True,
                             samesite="lax", max_age=TTL, path="/api/v1/connectors/oauth/plaid")
         response.headers["Cache-Control"] = "no-store"

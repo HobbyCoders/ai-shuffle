@@ -1,11 +1,11 @@
 """Provider-scoped model assignments and model-facing subagent discovery.
 
 ``config.provider_models`` is the ONE model binding an agent still carries: the
-default model when another agent dispatches it as a Task subagent. Task may
-choose another model from that provider's curated list. Top-level
-chat sessions stopped reading an agent's model in v79 — they carry their own,
-picked at creation — so the legacy ``config.provider`` / ``config.model`` pair
-survives here only as a fallback for agents configured before that move.
+default model it runs on when another agent dispatches it as a Task subagent.
+Task may choose another model from that provider's curated list. Top-level
+chat sessions do not read an agent's model — they carry their own, picked at
+creation — so the legacy ``config.provider`` / ``config.model`` pair survives
+here only as a fallback for agents configured before that change.
 
 The current caller provider chooses the map **entry**. That entry may name any
 leg — a native Claude alias or a ``prov:<providerId>:<modelId>`` composite —
@@ -92,8 +92,8 @@ def normalized_provider_models(config: Mapping[str, Any]) -> dict[str, str]:
     The legacy fallback is intentionally provider-local. An old native-Claude
     agent becomes available on native Claude, and an old provider-bound agent
     becomes available on that provider. Neither is inferred onto other
-    providers. Agents saved since v79 have no top-level model at all, so for
-    them the stored map is the whole answer.
+    providers. Newer agents have no top-level model at all, so for them the
+    stored map is the whole answer.
     """
     result: dict[str, str] = {}
     raw = config.get("provider_models")
@@ -464,8 +464,8 @@ def build_task_contract(
     # A background-default target is dispatched in the background whatever the
     # call says (task_dispatch._effective_task_mode). When EVERY reachable
     # target is one, ``mode`` is not a choice at all, so it is dropped from the
-    # schema — the round-2 audit found models defeating the default simply
-    # because the key was there to pass. On a mixed roster the key has to stay
+    # schema — models defeat the default simply because the key is there to
+    # pass. On a mixed roster the key has to stay
     # for the write-capable targets; the description then names the agents that
     # ignore it, so an ignored value is documented rather than surprising.
     background_only_ids = [
@@ -498,8 +498,8 @@ def build_task_contract(
             "busy-poll."
         )
 
-    # Documented once, here, because every audited delegating session burned
-    # turns rediscovering it by KeyError.
+    # Documented once, here, because delegating sessions otherwise burn turns
+    # rediscovering it by KeyError.
     sync_shape = (
         "A sync result is JSON with report_head (a bounded prefix), "
         "report_chars (the report's full length), and report_path (the whole "
@@ -637,9 +637,7 @@ def file_subagent_targets(
     return tuple(targets)
 
 
-def parent_subagent_guidance(
-    caller_profile_id: str | None, provider_id: str | None
-) -> str:
+def parent_subagent_guidance() -> str:
     """Compact system-prompt guidance aligned with the dynamic Task schema."""
     # The park doctrine is fluid's canonical fragment (spliced verbatim into
     # Task's and Monitor's own descriptions) so the copies cannot drift.
@@ -660,8 +658,9 @@ def parent_subagent_guidance(
         "yourself. Never invent a subagent ID, model, or provider.\n"
         f"{SWARM_ROUTING}\n"
         "\n"
-        # Background-work guidance applies regardless of which spawning tool produced the task. Do not hide that
-        # rule under a description of a tool that the session may not have.
+        # Kept outside the Task block above so a session with Task disabled
+        # does not read it as advice about a tool it lacks: it governs ALL
+        # background work, whichever tool produced it.
         "# Background work\n"
         "Every completion is push-based, whatever started the work — a Task "
         "subagent, a Monitor command, or a long Bash call the harness moved to "
@@ -676,7 +675,7 @@ def parent_subagent_guidance(
         "A change to rendered UI (anything under frontend/, a .svelte or .css "
         "file, a viewport meta) is verified in the browser at the affected "
         "viewport before you open the PR, not by unit tests alone. The browser "
-        "tools are available through search_tools / ToolSearch — "
-        "browser_navigate, browser_resize for viewport emulation, and "
-        "browser_screenshot."
+        "tools (browser_navigate, browser_resize for viewport emulation, and "
+        "browser_screenshot) may need loading first: use ToolSearch, or "
+        "search_tools in code mode, when they are not in your tool list."
     )

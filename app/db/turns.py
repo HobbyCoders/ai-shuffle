@@ -1,5 +1,5 @@
 """The ``turns`` table — durable per-session turn queue + live-turn state
-machine (v2 core, Phase 2).
+machine (v2 core).
 
 A *turn* is one unit of work for a session: a user prompt, a queued follow-up,
 an unpark wake, a failover retry, an automation intake, and so on. Turns move
@@ -27,7 +27,7 @@ for the same session will trip the unique index, and the loser returns cleanly.
 
 This module is a PURE DB layer. It deliberately does NOT append ``turn.*``
 events to ``session_events`` — the log is the record, but that mirroring is
-wired at the runtime/command layer (Phase 2 A4), not here.
+wired at the runtime/command layer, not here.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from typing import Any, Collection, Dict, List, Optional
 import psycopg2
 
 from app.core.config import settings
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb as _parse_json
 from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
@@ -54,22 +54,8 @@ logger = logging.getLogger(__name__)
 # cleanly (None) either way.
 _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 
-# States considered "live" — a turn actively owning the session's single runner
-# slot. The partial unique index is defined over exactly this set.
-LIVE_STATES = ("running", "interrupting", "draining")
 # Terminal states — settle/park are idempotent no-ops once a turn is here.
 TERMINAL_STATES = ("completed", "aborted", "parked")
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -346,8 +332,8 @@ def interrupt_turn(
     When ``turn_id`` is provided the UPDATE also requires ``id=turn_id`` so a
     stop whose target turn is no longer the running one (it settled and a
     successor took the live slot) matches zero rows and returns ``None`` — a
-    no-op, never touching the successor (GitHub #585). When ``turn_id`` is
-    absent the behavior is byte-identical to the legacy session-scoped stop.
+    no-op, never touching the successor. When ``turn_id`` is absent this is
+    the legacy session-scoped stop.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -514,9 +500,8 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
     Feed for the park watchdog (``startup_reconcile.sweep_stalled_parks``). A
     park is supposed to be brief: background work settles, a wake turn is
     enqueued, the session moves. A park with nothing after it is either a
-    healthy long wait or a lost wake — indistinguishable from outside, which
-    is why an audited session sat parked on a green CI run for nine minutes
-    with nobody noticing. The "no turn since" predicate is what makes it a
+    healthy long wait or a lost wake — indistinguishable from outside, so a
+    lost wake can sit unnoticed. The "no turn since" predicate is what makes it a
     STALL and not merely an old row: any wake, user message or queued turn
     after the park excludes the session.
 
@@ -668,16 +653,13 @@ def session_has_unsettled_turns(session_id: str) -> bool:
     (i.e. ``queued``, ``running``, ``interrupting`` or ``draining``) — the
     busy predicate behind ``turn_manager.wait_session_idle``.
 
-    ONE statement on purpose. The predicate used to be two separate reads
-    ("no live turn" via :func:`get_live_turn`, then "no queued turns" via
-    :func:`get_queued_turns`), each on its own connection/transaction — and a
-    turn moves AGAINST that read order during the queued→running handoff:
-    ``start_turn`` flips the row out of the second-checked set (queued) into
-    the first-checked set (live). A flip that landed between the two reads was
-    invisible to both (live read: still queued → none; queued read: already
-    running → none), so a waiter declared the session idle while its turn was
-    actually running (the automation empty-"completed" run race, 2026-08-28).
-    A single SELECT sees one consistent snapshot, so a turn is always in
+    ONE statement on purpose. Two separate reads ("no live turn" via
+    :func:`get_live_turn`, then "no queued turns" via :func:`get_queued_turns`),
+    each on its own connection/transaction, would race the queued→running
+    handoff: ``start_turn`` flips the row out of the second-checked set (queued)
+    into the first-checked set (live), so a flip landing between the two reads
+    is invisible to both and a waiter declares the session idle while its turn
+    is actually running. A single SELECT sees one consistent snapshot, so a turn is always in
     exactly one of the counted states or terminal — there is no in-between to
     fall through.
     """
@@ -713,8 +695,7 @@ def pop_ready(session_id: str) -> Optional[Dict[str, Any]]:
 
 def list_claimable_sessions(session_ids: Optional[List[str]] = None) -> List[str]:
     """Return the DISTINCT session ids that have at least one ``queued`` turn and
-    NO live run lease — the candidate set for the cross-runner claim loop
-    (V2 Phase 4).
+    NO live run lease — the candidate set for the cross-runner claim loop.
 
     The anti-join treats an ``active`` run with a LAPSED lease as absent: a
     crashed owner's stale row must not block another runner from claiming — the
@@ -761,11 +742,11 @@ def list_claimable_sessions(session_ids: Optional[List[str]] = None) -> List[str
 
 
 def list_interrupting_for_runner(runner_id: str) -> List[Dict[str, Any]]:
-    """Return the ``interrupting`` turns this runner is executing (V2 Phase 4
+    """Return the ``interrupting`` turns this runner is executing (the
     interrupt-observe pass).
 
     ``instance_id`` on a live turn is stamped exclusively by ``start_turn`` with
-    the EXECUTING runner's id (verified Q3-E1), so this filter is exactly "my
+    the EXECUTING runner's id, so this filter is exactly "my
     in-flight turns whose durable interrupt intent was flipped" — including
     flips made by a FOREIGN install's WS handler, which the in-process interrupt
     executor cannot deliver across installs.
@@ -791,7 +772,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     ``skip_turn_ids`` are turns the calling process is still executing. Their
     lease can be dead while the task runs on (it stops itself once the
     heartbeat notices), and requeueing one would let the next claim start it a
-    second time (#1444). They are left live and not returned.
+    second time. They are left live and not returned.
 
     A dead-lease live turn is resolved by its ``source`` and ``state``:
 

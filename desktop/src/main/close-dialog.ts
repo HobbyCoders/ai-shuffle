@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Render inside the app so custom palettes, fonts and light/dark mode carry over. */
-export async function showCloseDialog(parent: BrowserWindow | null, activeCount: number | null, error = false): Promise<boolean> {
+/**
+ * Ask before closing. `error` reports a failed session stop; with
+ * `offerForce` (a repeated failure) it also offers "Quit Anyway", and true
+ * means the user chose it.
+ */
+export async function showCloseDialog(parent: BrowserWindow | null, activeCount: number | null, error = false, offerForce = false): Promise<boolean> {
     const source = await readFile(path.join(app.getAppPath(), 'src/pages/close.js'), 'utf8');
     let target = parent;
     let fallback: BrowserWindow | null = null;
@@ -33,7 +38,7 @@ export async function showCloseDialog(parent: BrowserWindow | null, activeCount:
         // No renderer IPC capability is added. Only this window's explicit
         // affirmative result permits quitting; navigation/crash keeps it open.
         return (await Promise.race([
-            contents.executeJavaScript(`${source}(${JSON.stringify({ activeCount, error })})`, true),
+            contents.executeJavaScript(`${source}(${JSON.stringify({ activeCount, error, offerForce })})`, true),
             unavailable,
         ])) === true;
     } finally {

@@ -146,6 +146,6 @@ can't know (path allowlists, secret scanners, audit logging).
 | --- | --- |
 | `permission.protect_sensitive_files = false` | Drop the default credential-file ask-rules. |
 | `[[permission.rules]]` allow for a path | Override a default rule for that path (user rules come after defaults; last match wins). |
-| `approval_policy = "never_ask"` | Opts out of all prompting, including the default sensitive-file rules. Fences, screening, defanging, and the memory secret guard still apply. |
+| `permission.approval_policy = "never_ask"` | Opts out of all prompting, including the default sensitive-file rules. Fences, screening, defanging, and the memory secret guard still apply. |
 | `tools.disallowed = ["WebFetch", "WebSearch"]` | Remove the web surface entirely. |
 | `identity_file = false` / editing a blocked file | Screening blocks are recoverable by editing the file; nothing is deleted. |

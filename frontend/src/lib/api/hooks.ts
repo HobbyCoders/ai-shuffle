@@ -25,7 +25,7 @@ export const HOOK_EVENT_TYPES = [
 
 export type HookEventType = (typeof HOOK_EVENT_TYPES)[number];
 
-export type HookType = 'bash' | 'webhook' | 'message';
+export type HookType = 'bash' | 'webhook';
 
 export interface Hook {
 	id: string;
@@ -37,7 +37,6 @@ export interface Hook {
 	timeout: number;
 	url: string | null;
 	secret: string | null;
-	message_template: string | null;
 	enabled: boolean;
 	tool_matcher: string | null;
 	created_at: string;
@@ -54,7 +53,6 @@ export interface HookCreate {
 	timeout?: number;
 	url?: string;
 	secret?: string;
-	message_template?: string;
 	enabled?: boolean;
 	tool_matcher?: string;
 }
@@ -67,7 +65,6 @@ export interface HookUpdate {
 	timeout?: number;
 	url?: string | null;
 	secret?: string | null;
-	message_template?: string | null;
 	enabled?: boolean;
 	tool_matcher?: string | null;
 }
@@ -91,13 +88,6 @@ export interface PluginHookInfo {
 // ============================================================================
 // Hook API Functions
 // ============================================================================
-
-/**
- * Get all valid hook event types
- */
-export async function getHookEventTypes(): Promise<string[]> {
-	return api.get<string[]>('/hooks/events');
-}
 
 /**
  * Get all hooks for a project (includes app-level hooks)
@@ -125,13 +115,6 @@ export async function createHook(projectId: string, data: HookCreate): Promise<H
  */
 export async function createAppHook(data: HookCreate): Promise<Hook> {
 	return api.post<Hook>('/hooks/app', data);
-}
-
-/**
- * Get a single hook by ID
- */
-export async function getHook(hookId: string): Promise<Hook> {
-	return api.get<Hook>(`/hooks/${hookId}`);
 }
 
 /**

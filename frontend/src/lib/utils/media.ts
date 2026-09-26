@@ -12,6 +12,7 @@
 
 import { apiUrl } from '$lib/api/runtime';
 import { chatFileUrl } from './chat-files';
+import { escapeHtml } from './escape-html';
 
 export type MediaKind = 'image' | 'video' | 'audio';
 
@@ -62,26 +63,15 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	return null;
 }
 
-/** Escape a string for safe interpolation into an HTML attribute. */
-function escAttr(value: string): string {
-	return String(value ?? '')
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;');
-}
-
-/** Derive a download filename from a URL when none is supplied. */
-function filenameFor(url: string, kind: MediaKind): string {
-	const ext = extOf(url);
-	const fallback = kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3';
-	const base = `generated-${kind}`;
-	// /api/.../by-path?path=.../name.ext  or  /api/.../name.ext
+/**
+ * The file name a media URL points at, or null when it names none:
+ * `/api/.../by-path?path=.../name.ext` or `/api/.../name.ext`.
+ */
+export function filenameFromMediaUrl(url: string): string | null {
 	const m = url.match(/[?&]path=([^&]+)/);
 	if (m) {
 		try {
-			const decoded = decodeURIComponent(m[1]);
-			const name = decoded.split(/[/\\]/).pop();
+			const name = decodeURIComponent(m[1]).split(/[/\\]/).pop();
 			if (name) return name;
 		} catch {
 			/* ignore */
@@ -91,7 +81,13 @@ function filenameFor(url: string, kind: MediaKind): string {
 		const name = url.split(/[?#]/)[0].split('/').pop();
 		if (name && name.includes('.')) return name;
 	}
-	return `${base}.${ext || fallback}`;
+	return null;
+}
+
+/** Derive a download filename from a URL when none is supplied. */
+function filenameFor(url: string, kind: MediaKind): string {
+	const fallback = kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3';
+	return filenameFromMediaUrl(url) ?? `generated-${kind}.${extOf(url) || fallback}`;
 }
 
 const DOWNLOAD_ICON =
@@ -101,8 +97,8 @@ const EXPAND_ICON =
 	'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>';
 
 function overlayButtons(url: string, filename: string): string {
-	const u = escAttr(url);
-	const f = escAttr(filename);
+	const u = escapeHtml(url);
+	const f = escapeHtml(filename);
 	return `<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 transition-opacity">
 			<button type="button" class="media-expand-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors" title="Expand" aria-label="Expand">${EXPAND_ICON}</button>
 			<a href="${u}" download="${f}" class="media-download-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download" aria-label="Download">${DOWNLOAD_ICON}</a>
@@ -115,8 +111,8 @@ function overlayButtons(url: string, filename: string): string {
  */
 export function mediaHtml(kind: MediaKind, rawUrl: string, label = '', filename?: string): string {
 	const url = resolveMediaUrl(rawUrl);
-	const u = escAttr(url);
-	const alt = escAttr(label || `Generated ${kind}`);
+	const u = escapeHtml(url);
+	const alt = escapeHtml(label || `Generated ${kind}`);
 	const name = filename || filenameFor(url, kind);
 
 	if (kind === 'image') {
@@ -136,7 +132,7 @@ export function mediaHtml(kind: MediaKind, rawUrl: string, label = '', filename?
 	}
 
 	// audio — no lightbox; player + a download button beside it
-	const f = escAttr(name);
+	const f = escapeHtml(name);
 	return `<div class="generated-media-container generated-audio my-4 flex items-center gap-2 max-w-md rounded-lg border border-border bg-muted/30 px-3 py-2">
 		<audio src="${u}" controls preload="metadata" class="flex-1 min-w-0" title="${alt}"></audio>
 		<a href="${u}" download="${f}" class="media-download-btn shrink-0 p-1.5 rounded-sm text-muted-foreground hover:text-foreground transition-colors no-underline" title="Download audio" aria-label="Download audio">${DOWNLOAD_ICON}</a>

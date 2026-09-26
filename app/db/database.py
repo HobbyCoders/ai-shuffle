@@ -8,13 +8,14 @@ domain-specific modules in ``app.db.*`` so that existing callers like
 Only schema initialisation and maintenance helpers live here directly.
 """
 
+import hashlib
 import json
 import logging
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
 import psycopg2
 
@@ -24,7 +25,6 @@ from app.core.config import settings
 # Re-exported here so existing ``from app.db.database import get_db`` still works.
 from app.db.base import (  # noqa: F401
     get_connection,
-    _close_connection,
     get_db,
     _validate_identifier,
     WorktreeStatus,
@@ -37,10 +37,6 @@ from app.db.base import (  # noqa: F401
 
 from app.db.compat import (  # noqa: F401
     ph,
-    sql_date,
-    sql_strftime,
-    sql_ilike,
-    sql_current_timestamp,
 )
 
 # Database error type for catch blocks
@@ -169,11 +165,11 @@ def _savepoint(cursor, name: str):
 #     codex_refresh_token, codex_account_id, codex_id_token_expires_at,
 #     codex_last_refresh, needs_reauth. All additive/nullable.
 # 66 (2026-07-18): add sessions.provider_id TEXT — per-session provider
-#     binding (multi-provider phase-2 Chunk E, ruling G2-r). Stamped at session
+#     binding. Stamped at session
 #     creation from the profile's configured provider; every subsequent
 #     turn/spawn resolves the provider from THIS binding, not the live profile
-#     (editing a profile never reroutes an existing session). NULL = native
-#     Claude (gateway bypass, F1) — existing pre-migration sessions stay native.
+#     (editing a profile never reroutes an existing session). NULL = no
+#     provider binding; existing pre-migration sessions stay unbound.
 #     One nullable column only (one account per provider, amendment A1 — no
 #     provider_account_id). Additive/nullable, no index.
 # 67 (2026-07-19): add provider_usage_snapshots table — single row per
@@ -195,7 +191,7 @@ def _savepoint(cursor, name: str):
 #     uuid, NOT the fluid session id). It was previously in-process only, so
 #     after a restart the adapter resumed the CLI with the fluid session id and
 #     every turn died instantly. Additive/nullable, no index.
-# v71: agents unification (ruling A4). ``profiles`` is RENAMED in place to
+# v71: agents unification. ``profiles`` is RENAMED in place to
 #     ``agents`` (all seven FK consumers follow the rename automatically);
 #     ``subagents`` rows are FOLDED into ``agents`` (prompt -> custom
 #     system_prompt, tools -> allowed_tools list, memory -> config.memory,
@@ -212,8 +208,8 @@ def _savepoint(cursor, name: str):
 #     harness adapter's leg decision; lands via the always-run guarded ADD
 #     COLUMN in _run_column_migrations.
 # 74 (2026-08-14): add sessions.mode TEXT — the session's interaction mode,
-#     'chat' (default when NULL — every pre-existing session) or 'voice' (an
-#     OpenAI Realtime voice call, ruling VM4 of docs/VOICE_MODE_PLAN.md).
+#     NULL is the default code mode (every pre-existing session); 'chat' and
+#     'voice' (an OpenAI Realtime voice call) are stored explicitly.
 #     Additive/nullable with no index, same discipline as sessions.provider_id;
 #     lands via the always-run guarded ADD COLUMN in _run_column_migrations.
 # 75 (2026-08-15): add sessions.hidden BOOLEAN — list-visibility flag. TRUE
@@ -290,7 +286,33 @@ def _savepoint(cursor, name: str):
 #     sync_conflicts, sync_peers, network_joins, ...) and nullable
 #     ``owner_device_id`` on sessions / automations / connectors / artifacts,
 #     ``blob_hash`` on note_attachments. All additive.
-SCHEMA_VERSION = 88
+# 89 (2026-09-24): retire the in-app Claude sign-in's storage. AI Shuffle no
+#     longer keeps Claude credentials: drop ``claude_accounts``, delete the
+#     ``claude_active_account:*`` pointers, purge ``claude_accounts`` envelopes
+#     from sync_ops / sync_pending / sync_records / sync_conflicts, and drop
+#     ``usage_snapshots.account_id/account_email/account_name``. When the old
+#     sign-in left rows or pointers, the one-time CLI re-login notice is
+#     recorded first (``_retire_claude_accounts``).
+# 90 (2026-09-25): add usage_log.usage_estimated BOOLEAN DEFAULT FALSE — TRUE
+#     when any token count booked for that turn was estimated by the harness
+#     (chars/4, because the provider reported no usage or the reply was
+#     interrupted). Budgets and caps keep counting the estimated amounts; the
+#     flag only marks them as estimates in the usage panel and per-turn cost
+#     footers. Every pre-existing row reads FALSE. Additive, no index; lands
+#     via the always-run guarded ADD COLUMN in _run_column_migrations.
+#     Also retires message hooks (``hook_type = 'message'``), a type that was
+#     never delivered: their ``project_hooks`` rows are deleted, along with
+#     their sync envelopes, and ``project_hooks.message_template`` is dropped
+#     (``_retire_message_hooks``).
+#     Also retires storage no route reaches any more
+#     (``_retire_webhooks_and_legacy_push``): the standalone outbound
+#     ``webhooks`` table and its sync envelopes (the management API had no
+#     client), ``mobile_devices.unifiedpush_endpoint`` (the Android app has no
+#     UnifiedPush receiver; the FCM token of a row that carried an endpoint is
+#     cleared first, so such a row stays unable to receive push), and the
+#     ``rate_limits`` / ``request_log`` tables the removed rate-limit feature
+#     left behind.
+SCHEMA_VERSION = 90
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -378,7 +400,7 @@ def subagent_row_to_agent_config(row: dict) -> dict:
     """Map an old ``subagents`` row onto an agent config blob (v71 fold shape).
 
     Shared by the in-place v71 migration and the sqlite->postgres import tool.
-    ``prov:`` model composites (inert since ruling D4) are dropped — the agent
+    ``prov:`` model composites (inert) are dropped — the agent
     inherits the session model instead.
     """
     import json as _json
@@ -414,7 +436,7 @@ def subagent_row_to_agent_config(row: dict) -> dict:
 
 
 def _migrate_agent_tool_access(cursor, migrations_applied=None):
-    """v82 (rulings T2 + T5): stamp ``tool_selection_mode`` onto every agent
+    """v82: stamp ``tool_selection_mode`` onto every agent
     config and fold the retired ``ai_tools`` / ``app_config_tools`` switches
     into the tool lists.
 
@@ -668,7 +690,7 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "first_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN first_model TEXT")
             migrations_applied.append("sessions.first_model")
-        # True token accounting (audit P8). `total_tokens_in` holds FRESH input
+        # True token accounting. `total_tokens_in` holds FRESH input
         # only — the provider normalizes usage Anthropic-style, so cache reads are
         # excluded — while the per-turn cache numbers only ever landed in the
         # OVERWRITE snapshot columns (cache_read_tokens / cache_creation_tokens).
@@ -746,7 +768,7 @@ def _run_column_migrations(cursor):
             if backfilled > 0:
                 logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
 
-    # Per-turn cache usage on the usage log (audit P8). Without these a usage row
+    # Per-turn cache usage on the usage log. Without these a usage row
     # records only the fresh input tokens, so replaying the log can never
     # reconstruct what a cache-heavy turn actually sent to the provider.
     if table_exists(cursor, "usage_log"):
@@ -767,6 +789,12 @@ def _run_column_migrations(cursor):
                 "ALTER TABLE usage_log ADD COLUMN cache_creation_tokens BIGINT DEFAULT 0"
             )
             migrations_applied.append("usage_log.cache_creation_tokens")
+        # (v90) usage estimates: turns whose token counts the harness guessed.
+        if not column_exists(cursor, "usage_log", "usage_estimated"):
+            cursor.execute(
+                "ALTER TABLE usage_log ADD COLUMN usage_estimated BOOLEAN DEFAULT FALSE"
+            )
+            migrations_applied.append("usage_log.usage_estimated")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
@@ -794,11 +822,6 @@ def _run_column_migrations(cursor):
             triggers_arr = json.dumps([{"type": t_type, "config": t_config_parsed}])
             cursor.execute("UPDATE automations SET triggers = %s WHERE id = %s", (triggers_arr, auto_id))
         migrations_applied.append("automations.triggers_backfill")
-
-    # Add message_template column to project_hooks (v38)
-    if table_exists(cursor, "project_hooks") and not column_exists(cursor, "project_hooks", "message_template"):
-        cursor.execute("ALTER TABLE project_hooks ADD COLUMN message_template TEXT")
-        migrations_applied.append("project_hooks.message_template")
 
     # Make project_hooks.project_id nullable (v38)
     if table_exists(cursor, "project_hooks") and column_is_not_null(cursor, "project_hooks", "project_id"):
@@ -868,14 +891,10 @@ def _run_column_migrations(cursor):
             "ON session_messages(session_id, jsonl_uuid)"
         )
 
-    # Mobile companion app (UnifiedPush): per-device push endpoint URL so a
-    # self-hosted server can deliver notifications to the user's own push
-    # distributor (e.g. ntfy) without a shared Firebase project. Idempotent
-    # column add for databases created before the column existed.
+    # Mobile companion app: columns added after the table was first created.
+    # (The v88-era ``unifiedpush_endpoint`` column is dropped by
+    # ``_retire_webhooks_and_legacy_push`` below.)
     if table_exists(cursor, "mobile_devices"):
-        if not column_exists(cursor, "mobile_devices", "unifiedpush_endpoint"):
-            cursor.execute("ALTER TABLE mobile_devices ADD COLUMN unifiedpush_endpoint TEXT")
-            migrations_applied.append("mobile_devices.unifiedpush_endpoint")
         for column, definition in (
             ("paired_client_id", "TEXT"),
             ("api_key_expires_at", "TIMESTAMP WITH TIME ZONE"),
@@ -1134,36 +1153,14 @@ def _run_column_migrations(cursor):
         migrations_applied.append("installs")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)")
 
-    # claude_accounts (v52). Multiple Anthropic OAuth accounts + in-app switching.
-    # The account list is shared; the active pointer is per-install and lives in
-    # system_settings (key claude_active_account:{instance_id}), so no is_active
-    # column here. Idempotent so upgrades from any older version land the table
-    # without needing the SCHEMA_VERSION bump to fire the bootstrap path (same
-    # defensive pattern as the SessionStore / error_log / installs blocks above).
-    if not table_exists(cursor, "claude_accounts"):
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS claude_accounts (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT,
-                subscription_type TEXT,
-                credentials TEXT,
-                credential_fingerprint TEXT,
-                expires_at BIGINT,
-                has_refresh_token BOOLEAN DEFAULT TRUE,
-                sync_pending BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                last_used_at TIMESTAMP WITH TIME ZONE
-            )
-        """)
-        migrations_applied.append("claude_accounts")
+    # claude_accounts (v52) is no longer created; v89 drops it (see
+    # _retire_claude_accounts below).
 
     # model_providers (v64). Admin-configured non-Anthropic model gateways
     # (OpenRouter / custom Anthropic-compatible endpoints). Idempotent so
     # upgrades from any older version land the table without needing the
     # SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
-    # the SessionStore / error_log / installs / claude_accounts blocks above).
+    # the SessionStore / error_log / installs blocks above).
     # The index is bootstrapped unconditionally (CREATE INDEX IF NOT EXISTS) so
     # it exists on both fresh installs and upgrades.
     if not table_exists(cursor, "model_providers"):
@@ -1323,9 +1320,9 @@ def _run_column_migrations(cursor):
         migrations_applied.append("automation_fires")
 
     # usage_snapshots (v53). Per-install Claude usage-limits snapshot keyed by
-    # instance_id. The 5-hour Claude usage window is per-account and two installs
-    # on a shared DB may run different accounts, so each install persists its own
-    # snapshot and the usage endpoint serves them all. Idempotent so upgrades
+    # instance_id: the windows that install's CLI reported, so the usage
+    # endpoint can serve every install's. The account_* columns it carried
+    # until v89 are dropped by _retire_claude_accounts. Idempotent so upgrades
     # from any older version land the table without needing the SCHEMA_VERSION
     # bump to fire the bootstrap path (same defensive pattern as the
     # automation_fires block above).
@@ -1337,9 +1334,6 @@ def _run_column_migrations(cursor):
                 available BOOLEAN DEFAULT FALSE,
                 generation BIGINT,
                 fetched_at BIGINT,
-                account_id TEXT,
-                account_email TEXT,
-                account_name TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
@@ -1981,6 +1975,15 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
 
+    # Latest generated composer hint; retained even with no watching browser.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL
+        )
+    """)
+
     # One-time seed: carry every existing queued_messages row into turns as a
     # source='queue' queued turn, preserving order via position. queued_messages
     # is left in place, frozen (dropped in a later deletion PR). Deterministic
@@ -2052,7 +2055,7 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE connectors ADD COLUMN IF NOT EXISTS runner_id TEXT")
         migrations_applied.append("connectors.runner_id")
 
-    # Step B: placement backfill (hazard 1; A9 ruling, 07-14). Single
+    # Step B: placement backfill. Single
     # deterministic arm — idempotent via WHERE placement IS NULL:
     #   * Every session with a non-empty `instance_id` (this install's own
     #     included) is pinned to its owner: {"where": "runner:<instance_id>"}.
@@ -2070,7 +2073,7 @@ def _run_column_migrations(cursor):
     #     the local-default (the resolver runs it on the local runner).
     # Composition with v40: on any DB at schema >=v40 every session row already
     # carries instance_id (orphan NULL rows were adopted locally by the v40
-    # backfill earlier in this function, ~line 372-385), so Step B honors
+    # backfill earlier in this function), so Step B honors
     # instance_id as-found and stays a pure function of row data — that local
     # adoption is v40's long-established semantic, not nondeterminism Phase 4
     # introduces.
@@ -2103,19 +2106,18 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_usage_json JSONB")
         migrations_applied.append("sessions.context_usage_json")
 
-    # Per-session provider binding (v66, multi-provider phase-2 Chunk E / ruling
-    # G2-r). One nullable TEXT column: the model_providers id this session is
-    # bound to, stamped at creation from the profile's configured provider. NULL
-    # = native Claude (gateway bypass). Additive/nullable, no index — same
+    # Per-session provider binding (v66). One nullable TEXT column: the
+    # model_providers id this session is bound to, stamped at creation from the
+    # profile's configured provider. NULL = no provider binding. Additive/nullable, no index — same
     # discipline as cloud_branch / context_usage_json above; guarded so the
     # ALTER never re-runs.
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "provider_id"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
         migrations_applied.append("sessions.provider_id")
 
-    # Session interaction mode (v74, voice-mode ruling VM4). One nullable TEXT
-    # column: 'chat' (the implicit default — NULL means chat, so every existing
-    # row keeps working untouched) or 'voice' (an OpenAI Realtime voice call).
+    # Session interaction mode (v74). One nullable TEXT
+    # column: NULL is the default code mode (so every existing row keeps
+    # working untouched); 'chat' and 'voice' are stored explicitly.
     # Additive/nullable with NO index, exactly like provider_id above, so it is
     # immune to the schema-pass-before-column-migrations ordering trap; guarded
     # so the ALTER never re-runs.
@@ -2193,7 +2195,7 @@ def _run_column_migrations(cursor):
     # via guarded DROP+CREATE rather than ALTER INDEX: SQLite (the test pg_shim)
     # has no ALTER INDEX ... RENAME, and DROP/CREATE IF [NOT] EXISTS is
     # equivalent and idempotent on both backends.
-    # git_ops (v76) — the durable cross-install git-operation queue (D5). Each
+    # git_ops (v76) — the durable cross-install git-operation queue. Each
     # install's claim loop polls for rows targeted at itself and flips
     # queued -> running with a single conditional UPDATE. Idempotent so upgrades
     # from any older version land the table without needing the SCHEMA_VERSION
@@ -2219,7 +2221,7 @@ def _run_column_migrations(cursor):
         "ON git_ops(runner_id, status)"
     )
 
-    # upload_blobs (v76) — DB-mediated cross-install upload delivery (D8),
+    # upload_blobs (v76) — DB-mediated cross-install upload delivery,
     # modeled on note_attachments (bytes in the shared DB are the source of
     # truth; local disk is a cache). Same idempotent guard as git_ops above.
     if not table_exists(cursor, "upload_blobs"):
@@ -2242,7 +2244,7 @@ def _run_column_migrations(cursor):
         "ON upload_blobs(session_id)"
     )
 
-    # Tool access (v82, rulings T2 + T5). Stamp ``tool_selection_mode`` into
+    # Tool access (v82). Stamp ``tool_selection_mode`` into
     # every agent config so the runtime rule has no legacy branch, and fold the
     # two retired switches (``ai_tools`` / ``app_config_tools``) into the tool
     # lists. Runs once — an agent that already carries a valid mode is skipped,
@@ -2323,7 +2325,7 @@ def _run_column_migrations(cursor):
     # Worker network (v87): private-database peers replace the shared-database
     # cluster. Additive, nullable columns naming the owning device on the
     # tables whose rows execute somewhere, plus the local network tables.
-    # The startup backfill (app.network.migration) stamps this worker's device
+    # The startup backfill (app.network.startup.backfill_owner_device_ids) stamps this worker's device
     # id onto rows that still only carry instance_id.
     from app.db.network import create_schema as _create_network_schema
     _create_network_schema(cursor)
@@ -2336,6 +2338,17 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "note_attachments") and not column_exists(cursor, "note_attachments", "blob_hash"):
         cursor.execute("ALTER TABLE note_attachments ADD COLUMN blob_hash TEXT")
         migrations_applied.append("note_attachments.blob_hash")
+    # notes.api_user_id: the API key that wrote the note. NULL (every existing
+    # row) is the owner's; an API key reads and changes only its own notes.
+    # Local-only: the network registry does not sync it, so a mirrored note is
+    # the owner's on every peer.
+    if table_exists(cursor, "notes") and not column_exists(cursor, "notes", "api_user_id"):
+        cursor.execute("ALTER TABLE notes ADD COLUMN api_user_id TEXT")
+        migrations_applied.append("notes.api_user_id")
+
+    migrations_applied.extend(_retire_claude_accounts(cursor))
+    migrations_applied.extend(_retire_message_hooks(cursor))
+    migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -2367,18 +2380,280 @@ def _get_marker(cursor, key: str) -> Optional[str]:
 
 
 def _set_marker(cursor, key: str, value: str) -> None:
-    """Upsert a system_settings marker (no-op when the table does not exist)."""
+    """Upsert a system_settings marker (no-op when the table does not exist).
+
+    Every settings row carries an opaque ``revision`` (see
+    ``_migrate_provider_revisions``). A marker gets one when it is written and
+    keeps it while its value is unchanged, so re-running the migration pass
+    leaves the row as it was instead of a NULL the next pass backfills.
+    """
+    from uuid import uuid4
+
     if not table_exists(cursor, "system_settings"):
         return
     now = datetime.now(timezone.utc).isoformat()
+    if not column_exists(cursor, "system_settings", "revision"):
+        # Older database: _migrate_provider_revisions adds and backfills the
+        # column later in this same pass.
+        cursor.execute(
+            """INSERT INTO system_settings (key, value, updated_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at""",
+            (key, value, now),
+        )
+        return
     cursor.execute(
-        """INSERT INTO system_settings (key, value, updated_at)
-           VALUES (%s, %s, %s)
+        """INSERT INTO system_settings (key, value, updated_at, revision)
+           VALUES (%s, %s, %s, %s)
            ON CONFLICT(key) DO UPDATE SET
                value = excluded.value,
-               updated_at = excluded.updated_at""",
-        (key, value, now),
+               updated_at = excluded.updated_at,
+               revision = CASE WHEN system_settings.value = excluded.value
+                               THEN COALESCE(system_settings.revision, excluded.revision)
+                               ELSE excluded.revision END""",
+        (key, value, now, str(uuid4())),
     )
+
+
+#: The retired in-app Claude sign-in's network collection and pointer prefix.
+RETIRED_CLAUDE_COLLECTION = "claude_accounts"
+RETIRED_CLAUDE_POINTER_PREFIX = "claude_active_account:"
+#: Per-worker one-time notice read by ``app.core.claude_relogin_notice``.
+CLAUDE_RELOGIN_NOTICE_PREFIX = "claude_cli_relogin_notice:"
+CLAUDE_RELOGIN_PENDING = "pending"
+#: Database-wide flag: the old sign-in's storage was found and removed here.
+#: A worker whose pointer was not in this database (a second install sharing
+#: it) records its own pending notice from this flag at startup.
+CLAUDE_RELOGIN_NEEDED_MARKER = "migration:claude_cli_relogin_needed"
+
+
+def _retire_claude_accounts(cursor) -> List[str]:
+    """v89: remove every trace of the in-app Claude sign-in. Idempotent.
+
+    AI Shuffle no longer stores Claude credentials; the Claude Code CLI owns
+    its own login. Before deleting anything, a database the old sign-in used
+    (account rows or active-account pointers) records the one-time
+    ``claude auth logout`` / ``claude auth login`` notice for
+    every worker that had a pointer and for this one, plus a database-wide
+    flag other workers sharing it read at startup. An existing notice
+    (pending or dismissed) is never overwritten.
+
+    Then: drop ``claude_accounts``; delete the pointers; purge the
+    collection's sealed envelopes and records from the sync tables (a peer
+    behind the purged ops gets a snapshot copy, as after ``prune_ops``); drop
+    the ``usage_snapshots.account_*`` columns. Returns what was applied.
+    """
+    applied: List[str] = []
+    has_settings = table_exists(cursor, "system_settings")
+    pointer_ids: List[str] = []
+    if has_settings:
+        cursor.execute(
+            "SELECT key FROM system_settings WHERE key LIKE %s",
+            (RETIRED_CLAUDE_POINTER_PREFIX + "%",),
+        )
+        for row in cursor.fetchall():
+            key = row["key"] if isinstance(row, dict) else row[0]
+            suffix = key[len(RETIRED_CLAUDE_POINTER_PREFIX):]
+            if suffix:
+                pointer_ids.append(suffix)
+    has_table = table_exists(cursor, RETIRED_CLAUDE_COLLECTION)
+    rows = 0
+    if has_table:
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {RETIRED_CLAUDE_COLLECTION}")
+        row = cursor.fetchone()
+        rows = int((row["n"] if isinstance(row, dict) else row[0]) or 0)
+
+    if has_settings and (rows or pointer_ids):
+        now = datetime.now(timezone.utc).isoformat()
+        for instance_id in dict.fromkeys([*pointer_ids, settings.effective_instance_id]):
+            cursor.execute(
+                """INSERT INTO system_settings (key, value, updated_at) VALUES (%s, %s, %s)
+                   ON CONFLICT(key) DO NOTHING""",
+                (CLAUDE_RELOGIN_NOTICE_PREFIX + instance_id, CLAUDE_RELOGIN_PENDING, now),
+            )
+        _set_marker(cursor, CLAUDE_RELOGIN_NEEDED_MARKER, "1")
+        applied.append("claude_cli_relogin_notice")
+
+    if pointer_ids:
+        cursor.execute(
+            "DELETE FROM system_settings WHERE key LIKE %s",
+            (RETIRED_CLAUDE_POINTER_PREFIX + "%",),
+        )
+        applied.append(f"claude_active_account({len(pointer_ids)} pointers)")
+    if has_table:
+        cursor.execute(f"DROP TABLE IF EXISTS {RETIRED_CLAUDE_COLLECTION}")
+        applied.append(f"drop claude_accounts({rows} rows)")
+
+    for table in ("sync_ops", "sync_records", "sync_conflicts"):
+        if table_exists(cursor, table):
+            cursor.execute(f"DELETE FROM {table} WHERE collection = %s", (RETIRED_CLAUDE_COLLECTION,))
+            if cursor.rowcount:
+                applied.append(f"{table}.claude_accounts({cursor.rowcount})")
+    if table_exists(cursor, "sync_pending"):
+        # Held out-of-order envelopes carry the collection only inside the JSON.
+        cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+        stale = []
+        for row in cursor.fetchall():
+            try:
+                envelope = _safe_json(row["envelope"])
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("collection") == RETIRED_CLAUDE_COLLECTION:
+                stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+        for key in stale:
+            cursor.execute(
+                "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                key,
+            )
+        if stale:
+            applied.append(f"sync_pending.claude_accounts({len(stale)})")
+
+    if table_exists(cursor, "usage_snapshots"):
+        for column in ("account_id", "account_email", "account_name"):
+            if column_exists(cursor, "usage_snapshots", column):
+                cursor.execute(f"ALTER TABLE usage_snapshots DROP COLUMN {column}")
+                applied.append(f"usage_snapshots.drop_{column}")
+    return applied
+
+
+#: The retired hook type: it never had a delivery path into a session.
+RETIRED_HOOK_TYPE = "message"
+
+
+def _retire_message_hooks(cursor) -> List[str]:
+    """v90: remove message hooks and their column. Idempotent.
+
+    A ``message`` hook was meant to post a templated message into the chat,
+    but nothing ever delivered it; the type is gone from the API, the MCP
+    tools and the forms. Existing rows would only show as an unknown type and
+    fail every run, so they are deleted, with their ``project_hooks`` sync
+    envelopes (the collection stays; only these records leave it, so a peer
+    that has not upgraded keeps its own copy until its own migration runs).
+    Then ``project_hooks.message_template`` is dropped. Returns what was
+    applied.
+    """
+    applied: List[str] = []
+    if not table_exists(cursor, "project_hooks"):
+        return applied
+    cursor.execute("SELECT id FROM project_hooks WHERE hook_type = %s", (RETIRED_HOOK_TYPE,))
+    hook_ids = [row["id"] if isinstance(row, dict) else row[0] for row in cursor.fetchall()]
+    if hook_ids:
+        cursor.execute("DELETE FROM project_hooks WHERE hook_type = %s", (RETIRED_HOOK_TYPE,))
+        applied.append(f"project_hooks.message({len(hook_ids)} rows)")
+        marks = ", ".join(["%s"] * len(hook_ids))
+        for table in ("sync_ops", "sync_records", "sync_conflicts"):
+            if table_exists(cursor, table):
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE collection = %s AND record_id IN ({marks})",
+                    ("project_hooks", *hook_ids),
+                )
+                if cursor.rowcount:
+                    applied.append(f"{table}.message_hooks({cursor.rowcount})")
+        if table_exists(cursor, "sync_pending"):
+            # Held out-of-order envelopes carry collection and record only
+            # inside the JSON.
+            cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+            stale = []
+            wanted = set(hook_ids)
+            for row in cursor.fetchall():
+                try:
+                    envelope = _safe_json(row["envelope"])
+                except ValueError:
+                    continue
+                if (isinstance(envelope, dict) and envelope.get("collection") == "project_hooks"
+                        and envelope.get("record_id") in wanted):
+                    stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+            for key in stale:
+                cursor.execute(
+                    "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                    key,
+                )
+            if stale:
+                applied.append(f"sync_pending.message_hooks({len(stale)})")
+    if column_exists(cursor, "project_hooks", "message_template"):
+        cursor.execute("ALTER TABLE project_hooks DROP COLUMN message_template")
+        applied.append("project_hooks.drop_message_template")
+    return applied
+
+
+#: The retired standalone outbound-webhook table, also its network collection.
+RETIRED_WEBHOOKS_TABLE = "webhooks"
+#: Tables an older schema created for the removed rate-limit feature.
+RETIRED_RATE_LIMIT_TABLES = ("rate_limits", "request_log")
+
+
+def _purge_collection_envelopes(cursor, collection: str) -> List[str]:
+    """Delete every sync envelope of ``collection`` (a retired collection)."""
+    applied: List[str] = []
+    for table in ("sync_ops", "sync_records", "sync_conflicts"):
+        if table_exists(cursor, table):
+            cursor.execute(f"DELETE FROM {table} WHERE collection = %s", (collection,))
+            if cursor.rowcount:
+                applied.append(f"{table}.{collection}({cursor.rowcount})")
+    if table_exists(cursor, "sync_pending"):
+        # Held out-of-order envelopes carry the collection only inside the JSON.
+        cursor.execute("SELECT origin_device_id, incarnation, seq, envelope FROM sync_pending")
+        stale = []
+        for row in cursor.fetchall():
+            try:
+                envelope = _safe_json(row["envelope"])
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("collection") == collection:
+                stale.append((row["origin_device_id"], row["incarnation"], row["seq"]))
+        for key in stale:
+            cursor.execute(
+                "DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                key,
+            )
+        if stale:
+            applied.append(f"sync_pending.{collection}({len(stale)})")
+    return applied
+
+
+def _retire_webhooks_and_legacy_push(cursor) -> List[str]:
+    """v90: drop storage that no route reaches any more. Idempotent.
+
+    * ``webhooks``, the standalone outbound webhooks: their management API
+      had no client, so nobody could create or see one, and the connector
+      manager no longer fires them. The table goes with its sync envelopes
+      (the ``webhooks`` collection is no longer registered). Connector event
+      subscriptions and ``webhook`` hooks are separate and stay.
+    * ``mobile_devices.unifiedpush_endpoint``: the Android app dropped its
+      UnifiedPush receiver and the registration routes are gone. A row that
+      carried an endpoint was already treated as unable to receive push
+      (``device_receives_push``); its FCM token is cleared before the marker
+      column is dropped, so that stays true.
+    * ``rate_limits`` / ``request_log``: created by older releases for the
+      removed rate-limit feature and unused since.
+
+    Returns what was applied.
+    """
+    applied: List[str] = []
+    if (table_exists(cursor, "mobile_devices")
+            and column_exists(cursor, "mobile_devices", "unifiedpush_endpoint")):
+        cursor.execute(
+            "UPDATE mobile_devices SET fcm_token = NULL "
+            "WHERE unifiedpush_endpoint IS NOT NULL AND fcm_token IS NOT NULL"
+        )
+        if cursor.rowcount:
+            applied.append(f"mobile_devices.fcm_token_cleared({cursor.rowcount})")
+        cursor.execute("ALTER TABLE mobile_devices DROP COLUMN unifiedpush_endpoint")
+        applied.append("mobile_devices.drop_unifiedpush_endpoint")
+    if table_exists(cursor, RETIRED_WEBHOOKS_TABLE):
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {RETIRED_WEBHOOKS_TABLE}")
+        row = cursor.fetchone()
+        rows = int((row["n"] if isinstance(row, dict) else row[0]) or 0)
+        cursor.execute(f"DROP TABLE IF EXISTS {RETIRED_WEBHOOKS_TABLE}")
+        applied.append(f"drop webhooks({rows} rows)")
+    applied.extend(_purge_collection_envelopes(cursor, RETIRED_WEBHOOKS_TABLE))
+    for table in RETIRED_RATE_LIMIT_TABLES:
+        if table_exists(cursor, table):
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            applied.append(f"drop {table}")
+    return applied
 
 
 def _backfill_sessions_is_worker(cursor) -> Optional[int]:
@@ -2536,6 +2811,51 @@ def migrations_fingerprint() -> str:
     return h.hexdigest()
 
 
+#: ``pg_advisory_xact_lock`` key for :func:`init_database` (a fixed, namespaced
+#: signed bigint: the leading 8 bytes of sha256("shuffle-schema-init")).
+SCHEMA_INIT_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(b"shuffle-schema-init").digest()[:8], "big", signed=True
+)
+
+#: ``pg_advisory_xact_lock`` key for :func:`boot_init_lock`. Deliberately not
+#: ``SCHEMA_INIT_LOCK_KEY``: the boot lock is held on its own connection while
+#: ``init_database`` takes that key on another one, and a process would wait
+#: on itself.
+BOOT_INIT_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(b"shuffle-boot-init").digest()[:8], "big", signed=True
+)
+
+
+@contextmanager
+def boot_init_lock():
+    """Serialize a worker's whole database start-up against other workers.
+
+    ``init_database``'s lock ends with its transaction, but start-up goes on
+    to seed: ``run_migrations``, the mobile-tool tables (``CREATE TABLE IF
+    NOT EXISTS`` races on PostgreSQL), the built-in agents and templates
+    (check, then insert). Two workers booting together on one database raced
+    through those after the schema lock was released, and one of them could
+    fail to start on a duplicate key. The block under this lock runs one
+    worker at a time; the next one starts after the first committed
+    everything and finds the rows present.
+
+    A transaction-scoped lock on a dedicated connection, so any exit (an
+    exception, or the process dying) releases it.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (BOOT_INIT_LOCK_KEY,))
+        # This connection idles in its transaction for the whole start-up; a
+        # server-wide idle_in_transaction_session_timeout would end it (and
+        # the lock) half way.
+        try:
+            with _savepoint(cursor, "sp_boot_lock_idle"):
+                cursor.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+        except Exception:  # noqa: BLE001 - best effort; the lock is what matters
+            pass
+        yield
+
+
 def init_database():
     """Initialize the PostgreSQL database with schema.
 
@@ -2567,6 +2887,15 @@ def init_database():
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        # Serialize schema initialisation across processes. Workers sharing
+        # one database can boot (or roll out an upgrade) at the same moment;
+        # without this both see the same missing table/column, both issue the
+        # DDL, and the loser's whole init fails on a duplicate relation or
+        # column once the winner commits. Transaction-scoped, so it is released
+        # by the commit/rollback that ends this block, and everything below
+        # (version, fingerprint) is read only after the other boot finished.
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
 
         # Create schema version table
         cursor.execute("""
@@ -2827,7 +3156,6 @@ from app.db.auth import (  # noqa: F401
     is_setup_required,
     get_admin,
     create_admin,
-    update_admin_password,
     create_audit_log,
     get_audit_logs,
     get_audit_log_count,
@@ -2836,13 +3164,6 @@ from app.db.auth import (  # noqa: F401
     delete_auth_session,
     clear_all_sessions,
     cleanup_expired_sessions,
-    record_login_attempt,
-    get_failed_attempts_count,
-    get_failed_attempts_for_username,
-    create_lockout,
-    is_ip_locked,
-    is_username_locked,
-    get_api_key_session,
 )
 
 from app.db.profiles import (  # noqa: F401
@@ -2896,16 +3217,13 @@ from app.db.sessions import (  # noqa: F401
     list_sessions_by_pr_number,
     list_sessions_for_branch,
     session_has_forks,
-    get_session_forks,
     get_session_messages,
     add_session_message,
     add_session_messages_batch,
-    upsert_team_member_message,
     delete_session_message,
     delete_orphan_user_turn,
     discard_orphan_first_turn,
     clear_session_conversation,
-    delete_session_messages_after,
     delete_session_messages_after_jsonl_uuid,
     set_message_jsonl_uuid,
     search_sessions,
@@ -2913,13 +3231,11 @@ from app.db.sessions import (  # noqa: F401
     add_sync_log,
     get_sync_logs,
     get_latest_sync_id,
-    update_message_content,
 )
 
 from app.db.analytics import (  # noqa: F401
     log_usage,
     settle_turn_usage,
-    get_last_session_usage,
     get_all_session_usage,
     get_usage_stats,
     get_analytics_usage_stats,
@@ -2948,7 +3264,6 @@ from app.db.api_users import (  # noqa: F401
     get_all_user_credentials,
     set_user_credential,
     delete_user_credential,
-    user_has_credential,
 )
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync
@@ -2982,7 +3297,6 @@ from app.db.subagents import (  # noqa: F401
     delete_subagent,
     set_subagent_builtin,
     revert_subagent_to_defaults,
-    has_subagent_been_modified,
     builtin_subagent_is_modified,
     add_permission_rule,
     get_permission_rule,
@@ -3001,7 +3315,6 @@ from app.db.tags import (  # noqa: F401
     add_session_tag,
     remove_session_tag,
     set_session_tags,
-    get_sessions_by_tag,
 )
 
 from app.db.templates import (  # noqa: F401
@@ -3012,17 +3325,6 @@ from app.db.templates import (  # noqa: F401
     delete_template,
     get_template_categories,
     set_template_builtin,
-)
-
-from app.db.webhooks import (  # noqa: F401
-    get_all_webhooks,
-    get_active_webhooks,
-    get_webhook,
-    create_webhook,
-    update_webhook,
-    delete_webhook,
-    update_webhook_triggered,
-    get_webhooks_for_event,
 )
 
 from app.db.connectors import (  # noqa: F401
@@ -3040,25 +3342,10 @@ from app.db.connectors import (  # noqa: F401
     get_connector_event_log,
     create_connector_session,
     get_connector_session,
-    get_connector_session_by_id,
     get_connector_sessions_for_ai_session,
     update_connector_session_ai_session,
 )
 
-from app.db.claude_accounts import (  # noqa: F401
-    create_claude_account,
-    get_claude_account,
-    get_all_claude_accounts,
-    update_claude_account_credentials,
-    update_claude_account_credentials_only,
-    rename_claude_account,
-    delete_claude_account,
-    clear_claude_active_pointers,
-    mark_claude_account_sync_pending,
-    touch_claude_account_last_used,
-    set_claude_account_subscription_type,
-    count_claude_accounts,
-)
 
 from app.db.model_providers import (  # noqa: F401
     create_model_provider,
@@ -3079,6 +3366,7 @@ from app.db.model_providers import (  # noqa: F401
 
 from app.db.usage_snapshots import (  # noqa: F401
     upsert_usage_snapshot,
+    touch_usage_snapshot_observed,
     get_all_usage_snapshots,
     delete_usage_snapshot,
 )
@@ -3099,18 +3387,15 @@ from app.db.git import (  # noqa: F401
     create_git_repository,
     update_git_repository,
     update_git_repository_synced,
-    delete_git_repository,
     get_worktree,
     get_worktree_by_session,
     get_sessions_for_worktree,
     get_worktrees_with_sessions,
-    get_worktree_by_branch,
     get_worktrees_for_repository,
     get_active_worktrees_for_repository,
     create_worktree,
     update_worktree,
     delete_worktree,
-    delete_worktrees_for_repository,
 )
 
 from app.db.notes import (  # noqa: F401
@@ -3121,7 +3406,6 @@ from app.db.notes import (  # noqa: F401
     delete_note,
     get_all_note_tags,
     get_notes_autocomplete,
-    count_all_notes,
     get_all_note_filenames,
     get_notes_without_file_path,
     bulk_update_note_file_paths,
@@ -3139,7 +3423,6 @@ from app.db.hooks import (  # noqa: F401
     get_hooks_for_project,
     get_app_hooks,
     get_all_hooks_for_project,
-    get_enabled_hooks_for_project,
     get_hooks_for_project_and_event,
     get_app_hooks_for_event,
     create_hook,
@@ -3153,29 +3436,9 @@ from app.db.mobile import (  # noqa: F401
     get_mobile_device,
     get_mobile_device_by_api_key_hash,
     get_all_mobile_devices,
-    update_mobile_device_capabilities,
-    update_mobile_device_fcm_token,
-    update_mobile_device_unifiedpush_endpoint,
     update_mobile_device_last_seen,
     delete_mobile_device,
-    create_pending_action,
-    get_pending_action,
-    get_pending_actions_for_device,
-    update_pending_action_status,
-    cleanup_expired_actions,
-    create_trusted_action,
-    get_trusted_action,
-    get_trusted_actions_for_device,
-    delete_trusted_action,
-    get_mobile_schedules,
-    get_mobile_schedule,
-    save_mobile_schedule,
-    delete_mobile_schedule,
-    get_mobile_actions,
-    save_mobile_action,
-    delete_mobile_action,
     get_mobile_devices,
-    save_mobile_device,
 )
 
 from app.db.pairing import (  # noqa: F401
@@ -3215,17 +3478,14 @@ def get_paired_client_by_session_hash(token_hash):
 
 from app.db.installs import (  # noqa: F401
     register_install,
-    touch_install_last_seen,
     touch_install_heartbeat,
     set_install_name,
-    set_install_base_url,
     set_install_approval,
     is_install_approved,
     get_install,
     get_installs,
     get_installs_map,
     delete_install,
-    ONLINE_WINDOW_SECONDS,
 )
 
 from app.db.automations import (  # noqa: F401
@@ -3251,15 +3511,3 @@ from app.db.automations import (  # noqa: F401
     prune_automation_fires,
     record_automation_run_success,
 )
-
-from app.db.background_tasks import (  # noqa: F401
-    upsert_background_task,
-    mark_stale_background_tasks_killed,
-)
-
-# Backward-compatible alias kept for callers that import the private helper.
-_parse_subagent_json_fields = None
-try:
-    from app.db.subagents import _parse_json_fields as _parse_subagent_json_fields  # noqa: F401
-except ImportError:
-    pass

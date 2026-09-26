@@ -5,11 +5,13 @@ ConnectorManager — lifecycle management, event dispatch, and message routing.
 import asyncio
 import logging
 import secrets
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     BaseConnector,
+    ConnectorStatus,
     IncomingMessage,
     OutgoingMessage,
 )
@@ -19,12 +21,30 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# A connector turn runs as the connector's API user: its profile, project and
+# model. Without one there is no owner-chosen agent to run, so the message is
+# refused instead of falling back to whichever profile happens to be first.
+# A client still CONNECTING this long after it was registered has a handshake
+# that is not going to finish; a repeated start replaces it.
+CONNECTING_STALE_SECONDS = 120.0
+
+CONNECTOR_NEEDS_API_USER_MESSAGE = (
+    "This connector has no API user bound, so it cannot run the agent. "
+    "The owner needs to bind an API user in the connector settings."
+)
+CONNECTOR_NEEDS_PROFILE_MESSAGE = (
+    "This connector's API user has no agent profile, so it cannot run the agent. "
+    "The owner needs to give that API user a profile."
+)
+
+
 
 class ConnectorManager:
     """Central hub for connector lifecycle, event dispatch, and message routing."""
 
     def __init__(self):
         self._connectors: Dict[str, BaseConnector] = {}
+        self._registered_at: Dict[str, float] = {}  # connector_id -> time.monotonic()
         self._lock = asyncio.Lock()
         self._event_relay = None
 
@@ -127,7 +147,28 @@ class ConnectorManager:
         logger.info("All connectors shut down")
 
     async def start_connector(self, connector_id: str) -> bool:
-        """Instantiate, connect, and register a single connector."""
+        """Instantiate, connect, and register a single connector.
+
+        Idempotent for a live client: starting a connector that is already
+        connected (or still connecting) returns ``True`` without building a
+        second client, so a repeated POST /activate or MCP ``toggleConnector``
+        cannot leave two clients each handling every inbound message. A
+        registered client that has errored or disconnected, or that is stuck
+        connecting (its client task ended, or its handshake has run past
+        ``CONNECTING_STALE_SECONDS``), is torn down and replaced.
+        Config changes go through ``restart_connector``, which stops first.
+        """
+        async with self._lock:
+            existing = self._connectors.get(connector_id)
+            if existing is not None and self._is_live(connector_id, existing):
+                logger.info(f"Connector already running: {connector_id}")
+                return True
+            if existing is not None:
+                del self._connectors[connector_id]
+                self._registered_at.pop(connector_id, None)
+        if existing is not None:
+            await self._disconnect_quietly(connector_id, existing)
+
         def _prepare_blocking() -> Optional[Dict[str, Any]]:
             """Row read, config decrypt and impl-class lookup in ONE hop.
 
@@ -178,6 +219,26 @@ class ConnectorManager:
         config = prepared["config"]
         cls = prepared["cls"]
 
+        # A chat connector with no sender allowlist hands the agent to anyone
+        # who finds the bot, so it does not start.
+        from app.core.connector_service import (
+            ALLOWLIST_REQUIRED_MESSAGE,
+            missing_sender_allowlist,
+        )
+
+        if missing_sender_allowlist(connector_type, config):
+            logger.error(
+                "Connector %s (%s) not started: %s",
+                connector_id, connector_type, ALLOWLIST_REQUIRED_MESSAGE,
+            )
+            await run_sync(
+                database.update_connector_status,
+                connector_id, "error",
+                status_message=ALLOWLIST_REQUIRED_MESSAGE,
+                error=ALLOWLIST_REQUIRED_MESSAGE,
+            )
+            return False
+
         # Create the connector instance
         instance = cls(
             connector_id=connector_id,
@@ -203,7 +264,27 @@ class ConnectorManager:
 
         if success:
             async with self._lock:
+                displaced = self._connectors.get(connector_id)
                 self._connectors[connector_id] = instance
+                self._registered_at[connector_id] = time.monotonic()
+            # A concurrent start that registered while this one was connecting
+            # would otherwise stay live, unreferenced, and double-handle input.
+            if displaced is not None and displaced is not instance:
+                await self._disconnect_quietly(connector_id, displaced)
+            # connect() can outlast the fence sweep in network startup: re-apply
+            # the start rule now that the client is registered, so a fence (or
+            # an ownership move, or a delete) that landed meanwhile stops it
+            # here. Checked after registering, a fence landing later still
+            # finds it in the registry.
+            if not await run_sync(self._still_eligible, connector_id):
+                logger.info(f"Connector {connector_id} lost eligibility while connecting; stopping it")
+                async with self._lock:
+                    if self._connectors.get(connector_id) is instance:
+                        del self._connectors[connector_id]
+                        self._registered_at.pop(connector_id, None)
+                await self._disconnect_quietly(connector_id, instance)
+                await run_sync(database.update_connector_status, connector_id, "disconnected")
+                return False
             # Keep status as "connecting" — the connector's on_ready callback
             # will update to "connected" once the gateway handshake completes.
             # If login fails, _run_client will update to "error".
@@ -216,16 +297,52 @@ class ConnectorManager:
             )
             return False
 
+    @staticmethod
+    def _still_eligible(connector_id: str) -> bool:
+        """The pre-connect start rule, re-read: row present and not fenced/owned elsewhere.
+
+        ``decide_connector`` is the rule network startup and ``start_all`` use
+        (None off-network, ``start`` for this device's own connector). Fails
+        closed, like the check before connect().
+        """
+        from app.network import ownership
+
+        try:
+            row = database.get_connector(connector_id)
+            if not row:
+                return False
+            return ownership.decide_connector(row) in (None, "start")
+        except Exception:
+            logger.exception("Network ownership unavailable; stopping connector %s", connector_id)
+            return False
+
+    def _is_live(self, connector_id: str, instance: BaseConnector) -> bool:
+        """A registered client worth keeping: connected, or connecting in time."""
+        if instance.status == ConnectorStatus.CONNECTED:
+            return True
+        if instance.status != ConnectorStatus.CONNECTING:
+            return False
+        task = getattr(instance, "_task", None)
+        if task is not None and task.done():
+            return False
+        since = self._registered_at.get(connector_id)
+        return since is None or time.monotonic() - since < CONNECTING_STALE_SECONDS
+
+    @staticmethod
+    async def _disconnect_quietly(connector_id: str, instance: BaseConnector) -> None:
+        try:
+            await instance.disconnect()
+        except Exception as e:
+            logger.error(f"Error disconnecting connector {connector_id}: {e}")
+
     async def stop_connector(self, connector_id: str) -> None:
         """Disconnect and unregister a running connector."""
         async with self._lock:
             instance = self._connectors.pop(connector_id, None)
+            self._registered_at.pop(connector_id, None)
 
         if instance:
-            try:
-                await instance.disconnect()
-            except Exception as e:
-                logger.error(f"Error disconnecting connector {connector_id}: {e}")
+            await self._disconnect_quietly(connector_id, instance)
 
         # Single write after the disconnect await — one hop, nothing to batch.
         await run_sync(database.update_connector_status, connector_id, "disconnected")
@@ -293,13 +410,6 @@ class ConnectorManager:
                     logger.warning("Connector owner relay failed for %s", conn_row["id"], exc_info=True)
             else:
                 await self._deliver_connector_event(conn_row, event_type, data)
-
-        # Also dispatch to legacy webhooks
-        try:
-            from app.core.webhook_service import dispatch_webhook
-            await dispatch_webhook(event_type, data)
-        except Exception as e:
-            logger.error(f"Legacy webhook dispatch failed: {e}")
 
         # Dispatch to automations triggered by connector events
         try:
@@ -519,17 +629,29 @@ class ConnectorManager:
                 except Exception:
                     logger.debug("Mark-as-read failed", exc_info=True)
 
-            def _resolve_routing_blocking() -> Optional[Dict[str, Any]]:
-                """Session lookup/creation + connector row + API user + profile
-                fallback: FIVE contiguous round trips, ONE thread hop.
+            def _resolve_routing_blocking() -> Dict[str, Any]:
+                """Connector row + API user + session lookup/creation: contiguous
+                round trips, ONE thread hop.
 
                 Nothing between them awaits, and the "no session row yet →
                 create one" step is a read-decide-write that must not be split
                 across hops (two inbound messages racing on a fresh chat would
-                otherwise both decide to create the session). ``None`` means
-                "no profiles available" — the caller returns, exactly as the
-                inline code did after logging the same error here.
+                otherwise both decide to create the session). A result with
+                ``refused`` means the connector has no API user (or that user
+                has no agent profile): the turn is refused rather than run on
+                some other profile.
                 """
+                # Determine the API user for this connector
+                connector_row = database.get_connector(message.connector_id)
+                api_user_id = connector_row.get("api_user_id") if connector_row else None
+                api_user = database.get_api_user(api_user_id) if api_user_id else None
+                if not api_user:
+                    return {"refused": CONNECTOR_NEEDS_API_USER_MESSAGE}
+                profile_ids = api_user.get("profile_ids", []) or []
+                profile_id = profile_ids[0] if profile_ids else None
+                if not profile_id:
+                    return {"refused": CONNECTOR_NEEDS_PROFILE_MESSAGE}
+
                 # Look up or create connector session
                 session = database.get_connector_session(
                     message.connector_id, message.platform_chat_id
@@ -545,31 +667,10 @@ class ConnectorManager:
                         platform_user_name=message.platform_user_name,
                     )
 
-                # Determine the API user for this connector
-                connector_row = database.get_connector(message.connector_id)
-                api_user_id = connector_row.get("api_user_id") if connector_row else None
-
-                # Resolve profile / project / run config from the API user
-                api_user = database.get_api_user(api_user_id) if api_user_id else None
-                profile_id = None
-                project_id = None
-                api_user_model = None
-                api_user_effort = None
-                if api_user:
-                    profile_ids = api_user.get("profile_ids", [])
-                    profile_id = profile_ids[0] if profile_ids else None
-                    project_id = api_user.get("project_id")
-                    api_user_model = api_user.get("model")
-                    api_user_effort = api_user.get("effort")
-
-                # Fall back to the first available profile when none is configured
-                if not profile_id:
-                    profiles = database.get_all_profiles()
-                    if profiles:
-                        profile_id = profiles[0]["id"]
-                    else:
-                        logger.error("No profiles available for connector query")
-                        return None
+                # Project and run config come from the same API user.
+                project_id = api_user.get("project_id")
+                api_user_model = api_user.get("model")
+                api_user_effort = api_user.get("effort")
                 return {
                     "session": session,
                     "connector_row": connector_row,
@@ -581,7 +682,19 @@ class ConnectorManager:
                 }
 
             routing = await run_sync(_resolve_routing_blocking)
-            if routing is None:
+            if routing.get("refused"):
+                logger.error(
+                    "Connector %s refused a message from chat %s: %s",
+                    message.connector_id, message.platform_chat_id, routing["refused"],
+                )
+                if instance:
+                    try:
+                        await instance.send_message(OutgoingMessage(
+                            platform_chat_id=message.platform_chat_id,
+                            text=routing["refused"],
+                        ))
+                    except Exception:
+                        logger.debug("Refusal reply failed", exc_info=True)
                 return
             session = routing["session"]
             connector_row = routing["connector_row"]
@@ -603,7 +716,6 @@ class ConnectorManager:
             # subsequent turns the connector session already carries the link,
             # so this is a no-op.
             ai_session_id = session.get("session_id") if session else None
-            link_written = False
             if not ai_session_id and session and session.get("id"):
                 minted_id = str(uuid.uuid4())
                 title = (message.text or "")[:50].strip()
@@ -639,7 +751,6 @@ class ConnectorManager:
                 try:
                     await run_sync(_mint_blocking)
                     ai_session_id = minted_id
-                    link_written = True
                     # Mirror execute_query's sidebar broadcast for new sessions so
                     # connector-started conversations appear without a refresh.
                     try:
@@ -727,6 +838,9 @@ class ConnectorManager:
                     profile_id=profile_id,
                     project_id=project_id,
                     overrides=overrides or None,
+                    # The connector's API user is the turn's principal: its
+                    # tool surface and credentials, never the owner's.
+                    payload={"api_user_id": api_user_id},
                 )
                 idle = await turn_manager.wait_session_idle(
                     ai_session_id, timeout=3600
@@ -760,21 +874,6 @@ class ConnectorManager:
                         f"Connector turn failed for session {ai_session_id}: "
                         f"{outcome['error']}"
                     )
-
-            # The AI session id is known up front now, so the link is already
-            # written for sessions minted above. This only repairs legacy rows
-            # whose link points somewhere else (or nowhere).
-            if (
-                not link_written
-                and session
-                and session.get("id")
-                and session.get("session_id") != ai_session_id
-            ):
-                # Isolated repair write between two awaits — one hop.
-                await run_sync(
-                    database.update_connector_session_ai_session,
-                    session.get("id"), ai_session_id,
-                )
 
             # Send response back through the connector
             sent = False
@@ -824,37 +923,21 @@ class ConnectorManager:
     async def handle_permission_response(
         self, request_id: str, session_id: str, approved: bool
     ) -> None:
-        """Forward a permission approval/denial from a messaging platform.
+        """Ignore a tool approval answered from a messaging platform.
 
-        Connectors (Telegram, Discord, Slack, etc.) send interactive
-        Approve/Deny prompts and invoke this callback when the user presses a
-        button. We translate the boolean into the permission_handler decision
-        and resolve the pending request so the waiting tool call unblocks.
-
-        broadcast_func is None because a connector response has no associated
-        WebSocket UI session; permission_handler tolerates a None broadcaster
-        (all queue-update broadcasts are guarded).
+        Tool approvals for connector sessions are the owner's to answer, in the
+        app (web UI or phone), through the same pending-interaction path as any
+        other session. Chats no longer receive Approve/Deny buttons, but old
+        ones can still sit in chat history, and some connectors parse plain
+        text replies; every such answer ends here and is dropped, so nobody in
+        a chat can approve the agent's tool calls.
         """
-        logger.info(
-            f"Permission response: request={request_id} session={session_id} approved={approved}"
+        logger.warning(
+            "Ignoring a tool approval sent from a connector chat "
+            "(request=%s session=%s approved=%s): approvals are answered in the "
+            "owner's app",
+            request_id, session_id, approved,
         )
-
-        if not request_id or not session_id:
-            logger.warning(
-                "Ignoring connector permission response with missing "
-                f"request_id/session_id (request={request_id!r} session={session_id!r})"
-            )
-            return
-
-        from app.core.permission_handler import permission_handler
-
-        result = await permission_handler.respond(
-            request_id=request_id,
-            session_id=session_id,
-            decision="allow" if approved else "deny",
-            broadcast_func=None,
-        )
-        logger.debug(f"Connector permission response resolved: {result}")
 
     # ------------------------------------------------------------------
     # Public accessors (avoids external code reaching into _connectors)

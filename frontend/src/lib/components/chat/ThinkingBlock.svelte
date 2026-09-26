@@ -25,9 +25,6 @@
 		initialExpanded?: boolean;
 		/** Profile name to display in header (defaults to "Assistant") */
 		profileName?: string;
-		/** Live estimated thinking-token count, shown as a counter in the header
-		 *  (fed by the CLI's streaming `thinking_tokens` events). */
-		thinkingTokens?: number | null;
 		/** 'reasoning_summary' when this block is the provider's own summary of
 		 *  the model's reasoning (OpenAI Responses / xAI), not the reasoning
 		 *  itself. The header says so: a summary written in the second person
@@ -40,7 +37,6 @@
 		streaming = false,
 		initialExpanded,
 		profileName = 'Assistant',
-		thinkingTokens = null,
 		subtype = null
 	}: Props = $props();
 
@@ -195,12 +191,6 @@
 		<span class="thinking-who" title={profileName}>{profileName}</span>
 
 		<span class="thinking-right">
-			{#if thinkingTokens != null}
-				<span class="thinking-tokens" title="Estimated thinking tokens">
-					{thinkingTokens.toLocaleString()} tokens
-				</span>
-			{/if}
-
 			<!-- Chevron -->
 			<svg
 				class="thinking-chevron {isExpanded ? 'expanded' : ''}"
@@ -310,15 +300,6 @@
 		gap: 8px;
 		flex: none;
 		color: var(--subtle-foreground);
-	}
-
-	.thinking-tokens {
-		font-style: normal;
-		font-family: var(--font-mono);
-		font-size: 11px;
-		color: var(--subtle-foreground);
-		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
 	}
 
 	.thinking-chevron {

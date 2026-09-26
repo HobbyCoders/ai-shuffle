@@ -22,10 +22,7 @@ from __future__ import annotations
 import pytest
 
 from app.db import database
-
-
-def _column_names(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+from tests.db.migration_helpers import column_names, schema_version
 
 
 def _index_exists(conn, name):
@@ -33,10 +30,6 @@ def _index_exists(conn, name):
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)
     ).fetchone()
     return row is not None
-
-
-def _schema_version(conn):
-    return conn.execute("SELECT version FROM schema_version").fetchone()[0]
 
 
 def _stored_fingerprint(conn):
@@ -54,9 +47,9 @@ def _stored_fingerprint(conn):
 def test_fresh_db_carries_the_v84_index_and_columns(mock_db):
     conn = mock_db
     assert _index_exists(conn, "idx_usage_log_session")  # B3
-    assert "folded_through_id" in _column_names(conn, "session_store_summaries")  # B4
-    assert "is_worker" in _column_names(conn, "sessions")  # B7
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "folded_through_id" in column_names(conn, "session_store_summaries")  # B4
+    assert "is_worker" in column_names(conn, "sessions")  # B7
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -89,14 +82,14 @@ def test_init_upgrades_a_populated_pre_v84_db(mock_db):
     conn.commit()
 
     assert not _index_exists(conn, "idx_usage_log_session")
-    assert "is_worker" not in _column_names(conn, "sessions")
+    assert "is_worker" not in column_names(conn, "sessions")
 
     database.init_database()
 
     assert _index_exists(conn, "idx_usage_log_session")
-    assert "is_worker" in _column_names(conn, "sessions")
-    assert "folded_through_id" in _column_names(conn, "session_store_summaries")
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert "is_worker" in column_names(conn, "sessions")
+    assert "folded_through_id" in column_names(conn, "session_store_summaries")
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
     # Existing rows survived, with the new columns defaulted.
     assert conn.execute(
@@ -122,8 +115,8 @@ def test_v84_migration_is_idempotent(mock_db):
         database._run_column_migrations(shim.cursor())
 
     assert _index_exists(conn, "idx_usage_log_session")
-    assert "is_worker" in _column_names(conn, "sessions")
-    assert "folded_through_id" in _column_names(conn, "session_store_summaries")
+    assert "is_worker" in column_names(conn, "sessions")
+    assert "folded_through_id" in column_names(conn, "session_store_summaries")
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +219,7 @@ def test_older_schema_version_reruns_the_pass_even_with_a_matching_fingerprint(
     database.init_database()
 
     assert calls == [1]
-    assert _schema_version(conn) == database.SCHEMA_VERSION
+    assert schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_force_env_var_reruns_the_pass(mock_db, monkeypatch):

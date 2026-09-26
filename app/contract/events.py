@@ -48,12 +48,30 @@ class TurnCompleted(EventBase):
     type: Literal["turn.completed"] = "turn.completed"
     stop_reason: str | None = None
     terminal_reason: str | None = None
-    usage: dict = Field(default_factory=dict)
+    usage: dict = Field(
+        default_factory=dict,
+        description=(
+            "The turn's usage summary (tokens_in, tokens_out, cache_read_tokens, "
+            "cache_creation_tokens, total_cost_usd, duration_ms, num_turns). "
+            "usage_estimated: true when any token count in this turn was "
+            "estimated by the harness because the provider reported no usage "
+            "or the reply was interrupted; absent otherwise."
+        ),
+    )
 
 
 class TurnUsage(EventBase):
     type: Literal["turn.usage"] = "turn.usage"
-    usage: dict = Field(default_factory=dict)
+    usage: dict = Field(
+        default_factory=dict,
+        description=(
+            "One model call's usage record (input_tokens, output_tokens, "
+            "cache_read_input_tokens, cache_creation_input_tokens, cost_usd, "
+            "model_call_index). usage_estimated: true when a token count in "
+            "this record was estimated by the harness (input_tokens_estimated / "
+            "output_tokens_estimated name the guessed fields); absent otherwise."
+        ),
+    )
     # Context-window breakdown for the model call this usage record describes
     # (fluid's per-call snapshot). Same shape as the /context-usage fetch, so
     # the client can drive the live bar from the event stream instead of

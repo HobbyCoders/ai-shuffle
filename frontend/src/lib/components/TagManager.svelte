@@ -2,6 +2,7 @@
 	import { watchResources } from '$lib/services/watch-resources';
 	import type { Tag } from '$lib/api/client';
 	import { getTags, createTag, updateTag, deleteTag } from '$lib/api/client';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
 
 	let { onclose, ontagsupdated }: { onclose?: () => void; ontagsupdated?: (tags: Tag[]) => void } = $props();
 
@@ -122,13 +123,23 @@
 		if (fresh) startEdit(fresh);
 		else { cancelEdit(); remoteChange = 'This tag was deleted elsewhere.'; }
 	});
+
 </script>
 
-<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
+<!-- Escape is handled by the host page's global close-modal shortcut. -->
+
+<div
+	class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs"
+	role="dialog"
+	aria-modal="true"
+	aria-labelledby="tag-manager-title"
+	tabindex="-1"
+	use:focusTrap
+>
 	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] max-sm:max-h-full flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
-			<h2 class="text-lg font-semibold text-foreground">Manage Tags</h2>
+			<h2 id="tag-manager-title" class="text-lg font-semibold text-foreground">Manage Tags</h2>
 			<button
 				onclick={() => onclose?.()}
 				aria-label="Close"
@@ -144,7 +155,7 @@
 		{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 		<div class="flex-1 overflow-y-auto p-5 space-y-5">
 			{#if error}
-				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
+				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm" role="alert">
 					{error}
 				</div>
 			{/if}
@@ -165,6 +176,7 @@
 						{#each TAG_COLORS as color}
 							<button
 								onclick={() => newTagColor = color.value}
+								aria-pressed={newTagColor === color.value}
 								class="w-6 h-6 rounded-full transition-transform {newTagColor === color.value ? 'ring-2 ring-offset-2 ring-offset-background ring-primary scale-110' : 'hover:scale-110'}"
 								style="background-color: {color.value}"
 								title={color.name}
@@ -201,6 +213,7 @@
 									<input
 										type="text"
 										bind:value={editName}
+										aria-label="Tag name"
 										class="flex-1 px-2 py-1 rounded-sm bg-muted/50 border border-border text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-primary/50"
 										onkeypress={(e) => e.key === 'Enter' && saveEdit()}
 									/>
@@ -208,6 +221,7 @@
 										{#each TAG_COLORS as color}
 											<button
 												onclick={() => editColor = color.value}
+												aria-pressed={editColor === color.value}
 												class="w-5 h-5 rounded-full transition-transform {editColor === color.value ? 'ring-2 ring-offset-1 ring-offset-background ring-primary scale-110' : 'hover:scale-110'}"
 												style="background-color: {color.value}"
 												title={color.name}

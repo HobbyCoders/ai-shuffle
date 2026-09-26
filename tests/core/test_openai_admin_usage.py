@@ -47,7 +47,7 @@ def test_unsupported_capability_is_negative_cached_until_resume(test_db, status)
     polling.finish(key, 0, status)
     assert not polling.claim(key, 10_000_000)
 
-    polling.resume_authentication("https://example.test/unsupported", {})
+    polling.resume_identity(polling.identity("https://example.test/unsupported", {}))
     assert polling.claim(key, 10_000_000)
 
 
@@ -170,11 +170,11 @@ def test_explicit_resume_only_changes_auth_pauses(test_db):
     key = polling.identity(url, headers)
     assert polling.claim(key, 0)
     polling.finish(key, 0, 200)
-    polling.resume_authentication(url, headers)
+    polling.resume_identity(polling.identity(url, headers))
     assert not polling.claim(key, 1)
     polling.finish(key, 1, 403)
     assert not polling.claim(key, 10000)
-    polling.resume_authentication(url, headers)
+    polling.resume_identity(polling.identity(url, headers))
     assert polling.claim(key, 10000)
 
 
@@ -184,3 +184,46 @@ async def test_concurrent_consumers_issue_one_request(test_db, upstream):
     results = await asyncio.gather(*(admin.fetch("shared-key", "org-test", costs=True) for _ in range(8)), return_exceptions=True)
     assert upstream.await_count == 1
     assert sum(isinstance(r, polling.UsageDeferred) for r in results) == 7
+
+
+@pytest.mark.asyncio
+async def test_admin_pair_stores_when_budgets_drift(authenticated_client, upstream, monkeypatch):
+    import types
+
+    from app.core import encryption
+    from app.network import usage_budget
+
+    clock = [0.0]
+    monkeypatch.setattr(usage_budget, "time", types.SimpleNamespace(time=lambda: clock[0]))
+
+    async def get(url, **kwargs):
+        results = ([{"amount": {"value": "1.0", "currency": "usd"}}] if url.endswith("/costs")
+                   else [{"input_tokens": 1, "output_tokens": 1, "num_model_requests": 1}])
+        return response({"data": [{"results": results}], "has_more": False})
+    upstream.side_effect = get
+
+    row = db.create_model_provider(provider_id="drift-openai", name="OpenAI", provider_type="openai",
+                                   base_url="https://api.openai.com",
+                                   auth_token=encryption.encrypt_value("inference-key"))
+    db.set_openai_billing_binding(row["id"], "org-drift", settings.effective_instance_id,
+                                  encryption.encrypt_value("admin-key"))
+    headers = {"Authorization": "Bearer admin-key", "OpenAI-Organization": "org-drift"}
+    # The endpoints last finished with different jitter, so their next
+    # attempts differ by 20 s.
+    for url, jitter in ((admin.BASE + "/costs", 25.0), (admin.BASE + "/usage/completions", 5.0)):
+        key = polling.identity(url, headers)
+        monkeypatch.setattr(polling.random, "uniform", lambda *_, j=jitter: j)
+        assert polling.claim(key, 0, 900)
+        polling.finish(key, 0, 200, 0, 900)
+    monkeypatch.setattr(polling.random, "uniform", lambda *_: 5.0)
+
+    monitor = ProviderUsageMonitor()
+    stored = False
+    # Reads every five minutes, starting inside the 20 s gap, for four hours.
+    for step in range(48):
+        clock[0] = 910.0 + 300.0 * step
+        stored = await monitor._poll_openai_provider(row) or stored
+    assert stored, "every upstream success was discarded; spend never persisted"
+    snapshot = next(s for s in db.get_all_provider_usage_snapshots() if s["provider_id"] == row["id"])
+    assert snapshot["credits"]["spend_month"] == 1.0
+    assert snapshot["credits"]["input_tokens"] == 1

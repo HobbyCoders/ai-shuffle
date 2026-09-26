@@ -1,79 +1,45 @@
-"""Server-side sideband bridge for voice sessions (waves VW3–VW5, ruling VM8).
+"""Server-side sideband bridge for voice sessions.
 
-Transport shape (ruling VM2): the browser holds a WebRTC leg straight to
-OpenAI — audio never transits this process — and the backend joins the SAME
-realtime call over a *sideband* WebSocket
-(``wss://api.openai.com/v1/realtime?call_id=...``). That leg is where the
-backend owns instructions, VAD config and (from VW4) the tool declarations the
-client can neither see nor tamper with, and where both sides' final transcripts
-arrive for durable persistence.
+Transport shape: the browser holds a WebRTC leg straight to OpenAI — audio
+never transits this process — and the backend joins the SAME realtime call over
+a *sideband* WebSocket (``wss://api.openai.com/v1/realtime?call_id=...``). That
+leg is where the backend owns instructions, VAD config and the tool declarations
+the client can neither see nor tamper with, and where both sides' final
+transcripts arrive for durable persistence. ``_open_sideband`` tries the call's
+ephemeral client secret, then the provider API key, retrying the "call not found
+yet" class of failure with a short backoff; every failed attempt is logged with
+the upstream status and body.
 
-Sideband handshake (corrected 2026-08-14 after a live 404): the URL is right and
-unchanged, but a single attempt with the provider API key is NOT enough in
-practice. ``_open_sideband`` now walks a credential ladder — the real API key
-first (what the docs prescribe), then the ephemeral client secret the browser
-used to create the call (what every reported fix in the wild uses) — and retries
-the "call not found yet" class of handshake failure with a short backoff,
-because the call takes a moment to become joinable after the SDP answer. Every
-failed attempt is logged with the upstream HTTP status and body so a dead
-handshake is diagnosable from the app log instead of a bare exception.
+* :class:`VoiceBridge` — one live call: sends the initial ``session.update``,
+  reads events until the socket closes, and hands each complete exchange to
+  :func:`app.core.turn_recorder.record_voice_exchange`.
+* :class:`VoiceCallRegistry` — at most ONE live bridge per session, under an
+  asyncio lock. A new ``call_id`` REPLACES the attachment; ``shutdown_all`` is
+  wired into the app lifespan.
+* Delegation: function tools on the sideband (``dispatch_agent``,
+  ``check_agent``, ``list_agents``, ``message_agent``, ``stop_agent``,
+  ``respond_approval``) answered with ``function_call_output`` +
+  ``response.create``; a per-worker watcher announces completion unprompted and
+  an approval poller reads pending worker prompts aloud.
+* The call-length cap runs from a per-session *call epoch* that replace-attaches
+  preserve and only hangup clears; once it fires, /call and /secret answer 409
+  for a grace window so an auto-reconnect cannot restart the clock.
+* Context retention goes in a SECOND ``session.update``, so a rejected shape
+  never costs the first one's instructions / VAD / tools.
+* Usage and a cost estimate accumulate per epoch (``GET .../state``).
 
-This module ships:
+Scope fences: no server-side reconnect (the FE reconnects with a fresh
+``call_id`` and the replace-attach reseeds context via :func:`build_context_seed`);
+no worker teardown (dispatched agents survive hangup, so ``stop`` never calls
+``teardown_workers``); no file-editing or shell tools. The voice agent is a
+coordinator that sends substantive work to a worker; it may use code mode's
+hardened WebSearch/WebFetch (WebFetch keeps its approval gate) and the
+app-configuration tools bridged in-process (``_app_tools``).
 
-* :class:`VoiceBridge` — one live call. Opens the sideband, sends the initial
-  ``session.update``, reads events until the socket closes, assembles complete
-  exchanges (one user utterance + the assistant reply that follows it) and
-  hands each one to :func:`app.core.turn_recorder.record_voice_exchange`.
-* :class:`VoiceCallRegistry` — at most ONE live bridge per session, guarded by
-  an asyncio lock. Posting a new ``call_id`` REPLACES the existing attachment
-  (old one is closed first); ``shutdown_all`` is wired into the app lifespan.
-
-VW4 adds the delegation layer (rulings VM10/VM11/VM12/VM16): four function
-tools declared on the sideband (``dispatch_agent``, ``check_agent``,
-``list_agents``, ``respond_approval``), the servicing loop that answers them
-with ``function_call_output`` + ``response.create``, a per-worker WATCHER that
-injects "the agent finished" back into the conversation unprompted, and an
-approval poller that reads pending worker permission prompts out loud.
-
-VW5 hardens the whole thing:
-
-* **The call-length cap spans reconnects.** The registry stamps a per-session
-  *call epoch* on the first attach; a replace-attach (the FE's 50-minute
-  re-handshake) PRESERVES it and only an explicit hangup clears it, so the
-  bridge deadline is ``max_call_minutes`` measured from the epoch — not from
-  the attachment. When the cap fires the session is marked capped for a short
-  grace window and the call/secret routes answer 409, so an auto-reconnect
-  cannot silently restart the clock.
-* **Deterministic default agent + a roster in the instructions**, so "just get
-  an agent on it" always picks the same worker and the model knows the names
-  it may pass.
-* **Context retention** (``truncation.retention_ratio`` 0.8) sent as a SECOND,
-  isolated ``session.update`` — a rejected shape can never cost us the
-  instructions / VAD / tools of the first one.
-* **Per-call usage + a cost estimate**, accumulated across replace-attaches on
-  the epoch record and exposed through ``GET /voice/sessions/{id}/state``.
-
-Deliberately NOT here (scope fences):
-
-* No server-side reconnect. When the sideband drops, the bridge simply marks
-  itself disconnected — reconnect is FE-driven with a fresh ``call_id``, and
-  the replace-attach path reseeds context (see :func:`build_context_seed`).
-* No worker teardown. Dispatched agents SURVIVE hangup (ruling VM12): ``stop``
-  cancels only the bridge's own tasks — it must never call ``teardown_workers``
-  or any other worker-stopping API.
-* No file-editing or shell tools for the voice model, ever (ruling VM16, as
-  amended 2026-09). The voice agent is a coordinator: substantive work — code,
-  files, commands, codebase research — always goes to a worker through
-  ``dispatch_agent``. It may directly search the public web with the same
-  hardened WebSearch/WebFetch implementations used by code mode; WebFetch keeps
-  its normal session-scoped approval gate. App-configuration tools (automations,
-  hooks, agents, MCP servers, connectors, subagents) are also bridged onto the
-  sideband as realtime function tools (``_app_tools``) and serviced in-process.
-
-Robustness rule (mirrors the recorder): a bridge bug must never take down the
-call or the request that started it — the read loop swallows and logs per-event
-failures, tool servicing runs in its own task and turns any exception into an
-error payload, and persistence failures never propagate.
+Robustness rule: a bridge bug must never take down the call or the request that
+started it — the read loop swallows and logs per-event failures, tool servicing
+turns any exception into an error payload, and persistence failures never
+propagate.
 """
 
 from __future__ import annotations
@@ -93,7 +59,7 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 # The sideband endpoint: same realtime call as the browser's WebRTC leg, joined
-# by call_id. Verified current on 2026-08-14 against OpenAI's "Webhooks and
+# by call_id. Verified against OpenAI's "Webhooks and
 # server-side controls" guide and the officially-generated openai-python client
 # (``client.realtime.connect(call_id=...)`` builds exactly this URL and sends
 # only the Authorization header — no OpenAI-Beta, no subprotocol).
@@ -201,9 +167,6 @@ VOICE_INSTRUCTIONS = (
     "- Answer in the language the user speaks to you in."
 )
 
-#: Back-compat alias — VW3 shipped the placeholder under this name.
-VOICE_INSTRUCTIONS_V1 = VOICE_INSTRUCTIONS
-
 # Appended when the app-configuration tools are declared on the sideband —
 # the operating rules those tools need, condensed for a spoken channel.
 APP_TOOLS_INSTRUCTIONS = (
@@ -226,7 +189,7 @@ APP_TOOLS_INSTRUCTIONS = (
 CALL_STARTED_PREFIX = "[call started]"
 CONTEXT_SEED_MARKER = "[earlier conversation]"
 
-# The note injected at the start of a browser call (never on a wake-word
+# The note injected at the start of a browser call (never on a native phone
 # session, which must stay silent until the user speaks). A first-time call
 # gets a greeting; a rejoined session gets a welcome back keyed off the
 # replayed history item the bridge sends just before it.
@@ -238,31 +201,10 @@ GREETING_PROMPT = (
     "would like to do. Do not list your capabilities."
 )
 
-# Default per-mode appendices for native-app sessions (the Android voice
-# assistant). A native client reports its launch mode on call attach
-# (``session_mode``); browser calls send none and get the base prompt only.
-DEFAULT_COMMAND_INSTRUCTIONS = (
-    "Hands-free mode: you are also the user's phone assistant, speaking "
-    "through their Android phone, and this session was started by wake word. "
-    "The user may be driving and cannot touch the phone.\n"
-    "- Stay completely silent until the user speaks. Never speak first.\n"
-    "- You can act on the phone with the device tools the session declares "
-    "(calls, texts, notifications, apps, navigation, alarms, timers, "
-    "calendar, location, end_session). Use them immediately, without "
-    "asking for confirmation, except send_sms: its body is transcribed "
-    "speech, so call it without confirmed=true first, read the message back "
-    "in one short sentence, and send with confirmed=true only after a spoken "
-    "yes.\n"
-    "- If a contact lookup is ambiguous the tool says so: ask which one, "
-    "briefly. If a tool reports a missing permission, say so in a few words "
-    "and move on.\n"
-    "- Handle the request, say a very short confirmation, then call "
-    "end_session. Do not ask 'anything else?' and do not keep the session "
-    "open. If the user goes silent, call end_session.\n"
-    "- Keep every reply to one short sentence: no greetings, no explaining "
-    "what you are doing."
-)
-
+# Default per-mode appendix for native-app sessions (the Android voice
+# assistant). A native client reports its mode on call attach
+# (``session_mode``, always "chat"); browser calls send none and get the base
+# prompt only.
 DEFAULT_CHAT_INSTRUCTIONS = (
     "Phone mode: you are also the user's phone assistant, speaking through "
     "their Android phone.\n"
@@ -283,13 +225,13 @@ DEFAULT_CHAT_INSTRUCTIONS = (
 
 #: session_mode → default appendix (the route composes stored overrides).
 DEFAULT_MODE_INSTRUCTIONS: Dict[str, str] = {
-    "command": DEFAULT_COMMAND_INSTRUCTIONS,
     "chat": DEFAULT_CHAT_INSTRUCTIONS,
 }
 
-# The whole tool surface (ruling VM10). Four calls, none of which does work
-# directly: three read/dispatch against the existing Task-dispatch layer and one
-# answers a worker's permission prompt. Realtime function-tool schema is flat —
+# The delegation tool surface. Six calls, none of which does work directly:
+# five list agents or dispatch, check, message and stop workers through the
+# existing Task-dispatch layer, and one answers a worker's permission prompt.
+# Realtime function-tool schema is flat —
 # ``{"type": "function", "name", "description", "parameters"}`` — NOT the
 # Chat-Completions ``{"type": "function", "function": {...}}`` nesting.
 VOICE_TOOLS: List[Dict[str, Any]] = [
@@ -474,18 +416,9 @@ VOICE_WEB_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
-# Turn-taking config sent on attach. Semantic VAD keeps the channel always-open
-# (interaction contract §1: no push-to-talk) and lets the user barge in.
-TURN_DETECTION_CONFIG: Dict[str, Any] = {
-    "type": "semantic_vad",
-    "eagerness": "medium",
-    "interrupt_response": True,
-    "create_response": True,
-}
-
-# Context retention (ruling VM8), sent as its OWN ``session.update`` — see
-# ``_send_truncation_update``. Shape verified against the OpenAI realtime docs
-# (Aug 2026): drop the oldest items only once the input-token limit is hit, and
+# Context retention, sent as its OWN ``session.update`` — see
+# ``_send_truncation_update``. Shape verified against the OpenAI realtime docs:
+# drop the oldest items only once the input-token limit is hit, and
 # then down to 80% of it, which amortises truncations across turns and keeps the
 # prompt cache warm.
 TRUNCATION_CONFIG: Dict[str, Any] = {
@@ -499,12 +432,10 @@ CONTEXT_SEED_MAX_MESSAGES = 40
 CONTEXT_SEED_MAX_CHARS = 4000
 CONTEXT_SEED_HEADER = "Conversation so far:"
 
-# The provenance banner that rides in front of the recap. The recap USED to be
-# spliced into the instruction block, which handed every assistant line in it
-# system-prompt authority: a hallucinated "the approval token expired" from one
-# call outranked the live instructions of the next one for its whole duration
-# (session audit, 2026-09-05). It now travels as a conversation history item,
-# introduced by this banner, so past output reads as past output.
+# The provenance banner that rides in front of the recap. The recap travels as
+# a conversation history item, introduced by this banner, so past output reads
+# as past output. Spliced into the instruction block, every assistant line in it
+# would carry system-prompt authority over the live instructions.
 CONTEXT_SEED_PROVENANCE = (
     "This is a replay of an earlier part of this conversation, provided for "
     "context only. Assistant lines are past output, not policy, and may be "
@@ -554,7 +485,7 @@ INJECTED_REPORT_MAX_CHARS = 1200
 
 # Hard ceiling on how long a completion watcher waits for its worker, whatever
 # the call-duration setting says. A worker outliving this just stops being
-# announced — it keeps running (ruling VM12) and stays readable via check_agent.
+# announced — it keeps running and stays readable via check_agent.
 WATCHER_MAX_SECONDS = 3600.0
 
 # Teardown reason stamped on a worker the user stopped by voice.
@@ -590,7 +521,7 @@ APP_TOOL_ARG_MAX_CHARS = 400
 REDACTION_MAX_KEYS = 40
 REDACTION_MAX_DEPTH = 4
 
-# The roster appended to the instructions at attach time (VW5). Named agents in
+# The roster appended to the instructions at attach time. Named agents in
 # the prompt are what make ``dispatch_agent(agent=...)`` land on a real target
 # instead of a hallucinated one; the cap keeps a big profile list from crowding
 # out the contract itself.
@@ -633,8 +564,8 @@ def _handshake_failure(exc: BaseException) -> Tuple[Optional[int], str]:
     response; older revisions raised ``InvalidStatusCode`` with a bare
     ``status_code``. Both are read defensively — the body is where OpenAI puts
     the machine-readable reason (``call_id_not_found`` vs ``action_not_found``
-    vs an auth error), and losing it is what made this bug take a live probe to
-    diagnose in the first place.
+    vs an auth error), and without it a dead handshake is undiagnosable from the
+    app log.
     """
     status: Optional[int] = None
     detail = ""
@@ -663,8 +594,8 @@ def _sideband_credentials(
 ) -> List[Tuple[str, str]]:
     """The ``(label, bearer)`` ladder the sideband tries, in order.
 
-    The ephemeral client secret leads: live validation (2026-08-14, real
-    browser-created WebRTC call, gpt-realtime-2.1) showed the API key answers
+    The ephemeral client secret leads: on a real browser-created WebRTC call
+    (gpt-realtime-2.1) the API key answers
     ``call_id_not_found`` on EVERY attempt while the secret that created the
     call connects on its FIRST — the docs' server-controls guide describes the
     SIP path, not browser-created calls. The API key stays as the fallback for
@@ -754,10 +685,10 @@ def is_backend_note(text: Any) -> bool:
     """Whether ``text`` is a note the BACKEND put into the conversation.
 
     ``[call started]`` / ``[agent update]`` / ``[approval needed]`` notes and
-    the replayed-history item are machine boilerplate. They used to persist as
-    ordinary user messages, which made the greeting preamble the session title
-    and spent part of every later recap budget teaching the model that the user
-    says things like "Do not list your capabilities".
+    the replayed-history item are machine boilerplate. Persisted as ordinary
+    user messages, they would become the session title and spend recap budget
+    teaching the model that the user says things like "Do not list your
+    capabilities".
     """
     if not isinstance(text, str):
         return False
@@ -889,7 +820,7 @@ class VoiceBridge:
         self._pending_assistant: List[str] = []
         self._typed_user_items: set[str] = set()
 
-        # -- VW4 tool servicing ------------------------------------------
+        # -- tool servicing ----------------------------------------------
         # Function calls already serviced, by call_id: the same call reaches us
         # twice (once as response.function_call_arguments.done, once inside
         # response.done), and servicing it twice would dispatch two workers.
@@ -901,7 +832,6 @@ class VoiceBridge:
         self._announced_approvals: set = set()
         # Voice session's profile id, read lazily and cached (dispatch grants).
         self._profile_id: Optional[str] = None
-        self._provider_id: Optional[str] = None
         self._profile_loaded = False
 
         # -- client-serviced tools (native app integration) ----------------
@@ -939,7 +869,7 @@ class VoiceBridge:
             self._app_tools[schema["name"]] = tool
             self._app_tool_schemas.append(schema)
         # Whether to open the call with a greeting (browser calls only — a
-        # wake-word session must stay silent until the user speaks).
+        # native phone session must stay silent until the user speaks).
         self._greet = bool(greet)
 
     # -- lifecycle ---------------------------------------------------------
@@ -1006,11 +936,10 @@ class VoiceBridge:
         )
 
         # The spoken approval poller is the ONLY surface a caller has: the FE
-        # suppresses the GUI permission modal for the whole call (VM23). It used
-        # to start only from inside WebFetch/dispatch_agent/message_agent, so a
-        # request created by any other path in a call that used none of those
-        # tools was invisible AND inaudible. A 2s poll for the life of the call
-        # is cheap; this is the fix for that blind spot.
+        # suppresses the GUI permission modal for the whole call. It starts with
+        # the call, not with the first WebFetch/dispatch_agent/message_agent, so
+        # a request created by any other path is still read aloud. A 2s poll for
+        # the life of the call is cheap.
         self._ensure_approval_poller()
 
         # Which realtime model actually ran the call. ``sessions.model`` holds
@@ -1072,7 +1001,7 @@ class VoiceBridge:
         current = asyncio.current_task()
 
         # Cancel only the bridge's OWN tasks. Dispatched workers deliberately
-        # survive the call (ruling VM12) — nothing here may stop them, and this
+        # survive the call — nothing here may stop them, and this
         # module never calls ``teardown_workers``/``stop_all_workers``.
         for task in list(self._call_tasks) + list(self._watchers):
             if task is not current:
@@ -1114,17 +1043,16 @@ class VoiceBridge:
         )
 
     def remaining_seconds(self) -> float:
-        """Seconds left on the call cap, measured from the CALL's epoch (VW5).
+        """Seconds left on the call cap, measured from the CALL's epoch.
 
         Reconnecting mid-call re-attaches a new bridge to the same epoch, so the
-        deadline keeps counting down instead of starting over — the bug this
-        wave exists to fix.
+        deadline keeps counting down instead of starting over.
         """
         window = max(int(self.max_call_minutes or 0), 0) * SECONDS_PER_MINUTE
         return window - (time.time() - self.call_started_at)
 
     async def _duration_cap(self) -> None:
-        """Close the call once it exceeds ``voice_max_call_minutes`` (VM13)."""
+        """Close the call once it exceeds ``voice_max_call_minutes``."""
         try:
             await asyncio.sleep(max(self.remaining_seconds(), 0.0))
         except asyncio.CancelledError:
@@ -1151,11 +1079,11 @@ class VoiceBridge:
     async def _send_session_update(self) -> None:
         """Send the initial ``session.update`` (instructions, tools, turn detection).
 
-        The instruction payload is the VM16 contract text VERBATIM, then the
-        dispatchable-agent roster (VW5), so the contract always leads and the
+        The instruction payload is the voice contract text VERBATIM, then the
+        dispatchable-agent roster, so the contract always leads and the
         appendices can be trimmed independently.
 
-        The history recap is NOT here any more: it is conversation context, and
+        The history recap is NOT here: it is conversation context, and
         splicing transcribed assistant prose into an instruction block gave a
         hallucinated blocker instruction authority over the next call. See
         :meth:`_send_context_seed_item`. Retention/truncation is not here
@@ -1178,7 +1106,7 @@ class VoiceBridge:
                 "type": "realtime",
                 "instructions": instructions,
                 # Declared HERE, on the sideband, not by the browser: the client
-                # can neither see nor tamper with the dispatch surface (VM2).
+                # can neither see nor tamper with the dispatch surface.
                 # Client-declared device tools are appended verbatim (already
                 # sanitized by the route) and serviced by the client itself.
                 "tools": [dict(tool) for tool in VOICE_TOOLS]
@@ -1192,9 +1120,9 @@ class VoiceBridge:
     async def _send_truncation_update(self) -> None:
         """Send the retention config as its own, isolated ``session.update``.
 
-        Ruling VM8 wants ``retention_ratio`` 0.8; the documented shape is
+        The documented shape is
         ``session.truncation = {"type": "retention_ratio", "retention_ratio": ...}``
-        (OpenAI realtime docs, Aug 2026). It travels alone so that a schema
+        (OpenAI realtime docs). It travels alone so that a schema
         rejection costs only the retention knob — never the instructions, tools
         or VAD config of the first update. A rejection arrives asynchronously as
         an ``error`` event and is logged by :meth:`_handle_event`.
@@ -1210,13 +1138,11 @@ class VoiceBridge:
     async def _send_context_seed_item(self) -> None:
         """Replay the recent transcript as conversation HISTORY, not as policy.
 
-        This used to be appended to the ``instructions`` string, which is what
-        let a hallucinated "the approval token expired" from one call govern the
-        next one: an unverified assistant line inherited the authority of the
-        system prompt and outranked everything the user said out loud. Sending
-        it as a ``conversation.item.create`` behind
-        :data:`CONTEXT_SEED_PROVENANCE` keeps the recap (same 40-message /
-        4000-char budget) while putting it back at the altitude it belongs at.
+        Appended to the ``instructions`` string, an unverified assistant line
+        would inherit the authority of the system prompt and outrank everything
+        the user says out loud. Sending it as a ``conversation.item.create``
+        behind :data:`CONTEXT_SEED_PROVENANCE` keeps the recap (same 40-message /
+        4000-char budget) at the altitude it belongs at.
 
         No ``response.create``: this is context, and the greeting — or the user
         — starts the talking.
@@ -1264,7 +1190,7 @@ class VoiceBridge:
                 self.session_id, exc_info=True,
             )
         finally:
-            # Reconnect is FE-driven with a fresh call_id (ruling VM15): all we
+            # Reconnect is FE-driven with a fresh call_id: all we
             # do here is stop claiming to be connected.
             self.connected = False
             logger.info(
@@ -1362,7 +1288,7 @@ class VoiceBridge:
             "Voice: ignoring sideband event type=%r for %s", etype, self.session_id,
         )
 
-    # -- usage accounting (VW5) --------------------------------------------
+    # -- usage accounting --------------------------------------------------
 
     def _accumulate_usage(self, usage: Dict[str, Any]) -> None:
         """Fold one ``response.done`` usage block into the call's totals.
@@ -1437,7 +1363,7 @@ class VoiceBridge:
     # -- persistence -------------------------------------------------------
 
     async def _flush_exchange(self, usage: Dict[str, Any]) -> None:
-        """Persist the assembled exchange (VM9) and reset the buffers.
+        """Persist the assembled exchange and reset the buffers.
 
         Pairing note: the user's input transcription usually lands before the
         response completes, but it is not ordered by the protocol. When it has
@@ -1481,7 +1407,7 @@ class VoiceBridge:
             system_text=_cap(note_text),
         )
 
-    # -- tool servicing (VW4) ----------------------------------------------
+    # -- tool servicing ----------------------------------------------------
 
     def _maybe_service_call(
         self, call_id: Any, name: Any, arguments: Any
@@ -1562,11 +1488,9 @@ class VoiceBridge:
         """Write one serviced tool call to the session's event log.
 
         EVERY serviced tool, not just the web pair: dispatch_agent,
-        respond_approval, stop_agent and the whole app-config surface used to be
-        answered without leaving a single row, so "what did the voice agent
-        actually do on that call" was unanswerable after the fact — one audit
-        had to reconstruct a ``respond_approval`` call from a paraphrase of an
-        error string. Arguments are redacted first (see
+        respond_approval, stop_agent and the whole app-config surface each leave
+        a row, so "what did the voice agent actually do on that call" stays
+        answerable after the fact. Arguments are redacted first (see
         :func:`_redact_tool_input`).
         """
         from app.core import turn_recorder
@@ -1605,13 +1529,11 @@ class VoiceBridge:
         try:
             row = await run_sync(database.get_session, self.session_id)
             self._profile_id = (row or {}).get("profile_id")
-            self._provider_id = (row or {}).get("provider_id")
         except Exception:  # noqa: BLE001 — dispatch falls back to the row read
             logger.debug(
                 "Voice: could not read profile for %s", self.session_id, exc_info=True,
             )
             self._profile_id = None
-            self._provider_id = None
         self._profile_loaded = True
         return self._profile_id
 
@@ -1660,7 +1582,7 @@ class VoiceBridge:
         The voice approval tool answers this same session's durable interaction.
         """
         from app.core.permission_handler import permission_handler
-        from claude_agent_sdk.types import PermissionResultAllow
+        from app.core.agent_types import PermissionResultAllow
         from fluid.tools.builtins.web import fetch_handler
         from fluid.tools.registry import ToolCtx
 
@@ -1699,7 +1621,7 @@ class VoiceBridge:
         return {"ok": not outcome.is_error, "result": outcome.text}
 
     async def _tool_dispatch_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Spin up a background worker and ACK immediately (ruling VM10).
+        """Spin up a background worker and ACK immediately.
 
         The ack is the tool result — the model says "I've got an agent on it"
         and keeps talking. The completion arrives later, injected by the watcher
@@ -1777,22 +1699,6 @@ class VoiceBridge:
         """The agents this call may dispatch — the voice-assigned ones."""
         return await run_sync(_voice_roster_targets)
 
-    async def _default_agent_ref(self) -> Optional[str]:
-        """Agent to use when the model omits ``agent`` — DETERMINISTIC (VW5).
-
-        Three rules, in order: the agent the voice session was started with
-        (the user picked it on the new-chat screen, so "just get an agent on
-        it" means that one) when it is voice-assigned; else an agent whose id
-        or name is literally "default" (case-insensitive); else the
-        alphabetically first eligible agent by name.
-
-        Stability is the point: "just get an agent on it" must land on the same
-        worker every time, not on whatever the profile table happened to return
-        first. Returns None when there is nothing to pick.
-        """
-        rows = _roster_rows(await self._voice_roster())
-        return _pick_default_agent(rows, preferred=await self._caller_profile_id())
-
     async def _agent_roster(self) -> str:
         """The "Agents you can dispatch:" block appended to the instructions.
 
@@ -1840,10 +1746,15 @@ class VoiceBridge:
             }
 
         def _latest_binding():
-            live = turns_db.get_live_turn(task_id)
-            return live or turns_db.get_latest_turn(task_id)
+            from app.core import api_user_scope
 
-        latest = await run_sync(_latest_binding)
+            live = turns_db.get_live_turn(task_id)
+            # The follow-up runs as the key the worker belongs to (its own row,
+            # else the session that spawned it), never as the owner.
+            principal = api_user_scope.session_api_user_id(database.get_session(task_id))
+            return live or turns_db.get_latest_turn(task_id), principal
+
+        latest, api_user_id = await run_sync(_latest_binding)
         if not latest:
             return {
                 "ok": False,
@@ -1861,6 +1772,7 @@ class VoiceBridge:
                 project_id=latest.get("project_id"),
                 worktree_id=latest.get("worktree_id"),
                 overrides=dict(latest.get("overrides") or {}),
+                payload={"api_user_id": api_user_id} if api_user_id else None,
             )
         except Exception as exc:  # noqa: BLE001 — surfaced to the model
             logger.warning(
@@ -1975,7 +1887,7 @@ class VoiceBridge:
         the ROOT session (the one with a human watching), so the pending rows are
         parent-keyed. Passing the worker's id would find nothing.
 
-        Already-answered tolerance (VM23): the GUI modal is suppressed during a
+        Already-answered tolerance: the GUI modal is suppressed during a
         live call, but any OTHER surface (another device, the call ending and
         the modal returning) can still answer first. When the pending row is
         gone, look the request up among the ANSWERED rows and report that
@@ -2059,7 +1971,7 @@ class VoiceBridge:
         return {"ok": True, "request_id": request_id, "decision": decision,
                 "result": result}
 
-    # -- completion injection + approval surfacing (VW4) --------------------
+    # -- completion injection + approval surfacing -------------------------
 
     def _watch_timeout(self) -> float:
         """How long a watcher waits for its worker before giving up."""
@@ -2093,7 +2005,7 @@ class VoiceBridge:
             return
 
         # A stopped bridge means the user hung up: the worker keeps going
-        # (VM12) and its result stays in the session feed — there is simply
+        # and its result stays in the session feed — there is simply
         # nobody on the call to tell.
         if not self.active:
             return
@@ -2123,9 +2035,9 @@ class VoiceBridge:
     async def _poll_approvals(self) -> None:
         """Read out each pending worker permission request exactly once.
 
-        This is the spoken leg of ruling VM11 — and during a live call it is
+        This is the spoken approval leg — and during a live call it is
         the ONLY leg: the FE suppresses the GUI permission modal while the call
-        surface is up (VM23), so the same request is never presented on two
+        surface is up, so the same request is never presented on two
         surfaces at once. Nothing here answers a prompt: only
         ``respond_approval``, on the user's explicit spoken decision, does.
         """
@@ -2696,7 +2608,7 @@ def _active_task_count(session_id: str) -> int:
 def _answered_approval_decision(session_id: str, request_id: str) -> Optional[str]:
     """The decision an ALREADY-answered permission request settled on, if any.
 
-    Synchronous (call via ``run_sync``). Backs the VM23 already-answered
+    Synchronous (call via ``run_sync``). Backs the already-answered
     tolerance in ``respond_approval``: a request the user resolved from another
     surface should read back as its outcome, not as "not found".
     """
@@ -2763,7 +2675,7 @@ class _CallEpoch:
 
 
 class VoiceCallRegistry:
-    """In-process map of ``session_id -> VoiceBridge`` (ruling VM8)."""
+    """In-process map of ``session_id -> VoiceBridge``."""
 
     def __init__(self) -> None:
         self._bridges: Dict[str, VoiceBridge] = {}
@@ -2814,10 +2726,6 @@ class VoiceCallRegistry:
             return None
         return minutes
 
-    def clear_capped(self, session_id: str) -> None:
-        """Forget the cap — the user hung up, so a new call is allowed."""
-        self._capped.pop(session_id, None)
-
     def state(self, session_id: str) -> Dict[str, Any]:
         """State payload for a session, live bridge or not."""
         bridge = self._bridges.get(session_id)
@@ -2855,7 +2763,7 @@ class VoiceCallRegistry:
 
         The session's call EPOCH (start time + usage totals) is preserved across
         that replacement, so the duration cap and the cost estimate span the
-        whole call rather than restarting with each attachment (VW5). Only a
+        whole call rather than restarting with each attachment. Only a
         hangup — or the cap itself — clears it.
 
         ``greet`` asks for an opening greeting — honoured only on the FIRST

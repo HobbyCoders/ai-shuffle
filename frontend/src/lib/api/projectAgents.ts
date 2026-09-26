@@ -2,7 +2,7 @@
  * Project Agent Management API Client
  *
  * Provides functions for managing file-based agents in project directories.
- * Agents are stored as .md files in <project>/.claude/agents/ with YAML frontmatter.
+ * Agents are stored as .md files in <project>/.fluid/agents/ with YAML frontmatter.
  */
 
 import { api } from './client';
@@ -41,26 +41,15 @@ export interface UpdateProjectAgentRequest {
 	tools?: string[];
 }
 
-export interface RenameProjectAgentRequest {
-	new_name: string;
-}
-
 // ============================================================================
 // API Functions
 // ============================================================================
 
 /**
- * Get all agents in a project's .claude/agents/ directory
+ * Get all agents in a project's .fluid/agents/ directory
  */
 export async function getProjectAgents(projectId: string): Promise<ProjectAgent[]> {
 	return api.get(`/projects/${projectId}/agents`);
-}
-
-/**
- * Get detailed information about a specific agent including full prompt
- */
-export async function getProjectAgent(projectId: string, agentName: string): Promise<ProjectAgentDetail> {
-	return api.get(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}`);
 }
 
 /**
@@ -71,30 +60,6 @@ export async function createProjectAgent(
 	data: CreateProjectAgentRequest
 ): Promise<ProjectAgent> {
 	return api.post(`/projects/${projectId}/agents`, data);
-}
-
-/**
- * Update an existing agent
- */
-export async function updateProjectAgent(
-	projectId: string,
-	agentName: string,
-	data: UpdateProjectAgentRequest
-): Promise<ProjectAgent> {
-	return api.put(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}`, data);
-}
-
-/**
- * Rename an agent (changes the .md filename)
- */
-export async function renameProjectAgent(
-	projectId: string,
-	agentName: string,
-	newName: string
-): Promise<ProjectAgent> {
-	return api.post(`/projects/${projectId}/agents/${encodeURIComponent(agentName)}/rename`, {
-		new_name: newName
-	});
 }
 
 /**

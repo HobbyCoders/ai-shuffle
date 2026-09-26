@@ -30,9 +30,6 @@ export interface ChatPreferences {
 	toolsStartExpanded: boolean;        // Initial collapse state for tool results
 	groupToolCalls: boolean;            // Collapse consecutive tool calls into one group card
 
-	// Background tasks strip
-	activeTasksCollapsed: boolean;      // Whether the active-tasks strip is minimized
-
 	// Todo list
 	todosStartExpanded: boolean;        // Initial collapse state for todo list
 
@@ -51,7 +48,6 @@ const DEFAULT_PREFERENCES: ChatPreferences = {
 	showThinkingSummary: true,          // Show summary when collapsed by default
 	toolsStartExpanded: false,          // Collapsed by default (current behavior)
 	groupToolCalls: true,               // Group consecutive tools by default (current behavior)
-	activeTasksCollapsed: false,        // Expanded by default
 	todosStartExpanded: true,           // Expanded by default (current behavior)
 	autoScrollOnNewMessage: true,
 	showMessageTimestamps: false,       // Off by default - cleaner look
@@ -177,13 +173,6 @@ function reset(): void {
 }
 
 /**
- * Get current value of a preference (non-reactive)
- */
-function getValue<K extends keyof ChatPreferences>(key: K): ChatPreferences[K] {
-	return _state[key];
-}
-
-/**
  * Sync preferences from server (call after authentication)
  * Server is the source of truth - if server has different data, update local
  * If server is empty but local has data, push local to server (migration)
@@ -212,10 +201,8 @@ export const chatPreferences = {
 	subscribe,
 
 	load,
-	syncFromServer,
 	updatePreference,
 	reset,
-	getValue,
 
 	// Convenience setters for each preference
 	setShowThinkingBlocks: (value: boolean) => updatePreference('showThinkingBlocks', value),
@@ -223,7 +210,6 @@ export const chatPreferences = {
 	setShowThinkingSummary: (value: boolean) => updatePreference('showThinkingSummary', value),
 	setToolsStartExpanded: (value: boolean) => updatePreference('toolsStartExpanded', value),
 	setGroupToolCalls: (value: boolean) => updatePreference('groupToolCalls', value),
-	setActiveTasksCollapsed: (value: boolean) => updatePreference('activeTasksCollapsed', value),
 	setTodosStartExpanded: (value: boolean) => updatePreference('todosStartExpanded', value),
 	setAutoScrollOnNewMessage: (value: boolean) => updatePreference('autoScrollOnNewMessage', value),
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),

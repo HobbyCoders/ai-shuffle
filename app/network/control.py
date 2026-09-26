@@ -26,7 +26,7 @@ from fastapi.encoders import jsonable_encoder
 
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import engine, runners, transport
+from app.network import engine, membership, runners, transport
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +72,18 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
 async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None) -> Dict[str, Any]:
     """POST a control action to the owner with a device token."""
     ctx = engine.require_context()
+    known = ctx.member(device_id)
+    if known is not None and known.status != membership.STATUS_ACTIVE:
+        # A removed device is untrusted: never hand it a prompt, an answer or
+        # a stop. Its sessions stay read-only mirrors here (fork to continue).
+        raise RunnerUnreachable("The owning worker was removed from this network")
     link = transport._links.get(device_id)
     if link is None:
         member = await run_sync(store.get_member, device_id)
         if member is None:
             raise RunnerUnreachable("Unknown device")
-        presence = engine.presence_of(device_id) or {}
-        endpoints = list(presence.get("endpoints") or member.get("endpoints") or [])
-        link = transport.PeerLink(device_id, endpoints)
+        from app.network.endpoints import peer_endpoints
+        link = transport.PeerLink(device_id, peer_endpoints(member, engine.presence_of(device_id)))
         transport._links[device_id] = link
     if not link.endpoints:
         raise RunnerUnreachable("The owning worker has no reachable address")
@@ -310,8 +314,11 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                "context_window", "fast", "mode", "hidden"}
     fields = {k: v for k, v in session.items() if k in allowed}
     profile_id = fields.pop("profile_id", None) or "default"
-    # A remote member is the session's owner, never an API user of this worker.
-    fields["api_user_id"] = None
+    # The session keeps the API key that started it on the member (api_users
+    # replicate), so this row, which is the one every device mirrors, says the
+    # same. A key this worker does not know is dropped: the session is the owner's.
+    requested_api_user = session.get("api_user_id")
+    requested_api_user = requested_api_user if isinstance(requested_api_user, str) and requested_api_user else None
     if "hidden" in fields:
         fields["hidden"] = bool(fields["hidden"])
     if "permission_mode" in fields:
@@ -324,8 +331,10 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             return existing
         if database.get_profile(profile_id) is None:
             raise ValueError(f"Unknown profile: {profile_id}")
+        api_user_id = requested_api_user if (
+            requested_api_user and database.get_api_user(requested_api_user) is not None) else None
         return database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
-                                       is_active=True, **fields)
+                                       is_active=True, api_user_id=api_user_id, **fields)
 
     row = await run_sync(_create)
     _require_owned(session_id)

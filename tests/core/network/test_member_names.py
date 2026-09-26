@@ -4,7 +4,7 @@ import pytest
 from app.db import network as store
 from app.network import engine, hub, runners
 from tests.core.network.harness import converge, exchange, join
-from tests.core.network.test_api import workers, make_client
+from tests.core.network.test_api import make_client
 
 
 def names(worker, device_id):

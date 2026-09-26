@@ -76,7 +76,7 @@ def test_worker_cannot_ask_user_questions():
 
 def test_non_worker_session_keeps_ask_user_question():
     opts = _build(session_id="parent-1")
-    assert qo.WORKER_DISALLOWED_TOOL not in (opts.disallowed_tools or [])
+    assert qo.WORKER_DISALLOWED_TOOLS[0] not in (opts.disallowed_tools or [])
 
 
 # ─── CE12: the tool-surface override reaches the options object ─────────────

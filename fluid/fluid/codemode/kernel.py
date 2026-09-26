@@ -81,9 +81,10 @@ class KernelResult:
     notes: str = ""
 
 
-# The host-call callback maps a tool name and arguments to HostReply. Its wait is outside the cell compute
-# budget but is still bounded by KernelConfig.host_call_timeout, so a hung MCP call cannot hold the turn
-# indefinitely.
+# The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the
+# kernel; its time is not charged against the cell's *compute* budget, but a
+# single call is still bounded (``KernelConfig.host_call_timeout``), so a hung
+# MCP call cannot hold the cell, and the turn, open.
 HostCall = Callable[[str, dict], Awaitable[HostReply]]
 
 # Seconds the host has spent so far in THIS cell waiting on a human (a parked

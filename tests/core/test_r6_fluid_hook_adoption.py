@@ -124,16 +124,11 @@ async def test_reasoning_summary_subtype_rides_the_stream_events():
 
 def test_thinking_row_carries_the_subtype_in_metadata():
     from app.core.db_message_loader import _transform_row
-    from app.core.query_persistence import _row_for_thinking
-
-    row = _row_for_thinking("s", {"content": "sum", "subtype": "reasoning_summary"}, "p", "grok")
-    assert row["metadata"] == {"model": "grok", "subtype": "reasoning_summary"}
-    plain = _row_for_thinking("s", {"content": "t"}, "p", "grok")
-    assert plain["metadata"] == {"model": "grok"}
 
     loaded = _transform_row({
         "id": 1, "session_id": "s", "role": "thinking", "content": "sum",
-        "metadata": row["metadata"], "profile_id": "p", "created_at": None,
+        "metadata": {"model": "grok", "subtype": "reasoning_summary"},
+        "profile_id": "p", "created_at": None,
     })
     assert loaded["type"] == "thinking"
     assert loaded["metadata"]["subtype"] == "reasoning_summary"

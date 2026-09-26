@@ -41,6 +41,10 @@ _EXEMPT_PATHS = frozenset({
     # Pair exchange authenticates with a one-time, high-entropy grant in the
     # request body and is called before the new device owns a session cookie.
     "/api/v1/pairing/exchange",
+    # Owner password sign-in. The route itself requires a same-origin Origin
+    # before it sets a cookie; in Bearer mode it only returns the token in the
+    # body, which a cross-origin page cannot read.
+    "/api/v1/owner/login",
     # A worker joining a network posts its keys with a one-time join code
     # from another host: no cookie, no Origin header, nothing a browser can
     # forge without the code. The poll that follows is a safe GET.
@@ -184,12 +188,9 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         if self._wildcard_mode:
             return await call_next(request)
 
-        # 3. Bearer-token auth (API keys) — inherently CSRF-resistant.
-        #    Reuse auth info from request.state if already resolved by the
-        #    auth dependency, avoiding a redundant header check.
-        if getattr(request.state, "auth_token", None) and not getattr(request.state, "is_admin", False):
-            # API-key authenticated request — CSRF-safe
-            return await call_next(request)
+        # 3. Bearer-token auth (API keys) — inherently CSRF-resistant: a
+        #    cross-site page cannot attach an Authorization header without a
+        #    CORS preflight.
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             return await call_next(request)

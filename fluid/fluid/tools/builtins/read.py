@@ -204,8 +204,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # reaches the model at all — it is handed to the cell as a ResultRef whose
     # repr is a stub, and a cell that only measured it (``print(len(out))``)
     # learned nothing. Telling that model to "reuse what you already learned"
-    # is false, and transcripts show it paying several round-trips to recover.
-    # So the note only fires when the earlier read's payload was small enough
+    # would be false. So the note only fires when the earlier read's payload was small enough
     # that the calling surface delivered it whole.
     # Sized the way the code-mode kernel sizes it — UTF-8 bytes, not chars.
     delivered = (
@@ -235,7 +234,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # identity. Everything else claims its own window's identity *and* names
     # the whole-file one, so a holder of the whole file can serve this slice.
     window = None if offset == 1 and not more else (offset, key[2])
-    span = int(limit) if limit else DEFAULT_LINE_LIMIT
     return ToolOutcome(
         text=numbered + unchanged_read_note(repeat),
         content_id=_content_id(str(path), window, stamp),
@@ -245,7 +243,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             else ContentWindow(
                 content_id=_content_id(str(path), None, stamp),
                 start=offset - 1,
-                stop=offset - 1 + span,
+                stop=offset - 1 + window_len,
             )
         ),
     )
@@ -263,10 +261,9 @@ def _count_lines(path: Path) -> int | None:
 def _no_lines_note(path: Path, offset: int) -> str:
     """Why a read produced nothing — an empty file, or a window past the end.
 
-    "(empty file)" for a 900-line file read at ``offset=1200`` sent models
-    hunting for a bug that was not there (two recovery calls in the audited
-    transcript). Say which case it is, and hand back the number that makes the
-    next offset obvious.
+    "(empty file)" for a 900-line file read at ``offset=1200`` would send the
+    model hunting for a bug that is not there. Say which case it is, and hand
+    back the number that makes the next offset obvious.
     """
     if offset <= 1:
         return "(empty file)"

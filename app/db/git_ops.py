@@ -1,4 +1,4 @@
-"""The ``git_ops`` table — the durable cross-install git-operation queue (D5).
+"""The ``git_ops`` table — the durable cross-install git-operation queue.
 
 A *git op* is one unit of git work targeted at ONE install (``runner_id`` = that
 install's ``effective_instance_id``). It exists because git state lives on a
@@ -33,7 +33,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb as _parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +45,6 @@ TERMINAL_STATUSES = ("done", "error")
 # a long add is not skipped. Metadata GET must never fail these; cleanup lives
 # only in ``ensure_pending_checkout`` and only for this runner.
 STALE_RUNNING_SECONDS = 15 * 60
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -303,7 +292,7 @@ def list_stale_running(
 def list_recent_for_project(
     project_v2_id: str, limit: int = 20
 ) -> List[Dict[str, Any]]:
-    """Recent ops for a project across every runner (git-state visibility, D6)."""
+    """Recent ops for a project across every runner (git-state visibility)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

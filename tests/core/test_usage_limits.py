@@ -2,264 +2,52 @@
 Tests for the Claude usage-limits monitor (app/core/usage_limits.py).
 
 Covers:
-  * parse_usage_response — the real endpoint shape, the used → remaining flip
-    every reading goes through, the scoped-Fable window that only appears in the
-    ``limits`` array, overage from ``extra_usage``, and malformed/missing fields.
-  * UsageLimitsMonitor.fetch — happy path, missing credential (graceful empty),
-    HTTP error and network error (keep last snapshot, warn once).
+  * UsageLimitsMonitor.fetch — makes no request; keeps live windows.
   * apply_live_event — update an existing window vs append a new one, and the
     used → remaining flip that keeps live events on the snapshot's convention.
-  * get_snapshot — on-demand fetch when stale.
+  * get_snapshot — a read never refreshes (Claude usage is passive).
 """
 
-import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core import usage_limits
 from app.core.config import settings
-from app.core.usage_limits import (
-    UsageLimitsMonitor,
-    parse_usage_response,
-)
-
-
-# Trimmed copy of a real ``GET /api/oauth/usage`` 200 response.
-REAL_RESPONSE = {
-    "five_hour": {"utilization": 12.0, "resets_at": "2026-07-09T05:00:00+00:00"},
-    "seven_day": {"utilization": 17.0, "resets_at": "2026-07-13T23:00:00+00:00"},
-    "seven_day_opus": None,
-    "seven_day_sonnet": None,
-    "seven_day_overage_included": None,
-    "extra_usage": {"is_enabled": False, "utilization": None},
-    "limits": [
-        {"kind": "session", "percent": 12, "resets_at": "2026-07-09T05:00:00+00:00", "scope": None},
-        {"kind": "weekly_all", "percent": 17, "resets_at": "2026-07-13T23:00:00+00:00", "scope": None},
-        {
-            "kind": "weekly_scoped",
-            "percent": 24,
-            "resets_at": "2026-07-13T23:00:00+00:00",
-            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
-        },
-    ],
-}
-
-
-# ---------------------------------------------------------------------------
-# parse_usage_response
-# ---------------------------------------------------------------------------
-
-class TestParse:
-    def test_parses_top_level_and_scoped_fable(self):
-        windows = parse_usage_response(REAL_RESPONSE)
-        by_type = {w["type"]: w for w in windows}
-
-        # The endpoint reports percent USED; the snapshot carries REMAINING.
-        assert by_type["five_hour"]["utilization"] == 88.0  # 12% used
-        assert by_type["five_hour"]["resets_at"] == "2026-07-09T05:00:00+00:00"
-        assert by_type["seven_day"]["utilization"] == 83.0  # 17% used
-        # Fable weekly limit only exists in the limits[] array (weekly_scoped)
-        # and must be surfaced as seven_day_overage_included.
-        assert by_type["seven_day_overage_included"]["utilization"] == 76.0  # 24% used
-
-    def test_converts_used_percent_to_remaining(self):
-        # A window barely touched (1% used) must read as 99% LEFT, not 1% —
-        # the bug this conversion fixes (a window that had just reset showed 0).
-        windows = parse_usage_response({"five_hour": {"utilization": 1.0, "resets_at": None}})
-        assert windows[0]["utilization"] == 99.0
-
-        # A freshly reset window (0% used) is fully available.
-        assert parse_usage_response({"five_hour": {"utilization": 0.0}})[0]["utilization"] == 100.0
-        # An exhausted window has nothing left.
-        assert parse_usage_response({"five_hour": {"utilization": 100.0}})[0]["utilization"] == 0.0
-        # Out-of-range readings clamp instead of producing a negative remainder.
-        assert parse_usage_response({"five_hour": {"utilization": 140.0}})[0]["utilization"] == 0.0
-        assert parse_usage_response({"five_hour": {"utilization": -5.0}})[0]["utilization"] == 100.0
-
-    def test_limits_array_percent_is_also_converted(self):
-        data = {"limits": [{"kind": "session", "percent": 30, "resets_at": "y", "scope": None}]}
-        windows = parse_usage_response(data)
-        assert windows[0]["utilization"] == 70.0
-
-    def test_top_level_wins_over_limits_array(self):
-        data = {
-            "five_hour": {"utilization": 40.0, "resets_at": "x"},
-            "limits": [{"kind": "session", "percent": 5, "resets_at": "y", "scope": None}],
-        }
-        windows = parse_usage_response(data)
-        by_type = {w["type"]: w for w in windows}
-        assert by_type["five_hour"]["utilization"] == 60.0  # 40% used, not the limits[] 5
-
-    def test_overage_from_extra_usage_when_enabled(self):
-        data = {"extra_usage": {"is_enabled": True, "utilization": 8.0}}
-        windows = parse_usage_response(data)
-        by_type = {w["type"]: w for w in windows}
-        assert by_type["overage"]["utilization"] == 92.0  # 8% used
-
-    def test_extra_usage_disabled_is_omitted(self):
-        data = {"extra_usage": {"is_enabled": False, "utilization": None}}
-        assert parse_usage_response(data) == []
-
-    def test_null_and_missing_blocks_are_skipped(self):
-        data = {
-            "five_hour": None,
-            "seven_day": {"utilization": None, "resets_at": "z"},
-            "seven_day_opus": {"utilization": 3.0, "resets_at": "w"},
-        }
-        windows = parse_usage_response(data)
-        assert [w["type"] for w in windows] == ["seven_day_opus"]
-
-    def test_empty_and_malformed_do_not_raise(self):
-        assert parse_usage_response({}) == []
-        assert parse_usage_response({"limits": "not-a-list"}) == []
-        assert parse_usage_response({"limits": [None, 5, {"kind": "weird"}]}) == []
-        # A non-numeric utilization is dropped, not fatal.
-        assert parse_usage_response({"five_hour": {"utilization": "oops"}}) == []
-
-    def test_output_ordered_by_known_types(self):
-        data = {
-            "seven_day": {"utilization": 1.0},
-            "five_hour": {"utilization": 2.0},
-        }
-        windows = parse_usage_response(data)
-        # five_hour precedes seven_day per KNOWN_WINDOW_TYPES ordering.
-        assert [w["type"] for w in windows] == ["five_hour", "seven_day"]
+from app.core.usage_limits import UsageLimitsMonitor
 
 
 # ---------------------------------------------------------------------------
 # UsageLimitsMonitor.fetch
 # ---------------------------------------------------------------------------
 
-def _fake_httpx(status_code=200, json_body=None, raise_exc=None):
-    """Build a patch target for httpx.AsyncClient used as an async ctx manager."""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_body or {}
+class TestFetchWithoutToken:
+    """The Claude CLI's OAuth token is never read, so no usage request is made."""
 
-    client = MagicMock()
-    if raise_exc is not None:
-        client.get = AsyncMock(side_effect=raise_exc)
-    else:
-        client.get = AsyncMock(return_value=resp)
+    @pytest.mark.asyncio
+    async def test_refresh_makes_no_request_and_keeps_live_windows(self, monitor):
+        monitor.apply_live_event("five_hour", 0.25, None)
+        snap = await monitor.fetch()
+        assert snap["available"] is True
+        assert snap["windows"][0]["type"] == "five_hour"
 
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=client)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return MagicMock(return_value=ctx)
+    @pytest.mark.asyncio
+    async def test_refresh_without_live_windows_is_unavailable(self, monitor):
+        snap = await monitor.fetch()
+        assert snap["available"] is False and snap["windows"] == []
+        # Nothing was attempted upstream, so no attempt or error is reported.
+        assert snap["attempted_at"] is None and snap["last_error_kind"] is None
 
+    def test_no_oauth_usage_endpoint_or_parser_remains(self):
+        for name in ("USAGE_ENDPOINT", "_OAUTH_BETA_HEADER", "parse_usage_response",
+                     "httpx", "schedule_usage_refresh"):
+            assert not hasattr(usage_limits, name), name
 
 @pytest.fixture
 def monitor():
     return UsageLimitsMonitor()
 
-
-class TestFetch:
-    @pytest.mark.asyncio
-    async def test_happy_path_parses_and_caches(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "secret-token"
-
-            snap = await monitor.fetch()
-
-        assert snap["available"] is True
-        assert snap["fetched_at"] is not None
-        types = {w["type"] for w in snap["windows"]}
-        assert "five_hour" in types and "seven_day_overage_included" in types
-
-    @pytest.mark.asyncio
-    async def test_sends_bearer_and_beta_header_but_never_logs_token(self, monitor, caplog):
-        captured = {}
-
-        def _client_factory(*args, **kwargs):
-            captured["headers"] = kwargs.get("headers", {})
-            return _fake_httpx(200, REAL_RESPONSE)()
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", side_effect=None) as ac:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "secret-token"
-
-            # The get() call carries the headers, not the constructor — inspect it.
-            resp = MagicMock(); resp.status_code = 200; resp.json.return_value = REAL_RESPONSE
-            client = MagicMock()
-            client.get = AsyncMock(return_value=resp)
-            ctx = MagicMock()
-            ctx.__aenter__ = AsyncMock(return_value=client)
-            ctx.__aexit__ = AsyncMock(return_value=False)
-            ac.return_value = ctx
-
-            with caplog.at_level(logging.DEBUG):
-                await monitor.fetch()
-
-            _, kwargs = client.get.call_args
-            headers = kwargs["headers"]
-
-        assert headers["Authorization"] == "Bearer secret-token"
-        assert headers["anthropic-beta"] == "oauth-2025-04-20"
-        # The token must never appear in any log record.
-        assert "secret-token" not in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_no_credential_returns_empty_gracefully(self, monitor, caplog):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = None
-
-            with caplog.at_level(logging.WARNING):
-                snap = await monitor.fetch()
-
-        assert snap == {
-            "windows": [], "fetched_at": None, "available": False,
-            "attempted_at": snap["attempted_at"], "last_error_kind": "missing_credentials",
-            "generation": monitor.current_generation(),
-        }
-        assert snap["attempted_at"]
-        # Missing credential is an expected steady state — no warning spam.
-        assert caplog.text == ""
-
-    @pytest.mark.asyncio
-    async def test_http_error_keeps_last_snapshot_and_warns_once(self, monitor, caplog):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-
-            # First: a good fetch to populate a last-known snapshot.
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-                await monitor.fetch()
-
-            # Expire the previous success budget, then two failures coalesce.
-            from app.db import database as db
-            with db.get_db() as conn:
-                conn.cursor().execute("UPDATE usage_poll_state SET next_attempt = 0")
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(500, {})), \
-                 caplog.at_level(logging.WARNING):
-                snap1 = await monitor.fetch()
-                snap2 = await monitor.fetch()
-
-        assert snap1["available"] is True  # kept last good snapshot
-        assert snap1["windows"] == snap2["windows"]
-        assert caplog.text.count("Usage-limits fetch failed") == 1
-
-    @pytest.mark.asyncio
-    async def test_network_error_keeps_last_snapshot(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-
-            with patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-                await monitor.fetch()
-
-            with patch(
-                "app.core.usage_limits.httpx.AsyncClient",
-                _fake_httpx(raise_exc=RuntimeError("boom")),
-            ):
-                snap = await monitor.fetch()
-
-        assert snap["available"] is True
-        assert snap["windows"]  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -282,73 +70,6 @@ class TestGenerationGuard:
         # Strictly greater than any plausible pre-restart bump counter.
         assert fresh.current_generation() > 1_000_000
 
-    def test_bump_generation_strictly_increases(self, monitor):
-        g0 = monitor.current_generation()
-        g1 = monitor.bump_generation()
-        assert g1 > g0
-        assert monitor.current_generation() == g1
-        assert monitor._snapshot()["generation"] == g1
-        # Monotonic across repeated bumps and never behind the epoch clock.
-        g2 = monitor.bump_generation()
-        assert g2 > g1
-        assert g2 >= int(time.time()) - 5
-
-    @pytest.mark.asyncio
-    async def test_stale_fetch_discarded_when_generation_bumped_midflight(self, monitor):
-        """A poll that STARTED before an account switch must not overwrite the
-        new account's data if it completes afterwards.
-
-        Simulated by bumping the generation from inside the network read (as a
-        concurrent ``switch_account`` would) and returning DIFFERENT data. The
-        stale result is discarded and the primed windows survive.
-        """
-        # Prime the monitor with account A's windows.
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-        primed = monitor._snapshot()["windows"]
-        assert primed  # sanity: account A produced windows
-
-        async def _get_then_switch(*args, **kwargs):
-            # A switch lands while this fetch is awaiting the network.
-            monitor.bump_generation()
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
-            return resp
-
-        client = MagicMock()
-        client.get = AsyncMock(side_effect=_get_then_switch)
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=client)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        factory = MagicMock(return_value=ctx)
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", factory):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            snap = await monitor.fetch()
-
-        # Discarded: primed windows unchanged, the 99%-used straggler (= 1%
-        # remaining once converted) never applied.
-        assert snap["windows"] == primed
-        assert all(w["utilization"] != 1.0 for w in snap["windows"])
-
-    @pytest.mark.asyncio
-    async def test_fresh_fetch_applies_when_generation_stable(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch(
-                 "app.core.usage_limits.httpx.AsyncClient",
-                 _fake_httpx(200, {"five_hour": {"utilization": 55.0, "resets_at": None}}),
-             ):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            snap = await monitor.fetch()
-        assert any(w["utilization"] == 45.0 for w in snap["windows"])  # 55% used
-
 
 # ---------------------------------------------------------------------------
 # apply_live_event / get_snapshot
@@ -357,27 +78,41 @@ class TestGenerationGuard:
 class TestLiveEvents:
     def test_updates_existing_window(self, monitor):
         monitor._windows = [{"type": "five_hour", "utilization": 10.0, "resets_at": "a"}]
-        snap = monitor.apply_live_event("five_hour", 55.0, "b")
+        snap = monitor.apply_live_event("five_hour", 0.55, "b")
         assert snap is not None
         w = next(w for w in snap["windows"] if w["type"] == "five_hour")
         # 55% used → 45% remaining, the convention every snapshot window carries.
-        assert w["utilization"] == 45.0 and w["resets_at"] == "b"
+        assert w["utilization"] == pytest.approx(45.0) and w["resets_at"] == "b"
         assert len(snap["windows"]) == 1  # replaced, not appended
 
     def test_appends_new_window(self, monitor):
-        snap = monitor.apply_live_event("seven_day_opus", 30.0, "c")
+        snap = monitor.apply_live_event("seven_day_opus", 0.30, "c")
         assert [w["type"] for w in snap["windows"]] == ["seven_day_opus"]
-        assert snap["windows"][0]["utilization"] == 70.0
+        assert snap["windows"][0]["utilization"] == pytest.approx(70.0)
         assert snap["available"] is True
 
     def test_normalizes_fraction_utilization_to_remaining_percent(self, monitor):
         # SDK sends a 0.0-1.0 USED fraction; the snapshot stores 0-100 REMAINING.
         snap = monitor.apply_live_event("five_hour", 0.25, "a")
         assert snap["windows"][0]["utilization"] == 75.0
-        # A value already in percent (>1) skips the fraction scaling but still flips.
-        snap2 = monitor.apply_live_event("seven_day", 17.0, "b")
-        w = next(w for w in snap2["windows"] if w["type"] == "seven_day")
-        assert w["utilization"] == 83.0
+
+    def test_over_limit_fraction_is_not_read_as_percent(self, monitor):
+        # 105% of the window used -> nothing left (clamped), not ~99% left.
+        snap = monitor.apply_live_event("five_hour", 1.05, "1900000000")
+        assert snap["windows"][0]["utilization"] == 0.0
+
+    def test_event_dates_only_its_own_window(self, monitor):
+        # The snapshot's fetched_at moves with any window; observed_at does not.
+        old = int(time.time() * 1000) - 86_400_000
+        monitor._windows = [{"type": "seven_day", "utilization": 60.0, "resets_at": None,
+                             "observed_at": old}]
+        before = int(time.time() * 1000)
+        monitor.apply_live_event("five_hour", 0.5, None)
+        # An unchanged repeat is not persisted but still dates the window.
+        monitor.apply_live_event("five_hour", 0.5, None)
+        windows = {w["type"]: w for w in monitor._snapshot()["windows"]}
+        assert windows["seven_day"]["observed_at"] == old
+        assert windows["five_hour"]["observed_at"] >= before
 
     def test_ignores_incomplete_event(self, monitor):
         assert monitor.apply_live_event(None, 5.0, "x") is None
@@ -385,30 +120,12 @@ class TestLiveEvents:
         assert monitor.apply_live_event("five_hour", "nan", "x") is None
 
     @pytest.mark.asyncio
-    async def test_get_snapshot_refreshes_in_background_when_never_fetched(self, monitor):
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)), \
-             patch.object(monitor, "_broadcast", new=AsyncMock()):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            snap = await monitor.get_snapshot()
-            # The read returns the cached (empty) snapshot without waiting.
-            assert snap["available"] is False
-            await monitor._refresh_task
-            snap = await monitor.get_snapshot()
-        assert snap["available"] is True and snap["windows"]
-
-    @pytest.mark.asyncio
-    async def test_get_snapshot_uses_cache_when_fresh(self, monitor):
-        import time as _t
+    async def test_get_snapshot_never_refreshes(self, monitor):
         monitor._windows = [{"type": "five_hour", "utilization": 1.0, "resets_at": None}]
-        monitor._fetched_at = _t.time()
+        monitor._fetched_at = time.time() - 3600
         monitor._available = True
-        # If it tried to fetch, the missing httpx patch would still be fine, but
-        # patch direct_oauth to assert get_access_token is NOT called.
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            snap = await monitor.get_snapshot(max_age=300)
-            oauth.get_access_token.assert_not_called()
+        snap = await monitor.get_snapshot()
+        assert not monitor.refreshing
         assert snap["windows"][0]["utilization"] == 1.0
 
 
@@ -418,49 +135,17 @@ class TestLiveEvents:
 
 class TestPersistence:
     @pytest.mark.asyncio
-    async def test_fetch_persists_row_with_instance_and_account_meta(self, monitor, mock_db):
-        from app.db import database as db
-        iid = settings.effective_instance_id
-
-        # Seed an active Claude account for this install so metadata resolves.
-        db.create_claude_account(
-            account_id="acct-1", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            email="primary@example.com",
-        )
-        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tok"
-            await monitor.fetch()
-
-        rows = db.get_all_usage_snapshots()
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["instance_id"] == iid
-        assert row["available"] is True
-        assert row["account_id"] == "acct-1"
-        assert row["account_email"] == "primary@example.com"
-        assert row["account_name"] == "Primary"
-        assert row["windows"]  # normalized windows persisted
-
-    @pytest.mark.asyncio
     async def test_no_credential_persists_unavailable_row(self, monitor, mock_db):
         from app.db import database as db
-        with patch("app.core.usage_limits.direct_oauth") as oauth:
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = None
-            await monitor.fetch()
+        await monitor.fetch()
 
         rows = db.get_all_usage_snapshots()
         assert len(rows) == 1
         assert rows[0]["instance_id"] == settings.effective_instance_id
         assert rows[0]["available"] is False
         assert rows[0]["windows"] == []
-        # Legacy single-account/API-key mode → no account metadata.
-        assert rows[0]["account_id"] is None
+        # Snapshots carry no Claude account identity.
+        assert not any(k.startswith("account_") for k in rows[0])
 
     @pytest.mark.asyncio
     async def test_apply_live_event_and_broadcast_persists(self, monitor, mock_db):
@@ -477,6 +162,33 @@ class TestPersistence:
         # SDK used-fraction normalized to a remaining percent, then persisted.
         assert rows[0]["windows"][0]["utilization"] == 75.0
         monitor._broadcast.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_restart_does_not_wipe_persisted_claude_windows(self, mock_db):
+        from app.db import database as db
+        before = UsageLimitsMonitor()
+        before._broadcast = AsyncMock()
+        await before.apply_live_event_and_broadcast("seven_day", 0.40, "1900000000")
+
+        # Process restart: a fresh monitor has no in-memory windows.
+        after = UsageLimitsMonitor()
+        await after.fetch()
+
+        row = next(r for r in db.get_all_usage_snapshots()
+                   if r["instance_id"] == settings.effective_instance_id)
+        assert row["available"] is True
+        assert [w["type"] for w in row["windows"]] == ["seven_day"]
+        cluster = UsageLimitsMonitor()._cluster_snapshot()
+        assert cluster["available"] is True and cluster["windows"][0]["type"] == "seven_day"
+
+    def test_cluster_self_entry_reflects_memory_over_cached_row(self, monitor, mock_db):
+        self_id = settings.effective_instance_id
+        monitor._persist_snapshot()
+        monitor._cluster_snapshot()  # warm the cache with the empty row
+        monitor.apply_live_event("five_hour", 0.25, "a")
+        own = next(s for s in monitor._cluster_snapshot()["snapshots"] if s["instance_id"] == self_id)
+        assert own["available"] is True and own["windows"][0]["utilization"] == 75.0
+        assert own["generation"] == monitor.current_generation()
 
     def test_apply_live_event_is_in_memory_only(self, monitor, mock_db):
         # The sync refiner must NOT touch the DB — persistence is the async
@@ -498,15 +210,22 @@ class TestPersistence:
         assert monitor._persist_snapshot.call_count == 1
         assert monitor._broadcast.await_count == 1
 
-        # Identical repeat → no-op.
+        # Identical repeat → no persist/broadcast, but the observation time and
+        # generation semantics hold: fetched_at advances, generation does not.
+        monitor._fetched_at -= 600
+        generation = monitor.current_generation()
         await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
         assert monitor._persist_snapshot.call_count == 1
         assert monitor._broadcast.await_count == 1
+        assert time.time() - monitor._fetched_at < 5
+        assert monitor.current_generation() == generation
 
-        # A materially changed reading → persists + broadcasts immediately.
+        # A materially changed reading → persists + broadcasts immediately
+        # under a newer generation, so clients drop older in-flight snapshots.
         await monitor.apply_live_event_and_broadcast("five_hour", 0.55, "a")
         assert monitor._persist_snapshot.call_count == 2
         assert monitor._broadcast.await_count == 2
+        assert monitor.current_generation() > generation
 
     def test_cluster_cache_invalidated_on_own_persist(self, monitor, mock_db):
         from app.db import database as db
@@ -532,64 +251,6 @@ class TestPersistence:
         after = monitor._cluster_snapshot()
         assert any(s["instance_id"] == "peer-x" for s in after["snapshots"])
 
-    def test_cluster_rows_carry_each_installs_account_plan(self, monitor, mock_db):
-        """Each install's entry carries ITS OWN account's subscription tier, so
-        the popover can name a remote worker's plan (the local model registry
-        only speaks for the self install)."""
-        from app.db import database as db
-        self_id = settings.effective_instance_id
-
-        db.create_claude_account(
-            account_id="acct-max", name="Primary", credentials="enc:x",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-            subscription_type="max",
-        )
-        db.create_claude_account(
-            account_id="acct-none", name="Secondary", credentials="enc:y",
-            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-        )
-        db.register_install("peer-x", "Peer", "http://p:1", "docker", "1", {})
-        db.register_install("peer-y", "Peer Y", "http://p:2", "docker", "1", {})
-        db.upsert_usage_snapshot(
-            self_id, windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-max",
-        )
-        db.upsert_usage_snapshot(
-            "peer-x", windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-none",
-        )
-        # No account stamped at all (legacy single-account / API-key install).
-        db.upsert_usage_snapshot(
-            "peer-y", windows=[], available=True, generation=1, fetched_at=1,
-        )
-
-        by_id = {s["instance_id"]: s for s in monitor._read_cluster_rows(self_id)}
-        assert by_id[self_id]["plan_type"] == "max"
-        # Account row exists but its plan isn't known yet → null, not missing.
-        assert by_id["peer-x"]["plan_type"] is None
-        # No account_id on the row → null (never a KeyError / stray join hit).
-        assert by_id["peer-y"]["plan_type"] is None
-
-    def test_cluster_rows_survive_a_failing_plan_join(self, monitor, mock_db, monkeypatch):
-        """The plan is advisory: an accounts-table read failure must degrade to
-        null plans, NOT drop the whole cluster read (which would blank the
-        frontend's per-install buckets)."""
-        from app.db import database as db
-        self_id = settings.effective_instance_id
-        db.upsert_usage_snapshot(
-            self_id, windows=[], available=True, generation=1, fetched_at=1,
-            account_id="acct-max",
-        )
-
-        def _raise(*_args, **_kwargs):
-            raise Exception('relation "claude_accounts" does not exist')
-
-        monkeypatch.setattr(db, "get_all_claude_accounts", _raise)
-        rows = monitor._read_cluster_rows(self_id)
-
-        assert rows is not None
-        assert [r["instance_id"] for r in rows] == [self_id]
-        assert rows[0]["plan_type"] is None
 
     def test_cluster_snapshot_omits_keys_on_db_read_failure(self, monitor):
         # Fix 1: a DB read failure must NOT emit `snapshots: []` alongside valid
@@ -609,41 +270,116 @@ class TestPersistence:
         assert "snapshots" not in snap
         assert "self_instance_id" not in snap
 
+
+
+# ---------------------------------------------------------------------------
+# rejected verdict + observed_at on unchanged repeats
+# ---------------------------------------------------------------------------
+
+def _own_row():
+    from app.db import database as db
+    return next(r for r in db.get_all_usage_snapshots()
+                if r["instance_id"] == settings.effective_instance_id)
+
+
+class TestRejectedStatus:
+    def test_rejected_without_utilization_marks_the_window_exhausted(self, monitor):
+        before = int(time.time() * 1000)
+        generation = monitor.current_generation()
+        snap = monitor.apply_live_event("five_hour", None, "1900000000", status="rejected")
+        assert snap is not None
+        (w,) = snap["windows"]
+        # 100% used → 0% remaining, dated like any other reading.
+        assert w["type"] == "five_hour" and w["utilization"] == 0.0
+        assert w["resets_at"] == "1900000000" and w["observed_at"] >= before
+        assert snap["available"] is True and snap["generation"] > generation
+
+    def test_rejected_overrides_a_stale_utilization(self, monitor):
+        monitor.apply_live_event("five_hour", 0.4, "a")
+        snap = monitor.apply_live_event("five_hour", 0.4, "a", status="rejected")
+        assert snap is not None and snap["windows"][0]["utilization"] == 0.0
+
+    def test_other_verdicts_without_utilization_stay_ignored(self, monitor):
+        assert monitor.apply_live_event("five_hour", None, "a", status="allowed") is None
+        assert monitor.apply_live_event("five_hour", None, "a", status="allowed_warning") is None
+        assert monitor.apply_live_event(None, None, "a", status="rejected") is None
+        assert monitor._windows == []
+
     @pytest.mark.asyncio
-    async def test_midflight_generation_bump_does_not_persist_stale(self, monitor, mock_db):
+    async def test_rejected_is_persisted_and_broadcast(self, monitor, mock_db):
+        monitor._broadcast = AsyncMock()
+        await monitor.apply_live_event_and_broadcast("seven_day", None, "b", status="rejected")
+        row = _own_row()
+        assert row["windows"][0]["type"] == "seven_day"
+        assert row["windows"][0]["utilization"] == 0.0
+        assert isinstance(row["windows"][0]["observed_at"], int)
+        monitor._broadcast.assert_awaited_once()
+
+
+class TestObservedAtOnRepeat:
+    @pytest.mark.asyncio
+    async def test_repeat_persists_only_observed_at_coalesced_per_window(self, monitor, mock_db):
+        monitor._broadcast = AsyncMock()
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        await monitor.apply_live_event_and_broadcast("seven_day", 0.10, "b")
+        first = _own_row()
+        generation = first["generation"]
+        assert monitor._broadcast.await_count == 2
+
+        # Same values an hour later (pretend): the shared row learns the newer
+        # observation time without a new generation or a changed reading.
+        for key in monitor._observed_persisted:
+            monitor._observed_persisted[key] -= 3600
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        row = _own_row()
+        five = next(w for w in row["windows"] if w["type"] == "five_hour")
+        seven = next(w for w in row["windows"] if w["type"] == "seven_day")
+        mem = next(w for w in monitor._windows if w["type"] == "five_hour")
+        assert five["observed_at"] == mem["observed_at"]
+        assert five["utilization"] == 58.0 and five["resets_at"] == "a"
+        # Only that window's time moved; the row keeps its generation.
+        assert seven == next(w for w in first["windows"] if w["type"] == "seven_day")
+        assert row["generation"] == generation == monitor.current_generation()
+        assert row["fetched_at"] >= five["observed_at"]
+        assert monitor._broadcast.await_count == 3
+
+        # Further repeats within the minute: in memory only, no write, no fanout.
+        touch = MagicMock(wraps=monitor._persist_observed)
+        monitor._persist_observed = touch
+        for _ in range(5):
+            await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        assert touch.call_count == 0 and monitor._broadcast.await_count == 3
+        assert next(w for w in monitor._windows if w["type"] == "five_hour")["observed_at"] \
+            >= five["observed_at"]
+
+        # The other window has its own interval: its first repeat after a
+        # minute still writes.
+        monitor._observed_persisted["seven_day"] -= 3600
+        await monitor.apply_live_event_and_broadcast("seven_day", 0.10, "b")
+        assert touch.call_count == 1 and monitor._broadcast.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_repeat_right_after_a_full_persist_does_not_write(self, monitor, mock_db):
+        monitor._broadcast = AsyncMock()
+        monitor._persist_observed = MagicMock(return_value=True)
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        monitor._persist_observed.assert_not_called()
+        assert monitor._broadcast.await_count == 1
+
+
+class TestTouchObservedRow:
+    def test_touch_never_moves_time_back_and_keeps_the_rest(self, mock_db):
         from app.db import database as db
-
-        # Prime the persisted row with account A's windows.
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-        primed = db.get_all_usage_snapshots()[0]["windows"]
-        assert primed
-
-        async def _get_then_switch(*args, **kwargs):
-            monitor.bump_generation()  # a switch lands mid-flight
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
-            return resp
-
-        client = MagicMock()
-        client.get = AsyncMock(side_effect=_get_then_switch)
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=client)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        factory = MagicMock(return_value=ctx)
-
-        with patch("app.core.usage_limits.direct_oauth") as oauth, \
-             patch("app.core.usage_limits.httpx.AsyncClient", factory):
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
-            oauth.get_access_token.return_value = "tokA"
-            await monitor.fetch()
-
-        # The discarded straggler (99% used = 1% remaining) never overwrote the
-        # persisted row.
-        row = db.get_all_usage_snapshots()[0]
-        assert row["windows"] == primed
-        assert all(w["utilization"] != 1.0 for w in row["windows"])
+        windows = [
+            {"type": "five_hour", "utilization": 40.0, "resets_at": "a", "observed_at": 2000},
+            {"type": "seven_day", "utilization": 90.0, "resets_at": "b", "observed_at": 1000},
+        ]
+        db.upsert_usage_snapshot("inst-t", windows, True, 7, 2000)
+        assert db.touch_usage_snapshot_observed("inst-t", "five_hour", 1500) is False
+        assert db.touch_usage_snapshot_observed("inst-t", "seven_day", 3000) is True
+        assert db.touch_usage_snapshot_observed("nobody", "seven_day", 3000) is False
+        row = next(r for r in db.get_all_usage_snapshots() if r["instance_id"] == "inst-t")
+        assert row["windows"] == [windows[0], {**windows[1], "observed_at": 3000}]
+        assert row["generation"] == 7 and row["available"] is True
+        assert row["fetched_at"] == 3000

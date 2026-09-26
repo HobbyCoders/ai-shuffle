@@ -23,7 +23,7 @@ What is pinned here, end to end against the real turns/wakeups tables:
 from __future__ import annotations
 
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -34,18 +34,12 @@ from app.core.task_registry import task_registry
 from app.db import database
 from app.db import turns as turns_db
 from app.db import wakeups as wakeups_db
+from tests.shared_fixtures import clean_task_registry  # noqa: F401  (autouse fixture)
 
 SESSION = "stopped-stays-stopped"
 SHELL = "shell-dev-server"
 WORKER = "worker-top"
 NESTED = "worker-nested"
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    task_registry.reset_all()
-    yield
-    task_registry.reset_all()
 
 
 def _make_session(session_id: str = SESSION) -> str:
@@ -343,8 +337,6 @@ async def test_the_next_user_message_starts_a_turn_and_reopens_the_wakes(mock_db
     with patch.object(turn_scheduler, "_kick_after_batch_window"), patch.object(
         turn_scheduler, "_try_steer_terminal_notification",
         new=AsyncMock(return_value=False),
-    ), patch.object(
-        turn_scheduler, "_cli_owns_at_rest_wake", return_value=False
     ):
         await turn_scheduler.on_task_terminal(SESSION, {
             "task_id": fresh,

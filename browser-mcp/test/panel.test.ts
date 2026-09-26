@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Page } from "playwright-core";
-import { reportCurrentTarget, RETRY_DELAYS_MS } from "../src/panel.js";
+import { reportCurrentTarget, REGISTER_TIMEOUT_MS, RETRY_DELAYS_MS } from "../src/panel.js";
 
 const ENV_KEYS = ["AIS_SESSION_ID", "AIS_PANEL_TOKEN", "AIS_PANEL_REGISTER_URL"] as const;
 
@@ -124,6 +124,67 @@ describe("reportCurrentTarget", () => {
     expect(fetchMock).toHaveBeenCalledTimes(RETRY_DELAYS_MS.length + 1);
     expect(errSpy).toHaveBeenCalledTimes(1);
     expect(String(errSpy.mock.calls[0][0])).toMatch(/register failed after \d+ attempts/);
+  });
+
+  it("detaches the CDP session when the target lookup fails, on every attempt", async () => {
+    vi.useFakeTimers();
+    setEnv();
+    const fetchMock = vi.fn(async () => fakeResponse(true, 200));
+    vi.stubGlobal("fetch", fetchMock);
+    const cdp = {
+      send: vi.fn(async () => {
+        throw new Error("Target closed");
+      }),
+      detach: vi.fn(async () => undefined),
+    };
+    const context = { newCDPSession: vi.fn(async () => cdp) };
+    const page = { url: vi.fn(() => "about:blank"), context: vi.fn(() => context) } as unknown as Page;
+
+    reportCurrentTarget(page, "tab1");
+    await vi.advanceTimersByTimeAsync(0);
+    for (const delay of RETRY_DELAYS_MS) {
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    const attempts = RETRY_DELAYS_MS.length + 1;
+    expect(context.newCDPSession).toHaveBeenCalledTimes(attempts);
+    expect(cdp.detach).toHaveBeenCalledTimes(attempts);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(String(errSpy.mock.calls[0][0])).toMatch(/Target closed/);
+  });
+
+  it("aborts a hung register POST after the timeout and retries", async () => {
+    vi.useFakeTimers();
+    setEnv();
+    const signals: AbortSignal[] = [];
+    // Never resolves on its own; rejects only when its signal aborts.
+    const fetchMock = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal as AbortSignal;
+          signals.push(signal);
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    reportCurrentTarget(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(REGISTER_TIMEOUT_MS);
+    expect(signals[0].aborted).toBe(true);
+
+    for (const delay of RETRY_DELAYS_MS) {
+      await vi.advanceTimersByTimeAsync(delay + REGISTER_TIMEOUT_MS);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock).toHaveBeenCalledTimes(RETRY_DELAYS_MS.length + 1);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(String(errSpy.mock.calls[0][0])).toMatch(/timed out after 10000 ms/);
   });
 
   it("newest report wins: an older in-flight report is dropped, not sent", async () => {

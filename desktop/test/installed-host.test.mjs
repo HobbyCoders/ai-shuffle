@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {readInstalledHost,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
+const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
 test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
- assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['aishuffle://callback','--remote-debugging-port=19229']);
+ assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['--remote-debugging-port=19229'],'NC-16: no URL scheme is registered, so no link argument is forwarded');
  assert.deepEqual(installedLaunchArgs([]),[]);
  assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=0'],'0'),['--remote-debugging-port=0']);
  assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=19229'],'19229'),['--remote-debugging-port=19229']);
@@ -16,7 +16,7 @@ test('installed source versions preserve the original profile and EXE across res
  const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-test-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
  const root=path.join(userData,'updates');await fs.mkdir(root);
  const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'ai-shuffle-desktop'};
- assert.equal(await readInstalledHost(root),null);await saveInstalledHost(root,host);assert.deepEqual(await readInstalledHost(root),host);
+ assert.equal(readInstalledHostSync(root),null);await saveInstalledHost(root,host);assert.deepEqual(readInstalledHostSync(root),host);
  await assert.rejects(saveInstalledHost(root,{...host,userData:path.join(userData,'other')}),/Invalid installed/);
  const app={electron:path.join(root,'electron.exe'),desktopDir:path.join(root,'desktop'),revision:'a'.repeat(40),node:path.join(root,'node.exe'),python:path.join(root,'python.exe')};
  const launch=sourceLaunch(app,root,['aishuffle://callback']);
@@ -24,4 +24,36 @@ test('installed source versions preserve the original profile and EXE across res
  assert.equal(launch.options.windowsHide,false,'Electron must be allowed to show its splash window');assert.equal(launch.options.detached,true);
  assert.equal(launch.options.env.SHUFFLE_SOURCE_ROOT,root);assert.equal(launch.options.env.SHUFFLE_SOURCE_REVISION,app.revision);
  assert(!launch.args.some(arg=>/bootstrap|\.cmd|powershell/.test(arg)));
+});
+
+test('D5: the source-managed relaunch keeps the user\'s home and Claude Code config dir',t=>{
+ const saved={...process.env};t.after(()=>{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);});
+ Object.assign(process.env,{HOME:'/home/me',USERPROFILE:'C:\\Users\\me',CLAUDE_CONFIG_DIR:'D:\\claude-config',ANTHROPIC_API_KEY:'sk-not-forwarded'});
+ const app={electron:'/r/electron.exe',desktopDir:'/r/desktop',revision:'b'.repeat(40),node:'/r/node.exe',python:'/r/python.exe'};
+ const env=sourceLaunch(app,'/r',[]).options.env;
+ assert.equal(env.CLAUDE_CONFIG_DIR,'D:\\claude-config');
+ assert.equal(env.HOME,'/home/me');assert.equal(env.USERPROFILE,'C:\\Users\\me');
+ assert.equal(env.ANTHROPIC_API_KEY,undefined);
+});
+
+test('a corrupt or foreign installed-host.json fails closed instead of choosing a profile',async t=>{
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const root=path.join(userData,'updates');await fs.mkdir(root);const file=path.join(root,'installed-host.json');
+ const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'AI Shuffle'};
+ // Truncated by a crash or an editor: an error, never "no host" (which would start a fresh default profile).
+ await fs.writeFile(file,'{"executable":');assert.throws(()=>readInstalledHostSync(root),SyntaxError);
+ for(const bad of [
+  {...host,userData:path.join(userData,'..','someone-else')},  // a profile other than the one owning these updates
+  {...host,executable:'AI Shuffle.exe'},                       // relative executable
+  {...host,executable:path.join(userData,'run.sh')},           // not an EXE
+  {...host,name:''},{executable:host.executable,userData},null,[]
+ ]){
+  await fs.writeFile(file,JSON.stringify(bad));
+  assert.throws(()=>readInstalledHostSync(root),/Invalid installed desktop host/,JSON.stringify(bad));
+ }
+ await fs.writeFile(file,JSON.stringify(host));assert.deepEqual(readInstalledHostSync(root),host);
+ // A save leaves no temporary file behind and replaces the record whole.
+ await saveInstalledHost(root,{...host,name:'AI Shuffle 2'});
+ assert.deepEqual((await fs.readdir(root)).sort(),['installed-host.json']);
+ assert.equal(readInstalledHostSync(root).name,'AI Shuffle 2');
 });

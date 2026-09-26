@@ -16,6 +16,14 @@ Hooks run in registration order. A ``deny`` short-circuits immediately; a
 and is what the engine ultimately dispatches. ``stop`` (Claude Code's
 ``continue: false``) also short-circuits and ends the turn. A callback that
 raises is logged and reported as a warning; it never ends the turn.
+
+Separately, ``on_tool_allowed`` observers hear about every tool call a gate
+lets through, just before it dispatches, whatever allowed it: a PreToolUse
+``allow``, a permission rule or mode, a remembered "allow always", or a prompt
+answer. Every gate that dispatches a registry tool (the native loop, the
+code-mode bridge, the delegated leg's bundled bridge) calls ``tool_allowed``
+at that point, so an embedder that must know a call was allowed subscribes
+once here instead of in each decision path. Observers cannot change the call.
 """
 
 from __future__ import annotations
@@ -64,6 +72,9 @@ class HookDecision:
 
 
 HookCallback = Callable[[str, dict[str, Any]], Awaitable["HookDecision | None"]]
+# Payload: ``session_id`` (fluid's), ``name``, ``input`` (what will dispatch)
+# and ``tool_use_id`` (None on the bundled bridge, which is not told it).
+ToolAllowedCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 def hook_reminder(label: str, text: str) -> str:
@@ -86,9 +97,27 @@ def hook_reminder(label: str, text: str) -> str:
 class HookBus:
     def __init__(self) -> None:
         self._hooks: dict[str, list[HookCallback]] = {}
+        self._allowed_observers: list[ToolAllowedCallback] = []
 
     def on(self, event: str, callback: HookCallback) -> None:
         self._hooks.setdefault(event, []).append(callback)
+
+    def on_tool_allowed(self, callback: ToolAllowedCallback) -> None:
+        """Observe each tool call a gate allowed, before it dispatches."""
+        self._allowed_observers.append(callback)
+
+    async def tool_allowed(self, payload: dict[str, Any]) -> None:
+        """Tell every observer a call passed its gate and is about to run.
+
+        Awaited by the gate ahead of dispatch, so an observer's bookkeeping is
+        in place when the tool runs. An observer that raises is logged and
+        skipped: it neither blocks the call nor stops the other observers.
+        """
+        for callback in list(self._allowed_observers):
+            try:
+                await callback(dict(payload))
+            except Exception:  # noqa: BLE001 — an observer never ends the turn
+                log.warning("tool-allowed observer %r raised", callback, exc_info=True)
 
     async def emit(self, event: str, payload: dict[str, Any]) -> HookDecision:
         """Run every hook for ``event``; deny and stop short-circuit, the rest

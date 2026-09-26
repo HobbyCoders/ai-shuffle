@@ -10,7 +10,7 @@ order: 3
 
 The WhatsApp connector integrates your AI Shuffle agent with WhatsApp through the official WhatsApp Business API, powered by Meta's Cloud API. This allows your agent to send and receive messages on WhatsApp, the world's most widely used messaging platform with over two billion users.
 
-Unlike the standard WhatsApp app, the Business API is designed for programmatic access. Messages arrive via webhooks that Meta sends to your server, and responses are sent through the Cloud API. The connector handles the full message lifecycle, including read receipts and interactive buttons for permission prompts. You can optionally restrict the bot to only respond to specific phone numbers.
+Unlike the standard WhatsApp app, the Business API is designed for programmatic access. Messages arrive via webhooks that Meta sends to your server, and responses are sent through the Cloud API. The connector handles the full message lifecycle, including read receipts and interactive buttons for permission prompts. You list the phone numbers the bot is allowed to respond to.
 
 ## Prerequisites
 
@@ -78,15 +78,17 @@ Temporary tokens expire after 24 hours. For production use:
 
 ### Step 6: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
-2. Click **Add Connector** and select **WhatsApp**.
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **WhatsApp**.
+2. Click **Install WhatsApp** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Phone Number ID**: The phone number ID from Step 3
    - **Access Token**: The permanent System User token (or temporary token for testing)
    - **Verify Token**: The verify token string you set in Step 4
-   - **App Secret** (optional): Your Meta app secret, used to validate the `X-Hub-Signature-256` signature on incoming webhooks
-   - **Allowed Phone Numbers** (optional): Phone numbers in international format (e.g., `+14155551234`)
-4. Click **Save** and then **Enable** the connector.
+   - **App Secret** (required): Your Meta app secret (App settings > Basic). Every webhook must be signed with it.
+   - **Allowed Phone Numbers** (required to enable): Phone numbers as digits with country code and no `+` or spaces (e.g., `14155551234`), the same form WhatsApp uses in its webhooks
+4. Click **Create Connector**, then turn on the connection's **Activate** switch.
+
+The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
 
 ## Configuration Reference
 
@@ -95,10 +97,10 @@ Temporary tokens expire after 24 hours. For production use:
 | `phone_number_id` | string | Yes | The WhatsApp Business phone number ID from the Meta dashboard. This identifies which phone number the bot sends messages from. |
 | `access_token` | string | Yes | A valid access token for the WhatsApp Business API. Use a System User token for production (does not expire) or a temporary token for development (expires in 24 hours). |
 | `verify_token` | string | Yes | A secret string used to verify webhook requests from Meta. Must match the value configured in the Meta app dashboard webhook settings. |
-| `app_secret` | string | No | The Meta app secret. If set, the connector validates the `X-Hub-Signature-256` header on incoming webhook requests, rejecting payloads with a missing or mismatched signature. If empty, signature verification is skipped. |
-| `allowed_phone_numbers` | array of strings | No | List of phone numbers (in international E.164 format, e.g., `+14155551234`) that the bot is allowed to communicate with. If empty, the bot responds to all incoming messages. |
+| `app_secret` | string | Yes | The Meta app secret (App settings, Basic). Every incoming webhook must carry a valid `X-Hub-Signature-256` header made with it; payloads with a missing or mismatched signature are rejected, and a connector without an app secret accepts no webhooks. |
+| `allowed_phone_numbers` | array of strings | Yes (to enable) | Phone numbers the bot is allowed to communicate with, as digits with country code and no `+` or spaces (e.g., `14155551234`). At least one entry is required before the connector can be enabled. |
 | `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `templates`, `media`, `account`. |
-| `auto_approve_destructive` | string | No | Reserved for forward compatibility. The current action catalog has no destructive actions, so this has no effect today. |
+| `auto_approve_destructive` | string | No | Has no effect: WhatsApp has no destructive actions. |
 
 ## Capabilities
 
@@ -109,24 +111,21 @@ The WhatsApp connector supports the following capabilities:
 | Typing indicator | No | The connector does not send a "typing..." indicator |
 | Read receipts | Yes | Sends read receipts (blue check marks) when messages are received and processed |
 | Reactions | Yes | Available to the AI via the `send_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
-| Rich text | Yes | Supports bold (`*text*`), italic (`_text_`), strikethrough (`~text~`), and monospace (`` ```text``` ``) formatting |
-| File upload | Yes | Send images, documents, audio, video, and stickers. File size limits: 16 MB for media, 100 MB for documents |
-| Buttons | Yes | Used for interactive permission prompts, where the agent sends Approve/Deny reply buttons |
+| Rich text | No | Text is sent as-is. WhatsApp renders its own syntax: bold (`*text*`), italic (`_text_`), strikethrough (`~text~`) and monospace (`` ```text``` ``) |
+| File upload | No | Your agent can send images, documents and locations through actions. Audio, video and stickers are not supported. |
+| Buttons | Yes | Supported by the platform. Tool approvals are answered by the owner in the app; the chat only sees a waiting notice |
 | Threads | No | WhatsApp does not have a thread model |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.
 
-## AI Actions (Action Gateway)
+## AI Actions
 
-Sessions bound to a WhatsApp conversation get two MCP tools instead of one tool per feature:
+See [How AI actions work](/docs/connectors#how-ai-actions-work).
 
-- **`whatsapp_actions`** — discovery. Returns the action catalog (9 actions: send message, mark read, send/remove reaction, send template, send image/document/location, get phone number info), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
-- **`whatsapp_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Meta Cloud API.
+Your agent can use 9 actions: send message, mark read, send/remove reaction, send template, send image/document/location, and get phone number info.
 
-Safety rails:
-
-- Message-level actions only work in the session's bound conversation and the connector's `allowed_phone_numbers`.
-- **No destructive actions exist in this catalog.** The WhatsApp Business Cloud API gives bots no bulk-delete or membership-management surface, so every current action is `safe` or `write` risk and runs immediately without an approval prompt. The `request_action_approval`/`auto_approve_destructive` machinery is implemented for forward compatibility (mirroring Telegram and Signal) but nothing in the catalog triggers it today.
+- Message actions only work in the conversation the session started from and the connector's `allowed_phone_numbers`.
+- **There are no destructive actions.** Every current action runs immediately without an approval prompt.
 - Sending a template message still requires an approved Meta message template, and outbound free-form messages are still subject to WhatsApp's 24-hour conversation window (see Troubleshooting).
 
 ## Troubleshooting
@@ -153,7 +152,7 @@ Safety rails:
 
 ### Messages are delivered but formatting looks wrong
 
-- WhatsApp uses its own Markdown-like formatting syntax. Standard Markdown (e.g., `**bold**`) does not work. The connector automatically converts to WhatsApp format (`*bold*`), but if you see raw formatting characters, check that the conversion is enabled.
+- WhatsApp uses its own Markdown-like formatting syntax. Standard Markdown (e.g., `**bold**`) does not work. The connector sends the agent's text as-is. Ask the agent (for example in its instructions) to use WhatsApp formatting: `*bold*`, `_italic_`, `~strike~`.
 
 ### Rate limiting or "Too many requests" errors
 

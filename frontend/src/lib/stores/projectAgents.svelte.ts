@@ -2,7 +2,7 @@
  * Project Agents Management Store
  *
  * Manages state for file-based agents in project directories:
- * - Agents stored as .md files in <project>/.claude/agents/
+ * - Agents stored as .md files in <project>/.fluid/agents/
  * - YAML frontmatter for metadata (description, model, tools)
  *
  * Migrated to Svelte 5 runes.
@@ -15,6 +15,7 @@ import type {
 	UpdateProjectAgentRequest
 } from '$lib/api/projectAgents';
 import * as projectAgentsApi from '$lib/api/projectAgents';
+import { getErrorMessage } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================================================
@@ -49,6 +50,10 @@ const initialState: ProjectAgentsState = {
 
 let _state = $state<ProjectAgentsState>({ ...initialState });
 
+/** Latest loadAgents call; an older (slower) response is discarded so a
+ *  project the user already left cannot overwrite the current list. */
+let _loadSeq = 0;
+
 // ============================================================================
 // Subscribe shim (centralized via store-utils)
 // ============================================================================
@@ -78,39 +83,19 @@ export const projectAgents = {
 	 * Load all agents for a project
 	 */
 	async loadAgents(projectId: string): Promise<void> {
+		const seq = ++_loadSeq;
 		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
 
 		try {
 			const agents = await projectAgentsApi.getProjectAgents(projectId);
+			if (seq !== _loadSeq) return;
 			_update((state) => ({ ...state, agents, loading: false }));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load project agents';
+			if (seq !== _loadSeq) return;
+			const error = getErrorMessage(e, 'Failed to load project agents');
 			_update((state) => ({ ...state, error, loading: false }));
 			throw e;
 		}
-	},
-
-	/**
-	 * Load a specific agent with full details
-	 */
-	async selectAgent(projectId: string, agentName: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
-			const selectedAgent = await projectAgentsApi.getProjectAgent(projectId, agentName);
-			_update((state) => ({ ...state, selectedAgent, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load agent details';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Clear selected agent
-	 */
-	clearSelectedAgent(): void {
-		_update((state) => ({ ...state, selectedAgent: null }));
 	},
 
 	// ========================================================================
@@ -134,67 +119,7 @@ export const projectAgents = {
 			}));
 			return agent;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to create agent';
-			_update((state) => ({ ...state, error, saving: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Update an existing agent
-	 */
-	async updateAgent(
-		projectId: string,
-		agentName: string,
-		data: UpdateProjectAgentRequest
-	): Promise<ProjectAgent> {
-		_update((state) => ({ ...state, saving: true, error: null }));
-
-		try {
-			const agent = await projectAgentsApi.updateProjectAgent(projectId, agentName, data);
-			_update((state) => ({
-				...state,
-				agents: state.agents.map((a) => (a.name === agentName ? agent : a)),
-				selectedAgent:
-					state.selectedAgent?.name === agentName
-						? { ...state.selectedAgent, ...agent, ...data }
-						: state.selectedAgent,
-				saving: false
-			}));
-			return agent;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update agent';
-			_update((state) => ({ ...state, error, saving: false }));
-			throw e;
-		}
-	},
-
-	/**
-	 * Rename an agent
-	 */
-	async renameAgent(
-		projectId: string,
-		oldName: string,
-		newName: string
-	): Promise<ProjectAgent> {
-		_update((state) => ({ ...state, saving: true, error: null }));
-
-		try {
-			const agent = await projectAgentsApi.renameProjectAgent(projectId, oldName, newName);
-			_update((state) => ({
-				...state,
-				agents: state.agents
-					.map((a) => (a.name === oldName ? agent : a))
-					.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())),
-				selectedAgent:
-					state.selectedAgent?.name === oldName
-						? { ...state.selectedAgent, name: newName, file_path: agent.file_path }
-						: state.selectedAgent,
-				saving: false
-			}));
-			return agent;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to rename agent';
+			const error = getErrorMessage(e, 'Failed to create agent');
 			_update((state) => ({ ...state, error, saving: false }));
 			throw e;
 		}
@@ -216,7 +141,7 @@ export const projectAgents = {
 				saving: false
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to delete agent';
+			const error = getErrorMessage(e, 'Failed to delete agent');
 			_update((state) => ({ ...state, error, saving: false }));
 			throw e;
 		}
@@ -237,6 +162,7 @@ export const projectAgents = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
+		_loadSeq++;
 		_state = { ...initialState };
 		_notifySubscribers();
 	}

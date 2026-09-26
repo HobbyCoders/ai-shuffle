@@ -16,10 +16,14 @@ def _set_local_mode(monkeypatch, value: bool) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_ssrf_env(monkeypatch):
+def _clean_ssrf_env(monkeypatch, request):
     """Neither the process env nor the host's real deployment mode leaks in."""
     monkeypatch.delenv("BROWSER_SSRF_ALLOW", raising=False)
     monkeypatch.delenv("BROWSER_SSRF_BLOCK", raising=False)
+    monkeypatch.delenv("BROWSER_SSRF_DENY_PORTS", raising=False)
+    monkeypatch.delenv("BROWSER_LOOPBACK_HOST", raising=False)
+    if "own_address" not in request.node.name:
+        monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: None)
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", None, raising=False)
     _set_local_mode(monkeypatch, False)
 
@@ -66,21 +70,39 @@ def test_register_url_os_override(monkeypatch):
 #
 # Matrix (most specific first): an explicit BROWSER_SSRF_ALLOW always wins; then
 # BROWSER_SSRF_ALLOW_LOOPBACK true/false; then the default, which ALLOWS
-# loopback. AI Shuffle exposes no tenancy setting, so "self-hosted single user"
-# is what an install is — Docker included. The deployment-mode probe is no
-# longer consulted at all.
+# loopback in every runtime (Docker, native and desktop). AI Shuffle exposes no
+# tenancy setting, so the deployment-mode probe does not gate it (e55cfa74).
+# That is the documented policy in docs/internal/DEVELOPMENT.md and .env.example.
+
+_REAL_IS_LOCAL_MODE = type(settings).is_local_mode
 
 
-def test_default_allows_loopback(monkeypatch):
-    """Unset knob, non-local (Docker) deployment: loopback is allowed."""
+def test_docker_default_allows_loopback(monkeypatch):
+    """Unset knob in Docker: loopback is allowed."""
     _set_local_mode(monkeypatch, False)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_local_mode_allows_loopback_by_default(monkeypatch):
+def test_native_default_allows_loopback(monkeypatch):
     _set_local_mode(monkeypatch, True)
+
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
+
+
+@pytest.mark.parametrize("local_mode_env", [
+    # The desktop shell starts the worker with LOCAL_MODE=true (desktop/src/main/worker.ts).
+    "true",
+    # An explicit LOCAL_MODE=false is a Docker deployment.
+    "false",
+])
+def test_runtime_default_is_the_same_under_real_deployment_detection(monkeypatch, local_mode_env):
+    """End to end through settings.is_local_mode() and app.core.platform, not a stub."""
+    monkeypatch.setattr(type(settings), "is_local_mode", _REAL_IS_LOCAL_MODE)
+    monkeypatch.setattr(settings, "local_mode", None, raising=False)
+    monkeypatch.setenv("LOCAL_MODE", local_mode_env)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
@@ -97,8 +119,10 @@ def test_deployment_mode_is_not_consulted(monkeypatch):
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_setting_false_blocks_loopback(monkeypatch):
-    """An install fronted for other people turns it back off explicitly."""
+@pytest.mark.parametrize("local_mode", [False, True], ids=["docker", "native"])
+def test_setting_false_blocks_loopback(monkeypatch, local_mode):
+    """An install fronted for other people turns it off explicitly, in any runtime."""
+    _set_local_mode(monkeypatch, local_mode)
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False)
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
@@ -188,3 +212,115 @@ def test_own_address_is_routable_or_absent(monkeypatch, host, expected):
     monkeypatch.setattr('socket.socket', lambda *args, **kwargs: sock)
     assert mcp_config._own_routable_address() == expected
     sock.close.assert_called()
+
+
+# --- private ranges and the worker's own ports (SEC-12) ------------------------
+
+
+def test_loopback_stand_in_is_allowed_with_automatic_loopback(monkeypatch):
+    """browser-mcp now refuses private addresses by default, so the loopback
+    stand-in (this host's own address) rides on the automatic loopback allow."""
+    _set_local_mode(monkeypatch, True)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK + ",172.17.0.5/32"
+
+
+def test_explicit_allow_is_not_widened_by_the_loopback_stand_in(monkeypatch):
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env(
+        {"BROWSER_SSRF_ALLOW": "127.0.0.1/32"}, session_id=None
+    )
+    assert env["BROWSER_SSRF_ALLOW"] == "127.0.0.1/32"
+
+
+def test_stand_in_is_not_allowed_when_loopback_is_off(monkeypatch):
+    _set_local_mode(monkeypatch, True)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False, raising=False)
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert "BROWSER_SSRF_ALLOW" not in env
+
+
+def test_docker_default_allows_loopback_and_the_stand_in(monkeypatch):
+    _set_local_mode(monkeypatch, False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK + ",172.17.0.5/32"
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
+
+
+def test_docker_opt_out_refuses_loopback_and_the_stand_in(monkeypatch):
+    """The container's own address is private; with loopback off it stays
+    refused too, but the stand-in is still named for error messages."""
+    _set_local_mode(monkeypatch, False)
+    monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False, raising=False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert "BROWSER_SSRF_ALLOW" not in env
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
+
+
+def test_worker_ports_are_always_denied(monkeypatch):
+    monkeypatch.setattr(settings, "port", 8000, raising=False)
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_DENY_PORTS"] == "8000,8001"
+
+
+def test_operator_deny_ports_add_to_the_worker_ports(monkeypatch):
+    monkeypatch.setattr(settings, "port", 8000, raising=False)
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    monkeypatch.setenv("BROWSER_SSRF_DENY_PORTS", "9000")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_DENY_PORTS"] == "8000,8001,9000"
+
+
+class _Task:
+    def __init__(self, done: bool):
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+@pytest.mark.parametrize(
+    ("in_container", "start_chrome", "task", "expected"),
+    [
+        (True, None, None, True),  # Docker: start-chrome.sh launches it behind the proxy
+        (True, "0", None, False),  # Docker with START_CHROME=0: someone else's browser
+        (False, None, _Task(done=False), True),  # native supervisor running
+        (False, None, _Task(done=True), False),  # native supervisor gone
+        (False, None, None, False),  # external browser on the CDP port / not started
+    ],
+)
+def test_egress_proxy_flag_follows_the_launcher(monkeypatch, in_container, start_chrome, task, expected):
+    """browser-mcp reads BROWSER_EGRESS_PROXY=1 as "an https tunnel refusal is the
+    egress policy"; it must be set exactly when the browser runs behind egress-launch."""
+    from app.core import native_chrome
+
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: in_container)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", task)
+    if start_chrome is None:
+        monkeypatch.delenv("START_CHROME", raising=False)
+    else:
+        monkeypatch.setenv("START_CHROME", start_chrome)
+
+    env = mcp_config._build_browser_server_env({})
+
+    if expected:
+        assert env["BROWSER_EGRESS_PROXY"] == "1"
+    else:
+        assert "BROWSER_EGRESS_PROXY" not in env
+
+
+def test_egress_proxy_flag_is_not_taken_from_the_profile_env(monkeypatch):
+    from app.core import native_chrome
+
+    monkeypatch.setattr(native_chrome, "_in_container", lambda: False)
+    monkeypatch.setattr(native_chrome, "_supervisor_task", None)
+    monkeypatch.setenv("BROWSER_EGRESS_PROXY", "1")
+
+    env = mcp_config._build_browser_server_env({"BROWSER_EGRESS_PROXY": "1"})
+
+    assert "BROWSER_EGRESS_PROXY" not in env

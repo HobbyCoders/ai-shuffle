@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, List, Literal, Optional
+from typing import Any, Deque, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
@@ -211,4 +211,7 @@ async def rename_client(
 async def revoke_client(client_id: str, _: str = Depends(require_admin)) -> Response:
     if not await run_sync(database.revoke_paired_client, client_id):
         raise HTTPException(status_code=404, detail="Active paired device not found")
+    # Every socket the device holds closes now (4001), not at its next re-check.
+    from app.api.ws_key_watch import close_paired_client_sockets
+    close_paired_client_sockets(client_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

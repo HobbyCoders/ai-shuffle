@@ -12,6 +12,7 @@ afterEach(cleanup);
 it('joins from a pasted invite link without any fingerprint confirmation', async () => {
 	const onStarted = vi.fn();
 	render(JoinNetworkPanel, { props: { status: fresh(), onStarted } });
+	expect(screen.getByText(/Invite codes are for a worker on your home network or a VPN/).textContent).toContain('always talk over the encrypted tunnel');
 	const join = screen.getByRole('button', { name: 'Join' }) as HTMLButtonElement;
 	expect(join.disabled).toBe(true);
 	await fireEvent.input(screen.getByLabelText('Invite link or code'), { target: { value: link } });

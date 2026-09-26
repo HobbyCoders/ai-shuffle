@@ -313,12 +313,9 @@ def build_context_usage(
 
     ``mounted_tools`` names the tools this leg actually serves — the
     capability-filtered surface, not the registry. Hosts that assemble
-    ``tools_api`` or per-tool prompt sections from registered specs bill tools
-    the session cannot call: an audited leg was charged 546 tokens for
-    SendMessage and 245 for ListAgents on a host that never wired agent
-    messaging, and the same names were advertised in the prompt, so models
-    imported them and two workers briefed to coordinate through them could
-    not. Given the set, an unmounted tool gets no row: its schema tokens leave
+    ``tools_api`` or per-tool prompt sections from registered specs would
+    otherwise bill tools the session cannot call. Given the set, an unmounted
+    tool gets no row: its schema tokens leave
     the total (that schema is not sent) and its prompt-section tokens fall
     back to "System prompt" (that text IS sent, and every token must still
     land somewhere). ``None`` bills everything, as before.

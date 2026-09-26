@@ -8,6 +8,8 @@ order: 8
 
 Notes provide a simple, global space for capturing ideas, tracking bugs, and planning work. They support markdown formatting, tags, and search.
 
+Notes are not tied to a project or session. Each [API key](/docs/api-reference/api-users) has its own notes and sees only those; as the owner you see every note, including the ones API keys wrote.
+
 ## Features
 
 - **Markdown** — Write notes in markdown with live preview
@@ -15,13 +17,14 @@ Notes provide a simple, global space for capturing ideas, tracking bugs, and pla
 - **Pinning** — Pin important notes to the top
 - **Search** — Find notes by title or content
 - **Auto-save** — Changes save automatically with debouncing
+- **Attachments** — Attach files to a note (**Attach file**), then type `@` in the note to link one
 
 ## Using Notes
 
 ### Creating a Note
 
 1. Navigate to **Notes** in the sidebar
-2. Click **New Note** (+ button)
+2. Click **New note**
 3. Enter a title and content
 4. Add tags for organization
 5. Notes auto-save as you type

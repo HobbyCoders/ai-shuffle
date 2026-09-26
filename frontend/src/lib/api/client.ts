@@ -9,12 +9,7 @@
 // The usage-snapshot wire shapes live in the rate-limit store (their canonical
 // consumer). Re-export them here under the API-layer names other modules use so
 // there's a single source of truth. Types-only import — no runtime cycle.
-import type {
-	SnapshotWindow,
-	SnapshotInstance,
-	UsageSnapshot,
-	ProviderUsageEntry,
-} from '$lib/stores/rate-limit';
+import type { UsageSnapshot, ProviderUsageEntry } from '$lib/stores/rate-limit';
 import { apiBase, withAuth } from './runtime';
 
 
@@ -30,7 +25,7 @@ export interface ApiError {
  * the very page that needs to render the 401. Other endpoints can also report
  * provider authentication failures, so confirm worker auth first.
  */
-const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/', '/pairing/exchange'];
+const AUTH_PATH_PREFIXES = ['/auth/', '/owner/', '/workspace/', '/pairing/exchange'];
 
 function isAuthPath(path: string): boolean {
 	// `path` is the API-relative path (e.g. '/auth/status', '/sessions'). Strip a
@@ -94,7 +89,17 @@ async function extractErrorDetail(response: Response): Promise<string> {
 				}
 				return `API error: HTTP ${status}`;
 			}
-			if (json.detail) return json.detail;
+			// FastAPI request validation (422) sends a list of {loc, msg}; the
+			// detail must stay a string, so name each failing field.
+			if (Array.isArray(json.detail)) {
+				const messages = json.detail
+					.filter((d: unknown) => d && typeof d === 'object' && typeof (d as { msg?: unknown }).msg === 'string')
+					.map((d: { loc?: unknown; msg: string }) => {
+						const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : null;
+						return typeof field === 'string' ? `${field}: ${d.msg}` : d.msg;
+					});
+				if (messages.length) return messages.join('; ');
+			} else if (json.detail) return json.detail;
 			if (json.message) return json.message;
 			if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
 			// Even when `type` is missing, an explicit `retry_after_seconds` on a
@@ -303,17 +308,32 @@ export interface AuthStatus {
 	local_access?: boolean;
 	owner_linked?: boolean;
 	credential_storage?: { ready: boolean; state: string };
+	/** The Claude Code CLI reports a login (`claude auth status`). */
 	claude_authenticated: boolean;
-	/** True only when the Claude OAuth token is present AND not expired.
-	 *  May be undefined on older backends — treat undefined as "unknown". */
+	/** Same as claude_authenticated; kept for older clients. */
 	claude_token_valid?: boolean;
+	/** The CLI probe. Account fields only for a caller signed in to the worker. */
+	claude_cli?: Partial<import('./claude-cli').ClaudeCliStatus> & { installed: boolean; signed_in: boolean | null };
 	/** True when ANY usable credential exists: the Claude subscription login OR
 	 *  at least one enabled model provider with a stored credential (PA10).
 	 *  May be undefined on older backends — fall back to claude_authenticated. */
 	has_any_credential?: boolean;
+	/** The server's one credential gate (license plus the active Claude Code
+	 *  mode's credential). When `ready` is false, new Claude agent runs are
+	 *  refused with `reason` (reason only for callers signed in to the worker). */
+	agent_gate?: AgentGateStatus;
 	github_authenticated: boolean;
 	onboarding_complete: boolean;
 	username: string | null;
+}
+
+export interface AgentGateStatus {
+	ready: boolean;
+	mode: 'subscription' | 'api_key' | null;
+	claude_credential_ready: boolean;
+	reason?: string | null;
+	license_allows_runs?: boolean;
+	startup_state?: 'ready' | 'setup_required' | null;
 }
 
 // Profile types — Fluid harness options. Legacy SDK keys remain tolerated on
@@ -361,61 +381,6 @@ export interface Profile {
 	updated_at: string;
 }
 
-// Query types
-export interface QueryRequest {
-	prompt: string;
-	profile?: string;
-	project?: string;
-	overrides?: {
-		model?: string;
-		permission_mode?: string;
-		effort?: string;
-		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
-		context_window?: number;
-		system_prompt_append?: string;
-	};
-}
-
-export interface ConversationRequest {
-	prompt: string;
-	session_id?: string;
-	profile?: string;
-	project?: string;
-	overrides?: {
-		model?: string;
-		permission_mode?: string;
-		effort?: string;
-		/** Explicit token ceiling: 200k/256k standard, or 1m extended. */
-		context_window?: number;
-		system_prompt_append?: string;
-	};
-}
-
-export interface QueryResponse {
-	response: string;
-	session_id: string;
-	metadata: {
-		model?: string;
-		duration_ms?: number;
-		total_cost_usd?: number;
-		num_turns?: number;
-	};
-}
-
-// Health types
-export interface HealthResponse {
-	status: string;
-	service: string;
-	version: string;
-	authenticated: boolean;
-	setup_required: boolean;
-	auth_mode?: 'local' | 'account';
-	local_access?: boolean;
-	owner_linked?: boolean;
-	credential_storage?: { ready: boolean; state: string };
-	claude_authenticated: boolean;
-}
-
 // File upload types
 export interface FileUploadResponse {
 	filename: string;
@@ -433,27 +398,6 @@ export interface PermissionRequest {
 	queue_position?: number;
 	queue_total?: number;
 	created_at?: string;
-}
-
-export interface PermissionResponse {
-	request_id: string;
-	decision: 'allow' | 'deny';
-	remember?: 'none' | 'session' | 'profile';
-	pattern?: string;
-}
-
-export interface PermissionRule {
-	id: string;
-	profile_id: string | null;
-	tool_name: string;
-	tool_pattern: string | null;
-	decision: 'allow' | 'deny';
-	created_at: string;
-}
-
-export interface PermissionQueueUpdate {
-	resolved_ids: string[];
-	remaining_count: number;
 }
 
 // User Question types (for AskUserQuestion tool)
@@ -479,13 +423,6 @@ export interface UserQuestionRequest {
 	created_at?: string;
 }
 
-export interface UserQuestionResponse {
-	request_id: string;
-	tool_use_id: string;
-	answers: Record<string, string | string[]>;
-	remaining_count: number;
-}
-
 // Workspace configuration types
 export interface WorkspaceConfig {
 	workspace_path: string;
@@ -501,6 +438,16 @@ export interface WorkspaceValidation {
 	path: string;
 	exists: boolean;
 	writable: boolean;
+}
+
+/** `code_sandbox` in GET /api/v1/deployment: whether agents' Python cells run
+ * inside the bubblewrap sandbox (app/api/system.py code_sandbox_status). */
+export interface CodeSandboxStatus {
+	mode: 'auto' | 'required' | 'off';
+	state: 'active' | 'checking' | 'unavailable' | 'off';
+	active: boolean;
+	/** Why the sandbox is not active: the self-test's own message, or the setting that turned it off. */
+	reason: string;
 }
 
 // ============================================================================
@@ -561,23 +508,12 @@ export async function exportAgent(profileId: string): Promise<void> {
 }
 
 /**
- * Get agent export data without downloading (for preview)
- */
-export async function getAgentExportData(profileId: string): Promise<AgentExport> {
-	return api.get<AgentExport>(`/agents/${profileId}/export`);
-}
-
-/**
  * Import an agent from JSON data
  */
 export async function importAgent(data: AgentImportRequest): Promise<Profile> {
 	return api.post<Profile>('/agents/import', data);
 }
 
-/** One rate-limit window in a usage snapshot. */
-export type UsageLimitsWindow = SnapshotWindow;
-/** One install's usage bucket within a snapshot (clustered deployment). */
-export type UsageLimitsInstanceSnapshot = SnapshotInstance;
 /** One non-Claude provider's usage entry within a snapshot (U4 wire shape:
  *  provider_id, provider_name, provider_type, plan_type, windows, credits,
  *  fetched_at). Surfaced on {@link UsageLimitsSnapshot} as `providers?`. */
@@ -672,50 +608,6 @@ export async function getSubagentsForAutocomplete(
 }
 
 // ============================================================================
-// Agent Teams API Types and Functions
-// ============================================================================
-
-export interface Teammate {
-	team_name: string;
-	teammate_name: string;
-	teammate_session_id?: string;
-	pid?: number;
-	status: 'running' | 'completed' | 'error' | 'killed';
-	usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number };
-}
-
-export interface Team {
-	team_name: string;
-	parent_session_id: string;
-	teammates: Teammate[];
-}
-
-/**
- * List all agent teams (and their teammates) for a parent session.
- */
-export async function listTeams(sessionId: string): Promise<Team[]> {
-	const r = await fetch(`${apiBase()}/teams/${sessionId}`, withAuth({ }));
-	if (!r.ok) throw new Error(`listTeams: ${r.status}`);
-	return r.json();
-}
-
-/**
- * Kill a running teammate subprocess by its team/name pair.
- */
-export async function killTeammate(
-	sessionId: string,
-	teamName: string,
-	teammateName: string
-): Promise<{ success: boolean; pid?: number }> {
-	const r = await fetch(
-		`${apiBase()}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
-		withAuth({ method: 'POST' })
-	);
-	if (!r.ok) throw new Error(`killTeammate: ${r.status}`);
-	return r.json();
-}
-
-// ============================================================================
 // Utility functions
 // ============================================================================
 
@@ -744,10 +636,7 @@ export function getErrorMessage(e: unknown, fallback = 'Unknown error'): string 
 export * from './sessions';
 export * from './tags';
 export * from './analytics';
-export * from './templates';
 export * from './notes';
 export * from './hooks';
-export * from './preferences';
 export * from './rewind';
-export * from './knowledge';
 export * from './generation';

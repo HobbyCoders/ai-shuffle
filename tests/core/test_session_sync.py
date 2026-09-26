@@ -9,40 +9,17 @@ Tests cover:
 - Integration with database operations
 """
 
-import json
 import pytest
-import tempfile
-import shutil
 import time
 import uuid
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from claude_agent_sdk import SDKSessionInfo
+from app.core.cli_sessions import SessionInfo as SDKSessionInfo
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-@pytest.fixture
-def mock_settings(temp_dir):
-    """Mock settings with temporary directories."""
-    mock_settings_obj = MagicMock()
-    mock_settings_obj.workspace_dir = temp_dir / "workspace"
-    mock_settings_obj.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-    mock_settings_obj.workspace_dir.mkdir(parents=True, exist_ok=True)
-    mock_settings_obj.get_claude_projects_dir.mkdir(parents=True, exist_ok=True)
-    return mock_settings_obj
-
 
 @pytest.fixture
 def mock_database():
@@ -59,63 +36,6 @@ def mock_database():
             "sdk_session_id": "test-sdk-id"
         }
         yield mock_db
-
-
-@pytest.fixture
-def sample_project():
-    """Sample project data."""
-    return {
-        "id": "test-project",
-        "name": "Test Project",
-        "path": "test-project",
-        "settings": {}
-    }
-
-
-@pytest.fixture
-def sample_jsonl_content():
-    """Sample JSONL session content."""
-    return [
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "Hello, can you help me?"},
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:00Z"
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "Of course! How can I help you today?"}],
-                "usage": {"input_tokens": 100, "output_tokens": 50}
-            },
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:01Z"
-        },
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "Write a hello world program"},
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:02Z"
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "Here's a simple Python hello world:\n\n```python\nprint('Hello, World!')\n```"}],
-                "usage": {"input_tokens": 150, "output_tokens": 80}
-            },
-            "uuid": str(uuid.uuid4()),
-            "timestamp": "2024-01-15T10:00:03Z"
-        }
-    ]
-
-
-def create_jsonl_file(path: Path, content: list) -> None:
-    """Helper to create a JSONL file."""
-    with open(path, 'w', encoding='utf-8') as f:
-        for entry in content:
-            f.write(json.dumps(entry) + '\n')
 
 
 def make_sdk_session_info(
@@ -525,141 +445,3 @@ class TestSessionSyncAPIIntegration:
         import inspect
         sig = inspect.signature(list_sessions)
         assert "sync_claude_sessions" in sig.parameters
-
-
-# =============================================================================
-# Test Sync All Projects
-# =============================================================================
-
-class TestSyncAllProjects:
-    """Test syncing sessions across all projects."""
-
-    def test_sync_all_projects_empty(self, mock_database):
-        """Should handle case where no projects exist."""
-        from app.core.session_sync import SessionSyncService
-        service = SessionSyncService()
-
-        mock_database.get_all_projects.return_value = []
-
-        result = service.sync_all_projects()
-
-        assert result["total_imported"] == 0
-        assert result["projects_synced"] == 0
-        assert result["errors"] == []
-
-    def test_sync_all_projects_imports_from_multiple(self, mock_database):
-        """Should sync sessions from multiple projects."""
-        mock_database.get_all_projects.return_value = [
-            {"id": "project-1", "path": "project-1"},
-            {"id": "project-2", "path": "project-2"}
-        ]
-        mock_database.get_project.side_effect = lambda pid: {
-            "project-1": {"id": "project-1", "path": "project-1"},
-            "project-2": {"id": "project-2", "path": "project-2"}
-        }.get(pid)
-
-        # Each project has one session
-        sessions_by_dir = {}
-
-        def mock_list_sessions(directory=None, **kwargs):
-            if directory not in sessions_by_dir:
-                sessions_by_dir[directory] = [make_sdk_session_info()]
-            return sessions_by_dir[directory]
-
-        with patch("app.core.session_sync.list_sessions", side_effect=mock_list_sessions), \
-             patch("app.core.session_sync.get_session_cost_from_jsonl", return_value={}):
-            from app.core.session_sync import SessionSyncService
-            service = SessionSyncService()
-
-            result = service.sync_all_projects()
-
-            assert result["total_imported"] == 2
-            assert result["projects_synced"] == 2
-            assert result["errors"] == []
-
-    def test_sync_all_projects_with_limit(self, mock_database):
-        """Should respect limit_projects parameter."""
-        mock_database.get_all_projects.return_value = [
-            {"id": "project-1", "path": "project-1"},
-            {"id": "project-2", "path": "project-2"},
-            {"id": "project-3", "path": "project-3"}
-        ]
-        mock_database.get_project.side_effect = lambda pid: {
-            "project-1": {"id": "project-1", "path": "project-1"},
-            "project-2": {"id": "project-2", "path": "project-2"},
-            "project-3": {"id": "project-3", "path": "project-3"}
-        }.get(pid)
-
-        def mock_list_sessions(directory=None, **kwargs):
-            return [make_sdk_session_info()]
-
-        with patch("app.core.session_sync.list_sessions", side_effect=mock_list_sessions), \
-             patch("app.core.session_sync.get_session_cost_from_jsonl", return_value={}):
-            from app.core.session_sync import SessionSyncService
-            service = SessionSyncService()
-
-            # Only sync 2 projects
-            result = service.sync_all_projects(limit_projects=2)
-
-            assert result["projects_synced"] == 2
-            assert result["total_imported"] == 2
-
-    def test_sync_all_projects_continues_on_error(self, mock_database):
-        """Should continue syncing other projects when one fails."""
-        mock_database.get_all_projects.return_value = [
-            {"id": "project-1", "path": "project-1"},
-            {"id": "project-2", "path": "project-2"}
-        ]
-
-        # First project doesn't exist (returns None), second exists
-        def get_project_side_effect(pid):
-            if pid == "project-1":
-                return None
-            return {"id": "project-2", "path": "project-2"}
-
-        mock_database.get_project.side_effect = get_project_side_effect
-
-        def mock_list_sessions(directory=None, **kwargs):
-            return [make_sdk_session_info()]
-
-        with patch("app.core.session_sync.list_sessions", side_effect=mock_list_sessions), \
-             patch("app.core.session_sync.get_session_cost_from_jsonl", return_value={}):
-            from app.core.session_sync import SessionSyncService
-            service = SessionSyncService()
-
-            result = service.sync_all_projects()
-
-            # Project-2 should have synced successfully
-            assert result["projects_synced"] == 2
-            assert result["total_imported"] == 1
-            assert any("project-1" in err.lower() or "not found" in err.lower() for err in result["errors"])
-
-    def test_sync_all_projects_aggregates_counts(self, mock_database):
-        """Should correctly aggregate import counts across projects."""
-        mock_database.get_all_projects.return_value = [
-            {"id": "project-1", "path": "project-1"},
-            {"id": "project-2", "path": "project-2"}
-        ]
-        mock_database.get_project.side_effect = lambda pid: {
-            "project-1": {"id": "project-1", "path": "project-1"},
-            "project-2": {"id": "project-2", "path": "project-2"}
-        }.get(pid)
-
-        # 2 sessions for project-1, 3 for project-2
-        session_counts = {"project-1": 2, "project-2": 3}
-
-        def mock_list_sessions(directory=None, **kwargs):
-            for proj_name, count in session_counts.items():
-                if proj_name in (directory or ""):
-                    return [make_sdk_session_info() for _ in range(count)]
-            return [make_sdk_session_info() for _ in range(2)]  # default
-
-        with patch("app.core.session_sync.list_sessions", side_effect=mock_list_sessions), \
-             patch("app.core.session_sync.get_session_cost_from_jsonl", return_value={}):
-            from app.core.session_sync import SessionSyncService
-            service = SessionSyncService()
-
-            result = service.sync_all_projects()
-
-            assert result["total_imported"] == 5
-            assert result["projects_synced"] == 2

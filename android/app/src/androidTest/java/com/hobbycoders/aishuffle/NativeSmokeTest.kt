@@ -306,7 +306,6 @@ class NativeSmokeTest {
             onView(withText("Workers")).check(matches(isDisplayed()))
             onView(withText("Home workstation")).check(matches(isDisplayed()))
             onView(withContentDescription("Options for Home workstation")).perform(click())
-            onView(withText("Start voice chat")).check(matches(isDisplayed()))
             onView(withText("Remove from account")).perform(click())
             onView(withText("This removes Home workstation from your account on all devices and revokes its account access and managed remote connection. Direct pairings stay saved. To restore it, sign in again on that worker.")).check(matches(isDisplayed()))
             TestScreenshots.capture("remove-worker-account-confirmation")

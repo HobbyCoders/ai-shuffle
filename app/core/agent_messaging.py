@@ -68,7 +68,7 @@ def peer_rows(session_id: str | None) -> list[dict]:
             continue
         rows.append(
             {
-                # The roster name fluid derived from the task (round 9), else
+                # The roster name fluid derived from the task, else
                 # the agent type, else the subject.
                 "name": task.get("name") or task.get("agent") or task["subject"] or target,
                 "ref": target,
@@ -104,7 +104,7 @@ def make_message(supplier):
         rows = peer_rows(session_id)
         # Exact first: the task id (== worker session id), the name, or
         # "name [ref]". Then case-insensitive on the name — models retype a
-        # slug they read as "Fix Flaky Login" (round 9).
+        # slug they read as "Fix Flaky Login".
         matches = [
             r for r in rows
             if address in {r["name"], r["worker_session_id"], r.get("task_id"),
@@ -271,5 +271,4 @@ async def finish_message_resume(session_id, settled, outcome):
         "task_id": session_id, "tool_use_id": session_id,
         "status": status, "summary": summary,
         "agent_message_turn_id": settled["id"],
-        "origin": turn_scheduler.PROVIDER_AGENT_ORIGIN,
     })

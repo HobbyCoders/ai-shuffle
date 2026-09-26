@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 import run_local
-from scripts.stage_release import stage_release
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,45 +93,6 @@ def test_node_version_floor(version, supported, monkeypatch):
     monkeypatch.setattr(run_local.shutil, "which", lambda name: name)
     monkeypatch.setattr(run_local.subprocess, "check_output", lambda *a, **kw: version)
     assert run_local.check_node_version() is supported
-
-
-def test_stage_release_includes_runtime_sources_without_local_artifacts(tmp_path):
-    repo = tmp_path / "repo"
-    for name in (
-        "app/main.py",
-        "frontend/build/index.html",
-        "fluid/pyproject.toml",
-        "fluid/fluid/__init__.py",
-        "tools/package-lock.json",
-        "tools/worker.ts",
-        "tools/scripts/clean.mjs",
-        "browser-mcp/package-lock.json",
-        "browser-mcp/src/index.ts",
-        "requirements.txt",
-        "requirements-native.txt",
-        "run_local.py",
-        ".env.example",
-        "LICENSE",
-        "tools/node_modules/private.txt",
-        ".env",
-    ):
-        path = repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("fixture")
-    dest = tmp_path / "release"
-    stage_release(repo, dest)
-    for name in (
-        "fluid/fluid/__init__.py",
-        "tools/worker.ts",
-        "tools/scripts/clean.mjs",
-        "browser-mcp/src/index.ts",
-        "app/static/index.html",
-    ):
-        assert (dest / name).is_file()
-    assert not (dest / ".env").exists()
-    assert not (dest / "tools/node_modules").exists()
-    with pytest.raises(ValueError, match="refusing to overwrite"):
-        stage_release(repo, dest)
 
 
 def bash_path():
@@ -224,27 +184,6 @@ def test_backup_covers_project_media_memory_and_excludes_backup_recursion(tmp_pa
         assert "./.instance_id" in names
         assert not any(name.startswith("./backups") for name in names)
         assert not any(name.startswith("./postgres/data") for name in names)
-
-
-def test_retired_backup_sidecar_refuses_without_writes(tmp_path):
-    data, env, _script = backup_fixture(tmp_path)
-    result = subprocess.run(
-        [
-            bash_path(),
-            str(ROOT / "docker/backup-entrypoint.sh"),
-            bash_path(),
-            str(ROOT / "scripts/backup.sh"),
-            "--dry-run",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "retired" in result.stderr.lower()
-    assert not (data / "backups").exists()
 
 
 def test_custom_backup_destination_inside_project_media_is_excluded(tmp_path):
@@ -340,6 +279,7 @@ def test_operator_examples_have_no_database_environment_options():
     retired = re.compile(r"DATABASE_(?:MODE|URL)|POSTGRES_[A-Z_]+|DB_POOL_(?:MIN|MAX)")
     for name in (
         ".env.example", "docker-compose.yml", "README.md", "LOCAL_SETUP.md",
+        "docs/internal/LOCAL_SETUP.md", "docs/internal/DEVELOPMENT.md",
         "docs/RESTORE.md", "docs/content/getting-started/installation.md",
         "scripts/backup.sh", "scripts/deploy.sh", "tools/backup-db.sh",
         "tools/restore-db.sh",

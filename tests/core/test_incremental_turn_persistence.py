@@ -68,9 +68,9 @@ from app.core.provider.events import (
 import app.core.query_engine as qe
 import app.core.query_persistence as qp
 from app.core import jsonl_parser as jp
-from app.core.config import settings
-from app.core.session_pool import SessionState
 from app.db import database
+from tests.core.engine_harness import StubPool, collect, make_state
+from tests.core.helpers import new_session
 
 
 # ─── mode + cache hygiene ───────────────────────────────────────────────────
@@ -195,43 +195,6 @@ def _tool_result_entry(tool_id, output, entry_uuid):
 # ─── run_sync + database + _persist_turn_results REAL) ───────────────────────
 
 
-def _make_state():
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
-    adapter.send_query = AsyncMock()
-    return SessionState(adapter=adapter, is_connected=True)
-
-
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
 def _fake_sync_engine():
     sync = MagicMock()
     sync.broadcast_message_added = AsyncMock()
@@ -241,7 +204,7 @@ def _fake_sync_engine():
     return sync
 
 
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
+def _engine_patches(stack: ExitStack, pool: StubPool, cwd: str):
     """Patch the subprocess/profile boundaries ONLY.
 
     Deliberately REAL (they are the subject under test): run_sync, the whole
@@ -251,9 +214,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "default", "config": {}}
     ))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = cwd
@@ -267,19 +227,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
     stack.enter_context(patch.object(qe, "push_memory", new=AsyncMock()))
     stack.enter_context(patch.object(qe, "sync_engine", new=_fake_sync_engine()))
     return options
-
-
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
-
-
-def _new_session(profile_id="default"):
-    session_id = f"sess-{uuid.uuid4()}"
-    database.create_session(session_id=session_id, profile_id=profile_id)
-    return session_id
 
 
 def _stream_response(test_db, sdk_sid, script):
@@ -338,10 +285,10 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
     blocks must be readable through the real postgres_only reload path, the
     in-flight (never-mirrored) block absent, sdk_session_id already linked,
     and no crash artifacts / duplicate rows anywhere."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state()
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -368,8 +315,8 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(
-            qe.stream_to_websocket("run the thing", session_id, "default")
+        events = await collect(
+            qe._stream_to_websocket_impl("run the thing", session_id, "default")
         )
 
     # The crash surfaced as an error frame, with no misleading `done`.
@@ -398,10 +345,10 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
 async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, store_read, tmp_path):
     """Crash before the first mirrored block: the read path returns empty (not
     an error), the session row survives, and nothing is fabricated."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state()
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -411,7 +358,7 @@ async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, sto
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("hi", session_id, "default"))
 
     assert any(e.get("type") == "error" for e in events), events
     assert database.get_session(session_id)["sdk_session_id"] == sdk_sid
@@ -429,10 +376,10 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
     the durable transcript holds exactly one copy of every block (the mirror's),
     turn-end persistence adds only the sessions-row aggregates, and a reload
     (cached or fresh) returns the identical transcript."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state()
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -461,7 +408,7 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("do it", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("do it", session_id, "default"))
 
     assert any(e.get("type") == "done" for e in events), events
 
@@ -492,10 +439,10 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
 async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
     """Interrupt (CancelledError from the stream) after a flushed block: the
     interrupted persist path must not duplicate the mirrored block either."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    state = _make_state()
-    pool = _StubPool(state)
+    state = make_state()
+    pool = StubPool(state)
 
     script = [
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
@@ -509,7 +456,7 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
-        events = await _collect(qe.stream_to_websocket("long task", session_id, "default"))
+        events = await collect(qe._stream_to_websocket_impl("long task", session_id, "default"))
 
     assert any(e.get("type") == "interrupted" for e in events), events
     assert _content_signature(store_read(sdk_sid)) == [
@@ -523,27 +470,15 @@ async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monke
     """Pin the MECHANISM: _persist_turn_results never writes the legacy message
     batch (the store mirror is the single writer) and is idempotent across a
     crash-retry double call."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
-    turn_events = [
-        {"kind": "text", "payload": {"content": "Hello", "uuid": "a-1"}},
-        {"kind": "tool_use", "payload": {
-            "type": "tool_use", "name": "Bash", "tool_id": "t-1",
-            "input": {"command": "ls"}, "parent_tool_id": None, "uuid": "a-2"}},
-        {"kind": "tool_result", "payload": {
-            "type": "tool_result", "name": "Bash", "tool_id": "t-1",
-            "output": "ok", "parent_tool_id": None, "uuid": "u-2"}},
-    ]
 
     async def _persist():
         await qp._persist_turn_results(
             session_id=session_id,
             sdk_session_id=sdk_sid,
-            tool_messages=[],
-            response_text=["Hello"],
             metadata={"model": "claude-test", "total_cost_usd": 0.01, "num_turns": 1},
             profile_id="default",
-            turn_events=turn_events,
         )
 
     # postgres_only: zero rows, twice (a crash-retry re-persist cannot dupe).
@@ -562,107 +497,50 @@ async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monke
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 3. Eager mirror contract: the real SDK batcher flushes mid-turn
+# 3. Fluid's real delegated producer persists complete frames before turn end
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-class _RecordingStore:
-    def __init__(self, fail=False):
-        self.calls = []
-        self.attempts = 0
-        self.fail = fail
+@pytest.mark.parametrize("fail_store", [False, True])
+async def test_delegated_frame_persistence_without_sdk(mock_db, monkeypatch, fail_store):
+    from types import SimpleNamespace
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.delegated_proto import StreamJsonMapper
+    from fluid.messages.content import Message, Text
+    from fluid.store.base import SessionNode
+    from app.core.provider.fluid_pg_store import PgFluidStore
 
-    async def append(self, key, entries):
-        self.attempts += 1
-        if self.fail:
+    store = PgFluidStore()
+    loop = DelegatedLoop(store=store, model="fixture")
+    session = await loop._ensure_session()
+    sid = session.session_id
+    user = SessionNode(node_id="u", parent_id=None,
+                       message=Message(role="user", content=[Text(text="hello")]))
+    await store.append(sid, user)
+    stdout = asyncio.StreamReader()
+    # Actual CLI frame mapping + actual app store append, not a fixture that
+    # pre-seeds the rows the history reader consumes. EOF simulates CLI death.
+    stdout.feed_data((json.dumps({
+        "type": "assistant", "uuid": "a", "message": {
+            "id": "a", "role": "assistant", "model": "fixture",
+            "content": [{"type": "text", "text": "durable before result"}],
+        },
+    }) + "\n").encode())
+    stdout.feed_eof()
+    loop._proc = SimpleNamespace(stdout=stdout)
+    if fail_store:
+        async def fail(*args):
             raise RuntimeError("store down")
-        self.calls.append((key, list(entries)))
-
-
-async def _poll_until(predicate, timeout=5.0):
-    deadline = asyncio.get_event_loop().time() + timeout
-    while not predicate():
-        assert asyncio.get_event_loop().time() < deadline, "condition never became true"
-        await asyncio.sleep(0.01)
-
-
-def _build_batcher(tmp_path, store, on_error=None, flush_mode="eager"):
-    from claude_agent_sdk._internal.session_resume import build_mirror_batcher
-
-    async def _default_on_error(key, msg):  # pragma: no cover - default sink
-        pass
-
-    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "claude")}
-    batcher = build_mirror_batcher(
-        store=store,
-        materialized=None,
-        env=env,
-        on_error=on_error or _default_on_error,
-        flush_mode=flush_mode,
-    )
-    projects_dir = tmp_path / "claude" / "projects"
-    return batcher, projects_dir
-
-
-async def test_eager_mode_flushes_every_frame_mid_turn(tmp_path):
-    """The load-bearing wiring: flush_mode='eager' (what query_options passes
-    whenever the store is enabled) makes EVERY mirror frame reach store.append
-    in the background — no flush()/close() (i.e. no turn end) required."""
-    store = _RecordingStore()
-    batcher, projects_dir = _build_batcher(tmp_path, store)
-    sdk_sid = str(uuid.uuid4())
-    file_path = str(projects_dir / "-workspace" / f"{sdk_sid}.jsonl")
-
-    batcher.enqueue(file_path, [_asst_text_entry("Block one.", "a-1")])
-    await _poll_until(lambda: len(store.calls) == 1)
-
-    batcher.enqueue(file_path, [_asst_tool_entry("t-1", "Bash", {}, "a-2")])
-    await _poll_until(lambda: len(store.calls) == 2)
-
-    # Frames landed with the right key and payload — per-block durability.
-    for key, entries in store.calls:
-        assert key == {"project_key": "-workspace", "session_id": sdk_sid}
-    assert store.calls[0][1][0]["uuid"] == "a-1"
-    assert store.calls[1][1][0]["uuid"] == "a-2"
-
-
-async def test_batched_mode_would_hold_frames_until_flush(tmp_path):
-    """Contrast pin: WITHOUT eager mode, frames sit in memory until a result
-    frame flushes them — a mid-turn death would lose them. This is exactly why
-    the eager wiring in query_options is load-bearing for Phase 2.5."""
-    store = _RecordingStore()
-    batcher, projects_dir = _build_batcher(tmp_path, store, flush_mode="batched")
-    file_path = str(projects_dir / "-workspace" / f"{uuid.uuid4()}.jsonl")
-
-    batcher.enqueue(file_path, [_asst_text_entry("held", "a-1")])
-    await asyncio.sleep(0.05)
-    assert store.calls == []  # nothing durable yet
-
-    await batcher.flush()  # what a ResultMessage triggers
-    assert len(store.calls) == 1
-
-
-async def test_failed_eager_flush_never_raises_and_reports(tmp_path):
-    """A failed incremental flush must never break the turn: the batcher
-    retries, swallows the failure, and reports via on_error. enqueue and the
-    background drain never propagate an exception into the streaming loop."""
-    store = _RecordingStore(fail=True)
-    errors = []
-
-    async def _on_error(key, msg):
-        errors.append((key, msg))
-
-    batcher, projects_dir = _build_batcher(tmp_path, store, on_error=_on_error)
-    sdk_sid = str(uuid.uuid4())
-    file_path = str(projects_dir / "-workspace" / f"{sdk_sid}.jsonl")
-
-    batcher.enqueue(file_path, [_asst_text_entry("doomed", "a-1")])  # must not raise
-    # 3 attempts with 0.2s + 0.8s backoff, then on_error.
-    await _poll_until(lambda: len(errors) == 1, timeout=10.0)
-
-    assert store.attempts == 3
-    assert errors[0][0] == {"project_key": "-workspace", "session_id": sdk_sid}
-    assert "store down" in errors[0][1]
+        monkeypatch.setattr(store, "append", fail)
+        # Fluid fails closed; it does not silently lose a completed frame.
+        with pytest.raises(RuntimeError, match="store down"):
+            await loop._read_until_result(sid, "turn", StreamJsonMapper(session_id=sid, turn_id="turn", model="fixture", user_node_id="u"), user)
+    else:
+        error = await loop._read_until_result(sid, "turn", StreamJsonMapper(session_id=sid, turn_id="turn", model="fixture", user_node_id="u"), user)
+        assert error is not None  # no result frame was ever received
+        path = await PgFluidStore().load_path(sid)
+        assert [node.message.text() for node in path] == ["hello", "durable before result"]
+        assert len(path) == 2
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -674,7 +552,7 @@ def test_first_turn_discard_wipes_incremental_writes(test_db, store_read):
     """Stop-before-output on a brand-new session: discard_orphan_first_turn
     must erase the eagerly-mirrored rows AND the early-linked sdk_session_id,
     so the real read path shows a clean session."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
     # The turn got as far as: early link + the mirrored user line.
     database.update_session(session_id, sdk_session_id=sdk_sid)
@@ -700,7 +578,7 @@ def test_followup_turn_discard_keeps_prior_history(test_db, store_read):
     user line of the discarded turn stays in the store — follow-up discard is
     legacy-table-only by design (wiping the shared transcript would destroy
     real history)."""
-    session_id = _new_session()
+    session_id = new_session()
     sdk_sid = str(uuid.uuid4())
     database.update_session(session_id, sdk_session_id=sdk_sid)
     # Prior completed turn, incrementally mirrored.

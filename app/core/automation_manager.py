@@ -15,7 +15,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from app.core import turn_outcome
@@ -24,10 +24,92 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# APScheduler 3.x numbers day_of_week Monday=0, while crontab (and the UI,
+# docs and MCP tool examples) number it Sunday=0 with 7 also meaning Sunday.
+_CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def _crontab_dow(token: str) -> Optional[int]:
+    """A day-of-week token as crontab's number (Sunday=0), or None."""
+    if token.isdigit():
+        return int(token)
+    name = token.lower()[:3]
+    return _CRON_DOW_NAMES.index(name) if len(token) >= 3 and name in _CRON_DOW_NAMES else None
+
+
+def crontab_day_of_week(field: str) -> str:
+    """Translate a crontab day-of-week field into APScheduler's syntax.
+
+    Values follow crontab semantics (0 and 7 = Sunday, ``1-5`` = Monday to
+    Friday) and are expanded into explicit weekday names, so the result never
+    depends on APScheduler's Monday=0 numbering. Name ranges are expanded the
+    same way (``sun-thu`` = Sunday to Thursday) and may wrap past Saturday
+    (``fri-mon``). Bare ``*`` passes through unchanged.
+    """
+    field = field.strip()
+    if field == "*":
+        return field
+    out: List[str] = []
+    for item in field.split(","):
+        base, _, step_s = item.partition("/")
+        wraps = False
+        if base == "*":
+            lo, hi = 0, 6
+        elif "-" in base:
+            a, _, b = base.partition("-")
+            lo, hi = _crontab_dow(a), _crontab_dow(b)
+            if lo is None or hi is None:
+                raise ValueError(f"invalid day-of-week value: {item!r}")
+            wraps = not (a.isdigit() and b.isdigit())
+        else:
+            lo = _crontab_dow(base)
+            if lo is None:
+                raise ValueError(f"invalid day-of-week value: {item!r}")
+            hi = 7 if step_s else lo  # crontab: "N/S" means N-7/S
+        if step_s and not step_s.isdigit():
+            raise ValueError(f"invalid day-of-week step: {item!r}")
+        step = int(step_s) if step_s else 1
+        if wraps and lo > hi:
+            hi += 7  # a named range past Saturday: fri-mon
+        if not (0 <= lo <= 7 and 0 <= hi <= 14 and lo <= hi and step > 0) or (hi > 7 and not wraps):
+            raise ValueError(f"invalid day-of-week value: {item!r}")
+        for n in range(lo, hi + 1, step):
+            name = _CRON_DOW_NAMES[n % 7]
+            if name not in out:
+                out.append(name)
+    return ",".join(out)
+
 # Automations are shared across installs but APScheduler jobs are per-process,
 # so each install periodically re-syncs its jobs from the database to pick up
 # automations created, changed, or deleted on other installs.
 SCHEDULE_RECONCILE_SECONDS = 60
+
+# How long an approval stays good for the restart re-queue. An approved run a
+# shutdown cancelled is started again only when it was approved within this
+# window; an older one is stamped cancelled instead of surprising the owner
+# with a run they approved days ago (the first start after an upgrade would
+# otherwise run every run ever left ``approved``).
+APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    """A stored timestamp (datetime on PostgreSQL, ISO text on SQLite) as aware UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+class _ShutdownBeforeTurn(Exception):
+    """Shutdown began after the run moved to ``running`` but before its turn
+    was queued: the run is settled ``cancelled`` instead of leaving a queued
+    turn nobody watches (it would run unattended on the next boot)."""
 
 
 class AutomationManager:
@@ -40,12 +122,30 @@ class AutomationManager:
         self._initialized = False
         self._scheduled_versions: Dict[str, str] = {}  # automation_id → trigger fingerprint
         self._reconcile_task: Optional[asyncio.Task] = None
+        # Approved runs queued behind another run of the same automation.
+        # They hold no latch entry, so shutdown cancels them from here.
+        self._waiting_approved: Set[asyncio.Task] = set()
+        self._shutting_down = False
+        self._requeue_task: Optional[asyncio.Task] = None
 
     def _create_tracked_task(self, coro, *, name: str) -> asyncio.Task:
         """Create a background task with error logging on failure."""
         task = asyncio.create_task(coro, name=name)
         task.add_done_callback(self._on_task_done)
         return task
+
+    def _shutdown_begun(self) -> bool:
+        """Whether shutdown has begun, app-wide or for this manager.
+
+        The app flags ``startup.is_shutting_down`` first, then stops running
+        sessions, and reaches ``shutdown()`` (which sets ``_shutting_down``)
+        last. A run started in between would mint a session and a queued turn
+        the scheduler no longer starts, so every point where a run can move to
+        ``running`` checks both.
+        """
+        from app.core import startup
+
+        return self._shutting_down or bool(getattr(startup, "is_shutting_down", False))
 
     @staticmethod
     def _on_task_done(task: asyncio.Task) -> None:
@@ -63,6 +163,12 @@ class AutomationManager:
         """Initialize scheduler and load enabled automations."""
         if self._initialized:
             return
+        self._shutting_down = False
+        # Approved runs a shutdown cancelled while they waited kept their
+        # ``approved`` row; nothing else starts them again.
+        self._requeue_task = self._create_tracked_task(
+            self._requeue_approved_runs(), name="automation-requeue-approved"
+        )
 
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -93,13 +199,21 @@ class AutomationManager:
         if self._reconcile_task:
             self._reconcile_task.cancel()
             self._reconcile_task = None
+        if self._requeue_task:
+            self._requeue_task.cancel()
+            self._requeue_task = None
 
-        # Cancel running tasks
+        # Cancel running tasks, and the approved runs queued behind them: a
+        # queued run would otherwise wake to a free latch and start now.
         async with self._lock:
+            self._shutting_down = True
             for auto_id, task in self._running.items():
                 task.cancel()
                 logger.debug(f"Cancelled running automation {auto_id}")
             self._running.clear()
+            for task in self._waiting_approved:
+                task.cancel()
+            self._waiting_approved.clear()
 
         if self._scheduler:
             self._scheduler.shutdown(wait=False)
@@ -222,7 +336,8 @@ class AutomationManager:
                     trigger = CronTrigger(
                         minute=parts[0], hour=parts[1],
                         day=parts[2], month=parts[3],
-                        day_of_week=parts[4], timezone=timezone,
+                        day_of_week=crontab_day_of_week(parts[4]),
+                        timezone=timezone,
                     )
                     self._scheduler.add_job(
                         self._on_schedule_trigger,
@@ -302,6 +417,12 @@ class AutomationManager:
         can insert the (automation_id, fire_bucket) row, and only that winner
         executes the tick.
         """
+        if self._shutdown_begun():
+            # Before the cross-install fire claim, so a live install can still
+            # take this tick.
+            logger.info(f"Automation {automation_id}: shutting down — scheduled fire skipped")
+            return
+
         def _gate_blocking() -> Tuple[Optional[Dict[str, Any]], bool, str]:
             """Row read + runner election in ONE hop. ``should_run_scheduled_here``
             is itself a chain of blocking reads (install registry, project,
@@ -509,6 +630,14 @@ class AutomationManager:
 
         # Concurrency check — only one run at a time per automation
         async with self._lock:
+            # Shutdown has begun: the scheduler kick is already suppressed,
+            # so a run minted now would wait out its timeout (or be cancelled
+            # mid-wait, leaving its row ``running``) while its queued turn ran
+            # unwatched on the next boot. A webhook or connector event that
+            # lands in that window starts nothing.
+            if self._shutdown_begun():
+                logger.info(f"Automation {automation_id}: shutting down — run not started")
+                return
             if automation_id in self._running:
                 logger.warning(f"Automation {automation_id} already running — skipping")
                 return
@@ -718,11 +847,28 @@ class AutomationManager:
         run_id: str,
         rendered_prompt: str,
         trigger_data: Dict[str, Any],
+        *,
+        claim_from: Optional[str] = None,
     ) -> None:
-        """Execute a single automation run (after approval if needed)."""
+        """Execute a single automation run (after approval if needed).
+
+        ``claim_from`` makes the ``running`` stamp a compare-and-set from that
+        status: an approved run starts only while its row is still
+        ``approved``, so the row itself is the claim for the whole run and a
+        second install (or a second queued copy on this one) that reaches the
+        same run later finds it taken and does nothing.
+        """
         automation_id = automation["id"]
         action_steps = automation.get("action_steps") or []
         start_time = time.time()
+
+        if claim_from is not None and self._shutdown_begun():
+            # Leave the row ``claim_from`` (``approved``): the next boot's
+            # re-queue starts it, instead of a turn nobody would run.
+            logger.info(
+                f"Automation {automation_id}: shutting down — {claim_from} run {run_id} left for the next start"
+            )
+            return
 
         # If there's no prompt AND no action_steps, skip execution
         has_prompt = bool(rendered_prompt and rendered_prompt.strip())
@@ -732,24 +878,35 @@ class AutomationManager:
 
             def _settle_empty_run() -> None:
                 """Terminal stamp + success accounting, contiguous — one hop."""
-                database.update_automation_run(
+                settled = database.update_automation_run(
                     run_id, status="completed",
                     started_at=datetime.now(timezone.utc).isoformat(),
                     completed_at=datetime.now(timezone.utc).isoformat(),
+                    expected_status=claim_from,
                 )
-                database.record_automation_run_success(automation_id)
+                if claim_from is None or settled is not None:
+                    database.record_automation_run_success(automation_id)
 
             await run_sync(_settle_empty_run)
             return
 
-        def _mark_running() -> None:
+        def _mark_running() -> bool:
             """Both "now running" writes in one hop; they were already adjacent."""
-            database.update_automation_run(
-                run_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
+            started = database.update_automation_run(
+                run_id, status="running", started_at=datetime.now(timezone.utc).isoformat(),
+                expected_status=claim_from,
             )
+            if claim_from is not None and started is None:
+                return False
             database.update_automation(automation_id, status="running")
+            return True
 
-        await run_sync(_mark_running)
+        if not await run_sync(_mark_running):
+            logger.info(
+                f"Automation {automation_id}: run {run_id} is no longer {claim_from} "
+                "(started elsewhere) — skipping"
+            )
+            return
 
         try:
             response_text = ""
@@ -853,6 +1010,19 @@ class AutomationManager:
             # Deliver output
             await self._deliver_output(automation, run_id, response_text)
 
+        except _ShutdownBeforeTurn:
+            logger.info(f"Automation {automation_id}: shutting down — run {run_id} cancelled before its turn")
+
+            def _settle_cancelled() -> None:
+                database.update_automation_run(
+                    run_id, status="cancelled", error="Shutting down: the run's turn was not started",
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                database.update_automation(automation_id, status="idle")
+
+            await run_sync(_settle_cancelled)
+
         except asyncio.TimeoutError:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = f"Execution timed out after {automation.get('timeout_seconds', 300)}s"
@@ -899,7 +1069,12 @@ class AutomationManager:
             # Awaiting inside the handler keeps the active exception bound to
             # this frame, so the bare ``raise`` below still re-raises it.
             await run_sync(_settle_failure)
-            raise
+            if actual is e:
+                raise
+            # Propagate the unwrapped error: _execute records the failure a
+            # second time from what it catches, and the group's text
+            # ("unhandled errors in a TaskGroup") would overwrite this one.
+            raise actual from e
 
     # ------------------------------------------------------------------
     # Prompt execution — automation runs ARE normal streaming sessions
@@ -912,6 +1087,25 @@ class AutomationManager:
     @classmethod
     def _response_tail(cls, text: str) -> str:
         return (text or "")[-cls.RESPONSE_TAIL_CHARS:]
+
+    @staticmethod
+    async def _discard_unused_session(automation_id: str, session_id: str) -> None:
+        """Delete a session minted for a turn that will not start, and drop it
+        from connected devices. Best-effort: a failure leaves the empty session
+        behind, as before, and the run is still cancelled."""
+        try:
+            await run_sync(database.delete_session, session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Automation {automation_id}: could not delete unused session {session_id}: {e}")
+            return
+        try:
+            from app.core import sync_engine as sync_engine_module
+
+            await sync_engine_module.sync_engine.broadcast_user_session_deleted(
+                user_id="admin", session_id=session_id, source_device_id=None
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Automation {automation_id}: session delete broadcast failed: {e}")
 
     async def _run_prompt_as_session(
         self,
@@ -938,6 +1132,10 @@ class AutomationManager:
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
         timeout_seconds = automation.get("timeout_seconds", 300)
+        # The fire passed the shutdown gates before the run moved to
+        # ``running``; project resolution (possibly a clone) ran since.
+        if self._shutdown_begun():
+            raise _ShutdownBeforeTurn()
 
         # 1. Fresh badged session. This runs only AFTER the cross-install
         #    fire claim (_on_schedule_trigger) and budget check (_execute),
@@ -998,7 +1196,13 @@ class AutomationManager:
         # 3. Submit a durable ``source=automation`` turn. ``submit`` enqueues
         #    then kicks the scheduler, which starts the turn in the ONE spawn
         #    path (SessionRuntime). No ``deferred_delivery`` concept survives —
-        #    the v2 SSE typed-event feed is always live.
+        #    the v2 SSE typed-event feed is always live. Last shutdown gate:
+        #    the session mint and broadcast above both awaited. The session was
+        #    minted for this turn alone and is still empty, so it goes too
+        #    (the run's link clears with it: ON DELETE SET NULL).
+        if self._shutdown_begun():
+            await self._discard_unused_session(automation_id, session_id)
+            raise _ShutdownBeforeTurn()
         await turn_manager.submit_async(
             session_id,
             "automation",
@@ -1253,27 +1457,124 @@ class AutomationManager:
                 return None, None
             return run, automation
 
+        if self._shutdown_begun():
+            logger.info(f"Approval {approval_id}: shutting down — run left approved for the next start")
+            return None
         run, automation = await run_sync(_load_approved)
         if run is None or automation is None:
             return None
 
         # Execute in background
         async def _run():
-            async with self._lock:
-                self._running[automation["id"]] = asyncio.current_task()
+            auto_id = automation["id"]
+            me = asyncio.current_task()
+            # Same one-run-per-automation latch as _execute: queue behind an
+            # in-flight run rather than run beside it and overwrite (and later
+            # pop) that run's latch entry.
+            while True:
+                async with self._lock:
+                    if self._shutdown_begun():
+                        self._waiting_approved.discard(me)
+                        return
+                    holder = self._running.get(auto_id)
+                    if holder is None or holder.done():
+                        self._waiting_approved.discard(me)
+                        self._running[auto_id] = me
+                        break
+                    if me not in self._waiting_approved:
+                        self._waiting_approved.add(me)
+                        me.add_done_callback(self._waiting_approved.discard)
+                await asyncio.wait({holder})
             try:
                 await self._execute_run(
                     automation,
                     run["id"],
                     run.get("prompt_rendered") or automation.get("prompt") or "",
                     run.get("trigger_data", {}),
+                    claim_from="approved",
                 )
             finally:
                 async with self._lock:
-                    self._running.pop(automation["id"], None)
+                    if self._running.get(auto_id) is me:
+                        self._running.pop(auto_id, None)
 
         self._create_tracked_task(_run(), name=f"auto-approved-{run['id']}")
         return run
+
+    async def _requeue_approved_runs(self) -> None:
+        """Start again the approved runs a previous shutdown cancelled.
+
+        ``execute_approved_run`` queues an approved run behind a run of the
+        same automation already in flight; shutdown cancels that wait and the
+        row stays ``approved`` (the approval itself is spent, so approving
+        again is refused). Every install sharing the database sees the row, so
+        the same runner election as a scheduled fire picks one install.
+
+        Only runs of an automation that still exists and is enabled, approved
+        within ``APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS`` (24 h), are re-queued;
+        an older approved run is stamped ``cancelled`` (compare-and-set, so a
+        run another install just started is untouched). A disabled
+        automation's run is left ``approved`` for a later start once it is
+        enabled again (inside the same 24 h). Running once is guaranteed by
+        the run row itself: ``_execute_run(claim_from="approved")`` moves it
+        ``approved -> running`` as a compare-and-set, so a second install, a
+        second start, or a copy still queued in memory on a live install that
+        reaches it afterwards skips it.
+        """
+        def _select_approved_blocking() -> List[str]:
+            from app.core.automation_service import should_run_scheduled_here
+            from app.db.base import get_db, rows_to_list
+
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """SELECT a.id AS approval_id, a.decided_at, r.id AS run_id,
+                              r.automation_id
+                       FROM automation_approvals a
+                       JOIN automation_runs r ON r.id = a.run_id
+                       WHERE a.status = 'approved' AND r.status = 'approved'
+                       ORDER BY r.created_at"""
+                )
+                rows = rows_to_list(cursor.fetchall())
+            now = datetime.now(timezone.utc)
+            selected: List[str] = []
+            for row in rows:
+                decided = _parse_utc(row.get("decided_at"))
+                if decided is None or (now - decided).total_seconds() > APPROVED_RUN_REQUEUE_MAX_AGE_SECONDS:
+                    expired = database.update_automation_run(
+                        row["run_id"], status="cancelled",
+                        error="Approval expired: approved more than 24 h before a restart could run it",
+                        completed_at=now.isoformat(), expected_status="approved",
+                    )
+                    if expired is not None:
+                        logger.info(f"Approved run {row['run_id']} expired before a restart re-queued it")
+                    continue
+                automation = database.get_automation(row["automation_id"])
+                if not automation or not automation.get("is_enabled"):
+                    continue
+                try:
+                    should_run, reason = should_run_scheduled_here(automation)
+                except Exception as e:  # noqa: BLE001 — same fail-open stance as a fire
+                    should_run, reason = True, f"election failed ({e})"
+                if not should_run:
+                    logger.info(f"Approved run {row['run_id']} left to another install ({reason})")
+                    continue
+                selected.append(row["approval_id"])
+            return selected
+
+        if self._shutdown_begun():
+            return
+        try:
+            approval_ids = await run_sync(_select_approved_blocking)
+        except Exception as e:  # noqa: BLE001 — a DB blip must not break start()
+            logger.warning(f"Could not re-queue approved automation runs: {e}")
+            return
+        for approval_id in approval_ids:
+            if self._shutdown_begun():
+                return
+            run = await self.execute_approved_run(approval_id)
+            if run is not None:
+                logger.info(f"Re-queued approved automation run {run['id']} after restart")
 
     # ------------------------------------------------------------------
     # Output delivery
@@ -1315,19 +1616,21 @@ class AutomationManager:
             if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
                 recent = database.get_automation_runs(automation["id"], limit=5)
                 now = datetime.now(timezone.utc)
+                # Run rows store only the response tail, so compare tails.
+                stored_response = self._response_tail(response)
                 for prev in recent:
                     if prev["id"] == run_id:
                         continue
                     if (
-                        prev.get("response") == response
+                        prev.get("response") == stored_response
                         and prev.get("output_status") == "delivered"
                     ):
                         completed = prev.get("completed_at")
                         if completed:
                             try:
-                                completed_dt = datetime.fromisoformat(
-                                    str(completed).replace("Z", "+00:00").replace("+00:00", "")
-                                )
+                                completed_dt = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+                                if completed_dt.tzinfo is None:
+                                    completed_dt = completed_dt.replace(tzinfo=timezone.utc)
                                 age = (now - completed_dt).total_seconds()
                                 if 0 < age < dedup_window:
                                     logger.info(

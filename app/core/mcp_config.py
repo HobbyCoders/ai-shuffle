@@ -2,7 +2,7 @@
 MCP server and plugin configuration for Claude queries.
 
 Contains functions that build MCP server dictionaries and plugin lists
-for ClaudeAgentOptions.
+for ``AgentOptions``.
 """
 
 import logging
@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 # Env vars injected into the spawned ``browser`` MCP server subprocess, sourced
 # from the session's full_env (built by query_options). Keyed on server name so
-# no other STDIO server is affected. The ANTHROPIC_* subset feeds the future
-# ``browser_find`` cheap-model sub-call (PR A4): it inherits the session's
-# gateway routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
+# no other STDIO server is affected. The ANTHROPIC_* subset feeds the
+# ``browser_find`` cheap-model sub-call: it inherits the session's provider
+# routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
 # small-fast model id. CHROME_CDP_PORT tells the server which supervised
 # Chromium CDP port to attach to (default 9221); BROWSER_MCP_ENTRY is passed
 # through for dev overrides. BROWSER_UPLOAD_DIR gates browser_upload — the
@@ -75,18 +75,22 @@ def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
        env) is passed through untouched — the operator has stated the policy
        and we do not append to it.
     2. ``BROWSER_SSRF_ALLOW_LOOPBACK`` true/false, when set, decides.
-    3. Unset: loopback is ALLOWED. AI Shuffle has no multi-tenant or cloud mode
-       to detect — one admin password, one operator, and the agent already has
-       a shell on the same host — so a self-hosted install is single-user by
-       construction whether it runs in Docker or natively. The old rule keyed
-       off ``is_local_mode()``, which is a Docker-vs-native probe and not a
-       tenancy signal: on a single-user Unraid deployment it read False and the
-       one model that tried to verify a UI on 127.0.0.1 was refused twice
-       (audit R6/6). An install fronted for other people sets
+    3. Unset: loopback is ALLOWED in every runtime (Docker, native and
+       desktop). AI Shuffle has no multi-tenant mode — one owner, and the agent
+       already has a shell on the same host — so a self-hosted install is
+       single-user whether it runs in Docker or natively. ``is_local_mode()``
+       is a Docker-vs-native probe, not a tenancy signal, and gating on it
+       refused a single-user Unraid agent checking a UI on 127.0.0.1 (commit
+       e55cfa74). An install fronted for other people sets
        ``BROWSER_SSRF_ALLOW_LOOPBACK=false``.
 
+    The tradeoff: with loopback allowed, a page the agent visits can reach
+    anything listening on the worker's loopback that is not on the deny list.
+    The worker's own ports and the DevTools port are always denied (see
+    ``_worker_deny_ports`` and browser-mcp ``compilePolicy``).
+
     Returns None only when loopback is explicitly disabled, leaving browser-mcp
-    on its own default-block policy.
+    on its own default-block policy (loopback, private LAN and metadata refused).
     """
     if explicit:
         return explicit
@@ -144,6 +148,51 @@ def _browser_loopback_host(explicit: Optional[str]) -> Optional[str]:
         return None
 
 
+def _host_cidr(address: str) -> str:
+    """``address`` as a single-host CIDR (``/32`` or ``/128``)."""
+    return f"{address}/128" if ":" in address else f"{address}/32"
+
+
+def _browser_behind_egress_proxy() -> bool:
+    """Whether the browser the spawned server drives was started by egress-launch.
+
+    Only then may browser-mcp read an https ``ERR_TUNNEL_CONNECTION_FAILED`` as
+    a refusal by the egress policy (``BROWSER_EGRESS_PROXY``, see
+    browser-mcp/src/loopback.ts); any other proxy's failure must not be
+    reported as one. In the Docker image the supervised Chromium is always
+    launched through the proxy (start-chrome.sh refuses otherwise) unless
+    ``START_CHROME`` turned it off. On a native install it is so only while
+    the native supervisor runs; an external browser on the CDP port is not.
+    Unknown is "no": a missed flag only makes the message less specific.
+    """
+    try:
+        from app.core import native_chrome
+
+        if native_chrome._in_container():
+            return os.environ.get("START_CHROME", "1") == "1"
+        task = native_chrome._supervisor_task
+        return task is not None and not task.done()
+    except Exception:  # pragma: no cover - defensive: never break the env build
+        logger.debug("Could not tell whether the browser runs behind its egress proxy", exc_info=True)
+        return False
+
+
+def _worker_deny_ports(extra: Optional[str]) -> str:
+    """The worker's local and protected listener ports, plus any extras."""
+    ports = {str(settings.port)}
+    try:
+        from app.serve import configured_remote_port
+
+        ports.add(str(configured_remote_port(os.environ)))
+    except Exception:  # pragma: no cover - misconfigured protected port
+        ports.add("8001")
+    desktop_port = os.environ.get("SHUFFLE_DESKTOP_PROTECTED_PORT", "")
+    for token in f"{extra or ''} {desktop_port}".replace(",", " ").split():
+        if token.isdigit():
+            ports.add(token)
+    return ",".join(sorted(ports, key=int))
+
+
 def _build_browser_server_env(
     tool_env: Optional[Dict[str, str]],
     session_id: Optional[str] = None,
@@ -179,13 +228,27 @@ def _build_browser_server_env(
     )
 
     # Loopback egress: injected only when nothing explicit was configured above.
-    ssrf_allow = _browser_ssrf_allow(env.get("BROWSER_SSRF_ALLOW"))
-    if ssrf_allow:
-        env["BROWSER_SSRF_ALLOW"] = ssrf_allow
+    explicit_allow = env.get("BROWSER_SSRF_ALLOW")
+    ssrf_allow = _browser_ssrf_allow(explicit_allow)
 
     loopback_host = _browser_loopback_host(env.get("BROWSER_LOOPBACK_HOST"))
     if loopback_host:
         env["BROWSER_LOOPBACK_HOST"] = loopback_host
+        # browser-mcp refuses private addresses by default. The loopback
+        # stand-in is this host, so it rides on the automatic loopback allow;
+        # an operator's explicit allow-list is left exactly as written.
+        if ssrf_allow and not explicit_allow:
+            ssrf_allow = f"{ssrf_allow},{_host_cidr(loopback_host)}"
+    if ssrf_allow:
+        env["BROWSER_SSRF_ALLOW"] = ssrf_allow
+
+    # The worker's own listeners stay closed to the agent's browser on every
+    # internal address, whatever the allow-list says: a request from inside
+    # the container to them is treated as the owner.
+    env["BROWSER_SSRF_DENY_PORTS"] = _worker_deny_ports(os.environ.get("BROWSER_SSRF_DENY_PORTS"))
+
+    if _browser_behind_egress_proxy():
+        env["BROWSER_EGRESS_PROXY"] = "1"
 
     if session_id:
         from app.core import browser_panel_registry
@@ -209,7 +272,7 @@ def _build_mcp_servers_dict(
     session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
-    Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
+    Build the mcp_servers dict for ``AgentOptions`` from registered MCP servers.
 
     Reads MCP servers from two sources:
     1. Scope-based .mcp.json files (user, local, project) via McpService
@@ -223,7 +286,6 @@ def _build_mcp_servers_dict(
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
     """
-    import json as _json
 
     from app.core.builtin_mcp_servers import BROWSER_SERVER_NAME
 
@@ -345,9 +407,9 @@ def _build_plugins_list(
     setting_sources: Optional[list] = None
 ) -> Optional[list]:
     """
-    Build the plugins list for ClaudeAgentOptions.
+    Build the plugins list for ``AgentOptions``.
 
-    IMPORTANT: When setting_sources includes "user", the SDK auto-loads plugins from
+    IMPORTANT: When setting_sources includes "user", the Claude Code CLI auto-loads plugins from
     ~/.claude/settings.json. We must NOT pass those same plugins explicitly, or they
     will be loaded twice (causing duplicate skills, agents, etc.).
 
@@ -355,7 +417,7 @@ def _build_plugins_list(
     1. setting_sources does NOT include "user" (we need to load all plugins explicitly)
     2. OR the plugin is specified in profile config but NOT in user settings
 
-    According to the Claude Agent SDK documentation, plugins are specified as:
+    Entries use the SDK plugin shape:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
     Supports two formats for plugin entries:
@@ -373,8 +435,7 @@ def _build_plugins_list(
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
 
-    # Check if SDK will auto-load plugins from user settings
-    # When "user" is in setting_sources, SDK loads plugins from ~/.claude/settings.json
+    # When "user" is in setting_sources, the CLI loads plugins from ~/.claude/settings.json
     sdk_loads_user_plugins = setting_sources and "user" in setting_sources
 
     # Load installed plugins registry to resolve plugin IDs
@@ -398,7 +459,7 @@ def _build_plugins_list(
     all_plugin_entries = []
 
     if sdk_loads_user_plugins:
-        # SDK will auto-load user settings plugins - only add profile-specific plugins
+        # The CLI auto-loads user settings plugins - only add profile-specific plugins
         # that are NOT already in user settings (to avoid duplicates)
         logger.debug("SDK will auto-load user plugins (setting_sources includes 'user')")
         if profile_enabled_plugins:
@@ -407,7 +468,7 @@ def _build_plugins_list(
                     all_plugin_entries.append(entry)
                     logger.debug(f"Adding profile-only plugin (not in user settings): {entry}")
     else:
-        # SDK won't auto-load - we need to pass all plugins explicitly
+        # The CLI won't auto-load - we need to pass all plugins explicitly
         logger.debug("SDK won't auto-load plugins - adding all enabled plugins explicitly")
         for plugin_id, is_enabled in settings_enabled.items():
             if is_enabled:
@@ -450,7 +511,7 @@ def _build_plugins_list(
             if path.is_absolute():
                 resolved_path = path
             else:
-                resolved_path = settings.workspace_dir / plugin_entry
+                resolved_path = settings.effective_workspace_dir / plugin_entry
 
         if resolved_path and str(resolved_path) not in seen_paths:
             # Verify the plugin directory exists (manifest path checked for existence)

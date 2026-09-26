@@ -79,32 +79,6 @@ def require_legacy_key_mode(db_module) -> None:
         raise RuntimeError('Server-managed credential storage cannot be password-rekeyed')
 
 
-def init_encryption_from_env(db_module) -> bool:
-    """
-    Initialize encryption key from ADMIN_PASSWORD environment variable.
-    This allows headless operation without requiring admin login.
-
-    Call this at app startup to enable API key decryption.
-
-    Returns:
-        True if encryption was initialized, False if env var not set
-    """
-    admin_password = os.environ.get("ADMIN_PASSWORD")
-    # Also check settings (which loads from .env file)
-    if not admin_password:
-        try:
-            from app.core.config import settings
-            admin_password = settings.admin_password
-        except Exception:
-            pass
-    if not admin_password:
-        return False
-
-    set_encryption_key(admin_password, db_module)
-    logger.info("Encryption key initialized from ADMIN_PASSWORD environment variable")
-    return True
-
-
 def get_or_create_salt(db_module) -> bytes:
     """
     Get the salt from database or create a new one.
@@ -238,20 +212,22 @@ def is_encrypted(value: str) -> bool:
 # change requires re-encrypting EVERY ``enc:``-prefixed value under a key derived
 # from the new password, or those values become permanently undecryptable.
 #
-# The app Fernet-encrypts values in EIGHT storage locations (all sharing the same
+# The app Fernet-encrypts values in SEVEN storage locations (all sharing the same
 # admin-password-derived key and ``enc:`` prefix):
 #   1. ``system_settings.value``           — e.g. fal_api_key, anthropic_api_key
 #      (plus any orphaned/legacy keys such as cloud_install_api_key).
 #   2. ``automations.triggers`` / ``trigger_config`` (JSONB) — webhook secrets.
 #   3. ``connectors.config`` (JSONB)       — bot tokens / access tokens.
 #   4. ``api_user_credentials.encrypted_value``.
-#   5. ``claude_accounts.credentials``     — full claudeAiOauth JSON per account.
-#   6. ``model_providers.auth_token``      — gateway key per model provider.
-#   7. ``model_providers.codex_access_token``  — Codex/ChatGPT OAuth access token.
-#   8. ``model_providers.codex_refresh_token`` — Codex/ChatGPT OAuth refresh token.
+#   5. ``model_providers.auth_token``      — gateway key per model provider.
+#   6. ``model_providers.codex_access_token``  — Codex/ChatGPT OAuth access token.
+#   7. ``model_providers.codex_refresh_token`` — Codex/ChatGPT OAuth refresh token.
 #
-# (7 and 8 are the phase-2 Codex OAuth bundle, stored 1:1 on the provider row —
-# plan amendment A1. Missing either from the re-key plan would brick stored Codex
+# No Claude credential is stored anywhere (the ``claude_accounts`` table was
+# dropped in schema v89).
+#
+# (6 and 7 are the Codex OAuth bundle, stored 1:1 on the provider row. Missing
+# either from the re-key plan would brick stored Codex
 # tokens on a password change, exactly the failure class the auth_token entry
 # already guards against.)
 #
@@ -264,10 +240,10 @@ class ReencryptPlanItem:
     """One value to re-encrypt, with enough context to write it back.
 
     ``kind`` is one of: ``"system_setting"``, ``"automation"``, ``"connector"``,
-    ``"credential"``, ``"claude_account"``, ``"model_provider"``,
+    ``"credential"``, ``"model_provider"``,
     ``"model_provider_codex_access"``, ``"model_provider_codex_refresh"``.
     ``ref`` identifies the row (setting key, automation id, connector id,
-    (api_user_id, credential_type) tuple, claude_account id, or
+    (api_user_id, credential_type) tuple, or
     model_provider id — the three model_provider kinds all key by
     model_provider id but each writes back a different token column). ``label``
     is a
@@ -339,8 +315,6 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
       * ``get_all_connectors()``       -> recursive walk of ``config``.
       * ``get_all_api_users()`` x ``get_all_user_credentials()`` -> every
         credential whose ``encrypted_value`` ``is_encrypted``.
-      * ``get_all_claude_accounts(include_credentials=True)`` -> every account
-        whose ``credentials`` blob ``is_encrypted``.
       * ``get_all_model_providers(include_token=True)`` -> every provider whose
         ``auth_token`` / ``codex_access_token`` / ``codex_refresh_token`` blob
         ``is_encrypted`` (one plan entry per encrypted column).
@@ -438,29 +412,6 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
                 new_value=f"enc:{base64.b64encode(reenc).decode()}",
             ))
 
-    # (5) claude_accounts — the encrypted full claudeAiOauth JSON per account.
-    try:
-        accounts = db_module.get_all_claude_accounts(include_credentials=True) or []
-    except Exception as e:  # noqa: BLE001
-        logger.error("Failed to enumerate claude_accounts for re-encryption: %s", e)
-        accounts = []
-    for acct in accounts:
-        aid = acct.get("id")
-        value = acct.get("credentials")
-        if not (isinstance(value, str) and is_encrypted(value)):
-            continue
-        label = f"claude_accounts:{aid}"
-        try:
-            plaintext = old_fernet.decrypt(base64.b64decode(value[4:])).decode()
-        except Exception as e:  # noqa: BLE001
-            failures.append((label, f"decrypt failed: {type(e).__name__}"))
-            continue
-        reenc = new_fernet.encrypt(plaintext.encode())
-        plan.append(ReencryptPlanItem(
-            "claude_account", aid, label,
-            new_value=f"enc:{base64.b64encode(reenc).decode()}",
-        ))
-
     # (6/7/8) model_providers — the encrypted gateway key (auth_token) plus the
     # phase-2 Codex OAuth bundle (codex_access_token / codex_refresh_token), each
     # its own re-key entry so a password change never bricks a stored Codex token.
@@ -521,10 +472,6 @@ def apply_reencryption_plan(plan, db_module) -> None:
         elif item.kind == "credential":
             uid, ctype = item.ref
             db_module.set_user_credential(uid, ctype, item.new_value)
-        elif item.kind == "claude_account":
-            # Credentials-only update: the plaintext is unchanged, so leave the
-            # fingerprint / expires_at / has_refresh_token columns untouched.
-            db_module.update_claude_account_credentials_only(item.ref, item.new_value)
         elif item.kind == "model_provider":
             # Token-only update: the plaintext is unchanged, so no other column
             # is touched (update_model_provider only writes auth_token here).
@@ -547,10 +494,9 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
     Re-encrypt ALL at-rest secrets under a new admin password.
     Called when the admin changes their password.
 
-    Discovers every ``enc:``-prefixed value across all eight storage locations
+    Discovers every ``enc:``-prefixed value across all seven storage locations
     (system_settings, automations triggers/trigger_config, connectors config,
-    api_user_credentials, claude_accounts credentials, model_providers
-    auth_token, and the model_providers Codex OAuth blobs codex_access_token /
+    api_user_credentials, model_providers auth_token, and the model_providers Codex OAuth blobs codex_access_token /
     codex_refresh_token) — see :func:`build_reencryption_plan` — rather than a
     hardcoded name list. FAILS CLOSED: if ANY discovered value cannot be
     decrypted with the old key, every failure is logged (by table+id, never the
@@ -594,40 +540,3 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
         len(plan),
     )
     return True
-
-
-def encrypt_existing_plaintext_keys(db_module) -> int:
-    """
-    Encrypt any existing plaintext API keys in the database.
-    Called during migration or when encryption is first enabled.
-
-    NOTE: this is a DIFFERENT concern from :func:`re_encrypt_all_secrets`. It is
-    an opportunistic one-time migration of legacy PLAINTEXT ``system_settings``
-    keys to encrypted form, and intentionally stays scoped to the fixed list
-    below — it does NOT walk automations/connectors/credentials JSONB.
-
-    Returns:
-        Number of keys encrypted
-    """
-    if not _encryption_key:
-        raise RuntimeError(credential_storage_error())
-
-    sensitive_settings = [
-        "openai_api_key",
-        "gemini_api_key",
-        "image_api_key",
-        "video_api_key",
-        "anthropic_api_key",
-    ]
-
-    count = 0
-    for setting_name in sensitive_settings:
-        value = db_module.get_system_setting(setting_name)
-        if value and not is_encrypted(value):
-            # This is a plaintext key, encrypt it
-            encrypted = encrypt_value(value)
-            db_module.set_system_setting(setting_name, encrypted)
-            logger.debug(f"Encrypted existing plaintext key: {setting_name}")
-            count += 1
-
-    return count

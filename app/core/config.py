@@ -12,11 +12,14 @@ import logging
 import os
 import tempfile
 import threading
+import types
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ClassVar, Optional
-from pydantic import AliasChoices, Field
+from typing import ClassVar, Optional, Union, get_args, get_origin
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
+
+from app import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -80,53 +83,6 @@ def _parse_legacy_database_url(db_url: str) -> dict:
         "user": unquote(parsed.username or ""),
         "password": unquote(parsed.password or ""),
     }
-
-
-def normalize_database_url(db_url: str) -> str:
-    """Return ``db_url`` with its userinfo percent-encoded.
-
-    A password containing a reserved character — ``@`` above all — makes the
-    same connection string mean two different things depending on who reads it.
-    Python's ``urlsplit`` splits userinfo at the LAST ``@``, which is what
-    :func:`_parse_legacy_database_url` relies on. A client that splits at the
-    FIRST ``@`` can resolve the wrong host when given an unescaped DSN. The observed failure was a
-    worker container reporting ``could not translate host name "Pwd@10.0.0.200"``:
-    libpq had taken the tail of the password as part of the hostname, and the
-    fragment went into the event log with the error.
-
-    Explicit normalization makes the two readings agree. This pure helper is
-    not used to load application database settings; managed descriptors carry
-    separate credentials instead. Idempotent and never raises: an unparseable
-    string is returned untouched.
-    """
-    from urllib.parse import quote, unquote, urlsplit, urlunsplit
-
-    raw = (db_url or "").strip()
-    if not raw:
-        return raw
-    candidate = raw
-    if not candidate.startswith(("postgresql://", "postgres://")):
-        candidate = f"postgresql://{candidate}"
-    try:
-        parts = urlsplit(candidate)
-        raw_userinfo, sep, hostinfo = parts.netloc.rpartition("@")
-        if not sep:
-            return raw  # No credentials in the URL at all: nothing to encode.
-        # Split the credentials on the FIRST colon — a password may contain
-        # one, a username may not. ``unquote`` first so an already-encoded URL
-        # round-trips to itself instead of double-encoding.
-        raw_user, _, raw_password = raw_userinfo.partition(":")
-        userinfo = quote(unquote(raw_user), safe="")
-        if raw_password:
-            userinfo = f"{userinfo}:{quote(unquote(raw_password), safe='')}"
-        # ``hostinfo`` is copied verbatim: urlsplit would lowercase the host
-        # and re-render the port, which changes the string for no gain.
-        netloc = f"{userinfo}@{hostinfo}"
-        return urlunsplit(
-            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
-        )
-    except Exception:  # noqa: BLE001 — a malformed URL must never block boot
-        return raw
 
 
 _cached_persisted_instance_id: Optional[str] = None
@@ -224,6 +180,13 @@ def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> s
         return new_id
 
 
+def _is_text(annotation) -> bool:
+    """True for ``str`` and ``Optional[str]``: settings where an empty value is a value."""
+    if get_origin(annotation) in (Union, types.UnionType):
+        return all(arg is str for arg in get_args(annotation) if arg is not type(None))
+    return annotation is str
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
@@ -255,7 +218,13 @@ class Settings(BaseSettings):
 
     # Service info
     service_name: str = "ai-shuffle"
-    version: str = "0.8.9"
+    # The release tag is the version source. Release builds pass it as the
+    # APP_VERSION build arg (docker-publish.yml); app.__version__ is only the
+    # fallback for source runs.
+    version: str = Field(
+        default=__version__,
+        validation_alias=AliasChoices("APP_VERSION", "VERSION", "version"),
+    )
 
     # Deployment mode (auto-detected if not set)
     local_mode: Optional[bool] = None  # None = auto-detect, True = local, False = docker
@@ -264,7 +233,7 @@ class Settings(BaseSettings):
     data_dir: Optional[Path] = None
     workspace_dir: Optional[Path] = None
     claude_projects_dir: Optional[Path] = None  # Legacy Claude CLI transcript root (defaults to ~/.claude/projects)
-    # Native-leg project-memory root (ruling MEM1, 2026-08-21). A native (fluid
+    # Native-leg project-memory root. A native (fluid
     # NativeLoop) session keeps its per-project memory under
     # ``<fluid_projects_dir>/<slug>/memory/``, where <slug> is the SAME
     # path-based normalization the Claude CLI uses for ~/.claude/projects — so
@@ -310,7 +279,6 @@ class Settings(BaseSettings):
     cluster_artifact_proxy: bool = True
 
     # Session
-    session_secret: Optional[str] = None
     session_expire_days: int = 30
 
     # fluid_session_events retention. The engine persists every bus event, so
@@ -322,14 +290,11 @@ class Settings(BaseSettings):
     # in particular (it backs the accounting backfill). 0 disables pruning.
     fluid_event_retention_days: int = 7
 
-    # Claude
-    command_timeout: int = 300
-
-    # Security - API Key Session
-    api_key_session_expire_hours: int = 24  # API key web session duration
-
     # Security - Trusted Proxies (for getting real IP behind reverse proxy)
     trusted_proxy_headers: str = "X-Forwarded-For,X-Real-IP"  # Comma-separated
+    # Reverse proxies (comma-separated IPs or CIDRs) whose proxy headers are
+    # believed, in addition to loopback. Empty: only a proxy on this host is.
+    trusted_proxies: str = ""
 
     # Security - CORS (comma-separated origins, or "*" for development only)
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
@@ -342,6 +307,9 @@ class Settings(BaseSettings):
 
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
+    # Interactive API docs (/docs, /redoc, /openapi.json) are unauthenticated,
+    # so they stay off unless a developer sets API_DOCS_ENABLED=true.
+    api_docs_enabled: bool = False
 
     # Local transport access and optional account service share normal Settings
     # precedence: process environment overrides .env; neither is exported to os.environ.
@@ -352,9 +320,16 @@ class Settings(BaseSettings):
     # A paired device's hub verdict is reused for this long before the hub is
     # asked again, and honored for the grace window when the hub is down or
     # rate limiting. Both bound hub traffic; the hub allows 120 requests a
-    # minute per source IP. Hub-side revocation takes effect within the TTL.
-    mobile_account_hub_verify_ttl_seconds: float = 20.0
+    # minute per worker. Hub-side revocation takes effect within the TTL.
+    mobile_account_hub_verify_ttl_seconds: float = 90.0
     mobile_account_hub_grace_seconds: float = 1800.0
+
+    # Licensing (app/core/license.py). With no license server URL, or with
+    # LICENSE_BETA=true (a release image sets it at build time while the beta
+    # runs), every install gets an always-valid beta lease and nothing is
+    # checked. A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
+    license_server_url: str = ""
+    license_beta: bool = False
 
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
@@ -374,14 +349,12 @@ class Settings(BaseSettings):
     # Interval is a poll cadence (watchdog-style fs events are unreliable on the
     # network/fuse filesystems these installs commonly run on). 0 disables it.
     #
-    # F7: a pass is now METADATA-FIRST — it reads (id, title, file_path,
-    # updated_at) for every note and pulls the multi-KB ``content`` column only
-    # for the rows whose file mtime or DB ``updated_at`` actually moved — so the
-    # steady-state cost of a tick is one small indexed read plus one ``stat``
-    # per note. That made the old 15s cadence affordable, but the cadence itself
-    # was never the point: nothing in this loop is latency-critical (the UI's
-    # own GET reconcile covers the note you are looking at), so 60s is the
-    # honest default and cuts the idle wake count 4x.
+    # A pass is METADATA-FIRST — it reads (id, title, file_path, updated_at) for
+    # every note and pulls the multi-KB ``content`` column only for the rows
+    # whose file mtime or DB ``updated_at`` actually moved — so the steady-state
+    # cost of a tick is one small indexed read plus one ``stat`` per note.
+    # Nothing in this loop is latency-critical (the UI's own GET reconcile covers
+    # the note you are looking at), so 60s is the default.
     notes_sync_interval_seconds: int = 60
 
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
@@ -392,7 +365,7 @@ class Settings(BaseSettings):
     # disables the periodic worker (the refresh-on-401 hook still works on demand).
     codex_token_refresh_interval_seconds: int = 3600
 
-    # ─── Cross-install background sweep (F5) ────────────────────────────────
+    # ─── Cross-install background sweep ─────────────────────────────────────
     # turn-claim, git-ops-claim and interaction-expiry are cross-INSTALL
     # correctness loops multiplexed onto one timer (see app.core.turn_claim).
     # On a deployment with no peer installs they read tables only this process
@@ -408,13 +381,13 @@ class Settings(BaseSettings):
     # also invalidated immediately whenever a pass actually finds work.
     single_install_peer_check_seconds: int = 300
 
-    # ─── Orphaned-session reconciler cadence (F6) ───────────────────────────
+    # ─── Orphaned-session reconciler cadence ────────────────────────────────
     # The reconciler heals sessions whose ``sdk_session_id`` a mid-turn crash
     # left NULL. It is a RECOVERY sweep, not a hot path: the unbounded backfill
     # already runs once at startup, and new orphans are prevented at the source
-    # by the persist-on-init write. Running it on the 5-minute monitor tick made
-    # it re-aggregate the session store for every never-used session, forever.
-    # Hourly is ample. 0 disables the periodic pass (startup still runs one).
+    # by the persist-on-init write. Each pass re-aggregates the session store for
+    # every never-used session, so it runs hourly rather than on the 5-minute
+    # monitor tick. 0 disables the periodic pass (startup still runs one).
     orphan_reconcile_interval_seconds: int = 3600
 
     # SuperGrok / xAI OAuth token-refresh worker. Same cadence semantics as
@@ -439,7 +412,20 @@ class Settings(BaseSettings):
     fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
-    # Round-9 bounds passed to fluid when the vendored build has the seams
+    # OS-level sandbox (bubblewrap) for the code-mode kernel child. ``auto``
+    # uses it when bwrap is installed and its one-off self-test passes (else
+    # one warning, then the plain child); ``required`` refuses to start the
+    # kernel without it (every cell gets the reason as its error); ``off``
+    # never uses it. See fluid/fluid/codemode/os_sandbox.py. Env:
+    # CODE_MODE_OS_SANDBOX (fluid's KernelConfig reads the same variable).
+    code_mode_os_sandbox: str = "auto"
+    # On Linux the app marks itself non-dumpable at startup
+    # (prctl(PR_SET_DUMPABLE, 0)), so the model-run children that share its
+    # uid (kernel, hooks, CLI, MCP servers) cannot read /proc/<app>/environ,
+    # maps or mem. True skips that, keeping core dumps and same-uid debugging.
+    # Env: ALLOW_PROCESS_INTROSPECTION.
+    allow_process_introspection: bool = False
+    # Bounds passed to fluid when the vendored build has the seams
     # (see harness_adapter._registry_bound_kwargs / _loop_bound_kwargs).
     #   - fluid_external_call_timeout_seconds: cap on ONE MCP/inproc tool call.
     #     Above browser_batch's worst case (20 × 15s waits) and Monitor's 120s
@@ -449,22 +435,31 @@ class Settings(BaseSettings):
     #     FLUID_TURN_WATCHDOG_SECONDS.
     fluid_external_call_timeout_seconds: int = 330
     fluid_turn_watchdog_seconds: int = 900
+    # HTTP bounds on every native provider client the app builds (seconds;
+    # see harness_adapter._provider_timeout_kwargs; defaults match fluid's).
+    # Longest silence between two reads of a model response.
+    provider_read_timeout: float = 600.0
+    # Wall clock for one whole model call; 0 disables it.
+    provider_stream_deadline: float = 900.0
+    # Wait for a call's first byte (every native client: Anthropic, OpenRouter/OpenAI-format chat, Responses); 0 disables it. Retried only
+    # when even the response headers never came; after a 200 the call is not re-sent.
+    provider_first_byte_timeout: float = 60.0
+    # The first-byte bound for a row whose base_url is a local server (loopback,
+    # private or link-local address, localhost, *.local, host.docker.internal:
+    # Ollama, vLLM, LM Studio). Such a server may hold its headers while it loads
+    # a model, so the default 0 disables it, as fluid's LocalClient does.
+    # Env: PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL.
+    provider_first_byte_timeout_local: float = 0.0
 
-    # Timeouts (milliseconds)
-    hook_timeout_ms: int = 30_000
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
     max_display_output_chars: int = 2_000  # What we show in the UI
-    sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
 
-    # ─── SDK Session Pool sizing + TIERED idle policy (F1) ──────────────────
+    # ─── SDK Session Pool sizing + TIERED idle policy ───────────────────────
     #
-    # Every pooled session owns ONE long-lived Node CLI subprocess at
+    # Every pooled delegated session owns ONE long-lived Node CLI subprocess at
     # 100-300+MB RSS, so the pool's steady-state size IS the app's idle RAM
-    # floor. The old shape (8 slots x a flat 30-minute idle timeout, evicted
-    # only on the resource monitor's 5-minute tick) parked up to 8 subprocesses
-    # for ~35 minutes after a few chats — 1-2GB on a machine that is doing
-    # nothing. AI Shuffle targets weak machines, so the defaults below trade a
+    # floor. AI Shuffle targets weak machines, so the defaults below trade a
     # little respawn latency on rarely-touched sessions for a much lower idle
     # floor. All of it is configurable; see app.core.session_pool.IdlePolicy,
     # which is the single place the policy is expressed.
@@ -472,16 +467,15 @@ class Settings(BaseSettings):
     # Max concurrent SUBPROCESS sessions kept alive between queries. 4 covers
     # the realistic concurrent working set (the chat you are in, the one you
     # just left, and a running automation or two) while capping the worst case
-    # at ~4 subprocesses instead of 8. The hard cap is still 2x this (see
+    # at ~4 subprocesses. The hard cap is still 2x this (see
     # SessionPool._HARD_CAP_MULTIPLIER), so bursts still get headroom; only the
     # steady state shrinks. Raise it on a big box via SDK_SESSION_POOL_SIZE.
     #
     # SUBPROCESS ONLY, both this and the hard cap. It is sized against the
     # 100-300MB node CLI a DELEGATED session owns. A session on a native leg
     # (openai_responses / anthropic / openrouter) is coroutines inside this
-    # process and is not counted here at all — counting it refused subagent
-    # workers that cost no process (2026-09-04 audit: "session pool at hard cap
-    # (8/8)" for native workers). What governs native sessions and native
+    # process and is not counted here at all, so the cap never refuses native
+    # workers that cost no process. What governs native sessions and native
     # subagent workers instead: the real resource guards
     # (sdk_admission_min_available_mb, sdk_max_child_processes,
     # sdk_admission_rss_mb), the per-parent fan-out limit
@@ -508,7 +502,7 @@ class Settings(BaseSettings):
     # HOT-tier idle timeout: how long one of the ``sdk_session_hot_pool_size``
     # most-recently-used pooled subprocesses may sit idle before eviction.
     # Every eviction turns the next message into a cold respawn (slower first
-    # token, Chrome native-host handshake), so keep this comfortably above a
+    # token), so keep this comfortably above a
     # normal read-and-reply gap. Override via
     # SDK_SESSION_IDLE_TIMEOUT_SECONDS.
     #
@@ -568,10 +562,8 @@ class Settings(BaseSettings):
     # Per-turn progress watchdog (seconds). A turn that produces NO event at all
     # — no tool result, no usage, no text — for this long is terminalized with a
     # provider-error-shaped failure and a durable system message. It exists for
-    # a host tool call that never returns: an audited session issued a browser
-    # automation call whose own 30s cell timeout could not interrupt the blocked
-    # host call, and sat "running" for three hours with the user's final request
-    # unanswered and no way to tell from the outside.
+    # a host tool call that never returns, such as a browser automation call
+    # whose own cell timeout cannot interrupt the blocked host call.
     #
     # Deliberately generous — a legitimately slow model call, a long compaction
     # or a big file write must never trip it, and a turn blocked on a user
@@ -579,18 +571,6 @@ class Settings(BaseSettings):
     # ``user_question_timeout_seconds`` instead). 0 disables the watchdog.
     # Override via TURN_PROGRESS_TIMEOUT_SECONDS.
     turn_progress_timeout_seconds: int = 1800  # 30 minutes of total silence
-
-    # Between-turns idle reader — CLI-owned wake grace window (seconds). When the
-    # LAST background task completes while the parent is parked, the scheduler
-    # SUPPRESSES the app's own unpark wake because the CLI delivers the wake
-    # itself — but that CLI wake turn arrives 7-60s later, after the idle reader
-    # would otherwise exit on its next 2s poll (has_active_background_work now
-    # False). The reader then never reads the wake, so its frames stay buffered
-    # and the UI never sees it. This grace keeps the reader draining for up to
-    # this long after a CLI-owned suppression, so it captures the wake when it
-    # lands. Refreshed on every frame while waiting; cleared when the wake turn
-    # completes. Override via CLI_WAKE_GRACE_SECONDS.
-    cli_wake_grace_seconds: float = 300.0
 
     # Admission backpressure for the subagent fan-out. A single orchestrator
     # session can spawn dozens of subagent node subprocesses; rather than letting
@@ -641,9 +621,7 @@ class Settings(BaseSettings):
 
     # Session transcripts live in Postgres (the SessionStore adapter) — Postgres
     # is the single source of truth and the only store that streams the
-    # transcript durably in near-real-time. The old SESSION_STORE_MODE flag
-    # ("disabled"/"mirror"/"postgres_only") was removed after the cutover:
-    # postgres_only is now the one and only behavior.
+    # transcript durably in near-real-time. There is no store-mode setting.
 
     # Cross-install agent-memory sync. When enabled, each session mirrors the
     # Claude Code CLI's per-project memory directory (MEMORY.md + per-fact .md
@@ -655,22 +633,14 @@ class Settings(BaseSettings):
     # breaks a turn on error.
     agent_memory_sync: bool = True
 
-    # Cross-provider ProviderAgent workers (multi-provider phase 3, chunk P3-A).
-    # When ON, every non-worker session gets an in-process SDK MCP server
-    # exposing ONE tool, ``ProviderAgent``, which dispatches a task to a SEPARATE
-    # session bound to a DIFFERENT model provider and returns that worker's
-    # report. The Claude main stays fully native (no subscription token ever
-    # reaches the translator gateway — ruling P1/F1); the two halves are
-    # different processes, so the one-base-URL constraint does not apply.
-    # ON by default: the safety work this capability needed (turn-lifetime
-    # teardown, per-provider circuit breaker, permission/approval routing,
-    # rate-limit fail-fast, worker AskUserQuestion exclusion) has all landed and
-    # was E2E-verified 2026-07-25 — see the phase-3 plan §9.6 rulings 1–6.
-    # Disable with PROVIDER_AGENT_ENABLED=false (BaseSettings reads env vars by
-    # field name).
+    # Worker-session restrictions for Task-dispatched workers: when ON,
+    # query_options removes AskUserQuestion/AskUser from worker sessions (their
+    # tool approvals are routed to the parent, but a question would stall until
+    # user_question_timeout_seconds). Disable with PROVIDER_AGENT_ENABLED=false
+    # (BaseSettings reads env vars by field name).
     provider_agent_enabled: bool = True
 
-    # Task tool (agents-program P2c, rulings A8/A9): nesting depth for
+    # Task tool: nesting depth for
     # agent-invokes-agent chains and the live-worker budget per root session
     # tree. Set via TASK_TOOL_MAX_DEPTH / TASK_TOOL_MAX_WORKERS.
     task_tool_max_depth: int = 5
@@ -687,24 +657,22 @@ class Settings(BaseSettings):
     # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
     subagent_max_concurrent_per_session: int = 64
 
-    # ── Task worker lifecycle (2026-09-05 audit, round 7) ────────────────
+    # ── Task worker lifecycle ────────────────────────────────────────────
     # A worker has no wall-clock ceiling by design — a subagent may legitimately
     # run for hours — but a worker that has never streamed a SINGLE frame has
     # not started, and the harness knows it (``frames_forwarded == 0`` is what
-    # produces the "worker failed to start" summary). The audit found ten such
-    # workers sitting "started" for ~900s each across seven sessions before
-    # anyone was told. These settings bound only that pre-first-frame state; a
-    # working worker stays unbounded.
+    # produces the "worker failed to start" summary). These settings bound only
+    # that pre-first-frame state; a working worker stays unbounded.
     #
     # How long an admitted worker may go without streaming its first frame
     # before it is stopped as "forwarded no output". 0 disables the watchdog.
     #
     # Provider progress the parent card never shows also counts: reasoning and
     # tool-argument deltas, a finished call's usage, and turn.provider_alive in
-    # the worker's own log (#1418). The last is fluid's ProviderAlive: the
+    # the worker's own log. The last is fluid's ProviderAlive: the
     # provider accepted the request and its stream is open. That covers a
     # reasoning model whose reasoning is encrypted-only, which streams nothing
-    # else until the reasoning item ends. So this deadline now catches a
+    # else until the reasoning item ends. So this deadline catches a
     # request that was never accepted (queued, refused, or a connection that
     # never answered), not a slow model. It does not catch a stream that was
     # accepted and then stalled; fluid's per-call stream deadline and turn
@@ -716,8 +684,7 @@ class Settings(BaseSettings):
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every
     # attempt. A sync dispatch blocks the parent turn — it cannot park, cannot
     # be steered and cannot be told the worker went quiet — so unlike the
-    # background lane it gets a real ceiling (two audited sync dispatches
-    # blocked their parents for 15m03s and 19m28s and produced nothing).
+    # background lane it gets a real ceiling.
     # 0 disables the cap. Override via TASK_WORKER_SYNC_MAX_SECONDS.
     task_worker_sync_max_seconds: float = 900.0
     # How many times a BACKGROUND dispatch whose worker never streamed a frame
@@ -726,9 +693,11 @@ class Settings(BaseSettings):
     # live and gets the failure to act on. Override via
     # TASK_WORKER_START_RETRIES.
     task_worker_start_retries: int = 1
-    # Reschedule provider-rate-limited worker connects using the parseable provider delay or Retry-After rather
-    # than exhausting retries before the token window clears. Applies to both modes;
-    # TASK_WORKER_RATE_LIMIT_RETRIES controls the limit.
+    # How many times a worker refused at connect by a provider rate limit (a
+    # 429 carrying a parseable "try again in Ns" / Retry-After) is RESCHEDULED
+    # rather than terminated: fluid's own 3-retry / ~7s budget cannot outlast a
+    # 60s token window. Applies to both modes.
+    # Override via TASK_WORKER_RATE_LIMIT_RETRIES.
     task_worker_rate_limit_retries: int = 3
     # Ceiling on one rate-limit reschedule's backoff. The provider's own
     # retry-after is the floor; it is doubled per attempt and clamped here.
@@ -753,9 +722,8 @@ class Settings(BaseSettings):
     task_worker_provider_queue_seconds: float = 120.0
     # How long a worker's OWN background work (Monitor shells, nested workers)
     # is given to drain after its turn ends, before its report is written. A
-    # worker has no wake seam: one audited worker ended its turn with
-    # "Baseline tests are running. No files changed yet." and that interim
-    # sentence became its report and its registry summary. Work still
+    # worker has no wake seam, so without the wait an interim sentence ("tests
+    # are running") would become its report and registry summary. Work still
     # outstanding when this expires fails the worker instead of booking an
     # interim note as a result. 0 disables the WAIT, not the check: a worker
     # that ends with live work then fails immediately.
@@ -763,8 +731,8 @@ class Settings(BaseSettings):
     task_worker_background_settle_seconds: float = 120.0
 
     # Compiled system prompt for a PLAIN-STRING profile prompt on the
-    # delegated (claude CLI) leg. A preset profile is not affected: under
-    # decision D6 it always keeps Claude Code's own preset prompt and gets the
+    # delegated (claude CLI) leg. A preset profile is not affected: it always
+    # keeps Claude Code's own preset prompt and gets the
     # app's text through --append-system-prompt. For a plain-string profile,
     # True compiles the prompt (base + instruction files + skills + env +
     # blocks) and False sends it uncompiled plus the agents index; either way
@@ -774,18 +742,17 @@ class Settings(BaseSettings):
     prompt_full_replace: bool = True
 
     # Auto-continue an autonomous turn cut at the autocompact boundary. The
-    # bundled CLI ends the agentic loop when the NEXT turn would cross the
+    # Claude Code CLI ends the agentic loop when the NEXT turn would cross the
     # autocompact threshold and DEFERS compaction to the start of the next
-    # query (internal ``willRetriggerNextTurn``, never surfaced to the SDK), so
-    # from the app's side the turn just ends mid-task with
+    # query without surfacing it, so from the app's side the turn just ends mid-task with
     # ``stop_reason == "tool_use"`` and the session sits silent until a human
     # sends a message. When ON, the server detects that boundary cut at turn end
     # and spawns ONE continuation query so the CLI compacts and the model
-    # resumes. ON by default: this restores broken expected behavior. Set via
+    # resumes. ON by default. Set via
     # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
     auto_continue_on_compact: bool = True
 
-    # Idle-at-edge watchdog (#598). Belt-and-braces backstop for the edge-of-
+    # Idle-at-edge watchdog. Belt-and-braces backstop for the edge-of-
     # context stall: a periodic sweep finds sessions that sit IDLE (no in-flight
     # turn) with context usage above ``idle_watchdog_context_fraction`` of the
     # window and, via the durable wakeup machinery, fires ONE synthetic nudge turn
@@ -796,7 +763,7 @@ class Settings(BaseSettings):
     # (and over the fraction) at a scan tick to be nudged.
     idle_watchdog_interval_seconds: int = 300
     # Context-window fraction (totalTokens / maxTokens) at/above which an idle
-    # session is treated as "at the edge". ~0.85 per the issue.
+    # session is treated as "at the edge".
     idle_watchdog_context_fraction: float = 0.85
     # Per-session cooldown after a watchdog nudge, so a session whose compaction
     # does not drop it back under the fraction is not re-nudged every tick.
@@ -804,7 +771,7 @@ class Settings(BaseSettings):
     # How recently a session must have been touched (``sessions.updated_at``)
     # to still count as a watchdog candidate. ``status='active'`` is sticky, so
     # without this gate a session abandoned months ago near the context edge
-    # stayed eligible forever and drew a fresh nudge turn after every restart.
+    # would stay eligible forever and draw a fresh nudge turn after every restart.
     # Default 24h. Set to 0 to disable the gate. Env: IDLE_WATCHDOG_MAX_IDLE_SECONDS.
     idle_watchdog_max_idle_seconds: int = 86400
 
@@ -812,9 +779,7 @@ class Settings(BaseSettings):
     #
     # Default time budget for a Monitor command. Monitor's completion fires on
     # exit and only on exit, so a command that never exits parks the session
-    # until the session ends — an audited watch loop held one 9m37s past a
-    # green CI run before a force-reap ended it, and the reap then reached the
-    # model as a failure. This is the backstop: when the deadline passes the
+    # until the session ends. This is the backstop: when the deadline passes the
     # process is stopped and the completion fires with a "timed out after Ns"
     # summary, so "parked forever" becomes "woken with a timeout".
     #
@@ -824,23 +789,31 @@ class Settings(BaseSettings):
     # budget wins. Set to 0 to disable the backstop entirely.
     # Env: MONITOR_COMMAND_TIMEOUT_SECONDS.
     monitor_command_timeout_seconds: int = 1200  # 20 minutes
-    # Bound the completion summary delivered with a wake; the full buffer remains available through TaskOutput.
-    # MONITOR_SUMMARY_MAX_CHARS controls this budget.
+    # Head+tail cap on the completion summary the parent is WOKEN with. The
+    # full buffer stays available via TaskOutput; this only bounds what a wake
+    # turn has to read (a stack-trace tail can otherwise burn a whole turn).
+    # 4,000 is large enough that the summary is a result, not a pointer that
+    # sends the agent to TaskOutput. Env: MONITOR_SUMMARY_MAX_CHARS.
     monitor_summary_max_chars: int = 4000
     # Idle bound for a SERVING Monitor task (``serves``). Those are exempt from
-    # the command budget by design — they are meant to stay up — and nothing
-    # else bounded them: when a session's wake died, an audited runner carried
-    # a uvicorn fixture and a Vite dev server for 8h15m, next to a
-    # resource-monitor warning about 17 orphan children. The bound is on the
+    # the command budget by design — they are meant to stay up — so without this
+    # a server outlives a session whose wake died. The bound is on the
     # SESSION, not the process: while the session that started it keeps being
     # touched, the server is never disturbed. Past this many seconds with no
     # activity on that session, the process is stopped and the completion says
     # why. 0 disables. Env: MONITOR_SERVING_IDLE_SECONDS.
     monitor_serving_idle_seconds: int = 3600  # 60 minutes
 
-    # Park watchdog: periodic sweeps report background parks with no wake after the warning interval. Past the
-    # force ceiling, settle still-running task rows and emit their terminals so the session wakes.
-    # PARK_WATCHDOG_ENABLED=false disables this safeguard.
+    # ── Park watchdog ─────────────────────────────────────────────────────
+    #
+    # A session parked on background work wakes when that work settles. If the
+    # settle never arrives (a watcher that cannot exit, a lost terminal frame)
+    # the park is silent and unbounded — the failure mode is indistinguishable
+    # from a healthy long wait. The periodic sweep (resource_monitor's 5-minute
+    # tick) reports a park with no wake for ``warn`` seconds, and past the
+    # ``force`` ceiling settles the session's still-running task rows and fires
+    # their terminal frames so the session wakes instead of sitting forever.
+    # Kill switch: PARK_WATCHDOG_ENABLED=false.
     park_watchdog_enabled: bool = True
     # Park age at which a stalled park is REPORTED (log + durable error row).
     # Env: PARK_WATCHDOG_WARN_SECONDS.
@@ -851,25 +824,22 @@ class Settings(BaseSettings):
     # Env: PARK_WATCHDOG_FORCE_SECONDS.
     park_watchdog_force_seconds: int = 3600  # 60 minutes
 
-    # STOP SEMANTICS opt-out (round 7). Stop kills EVERYTHING the session is
-    # doing: sub-agents and their descendants, provider-lane workers, and
-    # Monitor shells including serving tasks and CI watchers. That is what the
-    # button says and what the user asked for after living with the previous
-    # rule, which spared a healthy Monitor shell on the theory that "a dev
-    # server the user asked to keep up is not part of the turn" — and which is
-    # one of the ways a stopped session came back to life. Set
-    # STOP_KEEPS_MONITOR_SHELLS=true to restore that older behaviour: a Stop
-    # then leaves running Monitor shells alive and only ghost rows are swept.
+    # STOP SEMANTICS opt-out. Stop kills EVERYTHING the session is doing:
+    # sub-agents and their descendants, provider-lane workers, and Monitor
+    # shells including serving tasks and CI watchers. That is what the button
+    # says; sparing a Monitor shell is one of the ways a stopped session comes
+    # back to life. Set STOP_KEEPS_MONITOR_SHELLS=true to leave running Monitor
+    # shells alive on Stop; only ghost rows are then swept.
     # Defaults OFF; the default must stay "kill everything".
     stop_keeps_monitor_shells: bool = False
 
-    # Durable background-task state (Phase 1, WRITE-ONLY). When on,
-    # task_registry mirrors every task transition into the background_tasks
-    # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget
-    # async writer that can never slow or break the registry hot path. No
-    # reader depends on the rows yet (Phase-1 discipline: derivation before
-    # enforcement); boot reconcile marks stale non-terminal rows killed. Kill
-    # switch: AI_SHUFFLE_DURABLE_TASKS=false disables all writes instantly.
+    # Durable background-task state. When on, task_registry mirrors every task
+    # transition into the background_tasks table via app.core.task_persistence
+    # — a coalescing, fire-and-forget async writer that can never slow or break
+    # the registry hot path. The rows back shared sidebar task presence, boot
+    # reconcile (stale non-terminal rows are marked killed) and the stop-task
+    # force-settle fallback. Kill switch: AI_SHUFFLE_DURABLE_TASKS=false
+    # disables all writes instantly.
     durable_task_state: bool = Field(
         default=True,
         validation_alias=AliasChoices(
@@ -877,7 +847,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Lazy self-seed of a MISSING base checkout (#607 PR-2). ON by default: when a
+    # Lazy self-seed of a MISSING base checkout. ON by default: when a
     # session is pinned to a runner that has never materialized the project, the
     # checkout_manager clones the project's remote on demand (recovered from legacy
     # data) instead of failing "not on this device". Bounded by the clone-timeout,
@@ -891,10 +861,9 @@ class Settings(BaseSettings):
     )
 
     # Whether WARNING records join ERROR+ in the durable ``error_log`` table
-    # (app.core.error_log_handler). ON by default: ERROR-only capture is what
-    # made a silent provider 403 invisible to ``GetAppErrors``, which answered
-    # {"errors": [], "count": 0} to an agent that was looking straight at the
-    # failure. Warnings never change that tool's DEFAULT output — it asks for
+    # (app.core.error_log_handler). ON by default: ERROR-only capture hides
+    # failures that only log a WARNING (e.g. a provider 403) from
+    # ``GetAppErrors``. Warnings never change that tool's DEFAULT output — it asks for
     # ERROR+ unless the caller passes min_level: "WARNING" — and they are
     # trimmed to their own smaller ceiling before the table-wide prune, so they
     # cannot evict errors. Set false to restore ERROR-only capture.
@@ -903,22 +872,18 @@ class Settings(BaseSettings):
     error_log_max_warning_rows: int = 1000
 
     # Whether the browser MCP server may reach loopback (127.0.0.0/8, ::1,
-    # "localhost"). browser-mcp blocks loopback by default: on a shared/multi-user
-    # deployment a hostile page could steer the agent's browser into the app's own
-    # API or a neighbouring service on 127.0.0.1. On a local/self-hosted install
-    # there is nothing on loopback the agent cannot already reach through its
-    # shell, and blocking it means an agent cannot view the dev server it just
-    # started; avoid requiring needless rebinding for permitted local access.
+    # "localhost"). browser-mcp blocks loopback by default, so a hostile page
+    # cannot steer the agent's browser into a service on 127.0.0.1.
     #
-    # None (default) = auto. AI Shuffle exposes no tenancy model: there is one
-    # admin password, one operator, and every session's agent already has an
-    # unrestricted shell on the box, so "self-hosted single user" is what an
-    # install IS — a Docker/Unraid deployment is not a shared one. Auto
-    # therefore ALLOWS loopback, in Docker as well as in local mode; the
-    # permit local verification under the configured policy.
+    # None (default) = auto, which ALLOWS loopback in every runtime (Docker,
+    # native and desktop): AI Shuffle has one owner and the agent already has a
+    # shell on the box, and blocking loopback means an agent cannot view the dev
+    # server it just started. The deployment-mode probe is not a tenancy signal
+    # and does not gate this. The worker's own ports and the DevTools port stay
+    # denied either way.
     #
-    # BROWSER_SSRF_ALLOW_LOOPBACK=false turns it back off for an install that
-    # is fronted for other people. Setting BROWSER_SSRF_ALLOW explicitly is
+    # BROWSER_SSRF_ALLOW_LOOPBACK=false turns it off for an install that is
+    # fronted for other people. Setting BROWSER_SSRF_ALLOW explicitly is
     # stronger still: that value is passed through verbatim and nothing is
     # appended to it — see app.core.mcp_config._browser_ssrf_allow.
     browser_ssrf_allow_loopback: Optional[bool] = Field(
@@ -930,14 +895,14 @@ class Settings(BaseSettings):
 
     # Per-provider rate-limit circuit breaker. The first upstream HTTP 429 for a
     # provider trips the breaker for that provider INSTALL-WIDE for a time-based
-    # cooldown. Motivation: the 2026-07-22 rate-limit storm (3,172 upstream POSTs
-    # in ~11 minutes, 1,750 of them 429s, all after the parent turn had ended)
-    # came from retry loops INSIDE the CLI processes. 429s are observed by the
-    # fluid harness's usage-capture response hook (they were the translator
-    # gateway's job until it was retired). The breaker only ever REFUSES — it
-    # never reroutes or fails over (ruling P10). ON by default: this is a safety
-    # feature. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to restore the previous
-    # behavior exactly. See app.core.rate_limit_breaker.
+    # cooldown. 429s are recorded only by harness_adapter._usage_capture_http_client,
+    # which is attached only to the openai_responses leg with a bound provider
+    # row (anthropic/openrouter native legs and the delegated CLI are not
+    # observed). The breaker never gates requests: its only reader is
+    # provider_agent._await_worker_idle, which fails a ProviderAgent worker fast
+    # while its provider is tripped. It never reroutes or fails over. ON by
+    # default. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to disable it.
+    # See app.core.rate_limit_breaker.
     provider_circuit_breaker_enabled: bool = True
     # Cooldown applied when the upstream 429 carries no usable Retry-After.
     provider_circuit_breaker_cooldown_seconds: int = 60
@@ -945,13 +910,34 @@ class Settings(BaseSettings):
     # hostile or malformed header cannot lock a provider out indefinitely.
     provider_circuit_breaker_max_cooldown_seconds: int = 300
 
-    # V2 projects cutover (Phase 3) is COMPLETE. Project/checkout resolution keys
-    # unconditionally off the origin-keyed ``projects_v2`` + per-runner
-    # ``checkouts`` tables (seeded by the v60 collapse migration) for any session
-    # bound to a ``project_v2_id``; sessions without one (created by an un-upgraded
-    # install sharing the DB) still take the legacy resolver ladder. The
-    # ``AI_SHUFFLE_V2_PROJECTS`` kill switch was removed in PR-B — rollback is now
-    # git-revert, not a flag flip.
+    # Project/checkout resolution keys unconditionally off the origin-keyed
+    # ``projects_v2`` + per-runner ``checkouts`` tables for any session bound to
+    # a ``project_v2_id``; sessions without one (created by an un-upgraded
+    # install sharing the DB) take the legacy resolver ladder. There is no
+    # setting for it.
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value, info):
+        """A blank value for a non-text setting means "use the default".
+
+        Unraid passes every template field to the container, filled in or not,
+        so ``BROWSER_SSRF_ALLOW_LOOPBACK=`` must not stop start-up. Text
+        settings keep a blank value as given; anything non-blank still parses
+        strictly."""
+        field = cls.model_fields[info.field_name]
+        if isinstance(value, str) and not value.strip() and not _is_text(field.annotation):
+            return field.get_default(call_default_factory=True)
+        return value
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _normalise_version(cls, value):
+        """Accept a raw tag ("v0.8.18") and treat an empty build arg as unset."""
+        text = str(value or "").strip()
+        if text[:1] in ("v", "V") and text[1:2].isdigit():
+            text = text[1:]
+        return text or cls.model_fields["version"].default
 
     class Config:
         env_file = _resolve_env_file()
@@ -1016,7 +1002,7 @@ class Settings(BaseSettings):
 
     @property
     def get_fluid_projects_dir(self) -> Path:
-        """Native-leg project-memory root (ruling MEM1) — ~/.fluid/projects."""
+        """Native-leg project-memory root — ~/.fluid/projects."""
         if self.fluid_projects_dir:
             return Path(self.fluid_projects_dir)
         return Path.home() / ".fluid" / "projects"
@@ -1146,6 +1132,16 @@ settings = Settings()
 # These take priority over settings fields when set.
 _runtime_overrides: dict[str, Path] = {}
 
+def set_workspace_override(path: Path) -> None:
+    """Make ``path`` the effective workspace, as start-up does for a saved one.
+
+    ``settings.effective_workspace_dir`` reads this override before the raw
+    ``workspace_dir`` setting, so a workspace chosen at runtime has to be set
+    here too, or it only takes effect after a restart.
+    """
+    _runtime_overrides["workspace_dir"] = path
+
+
 # Ensure directories exist
 def ensure_directories():
     """Create required directories if they don't exist"""
@@ -1173,7 +1169,7 @@ def load_workspace_from_database():
         if configured_path:
             path = Path(configured_path)
             if path.exists() or path.parent.exists():
-                _runtime_overrides["workspace_dir"] = path
+                set_workspace_override(path)
                 logger.info(f"Workspace directory set to: {path}")
             else:
                 logger.warning(f"Configured workspace path does not exist: {path}")

@@ -1,6 +1,6 @@
 <!--
 title: Webhook
-description: Generic webhook connector for integrating any HTTP service with Claude
+description: Generic webhook connector for integrating any HTTP service with AI Shuffle
 order: 14
 -->
 
@@ -8,9 +8,9 @@ order: 14
 
 ## Overview
 
-The Webhook connector is the most flexible connector in AI Shuffle. It allows Claude to receive and send messages via standard HTTP webhooks, making it possible to integrate with virtually any service that can make or receive HTTP requests. Whether you are connecting a custom application, an IoT device, a CI/CD pipeline, a monitoring system, or any other HTTP-capable service, the Webhook connector can handle it.
+The Webhook connector is the most flexible connector in AI Shuffle. It lets your agent receive payloads and send notifications via standard HTTP webhooks, making it possible to integrate with virtually any service that can make or receive HTTP requests. Whether you are connecting a custom application, an IoT device, a CI/CD pipeline, a monitoring system, or any other HTTP-capable service, the Webhook connector can handle it.
 
-The connector supports three modes of operation: **inbound** (receive webhooks from external services), **outbound** (deliver event notifications to a configured URL), and **bidirectional** (both). It includes optional authentication via bearer tokens and HMAC signature verification for secure integrations.
+The connector supports three modes of operation: **inbound** (receive webhooks from external services), **outbound** (deliver event notifications to a configured URL), and **bidirectional** (both). Inbound requests are authenticated with a bearer token or an HMAC signature.
 
 ## Prerequisites
 
@@ -26,79 +26,59 @@ Decide which mode fits your integration:
 
 | Mode | Use Case | Description |
 |------|----------|-------------|
-| `inbound` | Receive events from external services | AI Shuffle exposes an endpoint that external services can POST to. Claude processes the incoming messages and responds within AI Shuffle. |
-| `outbound` | Send event notifications to an external service | Event notifications are automatically POSTed to a configured URL. |
-| `bidirectional` | Two-way integration | Combines inbound and outbound. External services send messages in, and event notifications are sent back out to a configured URL. |
+| `inbound` | Receive events from external services | AI Shuffle exposes an endpoint that external services can POST to. Your agent processes each payload in an AI Shuffle session. |
+| `outbound` | Send HTTP requests from automations | An automation's **Send Webhook** action sends a request, to the configured `url` by default. Session event notifications are not sent in this mode (see below). |
+| `bidirectional` | Two-way integration | Combines inbound and outbound. External services send payloads in, and event notifications for those sessions are sent back out to the configured `url`. |
 
 ### 2. Create the Webhook connector
 
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Webhook**.
+2. Click **Install Webhook** if prompted, then click **Connect account**.
+3. Fill in the fields for your mode (see the [Configuration Reference](#configuration-reference)). For `inbound` or `bidirectional` mode, choose the **Agent** that handles incoming payloads. To get event notifications, open **Advanced settings** and tick the events under **Session notifications**.
+4. Click **Create Connector**.
+
+An inbound connection runs your agent, so it needs an API user with an agent, or every request is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps). To create the connector through the API instead, see [API Management](/docs/connectors#api-management). Example `config` objects for each mode:
+
 **Inbound only:**
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Monitoring Alerts",
-    "connector_type": "webhook",
-    "config": {
-      "mode": "inbound",
-      "inbound_path": "monitoring",
-      "inbound_token": "my_secret_bearer_token"
-    }
-  }'
+```json
+{
+  "mode": "inbound",
+  "inbound_path": "monitoring",
+  "inbound_token": "my_secret_bearer_token"
+}
 ```
 
 **Outbound only:**
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Notification Sender",
-    "connector_type": "webhook",
-    "config": {
-      "mode": "outbound",
-      "url": "https://your-service.example.com/api/messages",
-      "headers": {
-        "Authorization": "Bearer your_service_token",
-        "X-Source": "ai-shuffle"
-      }
-    }
-  }'
+```json
+{
+  "mode": "outbound",
+  "url": "https://your-service.example.com/api/messages",
+  "headers": {
+    "Authorization": "Bearer your_service_token",
+    "X-Source": "ai-shuffle"
+  }
+}
 ```
 
-**Bidirectional:**
+**Bidirectional** (also set `"events": ["session.complete", "session.error"]` next to `config` in the API call, or tick them under **Session notifications**):
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Custom Integration",
-    "connector_type": "webhook",
-    "config": {
-      "mode": "bidirectional",
-      "inbound_path": "custom",
-      "inbound_token": "my_inbound_secret",
-      "secret": "my_hmac_signing_secret",
-      "url": "https://your-service.example.com/api/responses",
-      "headers": {
-        "Authorization": "Bearer your_service_token"
-      }
-    }
-  }'
+```json
+{
+  "mode": "bidirectional",
+  "inbound_path": "custom",
+  "secret": "my_hmac_signing_secret",
+  "url": "https://your-service.example.com/api/responses",
+  "headers": {
+    "Authorization": "Bearer your_service_token"
+  }
+}
 ```
-
-Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Webhook**.
 
 ### 3. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
+Turn on the connection's **Activate** switch.
 
 ### 4. Test inbound webhooks
 
@@ -110,7 +90,9 @@ POST http://localhost:8000/api/v1/connectors/hooks/{inbound_path}
 
 The `{inbound_path}` is the bare slug you set in the connector's `inbound_path` config (e.g. `monitoring`). The connector must be running and in `inbound` or `bidirectional` mode for the endpoint to match.
 
-**Basic test with curl:**
+Inbound requests must authenticate: set `inbound_token` or `secret`. A connector with neither rejects every request with 403.
+
+**Test with a bearer token** (the `monitoring` connector above):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
@@ -125,24 +107,14 @@ curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
 
 The bearer token may alternatively be supplied via the `X-Webhook-Token` header instead of `Authorization: Bearer`.
 
-**Test without authentication (if `inbound_token` is not set):**
-
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Deployment to production completed successfully."
-  }'
-```
-
-**Test with HMAC signature:**
+**Test with an HMAC signature** (the `custom` connector above, which has a `secret` and no `inbound_token`):
 
 ```bash
 # Generate HMAC signature
 PAYLOAD='{"message": "Signed webhook test"}'
 SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "my_hmac_signing_secret" | awk '{print $2}')
 
-curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/custom \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Signature: sha256=$SIGNATURE" \
   -d "$PAYLOAD"
@@ -150,7 +122,9 @@ curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
 
 ### 5. Test outbound webhooks
 
-For outbound mode, event notifications are automatically sent to the configured `url`. To test this, start a simple HTTP listener:
+Event notifications are sent only for sessions started through this connector's inbound endpoint, and only for the events the connector subscribes to. So they need `bidirectional` mode with `events` set. For install-wide reactions to session events, use an automation with an event trigger instead.
+
+To test, start a simple HTTP listener:
 
 ```bash
 # Using Python's built-in HTTP server (for testing only)
@@ -170,7 +144,7 @@ HTTPServer(('0.0.0.0', 9999), Handler).serve_forever()
 "
 ```
 
-Then trigger an event in AI Shuffle that the connector delivers. The notification payload will be printed by the test listener.
+Point `url` at the listener, then send an inbound request (step 4). When the session it starts completes, the notification payload is printed by the test listener.
 
 ## Configuration Reference
 
@@ -178,10 +152,11 @@ Then trigger an event in AI Shuffle that the connector delivers. The notificatio
 |-------|------|----------|-------------|
 | `mode` | string | No | The webhook mode: `"inbound"`, `"outbound"` (default), or `"bidirectional"` |
 | `inbound_path` | string | No | URL slug for the inbound webhook endpoint, a bare slug with no leading slash (e.g., `my-service`). The public endpoint is `/api/v1/connectors/hooks/<slug>`. Required to enable inbound; without it there is no inbound endpoint. Only used in `inbound` and `bidirectional` modes. |
-| `inbound_token` | string | No | Bearer token required for authenticating inbound webhook requests. When set, incoming requests must include `Authorization: Bearer <token>` (or `X-Webhook-Token: <token>`) header. Only used in `inbound` and `bidirectional` modes. |
-| `secret` | string | No | HMAC secret used for verifying inbound signatures and signing outbound requests. When set, incoming requests are validated against the `X-Webhook-Signature` header using HMAC-SHA256. |
+| `inbound_token` | string | No | Bearer token for authenticating inbound webhook requests. When set, incoming requests must include `Authorization: Bearer <token>` (or `X-Webhook-Token: <token>`) header. Inbound needs `inbound_token` or `secret`. |
+| `secret` | string | No | HMAC secret used for verifying inbound signatures and signing outbound requests. HMAC is checked only when `inbound_token` is not set; if a token is set, the token is required. |
 | `url` | string | No | The outbound webhook endpoint URL where notifications are POSTed. Required for `outbound` and `bidirectional` modes. |
 | `headers` | object | No | Additional HTTP headers to include in outbound requests (e.g., authorization headers, custom identifiers). Only used in `outbound` and `bidirectional` modes. |
+| `prompt_template` | string | No | Instructions appended after the payload. Defaults to "Process the above webhook payload." |
 
 ## Capabilities
 
@@ -189,26 +164,16 @@ The Webhook connector supports the following capabilities:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `rich_text` | Yes | Webhook payloads can include formatted text content |
+| `rich_text` | No | Not applicable |
 | `typing_indicator` | No | Not supported |
 | `reactions` | No | Not supported |
 | `file_upload` | No | Not supported |
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-**Message length limit:** 10,000 characters per message. This is higher than most other connectors to accommodate structured data payloads (JSON, logs, etc.) commonly sent via webhooks.
-
 ### Inbound payload format
 
-The connector accepts JSON payloads with a flexible schema. At minimum, include a `message` field:
-
-```json
-{
-  "message": "The text content to send to Claude"
-}
-```
-
-Additional fields are passed as metadata and may be used by Claude for context:
+Any JSON object is accepted. The full payload (truncated to 4,000 characters) is passed to your agent as untrusted data, followed by `prompt_template` (default: "Process the above webhook payload."). For example:
 
 ```json
 {
@@ -219,6 +184,8 @@ Additional fields are passed as metadata and may be used by Claude for context:
   "timestamp": "2026-02-16T10:30:00Z"
 }
 ```
+
+Each inbound request also fires a `webhook_received` trigger that automations can use.
 
 ### Outbound payload format
 
@@ -238,7 +205,7 @@ The `event` field is the event type, `data` carries the event-specific payload, 
 
 ### HMAC Signature Verification
 
-When a `secret` is configured, the connector verifies inbound requests using HMAC-SHA256. The external service must compute a signature over the raw request body and include it in the `X-Webhook-Signature` header.
+When a `secret` is configured and no `inbound_token` is set, the connector verifies inbound requests using HMAC-SHA256. The external service must compute a signature over the raw request body and include it in the `X-Webhook-Signature` header.
 
 **How to compute the signature (examples in various languages):**
 
@@ -302,18 +269,17 @@ const signature = crypto
 
 ### Inbound webhook returns 403 Forbidden
 
+- **No credentials configured.** A connector with neither `inbound_token` nor `secret` rejects every inbound request.
 - **Missing or wrong token.** If `inbound_token` is configured, every inbound request must include the header `Authorization: Bearer <your_inbound_token>` (or `X-Webhook-Token: <your_inbound_token>`). Check that the token matches exactly.
-- **HMAC signature invalid.** If `secret` is configured and the signature does not match, the request is rejected. Verify that you are signing the exact raw request body (no extra whitespace or reformatting) with the correct secret.
+- **HMAC signature invalid.** If `secret` is configured (and no `inbound_token`) and the signature does not match, the request is rejected. If an `inbound_token` is set, a signature alone is not enough. Verify that you are signing the exact raw request body (no extra whitespace or reformatting) with the correct secret.
 
 ### Inbound webhook returns 400 Bad Request
 
 - **Invalid JSON.** Ensure the request body is valid JSON with the `Content-Type: application/json` header.
-- **Missing message field.** The payload must include a `message` field with a non-empty string value.
-- **Message too long.** The message must not exceed 10,000 characters.
 
 ### Outbound requests are not being sent
 
-- **Check mode.** The connector must be in `outbound` or `bidirectional` mode.
+- **Check mode and events.** Event notifications are only sent in `bidirectional` mode, for sessions started through this connector's inbound endpoint, and only for the events the connector subscribes to.
 - **Check `url`.** Verify the outbound URL is correct and the target service is reachable from the AI Shuffle host.
 - **Check target service.** Ensure the target service is running and accepting POST requests. Check its logs for incoming requests.
 - **Network issues.** If the target service is on a different network, verify there are no firewall rules blocking the connection.
@@ -328,4 +294,4 @@ const signature = crypto
 
 - **Encoding.** Ensure the signature is computed over the raw request body bytes, not a re-serialized or pretty-printed version. JSON keys must be in the same order.
 - **Secret mismatch.** Verify the `secret` in the connector config matches exactly what the sender is using to compute the signature.
-- **Header format.** The `X-Webhook-Signature` header must be in the format `sha256=<hex_digest>`. The `sha256=` prefix is required.
+- **Header format.** The `X-Webhook-Signature` header carries the hex digest, in the format `sha256=<hex_digest>`. The `sha256=` prefix is optional.

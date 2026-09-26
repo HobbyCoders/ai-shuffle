@@ -43,8 +43,12 @@ import _audit_guard
 import truncate
 import vfs
 
-_IN = sys.stdin.buffer  # binary framing channels, captured before any redirect
-_OUT = sys.stdout.buffer
+# The binary framing pipe (child stdin/stdout) is captured and redirected in
+# ``_main`` — see :func:`_framing`. It is deliberately NOT kept in a module
+# global: the pipe file objects, the ``_send``/``_read_frame`` closures and the
+# per-process nonce live only in ``_main``'s locals and the closures it builds,
+# so a cell that reaches this module (or a tool stub's ``__globals__``) finds no
+# ``_OUT``/``_send`` to forge frames onto. See the SE-2 notes below.
 
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
@@ -87,36 +91,59 @@ _CELL_SPILL_MAX = vfs.REF_REGISTRY_MAX  # unprinted results held per cell
 _CELL_DONE = []
 
 
-# ─── framing ─────────────────────────────────────────────────────────────────
+# ─── framing (SE-2: pipe + nonce held only in closures) ──────────────────────
+#
+# A cell must not be able to write forged frames onto the host RPC pipe. Two
+# things keep it out:
+#   * The pipe file objects and the ``send``/``read_frame`` closures are built
+#     here from ``_main``'s locals and never stored on any module or object a
+#     cell can reach (``sys.modules['__main__']`` is swapped for a clean module
+#     after boot, and gc enumeration is denied by the audit guard).
+#   * Every child→host frame carries the per-process ``nonce`` the host handed
+#     us at boot; the host drops any frame that lacks it. A cell that somehow
+#     reaches the raw pipe still cannot mint a frame the host will act on
+#     without also digging the nonce out of the closure.
+# This is defence in depth, not a boundary: a cell that traverses a tool stub's
+# ``__closure__`` chain can still reach both the pipe and the nonce in-process.
+# The OS sandbox is the real boundary (see ``_audit_guard`` module docstring).
 
 
-def _read_exact(n: int) -> bytes:
-    chunks = []
-    got = 0
-    while got < n:
-        chunk = _IN.read(n - got)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        got += len(chunk)
-    return b"".join(chunks)
+def _framing(pipe_in, pipe_out, nonce_box):
+    """Build the ``(send, read_frame)`` pair over the binary pipe.
 
+    ``nonce_box`` is a one-key dict whose value ``send`` stamps onto every
+    outgoing frame; ``_main`` fills it from the boot config.
+    """
 
-def _read_frame():
-    header = _read_exact(4)
-    if len(header) < 4:
-        return None
-    (length,) = struct.unpack(">I", header)
-    body = _read_exact(length)
-    if len(body) < length:
-        return None
-    return json.loads(body.decode("utf-8"))
+    def read_exact(n: int) -> bytes:
+        chunks = []
+        got = 0
+        while got < n:
+            chunk = pipe_in.read(n - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        return b"".join(chunks)
 
+    def read_frame():
+        header = read_exact(4)
+        if len(header) < 4:
+            return None
+        (length,) = struct.unpack(">I", header)
+        body = read_exact(length)
+        if len(body) < length:
+            return None
+        return json.loads(body.decode("utf-8"))
 
-def _send(obj: dict) -> None:
-    body = json.dumps(obj).encode("utf-8")
-    _OUT.write(struct.pack(">I", len(body)) + body)
-    _OUT.flush()
+    def send(obj: dict) -> None:
+        framed = dict(obj)
+        framed["_n"] = nonce_box.get("n", "")
+        body = json.dumps(framed).encode("utf-8")
+        pipe_out.write(struct.pack(">I", len(body)) + body)
+        pipe_out.flush()
+
+    return send, read_frame
 
 
 # ─── host-call RPC (blocks the cell until the host answers) ──────────────────
@@ -139,12 +166,19 @@ def _mutating(leaf: str) -> bool:
     return any(f"[risk: {r}]" in (_SOURCES.get(leaf) or "") for r in _MUTATING_RISKS)
 
 
-def _host_call(tool_name: str, kwargs: dict):
-    # Deliberately one frame, not a wrapper around an inner function: a tool
-    # error's traceback reaches the model with every frame below the cell in
-    # it, and an extra kernel frame is an extra line of noise on every failure.
-    _send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
-    reply = _read_frame()
+def _make_host_call(send, read_frame):
+    """The ``__host_call__`` a cell's tool stubs invoke, bound to this process's
+    framing pipe via closure (not a module global — see :func:`_framing`)."""
+
+    def __host_call__(tool_name: str, kwargs: dict):
+        return _do_host_call(send, read_frame, tool_name, kwargs)
+
+    return __host_call__
+
+
+def _do_host_call(send, read_frame, tool_name: str, kwargs: dict):
+    send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
+    reply = read_frame()
     if reply is None:
         raise vfs.ToolError("host pipe closed during a tool call")
     if reply.get("denied"):
@@ -338,8 +372,7 @@ _UNQUOTED_HINT = (
 # The tail of the tool call's own JSON envelope, left on the last line of the
 # cell: ``print(r)"}``. The model closed the `code` string and the argument
 # object in the source it was writing. It is the cheapest SyntaxError to
-# diagnose and the one an audited session hit on its very first tool call, so
-# it is checked before the heredoc story and answered in one line.
+# diagnose, so it is checked before the heredoc story and answered in one line.
 _ENVELOPE_TAIL_RE = re.compile(r"""["']\s*\}\s*,?\s*$""")
 
 _ENVELOPE_HINT = (
@@ -389,8 +422,8 @@ def _name_error_hint(name: str) -> str:
     """A NameError against a mounted tool means the namespace was reset.
 
     Python answers with ``Did you mean: 'hash'?`` — a suggestion that is never
-    right for ``Bash``, ``Note`` or ``Ledger``, and four audited sessions lost
-    a cell to it. The kernel knows which names it mounts, so it can say the one
+    right for ``Bash``, ``Note`` or ``Ledger``. The kernel knows which names it
+    mounts, so it can say the one
     thing that helps: the tool is here, this namespace just does not have it
     bound any more, and a kernel restart between turns is why.
     """
@@ -544,6 +577,51 @@ def _error_hint(exc: BaseException) -> str:
     return ""
 
 
+# What a rendering step answers when a cell-controlled hook it had to call (an
+# exception's ``__str__``/``__notes__``, a repr, a tampered stdout buffer) was
+# refused by the audit guard or raised: the kernel reports this and keeps going.
+_UNREPRESENTABLE = "<unrepresentable: denied>"
+
+
+def _plain_str(text) -> str:
+    """``text`` as an exact ``str`` without calling anything a cell can override.
+
+    A ``str`` subclass is copied through ``str.__str__`` (a subclass's own
+    ``__len__``/``__getitem__``/``__format__`` never runs); anything else is
+    not text the runner produced, so it becomes the fallback marker.
+    """
+    if type(text) is str:
+        return text
+    try:
+        if issubclass(type(text), str):
+            return str.__str__(text)
+    except BaseException:
+        pass
+    return _UNREPRESENTABLE
+
+
+def _render(fn, *args, fallback: str = _UNREPRESENTABLE) -> str:
+    """``fn(*args)`` as an exact ``str``, or ``fallback`` if anything in it raised.
+
+    Rendering touches cell-controlled objects, and the audit guard refuses a
+    hook that reaches for a denied operation by raising — which must cost the
+    rendered text, never the kernel. ``BaseException``: a hook can raise
+    ``SystemExit`` too.
+    """
+    try:
+        return _plain_str(fn(*args))
+    except BaseException:
+        return fallback
+
+
+def _type_name(exc: BaseException) -> str:
+    """The exception's class name, read past any metaclass ``__name__`` override."""
+    try:
+        return _plain_str(type.__dict__["__name__"].__get__(type(exc)))
+    except BaseException:
+        return "Exception"
+
+
 def _format_cell_traceback(exc: BaseException) -> str:
     """Traceback text starting at the model's own code.
 
@@ -553,15 +631,24 @@ def _format_cell_traceback(exc: BaseException) -> str:
     whose file is ``<cell>``; a failure with no cell frame at all (a
     SyntaxError from parsing, an error in a stub import before the cell ran)
     renders as just the exception line.
+
+    Formatting calls the exception's own ``__str__``, its ``__notes__`` and
+    every link of its ``__cause__``/``__context__`` chain — cell code. It runs
+    with the audit guard armed (see :func:`_run_cell`), and anything it raises,
+    a refusal included, yields a one-line fallback instead of killing the
+    kernel.
     """
-    tb = exc.__traceback__
-    while tb is not None and tb.tb_frame.f_code.co_filename != "<cell>":
-        tb = tb.tb_next
-    if tb is None:
-        text = "".join(traceback.format_exception_only(type(exc), exc))
-    else:
-        text = "".join(traceback.format_exception(type(exc), exc, tb))
-    return _scrub_host_paths(text)
+    try:
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_frame.f_code.co_filename != "<cell>":
+            tb = tb.tb_next
+        if tb is None:
+            text = "".join(traceback.format_exception_only(type(exc), exc))
+        else:
+            text = "".join(traceback.format_exception(type(exc), exc, tb))
+        return _scrub_host_paths(_plain_str(text))
+    except BaseException:
+        return f"{_type_name(exc)}: {_UNREPRESENTABLE}\n"
 
 
 _KERNEL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -630,9 +717,7 @@ class _SegmentedStdout(io.TextIOBase):
 # ─── the calls the error cancelled ───────────────────────────────────────────
 #
 # A host call that raises aborts the whole cell, so everything queued after it
-# is dropped without a word: audited sessions lost Note/Ledger bookkeeping,
-# commits and Monitor launches this way and re-issued them a turn later — once,
-# twelve model calls later. The host names the calls that *completed*; this
+# is dropped without a word. The host names the calls that *completed*; this
 # names the ones that never got their turn, read statically off the cell source.
 
 # Statements whose body may not run at all, so a call inside one is only
@@ -784,18 +869,63 @@ def _unattempted_note(code: str, exc: BaseException) -> str:
         else:
             note += "."
         return note
-    except Exception:  # pragma: no cover - a diagnostic must never mask the bug
+    except BaseException:  # a diagnostic must never mask the bug or end the kernel
         return ""
 
 
+def _cap_value_repr(text: str) -> str:
+    """The displayed value, held to the same budget as the cell's stdout.
+
+    A cell ending in a bare ``data`` used to pour the whole repr into the
+    model's context, which the stdout cap exists to prevent. The full value
+    stays bound to ``_`` for the next cell to slice.
+    """
+    if len(text) <= _STDOUT_CAP:
+        return text
+    dropped = len(text) - _STDOUT_CAP
+    return (
+        text[:_STDOUT_CAP]
+        + f"…[value repr truncated: -{dropped} chars; the full value is "
+        "bound to `_` — slice it instead of re-displaying it]"
+    )
+
+
 def _run_cell(code: str):
-    buf = _SegmentedStdout()
+    """Run one cell; ``(stdout, value_repr, error)``.
+
+    Everything here runs inside the audit guard's deny-any-frame region, and
+    entering it arms the guard for the rest of the process (R8-1, R9-2): the
+    cell body, the ``repr`` of its value, the rendering of a failure (the
+    exception's ``__str__``, ``__notes__`` and cause chain, the hint, the
+    "never attempted" note) and the stdout finishing all touch objects the cell
+    controls, any of which can carry a C-callable hook
+    (``functools.partial(exec, …)``) that runs with no ``<cell>`` frame on the
+    stack. A refusal inside a rendering step costs that text (see
+    :data:`_UNREPRESENTABLE`), never the kernel.
+    """
+    with _audit_guard.attributed_region():
+        buf = _SegmentedStdout()
+        saved = sys.stdout
+        sys.stdout = buf
+        _CELL_REFS.clear()
+        _CELL_DONE.clear()
+        try:
+            value_repr, err = _exec_cell(code)
+        finally:
+            sys.stdout = saved
+        # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
+        # cell shadows the view, never the recording.
+        try:
+            _NS["_refs"] = _REFS
+        except BaseException:  # a planted key's ``__eq__`` may raise
+            pass
+        return _finish_stdout(buf), value_repr, err
+
+
+def _exec_cell(code: str):
+    """The cell body and its displayed value, or the rendered failure."""
     value_repr = ""
     err = None
-    saved = sys.stdout
-    sys.stdout = buf
-    _CELL_REFS.clear()
-    _CELL_DONE.clear()
     try:
         tree = ast.parse(code, "<cell>", "exec")
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -804,16 +934,19 @@ def _run_cell(code: str):
                 exec(compile(tree, "<cell>", "exec"), _NS)
             value = eval(compile(ast.Expression(last.value), "<cell>", "eval"), _NS)
             if value is not None:
-                value_repr = repr(value)
-                # REPL semantics: the displayed value stays reachable as ``_``
-                # in the next cell, so an unbound last expression (a tool call
-                # written bare) is never lost.
+                # ``repr`` runs the value's own ``__repr__``; a refusal there
+                # raises into the handlers below like any cell error.
+                value_repr = _cap_value_repr(_plain_str(repr(value)))
+                # REPL semantics: the displayed value stays reachable as
+                # ``_`` in the next cell, so an unbound last expression (a
+                # tool call written bare) is never lost.
                 _NS["_"] = value
         else:
             exec(compile(tree, "<cell>", "exec"), _NS)
     except Exception as exc:
         err = _format_cell_traceback(exc)
-        hint = _error_hint(exc)
+        # ``_error_hint`` calls ``str(exc)``: the R9-2 hook.
+        hint = _render(_error_hint, exc, fallback="")
         if hint:
             err = err.rstrip("\n") + "\n" + hint + "\n"
         queued = _unattempted_note(code, exc)
@@ -826,24 +959,41 @@ def _run_cell(code: str):
         err = _format_cell_traceback(exc).rstrip("\n") + (
             "\nThe kernel keeps running; a cell cannot exit the process.\n"
         )
-    finally:
-        sys.stdout = saved
-    # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
-    # cell shadows the view, never the recording.
-    _NS["_refs"] = _REFS
-    segments = buf.segments()
-    truncated = bool(segments) and sum(len(s) for s in segments) > _STDOUT_CAP
-    refs = _cell_refs(truncated)
-    out = truncate.fair_share_stdout(segments, _STDOUT_CAP, refs=refs)
-    if not truncated:
-        # A truncated cell's notice already names the handles; an untruncated
-        # one said nothing at all, which is how a model ends up guessing which
-        # ``_refs`` slot holds its Read.
-        footer = truncate.refs_footer(refs)
-        if footer:
-            out = out.rstrip("\n")
-            out = f"{out}\n{footer}" if out else footer
-    return out, value_repr, err
+    except BaseException as exc:
+        # Any other BaseException subclass (a cell's own ``class E(BaseException)``,
+        # GeneratorExit) is still the cell's failure, not the kernel's: left
+        # uncaught it ended the child and cost every function defined so far.
+        err = _format_cell_traceback(exc)
+    return value_repr, err
+
+
+def _finish_stdout(buf: "_SegmentedStdout") -> str:
+    """The cell's captured stdout, fair-shared under the cap, with its footer.
+
+    The buffer is reachable from the cell as ``sys.stdout``, so its lists may
+    have been swapped for objects with hooks of their own; every segment is
+    forced to an exact ``str`` first, and a buffer that cannot be read at all
+    reports the fallback marker.
+    """
+    try:
+        segments = [_plain_str(s) for s in _SegmentedStdout.segments(buf)]
+    except BaseException:
+        segments = [_UNREPRESENTABLE + "\n"]
+    try:
+        truncated = bool(segments) and sum(len(s) for s in segments) > _STDOUT_CAP
+        refs = _cell_refs(truncated)
+        out = truncate.fair_share_stdout(segments, _STDOUT_CAP, refs=refs)
+        if not truncated:
+            # A truncated cell's notice already names the handles; an untruncated
+            # one said nothing at all, which is how a model ends up guessing which
+            # ``_refs`` slot holds its Read.
+            footer = truncate.refs_footer(refs)
+            if footer:
+                out = out.rstrip("\n")
+                out = f"{out}\n{footer}" if out else footer
+        return _plain_str(out)
+    except BaseException:
+        return _UNREPRESENTABLE
 
 
 # ─── namespace checkpoint / restore (kernel-death resilience) ────────────────
@@ -893,63 +1043,87 @@ class _BoundedSink:
 
 
 def _checkpoint() -> dict:
+    """Pickle the namespace's data variables, one at a time.
+
+    The whole walk runs inside the audit guard's deny-any-frame region (armed
+    for good once entered): not just ``pickle.dump`` — where a value's own
+    ``__reduce__``/``__getstate__`` runs — but the key checks, the type tests
+    and the sorting around it, since a cell can plant a ``str``-subclass key
+    whose ``startswith``/``__eq__``/``__lt__`` is a C-callable hook (R8-1,
+    R9-2). Anything a variable's hooks raise, a refusal included, drops that
+    variable; nothing drops the checkpoint or the kernel.
+    """
     import base64
     import pickle
-    import types
 
-    vars_map: dict = {}
-    dropped: list = []
-    oversized: list = []
-    # Budget on the pickled bytes; base64 adds a third on the wire, which the
-    # host's own cap allows for.
-    remaining = _CKPT_MAX_BYTES if _CKPT_MAX_BYTES > 0 else None
-    for key, value in _NS.items():
-        if key.startswith("__") or key in _CKPT_SKIP:
-            continue
-        # Module objects never pickle and are rebuilt by the fresh kernel's
-        # prelude anyway; listing them as "dropped" would be pure noise.
-        if isinstance(value, types.ModuleType):
-            continue
-        if remaining is not None and remaining <= 0:
-            oversized.append(key)
-            continue
-        sink = _BoundedSink(remaining if remaining is not None else 1 << 62)
-        try:
-            pickle.dump(value, sink)
-        except _CheckpointTooLarge:
-            oversized.append(key)
-            continue
-        except Exception:
-            dropped.append(key)
-            continue
-        blob = b"".join(sink.chunks)
-        if remaining is not None:
-            remaining -= len(blob)
-        vars_map[key] = base64.b64encode(blob).decode("ascii")
-    return {
-        "kind": "checkpoint",
-        "vars": vars_map,
-        "dropped": sorted(dropped),
-        "oversized": sorted(oversized),
-        # Tool and skill stubs never pickle as data, and re-importing them is
-        # both cheap and exactly what the model would have to do by hand. A
-        # restart that drops `Bash` and `Note` is the audited NameError; the
-        # names are recorded here so the restore can just put them back.
-        "tools": sorted(_bound_stubs(_SOURCES)),
-        "skills": sorted(_bound_stubs(_SKILLS)),
-    }
+    with _audit_guard.attributed_region():
+        vars_map: dict = {}
+        dropped: list = []
+        oversized: list = []
+        # Budget on the pickled bytes; base64 adds a third on the wire, which
+        # the host's own cap allows for.
+        remaining = _CKPT_MAX_BYTES if _CKPT_MAX_BYTES > 0 else None
+        for key, value in list(_NS.items()):
+            if type(key) is not str:
+                # Only an identifier binding is restorable, and only an exact
+                # ``str`` can be tested without running the cell's methods.
+                if issubclass(type(key), str):
+                    dropped.append(_plain_str(key))
+                continue
+            if key.startswith("__") or key in _CKPT_SKIP:
+                continue
+            sink = _BoundedSink(remaining if remaining is not None else 1 << 62)
+            try:
+                # Module objects never pickle and are rebuilt by the fresh
+                # kernel's prelude anyway; listing them as "dropped" would be
+                # pure noise.
+                if isinstance(value, types.ModuleType):
+                    continue
+                if remaining is not None and remaining <= 0:
+                    oversized.append(key)
+                    continue
+                pickle.dump(value, sink)
+            except _CheckpointTooLarge:
+                oversized.append(key)
+                continue
+            except BaseException:
+                # A cell object's own pickling hook may raise anything,
+                # SystemExit included; that makes the variable unrestorable,
+                # never the checkpoint (or the kernel) fail.
+                dropped.append(key)
+                continue
+            blob = b"".join(sink.chunks)
+            if remaining is not None:
+                remaining -= len(blob)
+            vars_map[key] = base64.b64encode(blob).decode("ascii")
+        return {
+            "kind": "checkpoint",
+            "vars": vars_map,
+            "dropped": sorted(dropped),
+            "oversized": sorted(oversized),
+            # Tool and skill stubs never pickle as data, and re-importing them
+            # is both cheap and exactly what the model would have to do by
+            # hand. The names are recorded here so the restore can just put
+            # them back instead of leaving a NameError for the next cell.
+            "tools": sorted(_bound_stubs(_SOURCES)),
+            "skills": sorted(_bound_stubs(_SKILLS)),
+        }
 
 
 def _bound_stubs(mounted: dict) -> list:
     """Names in the namespace that are imports of a mounted stub."""
     return [
-        name for name, value in _NS.items()
-        if name in mounted and callable(value)
+        name for name, value in list(_NS.items())
+        if type(name) is str and name in mounted and callable(value)
     ]
 
 
-def _reimport_stubs(names, package: str) -> list:
-    """Re-bind ``from <package> import <name>`` for each name. Best-effort."""
+def _reimport_stubs(names, package: str, keep=()) -> list:
+    """Re-bind ``from <package> import <name>`` for each name. Best-effort.
+
+    A name in ``keep`` (restored from the checkpoint as a variable) is
+    imported and reported but left bound to the restored value.
+    """
     import importlib
 
     done: list = []
@@ -957,9 +1131,10 @@ def _reimport_stubs(names, package: str) -> list:
         try:
             module = importlib.import_module(f"{package}.{name}")
             value = getattr(module, name)
-        except Exception:
+        except BaseException:  # a skill's module code may raise anything
             continue
-        _NS[name] = value
+        if name not in keep:
+            _NS[name] = value
         done.append(name)
     return done
 
@@ -970,19 +1145,37 @@ def _restore(vars_map: dict, tools=None, skills=None) -> dict:
 
     restored: list = []
     dropped: list = []
-    reimported = _reimport_stubs(tools, "tools") + _reimport_stubs(skills, "skills")
     for key, encoded in (vars_map or {}).items():
         try:
-            value = pickle.loads(base64.b64decode(encoded))
-        except Exception:
+            # Unpickle under the deny-any-frame region: a crafted checkpoint
+            # object's reconstructor runs with no <cell> frame on the stack, so
+            # the audit hook would otherwise let it reach os.system/sockets/open
+            # that a live cell is denied. A blocked payload raises here and the
+            # variable is simply dropped. Entering the region arms the guard
+            # for good, so the binding and ref adoption below — which touch
+            # the unpickled object (``isinstance`` may consult its
+            # ``__class__``) — and the stub re-import after the loop stay
+            # covered too (R9-2).
+            with _audit_guard.attributed_region():
+                value = pickle.loads(base64.b64decode(encoded))
+            _NS[key] = value
+            # A ResultRef pickles with its registry id, so re-adopting it here
+            # keeps ``_refs[7]`` resolving in the restarted kernel.
+            if isinstance(value, vfs.ResultRef):
+                _REFS.adopt(value)
+        except BaseException:
+            _NS.pop(key, None)
             dropped.append(key)
             continue
-        _NS[key] = value
-        # A ResultRef pickles with its registry id, so re-adopting it here
-        # keeps ``_refs[7]`` resolving in the restarted kernel.
-        if isinstance(value, vfs.ResultRef):
-            _REFS.adopt(value)
         restored.append(key)
+    # Re-imported after the variables (a skill is model-authored code, so it
+    # runs under the region too) but without displacing one: a restored
+    # variable of the same name keeps its value, as when the stubs came first.
+    with _audit_guard.attributed_region():
+        keep = frozenset(restored)
+        reimported = _reimport_stubs(tools, "tools", keep) + _reimport_stubs(
+            skills, "skills", keep
+        )
     return {
         "kind": "restored",
         "restored": sorted(restored),
@@ -1073,7 +1266,7 @@ def _guard_filesystem() -> None:
     _io.FileIO = _blocked_open  # type: ignore[assignment]
 
 
-def _boot(config: dict) -> None:
+def _boot(config: dict, host_call) -> None:
     global _REF_THRESHOLD, _STDOUT_CAP, _NS, _CKPT_MAX_BYTES
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
     _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
@@ -1084,7 +1277,7 @@ def _boot(config: dict) -> None:
     # writing, which the guard refuses. The kernel never needs bytecode
     # caches, so turn them off rather than widen the import carve-out.
     sys.dont_write_bytecode = True
-    # The hard boundary: an audit hook the interpreter consults at every
+    # The hard in-process layer: an audit hook the interpreter consults at every
     # spawn/socket/open no matter which object the cell reached it through.
     # Installed before the namespace exists, so no cell ever runs without it.
     _audit_guard.install(
@@ -1097,41 +1290,106 @@ def _boot(config: dict) -> None:
         _guard_filesystem()  # must precede make_namespace (it copies builtins)
     allowlist = set(config.get("allowlist") or vfs.DEFAULT_ALLOWLIST)
     _NS = vfs.make_namespace(
-        allowlist=allowlist, host_call=_host_call, refs=_REFS
+        allowlist=allowlist, host_call=host_call, refs=_REFS
     )
     vfs.install_finder(
-        _SOURCES, _host_call,
+        _SOURCES, host_call,
         skills=_SKILLS, guarded_builtins=_NS["__builtins__"],
     )
+    # SE-1/SE-2 hygiene, done once the guard is armed and the namespace built:
+    #   * Drop the guard module from ``sys.modules`` so a cell cannot reach it
+    #     by name (its enforcement state is in the hook's closure regardless).
+    #     The runner keeps its own ``_audit_guard`` global for ``_run_cell`` /
+    #     checkpoint / restore.
+    #   * Swap ``__main__`` for a clean, empty module so a cell that does
+    #     ``sys.modules['__main__']`` finds no ``_send``/``_OUT`` to forge onto.
+    #     The real runner module stays reachable only through its running frame
+    #     and (with gc enumeration denied) a tool stub's ``__closure__`` chain.
+    sys.modules.pop("_audit_guard", None)
+    try:
+        sys.modules["__main__"] = types.ModuleType("__main__")
+    except Exception:  # pragma: no cover - defensive; never fail boot for this
+        pass
 
 
 def _main() -> None:
-    boot = _read_frame()
+    # Capture the binary framing pipe BEFORE redirecting stdout, and keep it —
+    # with ``send``/``read_frame`` and the per-process nonce — only in locals and
+    # the closures below (SE-2). Stray text (a finalizer, a thread the cell left
+    # running) then goes to stderr, which the host drains, instead of desyncing
+    # the frame pipe. ``input()`` gets an empty stdin and fails at once with
+    # EOFError instead of blocking on the host's pipe until the cell times out.
+    pipe_in = sys.stdin.buffer
+    pipe_out = sys.stdout.buffer
+    sys.stdout = sys.stderr
+    sys.stdin = io.StringIO()
+    nonce_box = {"n": ""}
+    send, read_frame = _framing(pipe_in, pipe_out, nonce_box)
+    host_call = _make_host_call(send, read_frame)
+
+    boot = read_frame()
     if boot is None or boot.get("kind") != "boot":
         return
-    _boot(boot.get("config") or {})
-    _send({"kind": "ready"})
+    config = boot.get("config") or {}
+    # The host stamps every child→host frame with this nonce and rejects any
+    # frame that lacks it; a forging cell does not know it.
+    nonce_box["n"] = str(config.get("nonce") or "")
+    _boot(config, host_call)
+    send({"kind": "ready"})
     while True:
-        frame = _read_frame()
+        frame = read_frame()
         if frame is None:
             break
         kind = frame.get("kind")
+        if kind == "shutdown":
+            break
+        if isinstance(kind, str) and kind in _FALLBACK_REPLIES:
+            # Any other kind gets no reply, as ever.
+            send(_dispatch(kind, frame))
+
+
+def _dispatch(kind, frame: dict) -> dict:
+    """Run one host request and build its reply; never raises.
+
+    The handlers already turn a cell-controlled hook's failure into text or a
+    dropped variable; this is the last line, so an unforeseen raise still
+    answers the host in the shape it waits for and the kernel keeps running.
+    """
+    try:
         if kind == "exec":
             out, value_repr, err = _run_cell(frame.get("code", ""))
-            _send({"kind": "done", "stdout": out, "value_repr": value_repr, "error": err})
-        elif kind == "set_vfs":
+            return {"kind": "done", "stdout": out, "value_repr": value_repr, "error": err}
+        if kind == "set_vfs":
             _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})
-            _send({"kind": "vfs_ok"})
-        elif kind == "checkpoint":
-            _send(_checkpoint())
-        elif kind == "restore":
-            _send(_restore(
+            return {"kind": "vfs_ok"}
+        if kind == "checkpoint":
+            return _checkpoint()
+        if kind == "restore":
+            return _restore(
                 frame.get("vars") or {},
                 frame.get("tools") or [],
                 frame.get("skills") or [],
-            ))
-        elif kind == "shutdown":
-            break
+            )
+    except BaseException:
+        pass
+    return dict(_FALLBACK_REPLIES[kind])
+
+
+# The reply each request gets when its handler raised anyway: the frame the host
+# is waiting for, so the protocol stays aligned. A failed checkpoint or restore
+# reports nothing kept; a failed exec says its result could not be reported.
+_FALLBACK_REPLIES = {
+    "exec": {
+        "kind": "done", "stdout": "", "value_repr": "",
+        "error": f"the kernel could not report this cell's result: {_UNREPRESENTABLE}\n",
+    },
+    "set_vfs": {"kind": "vfs_ok"},
+    "checkpoint": {
+        "kind": "checkpoint", "vars": {}, "dropped": [], "oversized": [],
+        "tools": [], "skills": [],
+    },
+    "restore": {"kind": "restored", "restored": [], "dropped": [], "reimported": []},
+}
 
 
 if __name__ == "__main__":

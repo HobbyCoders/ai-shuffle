@@ -1,35 +1,15 @@
-"""Turn-lifetime safety for ProviderAgent workers (chunk P3-A4).
+"""Turn-lifetime safety for Task-dispatched workers.
 
-The 2026-07-22 rate-limit storm is the design case, and its forensics
-(reconstructed 2026-07-25 from ``~/.ai-shuffle/logs/debug-8766/app.log`` and the
-``background_tasks`` table) are what this module exists to answer:
+Background work can outlive its turn, and marking a task_registry row terminal
+does NOT stop the child: ``stop_session_task`` may only ghost-reap the row
+while the child keeps running. So teardown here kills the worker's SESSION and
+its subprocess tree; the registry row is bookkeeping that follows, never the
+act itself.
 
-* the parent turn ended at 19:58:23 and **all 3,172 upstream requests happened
-  after that** — background work outliving its turn is the whole failure mode;
-* 122 tasks were registered but only 2 were the parent's own — the other 120
-  started after the turn had ended;
-* both registered roots reached a terminal status at 20:06:43 and **410 more
-  upstream requests still flowed over the next two minutes**, with 23
-  descendants running and 35 child processes alive.
-
-That last point is the load-bearing one: **marking a registry row terminal does
-NOT cascade to its subtree.** ``stop_session_task`` even falls through to
-"ghost-reaping" the registry row when the pooled client is gone
-(``app/core/query_session_lifecycle.py:293-321``) — the row goes ``killed`` and
-the child keeps running. So teardown here kills the worker's SESSION and its
-subprocess tree; the registry row is bookkeeping that follows, never the act
-itself.
-
-Scope, deliberately narrow (plan §2 C.4 RULING, 2026-07-25): turn-lifetime
-binding applies to **ProviderAgent workers ONLY**. Ordinary CLI-native subagent
-parking — the ``_finalize`` park gate at ``app/core/session_runtime.py:664-690``
-— is a deliberate feature and is NOT changed. Nothing in this module can see or
-touch a task it did not itself register.
-
-Teardown is necessary but not sufficient: PR #761 adds the gateway-level
-per-provider circuit breaker separately, and that breaker (not this) is the
-protection against retries originating INSIDE an already-running child, which
-no registry-driven teardown could ever have seen (plan §9 Q6).
+Scope is deliberately narrow: only workers this module registered (via
+``provider_agent.dispatch_worker``). Ordinary CLI-native subagent parking (the
+park gate in ``SessionRuntime._finalize``) is a feature and is unchanged.
+Nothing here can see or touch a task it did not itself register.
 
 Three responsibilities:
 
@@ -37,7 +17,7 @@ Three responsibilities:
    Called from ``SessionRuntime._finalize`` on EVERY normal, aborted and
    crashed turn end.
 2. :func:`stop_all_workers` — the same kill, user-initiated, with user
-   attribution on the terminal rows (plan §2 C.4 "stop-all control").
+   attribution on the terminal rows.
 3. :func:`attribution` — per-turn worker token/spend grouped by the worker's
    PROVIDER, readable while the turn is still running.
 """
@@ -84,7 +64,7 @@ _COST_KEY = "total_cost_usd"
 
 @dataclass
 class WorkerRecord:
-    """One live ProviderAgent worker, from dispatch until its tool call returns.
+    """One live Task worker, from dispatch until its tool call returns.
 
     ``task_id`` and ``tool_use_id`` are BOTH the worker's session id today (see
     ``dispatch_worker``'s "ONE join key" note) but are kept as separate fields
@@ -103,8 +83,8 @@ class WorkerRecord:
     usage: Dict[str, Any] = field(default_factory=dict)
     #: The worker's :class:`app.core.provider_agent_feed.WorkerFeed`, when one
     #: exists. Teardown uses it to SETTLE the parent's card — ``turn.completed``
-    #: is emitted before ``_finalize`` runs (``app/core/query_engine.py:1785``),
-    #: so a card left running here would spin forever on replay.
+    #: is emitted before ``_finalize`` runs, so a card left running here would
+    #: spin forever on replay.
     feed: Any = None
     #: Latched by teardown so the dispatcher's own ``finally`` does not
     #: re-settle the card or re-complete the registry row.
@@ -115,7 +95,7 @@ class WorkerRecord:
     #: message that says what actually happened instead of the default success
     #: it would otherwise derive from an empty event log.
     torn_down_reason: Optional[str] = None
-    #: Task-tool background mode (ruling A8): a background worker deliberately
+    #: Task-tool background mode: a background worker deliberately
     #: OUTLIVES the caller's turn — its results are collected in a later turn
     #: via the task tools — so the turn-end teardown skips it. stop-all and the
     #: per-worker timeout still apply.
@@ -175,7 +155,7 @@ def reset() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Attribution (plan §2 C.4: "live attribution + stop-all")
+# Attribution
 # ---------------------------------------------------------------------------
 
 def record_usage(
@@ -204,7 +184,7 @@ def record_usage(
 def attribution(parent_session_id: str) -> Dict[str, Any]:
     """Per-worker and per-PROVIDER token/spend for a parent's live workers.
 
-    Readable while the turn runs — that is the point (plan §2 C.4). Returns
+    Readable while the turn runs — that is the point. Returns
     ``{"workers": [...], "providers": {...}, "totals": {...}}`` with an empty
     ``workers`` list when nothing is live, so a caller can attach it
     unconditionally and a wire consumer can test one field.
@@ -261,11 +241,10 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
        ``interrupting`` and fires the interrupt executor, so a runtime executing
        the worker turn on ANY runner reacts. Without it a peer runner would keep
        streaming the turn it owns.
-    2. ``session_pool.remove_broken`` evicts the pooled SDK client, which is
+    2. ``session_pool.remove_broken`` evicts the pooled adapter, which is
        what actually ends the CLI subprocess AND its descendants
-       (``snapshot_descendants`` + ``record_terminated_subprocess``). This is
-       the step the 2026-07-22 forensics show missing: the registry rows went
-       terminal at 20:06:43 while 35 child processes stayed alive.
+       (``snapshot_descendants`` + ``record_terminated_subprocess``). Marking
+       registry rows terminal without this step leaves child processes alive.
 
     ``remove_broken`` rather than ``remove``: this runs on the ``_finalize`` hot
     path, and ``remove_broken`` pops the pool entry synchronously while the
@@ -282,7 +261,7 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
 
         # interrupt_async, not to_thread(interrupt): the interrupt executor is a
         # coroutine fn that needs a running loop, so calling the sync form from a
-        # worker thread silently drops the SDK interrupt (the DB row flips but the
+        # worker thread silently drops the interrupt (the DB row flips but the
         # live runtime is never told to stop).
         row = await turn_manager.interrupt_async(worker_session_id, "stop", True,
                                                  source=reason)
@@ -319,12 +298,10 @@ async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
     """Book a killed worker's partial usage and stamp its terminal rows.
 
     Killing a worker ends the runtime that would otherwise have settled the
-    worker's OWN bookkeeping, which is how the live DB grew a user-killed sync
-    child showing 0 calls / 0 tokens / $0 against real provider usage, with
-    ``turns.state`` never leaving its live state and ``sessions.status`` still
-    ``'active'`` while the background-task row said ``killed``. The parent's
-    card, registry row and attribution were all settled; only the child's own
-    rows were not.
+    worker's OWN bookkeeping. Without this, a killed child would show no usage
+    against real provider spend, its ``turns.state`` would never leave its live
+    state and ``sessions.status`` would stay ``'active'`` while the
+    background-task row says ``killed``.
 
     Delegated to :func:`app.core.query_persistence.settle_killed_session`,
     which claims the turn with the guarded ``settle_turn`` UPDATE before
@@ -345,17 +322,18 @@ async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
 def _purge_park_gate_residue(parent_session_id: str, record: WorkerRecord) -> None:
     """Drop this worker's ids from the CUMULATIVE park-gate launch sets.
 
-    THE trap that makes a naive teardown silently do nothing (plan §2 C.4): the
-    park gate at ``app/core/session_runtime.py:674`` ORs
-    ``task_registry.get_background_launches(sid)``, a set that is NEVER reset
-    per turn and is cleared only by ``clear_session``
-    (``app/core/task_registry.py:1049``). A teardown that merely flips running
-    tasks terminal leaves that set populated, so the turn parks anyway — and so
-    does every turn after it, forever.
+    The park gate in ``SessionRuntime._finalize`` reads
+    ``task_registry.has_unresolved_background_launches``: a launch id stops
+    counting once a registry record with that ``tool_use_id`` is non-running,
+    so the teardown's ``complete_task`` resolves the launch id its record carries.
+    The launch set itself is cleared only by ``task_registry.clear_session``,
+    so any of this worker's ids that never got a terminal record would keep the
+    gate armed and buy a spurious park (which the turn-start self-heal later
+    settles). Discarding them here removes that residue.
 
     Strictly surgical: only THIS worker's ids are discarded, so an ordinary
-    CLI-native subagent's launch id — whose parking is a deliberate feature the
-    ruling says must not change — is left exactly where it was.
+    CLI-native subagent's launch id — whose parking is a deliberate feature —
+    is left exactly where it was.
     """
     try:
         from app.core.task_registry import task_registry
@@ -377,11 +355,10 @@ async def _settle_card(record: WorkerRecord, preview: str, summary: Optional[str
     """Settle the parent's subagent card for a torn-down worker. Never raises.
 
     Load-bearing ordering note: ``turn.completed`` is emitted BEFORE
-    ``_finalize`` runs (``app/core/query_engine.py:1785`` →
-    ``app/core/turn_recorder.py:703-709``), and the reducer speculatively
-    settles running cards only on ``turn.completed``, never on ``turn.aborted``
-    (``reducer.ts:609``). A card we kill after that point therefore gets no
-    second chance — if we skip this it spins forever on every replay.
+    ``_finalize`` runs, and the reducer speculatively settles running cards
+    only on ``turn.completed``, never on ``turn.aborted`` (``reducer.ts``
+    ``case 'turn.completed'``). A card we kill after that point therefore gets
+    no second chance — if we skip this it spins forever on every replay.
     """
     feed = record.feed
     if feed is None:
@@ -403,16 +380,15 @@ NOTE_SUBTYPE = "provider_agent_teardown"
 async def _note_parent(parent_session_id: str, message: str, count: int, reason: str) -> None:
     """Append ONE coalesced system note to the parent's log. Never raises.
 
-    This is the chip-flood answer (plan §2 C.4): ``complete_task`` fires a
-    durable terminal-notification chip per killed task
-    (``app/core/task_registry.py:785-796``), and fan-out is uncapped by ruling
-    P12, so N workers would mean N chips at once. Teardown suppresses those
+    This is the chip-flood answer: ``task_registry.complete_task`` fires a
+    durable terminal-notification chip per killed task, and fan-out can be
+    wide, so N workers would mean N chips at once. Teardown suppresses those
     (``notify=False``) and leaves this single line instead.
 
     Emitted as a ``system`` frame with an explicit ``subtype``/``data``: the
-    shared translator maps a subtype-less system frame onto a ``SystemNote``
-    whose fields are empty, so the text would be silently dropped
-    (``app/core/turn_recorder.py:352-356``).
+    shared translator (``turn_recorder._translate_shared``) maps a subtype-less
+    system frame onto a ``SystemNote`` whose fields are empty, so the text
+    would be silently dropped.
     """
     try:
         from app.core.turn_recorder import record_drained_event
@@ -440,10 +416,9 @@ async def _deliver_teardown(
     """Tell the PARENT — its engine, and its live turn if it has one.
 
     ``_note_parent`` writes the coalesced line to the session's event log, which
-    is the transcript the user reads. It is not a channel the MODEL has, and the
-    audit caught exactly that gap: an interrupt killed a running worker, the note
-    went into the log, and the parent — having heard nothing — told the user
-    minutes later that the worker was still running.
+    is the transcript the user reads. It is not a channel the MODEL has, so a
+    parent that heard nothing else would keep telling the user its killed
+    worker is still running.
 
     Two deliveries close it, both best-effort:
 
@@ -507,10 +482,10 @@ async def _deliver_teardown(
 async def _cancel_worker_prompts(record: WorkerRecord) -> None:
     """Sweep this worker's still-pending approval prompts off its PARENT.
 
-    A worker's prompts are RAISED ON THE PARENT's session id (P3-A3), so killing
-    the worker's own session leaves them pending on a surface the user is still
+    A worker's prompts are RAISED ON THE PARENT's session id, so killing the
+    worker's own session leaves them pending on a surface the user is still
     watching, asked by a worker that no longer exists — and the worker's waiter
-    sits in a detached SDK task that only the row leaving ``pending`` unblocks.
+    sits in a detached task that only the row leaving ``pending`` unblocks.
     The parent id comes off the record rather than the approval-route registry:
     routes are never unregistered, so they identify no rows.
 
@@ -578,7 +553,7 @@ async def teardown_worker(
             "killed",
             summary=summary,
             reason=reason,
-            # Suppress the per-task terminal chip: uncapped fan-out (P12)
+            # Suppress the per-task terminal chip: a wide fan-out
             # would otherwise surface one chip per worker in a burst. The
             # single coalesced note the caller emits replaces them.
             notify=False,
@@ -623,7 +598,7 @@ async def _teardown(
     """Kill every live worker of ``parent_session_id``. Never raises.
 
     ``include_background=False`` (the turn-end path) spares Task-tool
-    background workers (ruling A8): they outlive the caller's turn by design
+    background workers: they outlive the caller's turn by design
     and die on completion, timeout, or stop-all.
     """
     records = live_workers(parent_session_id)
@@ -654,7 +629,7 @@ async def _teardown(
 
 
 async def teardown_workers(parent_session_id: str) -> List[Dict[str, Any]]:
-    """Turn-end teardown: no ProviderAgent worker outlives its parent turn.
+    """Turn-end teardown: no synchronous worker outlives its parent turn.
 
     Called from ``SessionRuntime._finalize`` between ``persist_turn_end_state``
     and the park-gate read, which is the ONE point every normal, aborted and

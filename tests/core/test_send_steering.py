@@ -13,7 +13,6 @@ Three seams are covered here:
 The turns table is real (pg_shim SQLite); the engine and the pump are stubbed.
 """
 
-import asyncio
 import time
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,21 +21,6 @@ import pytest
 
 from app.core import session_runtime
 from app.db import turns as turns_db
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
 
 
 @pytest.fixture(autouse=True)

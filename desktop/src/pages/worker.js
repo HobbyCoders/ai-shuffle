@@ -6,7 +6,7 @@
  const status = {
   section: $('status'), heading: $('status-heading'), detail: $('status-detail'),
   postgres: $('status-postgres'), error: $('status-error'), log: $('log'),
-  actions: $('actions'), restart: $('restart'), openLogs: $('open-logs'), diagnostics: $('diagnostics')
+  actions: $('actions'), restart: $('restart'), openUi: $('open-ui'), openLogs: $('open-logs'), diagnostics: $('diagnostics')
  };
  let lastState = null;
  let loadError = new URLSearchParams(window.location.search).get('error');
@@ -30,6 +30,7 @@
   status.error.textContent = error || '';
   status.error.hidden = !error;
   status.restart.hidden = !worker;
+  status.openUi.hidden = true;
   status.actions.hidden = !worker;
  }
 
@@ -50,6 +51,7 @@
   status.error.hidden = true;
   status.error.textContent = '';
   status.restart.hidden = true;
+  status.openUi.hidden = true;
   status.actions.hidden = true;
   status.restart.disabled = retrying;
   status.restart.textContent = retrying ? 'Restarting…' : 'Try again';
@@ -85,6 +87,9 @@
    case 'ready':
     status.heading.textContent = 'Ready when you are';
     status.detail.textContent = 'Your local worker is running.';
+    // Opened from Worker Status…: the worker is already up, so offer the way back.
+    status.openUi.hidden = false;
+    status.actions.hidden = false;
     break;
    case 'stopping':
     status.heading.textContent = retrying ? 'Starting again' : 'Closing your local worker';
@@ -123,6 +128,7 @@
   loadError = null;
   resetWait();
   status.error.hidden = true;
+  status.openUi.hidden = true;
   status.section.dataset.mode = 'starting';
   status.heading.textContent = 'Starting again';
   status.detail.textContent = 'Preparing your local worker.';
@@ -139,6 +145,10 @@
    status.restart.textContent = 'Try again';
    showFailure('AI Shuffle could not restart', 'You can try again or close and reopen the app. Startup diagnostics are available below.', error instanceof Error ? error.message : String(error));
   }
+ });
+
+ status.openUi.addEventListener('click', () => {
+  worker.openUi().catch((error) => showFailure('AI Shuffle could not open', 'Try again to reconnect to your local worker. Startup diagnostics are available below.', error instanceof Error ? error.message : String(error)));
  });
 
  // Subscribe before the snapshot so a fast ready/failure event cannot be lost during page load.

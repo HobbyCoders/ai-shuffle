@@ -18,7 +18,7 @@ from app.core import pairing as pairing_core
 from app.db import database
 from app.db import network as store
 from app.network import engine, enrollment, identity, tokens, transport
-from tests.core.network.harness import Worker
+from tests.core.network.harness import Worker, owner_pref, set_owner_pref
 
 
 @pytest.fixture
@@ -112,20 +112,6 @@ class ServedBy:
         return httpx.MockTransport(self.handler)
 
 
-def _set_pref(worker, key, value):
-    with worker.active():
-        from app.core import owner_auth
-        database.set_user_preference("admin", owner_auth.preference_identity(), key, value)
-        engine.scan_all()
-
-
-def _pref(worker, key):
-    with worker.active():
-        from app.core import owner_auth
-        row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
-        return row["value"] if row else None
-
-
 async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monkeypatch):
     from app.core.config import settings
     monkeypatch.setattr(settings, "cors_origins", "https://app.example.com")
@@ -148,7 +134,7 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
             engine.apply_snapshot_chunk(chunk)
         engine.adopt_watermarks(manifest["watermarks"])
         engine.finish_bootstrap()
-    _set_pref(b, "from_b", 1)
+    set_owner_pref(b, "from_b", 1)
 
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
@@ -174,7 +160,7 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
                 summary = await link.sync_once(client, engine.context())
             assert summary["received"] == 0 and summary["sent"] == 0 and link.token == token_before
             assert heads.call_count == 3  # pull frontier, server response, push frontier
-    assert _pref(a, "from_b") == 1
+    assert owner_pref(a, "from_b") == 1
     with b.active():
         assert database.get_system_setting("tts_model") == "voice-a"
         assert store.list_peers()[0]["device_id"] if store.list_peers() else True
@@ -193,14 +179,14 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
             await link.sync_once(client, engine.context())
             assert identity.load().incarnation == 2
             assert engine.context().identity.incarnation == 2
-    _set_pref(b, "after_restore", True)
+    set_owner_pref(b, "after_restore", True)
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
             link = transport.PeerLink(a.device_id, ["https://a.example.com"])
             link.token = None
             summary = await link.sync_once(client, engine.context())
             assert summary["sent"] >= 1
-    assert _pref(a, "after_restore") is True
+    assert owner_pref(a, "after_restore") is True
     with a.active():
         marks = store.local_watermarks()
         assert "2" in marks[b.device_id]
@@ -213,7 +199,7 @@ async def test_rollback_proof_survives_peer_pruning(workers):
         engine.create_network("Home")
     join(a, b)
     for value in range(4):
-        _set_pref(b, "before-restore", value)
+        set_owner_pref(b, "before-restore", value)
     exchange(b, a)
     with a.active():
         assert store.prune_ops(keep_days=-1) > 0
@@ -233,11 +219,11 @@ async def test_rollback_proof_survives_peer_pruning(workers):
             # the same signed proof after the first recovery completes.
             await link._check_rollback(client, original_context, heads)
             assert engine.context().identity.incarnation == 2
-        _set_pref(b, "after-restore", True)
+        set_owner_pref(b, "after-restore", True)
         with b.active():
             await link.sync_once(client, engine.context())
-    assert _pref(a, "before-restore") == 3
-    assert _pref(a, "after-restore") is True
+    assert owner_pref(a, "before-restore") == 3
+    assert owner_pref(a, "after-restore") is True
 
 
 @pytest.mark.parametrize("replace_all", [False, True])
@@ -247,15 +233,15 @@ async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_a
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(b, "record-x", "b1")
-    _set_pref(b, "record-y", "b2")
+    set_owner_pref(b, "record-x", "b1")
+    set_owner_pref(b, "record-y", "b2")
     exchange(b, a)
     with b.active():
         with store.get_db() as conn:
             head = store.own_watermark(conn.cursor(), b.device_id, 1)
-    _set_pref(a, "record-y", "a-replacement")
+    set_owner_pref(a, "record-y", "a-replacement")
     if replace_all:
-        _set_pref(a, "record-x", "a-replacement")
+        set_owner_pref(a, "record-x", "a-replacement")
     with a.active():
         assert store.prune_ops(keep_days=-1) > 0
         assert store.local_watermarks()[b.device_id]["1"] == head
@@ -282,11 +268,11 @@ async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_a
             proofs = [r for r in served.requests if r[0] == "GET" and "/peer/ops/" in r[1]]
             assert len(proofs) == (1 if replace_all else 0)
         if not replace_all:
-            _set_pref(b, "after-restore", True)
+            set_owner_pref(b, "after-restore", True)
             with b.active():
                 await link.sync_once(client, engine.context())
-            assert _pref(a, "after-restore") is True
-    assert _pref(a, "record-y") == "a-replacement"
+            assert owner_pref(a, "after-restore") is True
+    assert owner_pref(a, "record-y") == "a-replacement"
 
 
 async def test_enrollment_over_http_then_sync(workers, monkeypatch):
@@ -343,12 +329,12 @@ async def test_enrollment_over_http_then_sync(workers, monkeypatch):
     assert "/api/v1/network/join" in paths and "/api/v1/network/peer/state" in paths
 
     # B now syncs to A over the transport loop's link.
-    _set_pref(b, "from_b", 42)
+    set_owner_pref(b, "from_b", 42)
     async with real_async(transport=served.transport()) as client:
         with b.active():
             results = await transport.sync_pass(client)
             assert results[a.device_id]["sent"] >= 1
-    assert _pref(a, "from_b") == 42
+    assert owner_pref(a, "from_b") == 42
 
 
 async def test_peer_loop_quiets_after_apply_and_wakes_for_a_real_write(workers, monkeypatch):
@@ -361,7 +347,7 @@ async def test_peer_loop_quiets_after_apply_and_wakes_for_a_real_write(workers, 
         engine.create_network("Loop pacing")
     join(a, b)
     served = ServedBy(a, "http://loop-a.local:8000")
-    _set_pref(b, "first-write", 1)
+    set_owner_pref(b, "first-write", 1)
     timeouts = []
     clients = []
     real_client = httpx.AsyncClient

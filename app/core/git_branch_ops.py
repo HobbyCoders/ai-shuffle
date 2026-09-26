@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core.git_cache import (
     _git_cache,
     _native_reader,
-    AHEAD_BEHIND_CACHE_TTL,
     DEFAULT_BRANCH_CACHE_TTL,
 )
 
@@ -378,25 +377,3 @@ class GitBranchMixin:
         except (subprocess.SubprocessError, OSError, ValueError):
             pass
         return (0, 0)
-
-    def check_remote_head(self, working_dir: str, remote: str = "origin") -> Optional[str]:
-        """Check the remote HEAD SHA without performing a fetch.
-
-        Uses 'git ls-remote' which is a lightweight network operation
-        (~100ms) that only reads the remote ref advertisement.
-
-        Returns:
-            The SHA-1 of the remote HEAD, or None on error.
-        """
-        try:
-            result = self._run_git(
-                working_dir,
-                ["ls-remote", "--head", remote, "HEAD"],
-                timeout=10
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # Output format: "<sha>\tHEAD"
-                return result.stdout.strip().split()[0]
-        except (subprocess.SubprocessError, OSError):
-            pass
-        return None

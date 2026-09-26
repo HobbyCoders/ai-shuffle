@@ -35,8 +35,10 @@ export interface ApiUserCreate {
 
 export interface ApiUserUpdate {
 	name?: string;
-	description?: string;
-	project_id?: string;
+	/** null clears it; omitted leaves it unchanged. */
+	description?: string | null;
+	/** null removes the project restriction; omitted leaves it unchanged. */
+	project_id?: string | null;
 	profile_ids?: string[];
 	is_active?: boolean;
 	model?: string | null;
@@ -62,10 +64,6 @@ export async function getApiUsers(): Promise<ApiUser[]> {
 
 export async function createApiUser(data: ApiUserCreate): Promise<ApiUserCreateResponse> {
 	return api.post<ApiUserCreateResponse>('/api-users', data);
-}
-
-export async function getApiUser(id: string): Promise<ApiUser> {
-	return api.get<ApiUser>(`/api-users/${id}`);
 }
 
 export async function updateApiUser(id: string, data: ApiUserUpdate): Promise<ApiUser> {

@@ -52,9 +52,6 @@ export const BrowserSidePanel = createLazyComponent('browser-panel', () =>
 export const ChangedFilesPanelLazy = createLazyComponent('changed-files', () =>
 	import('$lib/components/git/ChangedFilesPanel.svelte')
 );
-export const DiffViewerLazy = createLazyComponent('diff-viewer', () =>
-	import('$lib/components/git/DiffViewer.svelte')
-);
 export const CreateBranchModalLazy = createLazyComponent('create-branch-modal', () =>
 	import('$lib/components/git/CreateBranchModal.svelte')
 );

@@ -1,33 +1,19 @@
 """#1407 reconciliation transaction contracts on disposable PostgreSQL."""
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.environ.get("ALLOW_REAL_PG") != "1",
-                                reason="requires disposable TEST_POSTGRES_DSN")
+from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401  (pg_schema: autouse fixture)
+
+pytestmark = requires_real_pg
 
 T0 = datetime(2026, 9, 14, 22, 40, 0, tzinfo=timezone.utc)
 CALLS = ((1200, 40, 3000, 0), (800, 25, 4200, 64))
 SUMS = tuple(sum(c[i] for c in CALLS) for i in range(4))
 COST = 0.25
-
-
-@pytest.fixture(scope="module", autouse=True)
-def pg_schema():
-    from app.db import base
-    from app.db.schema_postgres import create_postgres_schema
-    assert os.environ.get("TEST_POSTGRES_DSN")
-    base.init_pool(min_conn=1, max_conn=6)
-    try:
-        with base.get_db() as conn:
-            create_postgres_schema(conn.cursor())
-        yield
-    finally:
-        base.close_pool()
 
 
 @pytest.fixture

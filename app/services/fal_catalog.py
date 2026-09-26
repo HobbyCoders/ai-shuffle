@@ -9,6 +9,7 @@ Catalog is persisted to PostgreSQL for instant availability on startup,
 and refreshed in the background periodically (default: every hour).
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import httpx
+# Bound at import: tests swap the module's ``httpx`` for a stub client factory.
+from httpx import HTTPStatusError, TimeoutException
 
 from app.db.async_database import run_sync
 from app.db.base import get_db
@@ -33,6 +36,7 @@ CATEGORY_TO_TOOL_TYPE = {
     "image-to-3d": "image_to_3d",
     "3d-to-3d": "text_to_3d",
     "text-to-speech": "tts",
+    "speech-to-text": "stt",
     "text-to-audio": "audio_generation",  # music / sound generation (Lyria, Stable Audio, ACE-Step, ...)
     "text-to-music": "audio_generation",
     "audio-to-audio": "audio_to_audio",  # remix / style transfer / restoration
@@ -106,6 +110,12 @@ def resolve_output_type(category: str) -> Optional[str]:
 
 FAL_CATALOG_API = "https://api.fal.ai/v1/models"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
+# httpx's 30 s timeout is per operation, so a slow-dripping upstream could keep
+# a paged fetch going far longer. The whole fetch gets this deadline, and a
+# caller waiting on a refresh (its own or one already running) gives up after
+# the fetch deadline plus a margin for the DB write, answering with the cache.
+REFRESH_FETCH_TIMEOUT_SECONDS = 120.0
+REFRESH_WAIT_TIMEOUT_SECONDS = REFRESH_FETCH_TIMEOUT_SECONDS + 30.0
 
 
 @dataclass
@@ -185,6 +195,15 @@ class CatalogModel:
         )
 
 
+def _describe_refresh_error(error: Exception) -> str:
+    """A short, key-free reason a catalog fetch failed."""
+    if isinstance(error, HTTPStatusError):
+        return f"fal.ai answered HTTP {error.response.status_code}"
+    if isinstance(error, (TimeoutException, asyncio.TimeoutError)):
+        return "fal.ai did not answer in time"
+    return f"could not reach fal.ai ({type(error).__name__})"
+
+
 class FalCatalogService:
     """
     Service that manages the fal.ai model catalog.
@@ -200,6 +219,7 @@ class FalCatalogService:
         self._cache_ttl = cache_ttl
         self._last_refresh: float = 0
         self._refreshing = False
+        self._refresh_task: Optional[asyncio.Task] = None
 
     @property
     def is_stale(self) -> bool:
@@ -257,18 +277,54 @@ class FalCatalogService:
         Paginates through all results, filters to inference models only,
         and persists to both memory and PostgreSQL.
 
-        Returns the number of models fetched.
+        Returns the number of models in the catalog afterwards (the cached
+        count when the fetch fails; see ``refresh_with_status``). A call made
+        while another refresh runs returns the cached count at once.
         """
         if self._refreshing:
             logger.debug("Catalog refresh already in progress, skipping")
             return len(self._cache)
+        count, _error = await self.refresh_with_status(api_key)
+        return count
 
+    async def refresh_with_status(self, api_key: Optional[str] = None) -> tuple[int, Optional[str]]:
+        """``refresh`` that also says why it kept the cache.
+
+        Returns ``(model count, error)``: ``error`` is ``None`` when fal.ai
+        answered with models, else a short reason with no key material, and
+        the count is the cached one. A call made while another refresh runs
+        waits for that refresh and reports its outcome, so a caller is never
+        told the cache it already had was just fetched.
+        """
+        task = self._refresh_task
+        if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
+            task = asyncio.ensure_future(self._refresh_once(api_key))
+            self._refresh_task = task
+        else:
+            logger.debug("Catalog refresh already in progress, waiting for it")
+        # Shielded: a caller that goes away (or stops waiting) does not cancel
+        # the refresh the other callers are waiting on. Bounded: a refresh
+        # that outlives the deadline leaves the cache as it was for this caller.
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), REFRESH_WAIT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "fal.ai catalog refresh still running after %.0f s; answering with the cache",
+                REFRESH_WAIT_TIMEOUT_SECONDS,
+            )
+            return len(self._cache), (
+                f"the refresh did not finish within {REFRESH_WAIT_TIMEOUT_SECONDS:.0f} s"
+            )
+
+    async def _refresh_once(self, api_key: Optional[str]) -> tuple[int, Optional[str]]:
         self._refreshing = True
         try:
-            models = await self._fetch_all_models(api_key)
+            models = await asyncio.wait_for(
+                self._fetch_all_models(api_key), REFRESH_FETCH_TIMEOUT_SECONDS
+            )
             if not models:
                 logger.warning("fal.ai catalog API returned no models, keeping existing cache")
-                return len(self._cache)
+                return len(self._cache), "fal.ai returned no models"
 
             self._cache = models
             self._last_refresh = time.time()
@@ -281,11 +337,11 @@ class FalCatalogService:
             await run_sync(self._persist_to_db, models)
 
             logger.info(f"Refreshed fal.ai catalog: {len(models)} models across {len(self.get_categories())} categories")
-            return len(models)
+            return len(models), None
         except Exception as e:
             logger.error(f"Failed to refresh fal.ai catalog: {e}")
             # Keep existing cache on failure
-            return len(self._cache)
+            return len(self._cache), _describe_refresh_error(e)
         finally:
             self._refreshing = False
 
@@ -293,6 +349,7 @@ class FalCatalogService:
         """Paginate through the fal.ai catalog API and return all inference models."""
         all_models: list[CatalogModel] = []
         cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
         page = 0
 
         headers = {}
@@ -339,6 +396,10 @@ class FalCatalogService:
 
                 if not has_more or not next_cursor:
                     break
+                if next_cursor in seen_cursors:
+                    logger.warning("Catalog fetch got a repeated page cursor, stopping pagination")
+                    break
+                seen_cursors.add(next_cursor)
 
                 cursor = next_cursor
 
@@ -384,17 +445,6 @@ class FalCatalogService:
     # Query Methods
     # =========================================================================
 
-    def get_all(self) -> list[CatalogModel]:
-        """Get all cached models."""
-        return self._cache
-
-    def get_model(self, endpoint_id: str) -> Optional[CatalogModel]:
-        """Get a specific model by endpoint ID."""
-        for model in self._cache:
-            if model.endpoint_id == endpoint_id:
-                return model
-        return None
-
     def search(
         self,
         q: Optional[str] = None,
@@ -436,10 +486,6 @@ class FalCatalogService:
             {"category": cat, "count": count, "tool_type": resolve_tool_type(cat)}
             for cat, count in sorted(category_counts.items(), key=lambda x: -x[1])
         ]
-
-    def get_models_for_tool(self, tool_type: str) -> list[CatalogModel]:
-        """Get all models that map to a specific tool type."""
-        return [m for m in self._cache if m.tool_type == tool_type]
 
 
 # Singleton instance

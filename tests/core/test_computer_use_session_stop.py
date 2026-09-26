@@ -7,7 +7,7 @@ a fresh agent can act again.
 """
 
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -39,6 +39,7 @@ def _runtime(sid="s1", tid="t1") -> SessionRuntime:
     rt._pump_task = None
     rt.source = "user"
     rt.turn = {"command_id": None}
+    rt.api_user_id = None
     return rt
 
 

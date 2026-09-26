@@ -38,7 +38,6 @@ vi.mock('./v2/feed-controller', () => ({
 		stop: vi.fn(),
 		restart: vi.fn(),
 		isFeeding: vi.fn(() => false),
-		currentSessionId: vi.fn(() => null),
 		invalidate: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
@@ -53,6 +52,7 @@ import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
+import { rateLimit } from '../rate-limit';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -170,26 +170,46 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('composer suggestions', () => {
-		const idle = { sessionId: 'session-1', mode: 'code', enabled: true, turnId: null, streaming: false, blocked: false };
-		const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 'reply-turn', suggestion: 'Explain the tests.' };
-		beforeEach(() => {
-			composerSuggestion.reset(); composerSuggestion.observe(idle);
-			composerSuggestion.observe({ ...idle, turnId: 'reply-turn', streaming: true });
-		});
-		it.each([true, false])('routes direct/enveloped broadcasts without ordering loss (envelope: %s)', envelope => {
+		it.each([true, false])('routes a hint notification to the authoritative reader (envelope: %s)', envelope => {
+			const receive = vi.spyOn(composerSuggestion, 'receive').mockImplementation(() => {});
+			const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 't', suggestion: 'Next?' };
 			handlers.handleMessage(envelope ? { event_type: 'stream_frame', data: frame } : frame);
-			expect(get(composerSuggestion)).toBe('');
-			handlers.handleMessage({type:'done',session_id:'session-1'});
-			composerSuggestion.observe(idle);
-			expect(get(composerSuggestion)).toBe(frame.suggestion);
+			expect(receive).toHaveBeenCalledWith(frame);
+			receive.mockRestore();
 		});
-		it.each(['stopped','interrupted','error'])('invalidates current-session %s, not background events', type => {
-			composerSuggestion.observe(idle); handlers.handleMessage(frame);
-			handlers.handleMessage({type,session_id:'other',message:'test'});
-			expect(get(composerSuggestion)).toBe(frame.suggestion);
-			handlers.handleMessage({type,session_id:'session-1',message:'test'});
-			expect(get(composerSuggestion)).toBe('');
-			handlers.handleMessage(frame); expect(get(composerSuggestion)).toBe('');
+		it.each(['stopped', 'interrupted', 'error'])('invalidates current-session %s, not background events', type => {
+			const invalidate = vi.spyOn(composerSuggestion, 'invalidate');
+			handlers.handleMessage({ type, session_id: 'other', message: 'test' });
+			expect(invalidate).not.toHaveBeenCalled();
+			handlers.handleMessage({ type, session_id: 'session-1', message: 'test' });
+			expect(invalidate).toHaveBeenCalledOnce();
+			invalidate.mockRestore();
+		});
+	});
+
+	describe('rate_limit frames', () => {
+		it('drops a frame without a window type, logging once, and forwards typed ones', () => {
+			const apply = vi.spyOn(rateLimit, 'applyLiveEvent').mockImplementation(() => {});
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				handlers.handleMessage({ type: 'rate_limit', status: 'rejected', utilization: 0.9 });
+				handlers.handleMessage({ type: 'rate_limit', rate_limit_type: '', utilization: 0.9 });
+				handlers.handleMessage({ type: 'rate_limit', rate_limit_type: null, status: 'allowed' });
+				expect(apply).not.toHaveBeenCalled();
+				expect(warn.mock.calls.filter((c) => String(c[0]).includes('rate_limit'))).toHaveLength(1);
+
+				handlers.handleMessage({
+					type: 'rate_limit', rate_limit_type: 'five_hour', status: 'rejected',
+					utilization: null, resets_at: '1900000000', instance_id: 'inst-a',
+				});
+				expect(apply).toHaveBeenCalledOnce();
+				expect(apply.mock.calls[0][0]).toMatchObject({
+					rate_limit_type: 'five_hour', status: 'rejected', instance_id: 'inst-a',
+				});
+			} finally {
+				apply.mockRestore();
+				warn.mockRestore();
+			}
 		});
 	});
 
@@ -1214,6 +1234,29 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(updatedPerms?.length).toBe(0);
+		});
+	});
+
+	describe('pending_* reply for a socket with no session selected', () => {
+		// The backend answers get_pending_permissions / get_pending_questions with
+		// an empty list and `session_id: null` when the socket has no session
+		// selected; that must not wipe the active session's open modals.
+		it('leaves the permission and question queues untouched', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [
+				{ session_id: 'session-1', request_id: 'perm-open', tool_name: 'Bash', tool_input: {} } as never,
+			];
+			state.pendingQuestions = [
+				{ session_id: 'session-1', request_id: 'q-open', tool_use_id: 't', questions: [] } as never,
+			];
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'pending_permissions', session_id: null, pending: [], deferred: [] });
+			handlers.handleMessage({ type: 'pending_questions', session_id: null, questions: [] });
+
+			expect(deps.update).not.toHaveBeenCalled();
 		});
 	});
 

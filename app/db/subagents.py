@@ -1,10 +1,8 @@
 """Subagent-shaped compat layer over the unified ``agents`` table + permission rules.
 
-v71 (agents-program ruling A4): the ``subagents`` table is gone — every former
-subagent row now lives in ``agents`` with its prompt/tools/model/memory folded
-into the config blob. Existing callers (the /subagents API until the P2b hard
-rename, query_options' enabled_agents resolution until P2c) keep working
-through this module, which projects agent rows into the old subagent dict
+The ``subagents`` table is gone — every former subagent row lives in
+``agents`` with its prompt/tools/model/memory folded into the config blob.
+Existing callers keep working through this module, which projects agent rows into the old subagent dict
 shape and maps writes back onto agent configs.
 
 Built-in subagents' "revert to defaults" now compares against the CODE
@@ -14,12 +12,10 @@ definitions in ``app.core.builtin_subagents.BUILTIN_SUBAGENTS`` — the old
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 from app.db import profiles as _agents_db
 
 
@@ -52,12 +48,6 @@ class PermissionRuleRow(TypedDict):
 # ============================================================================
 # Agent-row <-> subagent-shape projection
 # ============================================================================
-
-def _parse_json_fields(row: dict) -> dict:
-    """Kept for import compatibility (database.py re-exports it); the agents
-    config blob is already parsed by the profiles accessor."""
-    return row
-
 
 def _agent_to_subagent(agent: Optional[dict]) -> Optional[SubagentRow]:
     if not agent:
@@ -151,15 +141,18 @@ def create_subagent(
     mcp_servers: Optional[List[Any]] = None,
     is_builtin: bool = False,
     store_defaults: bool = False,
+    if_absent: bool = False,
 ) -> SubagentRow:
     """Create an agent row from subagent-shaped fields.
 
     ``store_defaults`` is accepted for signature compatibility and ignored —
     built-in defaults live in code (``BUILTIN_SUBAGENTS``) since v71.
+    ``if_absent`` keeps an existing row with this id (see ``create_profile``).
     """
     config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
     _agents_db.create_profile(
-        subagent_id, name, description, config, is_builtin=is_builtin
+        subagent_id, name, description, config, is_builtin=is_builtin,
+        if_absent=if_absent,
     )
     return get_subagent(subagent_id)
 
@@ -259,11 +252,6 @@ def builtin_subagent_is_modified(agent: Optional[dict]) -> Optional[bool]:
         or (current["tools"] or None) != (defaults.get("tools") or None)
         or (current["model"] or None) != (defaults.get("model") or None)
     )
-
-
-def has_subagent_been_modified(subagent_id: str) -> bool:
-    """True when a built-in agent differs from its in-repo definition."""
-    return bool(builtin_subagent_is_modified(get_subagent(subagent_id)))
 
 
 # ============================================================================

@@ -36,8 +36,11 @@
 		getConnectorTypes,
 		getConnectorEvents,
 		getConnectorLogs,
-		discoverDiscord
+		discoverDiscord,
+		connectorNeedsAgent,
+		buildConnectorCreate
 	} from '$lib/api/connectors';
+	import { api, type Profile } from '$lib/api/client';
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
 	import { listInstalls } from '$lib/api/installs';
@@ -52,6 +55,7 @@
 	let connectorTypes: ConnectorTypeInfo[] = $state([]);
 	let availableEvents: string[] = $state([]);
 	let apiUsers: ApiUser[] = $state([]);
+	let agents: Profile[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 
@@ -87,8 +91,11 @@
 	// Form state
 	let formName = $state('');
 	let formApiUserId = $state('');
+	let formProfileId = $state('');
 	let formConfig: Record<string, string> = $state({});
 	let formEvents: string[] = $state([]);
+	// A new API user needs an agent, or the connection refuses every incoming message.
+	const needsAgent = $derived.by(() => view === 'setup' && !formApiUserId && !!selectedType && connectorNeedsAgent(selectedType.type, formConfig));
 	let formSaving = $state(false);
 	let formError = $state('');
 	let testingId: string | null = $state(null);
@@ -335,6 +342,15 @@
 			loading = false;
 		}
 
+		// Agents for a new connection's API user. Kept out of the bundle above
+		// so a failure here never hides the connectors list.
+		try {
+			agents = await api.get<Profile[]>('/agents');
+			if (!formProfileId && agents.length === 1) formProfileId = agents[0].id;
+		} catch {
+			agents = [];
+		}
+
 		// Best-effort: resolve this install's id + peer device names so the card
 		// can label connectors that run on another install. A failure here must
 		// not affect the connectors list.
@@ -364,17 +380,23 @@
 			}
 		}
 
+		if (needsAgent && !formProfileId) {
+			formError = agents.length ? 'Choose an agent' : 'Create an agent first: every incoming message is refused without one';
+			return;
+		}
+
 		formSaving = true;
 		formError = '';
 
 		try {
-			const data: ConnectorCreate = {
+			const data: ConnectorCreate = buildConnectorCreate({
 				name: formName,
 				type: selectedType.type as ConnectorCreate['type'],
 				config: { ...formConfig },
 				events: formEvents,
-				...(formApiUserId ? { api_user_id: formApiUserId } : {})
-			};
+				apiUserId: formApiUserId,
+				profileId: needsAgent ? formProfileId : undefined
+			});
 			await createConnector(data);
 			// Close the form on the create response alone — don't gate the view
 			// transition on the follow-up loadData() reload. loadData() bundles
@@ -566,6 +588,7 @@
 		editingConnector = null;
 		formName = '';
 		formApiUserId = '';
+		formProfileId = agents.length === 1 ? agents[0].id : '';
 		formConfig = {};
 		formEvents = [];
 		formError = '';
@@ -773,7 +796,7 @@
 												class:on={connector.is_active}
 												role="switch"
 												aria-checked={connector.is_active}
-												aria-label={connector.is_active ? 'Deactivate connector' : 'Activate connector'}
+												aria-label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`}
 												onclick={() => handleToggle(connector)}
 												title={connector.is_active ? 'Deactivate' : 'Activate'}
 											>
@@ -786,6 +809,7 @@
 												disabled={testingId === connector.id}
 												class="connector-action-btn"
 												title="Test connection"
+												aria-label={`Test ${connector.name}`}
 											>
 												{#if testingId === connector.id}
 													<svg
@@ -835,6 +859,8 @@
 												class="connector-action-btn"
 												class:active={expandedLogs.has(connector.id)}
 												title="View event logs"
+												aria-label={`Event logs for ${connector.name}`}
+												aria-expanded={expandedLogs.has(connector.id)}
 											>
 												<svg
 													fill="none"
@@ -855,6 +881,7 @@
 												onclick={() => startEdit(connector)}
 												class="connector-action-btn"
 												title="Edit connector"
+												aria-label={`Edit ${connector.name}`}
 											>
 												<svg
 													fill="none"
@@ -875,6 +902,7 @@
 												onclick={() => handleDelete(connector.id)}
 												class="connector-action-btn act-danger"
 												title="Delete connector"
+												aria-label={`Delete ${connector.name}`}
 											>
 												<svg
 													fill="none"
@@ -1113,6 +1141,27 @@
 						/>
 					</div>
 
+					{#if needsAgent}
+						<div>
+							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-agent">
+								Agent <span class="text-destructive">*</span>
+							</label>
+							<select
+								id="connector-agent"
+								bind:value={formProfileId}
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
+							>
+								<option value="" disabled>Choose an agent</option>
+								{#each agents as agent (agent.id)}
+									<option value={agent.id}>{agent.name}</option>
+								{/each}
+							</select>
+							<p class="text-xs text-muted-foreground mt-1">
+								Runs incoming messages. Without an agent, every incoming message is refused.
+							</p>
+						</div>
+					{/if}
+
 					<button class="text-sm text-primary" aria-expanded={showAdvanced} onclick={() => showAdvanced = !showAdvanced}>
 						{showAdvanced ? 'Hide advanced settings' : 'Advanced settings'}
 					</button>
@@ -1136,7 +1185,7 @@
 							</select>
 							<p class="text-xs text-muted-foreground mt-1">
 								Select an existing API user or leave empty to auto-create one.
-								Manage API users in Settings &rarr; System.
+								Manage API users in Settings &rarr; API.
 							</p>
 						</div>
 					{/if}

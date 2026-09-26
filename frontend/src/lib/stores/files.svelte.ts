@@ -60,6 +60,15 @@ const SERVER_PREFERENCE_KEY = 'files_preferences';
 // Module-level mutable state (timers, flags)
 // ============================================================================
 
+/** Bumped per listing request; only the newest request may write the listing. */
+let _loadSeq = 0;
+
+/** The backend's `detail`, or `fallback` when the error body is not JSON (a proxy's HTML 502). */
+async function errorDetail(response: Response, fallback: string): Promise<string> {
+	const body = await response.json().catch(() => null);
+	return (body && typeof body.detail === 'string' && body.detail) || fallback;
+}
+
 
 // ============================================================================
 // Server preferences type (subset of FilesState)
@@ -195,16 +204,6 @@ export const files = {
 		files.loadFiles();
 	},
 
-	navigateUp(): void {
-		if (!_state.currentPath) return;
-
-		const parts = _state.currentPath.split('/');
-		parts.pop();
-		const parentPath = parts.join('/');
-
-		files.navigateTo(parentPath);
-	},
-
 	// ========================================================================
 	// File Loading
 	// ========================================================================
@@ -212,6 +211,7 @@ export const files = {
 	async loadFiles(): Promise<void> {
 		const currentPath = _state.currentPath;
 		const showHidden = _state.showHidden;
+		const seq = ++_loadSeq;
 
 		_update((s) => ({ ...s, loading: true, error: null }));
 
@@ -224,17 +224,19 @@ export const files = {
 			const response = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
 
 			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.detail || 'Failed to load files');
+				throw new Error(await errorDetail(response, 'Failed to load files'));
 			}
 
 			const data = await response.json();
+			// A newer navigation (or show-hidden toggle) owns the listing now.
+			if (seq !== _loadSeq) return;
 			_update((s) => ({
 				...s,
 				files: data.files,
 				loading: false,
 			}));
 		} catch (e) {
+			if (seq !== _loadSeq) return;
 			const error = e instanceof Error ? e.message : 'Failed to load files';
 			_update((s) => ({
 				...s,
@@ -263,8 +265,7 @@ export const files = {
 			}));
 
 			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.detail || 'Failed to create folder');
+				throw new Error(await errorDetail(response, 'Failed to create folder'));
 			}
 
 			await files.loadFiles();
@@ -289,8 +290,7 @@ export const files = {
 			}));
 
 			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.detail || 'Failed to rename');
+				throw new Error(await errorDetail(response, 'Failed to rename'));
 			}
 
 			await files.loadFiles();
@@ -311,8 +311,7 @@ export const files = {
 			}));
 
 			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.detail || 'Failed to delete');
+				throw new Error(await errorDetail(response, 'Failed to delete'));
 			}
 
 			await files.loadFiles();
@@ -329,13 +328,19 @@ export const files = {
 
 		const paths = Array.from(_state.selectedFiles);
 		let success = true;
+		// A later successful delete reloads the listing, which clears `error`;
+		// keep the failure so the user still learns which delete was refused.
+		let failure: string | null = null;
 
 		for (const path of paths) {
 			const result = await files.delete(path);
-			if (!result) success = false;
+			if (!result) {
+				success = false;
+				failure = _state.error;
+			}
 		}
 
-		_update((s) => ({ ...s, selectedFiles: new Set<string>() }));
+		_update((s) => ({ ...s, selectedFiles: new Set<string>(), ...(failure ? { error: failure } : {}) }));
 		return success;
 	},
 
@@ -349,10 +354,9 @@ export const files = {
 
 		_update((s) => ({ ...s, uploading: true, uploadProgress: 0, error: null }));
 
+		const total = fileList.length;
+		let completed = 0;
 		try {
-			const total = fileList.length;
-			let completed = 0;
-
 			for (const file of Array.from(fileList)) {
 				const formData = new FormData();
 				formData.append('file', file);
@@ -364,8 +368,7 @@ export const files = {
 				}));
 
 				if (!response.ok) {
-					const error = await response.json();
-					throw new Error(error.detail || `Failed to upload ${file.name}`);
+					throw new Error(await errorDetail(response, `Failed to upload ${file.name}`));
 				}
 
 				completed++;
@@ -380,6 +383,9 @@ export const files = {
 			return true;
 		} catch (e) {
 			const error = e instanceof Error ? e.message : 'Failed to upload files';
+			// Files before the failing one did land: show them (before setting the
+			// error, since a reload clears it).
+			if (completed > 0) await files.loadFiles();
 			_update((s) => ({
 				...s,
 				uploading: false,
@@ -401,8 +407,7 @@ export const files = {
 			const response = await fetch(`${apiBase()}/workspace/files/download?${params}`, withAuth({ }));
 
 			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.detail || 'Failed to download');
+				throw new Error(await errorDetail(response, 'Failed to download'));
 			}
 
 			// Create blob and download
@@ -454,30 +459,6 @@ export const files = {
 	// ========================================================================
 	// View Settings
 	// ========================================================================
-
-	setViewMode(mode: 'grid' | 'list'): void {
-		_update((s) => {
-			const newState = { ...s, viewMode: mode };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
-
-	setSortBy(sortBy: 'name' | 'size' | 'modified'): void {
-		_update((s) => {
-			const newState = { ...s, sortBy };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
-
-	toggleSortDirection(): void {
-		_update((s) => {
-			const newState = { ...s, sortAsc: !s.sortAsc };
-			saveToStorage(newState);
-			return newState;
-		});
-	},
 
 	toggleShowHidden(): void {
 		_update((s) => {

@@ -17,38 +17,18 @@ Tests cover:
 import pytest
 import asyncio
 import json
-import tempfile
-import shutil
-from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.api.sessions import router, check_session_access, enrich_sessions_with_tags
-from app.api.auth import require_auth
+from app.api.sessions import check_session_access, enrich_sessions_with_tags
+from tests.api.helpers import app  # noqa: F401  (fixture)
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-@pytest.fixture
-def mock_settings(temp_dir):
-    """Mock settings with temporary workspace directory."""
-    mock_settings_obj = MagicMock()
-    mock_settings_obj.workspace_dir = temp_dir
-    mock_settings_obj.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-    return mock_settings_obj
-
 
 @pytest.fixture
 def mock_database():
@@ -99,32 +79,6 @@ def mock_api_user():
             patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock
-
-
-@pytest.fixture
-def mock_sync_engine():
-    """Mock sync engine."""
-    with patch("app.api.sessions.sync_engine") as mock:
-        mock.is_session_streaming.return_value = False
-        mock.get_device_count.return_value = 1
-        mock.get_session_state = AsyncMock(return_value={
-            "is_streaming": False,
-            "connected_devices": 1,
-            "streaming_messages": []
-        })
-        yield mock
-
-
-@pytest.fixture
-def app(mock_database, mock_api_user):
-    """Create a FastAPI app with the sessions router and mocked dependencies."""
-    app = FastAPI()
-    app.include_router(router)
-
-    # Override auth dependencies
-    app.dependency_overrides[require_auth] = lambda: "test-session-token"
-
-    yield app
 
 
 @pytest.fixture
@@ -226,7 +180,7 @@ class TestCheckSessionAccess:
                 "project_id": "test-project"
             }
             # Should not raise
-            check_session_access(request, {"id": "session-1", "project_id": "test-project"})
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "test-project"})
 
     def test_api_user_denied_other_project(self):
         """API user should be denied access to sessions in other projects."""
@@ -237,7 +191,7 @@ class TestCheckSessionAccess:
                 "project_id": "project-a"
             }
             with pytest.raises(HTTPException) as exc_info:
-                check_session_access(request, {"id": "session-1", "project_id": "project-b"})
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "project-b"})
             assert exc_info.value.status_code == 403
             assert "Access denied" in exc_info.value.detail
 
@@ -247,10 +201,10 @@ class TestCheckSessionAccess:
         with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
-                "profile_id": "test-profile"
+                "profile_ids": ["test-profile"]
             }
             # Should not raise
-            check_session_access(request, {"id": "session-1", "profile_id": "test-profile"})
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "test-profile"})
 
     def test_api_user_denied_other_profile(self):
         """API user should be denied access to sessions with other profiles."""
@@ -258,12 +212,34 @@ class TestCheckSessionAccess:
         with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
-                "profile_id": "profile-a"
+                "profile_ids": ["profile-a"]
             }
             with pytest.raises(HTTPException) as exc_info:
-                check_session_access(request, {"id": "session-1", "profile_id": "profile-b"})
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "profile-b"})
             assert exc_info.value.status_code == 403
             assert "Access denied" in exc_info.value.detail
+
+    def test_api_user_with_several_agents_reaches_each(self):
+        """Every assigned agent's sessions are reachable; others are not."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {"id": "user-1", "profile_ids": ["a", "b"]}
+            check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "a"})
+            check_session_access(request, {"id": "s2", "api_user_id": "user-1", "profile_id": "b"})
+            with pytest.raises(HTTPException) as exc_info:
+                check_session_access(request, {"id": "s3", "api_user_id": "user-1", "profile_id": "c"})
+            assert exc_info.value.status_code == 403
+
+    def test_legacy_profile_id_column_is_ignored(self):
+        """The never-written ``api_users.profile_id`` column is not the
+        restriction: ``profile_ids`` is."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1", "profile_id": "b", "profile_ids": ["a"],
+            }
+            with pytest.raises(HTTPException):
+                check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "b"})
 
 
 class TestEnrichSessionsWithTags:
@@ -489,7 +465,7 @@ class TestListSessions:
         mock_api_user.return_value = {
             "id": "api-user-1",
             "project_id": "restricted-project",
-            "profile_id": "restricted-profile"
+            "profile_ids": ["restricted-profile"]
         }
         mock_database.get_sessions.return_value = [sample_session]
 
@@ -500,6 +476,26 @@ class TestListSessions:
         assert call_kwargs["project_id"] == "restricted-project"
         assert call_kwargs["profile_id"] == "restricted-profile"
         assert call_kwargs["api_user_id"] == "api-user-1"
+
+    def test_list_sessions_api_user_foreign_agent_filter_is_403(
+        self, client, mock_database, mock_api_user
+    ):
+        """A restricted API user cannot list another agent's sessions."""
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a", "b"]}
+
+        response = client.get("/api/v1/sessions?profile_id=c")
+
+        assert response.status_code == 403
+        mock_database.get_sessions.assert_not_called()
+
+    def test_list_sessions_api_user_several_agents_keeps_requested(
+        self, client, mock_database, mock_api_user
+    ):
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a", "b"]}
+        mock_database.get_sessions.return_value = []
+
+        assert client.get("/api/v1/sessions?profile_id=b").status_code == 200
+        assert mock_database.get_sessions.call_args[1]["profile_id"] == "b"
 
     def test_list_sessions_empty(self, client, mock_database):
         """Should return empty list when no sessions."""
@@ -666,7 +662,7 @@ class TestSearchSessions:
         mock_api_user.return_value = {
             "id": "api-user-1",
             "project_id": "restricted-project",
-            "profile_id": "restricted-profile"
+            "profile_ids": ["restricted-profile"]
         }
         mock_database.search_sessions.return_value = []
 
@@ -677,6 +673,19 @@ class TestSearchSessions:
         assert call_kwargs["project_id"] == "restricted-project"
         assert call_kwargs["profile_id"] == "restricted-profile"
         assert call_kwargs["api_user_id"] == "api-user-1"
+
+    @pytest.mark.parametrize("path", ["/api/v1/sessions/search/query",
+                                      "/api/v1/sessions/search/paginated"])
+    def test_search_sessions_api_user_foreign_agent_is_403(
+        self, client, mock_database, mock_api_user, path
+    ):
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a"]}
+
+        response = client.get(f"{path}?q=test&profile_id=other")
+
+        assert response.status_code == 403
+        mock_database.search_sessions.assert_not_called()
+        mock_database.search_sessions_paginated.assert_not_called()
 
     def test_search_sessions_empty_query_rejected(self, client, mock_database):
         """Should reject empty search query."""
@@ -1636,7 +1645,6 @@ class TestGetSessionState:
             mock_sync.get_session_state = AsyncMock(return_value={
                 "is_streaming": False,
                 "connected_devices": 1,
-                "streaming_messages": []
             })
 
             response = client.get("/api/v1/sessions/test-session-id/state")
@@ -2394,6 +2402,44 @@ class TestCreateWorktreeSession:
         assert response.status_code == 403
         assert "Access denied" in response.json()["detail"]
 
+    @pytest.mark.parametrize("profile_ids,requested,status,expected", [
+        (["a"], "b", 403, None),            # named agent outside the key's set
+        (["a"], None, 200, "a"),            # omitted: the only agent, never the project default
+        (["a", "b"], None, 400, None),      # omitted with several: must choose
+        (["a", "b"], "b", 200, "b"),        # named allowed agent
+        (None, None, 200, None),            # unrestricted: unchanged (project default downstream)
+    ])
+    def test_create_worktree_session_applies_assigned_agents(
+        self, client, mock_database, mock_api_user, sample_project,
+        profile_ids, requested, status, expected,
+    ):
+        """A restricted key cannot run another agent through /with-worktree,
+        and an omitted agent never falls back to the project default."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": profile_ids}
+        mock_database.get_project.return_value = {
+            **sample_project, "settings": {"default_profile_id": "project-default"}}
+        body = {"project_id": "test-project", "branch_name": "feature/test", "prompt": "go"}
+        if requested:
+            body["profile_id"] = requested
+        with patch(
+            "app.api.sessions_worktree._create_v2_branch_session",
+            new_callable=AsyncMock,
+            return_value=WorktreeSessionResponse(
+                session_id="s", worktree_id=None, branch_name="feature/test",
+                base_branch="main", worktree_path="/w", status="active",
+                query_started=True,
+            ),
+        ) as v2_helper:
+            response = client.post("/api/v1/sessions/with-worktree", json=body)
+
+        assert response.status_code == status
+        if status == 200:
+            assert v2_helper.await_args.args[0].profile_id == expected
+        else:
+            v2_helper.assert_not_awaited()
+
 
 # =============================================================================
 # Test Session ID Utilities
@@ -2575,4 +2621,3 @@ class TestGetSessionContextUsage:
 
         assert response.status_code == 200
         assert response.json() == {"available": False, "reason": "not_connected"}
-

@@ -191,7 +191,7 @@ def _member_view(row: dict, ctx) -> dict:
         "device_id": row["device_id"], "name": row["name"], "kind": row["kind"], "platform": row.get("platform") or presence.get("platform"),
         "status": row["status"], "generation": row["generation"], "is_self": is_self,
         "fingerprint": _fingerprint(row), "added_by": row.get("added_by"), "created_at": row.get("created_at"),
-        "last_seen": row.get("last_seen"), "endpoints": presence.get("endpoints") or row.get("endpoints") or [],
+        "last_seen": row.get("last_seen"), "endpoints": endpoints_mod.peer_endpoints(row, presence),
         "capabilities": presence.get("capabilities") or row.get("capabilities") or {},
         "version": presence.get("version") or row.get("version"),
         "online": is_self or row["device_id"] in online,
@@ -269,8 +269,10 @@ async def revoke_member(device_id: str, _: str = Depends(require_admin)) -> dict
 
 
 @router.get("/conflicts")
-async def list_conflicts(_: str = Depends(require_auth)) -> dict:
-    return {"conflicts": await run_sync(store.list_conflicts)}
+async def list_conflicts(_: str = Depends(require_admin)) -> dict:
+    rows = await run_sync(store.list_conflicts)
+    # Stored rows are redacted at write and at startup; this is the last guard.
+    return {"conflicts": [{**row, "losing_record": engine.redact_secrets(row.get("losing_record"))} for row in rows]}
 
 
 @router.delete("/conflicts/{conflict_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -320,7 +322,7 @@ async def recovery_status(_: str = Depends(require_admin)) -> dict:
 async def create_recovery(_: str = Depends(require_admin)) -> dict:
     try:
         return await run_sync(recovery.create)
-    except engine.NotEnrolled as exc:
+    except (engine.NotEnrolled, recovery.RecoveryError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
@@ -465,8 +467,17 @@ async def reject_join(join_id: str, _: str = Depends(require_admin)) -> dict:
 async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
     # Unauthenticated by nature; bounded per client address, issued only to
     # a named active member and spendable only by that member's key.
-    _challenge_limiter.check(get_client_ip(request))
-    return {"challenge": tokens.new_challenge(body.device_id), "expires_in": tokens.CHALLENGE_TTL_SECONDS}
+    requester = get_client_ip(request)
+    _challenge_limiter.check(requester)
+    member_address = False
+    if tokens.at_capacity():
+        # Past the global ceiling only member addresses get a challenge: one
+        # the member advertises as its own endpoint is recognised here (one
+        # that has spent a challenge before, inside ``tokens``).
+        row = await run_sync(store.get_member, body.device_id)
+        member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
+    return {"challenge": tokens.new_challenge(body.device_id, requester, member_address=member_address),
+            "expires_in": tokens.CHALLENGE_TTL_SECONDS}
 
 
 @router.post("/peer/auth/token")
@@ -541,10 +552,6 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
     return {"op": op}
 
 
-class ControlBody(BaseModel):
-    model_config = {"extra": "allow"}
-
-
 @router.post("/peer/control/{action}")
 async def peer_control(action: str, request: Request, device_id: str = Depends(tokens.require_device)) -> dict:
     """The owner side of the runner API: turns, sessions, interrupt, prompt answers, hydrate."""
@@ -599,7 +606,7 @@ async def hydrate_session(device_id: str, session_id: str, request: Request, _: 
         return await control.hydrate(device_id, session_id)
     except control.RunnerUnreachable as exc:
         raise HTTPException(503, f"The owning worker is offline: {exc}") from exc
-    except control.ControlRefused as exc:
+    except (control.ControlRefused, engine.NotEnrolled) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
@@ -609,7 +616,8 @@ async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
     transport.note_contact(device_id)
     if collection is None:
         return await run_sync(engine.snapshot_manifest)
-    if collection not in policy.COLLECTIONS:
+    # Retired collections answer with an empty page for joiners on older builds.
+    if collection not in policy.COLLECTIONS and collection not in policy.RETIRED_COLLECTIONS:
         raise HTTPException(404, "Unknown collection")
     return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
 

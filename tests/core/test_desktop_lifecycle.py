@@ -6,7 +6,7 @@ import pytest
 
 from app.core import desktop_lifecycle, session_runtime, startup, turn_manager
 from app.db import runs, turns
-from tests.core.test_session_runtime import mock_db, test_db, _runtime_env
+from tests.core.test_session_runtime import _runtime_env
 
 
 @pytest.fixture(autouse=True)

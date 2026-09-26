@@ -51,9 +51,9 @@ export const TRANSCRIPT_WINDOW_SIZE = 60;
 /** Items added per expansion step (scroll-up trigger and idle backfill). */
 export const TRANSCRIPT_WINDOW_CHUNK = 30;
 /** Extra items mounted above a jump target so it is not flush against the edge. */
-export const TRANSCRIPT_WINDOW_LEAD = 8;
+const TRANSCRIPT_WINDOW_LEAD = 8;
 /** Scroll-up expansion trigger: distance from the top of the mounted content. */
-export const TRANSCRIPT_EXPAND_THRESHOLD_PX = 900;
+const TRANSCRIPT_EXPAND_THRESHOLD_PX = 900;
 
 /**
  * Start index of the trailing window for a fresh view of `itemCount` items.

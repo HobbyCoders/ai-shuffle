@@ -23,7 +23,6 @@ session), so every gate recognises cross-turn background ids again.
 Harness mirrors tests/core/test_busy_write_guard_engine.py: no Postgres / real SDK.
 """
 
-import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,10 +33,10 @@ from app.core.task_registry import task_registry
 from app.core.provider.events import (
     AssistantMessage,
     StreamEvent,
-    TextBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
+from tests.core.engine_harness import StubPool, collect
 
 
 # ─── harness (mirrors test_busy_write_guard_engine._fake_state / _chat_patches) ─
@@ -46,7 +45,6 @@ from app.core.provider.events import (
 def _fake_state(messages, **overrides) -> SessionState:
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
     adapter.send_query = AsyncMock()
 
     async def _response():
@@ -60,36 +58,7 @@ def _fake_state(messages, **overrides) -> SessionState:
     return state
 
 
-class _StubPool:
-    def __init__(self, state=None):
-        self.state = state
-
-    def get(self, session_id):
-        return self.state
-
-    def peek(self, session_id):
-        return self.state
-
-    def put(self, session_id, state):
-        self.state = state
-
-    def admission_check(self, lane="delegated"):
-        return None
-
-    async def evict_if_needed(self, incoming_lane="delegated"):
-        return None
-
-    async def remove(self, session_id):
-        self.state = None
-
-    async def remove_dead(self, session_id):
-        self.state = None
-
-    async def remove_broken(self, session_id):
-        self.state = None
-
-
-def _chat_patches(stack: ExitStack, pool: _StubPool):
+def _chat_patches(stack: ExitStack, pool: StubPool):
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "claude-code", "config": {}}
     ))
@@ -98,9 +67,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool):
         return {"id": "row-1"}
 
     stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock()
-    stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.include_partial_messages = True  # exercise the StreamEvent path
     options.cwd = None
@@ -120,13 +86,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool):
     sync.broadcast_stream_end = AsyncMock()
     stack.enter_context(patch.object(qe, "sync_engine", new=sync))
     return options
-
-
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
 
 
 def _stream_text_delta(parent_tool_use_id, text):
@@ -191,12 +150,12 @@ class TestCrossTurnBackgroundSubagentRouting:
         ]
 
         state = _fake_state(messages)
-        pool = _StubPool(state)
+        pool = StubPool(state)
 
         with ExitStack() as stack:
             _chat_patches(stack, pool)
-            events = await _collect(
-                qe.stream_to_websocket("follow-up prompt", session_id, "claude-code")
+            events = await collect(
+                qe._stream_to_websocket_impl("follow-up prompt", session_id, "claude-code")
             )
 
         types = [e.get("type") for e in events]
@@ -269,12 +228,12 @@ class TestUnknownParentNeverLeaksToMainLane:
             _stream_text_delta(UNKNOWN_PARENT, "SUBAGENT leaked step"),
         ]
         state = _fake_state(messages)
-        pool = _StubPool(state)
+        pool = StubPool(state)
 
         with ExitStack() as stack:
             _chat_patches(stack, pool)
-            events = await _collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            events = await collect(
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         # The parent's own (parent=None) text still flows on the main lane.
@@ -313,12 +272,12 @@ class TestUnknownParentNeverLeaksToMainLane:
             ),
         ]
         state = _fake_state(messages)
-        pool = _StubPool(state)
+        pool = StubPool(state)
 
         with ExitStack() as stack:
             _chat_patches(stack, pool)
-            events = await _collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            events = await collect(
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         assert not any(
@@ -384,12 +343,12 @@ class TestSeedFromActiveBackgroundWork:
             ),
         ]
         state = _fake_state(messages)
-        pool = _StubPool(state)
+        pool = StubPool(state)
 
         with ExitStack() as stack:
             _chat_patches(stack, pool)
-            events = await _collect(
-                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            events = await collect(
+                qe._stream_to_websocket_impl("prompt", session_id, "claude-code")
             )
 
         # Seeded as run_in_background=True → recognised as a running launch: no

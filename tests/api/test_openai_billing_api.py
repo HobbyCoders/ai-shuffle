@@ -2,10 +2,8 @@
 from unittest.mock import Mock
 
 import pytest
-from starlette.websockets import WebSocketDisconnect
 
 from app.core import encryption
-from app.core.config import settings
 from app.db import database as db
 
 ROOT = "/api/v1/model-providers"

@@ -49,31 +49,3 @@ export async function updateTag(tagId: string, data: { name?: string; color?: st
 export async function deleteTag(tagId: string): Promise<void> {
 	await api.delete(`/tags/${tagId}`);
 }
-
-/**
- * Get tags for a session
- */
-export async function getSessionTags(sessionId: string): Promise<Tag[]> {
-	return api.get<Tag[]>(`/tags/session/${sessionId}`);
-}
-
-/**
- * Set all tags for a session (replaces existing)
- */
-export async function setSessionTags(sessionId: string, tagIds: string[]): Promise<Tag[]> {
-	return api.put<Tag[]>(`/tags/session/${sessionId}`, { tag_ids: tagIds });
-}
-
-/**
- * Add a tag to a session
- */
-export async function addSessionTag(sessionId: string, tagId: string): Promise<void> {
-	await api.post(`/tags/session/${sessionId}/${tagId}`);
-}
-
-/**
- * Remove a tag from a session
- */
-export async function removeSessionTag(sessionId: string, tagId: string): Promise<void> {
-	await api.delete(`/tags/session/${sessionId}/${tagId}`);
-}

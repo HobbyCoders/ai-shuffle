@@ -1,38 +1,21 @@
 """Compaction-aware SSE hydration for long sessions."""
 
 import asyncio
-import json
 
 import pytest
 from psycopg2.extras import Json
 
-import app.api.events as events_mod
-import app.core.history_backfill as history_backfill
 from app.api.events import (
     _boundary_frame,
     _compacted_replay_start,
     event_stream,
 )
-from app.core.event_gateway import EventGateway
 from app.core.provider.fluid_transcript import latest_compaction_boundary
 from app.db import session_events as session_events_db
 from app.db import sessions as sessions_db
 from app.db.base import get_cursor, get_db
-
-
-@pytest.fixture(autouse=True)
-def _reset_backfill_memo():
-    history_backfill._reset_memo()
-    yield
-    history_backfill._reset_memo()
-
-
-@pytest.fixture
-def gateway(monkeypatch):
-    value = EventGateway()
-    monkeypatch.setattr(value, "_ensure_listener", lambda: None)
-    monkeypatch.setattr(events_mod, "get_gateway", lambda: value)
-    return value
+from tests.api.sse_helpers import parse_frame
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 
 def _message(role: str, text: str) -> dict:
@@ -158,18 +141,6 @@ def _seed_app_turns(
             }
         )
         session_events_db.append_events(session_id, events)
-
-
-def _parse(frame: str) -> dict:
-    parsed: dict = {}
-    for line in frame.splitlines():
-        if line.startswith("id: "):
-            parsed["id"] = int(line[4:])
-        elif line.startswith("event: "):
-            parsed["event"] = line[7:]
-        elif line.startswith("data: "):
-            parsed["data"] = json.loads(line[6:])
-    return parsed
 
 
 def _four_turn_path() -> list[tuple[str, str | None, dict]]:
@@ -373,7 +344,7 @@ def test_turn_count_mismatch_fails_closed(mock_db):
 
 def test_boundary_frame_has_no_sse_id():
     frame = _boundary_frame("app-session", 7, 6, 3)
-    parsed = _parse(frame)
+    parsed = parse_frame(frame)
 
     assert "id" not in parsed
     assert parsed["event"] == "system.compaction_boundary"
@@ -382,7 +353,7 @@ def test_boundary_frame_has_no_sse_id():
 
 
 @pytest.mark.asyncio
-async def test_fresh_stream_starts_at_compacted_boundary(mock_db, gateway):
+async def test_fresh_stream_starts_at_compacted_boundary(mock_db, gw):
     app_session = "app-compacted-stream"
     sdk = "ses_compstream01"
     _seed_fluid(sdk, _four_turn_path())
@@ -395,7 +366,7 @@ async def test_fresh_stream_starts_at_compacted_boundary(mock_db, gateway):
     try:
         async def consume() -> None:
             async for chunk in stream:
-                parsed = _parse(chunk)
+                parsed = parse_frame(chunk)
                 frames.append(parsed)
                 if parsed.get("event") == "caught_up":
                     return
@@ -411,7 +382,7 @@ async def test_fresh_stream_starts_at_compacted_boundary(mock_db, gateway):
 
 
 @pytest.mark.asyncio
-async def test_reconnect_never_reapplies_elision(mock_db, gateway):
+async def test_reconnect_never_reapplies_elision(mock_db, gw):
     app_session = "app-compacted-resume"
     sdk = "ses_compresume1"
     _seed_fluid(sdk, _four_turn_path())
@@ -423,7 +394,7 @@ async def test_reconnect_never_reapplies_elision(mock_db, gateway):
     stream = event_stream(app_session, 5)
     try:
         async for chunk in stream:
-            parsed = _parse(chunk)
+            parsed = parse_frame(chunk)
             if parsed.get("event") == "caught_up":
                 break
             frames.append(parsed)

@@ -165,8 +165,6 @@ async def test_execute_query_attaches_hooks():
     ), patch.object(
         qe, "push_memory", _noop
     ), patch.object(
-        qe.direct_oauth, "ensure_fresh_credentials", _noop
-    ), patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
     ) as mock_build, patch(
         "app.core.provider.factory.make_adapter", return_value=adapter
@@ -210,8 +208,6 @@ async def test_stream_query_attaches_hooks():
     ), patch.object(
         qe, "sync_engine"
     ) as mock_sync, patch.object(
-        qe.direct_oauth, "ensure_fresh_credentials", _noop
-    ), patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
     ) as mock_build:
         mock_db.get_session.return_value = session_row
@@ -261,8 +257,6 @@ async def test_background_query_attaches_hooks():
     ), patch.object(
         qb, "sync_engine"
     ) as mock_sync, patch.object(
-        qb.direct_oauth, "ensure_fresh_credentials", _noop
-    ), patch.object(
         qb, "get_session_pool", poisoned_pool
     ), patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS

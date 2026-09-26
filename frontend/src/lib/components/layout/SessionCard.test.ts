@@ -551,6 +551,20 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.l2 .st')?.textContent).toBe('Done');
 	});
 
+	it('names the pip/warning state for screen readers on compact rows, where no status word shows', () => {
+		const working = renderCard({ is_active: true }, { status: 'working', compact: true });
+		expect(working.container.querySelector('.title .sr-only')?.textContent).toBe('Working: ');
+		cleanup();
+
+		const parked = renderCard({ is_active: true }, { status: 'needs_permission', compact: true });
+		expect(parked.container.querySelector('.title .sr-only')?.textContent).toBe('Needs permission: ');
+		cleanup();
+
+		// Full rows already print the status word on line two.
+		const full = renderCard({ is_active: true }, { status: 'working' });
+		expect(full.container.querySelector('.title .sr-only')).toBeNull();
+	});
+
 	it('keeps compact cards free of the working status and dots', () => {
 		const { container } = renderCard({}, { status: 'working', compact: true });
 		expect(container.querySelector('.l2')).toBeNull();

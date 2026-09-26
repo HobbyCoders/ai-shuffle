@@ -189,3 +189,184 @@ test('metadata failures retry and a current result clears stale availability', a
  await updater.check(); assert.equal(updater.current.phase, 'available'); assert.equal(updater.current.error, null);
  await updater.check(); assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null);
 });
+
+test('D22: installed apps check once shortly after launch and then daily, with no consent prompt', async () => {
+ const delays = []; const fns = [];
+ const module = { exports: {} };
+ vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
+  exports: module.exports, module, require: id => id === 'electron' ? { app: {} } : path, process: { env: {} },
+  setTimeout: (fn, ms) => { delays.push(['timeout', ms]); fns.push(fn); return fns.length; }, clearTimeout() {},
+  setInterval: (fn, ms) => { delays.push(['interval', ms]); fns.push(fn); return fns.length; }, clearInterval() {}, Date
+ });
+ const updater = new module.exports.Updater();
+ let checks = 0;
+ updater.useApplications(source({ check: async () => { checks++; return { kind: 'current' }; } }));
+ updater.start();
+ assert.deepEqual(delays, [['timeout', 15_000], ['interval', 24 * 60 * 60 * 1000]]);
+ for (const fn of fns) { fn(); await new Promise(setImmediate); }
+ assert.equal(checks, 2);
+ // A preview build has no update checks at all.
+ const preview = new module.exports.Updater(false);
+ preview.useApplications(source());
+ delays.length = 0; preview.start();
+ assert.deepEqual(delays, []);
+});
+
+test('the signed release name and notes travel with the offered update and clear when current', async () => {
+ const { updater } = fixture(); const seen = [];
+ updater.subscribe(state => seen.push(state));
+ let result = { ...available, release: '0.9.0', notes: 'Faster startup.\nFixes the sidebar.' };
+ updater.useApplications(source({ check: async () => result, download: async () => ({ ...result, kind: 'ready' }) }));
+ await updater.check();
+ assert.equal(updater.current.phase, 'available'); assert.equal(updater.current.release, '0.9.0'); assert.equal(updater.current.notes, 'Faster startup.\nFixes the sidebar.');
+ await updater.download();
+ assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.release, '0.9.0'); assert.match(seen.at(-1).notes, /Fixes the sidebar/);
+ const { updater: other } = fixture(); result = { kind: 'current' };
+ other.useApplications(source({ check: async () => result })); await other.check();
+ assert.equal(other.current.release, null); assert.equal(other.current.notes, null);
+});
+
+test('a download staged before a restart shows its notes from the stored manifest; older managers show none', async () => {
+ const pending = 'b'.repeat(40);
+ const { updater } = fixture();
+ updater.useApplications(source({ pendingVersion: pending, releaseInfo: async revision => { assert.equal(revision, pending); return { release: '0.9.1', notes: 'Stored notes' }; } }));
+ assert.equal(updater.current.phase, 'ready'); await new Promise(setImmediate);
+ assert.equal(updater.current.release, '0.9.1'); assert.equal(updater.current.notes, 'Stored notes');
+ const { updater: legacy } = fixture();
+ legacy.useApplications(source({ pendingVersion: pending })); await new Promise(setImmediate);
+ assert.equal(legacy.current.phase, 'ready'); assert.equal(legacy.current.notes, null);
+});
+test('macOS and Linux: installer checks run on launch and daily, offer the release, and download without installing', async () => {
+ const { updater, calls, timers } = fixture(); const saved = []; let checks = 0; let downloads = 0; let enabled = true;
+ const installers = {
+  check: async () => { checks++; return { kind: 'available', version: '0.9.0', release: '0.9.0', installer: {} }; },
+  download: async progress => { downloads++; progress(50, 'Downloading AI Shuffle 0.9.0…'); return { file: '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg', version: '0.9.0' }; }
+ };
+ updater.setPolicy(async () => enabled);
+ updater.useInstallers(installers, file => saved.push(file));
+ assert.equal(updater.current.phase, 'idle');
+ updater.start();
+ // One timer for the launch check, one for the daily check; no consent prompt in between.
+ assert.equal(timers.length, 2);
+ timers[0](); await new Promise(setImmediate);
+ assert.equal(checks, 1);
+ assert.equal(updater.current.phase, 'available');
+ assert.equal(updater.current.version, '0.9.0');
+ assert.equal(updater.current.release, '0.9.0');
+ await updater.check();
+ assert.equal(checks, 2);
+ enabled = false; await updater.download(); assert.equal(downloads, 0);
+ enabled = true; await updater.download();
+ assert.equal(downloads, 1);
+ assert.deepEqual(saved, ['/Users/me/Downloads/AI-Shuffle-0.9.0.dmg']);
+ assert.equal(updater.current.phase, 'idle');
+ assert.match(updater.current.message, /0\.9\.0 was downloaded and verified/);
+ // There is nothing to install in place: no relaunch, ever.
+ await updater.install(); assert.deepEqual(calls, []);
+ installers.check = async () => ({ kind: 'current' }); await updater.check();
+ assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null);
+ installers.check = async () => { throw Error('offline'); }; await updater.check();
+ assert.equal(updater.current.phase, 'error');
+ updater.stop();
+});
+test('installer checks never replace Windows source updates and respect the no-updates switch', () => {
+ const windows = fixture();
+ windows.updater.useApplications(source());
+ windows.updater.useInstallers({ check: async () => { throw Error('must not run'); }, download: async () => { throw Error('must not run'); } }, () => {});
+ assert.equal(windows.updater.installers, null);
+ const off = fixture({ SHUFFLE_DESKTOP_NO_UPDATES: '1' });
+ off.updater.useInstallers({ check: async () => ({ kind: 'current' }), download: async () => ({}) }, () => {});
+ assert.equal(off.updater.current.phase, 'unsupported');
+ off.updater.start(); assert.equal(off.timers.length, 0);
+});
+
+test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase at once', async () => {
+ const delays = []; const ticks = [];
+ const module = { exports: {} };
+ vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
+  exports: module.exports, module, require: id => id === 'electron' ? { app: {} } : path, process: { env: {} },
+  setTimeout: () => 0, clearTimeout() {}, setInterval: (fn, ms) => { delays.push(ms); ticks.push(fn); return ticks.length; }, clearInterval() {}, Date
+ });
+ const { Updater, BRIDGE_INTERVAL_MS } = module.exports;
+ assert.equal(BRIDGE_INTERVAL_MS, 30_000);
+ // The worker's windows: the desktop updater is gone after DESKTOP_PRESENCE_SECONDS of silence
+ // and a queued request lapses after DESKTOP_REQUEST_SECONDS. One missed report (two ticks of
+ // silence) must fit inside presence (R11-10), and a request must outlive presence.
+ const worker = readFileSync(new URL('../../app/core/application_updates.py', import.meta.url), 'utf8');
+ const seconds = name => Number(worker.match(new RegExp(`^${name} = (\\d+)$`, 'm'))[1]);
+ assert(2 * BRIDGE_INTERVAL_MS < seconds('DESKTOP_PRESENCE_SECONDS') * 1000);
+ assert(seconds('DESKTOP_PRESENCE_SECONDS') <= seconds('DESKTOP_REQUEST_SECONDS'));
+ const updater = new Updater(); const seen = [];
+ let release; const gate = () => new Promise(resolve => { release = resolve; });
+ updater.useApplications(source({ check: async () => { await gate(); return { kind: 'available', version: 'bbbbbbbbbbbb' }; } }));
+ updater.setBridge(async state => { seen.push(state.phase); return {}; }, async () => false);
+ updater.start();
+ assert.deepEqual(delays.filter(ms => ms < 60_000), [30_000], 'one bridge interval, no 2 s heartbeat');
+ await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle'], 'one exchange at start');
+ // An explicit check: "checking" and then "available" reach the worker without waiting for the tick.
+ const check = updater.check(true); await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle', 'checking']);
+ release(); await check; await new Promise(setImmediate);
+ assert.deepEqual(seen, ['idle', 'checking', 'available']);
+ // Progress inside a phase waits for the interval.
+ updater.useApplications(source({ download: async progress => { progress(10, 'a'); progress(20, 'b'); return { kind: 'ready', version: 'bbbbbbbbbbbb' }; } }));
+ seen.length = 0; updater.set({ phase: 'available' }); await new Promise(setImmediate);
+ seen.length = 0; await updater.download(); await new Promise(setImmediate);
+ assert.deepEqual(seen, ['downloading', 'ready'], 'no exchange per progress tick');
+ // A phase change during an exchange is reported right after it, not dropped.
+ seen.length = 0; let hold;
+ updater.setBridge(async state => { seen.push(state.phase); if (!hold) await new Promise(resolve => { hold = resolve; }); return {}; }, async () => false);
+ const ex = updater.exchange(); updater.set({ phase: 'error' }); hold(); await ex; await new Promise(setImmediate);
+ assert.deepEqual(seen, ['ready', 'error']);
+ updater.stop(); seen.length = 0; updater.set({ phase: 'idle' }); await new Promise(setImmediate);
+ assert.deepEqual(seen, [], 'nothing after stop');
+});
+
+test('an install the owner declines stops nothing and can be confirmed later; a failing confirmation fails closed', async () => {
+ const { updater, calls } = fixture(); const order = []; let answer = false;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ updater.onBeforeInstall(async () => { order.push('stop'); });
+ updater.onInstallFailed(async () => { order.push('restart'); });
+ await updater.install();
+ assert.deepEqual(order, ['confirm'], 'declined: the worker and database keep running');
+ assert.equal(calls.length, 0); assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.error, null);
+ updater.onConfirmInstall(async () => { order.push('confirm'); throw Error('No window to ask in'); });
+ await updater.install();
+ assert.deepEqual(order, ['confirm', 'confirm'], 'nothing was stopped, so nothing is restarted');
+ assert.equal(calls.length, 0); assert.match(updater.current.error, /No window to ask in/);
+ answer = true; updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ await updater.install();
+ assert.deepEqual(order, ['confirm', 'confirm', 'confirm', 'stop']);
+ assert.equal(calls.at(-1), 'quit');
+});
+
+test('the account policy is read before the owner is asked to confirm an install', async () => {
+ const { updater, calls } = fixture(); let asked = 0;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.setPolicy(async () => false);
+ updater.onConfirmInstall(async () => { asked++; return true; });
+ await updater.install();
+ assert.equal(asked, 0); assert.equal(calls.length, 0);
+});
+
+test('a bridge that fails or a session count that cannot be read never installs and never rejects', async () => {
+ const { updater, calls } = fixture(); let installs = 0;
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
+ updater.onBeforeInstall(async () => { installs++; });
+ updater.setBridge(async () => { throw Error('worker restarting'); }, async () => true);
+ updater.start();
+ await updater.exchange();
+ updater.setBridge(async () => ({ action: 'install', expires_at: Date.now() / 1000 + 10 }), async () => { throw Error('active-sessions 503'); });
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(installs, 0); assert.equal(calls.length, 0);
+ assert.equal(updater.current.phase, 'ready');
+ // An unknown action, or one without an expiry, does nothing either.
+ updater.setBridge(async () => ({ action: 'reinstall-everything', expires_at: Date.now() / 1000 + 10 }), async () => true);
+ await updater.exchange();
+ updater.setBridge(async () => ({ action: 'install' }), async () => true);
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(installs, 0);
+ updater.stop();
+});

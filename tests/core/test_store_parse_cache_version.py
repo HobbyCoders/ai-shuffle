@@ -24,42 +24,7 @@ live Postgres in this env (the same approach neighboring store tests use).
 from __future__ import annotations
 
 from app.core import jsonl_parser as jp
-
-
-def setup_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def teardown_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def _entries(pairs):
-    """Build minimal SDK user/assistant entries from (user_text, asst_text) pairs."""
-    out = []
-    for i, (u, a) in enumerate(pairs):
-        out.append(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": u},
-                "uuid": f"u{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2:02d}Z",
-            }
-        )
-        out.append(
-            {
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": a}],
-                    "usage": {"input_tokens": 5, "output_tokens": 3},
-                    "model": "claude-x",
-                },
-                "uuid": f"a{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2 + 1:02d}Z",
-            }
-        )
-    return out
+from tests.core.jsonl_cache_helpers import sdk_entries, setup_function, teardown_function  # noqa: F401  (module hooks)
 
 
 def _counting_loader(entries):
@@ -104,7 +69,7 @@ def test_store_version_change_drops_stale_cache_and_reparses():
     sid = "xinstall-rewind-1"
 
     # Prime the cache with the full 2-turn transcript, stamped at version (4, 40).
-    full = _entries([("Hi", "Hello"), ("Bye", "Goodbye")])  # 4 messages
+    full = sdk_entries([("Hi", "Hello"), ("Bye", "Goodbye")])  # 4 messages
     full_loader, full_calls = _counting_loader(full)
     version_loader, vstate = _mutable_version_loader((4, 40))
 
@@ -117,7 +82,7 @@ def test_store_version_change_drops_stale_cache_and_reparses():
 
     # A rewind on another install removes the 2nd turn: fewer rows, lower max_id.
     vstate["version"] = (2, 20)
-    rewound = _entries([("Hi", "Hello")])  # 2 messages
+    rewound = sdk_entries([("Hi", "Hello")])  # 2 messages
     rewound_loader, rewound_calls = _counting_loader(rewound)
 
     served, _ = jp.parse_session_history_from_store(
@@ -151,7 +116,7 @@ def test_store_version_change_drops_stale_cache_and_reparses():
 def test_unchanged_store_version_serves_cache_without_reparse():
     """When the store version is unchanged, the cache is served verbatim."""
     sid = "xinstall-hit-1"
-    msgs = _entries([("Q", "A")])
+    msgs = sdk_entries([("Q", "A")])
     loader, calls = _counting_loader(msgs)
     version_loader, _ = _mutable_version_loader((2, 20))
 
@@ -162,7 +127,7 @@ def test_unchanged_store_version_serves_cache_without_reparse():
     assert calls["n"] == 1  # cache miss -> loader ran
 
     # A sentinel loader carrying DIFFERENT data must not be consulted on the hit.
-    sentinel_loader, sentinel_calls = _counting_loader(_entries([("X", "SENTINEL")]))
+    sentinel_loader, sentinel_calls = _counting_loader(sdk_entries([("X", "SENTINEL")]))
     served, _ = jp.parse_session_history_from_store(
         sid, "/workspace", sentinel_loader, use_cache=True,
         store_version_loader=version_loader,
@@ -187,7 +152,7 @@ def test_legacy_unstamped_entry_is_treated_stale():
     sid = "legacy-unstamped-1"
 
     # Hand-plant a legacy 2-tuple (old on-the-wire shape) holding stale data.
-    stale = _entries([("old", "STALE")])
+    stale = sdk_entries([("old", "STALE")])
     import json
 
     with jp._store_parse_cache_lock:
@@ -196,7 +161,7 @@ def test_legacy_unstamped_entry_is_treated_stale():
             json.dumps({}, default=str),
         )
 
-    fresh = _entries([("new", "FRESH")])
+    fresh = sdk_entries([("new", "FRESH")])
     fresh_loader, fresh_calls = _counting_loader(fresh)
     version_loader, _ = _mutable_version_loader((2, 20))
 
@@ -230,7 +195,7 @@ def test_unresolvable_version_declines_to_cache():
     def _boom_version(_sid):
         raise RuntimeError("db down")
 
-    msgs = _entries([("Q", "A")])
+    msgs = sdk_entries([("Q", "A")])
     loader, calls = _counting_loader(msgs)
 
     jp.parse_session_history_from_store(
@@ -258,7 +223,7 @@ def test_unresolvable_version_declines_to_cache():
 def test_pre_seed_stamps_store_cache_entry():
     """The post-turn pre-seed must stamp the store cache so a later read trusts it."""
     sid = "preseed-stamp-1"
-    post = _entries([("Hi", "Hello"), ("Bye", "Goodbye")])
+    post = sdk_entries([("Hi", "Hello"), ("Bye", "Goodbye")])
     post_loader, _ = _counting_loader(post)
     version_loader, _ = _mutable_version_loader((4, 40))
 
@@ -274,7 +239,7 @@ def test_pre_seed_stamps_store_cache_entry():
 
     # The seeded entry is stamped, so an unchanged-version read hits it without
     # consulting a (stale, different) loader.
-    sentinel_loader, sentinel_calls = _counting_loader(_entries([("X", "SENTINEL")]))
+    sentinel_loader, sentinel_calls = _counting_loader(sdk_entries([("X", "SENTINEL")]))
     served, _ = jp.parse_session_history_from_store(
         sid, "/workspace", sentinel_loader, use_cache=True,
         store_version_loader=version_loader,
@@ -289,7 +254,7 @@ def test_pre_seed_with_matching_expected_version_writes_entry():
     """When the store hasn't moved since the caller snapshotted its messages,
     the seed is written and stamped as usual."""
     sid = "preseed-toctou-ok"
-    post = _entries([("Hi", "Hello")])
+    post = sdk_entries([("Hi", "Hello")])
     post_loader, _ = _counting_loader(post)
     version_loader, _ = _mutable_version_loader((4, 40))
 
@@ -315,7 +280,7 @@ def test_pre_seed_drops_entry_when_store_moved_past_expected_version():
     check could never catch. With the caller's pre-snapshot version passed as
     ``expected_store_version``, the mismatch must DROP the entry instead."""
     sid = "preseed-toctou-stale"
-    old = _entries([("Hi", "Hello")])
+    old = sdk_entries([("Hi", "Hello")])
     old_loader, _ = _counting_loader(old)
     version_loader, vstate = _mutable_version_loader((4, 40))
 
@@ -344,7 +309,7 @@ def test_pre_seed_drops_entry_when_store_moved_past_expected_version():
         )
 
     # And the next read re-parses fresh from the store, not the stale seed.
-    fresh_loader, fresh_calls = _counting_loader(_entries([("Hi", "Hello"), ("New", "Turn")]))
+    fresh_loader, fresh_calls = _counting_loader(sdk_entries([("Hi", "Hello"), ("New", "Turn")]))
     served, _ = jp.parse_session_history_from_store(
         sid, "/workspace", fresh_loader, use_cache=True,
         store_version_loader=version_loader,

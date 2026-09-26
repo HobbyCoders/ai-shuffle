@@ -2,10 +2,8 @@
 
 Covers the security-critical surface of cross-install trust:
 - ``verify_cluster_secret`` is a constant-time compare that rejects empties.
-- ``require_cluster_auth`` gates peer endpoints on a Bearer cluster secret.
 - ``mint_artifact_token``/``verify_artifact_token`` sign a cross-install
   artifact-download redirect and reject tampered/expired/garbage inputs.
-- ``cluster_headers`` presents the Bearer scheme + install id to peers.
 - ``advertise_url`` resolves env override → per-install DB override → host
   guess → none, and the DB override is scoped per install (never leaks across
   installs sharing one database).
@@ -19,17 +17,7 @@ import hmac
 import time
 from unittest.mock import patch
 
-import pytest
-from fastapi import HTTPException
-
 from app.core import cluster
-
-
-class FakeRequest:
-    """Minimal stand-in exposing the ``.headers`` mapping the deps read."""
-
-    def __init__(self, headers: dict):
-        self.headers = headers
 
 
 # ---------------------------------------------------------------------------
@@ -46,30 +34,6 @@ def test_verify_cluster_secret_rejects_wrong_and_empty():
         assert cluster.verify_cluster_secret("nope") is False
         assert cluster.verify_cluster_secret("") is False
         assert cluster.verify_cluster_secret(None) is False
-
-
-# ---------------------------------------------------------------------------
-# require_cluster_auth — Bearer-gated peer dependency
-# ---------------------------------------------------------------------------
-
-def test_require_cluster_auth_accepts_valid_secret_and_returns_install_id():
-    req = FakeRequest({"Authorization": "Bearer s3cr3t", "X-Install-Id": "peer-1"})
-    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
-        assert cluster.require_cluster_auth(req) == "peer-1"
-
-
-def test_require_cluster_auth_returns_empty_install_id_when_header_absent():
-    req = FakeRequest({"Authorization": "Bearer s3cr3t"})
-    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
-        assert cluster.require_cluster_auth(req) == ""
-
-
-def test_require_cluster_auth_rejects_missing_and_wrong_secret():
-    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"):
-        for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic s3cr3t"}):
-            with pytest.raises(HTTPException) as exc:
-                cluster.require_cluster_auth(FakeRequest(headers))
-            assert exc.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -124,19 +88,6 @@ def test_artifact_token_verify_never_raises_on_garbage():
         assert cluster.verify_artifact_token(h, "123", None) is False
         assert cluster.verify_artifact_token(h, None, "deadbeef") is False
         assert cluster.verify_artifact_token(h, 12345, "deadbeef") is False
-
-
-# ---------------------------------------------------------------------------
-# cluster_headers — Bearer scheme + install identity
-# ---------------------------------------------------------------------------
-
-def test_cluster_headers_use_bearer_scheme_and_install_id():
-    with patch.object(cluster, "get_cluster_secret", return_value="s3cr3t"), \
-         patch.object(cluster, "settings") as mock_settings:
-        mock_settings.effective_instance_id = "me-install"
-        headers = cluster.cluster_headers()
-    assert headers["Authorization"] == "Bearer s3cr3t"
-    assert headers["X-Install-Id"] == "me-install"
 
 
 # ---------------------------------------------------------------------------

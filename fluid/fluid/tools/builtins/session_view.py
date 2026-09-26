@@ -15,6 +15,7 @@ import inspect
 from datetime import datetime
 from typing import Any
 
+from fluid.store.base import clip_text
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _DEFAULT_COUNT = 10
@@ -79,9 +80,17 @@ SPEC = ToolSpec(
 )
 
 
-def _clip(text: str, cap: int) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
+def _accepts_viewer(slice_fn: Any) -> bool:
+    """True when the host's backend scopes windows to the calling session.
+
+    A multi-user host declares ``viewer_session_id`` on ``session_slice`` and
+    hides sessions the caller may not read; the stock single-user backends
+    take no such argument and are called exactly as before.
+    """
+    try:
+        return "viewer_session_id" in inspect.signature(slice_fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -98,7 +107,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raw_offset = input.get("offset")
     start = int(raw_offset) if raw_offset is not None else -count
 
-    window = slice_fn(session_id, start=start, count=count)
+    scope = (
+        {"viewer_session_id": ctx.session_id}
+        if _accepts_viewer(slice_fn) else {}
+    )
+    window = slice_fn(session_id, start=start, count=count, **scope)
     if inspect.isawaitable(window):
         window = await window
     if window is None:
@@ -126,7 +139,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         f"{window.total} messages; showing {window.start}–{last}:"
     ]
     for i, msg in enumerate(window.messages):
-        text = _clip(msg.text, _TEXT_CAP) if msg.text.strip() else ""
+        text = clip_text(msg.text, _TEXT_CAP) if msg.text.strip() else ""
         lines.append(f"[{window.start + i} {msg.role}] {text}".rstrip())
         for tool_line in msg.tools[:_TOOLS_SHOWN]:
             lines.append(f"    {tool_line}")

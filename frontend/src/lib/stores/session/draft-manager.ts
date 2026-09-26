@@ -8,7 +8,7 @@
  * - Session rewind and reload
  * - Session takeover (lock acquisition)
  *
- * Plain .ts file — no $state/$derived/$effect runes (see KNOWN_ISSUES.md Root Cause 10).
+ * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
 import type { ActiveSessionState } from '../active-session';
@@ -28,6 +28,10 @@ interface DraftManagerDeps {
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
+
+/** Disambiguates system messages added within the same millisecond — the
+ *  transcript is a keyed each block, so a repeated id breaks rendering. */
+let systemMessageSeq = 0;
 
 export function createDraftManager(deps: DraftManagerDeps) {
 	const { update, getState, wsSend, wsIsConnected, feedRestart, feedRevive } = deps;
@@ -76,18 +80,13 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({
 				...s,
 				messages: [...s.messages, {
-					id: `system-${Date.now()}`,
+					id: `system-${Date.now()}-${++systemMessageSeq}`,
 					role: 'system' as const,
 					content,
 					type: 'system' as MessageType,
 					systemSubtype: subtype,
 				}]
 			}));
-		},
-
-		/** @deprecated Use clearError() instead. Kept for backward compatibility. */
-		acknowledgeError() {
-			this.clearError();
 		},
 
 		/** Rewind session to a specific message. The rewind command is executed

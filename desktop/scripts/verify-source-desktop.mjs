@@ -13,6 +13,16 @@ const {chromium}=require('playwright-core');
 const {isolatedRoot,readProfile}=createRequire(import.meta.url)('./source-profile.cjs');
 isolatedRoot(root);
 const {isPortFree}=createRequire(import.meta.url)('../dist/main/worker.js');
+const {treeDigest}=createRequire(import.meta.url)('../dist/main/source-updates.js');
+async function treeFiles(dir,prefix=''){
+ const files=[];
+ for(const entry of await fs.readdir(dir,{withFileTypes:true})){
+  const full=path.join(dir,entry.name),name=prefix+entry.name;
+  if(entry.isDirectory())files.push(...await treeFiles(full,name+'/'));
+  else if(entry.isFile())files.push([name,createHash('sha256').update(await fs.readFile(full)).digest('hex')]);
+ }
+ return files;
+}
 for(const port of [18080,18081,19228])assert(await isPortFree(port),`Test port ${port} is busy`);
 const reuse=process.argv.includes('--reuse');
 try{
@@ -51,7 +61,7 @@ for(const label of ['A','B']){
  await fs.rename(source,tree);await fs.writeFile(path.join(tree,'acceptance-revision.txt'),label);
  const archive=path.join(root,'channel',revision+'.zip');
  execFileSync(process.env.PYTHON??'python',[path.join(repo,'desktop/test/helpers/source-archive.py'),'pack',container,archive],{stdio:'inherit'});
- const bytes=await fs.readFile(archive),payload=Buffer.from(JSON.stringify({format:2,revision,sequence:Date.now(),sha256:createHash('sha256').update(bytes).digest('hex'),size:bytes.length}));
+ const bytes=await fs.readFile(archive),payload=Buffer.from(JSON.stringify({format:2,revision,sequence:Date.now(),sha256:createHash('sha256').update(bytes).digest('hex'),size:bytes.length,channel:'stable',version:'0.0.0-acceptance.'+label,notes:'Acceptance build '+label,tree:treeDigest(await treeFiles(tree))}));
  await fs.writeFile(path.join(root,'channel',label+'.json'),JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')}));
  await fs.rename(tree,source);await fs.rmdir(container);
 }

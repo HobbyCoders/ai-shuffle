@@ -11,30 +11,13 @@ function makeBridge() {
 	const bridge: ShuffleDesktopBridge = {
 		version: '1.2.1',
 		platform: 'win32',
-		titleBarHeight: 52,
 		window: {
 			getState: () => Promise.resolve({ maximized: false, fullscreen: false, focused: true }),
 			onStateChange: () => () => {},
-			minimize: () => {},
-			toggleMaximize: () => {},
-			close: () => {},
-			focus: () => {},
 			setTitleBarTheme: () => {}
 		},
 		shell: {
-			openExternal: () => {},
-			setBadge: () => {},
-			notify: () => {},
-			onNotificationClick: () => () => {},
-			onCommand: () => () => {},
-			onNativeTheme: () => () => {}
-		},
-		worker: {
-			getState: () => Promise.resolve({ phase: 'ready', port: 8000, url: 'http://127.0.0.1:8000', pid: 1, external: false, error: null, exitCode: null, startedAt: null, logPath: '' }),
-			onState: () => () => {},
-			restart: () => Promise.resolve(),
-			openLogs: () => {},
-			openStatus: vi.fn()
+			onCommand: () => () => {}
 		},
 		updates: {
 			getState: () => Promise.resolve(idle()),
@@ -42,8 +25,6 @@ function makeBridge() {
 				updateListeners.add(listener);
 				return () => updateListeners.delete(listener);
 			},
-			check: () => Promise.resolve(),
-			download: () => Promise.resolve(),
 			install
 		}
 	};
@@ -88,17 +69,6 @@ describe('desktop update announcement', () => {
 		expect(mod.initDesktop()).toBeTypeOf('function');
 	});
 
-	it('opens worker status through the current preload bridge', async () => {
-		const { bridge } = makeBridge();
-		window.shuffleDesktop = bridge;
-		const { desktop } = await import('./desktop');
-
-		desktop?.worker.openStatus();
-
-		expect(bridge.worker.openStatus).toHaveBeenCalledOnce();
-		expect(Object.keys(bridge.worker).sort()).toEqual(['getState', 'onState', 'openLogs', 'openStatus', 'restart']);
-	});
-
 	it('puts a downloaded update in the bell once, with a restart action', async () => {
 		const { bridge, install, emit } = makeBridge();
 		(window as Window & { shuffleDesktop?: ShuffleDesktopBridge }).shuffleDesktop = bridge;
@@ -127,6 +97,28 @@ describe('desktop update announcement', () => {
 		items[0].action?.onClick();
 		expect(install).toHaveBeenCalledTimes(1);
 
+		teardown();
+	});
+
+	it('names the release and summarizes its signed notes in the announcement', async () => {
+		const { bridge, emit } = makeBridge();
+		(window as Window & { shuffleDesktop?: ShuffleDesktopBridge }).shuffleDesktop = bridge;
+		const { initDesktop, notesSummary } = await import('./desktop');
+		const { notify, notificationHistory } = await import('$lib/stores/notifications');
+		notify.resetLocal();
+		const teardown = initDesktop();
+		await flush();
+
+		emit({ ...ready('bbbbbbbbbbbb'), release: '0.9.0', notes: '- Faster startup\n- Fixes the sidebar' });
+		await flush();
+
+		let history: AppNotification[] = [];
+		notificationHistory.subscribe((h) => (history = h))();
+		const [item] = history.filter((n) => n.category === 'desktop-update');
+		expect(item.message).toContain('AI Shuffle Desktop 0.9.0 has downloaded');
+		expect(item.message).toContain("What's new: - Faster startup - Fixes the sidebar");
+		expect(notesSummary('x'.repeat(4000))).toHaveLength(280);
+		expect(notesSummary(null)).toBe('');
 		teardown();
 	});
 });

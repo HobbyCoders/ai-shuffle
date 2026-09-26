@@ -4,22 +4,13 @@ import pytest
 from app.db import database
 from app.db import network as store
 from app.network import crypto, engine, membership
-from tests.core.network.harness import Worker, converge, exchange, join
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
+from tests.core.network.harness import (
+    converge,
+    exchange,
+    join,
+    owner_pref,
+    set_owner_pref,
+)
 
 
 def test_observed_docker_address_is_published_to_other_workers(workers, monkeypatch):
@@ -58,20 +49,6 @@ def test_observed_docker_address_is_published_to_other_workers(workers, monkeypa
         assert not cluster.observe_local_advertise_url(request)
         cluster.set_advertise_url_override("http://10.0.0.200:19000")
         assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.200:19000"]
-
-
-def _set_pref(worker, key, value):
-    with worker.active():
-        from app.core import owner_auth
-        database.set_user_preference("admin", owner_auth.preference_identity(), key, value)
-        engine.scan_all()
-
-
-def _pref(worker, key):
-    with worker.active():
-        from app.core import owner_auth
-        row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
-        return row["value"] if row else None
 
 
 @pytest.mark.asyncio
@@ -125,8 +102,14 @@ async def test_account_preferences_reach_fresh_worker_without_controller(workers
         assert (await api.get_preference(request, "composer.fastMode")).value == ""
 
 
-@pytest.mark.parametrize("state", ["disconnected", "connecting", "reconnecting", "connected"])
-def test_presence_advertises_only_verified_cloud_route(workers, monkeypatch, state):
+@pytest.mark.parametrize("state", ["disconnected", "waiting", "limited", "locked", "unavailable",
+                                   "connecting", "reconnecting", "connected"])
+def test_presence_advertises_the_tunnel_first_while_the_account_link_exists(workers, monkeypatch, state):
+    """The tunnel is listed, first, for as long as the account has assigned it,
+    including while the connector restarts: peers dial only the tunnel once
+    they see it, so a momentarily down tunnel reads as offline rather than
+    letting peer traffic drop back to plain http. Signed out, refused or
+    unassigned states advertise the LAN address alone."""
     from app.core import cluster, managed_connection
     a, b = workers("docker"), workers("desktop")
     lan, cloud = "http://172.17.0.11:8000", "https://worker.example.com"
@@ -136,7 +119,7 @@ def test_presence_advertises_only_verified_cloud_route(workers, monkeypatch, sta
         engine.create_network("Home")
         engine.publish_presence(version="test")
         endpoints = engine.presence_of(a.device_id)["endpoints"]
-        assert endpoints == ([lan, cloud] if state == "connected" else [lan])
+        assert endpoints == ([cloud, lan] if state in ("connected", "connecting", "reconnecting") else [lan])
     join(a, b)
     with b.active():
         assert engine.presence_of(a.device_id)["endpoints"] == endpoints
@@ -334,20 +317,20 @@ def test_join_snapshot_and_tail_converge(workers):
         assert {m.device_id for m in ctx.active_members()} == {a.device_id, b.device_id}
         assert database.get_system_setting("tts_model") == "voice-1"
         assert database.get_tag("t1")["name"] == "urgent"
-    assert _pref(b, "layout") == {"sidebarWidth": 320}
+    assert owner_pref(b, "layout") == {"sidebarWidth": 320}
 
     # A membership record for B is now known to A and published.
     with a.active():
         assert engine.context().member(b.device_id).status == "active"
     # Live change on A reaches B within one exchange.
-    _set_pref(a, "layout", {"sidebarWidth": 400})
+    set_owner_pref(a, "layout", {"sidebarWidth": 400})
     result = exchange(a, b)
     assert result.applied == 1 and result.rejected == 0
-    assert _pref(b, "layout") == {"sidebarWidth": 400}
+    assert owner_pref(b, "layout") == {"sidebarWidth": 400}
     # And B's change reaches A.
-    _set_pref(b, "theme", {"preference": "dark"})
+    set_owner_pref(b, "theme", {"preference": "dark"})
     exchange(b, a)
-    assert _pref(a, "theme") == {"preference": "dark"}
+    assert owner_pref(a, "theme") == {"preference": "dark"}
     # Deletion propagates as a tombstone; the second delivery is a duplicate.
     with a.active():
         database.delete_tag("t1")
@@ -367,14 +350,14 @@ def test_partitioned_edits_resolve_by_clock_with_conflicts_on_both(workers):
     with a.active():
         engine.create_network("Home")
     join(a, b)
-    _set_pref(a, "layout", {"sidebarWidth": 1})
+    set_owner_pref(a, "layout", {"sidebarWidth": 1})
     converge([a, b])
     # Both edit the same key while partitioned.
-    _set_pref(a, "layout", {"sidebarWidth": 100})
-    _set_pref(b, "layout", {"sidebarWidth": 200})
-    _set_pref(b, "layout", {"sidebarWidth": 201})  # B's clock is now ahead
+    set_owner_pref(a, "layout", {"sidebarWidth": 100})
+    set_owner_pref(b, "layout", {"sidebarWidth": 200})
+    set_owner_pref(b, "layout", {"sidebarWidth": 201})  # B's clock is now ahead
     converge([a, b])
-    assert _pref(a, "layout") == _pref(b, "layout") == {"sidebarWidth": 201}
+    assert owner_pref(a, "layout") == owner_pref(b, "layout") == {"sidebarWidth": 201}
     with a.active():
         conflicts = store.list_conflicts()
         assert conflicts and conflicts[0]["record_id"] == "admin|@owner|layout"
@@ -449,12 +432,12 @@ def test_same_operation_over_two_routes_applies_once(workers):
     join(a, b)
     join(a, c)
     converge([a, b, c])
-    _set_pref(a, "layout", {"sidebarWidth": 7})
+    set_owner_pref(a, "layout", {"sidebarWidth": 7})
     exchange(a, b)   # route 1: direct
     exchange(a, c)
     forwarded = exchange(c, b)  # route 2: forwarded by C
     assert forwarded.applied == 0 and forwarded.rejected == 0
-    assert _pref(b, "layout") == {"sidebarWidth": 7}
+    assert owner_pref(b, "layout") == {"sidebarWidth": 7}
     with b.active():
         assert len([o for o in store.ops_since({}) if o["collection"] == "user_preferences"]) == 1
 
@@ -465,9 +448,9 @@ def test_out_of_order_delivery_is_held_until_the_hole_fills(workers):
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "k1", 1)
-    _set_pref(a, "k2", 2)
-    _set_pref(a, "k3", 3)
+    set_owner_pref(a, "k1", 1)
+    set_owner_pref(a, "k2", 2)
+    set_owner_pref(a, "k3", 3)
     with b.active():
         marks = store.local_watermarks()
     with a.active():
@@ -479,7 +462,7 @@ def test_out_of_order_delivery_is_held_until_the_hole_fills(workers):
         assert store.pending_holes()[0]["count"] == 2
         second = engine.apply_batch([ops[0]])
         assert second.applied == 3 and store.pending_holes() == []
-    assert _pref(b, "k3") == 3
+    assert owner_pref(b, "k3") == 3
 
 
 def test_revoked_device_is_rejected_and_cannot_read_new_records(workers):
@@ -490,7 +473,7 @@ def test_revoked_device_is_rejected_and_cannot_read_new_records(workers):
     join(a, c)
     converge([a, b, c])
     # B goes offline and keeps writing.
-    _set_pref(b, "offline_write", True)
+    set_owner_pref(b, "offline_write", True)
     with a.active():
         outcome = engine.revoke_device(b.device_id, reason="lost laptop")
         assert outcome["key_version"] == 2
@@ -509,7 +492,7 @@ def test_revoked_device_is_rejected_and_cannot_read_new_records(workers):
             result = engine.apply_batch(ops)
             assert result.applied == 0 and result.rejected >= 1 and "origin revoked" in result.reasons
     # New records use key version 2, which B does not hold.
-    _set_pref(a, "after", "rotation")
+    set_owner_pref(a, "after", "rotation")
     with a.active():
         op = [o for o in store.ops_since({}) if o["record_id"] == "admin|@owner|after"][0]
         assert op["key_version"] == 2
@@ -520,7 +503,7 @@ def test_revoked_device_is_rejected_and_cannot_read_new_records(workers):
         assert result.applied == 0 and result.retry == 1 and "unknown key version 2" in result.reasons
     # C still converges with A on the new key.
     converge([a, c])
-    assert _pref(c, "after") == "rotation"
+    assert owner_pref(c, "after") == "rotation"
 
 
 def test_recovery_certificate_admits_a_device_when_everyone_is_off(workers):
@@ -554,12 +537,12 @@ def test_recovery_certificate_admits_a_device_when_everyone_is_off(workers):
         assert database.get_system_setting("tts_model") == "voice-9"
         assert engine.context().member(d.device_id).status == "active"
     # A later-online worker accepts D purely from the ops D publishes.
-    _set_pref(d, "from_d", 1)
+    set_owner_pref(d, "from_d", 1)
     result = exchange(d, a)
     assert result.rejected == 0 and result.applied >= 1
     with a.active():
         assert engine.context().member(d.device_id).status == "active"
-    assert _pref(a, "from_d") == 1
+    assert owner_pref(a, "from_d") == 1
 
 
 def test_bad_envelopes_are_rejected_without_side_effects(workers):
@@ -568,7 +551,7 @@ def test_bad_envelopes_are_rejected_without_side_effects(workers):
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "x", 1)
+    set_owner_pref(a, "x", 1)
     with b.active():
         marks = store.local_watermarks()
     with a.active():
@@ -579,7 +562,7 @@ def test_bad_envelopes_are_rejected_without_side_effects(workers):
         assert result.rejected == 3 and "bad signature" in result.reasons and "wrong network" in result.reasons
         assert store.get_watermark(store.get_db().__enter__().cursor(), a.device_id, 1) < op["origin_seq"]
         assert engine.apply_batch([op]).applied == 1
-    assert _pref(b, "x") == 1
+    assert owner_pref(b, "x") == 1
 
 
 def test_stale_incarnation_is_rejected(workers):
@@ -588,7 +571,7 @@ def test_stale_incarnation_is_rejected(workers):
         engine.create_network("Home")
     join(a, b)
     converge([a, b])
-    _set_pref(a, "x", 1)
+    set_owner_pref(a, "x", 1)
     with a.active():
         [op] = [o for o in store.ops_since({a.device_id: {"1": 1}}, exclude_origin=b.device_id)
                 if o["collection"] == "user_preferences"]

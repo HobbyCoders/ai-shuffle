@@ -55,7 +55,6 @@ REFRESH_LOCK_WAIT = 30.0
 ISSUER = "https://auth.openai.com"
 AUTHORIZE_URL = f"{ISSUER}/oauth/authorize"
 TOKEN_URL = f"{ISSUER}/oauth/token"
-REVOKE_URL = f"{ISSUER}/oauth/revoke"
 DEVICE_USERCODE_URL = f"{ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{ISSUER}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URL = f"{ISSUER}/codex/device"
@@ -403,16 +402,6 @@ async def refresh_tokens(
     return _bundle_from_token_response(_safe_json(resp), prior_refresh_token=refresh_token)
 
 
-async def revoke_token(token: str, *, client: httpx.AsyncClient | None = None) -> bool:
-    """Best-effort token revoke. Never raises."""
-    try:
-        resp = await _post(client, REVOKE_URL, data={"client_id": client_id(), "token": token})
-        return 200 <= resp.status_code < 300
-    except Exception:
-        logger.debug("codex_oauth: revoke failed", exc_info=True)
-        return False
-
-
 # ─── file-backed token store + auth hook ─────────────────────────────────────
 
 
@@ -486,6 +475,11 @@ def save_bundle(bundle: StoredBundle, path: Path | None = None) -> Path:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if sys.platform != "win32":
+                # The mode argument only applies when the file is created; a
+                # stale temp file left with wider permissions would otherwise
+                # hold the secret world-readable until the rename.
+                os.fchmod(fh.fileno(), 0o600)
             fh.write(json.dumps(asdict(bundle), indent=2))
             fh.flush()
             os.fsync(fh.fileno())
@@ -515,7 +509,10 @@ def load_bundle(path: Path | None = None) -> StoredBundle | None:
     if not isinstance(raw, dict) or not raw.get("access_token"):
         return None
     known = {f for f in StoredBundle.__dataclass_fields__}  # type: ignore[attr-defined]
-    return StoredBundle(**{k: v for k, v in raw.items() if k in known})
+    try:
+        return StoredBundle(**{k: v for k, v in raw.items() if k in known})
+    except TypeError:  # a required field (refresh_token) is missing
+        return None
 
 
 def _needs_refresh(bundle: StoredBundle) -> bool:

@@ -6,26 +6,27 @@ order: 1
 
 # AI Shuffle
 
-AI Shuffle is a self-hosted web interface for Claude Code — Anthropic's AI coding assistant. It provides a rich chat UI, multi-platform connectors, automation pipelines, and a full REST API for building integrations.
+AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It runs Claude Code, and it can also run models from other providers. You bring your own AI account or API key; AI Shuffle includes no AI usage. New here? Start with [Requirements](/docs/getting-started/requirements) and [First run](/docs/getting-started/first-run). It includes a chat interface, connectors for messaging platforms and services, automation pipelines, and a REST API for building integrations.
 
 ## Key Features
 
 ### Chat Interface
-A real-time chat workspace powered by Claude via the Agent SDK. Features include:
+A real-time chat workspace for the model and provider you choose. Features include:
 - Streaming responses with tool use visualization
-- Session management with search, tags, and an Active group — sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
+- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you settle them, which moves them to Settled
 - Session forking to branch conversations
 - Git worktree integration for isolated development
 - File sharing and media generation
-- Thinking mode control (default, think, think harder, ultra think)
+- Model and reasoning effort chosen per session
+- Permission modes per session (Ask, Accept Edits, Bypass, and Auto where available)
 
 ### Connectors
-Connect AI Shuffle to external platforms so Claude can respond to messages from:
+Connect AI Shuffle to external platforms so an agent can respond to messages from:
 - **Messaging:** Telegram, Discord, WhatsApp, Slack, Line, Signal, MS Teams, iMessage, BlueBubbles
 - **Smart Home:** Home Assistant, Philips Hue
-- **Other:** Spotify, Gmail, Webhooks
+- **Other:** Spotify, Gmail, Plaid (read-only bank data), Webhooks
 
-Each connector creates a bridge — messages from the platform flow into Claude, and responses flow back.
+Each connector creates a bridge: messages from the platform flow to the agent, and responses flow back.
 
 ### Automations
 Schedule and trigger AI workflows:
@@ -36,38 +37,30 @@ Schedule and trigger AI workflows:
 - Budget controls, approval gates, and output routing
 
 ### Hooks
-Execute custom bash scripts or webhook calls at key points in the AI workflow:
-- Before/after tool use
-- Session start/end
-- On user prompt submission
-- On notifications
+Run custom bash scripts or webhook calls at key points in the AI workflow:
+- Before a tool runs, with the option to block it
+- When the agent finishes its turn
+- After a tool runs, when a prompt is sent, when a session starts or ends, and at other points, in the background
 
 ### MCP Servers
-Extend Claude's capabilities by connecting Model Context Protocol (MCP) servers:
+Extend what agents can do by connecting Model Context Protocol (MCP) servers:
 - **stdio** servers (subprocess-based)
 - **SSE** servers (Server-Sent Events)
 - **HTTP** servers
 - Global and project-scoped configurations
 
-### Subagents
-Define specialized AI agents for specific tasks:
-- Custom system prompts and tool restrictions
-- Model selection (Haiku, Sonnet, Opus)
-- Per-profile agent enablement
-
-### Profiles
-Configuration containers that control Claude's behavior:
+### Agents
+Configurations that control how an agent behaves, under **Build → Agents**:
 - System prompt and tool permissions
-- Model selection and thinking mode
-- MCP servers, plugins, and subagents
-- Execution mode (default, accept edits, plan, bypass)
+- Durable memory the agent keeps across sessions
+- Agents can call other agents (the **Agents** tab's roster), each on the model you pick for it
 
 ### Projects
 Organize work into project directories:
 - File browsing and uploads
 - Git integration with branch management
 - Worktree support for parallel development
-- Per-project MCP and plugin configuration
+- Per-project MCP servers, agents, hooks and memory
 
 ### API
 Full REST API for external integrations:
@@ -80,19 +73,19 @@ Full REST API for external integrations:
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   SvelteKit UI  │────▶│   FastAPI Backend │────▶│  Claude Agent   │
-│   (Frontend)    │◀────│   (WebSocket/REST)│◀────│  SDK (Python)   │
+│   SvelteKit UI  │────▶│   FastAPI Backend │────▶│  Fluid harness  │
+│   (Frontend)    │◀────│   (WebSocket/REST)│◀────│  and providers  │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                               │
                     ┌─────────┼─────────┐
                     ▼         ▼         ▼
               ┌──────────┐ ┌──────────┐ ┌──────────┐
               │Connectors│ │PostgreSQL│ │MCP Servers│
-              │(14 types)│ │    DB    │ │(stdio/sse)│
+              │(15 types)│ │    DB    │ │(stdio/sse)│
               └──────────┘ └──────────┘ └──────────┘
 ```
 
 - **Frontend:** SvelteKit with Svelte 5, Tailwind CSS, TipTap editor
 - **Backend:** FastAPI with WebSocket support, PostgreSQL database
-- **AI:** Claude Agent SDK for Python — manages sessions, streaming, tool execution
-- **Storage:** PostgreSQL for metadata, JSONL files for message history
+- **Agents:** the Fluid harness runs sessions, streaming and tool execution against the configured provider; Claude Code sessions run the standard Claude Code CLI with your own sign-in or API key
+- **Storage:** PostgreSQL for sessions, message history and settings; your projects stay as ordinary files in the workspace

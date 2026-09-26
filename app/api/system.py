@@ -4,13 +4,13 @@ System API routes - health, version, stats, workspace configuration, tools
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -18,10 +18,12 @@ from pydantic import BaseModel
 
 from app.core.models import HealthResponse, VersionResponse, StatsResponse
 from app.core.auth import auth_service
+from app.core import config as config_module
 from app.core.config import settings
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin
+from app.api.common import reset_served_roots_cache
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,12 @@ def desktop_attach_hash() -> Optional[str]:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _claude_cli_signed_in_cached() -> bool:
+    from app.core import claude_cli_status
+    status = claude_cli_status.peek()
+    return bool(status and status.signed_in)
+
+
 @router.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def health_check():
     """Health check endpoint (no auth required)"""
@@ -53,7 +61,9 @@ async def health_check():
         "version": settings.version,
         "authenticated": False,  # Not checking session for health
         "setup_required": auth_service.is_setup_required(),
-        "claude_authenticated": auth_service.is_claude_authenticated()
+        # The last `claude auth status` answer, without running the CLI on a
+        # polled endpoint (startup runs the first probe).
+        "claude_authenticated": _claude_cli_signed_in_cached(),
     }
     attach = desktop_attach_hash()
     if attach is not None:
@@ -193,14 +203,49 @@ async def get_stats(token: str = Depends(require_auth)):
     return stats
 
 
+def code_sandbox_status() -> dict:
+    """Whether agents' Python cells run inside the bubblewrap sandbox right now.
+
+    Reads only the self-test result the startup pre-warm cached
+    (``fluid.codemode.os_sandbox``, ``app.core.startup.prewarm_code_mode_sandbox``);
+    it never probes, so a settings request stays cheap. ``state`` is ``active``,
+    ``unavailable`` (``reason`` is the self-test's own message), ``checking``
+    (the pre-warm has not finished) or ``off`` (code mode or the sandbox
+    setting turned off). Settings shows it: without the sandbox, Ask mode
+    prompts before each Python cell (``run_python`` is rated ``write``).
+    """
+    from fluid.codemode import os_sandbox
+
+    mode = os_sandbox.normalize_mode(settings.code_mode_os_sandbox)
+    body = {"mode": mode, "active": False, "state": "off", "reason": ""}
+    if not settings.fluid_code_mode:
+        body["reason"] = "code mode is off (FLUID_CODE_MODE)"
+    elif mode == "off":
+        body["reason"] = "CODE_MODE_OS_SANDBOX is off"
+    elif sys.platform != "linux":
+        body.update(state="unavailable", reason="the bubblewrap sandbox is Linux-only")
+    else:
+        result = os_sandbox.cached_self_test(sys.executable)
+        if result is None:
+            body.update(state="checking", reason="the self-test has not finished yet")
+        elif result.ok:
+            body.update(state="active", active=True)
+        else:
+            body.update(state="unavailable", reason=result.reason)
+    return body
+
+
 @router.get("/api/v1/deployment")
 async def get_deployment_info(token: str = Depends(require_auth)):
     """
     Get deployment configuration and platform information.
 
     Useful for debugging and understanding the current deployment mode.
+    ``code_sandbox`` (see :func:`code_sandbox_status`) feeds the Settings badge.
     """
-    return settings.get_deployment_info()
+    info = dict(settings.get_deployment_info())
+    info["code_sandbox"] = code_sandbox_status()
+    return info
 
 
 @router.get("/api/v1/diagnostics")
@@ -233,8 +278,7 @@ async def get_diagnostics(request: Request, token: str = Depends(require_auth), 
             "worker": "local", "cross_worker_activity_known": False,
             "whole_stack_idle_classified": False,
             "local_concurrent_activity": bool(
-                metrics.get("pool_streaming", 0) or metrics.get("ws_active_chat_sessions", 0)
-                or metrics.get("browser_active_calls", 0)
+                metrics.get("pool_streaming", 0) or metrics.get("browser_active_calls", 0)
             ),
             "local_streaming_sessions": metrics.get("pool_streaming", 0),
             "local_browser_viewers": metrics.get("browser_viewers", 0),
@@ -350,7 +394,7 @@ async def set_workspace_config(
             status_code=400,
             detail=f"Permission denied: Cannot write to '{path}'"
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Invalid workspace path")
         raise HTTPException(
             status_code=400,
@@ -361,8 +405,13 @@ async def set_workspace_config(
     instance_key = f"workspace_path:{settings.effective_instance_id}"
     await run_sync(database.set_system_setting, instance_key, str(path))
 
-    # Update the runtime settings
+    # Update the runtime settings. Callers read the effective workspace, which
+    # start-up pins to the saved folder through a runtime override, so the
+    # override moves too; otherwise the change only applied after a restart.
     object.__setattr__(settings, 'workspace_dir', path)
+    config_module.set_workspace_override(path)
+    # Relative project paths resolve against the workspace: drop the cached roots.
+    reset_served_roots_cache()
 
     return WorkspaceConfigResponse(
         workspace_path=str(path),
@@ -480,7 +529,8 @@ async def browse_filesystem(
     import sys
 
     local_mode = is_local_mode()
-    workspace_root = app_settings.workspace_dir.resolve()
+    # The effective dir: ``workspace_dir`` is None unless WORKSPACE_DIR is set.
+    workspace_root = app_settings.effective_workspace_dir.resolve()
 
     if not path:
         entries = []
@@ -600,7 +650,7 @@ async def browse_filesystem(
 
 @router.post("/api/v1/system/db-maintenance")
 async def run_db_maintenance(token: str = Depends(require_admin)):
-    """Run database maintenance on-demand: WAL checkpoint, OPTIMIZE, log cleanup, VACUUM."""
+    """Run database maintenance on demand: ANALYZE, log-table cleanup, VACUUM ANALYZE."""
     import time
     start = time.monotonic()
     result = await asyncio.to_thread(database.run_database_maintenance)

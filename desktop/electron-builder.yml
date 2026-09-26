@@ -4,7 +4,7 @@
 # (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
 # because a publish provider is configured, even when `--publish never` is
 # used. Stable Windows installers ship on v* releases; the installed app
-# independently consumes signed main-branch source updates from the hub.
+# independently consumes signed stable-channel source updates from the hub.
 appId: com.hobbycoders.aishuffle.desktop
 productName: AI Shuffle
 copyright: Copyright © 2026 HobbyCoders
@@ -42,11 +42,6 @@ publish:
   owner: HobbyCoders
   repo: ai-shuffle
   releaseType: release
-
-protocols:
-  - name: AI Shuffle
-    schemes:
-      - aishuffle
 
 win:
   target:

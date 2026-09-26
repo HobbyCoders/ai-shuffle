@@ -24,6 +24,20 @@ type Kind = (typeof ACT_KINDS)[number];
 const REF_ACTION_TIMEOUT_MS = 2000;
 
 /**
+ * Per-character allowance for `type` on a ref. Playwright's pressSequentially
+ * timeout covers the keystrokes as well as the actionability wait, at roughly
+ * 1ms per character on an idle host; a flat 2s cut a 3000-character value off
+ * part-typed and reported it as stale_ref. Generous so a loaded host still
+ * finishes; the actionability part of the budget stays REF_ACTION_TIMEOUT_MS.
+ */
+export const TYPE_MS_PER_CHAR = 25;
+
+/** Timeout for typing `value` into a ref: the actionability wait plus the keystrokes. */
+export function typeTimeoutMs(value: string): number {
+  return REF_ACTION_TIMEOUT_MS + value.length * TYPE_MS_PER_CHAR;
+}
+
+/**
  * Does a Playwright error message indicate the ref locator failed to resolve to
  * an actionable element (element detached after the ref was handed out)? Such
  * failures surface as an actionability timeout naming the `aria-ref=` selector.
@@ -165,7 +179,7 @@ async function performAction(session: Session, page: Page, input: ActInput): Pro
 
     case "type": {
       const value = requireValue(input.value, "type");
-      if (locator) await locator.pressSequentially(value, refTimeout);
+      if (locator) await locator.pressSequentially(value, { timeout: typeTimeoutMs(value) });
       else {
         await page.mouse.click(point![0], point![1]);
         await page.keyboard.type(value);

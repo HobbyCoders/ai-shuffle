@@ -251,12 +251,13 @@ and searches past sessions, `SessionView` opens one.
 
 ### `[[hooks]]`
 
-Shell commands run before and after tool calls and at turn boundaries. Full
+Shell commands run on lifecycle events: around tool calls, at turn and session
+boundaries, before compaction, when a subagent stops, and on notifications. Full
 contract (stdin payload, exit codes, `updated_input`) in [hooks.md](hooks.md).
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `event` | yes | | `PreToolUse`, `PostToolUse`, `TurnStart`, or `TurnEnd`. |
+| `event` | yes | | `PreToolUse`, `PostToolUse`, `TurnStart`, `TurnEnd`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop`, or `Notification`. Claude Code's `UserPromptSubmit` and `Stop` are accepted as `TurnStart` and `TurnEnd`. |
 | `command` | yes | | Shell string, run through the same shell as the `Bash` tool with `cwd` as its working directory. |
 | `matcher` | no | every tool | Tool-name filter for tool events: a glob, or a regex when it contains `^`, `|`, or `(`. |
 | `timeout` | no | `60` | Seconds before the hook is killed and treated as allow. |
@@ -287,6 +288,7 @@ Every provider block has the same keys; `kind` decides which client is built.
 | `api_key_env` | none | Environment variable holding the API key. The Anthropic, OpenAI, and OpenRouter clients also fall back to `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `OPENROUTER_API_KEY` respectively. |
 | `tool_style` | `"native"` | `text` switches to the `<tool_call>` text protocol for models without reliable native tool calling. See [local-models.md](local-models.md). |
 | `stream_deadline` | `900` (seconds) | Wall clock for one whole model call. The HTTP timeout is per read, so a provider that keeps emitting bytes — a degenerate generation, an upstream streaming padding — resets it forever; this bounds the call itself and surfaces as a retriable error. `0` disables it. |
+| `first_byte_timeout` | `60` (seconds; off for `local`) | Every native kind. How long a call may wait for its first byte (the response headers, then the first SSE event) before it is abandoned. Headers that never arrive are retried like a read timeout (on the transport-retry budget, which is 0 for `openrouter` by default); a `200` followed by silence is not re-sent by the client (`anthropic` reports it as a transport failure; `openrouter`, `local` and `openai_responses` as a truncated stream, which the engine retries as an empty response). The chat/completions kinds also keep a fixed 30 s wait for the first data event after the headers. Raise it for a gateway that sends nothing until the upstream model's first token; `0` disables it. |
 | `extra` | `{}` | Request-body fields merged into every request. Honoured by `local` (llama.cpp `cache_prompt`, samplers, Ollama `options`). |
 
 The built-in blocks:
@@ -432,7 +434,7 @@ extra (`uv sync --extra mcp`), which installs `mcp>=2.0`.
 
 ## Environment variables
 
-Config overrides, applied as layer 5 (`env_overrides` in the loader):
+Config overrides, applied as layer 6 (`env_overrides` in the loader):
 
 | Variable | Sets |
 |---|---|

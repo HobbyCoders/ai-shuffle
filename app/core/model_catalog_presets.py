@@ -11,11 +11,11 @@ entry in the UI simply drops it from the curated set.
 Roster note (``CODEX_PRESET_MODELS``): this is the **live-confirmed** ChatGPT/
 Codex-subscription roster, not speculative naming. It was validated against the
 real Codex backend (``GET /backend-api/codex/models?client_version=1.0.0``) on
-2026-07-18 (see the spike's "surprise #1" finding). The entitled
+2026-07-18. The entitled
 roster observed was ``gpt-5.6-sol``, ``gpt-5.6-terra``, ``gpt-5.6-luna``,
 ``gpt-5.5``, ``gpt-5.4``, ``gpt-5.4-mini`` plus ``codex-auto-review``. The
 special-purpose ``codex-auto-review`` is **excluded** — it is not a general
-chat/agent model (spike finding + plan ruling PR3). Because the roster is
+chat/agent model. Because the roster is
 server-enforced upstream, this list only curates what the picker offers.
 
 Roster note (``OPENAI_PRESET_MODELS``): the current OpenAI *public API*
@@ -88,8 +88,8 @@ _PRESET_ROSTERS: Dict[str, List[Dict[str, Any]]] = {
 def preset_kind_for(provider_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Normalized preset classification for a provider row, or ``None``.
 
-    Keys on ``auth_mode`` FIRST, then ``provider_type`` (plan ruling PR1 — the
-    already-enrolled Codex row is ``provider_type='custom'`` +
+    Keys on ``auth_mode`` FIRST, then ``provider_type`` (an already-enrolled
+    Codex row is ``provider_type='custom'`` +
     ``auth_mode='chatgpt'`` and must still resolve to the Codex roster):
 
       * ``auth_mode == "chatgpt"``            → ``"chatgpt"`` (Codex roster)

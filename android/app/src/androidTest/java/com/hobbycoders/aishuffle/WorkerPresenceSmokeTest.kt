@@ -71,7 +71,7 @@ class WorkerPresenceSmokeTest {
                         assertSame(originalRow, views(activity.findViewById(android.R.id.content)).first { it.contentDescription == "Options for Home fixture" })
                         assertTrue(originalRow!!.performClick())
                     }
-                    androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withText("Start voice chat"))
+                    androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withText("Remove from account"))
                         .check(androidx.test.espresso.assertion.ViewAssertions.matches(androidx.test.espresso.matcher.ViewMatchers.isDisplayed()))
                     androidx.test.espresso.Espresso.pressBack()
                     instrumentation.waitForIdleSync()

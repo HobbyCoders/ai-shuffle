@@ -122,15 +122,29 @@ SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
     ".env", ".env.*", "*.pem", "*.p12", "*.pfx",
     "id_rsa", "id_rsa.*", "id_ed25519", "id_ed25519.*", "id_ecdsa", "id_ecdsa.*",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
+    # AI Shuffle's managed-Postgres descriptor (host, port, password).
+    "managed-postgres.json",
 )
 SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
     "/.aws/credentials", "/.ssh/config",
+    # Claude CLI OAuth tokens and the GitHub CLI token.
+    "/.claude/.credentials.json", "/.config/gh/hosts.yml",
+)
+# Directories whose every file is a secret: AI Shuffle's credential wrapping
+# keys and the agent browser's persisted profile (cookies, logged-in sessions).
+# Matched as a path component anywhere in the path.
+SENSITIVE_DIR_NAMES: tuple[str, ...] = (
+    ".credential-keys", "chrome-profile",
+)
+# The running AI Shuffle code inside its container. Reading it is fine; an
+# agent editing it gains persistence across restarts, so writes always ask.
+PROTECTED_WRITE_PREFIXES: tuple[str, ...] = (
+    "/app/app/", "/app/docker/", "/app/scripts/",
 )
 
 
 # Template/sample variants are meant to be read; they carry no real values.
 SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"})
-_SENSITIVE_EXCEPTIONS = SENSITIVE_EXCEPTIONS
 
 
 def is_sensitive_path(path: str) -> bool:
@@ -139,15 +153,18 @@ def is_sensitive_path(path: str) -> bool:
 
     normalized = str(path).replace("\\", "/").rstrip("/")
     basename = normalized.rsplit("/", 1)[-1]
-    if basename.lower() in _SENSITIVE_EXCEPTIONS:
+    if basename.lower() in SENSITIVE_EXCEPTIONS:
         return False
     if any(fnmatch(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
         return True
     lowered = normalized.lower()
-    return any(
+    if any(
         lowered.endswith(suffix) or lowered == suffix.lstrip("/")
         for suffix in SENSITIVE_PATH_SUFFIXES
-    )
+    ):
+        return True
+    components = lowered.split("/")
+    return any(name in components for name in SENSITIVE_DIR_NAMES)
 
 
 # ─── provider-side elision detection ─────────────────────────────────────────

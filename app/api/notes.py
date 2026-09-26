@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Request, status, Query, UploadFile, File
 from fastapi.responses import FileResponse, Response
 
 from app.core.models import Note, NoteCreate, NoteUpdate, NoteTag, NoteAutocomplete, NoteAttachment
@@ -22,7 +22,7 @@ from app.core.note_files import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth
+from app.api.auth import get_api_user_from_request, require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,24 @@ router = APIRouter(prefix="/api/v1/notes", tags=["Notes"])
 # Max attachment size (25 MB) — notes attachments are reference material, not
 # bulk storage. Mirrors the audio-upload ceiling used elsewhere.
 MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024
+
+
+def _caller_api_user_id(request: Request) -> Optional[str]:
+    """The API key behind the request; ``None`` for the owner."""
+    return (get_api_user_from_request(request) or {}).get("id")
+
+
+def _owned_note(note_id: str, api_user_id: Optional[str]) -> Optional[dict]:
+    """The note when the caller may use it, else ``None`` (reads as 404).
+
+    Notes follow the session ownership model: a note belongs to the API key
+    that wrote it (``notes.api_user_id``) and NULL is the owner's. The owner
+    reaches every note; an API key only its own.
+    """
+    note = database.get_note(note_id)
+    if note and api_user_id and note.get("api_user_id") != api_user_id:
+        return None
+    return note
 
 
 def _parse_db_timestamp(value) -> Optional[datetime]:
@@ -101,6 +119,7 @@ def _reconcile_note_with_disk(note: dict) -> dict:
 
 @router.get("", response_model=List[Note])
 async def list_notes(
+    request: Request,
     search: Optional[str] = Query(None, description="Search in title and content"),
     tag: Optional[str] = Query(None, description="Filter by tag"),
     limit: int = Query(100, ge=1, le=500),
@@ -119,17 +138,20 @@ async def list_notes(
         search=search,
         tag=tag,
         limit=limit,
-        offset=offset
+        offset=offset,
+        api_user_id=_caller_api_user_id(request),
     )
 
 
 @router.post("", response_model=Note, status_code=status.HTTP_201_CREATED)
 async def create_note(
     note_data: NoteCreate,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Create a new note"""
     note_id = f"note-{uuid.uuid4().hex[:12]}"
+    api_user_id = _caller_api_user_id(request)
 
     def _create():
         # ONE hop for the whole create: the filename read, the markdown file
@@ -148,7 +170,8 @@ async def create_note(
             content=note_data.content,
             tags=note_data.tags,
             is_pinned=note_data.is_pinned,
-            file_path=file_path
+            file_path=file_path,
+            api_user_id=api_user_id,
         )
 
     return await run_sync(_create)
@@ -156,14 +179,16 @@ async def create_note(
 
 @router.get("/tags", response_model=List[NoteTag])
 async def get_note_tags(
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Get all unique tags used in notes with their counts"""
-    return await run_sync(database.get_all_note_tags)
+    return await run_sync(database.get_all_note_tags, _caller_api_user_id(request))
 
 
 @router.get("/autocomplete", response_model=List[NoteAutocomplete])
 async def get_notes_autocomplete(
+    request: Request,
     search: Optional[str] = Query(None, description="Search in title and content"),
     limit: int = Query(20, ge=1, le=50),
     token: str = Depends(require_auth)
@@ -172,7 +197,8 @@ async def get_notes_autocomplete(
     notes = await run_sync(
         database.get_notes_autocomplete,
         search=search,
-        limit=limit
+        limit=limit,
+        api_user_id=_caller_api_user_id(request),
     )
     # Compute absolute paths for the frontend
     for note in notes:
@@ -184,13 +210,15 @@ async def get_notes_autocomplete(
 @router.get("/{note_id}", response_model=Note)
 async def get_note(
     note_id: str,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Get a note by ID"""
+    api_user_id = _caller_api_user_id(request)
     def _load():
         # ONE hop: the read plus the disk reconciliation, which itself stats and
         # may re-read the markdown file and write the row back — all blocking.
-        note = database.get_note(note_id)
+        note = _owned_note(note_id, api_user_id)
         if not note:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -206,15 +234,17 @@ async def get_note(
 async def update_note(
     note_id: str,
     note_data: NoteUpdate,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Update a note"""
+    api_user_id = _caller_api_user_id(request)
     def _update():
         # Read-decide-write in ONE hop: the current row decides which file is
         # renamed/rewritten and what path is stored, so the read, the filesystem
         # mutation and the UPDATE cannot be split without opening a race between
         # two concurrent edits of the same note.
-        existing = database.get_note(note_id)
+        existing = _owned_note(note_id, api_user_id)
         if not existing:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -259,13 +289,15 @@ async def update_note(
 @router.delete("/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_note(
     note_id: str,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Delete a note"""
+    api_user_id = _caller_api_user_id(request)
     def _delete():
         # Read-decide-write kept atomic, and the two file/tree deletions (also
         # blocking I/O) ride the same hop.
-        existing = database.get_note(note_id)
+        existing = _owned_note(note_id, api_user_id)
         if not existing:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -292,11 +324,13 @@ async def delete_note(
 @router.get("/{note_id}/attachments", response_model=List[NoteAttachment])
 async def list_note_attachments(
     note_id: str,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """List all files attached to a note."""
+    api_user_id = _caller_api_user_id(request)
     def _load():
-        if not database.get_note(note_id):
+        if not _owned_note(note_id, api_user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Note not found: {note_id}"
@@ -313,15 +347,17 @@ async def list_note_attachments(
 )
 async def upload_note_attachment(
     note_id: str,
+    request: Request,
     file: UploadFile = File(...),
     token: str = Depends(require_auth)
 ):
     """Upload a file and attach it to a note."""
+    api_user_id = _caller_api_user_id(request)
     # TWO hops, and only two: the 404 must be decided BEFORE the body is read
     # (unchanged ordering), and reading the body is a real await that cannot sit
     # inside a worker thread. Everything after the read is one hop.
     def _check_note():
-        if not database.get_note(note_id):
+        if not _owned_note(note_id, api_user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Note not found: {note_id}"
@@ -379,15 +415,18 @@ async def upload_note_attachment(
 async def download_note_attachment(
     note_id: str,
     attachment_id: str,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Download an attachment file."""
+    api_user_id = _caller_api_user_id(request)
     def _resolve():
         # ONE hop resolves everything blocking: the row read, the cache stat,
         # the fallback blob read and the cache re-materialization (a disk
         # write). Only the Response object is built back on the loop.
         attachment = database.get_note_attachment(attachment_id)
-        if not attachment or attachment["note_id"] != note_id:
+        if (not attachment or attachment["note_id"] != note_id
+                or not _owned_note(note_id, api_user_id)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Attachment not found"
@@ -448,13 +487,16 @@ async def download_note_attachment(
 async def delete_note_attachment_endpoint(
     note_id: str,
     attachment_id: str,
+    request: Request,
     token: str = Depends(require_auth)
 ):
     """Delete an attachment (DB row + file on disk)."""
+    api_user_id = _caller_api_user_id(request)
     def _delete():
         # Read-decide-write kept atomic; the file unlink rides the same hop.
         attachment = database.get_note_attachment(attachment_id)
-        if not attachment or attachment["note_id"] != note_id:
+        if (not attachment or attachment["note_id"] != note_id
+                or not _owned_note(note_id, api_user_id)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Attachment not found"

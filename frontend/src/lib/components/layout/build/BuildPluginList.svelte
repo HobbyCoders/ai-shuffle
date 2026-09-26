@@ -28,6 +28,7 @@
 	import type { AvailablePlugin, PluginInfo, PluginUpdateInfo, AutoUpdateSettings } from '$lib/api/plugins';
 	import PluginDetails from '$lib/components/plugins/PluginDetails.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import {
 		Package, Puzzle, Search, Plus, RefreshCw, ArrowUpCircle, ToggleLeft, ToggleRight,
 		Trash2, Download, Loader2, AlertCircle, X, Database, Settings, Clock
@@ -50,6 +51,14 @@
 
 	// Sources delete confirm
 	let confirmDeleteSource = $state<string | null>(null);
+
+	// Uninstall confirm (plugin awaiting confirmation, or null)
+	let pendingUninstall = $state<PluginInfo | null>(null);
+	function confirmUninstall() {
+		const p = pendingUninstall;
+		pendingUninstall = null;
+		if (p) quiet(plugins.uninstallPlugin(p.id));
+	}
 
 	// Touch/narrow only: which row (installed or source) has its collapsed ⋮ action
 	// tray expanded. One open at a time; desktop keeps the always-inline rail.
@@ -87,8 +96,12 @@
 		{ value: 24, label: '24 hours' }
 	];
 
+	// Store actions surface failures through $pluginsError and then rethrow; the
+	// rethrow has no other consumer here, so don't leave it unhandled.
+	function quiet(p: Promise<unknown>) { p.catch(() => {}); }
+
 	onMount(() => {
-		plugins.loadAll();
+		quiet(plugins.loadAll());
 	});
 
 	const updateLookup = $derived.by(() => {
@@ -139,7 +152,11 @@
 
 	async function openDetails(pluginId: string) {
 		previousTab = activeTab;
-		await plugins.selectPlugin(pluginId);
+		try {
+			await plugins.selectPlugin(pluginId);
+		} catch {
+			return; // shown via $pluginsError
+		}
 		activeTab = 'details';
 	}
 
@@ -190,7 +207,7 @@
 
 	function handleRemoveSource(id: string) {
 		if (confirmDeleteSource === id) {
-			plugins.removeMarketplace(id);
+			quiet(plugins.removeMarketplace(id));
 			confirmDeleteSource = null;
 		} else {
 			confirmDeleteSource = id;
@@ -251,7 +268,7 @@
 		<PluginDetails
 			plugin={$selectedPlugin}
 			onClose={() => { plugins.clearSelectedPlugin(); activeTab = previousTab; }}
-			onInstall={() => plugins.installPlugin($selectedPlugin.id)}
+			onInstall={() => quiet(plugins.installPlugin($selectedPlugin.id))}
 			installing={$pluginInstalling[$selectedPlugin.id] || false}
 		/>
 	{:else}
@@ -331,16 +348,16 @@
 									label="Plugin actions"
 								>
 									{#if updateLookup.has(p.id)}
-										<button class="bpl-act bpl-act--update" title="Update" onclick={() => { actionsOpenId = null; plugins.updatePlugin(p.id); }} disabled={$pluginUpdating[p.id]}>
+										<button class="bpl-act bpl-act--update" title="Update" aria-label="Update {p.name}" onclick={() => { actionsOpenId = null; quiet(plugins.updatePlugin(p.id)); }} disabled={$pluginUpdating[p.id]}>
 											{#if $pluginUpdating[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<ArrowUpCircle size={15} strokeWidth={1.7} />{/if}
 										</button>
 									{/if}
-									<button class="bpl-act bpl-act--danger" title="Uninstall" onclick={() => { actionsOpenId = null; plugins.uninstallPlugin(p.id); }}>
+									<button class="bpl-act bpl-act--danger" title="Uninstall" aria-label="Uninstall {p.name}" onclick={() => { actionsOpenId = null; pendingUninstall = p; }}>
 										<Trash2 size={15} strokeWidth={1.7} />
 									</button>
 								</RowActionMenu>
 								<!-- Enable/disable stays outside the menu — an always-visible control. -->
-								<button class="bpl-act bpl-toggle-act" title={p.enabled ? 'Disable' : 'Enable'} onclick={() => plugins.togglePlugin(p.id)}>
+								<button class="bpl-act bpl-toggle-act" title={p.enabled ? 'Disable' : 'Enable'} aria-label="{p.enabled ? 'Disable' : 'Enable'} {p.name}" onclick={() => quiet(plugins.togglePlugin(p.id))}>
 									{#if p.enabled}<ToggleRight size={16} strokeWidth={1.7} />{:else}<ToggleLeft size={16} strokeWidth={1.7} />{/if}
 								</button>
 							</div>
@@ -361,7 +378,7 @@
 				<div class="bpl-list">
 					{#each filteredAvailable as p (p.id)}
 						<div class="bpl-row" class:bpl-row--sel={selectedForInstall.has(p.id)} role="button" tabindex="0" onclick={() => openDetails(p.id)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetails(p.id); } }}>
-							<button class="bpl-check" class:on={selectedForInstall.has(p.id)} title="Select for batch install" onclick={(e) => { e.stopPropagation(); toggleSelect(p.id); }}>
+							<button class="bpl-check" class:on={selectedForInstall.has(p.id)} title="Select for batch install" aria-label="Select {p.name} for batch install" aria-pressed={selectedForInstall.has(p.id)} onclick={(e) => { e.stopPropagation(); toggleSelect(p.id); }}>
 								{#if selectedForInstall.has(p.id)}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 13l4 4L19 7" /></svg>{/if}
 							</button>
 							<span class="bpl-ic"><Package size={17} strokeWidth={1.7} /></span>
@@ -374,7 +391,7 @@
 								{#each caps(p) as c}<span class="bpl-tag">{c}</span>{/each}
 							</div>
 							<div class="bpl-actions bpl-actions--hover" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-								<button class="bpl-act" title="Install" onclick={() => plugins.installPlugin(p.id)} disabled={$pluginInstalling[p.id]}>
+								<button class="bpl-act" title="Install" aria-label="Install {p.name}" onclick={() => quiet(plugins.installPlugin(p.id))} disabled={$pluginInstalling[p.id]}>
 									{#if $pluginInstalling[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<Download size={15} strokeWidth={1.7} />{/if}
 								</button>
 							</div>
@@ -400,14 +417,14 @@
 								onToggle={(e) => toggleRowActions(e, m.id)}
 								label="Source actions"
 							>
-								<button class="bpl-act" title="Sync from git" onclick={() => { actionsOpenId = null; plugins.syncMarketplace(m.id); }} disabled={$marketplaceSyncing[m.id]}>
+								<button class="bpl-act" title="Sync from git" aria-label="Sync {m.id} from git" onclick={() => { actionsOpenId = null; quiet(plugins.syncMarketplace(m.id)); }} disabled={$marketplaceSyncing[m.id]}>
 									<RefreshCw size={15} strokeWidth={1.7} class={$marketplaceSyncing[m.id] ? 'bpl-spin' : ''} />
 								</button>
 								{#if confirmDeleteSource === m.id}
 									<button class="bpl-btn bpl-btn--danger bpl-btn--sm" onclick={() => handleRemoveSource(m.id)}>Remove</button>
 									<button class="bpl-btn bpl-btn--sm" onclick={() => (confirmDeleteSource = null)}>Cancel</button>
 								{:else}
-									<button class="bpl-act bpl-act--danger" title="Remove source" onclick={() => handleRemoveSource(m.id)}>
+									<button class="bpl-act bpl-act--danger" title="Remove source" aria-label="Remove source {m.id}" onclick={() => handleRemoveSource(m.id)}>
 										<Trash2 size={15} strokeWidth={1.7} />
 									</button>
 								{/if}
@@ -446,7 +463,7 @@
 						</div>
 						<div class="bpl-au-footer">
 							<span>Last checked: {formatLastChecked($autoUpdateSettings.last_check)}</span>
-							<button class="bpl-btn bpl-btn--sm" onclick={() => plugins.runAutoUpdate()} disabled={$checkingUpdates}>
+							<button class="bpl-btn bpl-btn--sm" onclick={() => quiet(plugins.runAutoUpdate())} disabled={$checkingUpdates}>
 								<RefreshCw size={13} strokeWidth={1.7} class={$checkingUpdates ? 'bpl-spin' : ''} /> Check now
 							</button>
 						</div>
@@ -459,10 +476,10 @@
 
 <!-- Add-source modal -->
 {#if showAddSource}
-	<div class="bpl-modal-overlay" role="dialog" aria-modal="true">
+	<div class="bpl-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="bpl-add-source-title">
 		<button class="bpl-modal-scrim" onclick={() => (showAddSource = false)} tabindex="-1" aria-label="Close"></button>
 		<div class="bpl-modal">
-			<h3>Add plugin source</h3>
+			<h3 id="bpl-add-source-title">Add plugin source</h3>
 			<div class="bpl-field">
 				<label for="bpl-src-name">Name</label>
 				<input id="bpl-src-name" type="text" bind:value={newSourceName} placeholder="e.g. my-plugins" />
@@ -480,6 +497,16 @@
 		</div>
 	</div>
 {/if}
+
+<ConfirmDialog
+	open={pendingUninstall !== null}
+	title="Uninstall plugin"
+	message={`Uninstall "${pendingUninstall?.name ?? ''}"? Its commands, agents, skills and hooks will no longer be available.`}
+	confirmLabel="Uninstall"
+	danger
+	onConfirm={confirmUninstall}
+	onCancel={() => (pendingUninstall = null)}
+/>
 
 <style>
 	.bpl { display: flex; flex-direction: column; gap: 14px; }

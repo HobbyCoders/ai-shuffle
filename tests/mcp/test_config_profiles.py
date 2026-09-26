@@ -6,29 +6,16 @@ The database layer is mocked at the function level (app.db.database.*) so no
 real DB connection is needed. Mirrors the style of test_config_subagents.py.
 """
 
-import json
 import pytest
 from unittest.mock import patch
 
 from app.mcp.config_profiles import _create_profile_tools
+from tests.mcp.tool_helpers import get_tool, tool_result_json
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _get_tool(tools: list, name: str):
-    """Return the SdkMcpTool with the given name."""
-    for t in tools:
-        if t.name == name:
-            return t
-    raise KeyError(f"Tool '{name}' not found in tool list")
-
-
-def _decode(result: dict) -> dict:
-    """Decode the MCP tool result envelope."""
-    return json.loads(result["content"][0]["text"])
-
 
 def _make_profile(**kwargs) -> dict:
     """Return a minimal profile row dict, overridable via kwargs."""
@@ -74,10 +61,10 @@ class TestListProfiles:
             name="My List Profile",
             config={"model": "claude-opus-4-20250514"},
         )
-        tool = _get_tool(admin_tools, "listProfiles")
+        tool = get_tool(admin_tools, "listProfiles")
         with patch("app.db.database.get_all_profiles", return_value=[profile]):
             result = await tool.handler({})
-        body = _decode(result)
+        body = tool_result_json(result)
         ids = [p["id"] for p in body["profiles"]]
         assert "my-list-profile" in ids
         assert body["count"] >= 1
@@ -90,10 +77,10 @@ class TestListProfiles:
 class TestGetProfile:
     @pytest.mark.asyncio
     async def test_get_profile_not_found_returns_error(self, admin_tools):
-        tool = _get_tool(admin_tools, "getProfile")
+        tool = get_tool(admin_tools, "getProfile")
         with patch("app.db.database.get_profile", return_value=None):
             result = await tool.handler({"profile_id": "does-not-exist-xyz"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "not found" in body["error"].lower()
 
@@ -105,10 +92,10 @@ class TestGetProfile:
             description="desc",
             config={"model": "claude-haiku-4-20250514", "tools_preset": "claude_code"},
         )
-        tool = _get_tool(admin_tools, "getProfile")
+        tool = get_tool(admin_tools, "getProfile")
         with patch("app.db.database.get_profile", return_value=profile):
             result = await tool.handler({"profile_id": "full-record-profile"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["id"] == "full-record-profile"
         assert "config" in body
         assert body["config"]["model"] == "claude-haiku-4-20250514"
@@ -125,10 +112,10 @@ class TestGetProfile:
             created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
         )
-        tool = _get_tool(admin_tools, "getProfile")
+        tool = get_tool(admin_tools, "getProfile")
         with patch("app.db.database.get_profile", return_value=profile):
             result = await tool.handler({"profile_id": "dt-profile"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["id"] == "dt-profile"
         assert body["created_at"].startswith("2026-01-02T03:04:05")
 
@@ -141,19 +128,19 @@ class TestCreateProfile:
     @pytest.mark.asyncio
     async def test_create_profile_minimal_only_name(self, admin_tools):
         created = _make_profile(id="simple-test-profile", name="Simple Test Profile")
-        tool = _get_tool(admin_tools, "createProfile")
+        tool = get_tool(admin_tools, "createProfile")
         with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile", return_value=created):
             result = await tool.handler({"name": "Simple Test Profile"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         # ID should be kebab-case derived from name
         assert body["profile_id"] == "simple-test-profile"
 
     @pytest.mark.asyncio
     async def test_create_profile_with_system_prompt_content_stores_custom(self, admin_tools):
-        tool = _get_tool(admin_tools, "createProfile")
-        with patch("app.db.database.get_profile", return_value=None) as mock_get, \
+        tool = get_tool(admin_tools, "createProfile")
+        with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile") as mock_create:
             mock_create.return_value = _make_profile(
                 id="custom-prompt-profile",
@@ -163,7 +150,7 @@ class TestCreateProfile:
                 "name": "Custom Prompt Profile",
                 "system_prompt_content": "You are a code reviewer.",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         # Verify create_profile was called with the correct config
         _, kwargs = mock_create.call_args
@@ -173,7 +160,7 @@ class TestCreateProfile:
 
     @pytest.mark.asyncio
     async def test_create_profile_with_system_prompt_append_stores_preset(self, admin_tools):
-        tool = _get_tool(admin_tools, "createProfile")
+        tool = get_tool(admin_tools, "createProfile")
         with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile") as mock_create:
             mock_create.return_value = _make_profile(
@@ -184,7 +171,7 @@ class TestCreateProfile:
                 "name": "Append Prompt Profile",
                 "system_prompt_append": "Always use Python 3.",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_create.call_args
         sp = kwargs["config"]["system_prompt"]
@@ -194,19 +181,19 @@ class TestCreateProfile:
     @pytest.mark.asyncio
     async def test_create_profile_duplicate_id_rejected(self, admin_tools):
         existing = _make_profile(id="dup-profile", name="Dup Profile")
-        tool = _get_tool(admin_tools, "createProfile")
+        tool = get_tool(admin_tools, "createProfile")
         # First call finds no conflict, second call finds existing profile
         with patch("app.db.database.get_profile", return_value=existing):
             result = await tool.handler({"name": "Dup Profile"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "already exists" in body["error"]
 
     @pytest.mark.asyncio
     async def test_create_profile_requires_admin(self, non_admin_tools):
-        tool = _get_tool(non_admin_tools, "createProfile")
+        tool = get_tool(non_admin_tools, "createProfile")
         result = await tool.handler({"name": "Admin Only"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "admin" in body["error"].lower()
 
@@ -229,7 +216,7 @@ class TestUpdateProfile:
                 "app_config_tools": True,
             },
         )
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original),              patch("app.db.database.update_profile", return_value=updated) as mock_update:
             result = await tool.handler({
                 "profile_id": "update-basic",
@@ -238,7 +225,7 @@ class TestUpdateProfile:
                 "max_turns": 5,
                 "app_config_tools": True,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         cfg = kwargs["config"]
@@ -250,7 +237,7 @@ class TestUpdateProfile:
     @pytest.mark.asyncio
     async def test_update_profile_allowed_tools(self, admin_tools):
         original = _make_profile(id="update-allowed", name="Update Allowed", config={})
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
 
         # Set a whitelist
         with patch("app.db.database.get_profile", return_value=original), \
@@ -264,7 +251,7 @@ class TestUpdateProfile:
                 "profile_id": "update-allowed",
                 "allowed_tools": ["Read", "Grep"],
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         assert kwargs["config"]["allowed_tools"] == ["Read", "Grep"]
@@ -281,7 +268,7 @@ class TestUpdateProfile:
                 "profile_id": "update-allowed",
                 "allowed_tools": [],
             })
-        body2 = _decode(result2)
+        body2 = tool_result_json(result2)
         assert body2["success"] is True
         _, kwargs2 = mock_update2.call_args
         assert kwargs2["config"]["allowed_tools"] == []
@@ -289,7 +276,7 @@ class TestUpdateProfile:
     @pytest.mark.asyncio
     async def test_update_profile_disallowed_tools(self, admin_tools):
         original = _make_profile(id="update-disallowed", name="Update Disallowed", config={})
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original), \
              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
@@ -301,7 +288,7 @@ class TestUpdateProfile:
                 "profile_id": "update-disallowed",
                 "disallowed_tools": ["Bash"],
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         assert kwargs["config"]["disallowed_tools"] == ["Bash"]
@@ -312,7 +299,7 @@ class TestUpdateProfile:
         (v79) — the tool must not write them into an agent's config even if a
         model names them."""
         original = _make_profile(id="update-binding", name="Update Binding", config={})
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original),              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
                 id="update-binding",
@@ -326,7 +313,7 @@ class TestUpdateProfile:
                 "permission_mode": "auto",
                 "effort": "high",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         cfg = mock_update.call_args[1]["config"]
         assert cfg["max_turns"] == 3
@@ -341,7 +328,7 @@ class TestUpdateProfile:
             name="SP Content Switch",
             config={"system_prompt": {"type": "preset", "preset": "claude_code"}},
         )
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original), \
              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
@@ -353,7 +340,7 @@ class TestUpdateProfile:
                 "profile_id": "sp-content-switch",
                 "system_prompt_content": "x",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         sp = kwargs["config"]["system_prompt"]
@@ -367,7 +354,7 @@ class TestUpdateProfile:
             name="SP Append Set",
             config={"system_prompt": {"type": "preset", "preset": "claude_code"}},
         )
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original), \
              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
@@ -379,7 +366,7 @@ class TestUpdateProfile:
                 "profile_id": "sp-append-set",
                 "system_prompt_append": "hello",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
         sp = kwargs["config"]["system_prompt"]
@@ -394,7 +381,7 @@ class TestUpdateProfile:
             name="SP Preserve",
             config={"system_prompt": {"type": "custom", "content": "abc"}},
         )
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original), \
              patch("app.db.database.update_profile") as mock_update:
             mock_update.return_value = _make_profile(
@@ -409,7 +396,7 @@ class TestUpdateProfile:
                 "profile_id": "sp-preserve",
                 "max_turns": 4,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         # Inspect the config kwarg passed to update_profile — system_prompt must be unchanged
         _, kwargs = mock_update.call_args
@@ -419,34 +406,34 @@ class TestUpdateProfile:
 
     @pytest.mark.asyncio
     async def test_update_profile_not_found_returns_error(self, admin_tools):
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=None):
             result = await tool.handler({
                 "profile_id": "no-such-profile-xyz",
                 "model": "claude-haiku-4-20250514",
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "not found" in body["error"].lower()
 
     @pytest.mark.asyncio
     async def test_update_profile_no_fields_returns_error(self, admin_tools):
         original = _make_profile(id="no-fields-update", name="No Fields Update", config={})
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original):
             result = await tool.handler({"profile_id": "no-fields-update"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "no fields" in body["error"].lower()
 
     @pytest.mark.asyncio
     async def test_update_profile_requires_admin(self, non_admin_tools):
-        tool = _get_tool(non_admin_tools, "updateProfile")
+        tool = get_tool(non_admin_tools, "updateProfile")
         result = await tool.handler({
             "profile_id": "admin-update-check",
             "model": "claude-haiku-4-20250514",
         })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "admin" in body["error"].lower()
 
@@ -465,14 +452,14 @@ class TestUpdateProfile:
             is_builtin=True,
             config={"max_turns": 9},
         )
-        tool = _get_tool(admin_tools, "updateProfile")
+        tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=builtin), \
              patch("app.db.database.update_profile", return_value=updated_row) as mock_update:
             result = await tool.handler({
                 "profile_id": "claude-code",
                 "max_turns": 9,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         assert "max_turns" in body["updated_fields"]
         # Confirm allow_builtin=True was passed through to the DB layer
@@ -487,10 +474,10 @@ class TestUpdateProfile:
 class TestDeleteProfile:
     @pytest.mark.asyncio
     async def test_delete_profile_requires_confirm(self, admin_tools):
-        tool = _get_tool(admin_tools, "deleteProfile")
+        tool = get_tool(admin_tools, "deleteProfile")
         # Without confirm key at all
         result = await tool.handler({"profile_id": "del-no-confirm"})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "confirm" in body["error"].lower()
 
@@ -499,32 +486,32 @@ class TestDeleteProfile:
             "profile_id": "del-no-confirm",
             "confirm": False,
         })
-        body2 = _decode(result2)
+        body2 = tool_result_json(result2)
         assert body2["success"] is False
         assert "confirm" in body2["error"].lower()
 
     @pytest.mark.asyncio
     async def test_delete_profile_not_found(self, admin_tools):
-        tool = _get_tool(admin_tools, "deleteProfile")
+        tool = get_tool(admin_tools, "deleteProfile")
         with patch("app.db.database.get_profile", return_value=None):
             result = await tool.handler({
                 "profile_id": "ghost-profile-xyz",
                 "confirm": True,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "not found" in body["error"].lower()
 
     @pytest.mark.asyncio
     async def test_delete_profile_rejects_builtin(self, admin_tools):
         builtin = _make_profile(id="builtin-del", name="Builtin Del", is_builtin=True)
-        tool = _get_tool(admin_tools, "deleteProfile")
+        tool = get_tool(admin_tools, "deleteProfile")
         with patch("app.db.database.get_profile", return_value=builtin):
             result = await tool.handler({
                 "profile_id": "builtin-del",
                 "confirm": True,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "built-in" in body["error"].lower()
 
@@ -535,7 +522,7 @@ class TestDeleteProfile:
             name="Del Success",
             config={"model": "claude-haiku-4-20250514"},
         )
-        tool = _get_tool(admin_tools, "deleteProfile")
+        tool = get_tool(admin_tools, "deleteProfile")
         with patch("app.db.database.get_profile", return_value=profile), \
              patch("app.db.database.get_automations_for_profile", return_value=[]), \
              patch("app.db.database.delete_profile", return_value=True):
@@ -543,7 +530,7 @@ class TestDeleteProfile:
                 "profile_id": "del-success",
                 "confirm": True,
             })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is True
         assert body["profile_id"] == "del-success"
 
@@ -551,12 +538,12 @@ class TestDeleteProfile:
     async def test_delete_profile_blocked_by_automation(self, admin_tools):
         profile = _make_profile(id="del-blocked", name="Del Blocked")
         automations = [{"name": "Nightly Sync"}, {"name": "Weekly Report"}]
-        tool = _get_tool(admin_tools, "deleteProfile")
+        tool = get_tool(admin_tools, "deleteProfile")
         with patch("app.db.database.get_profile", return_value=profile), \
              patch("app.db.database.get_automations_for_profile", return_value=automations), \
              patch("app.db.database.delete_profile") as mock_delete:
             result = await tool.handler({"profile_id": "del-blocked", "confirm": True})
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "2 automation(s)" in body["error"]
         assert "Nightly Sync" in body["error"]
@@ -565,11 +552,11 @@ class TestDeleteProfile:
 
     @pytest.mark.asyncio
     async def test_delete_profile_requires_admin(self, non_admin_tools):
-        tool = _get_tool(non_admin_tools, "deleteProfile")
+        tool = get_tool(non_admin_tools, "deleteProfile")
         result = await tool.handler({
             "profile_id": "admin-del-check",
             "confirm": True,
         })
-        body = _decode(result)
+        body = tool_result_json(result)
         assert body["success"] is False
         assert "admin" in body["error"].lower()

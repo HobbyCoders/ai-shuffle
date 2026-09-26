@@ -16,7 +16,7 @@
 	import './settings/settings-layout.css';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
-	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
+	import type { CodeSandboxStatus, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import {
 		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig
 	} from '$lib/api/auth';
@@ -26,29 +26,24 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines, BadgeCheck } from 'lucide-svelte';
+	import { OPEN_SETTINGS_TAB_EVENT } from '$lib/api/account';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
 	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
+	import OwnerAccessSection from './settings/OwnerAccessSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
 	import VoiceSection from './settings/VoiceSection.svelte';
+	import LicenseSection from './settings/LicenseSection.svelte';
 	import ApiTab from './settings/ApiTab.svelte';
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
-	interface Props {
-		mobile?: boolean;
-	}
-
-	let {
-		mobile = false
-	}: Props = $props();
-
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'license' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -64,6 +59,7 @@
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
 		{ id: 'voice', label: 'Voice', icon: AudioLines },
 		{ id: 'providers', label: 'Providers', icon: KeyRound },
+		{ id: 'license', label: 'License', icon: BadgeCheck },
 		...($isAdmin
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
@@ -100,6 +96,8 @@
 	let securityInstructionsError = $state('');
 	// Pending "revert security instructions" awaiting confirmation (replaces native confirm()).
 	let pendingRevertSecurity = $state(false);
+	// Code-mode sandbox state (admin only; the System tab shows it).
+	let codeSandbox: CodeSandboxStatus | null = $state(null);
 
 	// Load data on mount — use onMount for one-time setup to avoid
 	// subscription accumulation from $effect re-runs.
@@ -118,7 +116,14 @@
 			currentTimezone = tz;
 		});
 
-		return () => { unsubscribe(); unsubTz(); };
+		// Other panels (the remote-access refusal) link to a tab here.
+		const openTab = (event: Event) => {
+			const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+			if (settingsTabs.some((item) => item.id === tab && !item.heading)) activeTab = tab as Tab;
+		};
+		window.addEventListener(OPEN_SETTINGS_TAB_EVENT, openTab);
+
+		return () => { unsubscribe(); unsubTz(); window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, openTab); };
 	});
 
 	async function loadChatPreferences() {
@@ -128,8 +133,18 @@
 	async function loadAllData() {
 		await Promise.all([
 			loadWorkspaceConfig(),
-			loadSecurityInstructions()
+			loadSecurityInstructions(),
+			loadCodeSandbox()
 		]);
+	}
+
+	async function loadCodeSandbox() {
+		try {
+			const info = await api.get<{ code_sandbox?: CodeSandboxStatus }>('/deployment');
+			codeSandbox = info?.code_sandbox ?? null;
+		} catch (e) {
+			console.error('Failed to load the code sandbox state:', e);
+		}
 	}
 
 	async function loadWorkspaceConfig(quiet = false) {
@@ -294,6 +309,7 @@
 							onValidateWorkspace={handleValidateWorkspace}
 							onSaveWorkspace={handleSaveWorkspace}
 						/>
+						{#if $isAdmin}<OwnerAccessSection />{/if}
 					</div>
 				{/if}
 
@@ -324,6 +340,13 @@
 					</div>
 				{/if}
 
+				<!-- LICENSE -->
+				{#if activeTab === 'license'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<LicenseSection isAdmin={$isAdmin} />
+					</div>
+				{/if}
+
 				<!-- API -->
 				{#if activeTab === 'api' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
@@ -346,6 +369,7 @@
 							{securityInstructionsError}
 							onSaveSecurityInstructions={saveSecurityInstructions}
 							onRevertSecurityInstructions={revertSecurityInstructions}
+							{codeSandbox}
 						/>
 					</div>
 				{/if}

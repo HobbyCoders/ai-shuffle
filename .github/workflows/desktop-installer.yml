@@ -32,11 +32,14 @@ concurrency:
 
 jobs:
   build:
-    if: inputs.candidate_run_id == ''
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
+      (inputs.candidate_run_id == '')
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 50
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +58,8 @@ jobs:
           "DESKTOP_VERSION=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_ENV
       - name: Build frontend
         working-directory: frontend
+        env:
+          APP_VERSION: ${{ inputs.release_tag }}
         run: npm ci && npm run build
       - name: Test desktop and build bundled runtime
         working-directory: desktop
@@ -67,9 +72,51 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stamp-desktop-build.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Authenticode: Azure Trusted Signing or a PFX, from repository secrets
+      # (desktop/RELEASING.md). No secrets means an unsigned installer, as
+      # before; half-configured secrets fail here. Setting the repository
+      # variable DESKTOP_REQUIRE_SIGNING=true refuses unsigned releases.
+      - name: Choose code signing
+        id: signing
+        working-directory: desktop
+        env:
+          DESKTOP_REQUIRE_SIGNING: ${{ vars.DESKTOP_REQUIRE_SIGNING }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TRUSTED_SIGNING_PUBLISHER: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: node scripts/signing.mjs win --args-file "$env:RUNNER_TEMP/signing-args.txt" --github-env
       - name: Build stable Windows installer
         working-directory: desktop
-        run: npm run dist -- --win nsis --x64 "--config.extraMetadata.version=$env:DESKTOP_VERSION"
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signing = @(Get-Content "$env:RUNNER_TEMP/signing-args.txt" | Where-Object { $_ })
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Straight to the CLI so no shell re-splits the publisher name.
+          node node_modules/electron-builder/cli.js --publish never --win nsis --x64 "--config.extraMetadata.version=$env:DESKTOP_VERSION" @signing
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Authenticode signatures
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          foreach ($file in @($installer[0].FullName, 'desktop/release/win-unpacked/AI Shuffle.exe')) {
+            $signature = Get-AuthenticodeSignature $file
+            if ($signature.Status -ne 'Valid') { throw "$file signature is $($signature.Status)" }
+            if (-not $signature.TimeStamperCertificate) { throw "$file has no timestamp" }
+            Write-Host "Signed: $(Split-Path $file -Leaf) by $($signature.SignerCertificate.Subject)"
+          }
       - name: Collect private installer candidate
         run: |
           $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
@@ -90,10 +137,13 @@ jobs:
 
   verify:
     needs: build
-    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
+      (always() && (needs.build.result == 'success' || needs.build.result == 'skipped'))
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 35
     env:
+      EXPECT_SIGNED: ${{ needs.build.outputs.signed }}
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -114,6 +164,9 @@ jobs:
           if ($installer[0].Name -ne "AI-Shuffle-Desktop-$($env:RELEASE_TAG.Substring(1))-win-x64.exe") { throw 'Candidate release version mismatch' }
           $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
           if ((Get-Content installer/SHA256SUMS -Raw).Trim() -ne "$hash  $($installer[0].Name)") { throw 'Candidate checksum mismatch' }
+          $signature = Get-AuthenticodeSignature $installer[0].FullName
+          Write-Host "Installer signature: $($signature.Status)"
+          if ($env:EXPECT_SIGNED -eq 'true' -and $signature.Status -ne 'Valid') { throw 'The signed installer candidate lost its signature' }
           node desktop/scripts/verify-installed-desktop.mjs $installer[0].FullName (Join-Path $env:RUNNER_TEMP 'installed-desktop-evidence')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
@@ -133,7 +186,9 @@ jobs:
 
   publish:
     needs: verify
-    if: always() && needs.verify.result == 'success'
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
+      (always() && needs.verify.result == 'success')
     runs-on: ubuntu-latest
     environment: account-hub-production
     permissions:

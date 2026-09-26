@@ -12,6 +12,13 @@ export function setWorkspaceRuntimeIdentity(session: Session, env = process.env)
 }
 
 export const HUMAN_LEASE_MS = 65000;
+/**
+ * Ceiling for a panel text edit. It runs page script (the page's own input
+ * listeners fire synchronously inside it) while holding the session queue, so
+ * a page that never returns would otherwise block every later agent and
+ * viewer operation.
+ */
+export const EDIT_TIMEOUT_MS = 5000;
 export interface CommandResult { id: string; ok: boolean; error?: string }
 /** Page operations share one queue; an admitted Stop interrupts it. */
 export class BrowserWorkspace {
@@ -158,7 +165,7 @@ export class BrowserWorkspace {
     } else if (c.op === "upload") {
       await uploadField(page, a);
     } else if (c.op === "edit") {
-      await editField(page, a);
+      await raceWithTimeout(editField(page, a), EDIT_TIMEOUT_MS, "edit timed out; outcome unknown, do not replay");
     } else if (c.op === "input") {
       const cdp = await this.session.currentCDP();
       await raceWithTimeout(cdp.send(a.method as "Input.insertText", a.params as { text: string }), 5000, "input timed out; outcome unknown, do not replay");

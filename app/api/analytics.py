@@ -59,9 +59,9 @@ def validate_date_format(date_str: Optional[str], param_name: str) -> Optional[s
 
 
 def get_default_date_range() -> tuple[str, str]:
-    """Get default date range (last 30 days)"""
+    """Get default date range (last 30 days, both ends inclusive)"""
     end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=30)
+    start_date = end_date - timedelta(days=29)
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
@@ -93,9 +93,9 @@ async def get_analytics_summary(
     # Get user filter (None for admin, user_id for API users)
     api_user_id = get_user_filter(request)
 
-    # Get recent trend window (last 7 days of the range) up front so the three
-    # aggregations can share ONE thread hop.
-    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    # Get recent trend window (last 7 days of the range, both ends inclusive)
+    # up front so the three aggregations can share ONE thread hop.
+    trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
 
     def _load_summary():
         """All three `usage_log` aggregations in ONE off-loop hop.
@@ -118,7 +118,8 @@ async def get_analytics_summary(
         total_tokens_out=usage_data["total_tokens_out"],
         total_cost_usd=usage_data["total_cost_usd"],
         session_count=usage_data["session_count"],
-        query_count=usage_data["query_count"]
+        query_count=usage_data["query_count"],
+        estimated_query_count=usage_data.get("estimated_query_count", 0),
     )
 
     # Get top profiles (limit to 5 for summary)
@@ -129,7 +130,8 @@ async def get_analytics_summary(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in profile_breakdown[:5]
     ]
@@ -141,7 +143,8 @@ async def get_analytics_summary(
             tokens_in=item["tokens_in"],
             tokens_out=item["tokens_out"],
             cost_usd=item["cost_usd"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in trend_data
     ]
@@ -205,7 +208,8 @@ async def get_cost_breakdown(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in breakdown_data
     ]
@@ -270,7 +274,8 @@ async def get_usage_trends(
             tokens_in=item["tokens_in"],
             tokens_out=item["tokens_out"],
             cost_usd=item["cost_usd"],
-            query_count=item["query_count"]
+            query_count=item["query_count"],
+            estimated_query_count=item.get("estimated_query_count", 0),
         )
         for item in trend_data
     ]
@@ -327,7 +332,8 @@ async def get_top_sessions(
             total_cost_usd=item["total_cost_usd"],
             total_tokens_in=item["total_tokens_in"],
             total_tokens_out=item["total_tokens_out"],
-            created_at=item["created_at"]
+            created_at=item["created_at"],
+            usage_estimated=bool(item.get("usage_estimated", False)),
         )
         for item in sessions_data
     ]

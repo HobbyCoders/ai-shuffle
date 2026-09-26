@@ -84,6 +84,62 @@ export function loopbackGuidance(
   return reason ? `${action} ${cause} (Policy detail: ${reason})` : `${action} ${cause}`;
 }
 
-/** Chromium net errors that mean "nothing answered", i.e. worth one retry. */
+/** Chromium net errors that mean "nothing answered", i.e. worth one retry.
+ * Behind the egress proxy a target that does not answer (or a name that does
+ * not resolve) is ERR_EMPTY_RESPONSE for https, ws and plain http alike: the
+ * proxy closes the connection unanswered. */
 export const RETRYABLE_NET_ERRORS =
   /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_ADDRESS_UNREACHABLE|ERR_EMPTY_RESPONSE|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_BLOCKED_BY_CLIENT|ERR_ABORTED|ERR_FAILED/;
+
+/** Chromium's report of a CONNECT a proxy refused. Behind the app's egress
+ * proxy that is its marked 403, i.e. policy (see {@link behindEgressProxy}); any
+ * other proxy on the way reports its refusals the same way. */
+export const EGRESS_REFUSED_NET_ERRORS = /ERR_TUNNEL_CONNECTION_FAILED/;
+
+/**
+ * Whether the browser this server drives runs behind the app's egress proxy
+ * (BROWSER_EGRESS_PROXY=1, set by whoever launched it through egress-launch).
+ * Chromium hides a refused CONNECT's reply, marker header included, so this is
+ * the only way an https ERR_TUNNEL_CONNECTION_FAILED is known to be the egress
+ * policy rather than some other proxy (a browser reached over CDP without the
+ * launcher, a corporate proxy). A plain-http refusal carries its marker and
+ * needs no such knowledge.
+ */
+export function behindEgressProxy(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes)$/i.test((env.BROWSER_EGRESS_PROXY ?? "").trim());
+}
+
+/**
+ * What to tell a model whose tunnel a proxy refused when this server cannot
+ * say which proxy that was: not a policy verdict, and not "do not retry".
+ */
+export function tunnelRefusal(url: string, detail: string): string {
+  return (
+    `a proxy between the browser and ${url} refused the connection (ERR_TUNNEL_CONNECTION_FAILED). ` +
+    "If this browser runs behind the app's egress proxy, the address is outside what it may " +
+    `reach; otherwise a proxy on the way refused it. (${detail})`
+  );
+}
+
+/** The egress proxy's marker header on a refusal (see egress.ts), lower-cased. */
+export const EGRESS_REFUSAL_HEADER = "x-browser-egress";
+
+/**
+ * What to tell a model whose navigation the browser's egress proxy refused.
+ * The server may be up; retrying or rewriting the URL will not get past the
+ * proxy. For loopback it also names the likely cause when loopback normally
+ * works: the launcher could not load the app's policy and fell back to public
+ * addresses only (its log says so).
+ */
+export function egressRefusal(url: string, reason?: string): string {
+  const fallback = isLoopbackUrl(url)
+    ? " If this browser normally reaches loopback, its egress proxy is running the fallback " +
+      "policy (public addresses only); the browser launcher's log names the reason."
+    : "";
+  const detail = reason ? ` (Policy detail: ${reason})` : "";
+  return (
+    `blocked by the browser's egress proxy: ${url} is outside the addresses this browser may ` +
+    "reach, so the request never left the browser. This is policy, not a server that is down; " +
+    `retrying or rewriting the URL will not help.${fallback}${detail}`
+  );
+}

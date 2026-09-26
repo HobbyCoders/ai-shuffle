@@ -29,6 +29,9 @@ def _isolated_key(tmp_path, monkeypatch):
     # No managed DB in unit tests → the signature alone decides.
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
+    # The direct-LAN owner here needs "trusted LAN, no login" (off by default).
+    from app.core import owner_auth
+    monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
 
 
 def _request(path="/", method="GET", *, peer="10.0.0.200", port=8000, ingress="local",
@@ -257,18 +260,21 @@ def test_transport_check_uses_the_shared_owner_auth_helpers():
     assert not preview_access._private_peer(_request(peer="203.0.113.4"))
     assert not preview_access._private_peer(_request(ingress="remote"))
 
-@pytest.mark.parametrize("dependency", ["require_auth", "require_admin", "require_api_key", "get_current_api_user"])
-@pytest.mark.parametrize("identity", ["local-owner", "admin-cookie", "paired-cookie", "paired-bearer", "api-key"])
+@pytest.mark.parametrize("dependency", ["require_auth", "require_admin", "require_api_key"])
+@pytest.mark.parametrize("identity", ["local-owner", "admin-cookie", "invalid-admin-cookie", "paired-cookie", "paired-bearer", "api-key"])
 @pytest.mark.parametrize("transport", ["direct-LAN", "vite-proxy", "remote"])
 @pytest.mark.parametrize("cookie_state", ["valid", "expired", "invalid", "missing"])
 def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, dependency, identity, transport, cookie_state):
     from fastapi import HTTPException
+
     from app.api import auth as auth_api
 
     paired = {"id": "paired", "account_owner_admin": True}
     monkeypatch.setattr(auth_api, "get_paired_client_from_token",
                         lambda token, **kw: paired if token == "paired-token" else None)
-    monkeypatch.setattr(auth_api.auth_service, "validate_session", lambda token: token == "admin-token")
+    # A real owner session, not the unused legacy validator mock. Otherwise
+    # this case tests only the old invalid-cookie -> trusted-LAN fallback.
+    owner_token = auth_api.owner_auth.issue_session()[0] if identity == "admin-cookie" else None
     monkeypatch.setattr(auth_api.db, "get_api_user_by_key_hash",
                         lambda hashed: {"id": "api-user"} if hashed == auth_api.hash_api_key("api-token") else None)
     monkeypatch.setattr(auth_api.db, "update_api_user_last_used", lambda ident: None)
@@ -282,8 +288,12 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
     headers = {"Origin": "http://10.0.0.135:8000"}
     if transport == "vite-proxy":
         headers.update(_VITE)
-    if identity.endswith("cookie"):
-        cookies["session"] = "admin-token" if identity == "admin-cookie" else "paired-token"
+    if identity == "admin-cookie":
+        cookies["session"] = owner_token
+    elif identity == "invalid-admin-cookie":
+        cookies["session"] = "invalid-owner-token"
+    elif identity == "paired-cookie":
+        cookies["session"] = "paired-token"
     elif identity in ("paired-bearer", "api-key"):
         headers["Authorization"] = "Bearer " + ("paired-token" if identity == "paired-bearer" else "api-token")
     request = _request("/api/v1/settings/test-only", "POST", cookies=cookies, headers=headers,
@@ -299,13 +309,18 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
         return
 
     # A broken/absent cookie does not change the normal credential's authority.
-    api_only = dependency in ("require_api_key", "get_current_api_user")
+    api_only = dependency == "require_api_key"
     admitted = (identity == "api-key" if api_only else
                 identity.startswith("paired") or
                 (identity == "api-key" and dependency == "require_auth") or
-                (transport == "direct-LAN" and identity != "api-key"))
+                (identity == "admin-cookie" and transport != "remote") or
+                (transport == "direct-LAN" and identity == "local-owner"))
     if admitted:
-        assert call(request)
+        result = call(request)
+        assert result
+        if identity == "admin-cookie":
+            assert result == owner_token  # Never accept via the LAN fallback.
+            assert request.state.is_admin is True
     else:
         with pytest.raises(HTTPException) as exc:
             call(request)
@@ -318,6 +333,7 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
 @pytest.mark.parametrize("dependency", ["require_auth", "require_admin"])
 def test_direct_owner_preview_cannot_reach_protected_handler(prefix, method, dependency):
     from unittest.mock import Mock
+
     from app.api import auth as auth_api
 
     api = FastAPI()
@@ -338,6 +354,7 @@ def test_direct_owner_preview_cannot_reach_protected_handler(prefix, method, dep
 @pytest.mark.parametrize("proxied", [False, True])
 def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, proxied):
     from fastapi import HTTPException
+
     from app.api.auth import require_admin
 
     client = _client(app)

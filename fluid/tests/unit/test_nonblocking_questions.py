@@ -9,7 +9,7 @@ from fluid.cli.repl import Repl, stream_turn
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.native import NativeLoop
 from fluid.events import (
-    Interrupt, QuestionAnswered, QuestionDelivered, QuestionRequest,
+    Interrupt, QuestionAnswered, QuestionRequest,
     RespondQuestion, ToolResult, TurnComplete, UserTurn,
 )
 from fluid.permissions.engine import PermissionEngine
@@ -17,7 +17,7 @@ from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.builtins import ask_user
 from fluid.tools.mcp.bundled_server import _answer
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
 from tests.unit.test_tool_loop import ScriptedProvider, _text, _tool
 
 QUESTIONS = [{"question": "Which region?", "options": [

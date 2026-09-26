@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -412,7 +411,13 @@ def get_automation_runs(automation_id: str, limit: int = 50, offset: int = 0) ->
 
 
 def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
-    """Update an automation run."""
+    """Update an automation run.
+
+    ``expected_status`` makes the write a compare-and-set: it applies only
+    while the row still has that status, and None is returned when it did not
+    (another install or task moved the run first).
+    """
+    expected_status = kwargs.pop("expected_status", None)
     updates = []
     values = []
 
@@ -429,12 +434,18 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
 
     if updates:
         values.append(run_id)
+        where = "id = %s"
+        if expected_status is not None:
+            where += " AND status = %s"
+            values.append(expected_status)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = %s",
+                f"UPDATE automation_runs SET {', '.join(updates)} WHERE {where}",
                 values
             )
+            if expected_status is not None and cursor.rowcount != 1:
+                return None
 
     return get_automation_run(run_id)
 

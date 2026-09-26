@@ -740,3 +740,140 @@ async def test_importing_read_tool_docs_from_a_cell_corrects_the_model() -> None
         assert "dir(tools)" in r.error
     finally:
         await k.stop()
+
+
+# ─── Kernel guards exercised in-process (no child interpreter) ──────────────
+
+
+def _fake_frame(filename: str, name: str = "_find_and_load"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(f_code=SimpleNamespace(co_filename=filename, co_name=name))
+
+
+def test_audit_guard_import_exemption_is_read_only_module_files_under_roots(tmp_path) -> None:
+    """The carve-out that lets a cell import allowlisted modules must not
+    become a file-access hole: only importlib/linecache callers, only
+    read-mode opens, only module files, only under a frozen root (a sibling
+    directory sharing the root's prefix does not count)."""
+    import os
+
+    from fluid.codemode._audit_guard import AuditGuard
+
+    root = tmp_path / "lib"
+    (root / "pkg").mkdir(parents=True)
+    module = root / "pkg" / "mod.py"
+    module.write_text("x = 1\n")
+    (root / "secrets.txt").write_text("k")
+    sibling = tmp_path / "lib2"
+    sibling.mkdir()
+    (sibling / "evil.py").write_text("")
+    guard = AuditGuard(allow_fs=False, allow_network=False, roots=[str(root)])
+    importer = _fake_frame("<frozen importlib._bootstrap_external>")
+    linecache = _fake_frame(os.path.join("lib", "tokenize.py"), "open")
+
+    assert guard.import_exempt("open", (str(module), "r"), importer)
+    assert guard.import_exempt("open", (os.fsencode(module),), importer)
+    assert guard.import_exempt("os.listdir", (root / "pkg",), importer)
+    assert guard.import_exempt("open", (str(module), "r"), linecache)
+
+    for mode in ("w", "a", "r+", "xb", "wb"):
+        assert not guard.import_exempt("open", (str(module), mode), importer), mode
+    assert not guard.import_exempt("open", (str(root / "secrets.txt"), "r"), importer)
+    assert not guard.import_exempt("open", (str(sibling / "evil.py"), "r"), importer)
+    assert not guard.import_exempt("open", (str(module), "r"), _fake_frame("<cell>"))
+    assert not guard.import_exempt("open", (str(module), "r"), _fake_frame("tokenize.py", "detect"))
+    assert not guard.import_exempt("os.remove", (str(module),), importer)
+    assert not guard.import_exempt("open", (3, "r"), importer)
+    assert not guard.import_exempt("open", (), importer)
+    assert not guard.import_exempt("open", (str(module), "r"), None)
+
+
+def test_audit_guard_hook_refuses_denied_events_raised_from_cell_code() -> None:
+    """``__call__`` is the hook itself: from a cell frame a denied event
+    raises with advice naming the sanctioned route; from host code, or for an
+    event not on the list, it stays silent."""
+    from fluid.codemode._audit_guard import AuditGuard
+
+    guard = AuditGuard(allow_fs=False, allow_network=False, roots=[])
+    cell_ns: dict = {"__name__": "__cell__", "__builtins__": __builtins__, "guard": guard}
+    exec(compile("def fire(event, args):\n    guard(event, args)\n", "<cell>", "exec"), cell_ns)
+
+    for event, advice in (
+        ("subprocess.Popen", "projected Bash tool"),
+        ("socket.connect", "WebFetch"),
+        ("open", "projected file tools"),
+        ("shutil.rmtree", "projected file tools"),
+    ):
+        with pytest.raises(RuntimeError, match="blocked in the code-mode kernel") as info:
+            cell_ns["fire"](event, ("x",))
+        assert event in str(info.value) and advice in str(info.value)
+    cell_ns["fire"]("compile", ("x",))  # not on the deny list
+    assert not guard._busy
+
+    guard("subprocess.Popen", ("x",))  # host frame: allowed
+    # Re-entrancy: an event raised while the hook is deciding is not judged.
+    guard._busy = True
+    cell_ns["fire"]("os.system", ("x",))
+    guard._busy = False
+
+
+def test_guarded_import_blocks_modules_off_the_allowlist_with_a_hint() -> None:
+    from fluid.codemode.vfs import make_guarded_import
+
+    guarded = make_guarded_import({"json", "re"})
+    assert guarded("json").__name__ == "json"
+    assert guarded("re", None, None, ("compile",), 0).__name__ == "re"
+    for name, hint in (
+        ("os", "use the Bash tool"),
+        ("os.path", "use the Bash tool"),
+        ("subprocess", "permission-gated"),
+        ("socket", "network access is blocked"),
+        ("jsonschema", "Allowed: json, re"),
+    ):
+        with pytest.raises(ImportError) as info:
+            guarded(name)
+        message = str(info.value)
+        assert f"import of {name.split('.')[0]!r} is blocked" in message
+        assert hint in message
+
+
+def test_skill_modules_load_under_the_guarded_builtins_but_tool_stubs_do_not() -> None:
+    """Skills are model-authored: the VFS loader must execute them with the
+    cell's guarded builtins, so a skill cannot widen the sandbox by importing
+    what a cell may not. Host-generated tool stubs load with real builtins."""
+    from fluid.codemode.vfs import VfsFinder, make_namespace
+
+    ns = make_namespace(allowlist={"json"}, host_call=lambda *a, **k: None)
+    finder = VfsFinder(
+        {"Probe": "import os\ndef Probe():\n    return os.sep\n"},
+        lambda *a, **k: None,
+        skills={
+            "sneaky": "import os\ndef sneaky():\n    return os.getcwd()\n",
+            "fine": '"""Fine."""\nimport json\ndef fine():\n    return json.dumps(1)\n',
+        },
+        guarded_builtins=ns["__builtins__"],
+    )
+
+    def load(name: str):
+        spec = finder.find_spec(name)
+        assert spec is not None, name
+        module = finder.create_module(spec)
+        finder.exec_module(module)
+        return module
+
+    with pytest.raises(ImportError, match="'os' is blocked"):
+        load("skills.sneaky")
+    assert load("skills.fine")() == "1"
+    assert load("tools.Probe")() in ("/", "\\")
+
+    assert finder.find_spec("skills.absent") is None
+    assert finder.find_spec("tools.NotMounted") is None
+    assert finder.find_spec("elsewhere") is None
+    # A top-level catalog tool or an unwired capability is a plain ImportError
+    # with the correction, not a ModuleNotFoundError that ``from x import y``
+    # would swallow.
+    for leaf, why in (("read_tool_docs", "top-level tool call"), ("SendMessage", "not available")):
+        with pytest.raises(ImportError) as info:
+            finder.find_spec(f"tools.{leaf}")
+        assert type(info.value) is ImportError and why in str(info.value)

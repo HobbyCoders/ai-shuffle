@@ -45,7 +45,11 @@ from fluid.codemode.journal import FrictionDetector, append_friction, strip_remi
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
-from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from fluid.codemode.subprocess_kernel import (
+    KernelConfig,
+    SubprocessKernel,
+    os_sandbox_active,
+)
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
@@ -113,10 +117,8 @@ _RUN_PYTHON_DESC = (
 def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
     """run_python's description plus this session's real stdout budget.
 
-    The cap used to be undocumented, and it is the single largest silent loss
-    in the code surface: transcripts show cells printing 27k chars, losing 11k
-    of them, and the model paying to re-run the tools because nothing had told
-    it a budget existed or that the full results were still in the kernel.
+    Stating the cap tells the model a budget exists and that full results stay
+    in the kernel, so it slices them instead of re-running the tools.
     """
     return (
         f"{_RUN_PYTHON_DESC}\n"
@@ -127,6 +129,61 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         "to print is already in the kernel as a ResultRef, so slice it (or "
         "recover it from `_refs[N]`) rather than re-running the tool."
     )
+
+# ── the permission prompt for a cell ──
+# Ask mode prompts for a cell only while the kernel runs unsandboxed (see
+# ``CodeModeSession.run_python_risk``). The host renders these instead of the
+# raw tool name and a JSON-escaped, 100-character cut of the input.
+RUN_PYTHON_TITLE = "Run Python code"
+RUN_PYTHON_UNSANDBOXED_REASON = (
+    "The code sandbox is not active on this host, so each Python cell asks "
+    "first: it would run with the app's own file and network access. Review "
+    "the code before approving; a tool the cell calls may ask again."
+)
+PROMPT_PREVIEW_LINES = 20
+PROMPT_PREVIEW_CHARS = 1500
+
+
+def code_preview(
+    code: str, *, max_lines: int = PROMPT_PREVIEW_LINES, max_chars: int = PROMPT_PREVIEW_CHARS,
+) -> str:
+    """The first ``max_lines`` lines / ``max_chars`` characters of ``code`` as
+    plain text, with a closing note saying how much is not shown."""
+    text = code.rstrip()
+    lines = text.splitlines()
+    shown = "\n".join(lines[:max_lines])
+    cut_chars = len(shown) > max_chars
+    if cut_chars:
+        shown = shown[:max_chars].rstrip()
+    hidden_lines = len(lines) - shown.count("\n") - 1
+    if hidden_lines > 0:
+        noun = "line" if hidden_lines == 1 else "lines"
+        shown += f"\n… ({hidden_lines} more {noun} not shown)"
+    elif cut_chars:
+        shown += " … (truncated)"
+    return shown
+
+
+def run_python_prompt(input: Any, *, sandboxed: bool) -> dict[str, str]:
+    """``title``/``display_name`` and ``description`` for a ``run_python``
+    permission prompt.
+
+    The description leads with why this host asks (only when the cell is
+    unsandboxed, i.e. its risk was not lowered to ``safe``), then the code as
+    plain text, cut by :func:`code_preview`. The app shows the whole
+    description as the "Code to run" block, so a caller that tags the prompt
+    (a ProviderAgent worker's approval) puts its tag in the title instead of
+    prepending it here.
+    """
+    code = input.get("code") if isinstance(input, dict) else None
+    parts = [] if sandboxed else [RUN_PYTHON_UNSANDBOXED_REASON]
+    if isinstance(code, str) and code.strip():
+        parts.append(code_preview(code))
+    out = {"title": RUN_PYTHON_TITLE, "display_name": RUN_PYTHON_TITLE}
+    if parts:
+        out["description"] = "\n\n".join(parts)
+    return out
+
 
 class _HumanWait:
     """A stopwatch for the parts of a cell that are waiting on a person.
@@ -145,8 +202,6 @@ class _HumanWait:
 
     @staticmethod
     def _now() -> float:
-        import asyncio
-
         try:
             return asyncio.get_running_loop().time()
         except RuntimeError:  # pragma: no cover - always called inside a loop
@@ -296,6 +351,26 @@ class CodeModeSession:
         """Friction entries recorded this turn (the engine's nudge trigger)."""
         return self._friction.count if self._skills is not None else 0
 
+    def os_sandbox_active(self) -> bool:
+        """Whether this session's cells run under the OS sandbox (bwrap).
+
+        The process-wide cached self-test must hold for this kernel config,
+        and a live kernel must itself have been spawned sandboxed (``auto``
+        starts it plain after a bwrap refusal). Drives ``run_python``'s risk.
+        """
+        if not os_sandbox_active(self._config):
+            return False
+        return self._kernel is None or bool(self._kernel.sandboxed)
+
+    def run_python_risk(self, _input: dict | None = None) -> str:
+        """``safe`` behind the OS sandbox, else ``write`` so Ask mode prompts.
+
+        Without bwrap the kernel's only boundary is the in-process audit guard,
+        which is defence in depth, not a trust boundary: a cell that escapes it
+        runs host commands as the app user.
+        """
+        return "safe" if self.os_sandbox_active() else "write"
+
     def begin_turn(self) -> None:
         """Turn boundary: reset friction budget and cross-call state."""
         try:
@@ -358,11 +433,8 @@ class CodeModeSession:
         src = self._projection().docs(name)
         if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
-        # Audited sessions re-fetched the same four browser stubs an hour
-        # apart with the first copy still in context, eight calls for four
-        # signatures. The docs are returned anyway — a compaction may have
-        # taken them — but the model is told it is probably already holding
-        # them.
+        # A repeat fetch returns the docs anyway — a compaction may have taken
+        # them — but tells the model it is probably already holding them.
         if name in self._docs_served:
             return (
                 f"(You already read {name}'s docs earlier in this session; "
@@ -541,8 +613,8 @@ class CodeModeSession:
             except asyncio.CancelledError:
                 # The kernel's per-call ceiling (or the turn's watchdog)
                 # cancelled this call. The ToolUse above already went out;
-                # without a matching ToolResult the transcript shows a call
-                # that never returned and the audit reads it as a dead turn.
+                # without a matching ToolResult the transcript would show a
+                # call that never returned.
                 try:
                     await loop._emit(ToolResult(
                         session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
@@ -668,7 +740,7 @@ class CodeModeSession:
         except Exception:
             pass
         pending, self._friction_pending = self._friction_pending, []
-        append_friction(self._skills, self._synthesizer, pending)
+        append_friction(self._skills, pending)
         if self._synthesizer is not None:
             try:
                 self._synthesizer.kick()
@@ -802,6 +874,11 @@ def register_code_mode_tools(
                 "required": ["code"],
             },
             source=CODE_MODE_SOURCE,
+            # ``write`` is the ceiling; the classifier lowers it to ``safe``
+            # only while the OS sandbox holds (see run_python_risk), so Ask
+            # mode prompts for cells whenever the kernel runs unsandboxed.
+            risk="write",
+            classify_risk=getattr(session, "run_python_risk", None),
         ),
         _run_guard,
     )
@@ -862,15 +939,37 @@ def register_code_mode_tools(
             verdicts = await verify_sources(
                 {**store.sources(), name: source}, [name], config=session._config
             )
-            verdict = verdicts.get(name)
-        except Exception:
-            verdict = None  # verification infrastructure failure ≠ bad skill
+        except Exception as exc:
+            # Verification infrastructure failure (e.g. the ``required``
+            # sandbox is unavailable) is not a bad skill, but it is not a
+            # passing self-test either (R11-2). Save it unverified: the store
+            # sees it as stale, the mount withholds it, and the first mount
+            # whose kernel starts runs its self-test and records the verdict.
+            verdicts = None
+            infra = f"{type(exc).__name__}: {exc}"
+        else:
+            infra = None
+            if name not in verdicts:
+                # The kernel went down (sandbox lost) before reaching it.
+                verdicts = None
+                infra = "the verification kernel stopped before the skill ran"
+        verdict = None if verdicts is None else verdicts[name]
         if verdict is not None:
             return ToolOutcome(
                 text=f"skill {name!r} rejected — verification failed: {verdict}",
                 is_error=True,
             )
         skill = store.save(name, source)
+        if verdicts is None:
+            return ToolOutcome(
+                text=(
+                    f"skill {skill.name!r} saved but NOT verified — its "
+                    f"self-test could not run ({infra}). It stays out of "
+                    "the kernel until a later run_python mount verifies it; "
+                    "a failing self-test then keeps it out until its source "
+                    "changes."
+                )
+            )
         store.mark_verified(name)
         return ToolOutcome(
             text=(

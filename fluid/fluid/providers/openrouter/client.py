@@ -15,12 +15,25 @@ import httpx
 
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
-from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S, is_usable_client
+from fluid.providers._transport import (
+    DEFAULT_FIRST_BYTE_TIMEOUT_S,
+    DEFAULT_STREAM_DEADLINE_S,
+    is_usable_client,
+)
 from fluid.providers._retry import is_retriable_status
 from fluid.providers.base import ErrorClass, ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openrouter.serialize import build_request_body
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def is_openrouter_url(url: str) -> bool:
+    """True when ``url`` points at OpenRouter (``openrouter.ai`` or a subdomain)."""
+    try:
+        host = (httpx.URL(url).host or "").lower().rstrip(".")
+    except Exception:  # noqa: BLE001 — an unparseable URL is not OpenRouter
+        return False
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
 
 class OpenRouterClient:
@@ -44,16 +57,24 @@ class OpenRouterClient:
         base_url: str = API_URL,
         timeout: float = 600.0,
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
+        first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         pricing: dict[str, dict[str, float]] | None = None,
         allow_fallbacks: bool = False,
+        openrouter: bool | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
         self._stream_deadline = stream_deadline
+        # Wall clock for the headers plus the first data event; None or 0
+        # disables it. Headers that never came are a pre-content transport
+        # failure (retried only on the transport budget, 0 by default here);
+        # a 200 followed by silence is a truncated stream. See
+        # fluid.providers._chat_completions.stream_chat_completions.
+        self._first_byte_timeout = first_byte_timeout
         self._http = http_client
         # A refused request (429, 5xx, or an error chunk sent in place of
         # content) started no generation, so it retries with backoff. A
@@ -66,12 +87,15 @@ class OpenRouterClient:
         # logical call stays bound to one upstream generation; set it when the
         # embedder prefers OpenRouter's silent failover to visible failures.
         self._allow_fallbacks = allow_fallbacks
-
-    def estimate_input_cost(self, model: str, input_tokens: int) -> float | None:
-        row = self._pricing.get(model)
-        if not row or "prompt" not in row:
-            return None
-        return max(input_tokens, 0) * row["prompt"]
+        # Whether the endpoint is OpenRouter, which decides whether its body
+        # extensions (``usage``, ``provider``) are sent. This client is also
+        # the generic chat/completions client for custom OpenAI-format rows
+        # (vLLM, Groq, xAI) whose strict servers reject unknown fields. None
+        # infers it from the host; a row that is OpenRouter behind a proxy
+        # says so explicitly.
+        self._openrouter = (
+            is_openrouter_url(base_url) if openrouter is None else bool(openrouter)
+        )
 
     def classify_error(self, error: dict) -> ErrorClass:
         """Retry class of an error; an empty completion drops ``session_id``.
@@ -109,7 +133,9 @@ class OpenRouterClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request, allow_fallbacks=self._allow_fallbacks)
+        body = build_request_body(
+            request, allow_fallbacks=self._allow_fallbacks, openrouter=self._openrouter,
+        )
         if not is_usable_client(self._http):
             # A host-injected client its owner has closed can never send again;
             # drop it here so later calls do not re-check a corpse.
@@ -123,5 +149,6 @@ class OpenRouterClient:
             retry=self._retry,
             track_provider_requests=True,
             stream_deadline=self._stream_deadline,
+            first_byte_timeout=self._first_byte_timeout,
         ):
             yield chunk

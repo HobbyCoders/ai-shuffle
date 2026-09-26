@@ -1,4 +1,4 @@
-"""CLI surfaces for anchors and guarded evolution (Phase 2.1/2.2).
+"""CLI surfaces for anchors and guarded evolution.
 
 ``fluid anchors``  — manage the anchor set: list, add, rm, run (replay and
 record baselines), harvest (draft candidates from recent project sessions,
@@ -11,8 +11,8 @@ retention; and the audit surfaces (parked proposals, the evolution log).
 This module owns the guidance-specific halves the generic gate deliberately
 does not know about: the validator (the prompt vocabulary lives at this
 layer) and the apply step (writing ``~/.fluid/guidance/<stem>.md``).
-Phase 2.3 will make the synthesizer the second proposer through the same
-``CommitGate`` path.
+The continual synthesizer is the second proposer: its queued proposals go
+through the same ``CommitGate`` path via ``fluid evolve pending|run``.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from fluid.codemode.evolution import (
 )
 from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
 from fluid.config.model import HarnessConfig
+from fluid.context.guidance import guidance_dir
 
 _STEM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _ANCHOR_TAG_RE = re.compile(
@@ -84,10 +85,6 @@ If nothing is worth anchoring: NO_ANCHORS
 
 def skills_root(config: HarnessConfig) -> Path:
     return Path(config.skills_dir or DEFAULT_SKILLS_ROOT)
-
-
-def guidance_dir(home: Path | None = None) -> Path:
-    return (home or Path.home()) / ".fluid" / "guidance"
 
 
 # ─── guidance proposal: validator + apply ────────────────────────────────────
@@ -463,11 +460,10 @@ async def _evolve_run_pending(args, config: HarnessConfig) -> int:
     from fluid.cli.replay import AnchorRunner
 
     runner = AnchorRunner(config, provider_name=getattr(args, "provider", None))
-    budget = getattr(args, "budget", None)
     committed, parked = await run_pending(
         config,
         runner=runner,
-        budget=budget if budget is not None else config.anchor_budget,
+        budget=getattr(args, "budget", None),
         allow_no_anchors=getattr(args, "allow_no_anchors", False),
     )
     if not committed and not parked:

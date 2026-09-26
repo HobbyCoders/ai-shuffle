@@ -9,27 +9,40 @@ Turn lifecycle:
   model call → else TurnComplete.
 
 Tools/permissions/hooks are all optional: with no registry the loop behaves as
-the M0 text/thinking streamer (a tool_use stop is terminal).
+a plain text/thinking streamer (a tool_use stop is terminal).
 
 Empty completions are retried rather than accepted. Some providers answer a
 request with HTTP 200 and nothing in it — either a terminal usage chunk
 reporting zero tokens and no content, or a stream that closes before any
 terminal chunk arrives (which the chat-completions client reports as an error).
-Both used to end the turn, the first by persisting an empty assistant node and
-stopping the agent mid-work. The loop now re-sends the same history up to
+The loop re-sends the same history up to
 ``EMPTY_COMPLETION_MAX_RETRIES`` times, emitting a ProviderRetry event before
 each attempt and backing off (interruptibly) in between; only after the cap is
 reached does the turn end with the usual terminal ErrorEvent. No empty
 assistant node is ever written, and each failed call's usage is still folded
-into the turn totals so nothing billed is lost.
+into the turn totals so nothing billed is lost. A stream cut while a tool
+call's arguments were still arriving is the same retry under its own label
+("truncated stream") and a lower cap, ``TRUNCATED_STREAM_MAX_RETRIES``.
+
+A call that fails after content streamed keeps that content: the visible text
+and the tool calls that closed are stored as an assistant node marked
+``provider_meta["interrupted"]``, each closed call answered by an error
+result, whether the stream died on a dropped connection, an in-stream error or
+a body cut before its terminal event.
 
 A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
-a text prompt, or the tool results the model never got to read. The Resume op
-picks the loop back up from exactly that node without appending anything, so
-the retry re-sends the same history the failed call saw. Resume on a head that
-is already an assistant reply has nothing to continue and ends the turn with an
-ErrorEvent saying so. Peer messages accepted during a failed call are retained
-as a new unanswered user-role node and included in an explicit later resume.
+a text prompt, or the tool results the model never got to read — or on the
+interrupted partial reply to one. The Resume op picks the loop back up from
+that user node without appending anything, so the retry re-sends the same
+history the failed call saw. A kept partial reply with no closed tool call is
+the head itself: Resume steps back to the prompt under it, and the new reply
+branches beside the partial text. When a tool call closed before the error,
+the head is the user node holding that call's error result, so the partial
+reply (its text and tool calls) stays on the re-sent path and the model reads
+it, followed by the error results. Resume on a head that is a completed assistant reply has nothing to continue
+and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
+failed call are retained as a new unanswered user-role node and included in an
+explicit later resume.
 """
 
 from __future__ import annotations
@@ -38,10 +51,10 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from fnmatch import fnmatchcase
 from typing import Any
 
 from fluid.codemode.session import (
@@ -77,7 +90,7 @@ from fluid.context.trim import (
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
-from fluid.engine.base import EngineCaps
+from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     BlockStart,
@@ -132,6 +145,7 @@ from fluid.hooks.bus import (
     TURN_START,
     HookDecision,
     HookBus,
+    hook_reminder,
 )
 from fluid.messages import (
     Image,
@@ -142,6 +156,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.messages.content import SteerDelivery
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -156,6 +171,11 @@ from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
+
+#: ``LocalClient.name``: the one dialect whose tokens are never priced (see
+#: ``NativeLoop._fold_call_usage``). A string rather than an import so the
+#: engine does not load the local provider package to know its name.
+LOCAL_PROVIDER_NAME = "local"
 from fluid.providers.windows import context_window_for
 from fluid.store.base import (
     RECONSTRUCTIBLE_EVENTS,
@@ -168,6 +188,7 @@ from fluid.store.base import (
     replay_source,
 )
 from fluid.tools.builtins._util import resolve as resolve_tool_path
+from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.builtins.tool_search import (
     parse_deferred_catalog,
     render_deferred_catalog,
@@ -282,13 +303,6 @@ _CONTINUE_NUDGE = (
 MAX_STOP_HOOK_CONTINUATIONS = 3
 
 
-def _hook_reminder(label: str, text: str) -> str:
-    """Hook-supplied text as a system-reminder block on a user message."""
-    from fluid.hooks.bus import hook_reminder
-
-    return hook_reminder(label, text)
-
-
 def _steer_parts(
     pending: Steer | AgentMessage | str,
 ) -> tuple[str | None, str, str | None, str]:
@@ -318,8 +332,6 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     user's own authority, and a <task-notification> whose summary a sub-agent
     wrote plainly does not.
     """
-    from fluid.messages.content import SteerDelivery
-
     return SteerDelivery(text=text, sender=sender, origin=origin).render()
 
 
@@ -341,10 +353,8 @@ class ToolArgStreamGuard:
 
     A model can degenerate mid-``arguments`` and stream padding forever: the
     JSON never becomes callable, the per-read HTTP timeout never fires because
-    data keeps arriving, and the only thing that ends the call is the user
-    pressing Stop. Three sessions in one audited day burned 224 s, 495 s and
-    839 s that way, the last of them on 423 KB of whitespace across 27,845
-    delta events.
+    data keeps arriving, and without this guard only the user pressing Stop
+    ends the call.
 
     Any limit set to ``None`` is off; all three off means no guard at all.
     """
@@ -377,6 +387,13 @@ class _CallResult:
     # HTTP status of a rejected request, when the provider reported one. A
     # 413 means "the prompt no longer fits" whatever the body says.
     error_status: int | None = None
+    # The provider's own short explanation of the error (≤300 chars, HTML
+    # stripped), for the ErrorEvent; ``error_message`` may be the raw body.
+    error_provider_message: str | None = None
+    # The stream failed while a tool_use block was still open: the provider
+    # cut it mid-arguments. Such a call is retried under its own, lower cap
+    # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
+    cut_in_tool_args: bool = False
     # The provider's own verdict on the upstream call when it differs from the
     # normalized stop reason (OpenRouter's native_finish_reason). "stop" with a
     # native reason of "network_error" is how a dead upstream replica looks.
@@ -398,14 +415,6 @@ _OVERFLOW_MARKERS = (
 
 # HTTP statuses that mean the request body itself was rejected for size.
 _OVERFLOW_STATUSES = frozenset({413})
-
-# Events whose loss costs a gap in the replay log and nothing else: they are
-# progress frames, and the assistant node the turn stores carries the same
-# content in full. A store failure on one of these is logged, not raised (see
-# NativeLoop._emit). Everything else — ToolUse, ToolResult, Usage, every
-# lifecycle event — is load-bearing, and a store that cannot take it must say
-# so loudly.
-_RECONSTRUCTIBLE_EVENTS = RECONSTRUCTIBLE_EVENTS
 
 # Exception class-name suffixes that mean "the transport or the database was
 # briefly unavailable", matched anywhere in an exception's inheritance chain.
@@ -471,22 +480,21 @@ def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
     )
 
 
-# How long a turn parks on a QuestionRequest before giving up on an answer.
-# A host that renders no questions and never interrupts used to hold the
-# turn open for good. An engine instance may set ``question_timeout`` to
-# another number of seconds, or None to wait without limit.
+# How long a turn parks on a QuestionRequest before giving up on an answer,
+# so a host that renders no questions cannot hold the turn open for good. An
+# engine instance may set ``question_timeout`` to another number of seconds, or
+# None to wait without limit.
 QUESTION_TIMEOUT_S = 30 * 60.0
 
+# How long a turn parks on a PermissionRequest before denying the call, so a
+# host with nobody to approve (REST, background or failover runs with no
+# approver wired) cannot hold the turn open for good. Longer than any host's
+# own approval deadline (the app's is 300 s) so a late answer still wins, and
+# the same bound the delegated leg uses. An engine instance may set
+# ``permission_timeout`` to another number of seconds, or None to wait
+# without limit.
+PERMISSION_TIMEOUT_S = 900.0
 
-def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
-    """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
-
-    ``mcp__chrome-devtools__*`` is the motivating shape; plain names carry no
-    wildcards and fall out of ``fnmatchcase`` as exact comparisons anyway, but
-    the equality check is kept so a name containing ``[`` (legal in MCP tool
-    names, a character class to fnmatch) still matches itself.
-    """
-    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 
 def _is_context_overflow(message: str, status: int | None = None) -> bool:
@@ -500,6 +508,14 @@ def _is_context_overflow(message: str, status: int | None = None) -> bool:
         return True
     lowered = (message or "").lower()
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
+
+
+# The token counters a provider's usage report carries. A call whose usage
+# holds none of them was never reported on (as opposed to reported as zero).
+_USAGE_TOKEN_KEYS = (
+    "input_tokens", "output_tokens",
+    "cache_read_input_tokens", "cache_creation_input_tokens",
+)
 
 
 def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
@@ -528,7 +544,20 @@ def _measured_prompt_tokens(usage: dict[str, Any]) -> int:
 
 EMPTY_COMPLETION_MAX_RETRIES = 10
 
+# A stream cut while a tool call's arguments were still arriving is retried
+# like an empty completion (nothing usable was delivered), but under a much
+# lower cap: an empty 200 is a replica blip that clears on its own, while a
+# stream that keeps dying mid-arguments is usually a proxy or size limit the
+# same request will hit again. Three attempts rides out a blip without
+# spending ten full generations on a request that cannot get through.
+TRUNCATED_STREAM_MAX_RETRIES = 3
+
 _EMPTY_STREAM_MARKER = "terminal usage chunk"
+
+# Stored on ``Message.provider_meta`` of an assistant node kept from a call
+# that failed mid-stream: the text is what the user saw arrive, not a
+# finished answer. The value says why the stream ended.
+INTERRUPTED_META_KEY = "interrupted"
 
 
 def _empty_retry_delay(attempt: int) -> float:
@@ -586,6 +615,13 @@ def _is_empty_completion(result: _CallResult) -> bool:
 def _plain_text(blocks: list[Any]) -> str:
     """Concatenated Text-block text of a message (for the episodic journal)."""
     return "\n".join(b.text for b in blocks if isinstance(b, Text) and b.text).strip()
+
+
+# The ToolResult a tool call gets when the model response that carried it
+# failed before it finished (see the error path in _agent_loop).
+_FAILED_CALL_TOOL_TEXT = (
+    "Tool not executed: the model's response failed before it finished."
+)
 
 
 LOST_TOOL_RESULT_TEXT = (
@@ -800,13 +836,23 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
 
 
 
+def _synthetic_tool_use_id() -> str:
+    """An id for a tool call the provider streamed without one.
+
+    Some OpenAI-compatible servers omit ``tool_calls[].id``. Every call then
+    shared the id "", so parallel calls' results could not be told apart by
+    a host, and the next request answered each call with ``tool_call_id: ""``.
+    """
+    return f"call_{uuid.uuid4().hex[:24]}"
+
+
 def _held_peer_id(seq: int) -> str:
     """The id of a peer message held while parked: its progress event's seq."""
     return f"held-peer:{seq}"
 
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
-        inproc_tools=True,
+        code_mode=True, inproc_tools=True, subagents=True,
         fork=True, rewind=True, cache_metrics=True, context_usage=True,
     )
 
@@ -852,9 +898,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         disallowed_tools: Sequence[str] | None = None,
         native_agents: bool = True,
         setting_sources: Sequence[str] | None = None,
-        claude_settings: bool = False,
-        claude_plugins: bool = False,
-        claude_agents: bool = False,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -940,7 +983,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # a filtered tool is never described and never callable from code.
             register_code_mode_tools(
                 registry, codemode,
-                tool_filter=self._tool_available,
+                tool_filter=self._tool_wired,
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -959,16 +1002,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_model_calls = 0
         # The live turn-totals dict the agent loop folds each call's usage
         # into, by reference, for the same reason: a turn that dies outside the
-        # loop still bills what it spent. Four crashed turns in one audited day
-        # carried ``cost_usd: null`` and lost real spend.
+        # loop still bills what it spent.
         self._turn_usage: dict[str, Any] = {}
         self._tool_deliveries = []  # Includes nested code-mode tool completions.
         # Streaming deltas the store refused (see _emit / _note_dropped_event).
-        # Cumulative for the engine; the per-turn count drives the log's
-        # once-per-turn rate limit and hosts can read the total as a metric.
+        # Cumulative for the engine, which hosts can read as a metric;
+        # ``_dropped_events_turn`` rate-limits the log to once per turn.
         self.dropped_delta_events = 0
         self._dropped_events_turn: str | None = None
-        self._dropped_events_in_turn = 0
         # Hook bookkeeping. ``_session_hook_started`` gates the one SessionStart
         # per engine and ``_session_start_context`` holds what those hooks
         # asked to add to the first user message. ``_turn_end_hook_fired``
@@ -989,10 +1030,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._reflection_nudged = False
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
-        # Turn watchdog (round 9): a turn whose active tool call never
-        # returned and whose stream made no progress sat until the host tore
-        # the engine down, with no terminal event and its cost unrecorded.
-        # ``_turn_progress_at`` moves on every emitted event; the watchdog
+        self.permission_timeout: float | None = PERMISSION_TIMEOUT_S
+        # Turn watchdog: bounds a turn whose tool call never returns and whose
+        # stream makes no progress. ``_turn_progress_at`` moves on every emitted event; the watchdog
         # task cancels the turn after ``turn_watchdog_seconds`` of silence
         # that is not a human wait (a pending permission or question).
         self.turn_watchdog_seconds = turn_watchdog_seconds
@@ -1020,6 +1060,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._pending_system_text: str | None = None
         self._prev_system_text: str | None = None
         self._pending_questions: dict[str, asyncio.Future] = {}
+        self.question_timeout: float | None = QUESTION_TIMEOUT_S
         # Mid-turn user steers and peer messages awaiting the next tool
         # result (see the Steer and AgentMessage ops).
         self._pending_steers: list[Steer | AgentMessage | str] = []
@@ -1154,17 +1195,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         # The Skill builtin's miss list walks the same scopes the index did.
         self.ctx.extra.setdefault("setting_sources", self._setting_sources)
-        # Deprecated Claude ecosystem keywords and observability attributes are
-        # inert compatibility seams. Provider homes are never read by NativeLoop.
-        self.claude_settings: dict[str, Any] = {}
-        self.claude_plugins: list[Any] = []
         self.native_agents: list[Any] = []
         if native_agents:
             self._apply_native_agents()
-        self.claude_agents = self.native_agents
         self._init_background_lifecycle()
 
-    # Discovery scope → the ``source`` label carried on a usage agent row.
     def _apply_native_agents(self) -> None:
         """Discover native agent definitions and publish them to the session.
 
@@ -1335,7 +1370,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._hook_stop_reason = None
         parts: list[str] = []
         if with_context and self._session_start_context:
-            parts.append(_hook_reminder("SessionStart hook context", self._session_start_context))
+            parts.append(hook_reminder("SessionStart hook context", self._session_start_context))
             self._session_start_context = None
         if self.hooks is None:
             return False, "\n".join(parts) or None
@@ -1359,7 +1394,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return True, None
         if with_context and decision.additional_context:
             parts.append(
-                _hook_reminder("UserPromptSubmit hook context", decision.additional_context)
+                hook_reminder("UserPromptSubmit hook context", decision.additional_context)
             )
         return False, "\n".join(parts) or None
 
@@ -1423,24 +1458,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_end_hook_fired = False
         return reason
 
-    async def _seed_bus_seq(self, sid: str) -> None:
-        """Continue event numbering after the rows already persisted.
-
-        A fresh bus counts from 1, so a resumed session would re-issue seqs
-        the events file already holds and ``events_since`` would skip the
-        resumed run's first events. A store may offer ``last_event_seq``;
-        otherwise the maximum is taken from a full ``events_since`` read.
-        """
-        last_event_seq = getattr(self.store, "last_event_seq", None)
-        # Failure must abort resume: starting at zero would silently collide
-        # with durable events in stores that deduplicate by (session_id, seq).
-        if callable(last_event_seq):
-            last = int(await last_event_seq(sid))
-        else:
-            events = await self.store.events_since(sid, 0)
-            last = max((e.seq for e in events), default=0)
-        self.bus.seed(sid, last)
-
     @property
     def context_window(self) -> int | None:
         """The window the usage breakdown and the eviction ladder size against.
@@ -1495,8 +1512,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # wrote — which must not be able to close the notice and open the
             # user's marker.
             if op.origin != "user":
-                from fluid.tools.hardening import defang_harness_markers
-
                 op = replace(op, text=defang_harness_markers(op.text))
             if self._turn_task is not None and not self._turn_task.done():
                 self._pending_steers.append(op)
@@ -1511,8 +1526,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # the answer. Busy: queue like a steer, rendered in the peer marker
             # so it cannot borrow the user's authority. Idle: an ordinary turn,
             # unless the host owns wake scheduling and disables it on the op.
-            from fluid.tools.hardening import defang_harness_markers
-
             if self._background_closed or self._interrupted.is_set():
                 raise RuntimeError("receiver is stopping; peer message was not delivered")
             text = defang_harness_markers(op.text)
@@ -1555,15 +1568,21 @@ class NativeLoop(BackgroundLifecycleMixin):
             self.model = op.model
         elif isinstance(op, SetPermissionMode):
             # Accept fluid's native policies directly, plus the Claude-Code-style
-            # mode names clients (the CLI, embedding apps) already speak.
+            # mode names clients (the CLI, embedding apps) already speak. A
+            # mode is a policy plus the rules it implies: ``acceptEdits`` is
+            # ``on_write`` with allow rules for the edit-class tools, so a
+            # file edit runs and everything else asks as ``default`` does.
+            # The rules of the mode being left are lifted at the same time.
+            from fluid.permissions.modes import MODE_POLICY, mode_rules
+
             mode = op.mode
-            policy = mode if mode in ("never_ask", "on_write", "always_ask") else {
-                "bypassPermissions": "never_ask",
-                "acceptEdits": "on_write",
-                "default": "on_write",
-            }.get(mode, "on_write")
+            policy = (
+                mode if mode in ("never_ask", "on_write", "always_ask")
+                else MODE_POLICY.get(mode, "on_write")
+            )
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
+                self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
         elif isinstance(op, Fork):
@@ -1640,11 +1659,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         reply visible while it is written, and every one of them is
         reconstructible from the assistant node the turn goes on to store, so
         a store that refuses a single ``ToolArgsDelta`` INSERT costs a gap in
-        the replay log and nothing else. It used to cost the turn: the failure
-        raised through the agent loop into the catch-all in
-        :meth:`_start_and_loop`, which ended the turn on a non-retriable
-        ErrorEvent. One transient database blip killed two turns and three
-        workers that way. Load-bearing events (ToolUse, ToolResult, Usage, and
+        the replay log and nothing else, never the turn. Load-bearing events (ToolUse, ToolResult, Usage, and
         every lifecycle event) still surface their failures — losing one of
         those really does corrupt the record.
         """
@@ -1653,7 +1668,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         try:
             await persist_event(self.store, sequenced)
         except Exception as exc:
-            if not isinstance(event, _RECONSTRUCTIBLE_EVENTS):
+            if not isinstance(event, RECONSTRUCTIBLE_EVENTS):
                 raise
             self._note_dropped_event(event, exc)
         return sequenced
@@ -1663,20 +1678,18 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         Rate-limited on purpose: the failure mode is a store that is down for
         seconds, and a degenerate stream emits thousands of deltas a second.
-        One warning names the cause; the rest are counted and reported at the
-        end of the turn.
+        One warning names the cause; the rest are only counted in
+        ``dropped_delta_events``.
         """
         turn = self._active_turn_id
         if turn != self._dropped_events_turn:
             self._dropped_events_turn = turn
-            self._dropped_events_in_turn = 0
             log.warning(
                 "store refused a %s event (%s: %s); the turn continues — "
                 "streaming deltas are reconstructible from the stored "
                 "assistant message",
                 type(event).__name__, type(exc).__name__, exc,
             )
-        self._dropped_events_in_turn += 1
         self.dropped_delta_events += 1
 
     def events(self, *, since_seq: int = 0) -> AsyncIterator[Event]:
@@ -1750,7 +1763,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         """Claude-Code-parity breakdown of what the NEXT request would carry.
 
         A snapshot, safe between turns: it reads the store, renders the history
-        through the trimmer's read-only view (:meth:`ToolResultTrimmer.view` —
+        through the compactor's read-only view (:meth:`Compactor.view` —
         no batch is armed, nothing is trimmed as a side effect) and prices the
         same tool schemas ``_build_request`` would send. No model call is made
         and no node is written; a session that does not exist yet simply prices
@@ -2017,7 +2030,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     def _human_wait_pending(self) -> bool:
         """A permission or question is out to the user: silence is not a hang."""
-        for futures in (self._pending_permissions, getattr(self, "_pending_questions", {})):
+        for futures in (self._pending_permissions, self._pending_questions):
             for fut in list(futures.values()):
                 if not fut.done():
                     return True
@@ -2028,7 +2041,8 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         Polls at a quarter of the limit (at least once a second). A pending
         permission or question resets the clock: waiting on a person is not
-        a hang. When it fires, the cancel reason names the silence so the
+        a hang, and those waits end on their own ``permission_timeout`` /
+        ``question_timeout``. When it fires, the cancel reason names the silence so the
         ErrorEvent the cancel path emits says why the turn ended.
         """
         interval = max(1.0, limit / 4)
@@ -2081,6 +2095,17 @@ class NativeLoop(BackgroundLifecycleMixin):
             # writing a node, so none of it applies here.
             path = await self.store.load_path(sid)
             head = path[-1] if path else None
+            if (
+                head is not None and len(path) > 1
+                and head.message.role == "assistant"
+                and (head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
+                and path[-2].message.role == "user"
+            ):
+                # A reply cut off by a provider error is not an answer: the
+                # prompt under it is still unanswered. Resume from that node,
+                # so the request is the one the failed call sent and the new
+                # reply branches beside the kept partial text.
+                head = path[-2]
             if head is None or head.message.role != "user":
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
@@ -2345,16 +2370,15 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         The compiled system prompt carries the FIXED environment facts (cwd,
         platform, shell, project manifests); the date and the git state change
-        under a session and used to be compiled in with them, so every new day
-        and every commit rewrote the prompt prefix and cost the cache. Only a
+        under a session, so they ride here to keep the prompt prefix cacheable.
+        Only a
         prompt compiled with an environment section gets the full note — a
         host that injects its own environment keeps its date and git lines.
         The RUNTIME facts (which Python has pytest, which packages lack
         node_modules) are independent of that section: for any compiled
         prompt they ride their own small block on the first turn and
-        whenever they change, because a host that suppressed the environment
-        section used to lose them too and its sessions re-discovered the same
-        facts by hand. A bare system string (no sections) still gets nothing. Gathering runs
+        whenever they change, even when a host suppressed the environment
+        section. A bare system string (no sections) still gets nothing. Gathering runs
         git and stats the tree, so it runs off the loop. Either way the facts
         are also harvested into the memory store (see
         :func:`fluid.context.runtime_facts.harvest_environment_facts`).
@@ -2723,6 +2747,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         overflow_retries = 0
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
+        truncated_retries = 0  # of those, streams cut mid tool arguments
         continuations = 0
         stop_hook_continuations = 0
         arg_stream_retries = 0  # runaway tool-argument streams, retried once
@@ -2766,23 +2791,27 @@ class NativeLoop(BackgroundLifecycleMixin):
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
-            if not _is_empty_completion(result):
+            empty = _is_empty_completion(result)
+            truncated = empty and result.cut_in_tool_args
+            if not empty:
                 empty_retries = 0
-            elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
+                truncated_retries = 0
+            elif (
+                truncated_retries < TRUNCATED_STREAM_MAX_RETRIES
+                if truncated
+                else empty_retries < EMPTY_COMPLETION_MAX_RETRIES
+            ):
                 # Nothing came back. Re-send the SAME history — the transcript
                 # gains no node — but WITHOUT the sticky-routing key, so
                 # OpenRouter may pick a different upstream replica. Retrying
-                # byte-identically pins the retry to the replica that just
-                # failed, which is how ten retries in a row all come back empty.
+                # byte-identically would pin the retry to the replica that just
+                # failed.
                 #
                 # A key whose replica is dead stays dead for longer than one
-                # call: a turn that re-probed stickiness after every recovery
-                # paid a dud call plus a backoff on all 16 of its model calls.
-                # So if THIS call carried the key, drop it — and keep it dropped
-                # past the end of the turn. Re-probing once per turn was cheap
-                # while dead replicas failed fast, but a replica that HANGS
-                # makes every probe cost a full first-data watchdog timeout. A
-                # new session (or a new process) starts clean.
+                # call, and a replica that HANGS makes every re-probe cost a
+                # full first-data watchdog timeout. So if THIS call carried the
+                # key, drop it — and keep it dropped past the end of the turn.
+                # A new session (or a new process) starts clean.
                 #
                 # That is OpenRouter's policy. The provider decides through
                 # classify_error: the Responses API never drops its
@@ -2810,6 +2839,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                         miss_class=PROVIDER_FALLBACK,
                     ))
                 empty_retries += 1
+                if truncated:
+                    truncated_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
                 # Rotate the prefix fingerprint past the dud call too, so the
@@ -2820,13 +2851,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Set after the dud call's own probe fields: the call
                     # that follows is the first without the key.
                     self._sticky_drop_unreported = True
-                delay = _empty_retry_delay(empty_retries)
+                attempt = truncated_retries if truncated else empty_retries
+                delay = _empty_retry_delay(attempt)
                 await self._emit(ProviderRetry(
                     session_id=sid, turn_id=turn_id,
-                    attempt=empty_retries,
-                    max_attempts=EMPTY_COMPLETION_MAX_RETRIES,
+                    attempt=attempt,
+                    max_attempts=(
+                        TRUNCATED_STREAM_MAX_RETRIES if truncated
+                        else EMPTY_COMPLETION_MAX_RETRIES
+                    ),
                     reason=(
-                        "empty response from provider"
+                        (
+                            "truncated stream from provider (cut mid tool arguments)"
+                            if truncated else "empty response from provider"
+                        )
                         + _upstream_suffix(result.native_stop_reason)
                     ),
                     delay_seconds=delay, model=self.model,
@@ -2851,15 +2889,21 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # end the turn on; the message deliberately carries no
                 # context-overflow marker, so the trim-and-retry branch below
                 # cannot mistake it for a too-long prompt.
+                if truncated:
+                    reason = (
+                        f"provider stream was cut mid tool arguments "
+                        f"{truncated_retries + 1} times in a row; giving up"
+                    )
+                else:
+                    reason = (
+                        f"provider returned an empty response "
+                        f"{empty_retries + 1} times in a row; giving up"
+                    )
                 result = _CallResult(
                     message=result.message,
                     usage=result.usage,
                     stop_reason="error",
-                    error_message=(
-                        f"provider returned an empty response "
-                        f"{empty_retries + 1} times in a row; giving up"
-                        + _upstream_suffix(result.native_stop_reason)
-                    ),
+                    error_message=reason + _upstream_suffix(result.native_stop_reason),
                     error_retriable=False,
                     native_stop_reason=result.native_stop_reason,
                 )
@@ -2868,9 +2912,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     arg_stream_retries < _ARG_STREAM_MAX_RETRIES
                     and not self._interrupted.is_set()
                 ):
-                    # A degenerate generation is usually a one-off: the audited
-                    # sessions all re-issued the identical cell successfully on
-                    # the next attempt. Re-send the same history — nothing is
+                    # A degenerate generation is usually a one-off. Re-send the
+                    # same history — nothing is
                     # appended, so the prompt and its cache prefix are
                     # unchanged — and bill what the abandoned call produced.
                     arg_stream_retries += 1
@@ -2997,42 +3040,62 @@ class NativeLoop(BackgroundLifecycleMixin):
                         continue
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
-                if result.usage.get("transport_failure"):
-                    # Keep visible text and completed tool requests for a later
-                    # user-directed continuation. Incomplete arguments and opaque
-                    # reasoning envelopes are not safe provider history.
-                    completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
-                    content = [
-                        block for block in result.message.content
-                        if isinstance(block, Text) or (
-                            isinstance(block, ToolUseBlock) and block.id in completed_ids
-                        )
-                    ]
-                    if content:
-                        node = SessionNode(
-                            node_id=new_id("node"), parent_id=parent.node_id,
-                            message=Message(role="assistant", content=content),
-                        )
-                        await self.store.append(sid, node)
-                        parent = node
-                    aborted = []
-                    for tu in result.tool_uses:
-                        text = "Tool not executed: the provider connection was interrupted before the response finished."
-                        await self._emit(ToolResult(
-                            session_id=sid, turn_id=turn_id,
-                            tool_use_id=tu["tool_use_id"], name=tu["name"],
-                            output=text, is_error=True,
-                        ))
-                        aborted.append(ToolResultBlock(
-                            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
-                        ))
-                    if aborted:
-                        node = SessionNode(
-                            node_id=new_id("node"), parent_id=parent.node_id,
-                            message=Message(role="user", content=aborted),
-                        )
-                        await self.store.append(sid, node)
-                        parent = node
+                #
+                # Whatever the user watched stream is kept, however the stream
+                # ended (a dropped connection, an in-stream error, a body cut
+                # before its terminal event): the visible text and the tool
+                # requests that closed, for a later user-directed continuation.
+                # The node is marked interrupted so no reader takes it for a
+                # finished answer. Incomplete arguments and opaque reasoning
+                # envelopes are not safe provider history and are dropped.
+                transport = bool(result.usage.get("transport_failure"))
+                completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
+                content = [
+                    block for block in result.message.content
+                    if (isinstance(block, Text) and block.text) or (
+                        isinstance(block, ToolUseBlock) and block.id in completed_ids
+                    )
+                ]
+                if content:
+                    node = SessionNode(
+                        node_id=new_id("node"), parent_id=parent.node_id,
+                        message=Message(
+                            role="assistant", content=content,
+                            provider_meta={
+                                INTERRUPTED_META_KEY: (
+                                    "transport_failure" if transport else "provider_error"
+                                ),
+                            },
+                        ),
+                    )
+                    await self.store.append(sid, node)
+                    parent = node
+                # The tool blocks that closed before the failure were already
+                # published as ToolUse events. Answer each one, so a host
+                # rendering the stream never keeps a tool card open for a call
+                # that will never run, and the stored call has its result.
+                text = (
+                    "Tool not executed: the provider connection was interrupted "
+                    "before the response finished."
+                    if transport else _FAILED_CALL_TOOL_TEXT
+                )
+                aborted = []
+                for tu in result.tool_uses:
+                    await self._emit(ToolResult(
+                        session_id=sid, turn_id=turn_id,
+                        tool_use_id=tu["tool_use_id"], name=tu["name"],
+                        output=text, is_error=True,
+                    ))
+                    aborted.append(ToolResultBlock(
+                        tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+                    ))
+                if aborted and content:
+                    node = SessionNode(
+                        node_id=new_id("node"), parent_id=parent.node_id,
+                        message=Message(role="user", content=aborted),
+                    )
+                    await self.store.append(sid, node)
+                    parent = node
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
@@ -3040,6 +3103,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     retriable=result.error_retriable,
                     usage=partial, cost_usd=partial_cost,
                     num_model_calls=num_calls,
+                    status=result.error_status,
+                    provider_message=result.error_provider_message,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -3055,10 +3120,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             usage_raw["model_call_index"] = num_calls
             usage_raw["projected_prompt_tokens"] = projected_prompt
             usage_raw.update(self._cache_probe_fields(result.usage))
-            prompt_tokens = _measured_prompt_tokens(result.usage)
+            prompt_tokens = (
+                0 if result.usage.get("input_tokens_estimated")
+                else _measured_prompt_tokens(result.usage)
+            )
             if prompt_tokens > 0:
                 # A provider that reported nothing leaves the estimate in place
-                # rather than pinning the whole context at zero tokens.
+                # rather than pinning the whole context at zero tokens (nor at
+                # an estimate standing in for the missing report).
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
                 self._last_call_model[sid] = call_model
             snapshot: dict[str, Any] | None = None
@@ -3102,7 +3171,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
 
             # Only run the tool loop when tools are actually configured; without
-            # a registry a tool_use stop is terminal (M0 behavior). With one,
+            # a registry a tool_use stop is terminal. With one,
             # every emitted tool call is dispatched whatever the stop reason
             # says: llama.cpp, vLLM and Ollama builds report ``stop`` next to
             # tool_calls (mapped to ``end_turn``), and a stream that ran out of
@@ -3160,7 +3229,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     nudge = SessionNode(
                         node_id=new_id("node"), parent_id=parent.node_id,
                         message=Message(role="user", content=[Text(
-                            _hook_reminder("A Stop hook asked you to continue", reason)
+                            hook_reminder("A Stop hook asked you to continue", reason)
                         )]),
                     )
                     await self.store.append(sid, nudge)
@@ -3383,24 +3452,21 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # harness surface: an allowlist of work tools must not
                 # silently amputate the learning loop either. Deny still
                 # beats everything.
-                return not _matches_tool_pattern(name, self.disallowed_tools)
-        if self.allowed_tools is not None and not _matches_tool_pattern(
+                return not matches_tool_pattern(name, self.disallowed_tools)
+        if self.allowed_tools is not None and not matches_tool_pattern(
             name, self.allowed_tools
         ):
             return False
-        return not _matches_tool_pattern(name, self.disallowed_tools)
+        return not matches_tool_pattern(name, self.disallowed_tools)
 
     def _tool_wired(self, name: str) -> bool:
         """Permitted (:meth:`_tool_permitted`) AND backed by a wired capability.
 
         The predicate every catalog is read through — the deferred schemas,
-        the deferred-catalog reminder, ToolSearch, the usage accounting — so a
-        ``requires_extra`` tool whose host injection is missing is invisible
-        there too, exactly as :meth:`_tools_api` withholds it from the request.
-        Filtered on permission alone, an audited host that never wired agent
-        messaging still listed SendMessage and ListAgents in ToolSearch and
-        billed them in the context breakdown; models loaded them and every
-        call failed.
+        the deferred-catalog reminder, ToolSearch, the usage accounting, and
+        the code-mode projection — so a ``requires_extra`` tool whose host
+        injection is missing is invisible on every surface, exactly as
+        :meth:`_tools_api` withholds it from the request.
         """
         if not self._tool_permitted(name):
             return False
@@ -3417,25 +3483,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             s.name for s in self.registry.list_tools(loaded_only=False)
             if self._tool_wired(s.name)
         )
-
-    def _tool_available(self, name: str) -> bool:
-        """Permitted and backed by a wired host capability.
-
-        The JSON surface drops a ``requires_extra`` tool whose injection is
-        missing (:meth:`_capability_present`), but code mode projected it
-        anyway — so a kernel cell could import ``SessionSearch`` and get
-        "unavailable: no session store directory injected" back as a tool
-        error. Absent capability must be invisible on both surfaces.
-
-        """
-        if not self._tool_permitted(name):
-            return False
-        if self.registry is None:
-            return True
-        spec = self.registry.get(name)
-        if spec is None:
-            return True
-        return self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
@@ -3520,8 +3567,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _learner_routing(self) -> tuple[dict[str, Any], WireState | None]:
         """Request extra and wire state for the memory learner's calls.
 
-        The key is ``"learner:<affinity key>"`` (design 2.4: one cache key
-        per role), and the wire state is this loop's ``learner`` state.
+        The key is ``"learner:<affinity key>"`` (one cache key per role), and the wire state is this loop's ``learner`` state.
         Empty before a session exists or once the sticky key was dropped.
         """
         key = self._affinity_key()
@@ -3568,6 +3614,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         The provider's ``classify_error`` decides (its ``drop_sticky``). A
         provider without one keeps the original behaviour, which drops it.
         """
+        if not self._affinity_keys(True):
+            # This provider is never sent an affinity key (Anthropic, local
+            # servers): there is nothing to drop, and announcing a dropped key
+            # would be a false alarm.
+            return False
         classify = getattr(self.provider, "classify_error", None)
         if not callable(classify):
             return True
@@ -3757,8 +3808,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         One unexplained miss is noise (a TTL expiry looks identical). Two in a
         row inside one turn is a pattern the host should be able to see and act
-        on - audited sessions repeatedly paid full price with nothing
-        in the transcript saying so. Emitted once when the streak reaches the
+        on. Emitted once when the streak reaches the
         threshold, not on every later call in the same run.
         """
         threshold = self._cache_probe.alert_after_misses
@@ -3884,13 +3934,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._merge_usage(usage_totals, payload.get("usage", {}))
             elif chunk.kind == "block_start":
                 index = payload["index"]
+                tool_use_id = payload.get("tool_use_id")
+                if payload["block_type"] == "tool_use" and not tool_use_id:
+                    tool_use_id = _synthetic_tool_use_id()
                 blocks[index] = {
                     "type": payload["block_type"],
                     "text": "",
                     "args": "",
                     "signature": "",
                     "tool_name": payload.get("tool_name"),
-                    "tool_use_id": payload.get("tool_use_id"),
+                    "tool_use_id": tool_use_id,
                     # The provider's own block as it opened. Blocks the
                     # engine has no model for (redacted thinking, server
                     # tool use and results) are kept from this and resent
@@ -3904,7 +3957,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         block_type=payload["block_type"],
                         subtype=payload.get("subtype"),
                         tool_name=payload.get("tool_name"),
-                        tool_use_id=payload.get("tool_use_id"),
+                        tool_use_id=tool_use_id,
                     )
                 )
             elif chunk.kind == "text_delta":
@@ -3981,8 +4034,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if payload.get("provider_requests"):
                     usage_totals["provider_requests"] = payload["provider_requests"]
                 # No ErrorEvent here — _agent_loop decides whether this error
-                # is terminal or recoverable (context overflow → forced trim
-                # + one retry) before surfacing it.
+                # is terminal or recoverable (context overflow → compaction
+                # escalation and up to 3 retries) before surfacing it.
                 status = payload.get("status")
                 transport_failure = payload.get("transport_failure")
                 error_message = str(payload.get("message", payload))
@@ -3990,11 +4043,27 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Raw exception text stays out of user messaging and cannot
                     # accidentally activate a context-overflow retry. Transport
                     # clients already exhausted safe pre-stream retries.
-                    error_message = (
-                        "The provider connection was interrupted before the response finished. "
-                        "The response may be incomplete. No automatic replay was attempted. "
-                        "Review any completed actions before asking to continue."
-                    )
+                    evidence = transport_failure if isinstance(transport_failure, dict) else {}
+                    if not blocks and evidence.get("chunks_delivered") is False:
+                        # Nothing arrived on any attempt (a first-byte timeout
+                        # or a refused connection): no partial reply exists.
+                        attempts = evidence.get("attempt")
+                        tried = (
+                            f" ({attempts} attempts)"
+                            if isinstance(attempts, int) and not isinstance(attempts, bool)
+                            and attempts > 1 else ""
+                        )
+                        error_message = (
+                            f"The provider sent nothing before the connection failed{tried}. "
+                            "No reply was received."
+                        )
+                    else:
+                        error_message = (
+                            "The provider connection was interrupted before the response finished. "
+                            "The response may be incomplete. No automatic replay was attempted. "
+                            "Review any completed actions before asking to continue."
+                        )
+                provider_message = payload.get("provider_message")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     tool_uses=tool_uses,
@@ -4002,8 +4071,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                     stop_reason="error",
                     error_message=error_message,
                     error_retriable=False if transport_failure else bool(payload.get("retriable")),
-                    error_status=status if isinstance(status, int) else None,
+                    error_status=(
+                        status if isinstance(status, int) and not isinstance(status, bool)
+                        else None
+                    ),
+                    error_provider_message=(
+                        provider_message if isinstance(provider_message, str) else None
+                    ),
                     native_stop_reason=native_stop_reason,
+                    cut_in_tool_args=any(
+                        b["type"] == "tool_use" and "input" not in b
+                        for b in blocks.values()
+                    ),
                 )
 
         if self._interrupted.is_set():
@@ -4038,6 +4117,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
 
         if interrupted or arg_stream_error is not None:
+            self._estimate_partial_usage(usage_totals, blocks, request)
+        elif not any(key in usage_totals for key in _USAGE_TOKEN_KEYS) and any(
+            b.get("text") or b.get("args") for b in blocks.values()
+        ):
+            # A reply the provider sent no usage for (a server that ignores
+            # stream_options.include_usage). It was billed all the same, so
+            # it is estimated the way an interrupted call is and flagged as
+            # such. A reply with no content keeps its empty usage: that is
+            # what the empty-completion retry recognises.
             self._estimate_partial_usage(usage_totals, blocks, request)
 
         # Reasoning-channel answer fallback (observed on GLM-4.5 via
@@ -4144,9 +4232,8 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         A call that ends mid-stream — the user pressed Stop, or the argument
         guard fired — normally never reaches the provider's terminal usage
-        chunk, so its usage dict is empty and every downstream number reads
-        zero: an interrupted turn used to record ``cost_usd: 0.0`` for a
-        prompt and an output the provider certainly charged for. The tokens
+        chunk, so its usage dict is empty, yet the provider still charged for
+        the prompt and output. The tokens
         that were generated are sitting in the accumulated blocks, and the
         prompt is the request that was just sent, so both are estimated here
         and flagged as estimates.
@@ -4172,19 +4259,20 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> None:
         """Open a block a delta refers to when no ``block_start`` announced it.
 
-        A provider that skips the start frame (a proxy that drops it, a
-        stream joined late) used to raise ``KeyError`` out of the consumer
-        and lose the turn; the delta's own index and kind say enough to open
-        the block.
+        A provider may skip the start frame (a proxy that drops it, a stream
+        joined late); the delta's own index and kind say enough to open the
+        block.
         """
         if index in blocks:
             return
+        tool_use_id = _synthetic_tool_use_id() if block_type == "tool_use" else None
         blocks[index] = {
             "type": block_type, "text": "", "args": "", "signature": "",
-            "tool_name": None, "tool_use_id": None, "raw": None,
+            "tool_name": None, "tool_use_id": tool_use_id, "raw": None,
         }
         await self._emit(BlockStart(
             session_id=sid, turn_id=turn_id, index=index, block_type=block_type,
+            tool_use_id=tool_use_id,
         ))
 
     async def _provider_chunks_interruptible(
@@ -4237,11 +4325,8 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> ToolResultBlock:
         """Dispatch one tool call, racing it against the interrupt flag.
 
-        Interrupt used to be invisible here: the flag was polled only between
-        provider stream chunks and after a full dispatch round, so a
-        long-running tool (a sync Task worker, a slow shell command) pinned the
-        turn arbitrarily long after the user pressed stop. An interrupt now
-        cancels the in-flight dispatch. The cancelled call still surfaces as an
+        An interrupt cancels the in-flight dispatch, so a long-running tool (a
+        sync Task worker, a slow shell command) cannot pin the turn. The cancelled call still surfaces as an
         is_error ToolResult — every tool_use must get a result or the
         transcript is malformed for the next model call — and the agent loop's
         existing post-dispatch interrupt check then ends the turn.
@@ -4395,11 +4480,8 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _reflection_nudge(self) -> str | None:
         """One appended system-reminder asking the model to record a lesson.
 
-        Small models never call Remember on their own after an expensive
-        harness mistake — audited sessions show the model naming the problem
-        in its own thinking, redoing a subagent's work by hand, and leaving
-        nothing durable behind. The journal now records the mistake
-        mechanically (``FrictionDetector``); this is the other half: a prompt
+        Models rarely call Remember on their own after an expensive harness
+        mistake. The journal records the mistake mechanically (``FrictionDetector``); this is the other half: a prompt
         to turn the mistake into a memory while the context is still hot.
 
         Three properties it must keep:
@@ -4424,7 +4506,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         if self.registry is not None and (
             self.registry.get("Remember") is None
-            or not self._tool_available("Remember")
+            or not self._tool_wired("Remember")
         ):
             return None
         try:
@@ -4499,8 +4581,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # (the schema was never sent), so this is the defense against
         # hallucinated and stale-transcript names — it answers in-context
         # instead of crashing the turn. Placed ahead of the hook and permission
-        # gates so the same wall covers the code-mode bridge, which enters the
-        # dispatch path here rather than through ``_dispatch_tool``.
+        # gates. Code mode enforces the same predicate in its own bridge.
         if not self._tool_permitted(name):
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
@@ -4559,8 +4640,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if verdict == "allow" and self.permissions.note_execution(name, input):
                 # Doom-loop checkpoint. Under never_ask there may be nobody
                 # listening for permission prompts (headless embedders), so an
-                # "ask" would park the turn forever — deny with in-context
-                # feedback instead; that alone breaks the repeat pattern.
+                # "ask" would park the turn until ``permission_timeout`` —
+                # deny with in-context feedback instead; that alone breaks the
+                # repeat pattern.
                 if self.permissions.approval_policy == "never_ask":
                     return await self._finish_tool(
                         sid, turn_id, name, tool_use_id,
@@ -4591,11 +4673,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     input=input,
                 )
 
+        # Every allow path (a hook's allow, a rule or mode, a remembered
+        # allow_always, a prompt answer) arrives here: observers hear of it
+        # before the tool runs.
+        if self.hooks is not None:
+            await self.hooks.tool_allowed({
+                "session_id": sid, "name": name, "input": input,
+                "tool_use_id": tool_use_id,
+            })
+
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
         # tool calls are gated by HostBridge (see CodeModeSession.run_python),
         # which runs its own MRTR round-trip through this loop's
-        # ``_collect_input_responses`` — so an in-kernel AskUser reaches the user
-        # exactly as a JSON-path one does.
+        # ``_collect_input_responses`` — so an in-kernel input_required pause
+        # reaches the user exactly as a JSON-path one does.
         if self._codemode is not None and name == "run_python":
             outcome = await self._codemode.run_python(
                 sid=sid, turn_id=turn_id, input=input, loop=self
@@ -4625,7 +4716,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         """One QuestionRequest/RespondQuestion round-trip per MRTR request.
 
         Returns {server-request-id: answer} for the retry's ``inputResponses``,
-        or None if the turn was interrupted while parked on a question.
+        or None if the turn was interrupted while parked on a question or no
+        answer came within ``question_timeout``.
         """
         answers: dict[str, Any] = {}
         user_answered = False
@@ -4648,7 +4740,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             try:
                 done, _ = await asyncio.wait(
                     {fut, interrupt_wait},
-                    timeout=getattr(self, "question_timeout", QUESTION_TIMEOUT_S),
+                    timeout=self.question_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if fut not in done:
@@ -4674,6 +4766,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     ) -> tuple[str, str | None, dict[str, Any] | None]:
         """Publish a PermissionRequest and park the turn until RespondPermission.
 
+        The wait also ends on an Interrupt, and after ``permission_timeout``
+        seconds with no decision the call is denied rather than parked.
+
         Returns ``(verdict, deny_message, updated_input)``: the responder's
         reason (surfaced as the denied tool's output) and any rewritten tool
         input it handed back on an allow.
@@ -4690,13 +4785,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
             name=name, tool_use_id=tool_use_id,
         )
+        timeout = self.permission_timeout
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
             done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                {fut, interrupt_wait}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            if fut not in done:  # Interrupt arrived while parked on the prompt
-                return ("deny", "interrupted while awaiting permission", None)
+            if fut not in done:
+                if interrupt_wait in done:
+                    return ("deny", "interrupted while awaiting permission", None)
+                log.warning(
+                    "no permission decision for %s within %.0fs; denying", name, timeout,
+                )
+                return (
+                    "deny",
+                    f"permission request timed out after {timeout:.0f}s with no "
+                    "decision; the call was denied",
+                    None,
+                )
             resp: RespondPermission = fut.result()
         finally:
             interrupt_wait.cancel()
@@ -4704,7 +4811,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         allowed = resp.decision in ("allow", "allow_always")
         if resp.decision == "allow_always" and self.permissions is not None:
             # Sticky for the rest of the session: future calls to this tool
-            # skip the prompt (fix: allow_always used to be a one-shot allow).
+            # skip the prompt.
             spec = self.registry.get(name) if self.registry is not None else None
             scope = spec.scope_of(input) if spec is not None else None
             if spec is not None and spec.session_scope is not None and scope is None:
@@ -4751,8 +4858,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Genuine instances are appended AFTER this point (steers below,
             # nested-instruction reminders in _dispatch_tool), so they are
             # never touched.
-            from fluid.tools.hardening import defang_harness_markers
-
             defanged = defang_harness_markers(outcome.text)
             if defanged is not outcome.text:
                 outcome = replace(outcome, text=defanged)
@@ -4784,10 +4889,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     message=f"PostToolUse hook on {name}: {reason}",
                     hook_event=POST_TOOL_USE, tool_name=name,
                 ))
-                additions.append(_hook_reminder("PostToolUse hook feedback", reason))
+                additions.append(hook_reminder("PostToolUse hook feedback", reason))
             if decision.additional_context:
                 additions.append(
-                    _hook_reminder("PostToolUse hook context", decision.additional_context)
+                    hook_reminder("PostToolUse hook context", decision.additional_context)
                 )
             if additions:
                 # New text the tool never produced: drop the content id so
@@ -4805,7 +4910,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._pending_steers:
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
-            from fluid.messages.content import SteerDelivery
             self._tool_deliveries.extend(
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
                 for steer_id, text, sender, origin in delivered
@@ -4885,8 +4989,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         ))
 
     def _fold_call_usage(self, totals: dict[str, Any], usage: dict[str, Any]) -> None:
-        """Fold one model call's usage into the turn totals, filling in an
-        estimated cost when the provider reported none.
+        """Fold one model call's usage into the turn totals, filling in a
+        table price when the provider reported no cost.
 
         Three tiers, first answer wins: the provider's own ``estimate_cost``
         (Anthropic and the OpenAI dialect ship sourced tables; OpenRouter
@@ -4896,23 +5000,37 @@ class NativeLoop(BackgroundLifecycleMixin):
         recording no spend at all. A model nobody can price leaves ``cost_usd``
         absent, so the field stays "unknown" rather than becoming a wrong
         number; every call here is guarded, and a missing price never raises.
+
+        A cost this method fills in is flagged ``cost_from_table``: the
+        dollars came from a price list, not from the provider's bill. That
+        flag says nothing about the token counts; those carry their own
+        ``input_tokens_estimated`` / ``output_tokens_estimated`` flags when
+        they were guessed from text (see ``_estimate_partial_usage``).
+
+        The local dialect (llama.cpp, Ollama, LM Studio, vLLM: ``kind =
+        "local"``) is never priced: its tokens cost nothing, and the table
+        would otherwise bill a local ``glm-4.5-air`` at the hosted rate just
+        because the names match. Its cost is a plain ``0.0``, unflagged.
         """
         if "cost_usd" not in usage:
-            cost: float | None = None
-            est = getattr(self.provider, "estimate_cost", None)
-            if est is not None:
-                try:
-                    cost = est(self.model, usage)
-                except Exception:  # noqa: BLE001 — accounting is never fatal
-                    log.debug("provider cost estimate failed", exc_info=True)
-                    cost = None
-            if cost is None:
-                cost = estimate_cost_from_table(
-                    self.model, usage, resolver=self._pricing_resolver
-                )
-            if cost is not None:
-                usage["cost_usd"] = cost
-                usage["cost_estimated"] = True
+            if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                usage["cost_usd"] = 0.0
+            else:
+                cost: float | None = None
+                est = getattr(self.provider, "estimate_cost", None)
+                if est is not None:
+                    try:
+                        cost = est(self.model, usage)
+                    except Exception:  # noqa: BLE001 — accounting is never fatal
+                        log.debug("provider cost estimate failed", exc_info=True)
+                        cost = None
+                if cost is None:
+                    cost = estimate_cost_from_table(
+                        self.model, usage, resolver=self._pricing_resolver
+                    )
+                if cost is not None:
+                    usage["cost_usd"] = cost
+                    usage["cost_from_table"] = True
         self._accumulate_usage(totals, usage)
 
     @staticmethod

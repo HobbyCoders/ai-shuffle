@@ -10,14 +10,11 @@ import pytest
 
 from app.core import encryption, xai_oauth
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 ROOT = "/api/v1/model-providers"
 PROVIDER_ID = "prov-xai-api"
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider():
@@ -45,7 +42,7 @@ class TestDeviceStart:
     def test_start_prefers_verification_uri_complete(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
 
         async def _fake_start(*, client=None):
@@ -69,7 +66,7 @@ class TestDeviceStart:
         assert "dev-1" not in resp.text
 
     def test_start_unknown_provider_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         resp = authenticated_client.post(
             f"{ROOT}/nope/xai/device/start", json={}
         )
@@ -90,7 +87,7 @@ class TestDevicePoll:
         assert r.status_code == 200, r.text
 
     def test_poll_pending(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -105,7 +102,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "pending"
 
     def test_poll_slow_down(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -119,7 +116,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "slow_down"
 
     def test_poll_without_start_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         resp = authenticated_client.post(
             f"{ROOT}/{PROVIDER_ID}/xai/device/poll", json={}
@@ -129,7 +126,7 @@ class TestDevicePoll:
     def test_poll_complete_persists_encrypted_seeds_preset(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -167,3 +164,46 @@ class TestDevicePoll:
         assert stored["codex_access_token"].startswith("enc:")
         assert encryption.decrypt_value(stored["codex_access_token"]) == SECRET_ACCESS
         assert encryption.decrypt_value(stored["codex_refresh_token"]) == SECRET_REFRESH
+
+
+class TestClearReauth:
+    def _bundle(self, auth_mode):
+        db.set_codex_token_bundle(
+            PROVIDER_ID, access_token=encryption.encrypt_value("acc"),
+            refresh_token=encryption.encrypt_value("ref"), account_id=None,
+            needs_reauth=True, auth_mode=auth_mode,
+        )
+
+    def test_clears_the_flag_and_keeps_the_bundle(self, authenticated_client, mock_db):
+        unlock_encryption(mock_db)
+        _make_provider()
+        self._bundle("grok")
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/xai/clear-reauth", json={})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["needs_reauth"] is False
+        stored = db.get_codex_tokens(PROVIDER_ID)
+        assert stored["auth_mode"] == "grok"
+        assert encryption.decrypt_value(stored["codex_refresh_token"]) == "ref"
+
+    def test_unknown_provider_404(self, authenticated_client, mock_db):
+        unlock_encryption(mock_db)
+        resp = authenticated_client.post(f"{ROOT}/nope/xai/clear-reauth", json={})
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Model provider not found"
+
+    def test_api_key_provider_is_not_relabelled_grok(self, authenticated_client, mock_db):
+        unlock_encryption(mock_db)
+        _make_provider()
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/xai/clear-reauth", json={})
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Model provider has no Grok sign-in"
+        assert db.get_codex_tokens(PROVIDER_ID)["auth_mode"] is None
+
+    def test_chatgpt_provider_is_left_alone(self, authenticated_client, mock_db):
+        unlock_encryption(mock_db)
+        _make_provider()
+        self._bundle("chatgpt")
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/xai/clear-reauth", json={})
+        assert resp.status_code == 404
+        stored = db.get_codex_tokens(PROVIDER_ID)
+        assert (stored["auth_mode"], bool(stored["needs_reauth"])) == ("chatgpt", True)

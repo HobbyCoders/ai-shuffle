@@ -33,7 +33,7 @@ async def test_old_native_mode_request_uses_normal_permission_policy():
     )
     await loop.submit(SetPermissionMode(mode="plan"))
     assert loop.permissions.approval_policy == "on_write"
-    assert loop._tool_available("Write")
+    assert loop._tool_wired("Write")
     assert "plan_mode_control" not in loop.ctx.extra
     assert not hasattr(loop, "plan_mode")
 

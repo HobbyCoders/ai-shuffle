@@ -163,9 +163,9 @@ _OPENAI_6_LUNA = "developers.openai.com/api/docs/pricing, 2026-09-23; short-cont
 
 PRICES: list[tuple[str, ModelPrice]] = [
     # ── xAI, reached through the openai_responses dialect ────────────────
-    # Grok ids match no row in the OpenAI table, so these calls priced at
-    # nothing at all until the rows below were sourced. Families the page
-    # does not list (grok-4, grok-3) stay recognized-but-unpriced.
+    # Grok ids match no row in the OpenAI table, so they are priced here.
+    # Families the page does not list (grok-4, grok-3) stay
+    # recognized-but-unpriced.
     ("grok-4.6", ModelPrice(input=2.00, cached_input=0.50, output=6.00, source=_XAI)),
     ("grok-4.5", ModelPrice(input=2.00, cached_input=0.30, output=6.00, source=_XAI)),
     ("grok-4.3", ModelPrice(input=1.25, cached_input=0.20, output=2.50, source=_XAI)),
@@ -194,8 +194,8 @@ PRICES: list[tuple[str, ModelPrice]] = [
     ("glm-4.5", ModelPrice(input=0.60, cached_input=0.11, output=2.20, source=_ZAI)),
     ("glm", ModelPrice(source="Z.AI — rate not sourced; host must supply")),
     # ── OpenAI ids newer than the openai_responses table ─────────────────
-    # astra's row had no cache_write, so its writes billed at the $10 input
-    # rate instead of the listed $12.50.
+    # cache_write is listed explicitly: without it, writes would bill at the
+    # input rate instead of the listed cache-write rate.
     (
         "gpt-6-astra",
         ModelPrice(
@@ -210,8 +210,8 @@ PRICES: list[tuple[str, ModelPrice]] = [
             source=_OPENAI_6_LUNA,
         ),
     ),
-    # Before this row luna fell through to the unpriced "gpt-6" row below,
-    # so every luna call recorded no cost and the host stored $0.
+    # Without this row luna would fall through to the unpriced "gpt-6" row
+    # below and record no cost.
     (
         "gpt-6-luna",
         ModelPrice(

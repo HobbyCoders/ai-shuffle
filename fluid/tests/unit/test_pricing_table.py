@@ -241,6 +241,36 @@ async def test_the_engine_reports_no_cost_when_nobody_can_price_the_model() -> N
     assert done.cost_usd is None
 
 
+class _LocalNoPriceProvider(_NoPriceProvider):
+    """The local dialect: same stream, no ``estimate_cost``, ``name = "local"``."""
+
+    name = "local"
+
+
+async def test_the_local_dialect_is_never_priced_from_a_table() -> None:
+    """A local ``glm-4.5-air`` matches a hosted row in the table, and the
+    host's resolver may know a price for the name too. Neither applies:
+    local tokens cost 0, and the 0 is not flagged as a table price."""
+    import asyncio
+
+    from fluid.engine.native import NativeLoop
+    from fluid.events import TurnComplete, Usage, UserTurn
+    from fluid.store.base import MemoryStore
+
+    loop = NativeLoop(
+        provider=_LocalNoPriceProvider(), store=MemoryStore(),
+        model="glm-4.5-air", pricing=lambda _m: {"input": 0.20, "output": 1.10},
+    )
+    await loop.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    log = loop.bus.log(loop.session_id)
+    usage = next(e for e in log if isinstance(e, Usage))
+    assert usage.raw["cost_usd"] == 0
+    assert "cost_from_table" not in usage.raw
+    done = next(e for e in log if isinstance(e, TurnComplete))
+    assert done.cost_usd == 0
+
+
 async def test_the_per_call_usage_event_carries_the_estimate_too() -> None:
     """Not just the turn total: each call's own Usage row is what the host
     aggregates, and it must say the number was estimated, not billed."""
@@ -258,4 +288,4 @@ async def test_the_per_call_usage_event_carries_the_estimate_too() -> None:
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
     usage = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage))
     assert usage.raw["cost_usd"] == pytest.approx(1.20)
-    assert usage.raw["cost_estimated"] is True
+    assert usage.raw["cost_from_table"] is True

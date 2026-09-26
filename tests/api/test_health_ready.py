@@ -9,7 +9,7 @@ These use FastAPI's TestClient against a bare app mounting only the system
 router (matching the pattern in tests/api/test_system.py::TestValidateWorkspaceAuth).
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

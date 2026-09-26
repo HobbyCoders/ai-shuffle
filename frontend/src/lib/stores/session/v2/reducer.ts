@@ -1,7 +1,7 @@
 /**
  * V2 session reducer — PURE `(state, wireEvent) -> state`.
  *
- * V2 Phase 1 (docs/V2_PHASE1_DESIGN.md §6). For `v2_stream` sessions the
+ * V2 Phase 1. For `v2_stream` sessions the
  * transcript is rebuilt deterministically from the append-only event log
  * (`GET /api/v1/sessions/{id}/events`) instead of the poller + 3-phase merge.
  *
@@ -67,6 +67,10 @@ export interface V2SessionState {
 	 *  refresh per model call instead of polling. Null until a snapshot
 	 *  arrives; a `turn.usage` without one leaves the previous value in place. */
 	contextUsage: Record<string, unknown> | null;
+	/** Session output tokens: the sum of every `turn.completed` usage
+	 *  `tokens_out`. `turn.usage` records are per model call, partial while
+	 *  streaming and coalesced, so they cannot be summed. */
+	outputTokensTotal: number;
 	lastSeq: number;
 	/** Deterministic bookkeeping: id of the currently-open streaming text /
 	 *  thinking message for the active turn (null = none open). Derived purely
@@ -155,6 +159,7 @@ export function initialState(): V2SessionState {
 		activeTaskSummaries: [],
 		usage: null,
 		contextUsage: null,
+		outputTokensTotal: 0,
 		lastSeq: 0,
 		openTextId: null,
 		openThinkingId: null,
@@ -248,7 +253,7 @@ function findSubagentByTask(
  * it gets a paragraph break. Every other boundary (a coalescer splitting one
  * block mid-sentence) is untouched.
  */
-export function joinThinking(previous: string, chunk: string): string {
+function joinThinking(previous: string, chunk: string): string {
 	if (!previous) return chunk;
 	if (previous.trimEnd().endsWith('**') && chunk.trimStart().startsWith('**')) {
 		return `${previous.trimEnd()}\n\n${chunk.trimStart()}`;
@@ -662,6 +667,12 @@ function obj(v: unknown): Record<string, unknown> | undefined {
 	return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
+/** A completed turn's output tokens (`turn.completed` usage `tokens_out`), else 0. */
+function turnOutputTokens(usage: unknown): number {
+	const out = obj(usage)?.tokens_out;
+	return typeof out === 'number' && Number.isFinite(out) && out > 0 ? out : 0;
+}
+
 // ─── Task-notification parsing ────────────────────────────────────────────────
 // Background-task wake turns persist their synthesized prompt as a
 // `message.user` event whose body is one or more `<task-notification>` XML
@@ -923,6 +934,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					pendingPumpAck: null,
 					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
+					outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn

@@ -21,7 +21,7 @@ from fluid.cli.config import list_sessions
 from fluid.events.model import TurnStarted, event_to_dict
 from fluid.messages import Message
 from fluid.messages.content import Text
-from fluid.store.base import CorruptSession, MemoryStore, SessionLocked, SessionNode
+from fluid.store.base import CorruptSession, MemoryStore, SessionNode
 from fluid.store.jsonl import JsonlStore
 
 REPO = Path(__file__).resolve().parents[2]
@@ -316,7 +316,6 @@ def test_second_process_on_a_locked_session_is_refused(tmp_path) -> None:
 
 
 def test_lock_session_fails_fast_and_cli_reports_exit_2(tmp_path) -> None:
-    from fluid.cli.__main__ import main
 
     store = JsonlStore(tmp_path)
     sid = asyncio.run(store.create_session("ses_cli")).session_id
@@ -332,7 +331,7 @@ def test_lock_session_fails_fast_and_cli_reports_exit_2(tmp_path) -> None:
     """
     assert _child(probe, str(tmp_path), sid).returncode == 3
     # The CLI turns the same refusal into exit code 2 with a plain message.
-    cli = f"""
+    cli = """
     import sys
     from fluid.cli.__main__ import main
     sys.exit(main(["run", "--store", sys.argv[1], "--resume", sys.argv[2], "hello"]))

@@ -22,6 +22,7 @@ import type {
 	AutoUpdateSettings
 } from '$lib/api/plugins';
 import * as pluginsApi from '$lib/api/plugins';
+import { getErrorMessage } from '$lib/api/client';
 import { createSubscribers, withLoading } from './store-utils';
 
 // ============================================================================
@@ -42,6 +43,16 @@ interface PluginsState {
 	autoUpdateSettings: AutoUpdateSettings | null;
 	checkingUpdates: boolean;
 	error: string | null;
+}
+
+/**
+ * Merge freshly installed plugins into the installed list. The backend keeps one
+ * install record per plugin id (a reinstall, e.g. at another scope, replaces
+ * it), so a returned id replaces its old entry instead of adding a duplicate.
+ */
+function upsertInstalled(list: PluginInfo[], incoming: PluginInfo[]): PluginInfo[] {
+	const ids = new Set(incoming.map((p) => p.id));
+	return [...list.filter((p) => !ids.has(p.id)), ...incoming];
 }
 
 // ============================================================================
@@ -96,16 +107,6 @@ export const plugins = {
 	// ========================================================================
 
 	/**
-	 * Load all marketplaces
-	 */
-	async loadMarketplaces(): Promise<void> {
-		return withLoading(_update, async () => {
-			const marketplaces = await pluginsApi.getMarketplaces();
-			_update((state) => ({ ...state, marketplaces }));
-		}, 'Failed to load marketplaces');
-	},
-
-	/**
 	 * Add a new marketplace
 	 */
 	async addMarketplace(url: string, name: string): Promise<MarketplaceInfo> {
@@ -113,7 +114,7 @@ export const plugins = {
 			const marketplace = await pluginsApi.addMarketplace(url, name);
 			_update((state) => ({ ...state, marketplaces: [...state.marketplaces, marketplace] }));
 			return marketplace;
-		}, 'Failed to add marketplace');
+		}, (e) => getErrorMessage(e, 'Failed to add marketplace'));
 	},
 
 	/**
@@ -127,7 +128,7 @@ export const plugins = {
 				marketplaces: state.marketplaces.filter((m) => m.id !== marketplaceId),
 				available: state.available.filter((p) => p.marketplace !== marketplaceId)
 			}));
-		}, 'Failed to remove marketplace');
+		}, (e) => getErrorMessage(e, 'Failed to remove marketplace'));
 	},
 
 	/**
@@ -150,7 +151,7 @@ export const plugins = {
 				syncing: { ...state.syncing, [marketplaceId]: false }
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to sync marketplace';
+			const error = getErrorMessage(e, 'Failed to sync marketplace');
 			_update((state) => ({
 				...state,
 				syncing: { ...state.syncing, [marketplaceId]: false },
@@ -171,7 +172,7 @@ export const plugins = {
 		return withLoading(_update, async () => {
 			const available = await pluginsApi.getAvailablePlugins(marketplace);
 			_update((state) => ({ ...state, available }));
-		}, 'Failed to load available plugins');
+		}, (e) => getErrorMessage(e, 'Failed to load available plugins'));
 	},
 
 	/**
@@ -181,7 +182,7 @@ export const plugins = {
 		return withLoading(_update, async () => {
 			const installed = await pluginsApi.getInstalledPlugins();
 			_update((state) => ({ ...state, installed }));
-		}, 'Failed to load installed plugins');
+		}, (e) => getErrorMessage(e, 'Failed to load installed plugins'));
 	},
 
 	/**
@@ -207,7 +208,7 @@ export const plugins = {
 				updatesAvailable,
 				autoUpdateSettings
 			}));
-		}, 'Failed to load plugins data');
+		}, (e) => getErrorMessage(e, 'Failed to load plugins data'));
 	},
 
 	/**
@@ -217,7 +218,7 @@ export const plugins = {
 		return withLoading(_update, async () => {
 			const selectedPlugin = await pluginsApi.getPluginDetails(pluginId);
 			_update((state) => ({ ...state, selectedPlugin }));
-		}, 'Failed to load plugin details');
+		}, (e) => getErrorMessage(e, 'Failed to load plugin details'));
 	},
 
 	/**
@@ -245,15 +246,15 @@ export const plugins = {
 			const plugin = await pluginsApi.installPlugin(pluginId, scope);
 			_update((state) => ({
 				...state,
-				installed: [...state.installed, plugin],
+				installed: upsertInstalled(state.installed, [plugin]),
 				available: state.available.map((p) =>
-					p.id === pluginId ? { ...p, installed: true, installed_version: plugin.version } : p
+					p.id === pluginId ? { ...p, installed: true, enabled: plugin.enabled } : p
 				),
 				installing: { ...state.installing, [pluginId]: false }
 			}));
 			return plugin;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to install plugin';
+			const error = getErrorMessage(e, 'Failed to install plugin');
 			_update((state) => ({
 				...state,
 				installing: { ...state.installing, [pluginId]: false },
@@ -279,16 +280,15 @@ export const plugins = {
 
 		try {
 			const plugins = await pluginsApi.installPluginsBatch(pluginIds, scope);
-			const installedIds = new Set(plugins.map((p) => p.id));
+			const installedById = new Map(plugins.map((p) => [p.id, p]));
 
 			_update((state) => ({
 				...state,
-				installed: [...state.installed, ...plugins],
-				available: state.available.map((p) =>
-					installedIds.has(p.id)
-						? { ...p, installed: true, installed_version: plugins.find((ip) => ip.id === p.id)?.version || null }
-						: p
-				),
+				installed: upsertInstalled(state.installed, plugins),
+				available: state.available.map((p) => {
+					const installed = installedById.get(p.id);
+					return installed ? { ...p, installed: true, enabled: installed.enabled } : p;
+				}),
 				installing: {
 					...state.installing,
 					...pluginIds.reduce((acc, id) => ({ ...acc, [id]: false }), {})
@@ -296,7 +296,7 @@ export const plugins = {
 			}));
 			return plugins;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to install plugins';
+			const error = getErrorMessage(e, 'Failed to install plugins');
 			_update((state) => ({
 				...state,
 				installing: {
@@ -325,12 +325,12 @@ export const plugins = {
 				...state,
 				installed: state.installed.filter((p) => p.id !== pluginId),
 				available: state.available.map((p) =>
-					p.id === pluginId ? { ...p, installed: false, installed_version: null } : p
+					p.id === pluginId ? { ...p, installed: false, enabled: false } : p
 				),
 				installing: { ...state.installing, [pluginId]: false }
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to uninstall plugin';
+			const error = getErrorMessage(e, 'Failed to uninstall plugin');
 			_update((state) => ({
 				...state,
 				installing: { ...state.installing, [pluginId]: false },
@@ -357,7 +357,7 @@ export const plugins = {
 				)
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to enable plugin';
+			const error = getErrorMessage(e, 'Failed to enable plugin');
 			_update((state) => ({ ...state, error }));
 			throw e;
 		}
@@ -376,7 +376,7 @@ export const plugins = {
 				)
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to disable plugin';
+			const error = getErrorMessage(e, 'Failed to disable plugin');
 			_update((state) => ({ ...state, error }));
 			throw e;
 		}
@@ -400,20 +400,6 @@ export const plugins = {
 	// File-Based Agents
 	// ========================================================================
 
-	/**
-	 * Load file-based agents from enabled plugins
-	 */
-	async loadFileBasedAgents(): Promise<void> {
-		try {
-			const fileBasedAgents = await pluginsApi.getFileBasedAgents();
-			_update((state) => ({ ...state, fileBasedAgents }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load file-based agents';
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
-
 	// ========================================================================
 	// Plugin Updates
 	// ========================================================================
@@ -429,7 +415,7 @@ export const plugins = {
 			_update((state) => ({ ...state, updatesAvailable, checkingUpdates: false }));
 			return updatesAvailable;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to check for updates';
+			const error = getErrorMessage(e, 'Failed to check for updates');
 			_update((state) => ({ ...state, checkingUpdates: false, error }));
 			throw e;
 		}
@@ -461,7 +447,7 @@ export const plugins = {
 			}));
 			return updated;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update plugin';
+			const error = getErrorMessage(e, 'Failed to update plugin');
 			_update((state) => ({
 				...state,
 				updating: { ...state.updating, [pluginId]: false },
@@ -506,7 +492,7 @@ export const plugins = {
 			}));
 			return updatedPlugins;
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update plugins';
+			const error = getErrorMessage(e, 'Failed to update plugins');
 			_update((state) => ({
 				...state,
 				updating: {
@@ -524,20 +510,6 @@ export const plugins = {
 	// ========================================================================
 
 	/**
-	 * Load auto-update settings
-	 */
-	async loadAutoUpdateSettings(): Promise<void> {
-		try {
-			const autoUpdateSettings = await pluginsApi.getAutoUpdateSettings();
-			_update((state) => ({ ...state, autoUpdateSettings }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load auto-update settings';
-			_update((state) => ({ ...state, error }));
-			throw e;
-		}
-	},
-
-	/**
 	 * Update auto-update settings
 	 */
 	async updateAutoUpdateSettings(settings: Partial<AutoUpdateSettings>): Promise<void> {
@@ -545,7 +517,7 @@ export const plugins = {
 			const autoUpdateSettings = await pluginsApi.updateAutoUpdateSettings(settings);
 			_update((state) => ({ ...state, autoUpdateSettings }));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to update auto-update settings';
+			const error = getErrorMessage(e, 'Failed to update auto-update settings');
 			_update((state) => ({ ...state, error }));
 			throw e;
 		}
@@ -571,7 +543,7 @@ export const plugins = {
 				checkingUpdates: false
 			}));
 		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to run auto-update';
+			const error = getErrorMessage(e, 'Failed to run auto-update');
 			_update((state) => ({ ...state, checkingUpdates: false, error }));
 			throw e;
 		}

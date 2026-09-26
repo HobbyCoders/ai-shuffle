@@ -13,34 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.core import git_ops_runner
-from app.core.config import settings
 from app.db import git_ops as git_ops_db
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
-ME = "local-me"
 PEER = "peer-1"
 PV2 = "pv2-abc"
-
-
-@pytest.fixture(autouse=True)
-def pin_runner(monkeypatch):
-    monkeypatch.setattr(
-        type(settings), "effective_instance_id", property(lambda self: ME)
-    )
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
 
 
 @pytest.fixture

@@ -101,7 +101,6 @@ def create_computer_use_server(
     permission_mode: Optional[str] = None,
     session_id: Optional[str] = None,
     profile_id: Optional[str] = None,
-    require_confirmation: bool = False,  # accepted for back-compat; unused
 ) -> Optional[Any]:
     """Build the `computer-use` SDK MCP server, or None if unavailable/disabled."""
     if not enabled:
@@ -111,7 +110,7 @@ def create_computer_use_server(
         logger.info("computer-use disabled (%s) — server not created", reason)
         return None
     try:
-        from claude_agent_sdk import tool, create_sdk_mcp_server
+        from app.mcp.inproc import tool, create_tool_server
         from mcp.types import ToolAnnotations
     except ImportError:
         return None
@@ -433,6 +432,21 @@ def create_computer_use_server(
                             "description": "[x, y] in pixels of the most recent screenshot."}}
     MODS = {"text": {"type": "string", "description": "Modifier keys to hold, e.g. 'shift', 'ctrl+shift'."}}
 
+    def _bypass_mode() -> bool:
+        """True when the session runs in bypassPermissions — read live from the
+        pooled adapter (the mode can change between turns without a rebuild),
+        falling back to the mode this server was built with."""
+        mode = permission_mode
+        try:
+            from app.core.session_pool import get_session_pool
+            state = get_session_pool().peek(session_id) if session_id else None
+            live = getattr(getattr(state, "adapter", None), "permission_mode", None)
+            if isinstance(live, str) and live:
+                mode = live
+        except Exception:
+            logger.debug("computer-use: live permission mode lookup failed", exc_info=True)
+        return mode == "bypassPermissions"
+
     # ----- access tools ------------------------------------------------------
     @tool(
         "request_access",
@@ -454,10 +468,16 @@ def create_computer_use_server(
         },
     )
     async def request_access(args: dict) -> dict:
+        # The runtime's allow decision is a server-side record, not an
+        # assumption: fluid's gate reports each allowed call (prompt, hook,
+        # rule or mode) and the adapter records one per call; bypass mode is
+        # itself the decision.
+        approved = access.consume_request_approval(session_id) or _bypass_mode()
         if is_stopped(session_id):
             return _err("Computer-use was stopped. Start a new turn to request access again.")
-        # Approval already enforced by the query callback (by permission mode);
-        # if we got here, record the grant.
+        if not approved:
+            return _err("request_access was not approved for this session. "
+                        "The user must approve the request before access is granted.")
         granted = access.grant(
             session_id, args.get("apps") or [],
             clipboard_read=bool(args.get("clipboardRead")),
@@ -725,7 +745,7 @@ def create_computer_use_server(
         len(tools), session_id, permission_mode, mgr.selected_index,
     )
     return patch_sdk_server(
-        create_sdk_mcp_server(name="computer-use", version="2.0.0", tools=tools),
+        create_tool_server(name="computer-use", version="2.0.0", tools=tools),
         tools,
     )
 

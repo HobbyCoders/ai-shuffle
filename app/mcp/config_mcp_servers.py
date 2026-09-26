@@ -22,7 +22,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
             LOCAL/PROJECT scope .mcp.json files. This must be a filesystem
             path, not a project identifier — see McpService.__init__.
     """
-    from claude_agent_sdk import tool
+    from app.mcp.inproc import tool
     from app.core.mcp_service import get_mcp_service, McpScope, McpServerType
 
     _is_admin = is_admin

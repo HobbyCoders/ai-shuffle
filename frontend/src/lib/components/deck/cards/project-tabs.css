@@ -249,41 +249,6 @@
 	cursor: not-allowed;
 }
 
-/* ── Multi-select chips ── */
-.ptab .chips-select {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
-}
-.ptab .chsel {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	min-height: 31px;
-	padding: 0 12px;
-	border-radius: 9px;
-	border: 1px solid var(--border);
-	background: var(--background);
-	color: var(--foreground);
-	font: inherit;
-	font-size: 12.5px;
-	font-weight: 500;
-	cursor: pointer;
-	transition: background 0.12s, border-color 0.12s, color 0.12s;
-}
-.ptab .chsel:hover {
-	border-color: var(--muted-foreground);
-}
-.ptab .chsel.on {
-	background: var(--primary);
-	border-color: var(--primary);
-	color: var(--primary-foreground);
-}
-.ptab .chsel svg {
-	width: 12px;
-	height: 12px;
-}
-
 /* ── Segmented control ── */
 .ptab .seg {
 	display: inline-flex;
@@ -548,16 +513,6 @@
 .ptab .lnk.muted {
 	color: var(--muted-foreground);
 	font-weight: 500;
-}
-.ptab .lnk-inline {
-	background: none;
-	border: none;
-	padding: 0;
-	font: inherit;
-	font-weight: 600;
-	color: var(--foreground);
-	cursor: pointer;
-	text-decoration: underline;
 }
 
 /* ── Field-level error ── */

@@ -19,7 +19,7 @@ from app.core.models import ConversationRequest
 
 
 # ``id`` is None so the minted session row needs no api_users FK to exist.
-API_USER = {"id": None, "profile_id": "default", "project_id": None}
+API_USER = {"id": None, "profile_ids": ["default"], "project_id": None}
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +134,9 @@ async def test_conversation_continues_existing_session(mock_db, monkeypatch):
     from app.db import database
 
     database.create_session(session_id="sess-known", profile_id="default")
+    # These tests exercise queue intake, not access: the placeholder API user
+    # (id None) owns no session, so treat it as the session's owner here.
+    monkeypatch.setattr("app.api.sessions_helpers.api_user_owns_session", lambda *a, **k: True)
     calls = _capture_submit(monkeypatch)
     _stub_wait(monkeypatch)
     _stub_outcome(monkeypatch, text="continued")
@@ -220,6 +223,7 @@ async def test_conversation_into_busy_session_queues_instead_of_racing(
 
     sid = "sess-busy"
     database.create_session(session_id=sid, profile_id="default")
+    monkeypatch.setattr("app.api.sessions_helpers.api_user_owns_session", lambda *a, **k: True)
     live = turns_db.enqueue_turn(sid, "user", prompt="do work")
     turns_db.start_turn(live["id"])
     assert turns_db.get_live_turn(sid)["state"] == "running"
@@ -472,3 +476,45 @@ async def test_connector_turn_without_api_user_config_asks_only(mock_db, monkeyp
     assert "model" not in calls[0]["overrides"]
     assert "effort" not in calls[0]["overrides"]
     assert calls[0]["overrides"]["permission_mode"] == "default"
+
+
+@pytest.mark.parametrize("bound,api_user,expected", [
+    (None, None, "no API user bound"),
+    ("api-user-1", {"id": "api-user-1", "profile_ids": []}, "no agent profile"),
+])
+async def test_connector_turn_is_refused_without_a_bound_api_user(
+    mock_db, monkeypatch, bound, api_user, expected
+):
+    """No API user (or one without a profile) → the chat gets one line and no
+    turn runs; the first profile in the database is never used instead."""
+    from app.core.connectors import manager as manager_module
+    from app.core.connectors.manager import ConnectorManager
+
+    manager = ConnectorManager()
+    instance = _FakeConnector()
+    _wire_connector(
+        monkeypatch, manager, instance,
+        session_row={"id": "cs-1", "session_id": "ai-sess-1"},
+        api_user=api_user,
+    )
+    db = manager_module.database
+    monkeypatch.setattr(
+        db, "get_connector",
+        lambda cid: {"id": cid, "type": "discord", "name": "Discord", "api_user_id": bound},
+    )
+    if bound is None:
+        monkeypatch.setattr(db, "get_api_user", lambda uid: None)
+    created = []
+    monkeypatch.setattr(db, "create_connector_session", lambda **kw: created.append(kw))
+
+    calls = _capture_submit(monkeypatch)
+    _stub_wait(monkeypatch)
+    _stub_outcome(monkeypatch)
+
+    await manager.handle_incoming_message(_incoming())
+
+    assert calls == []
+    assert created == []
+    assert len(instance.sent) == 1
+    assert expected in instance.sent[0].text
+

@@ -12,11 +12,11 @@ monkeypatch on ``app.core.http_client.get_http_client``.
 """
 
 import httpx
-import pytest
 
 from app.api import model_providers as mp_api
 from app.core import encryption, model_catalog_presets
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 ROOT = "/api/v1/model-providers"
@@ -28,7 +28,7 @@ def test_codex_refresh_repairs_v1_null_despite_missing_curated_model(
     authenticated_client, mock_db, monkeypatch,
 ):
     """A partial live repair must tell the client to reload the persisted rows."""
-    _unlock(mock_db)
+    unlock_encryption(mock_db)
     _make_provider(provider_type="chatgpt", base_url="https://chatgpt.com/backend-api")
     _attach_subscription()
     mp_api._capability_results.clear()
@@ -69,10 +69,6 @@ def test_codex_refresh_repairs_v1_null_despite_missing_curated_model(
     finally:
         mp_api._capability_results.clear()
         mp_api._capability_locks.clear()
-
-
-def _unlock(mock_db):
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider(
@@ -126,7 +122,7 @@ class TestLiveCatalogs:
     def test_chatgpt_hits_codex_models_endpoint(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(
             provider_type="chatgpt",
             base_url="https://chatgpt.com/backend-api/codex",
@@ -176,7 +172,7 @@ class TestLiveCatalogs:
         like gpt-6-astra never appeared on the ChatGPT sub picker even though
         the same account's OpenAI API catalog listed them.
         """
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(
             provider_type="chatgpt",
             base_url="https://chatgpt.com/backend-api/codex",
@@ -245,7 +241,7 @@ class TestLiveCatalogs:
     def test_chatgpt_without_tokens_returns_409(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(provider_type="chatgpt",
                        base_url="https://chatgpt.com/backend-api/codex")
 
@@ -259,7 +255,7 @@ class TestLiveCatalogs:
     def test_chatgpt_401_refreshes_and_retries(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(
             provider_type="chatgpt",
             base_url="https://chatgpt.com/backend-api/codex",
@@ -297,7 +293,7 @@ class TestLiveCatalogs:
     def test_openai_live_catalog_does_not_double_v1(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(
             provider_type="openai",
             base_url="https://api.openai.com/v1",
@@ -333,7 +329,7 @@ class TestLiveCatalogs:
     def test_xai_live_catalog_does_not_double_v1(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(
             provider_type="xai",
             base_url="https://api.x.ai/v1",
@@ -362,7 +358,7 @@ class TestLiveCatalogs:
     def test_grok_subscription_uses_oauth_token(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(provider_type="grok", base_url="https://api.x.ai/v1")
         _attach_subscription(auth_mode="grok")
 
@@ -389,7 +385,7 @@ class TestLiveCatalogs:
 
 class TestUpstreamPath:
     def test_openai_shape(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -413,7 +409,7 @@ class TestUpstreamPath:
     def test_openrouter_strips_author_prefix_from_names(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -434,7 +430,7 @@ class TestUpstreamPath:
         ]
 
     def test_bare_list_shape(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -455,7 +451,7 @@ class TestUpstreamPath:
         ]
 
     def test_upstream_500_maps_to_502(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -466,7 +462,7 @@ class TestUpstreamPath:
         assert resp.status_code == 502, resp.text
 
     def test_list_capped_at_2000(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -480,7 +476,7 @@ class TestUpstreamPath:
         assert len(resp.json()["models"]) == 2000
 
     def test_auth_header_carries_decrypted_token(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         captured = {}
@@ -511,7 +507,7 @@ class TestUpstreamPath:
         assert resp.status_code == 400, resp.text
 
     def test_provider_not_found_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         resp = authenticated_client.post(f"{ROOT}/does-not-exist/fetch-models")
         assert resp.status_code == 404, resp.text
 
@@ -692,7 +688,7 @@ class TestMediaModelFiltering:
     def test_media_models_are_split_out_on_the_generic_path(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -726,7 +722,7 @@ class TestMediaModelFiltering:
         self, authenticated_client, mock_db, monkeypatch
     ):
         """The UI switches on this to say where the model actually lives."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -749,7 +745,7 @@ class TestMediaModelFiltering:
     def test_an_all_text_roster_reports_nothing_hidden(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):
@@ -769,7 +765,7 @@ class TestMediaModelFiltering:
     ):
         """A custom gateway serves ids this rule has never seen; hiding them
         would empty its picker."""
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
 
         def _handler(request):

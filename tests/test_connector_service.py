@@ -7,7 +7,7 @@ import types
 import pytest
 
 pytestmark = pytest.mark.usefixtures("bundled_connector_catalog")
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 
 from app.core.connector_service import (
     get_sensitive_fields,
@@ -33,7 +33,7 @@ class TestGetSensitiveFields:
         assert get_sensitive_fields("discord") == ["bot_token"]
 
     def test_whatsapp_sensitive_fields(self):
-        assert get_sensitive_fields("whatsapp") == ["access_token"]
+        assert get_sensitive_fields("whatsapp") == ["access_token", "app_secret"]
 
     def test_slack_sensitive_fields(self):
         assert get_sensitive_fields("slack") == ["bot_token", "app_token"]

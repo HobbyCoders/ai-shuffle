@@ -115,7 +115,8 @@ class HueConnector(BaseConnector):
 
     def _find_light(self, name_or_id: str) -> Optional[str]:
         """
-        Match a light by name (case-insensitive partial match) or numeric ID.
+        Match a light by numeric ID, then by exact name, then by partial name
+        (names compare case-insensitively).
 
         Returns the light ID string, or ``None`` if no match is found.
         """
@@ -123,13 +124,31 @@ class HueConnector(BaseConnector):
         if name_or_id in self._lights:
             return name_or_id
 
-        # Case-insensitive partial name match
-        query = name_or_id.lower()
+        query = name_or_id.strip().lower()
+        # An exact name wins over a longer name that merely contains it
+        # ("Lamp" must not resolve to "Floor Lamp").
+        for light_id, light_name in self._lights.items():
+            if query == light_name.strip().lower():
+                return light_id
         for light_id, light_name in self._lights.items():
             if query in light_name.lower():
                 return light_id
 
         return None
+
+    async def _rejected(self, response: httpx.Response, what: str) -> bool:
+        """Report a write the bridge refused inside an HTTP 200 response.
+
+        Returns True (after replying with the bridge's reason) when the body
+        carries error entries, False when the write succeeded.
+        """
+        errors = hue_actions.bridge_errors(response)
+        if not errors:
+            return False
+        reason = "; ".join(errors)
+        logger.warning("HueConnector %s %s rejected by bridge: %s", self.connector_id, what, reason)
+        await self._emit_reply(f"Bridge rejected {what}: {reason}")
+        return True
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -153,11 +172,13 @@ class HueConnector(BaseConnector):
 
             lights_data = response.json()
 
-            # Check for Hue API error responses (list of error dicts)
-            if isinstance(lights_data, list):
-                errors = [e.get("error", {}).get("description", "") for e in lights_data if "error" in e]
-                if errors:
-                    raise RuntimeError("; ".join(errors))
+            # The bridge answers errors (e.g. unauthorized user) as HTTP 200
+            # with a list of error dicts; anything but a map is not a lights list.
+            if not isinstance(lights_data, dict):
+                errors = hue_actions.bridge_errors(response)
+                raise RuntimeError(
+                    "; ".join(errors) or f"Unexpected bridge response: {response.text[:200]}"
+                )
 
             # Cache light ID -> name mapping
             self._lights = {
@@ -229,11 +250,12 @@ class HueConnector(BaseConnector):
                         consecutive_failures += 1
                     else:
                         lights_data = response.json()
-                        if isinstance(lights_data, list):
+                        if not isinstance(lights_data, dict):
                             # Error response from bridge
                             consecutive_failures += 1
                         else:
                             consecutive_failures = 0
+                            await self._poll_recovered()
 
                             # Update light name cache
                             self._lights = {
@@ -297,6 +319,20 @@ class HueConnector(BaseConnector):
 
         except asyncio.CancelledError:
             logger.info("HueConnector %s poll task cancelled", self.connector_id)
+
+    async def _poll_recovered(self) -> None:
+        """Leave ERROR once a poll succeeds again after repeated failures."""
+        if self._status != ConnectorStatus.ERROR:
+            return
+        self._status = ConnectorStatus.CONNECTED
+        self._status_message = None
+        logger.info("HueConnector %s recovered: polling succeeded again", self.connector_id)
+        try:
+            from app.db import database
+            from app.db.async_database import run_sync
+            await run_sync(database.update_connector_status, self.connector_id, ConnectorStatus.CONNECTED.value)
+        except Exception:
+            logger.debug("Failed to update DB status", exc_info=True)
 
     @staticmethod
     def _describe_state_diff(
@@ -537,6 +573,8 @@ class HueConnector(BaseConnector):
 
         name = self._lights.get(light_id, light_query)
         state_str = "on" if on else "off"
+        if await self._rejected(response, f"turning {name} {state_str}"):
+            return True
         await self._emit_reply(f"{name} turned {state_str}")
         return True
 
@@ -559,6 +597,8 @@ class HueConnector(BaseConnector):
             return False
 
         name = self._lights.get(light_id, light_query)
+        if await self._rejected(response, f"brightness for {name}"):
+            return True
         await self._emit_reply(f"{name} brightness set to {pct}%")
         return True
 
@@ -586,6 +626,8 @@ class HueConnector(BaseConnector):
             return False
 
         name = self._lights.get(light_id, light_query)
+        if await self._rejected(response, f"color temperature for {name}"):
+            return True
         await self._emit_reply(f"{name} color temperature set to {preset} ({ct_value} mirek)")
         return True
 
@@ -623,6 +665,8 @@ class HueConnector(BaseConnector):
             )
             return False
 
+        if await self._rejected(response, f"scene '{scene_name}'"):
+            return True
         await self._emit_reply(f"Scene '{scene_name}' activated")
         return True
 
@@ -638,6 +682,8 @@ class HueConnector(BaseConnector):
             )
             return False
 
+        if await self._rejected(response, description.lower()):
+            return True
         await self._emit_reply(description)
         return True
 
@@ -749,6 +795,12 @@ class HueConnector(BaseConnector):
 
             if response.status_code == 200:
                 data = response.json()
+                if not isinstance(data, dict):
+                    errors = hue_actions.bridge_errors(response)
+                    return {
+                        "success": False,
+                        "message": "; ".join(errors) or "Unexpected bridge response",
+                    }
                 bridge_name = data.get("name", "Unknown")
                 api_version = data.get("apiversion", "Unknown")
                 return {

@@ -79,17 +79,6 @@ class MarketplaceInfo(DictMixin):
 
 
 @dataclass
-class PluginInstallation:
-    """Information about an installed plugin instance"""
-    scope: str
-    install_path: str
-    version: str
-    installed_at: datetime
-    last_updated: Optional[datetime] = None
-    is_local: bool = True
-
-
-@dataclass
 class PluginInfo(DictMixin):
     """Information about a plugin"""
     id: str  # e.g., "frontend-design@claude-plugins-official"

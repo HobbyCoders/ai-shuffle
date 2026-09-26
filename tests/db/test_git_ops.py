@@ -10,28 +10,11 @@ claim, and a second claim of a won row returns None rather than double-running
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from app.db import git_ops
 
 RUNNER = "runner-a"
 OTHER = "runner-b"
 PV2 = "pv2-abc"
-
-
-@pytest.fixture
-def test_db():
-    from tests.pg_shim import new_sqlite_connection
-    conn = new_sqlite_connection()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def mock_db(test_db):
-    from tests.pg_shim import route_db_to
-    with route_db_to(test_db):
-        yield test_db
 
 
 def _got(op_id: str):

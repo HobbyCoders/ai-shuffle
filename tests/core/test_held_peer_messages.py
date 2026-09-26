@@ -272,7 +272,6 @@ async def test_a_steered_completion_carries_held_messages_once(
     monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
     monkeypatch.setattr(session_runtime, "try_steer_task_notification", _steer)
     monkeypatch.setattr(task_registry, "is_own_background_task", lambda *a, **k: True)
-    monkeypatch.setattr(turn_scheduler, "_cli_owns_at_rest_wake", lambda *a, **k: False)
 
     await turn_scheduler.on_task_terminal("g3", _frame("w2"))
 
@@ -304,40 +303,6 @@ async def test_a_steer_the_turn_never_delivers_hands_held_messages_to_the_wake(
 
     (wake,) = turns_db.get_queued_turns("g4")
     assert wake["prompt"].count("halfway") == 1
-
-
-async def test_a_cli_owned_wake_delivers_held_messages_when_it_comes_to_rest(
-    mock_db, monkeypatch, _clean_delivered, _quiet,
-):
-    from unittest.mock import AsyncMock
-
-    from app.core import idle_reader
-    from app.core.task_registry import task_registry
-
-    _parked("g5")
-    assert await turn_scheduler.on_agent_message("g5", "w1", "halfway") == turn_scheduler.HELD
-    monkeypatch.setattr(task_registry, "is_own_background_task", lambda *a, **k: True)
-    monkeypatch.setattr(turn_scheduler, "_cli_owns_at_rest_wake", lambda *a, **k: True)
-
-    assert await turn_scheduler.on_task_terminal("g5", _frame("w1")) == "cli-owned-wake"
-    # The CLI writes its own wake; nothing is queued for it.
-    assert turns_db.get_queued_turns("g5") == []
-
-    monkeypatch.setattr(
-        "app.core.turn_recorder.record_cli_wake_turn_completed", AsyncMock(),
-    )
-    monkeypatch.setattr(
-        "app.core.turn_finalize.persist_turn_end_state", AsyncMock(),
-    )
-    await idle_reader._close_open_wake_turn("g5", "cliwake-1")
-
-    (turn,) = turns_db.get_queued_turns("g5")
-    assert turn["prompt"].count("halfway") == 1
-    assert _held("g5") == []
-    assert _quiet == ["g5"]
-    # Resting again delivers nothing new, and the queued turn adds nothing.
-    assert await turn_scheduler.on_cli_wake_rested("g5") is None
-    assert await turn_scheduler.fold_held_peer_messages_for_turn("g5", turn) == ""
 
 
 async def test_a_message_after_the_unpark_is_claimed_is_not_held_for_the_deadline(

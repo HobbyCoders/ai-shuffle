@@ -2,7 +2,7 @@
 AI Tools SDK MCP Server - Native tool registration for AI content generation.
 
 Registers AI tools as proper SDK MCP tools using the @tool decorator and
-create_sdk_mcp_server(). Each tool delegates to a persistent Node.js worker
+create_tool_server(). Each tool delegates to a persistent Node.js worker
 process that handles execution via stdin/stdout JSON-RPC.
 
 The worker is started lazily on first tool call and stays alive for the session,
@@ -11,9 +11,9 @@ eliminating the overhead of temp file creation and cold Node.js startup per call
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from app.mcp.inproc import tool, create_tool_server
 from mcp.types import ToolAnnotations
 
 from app.mcp.config_helpers import _json_default
@@ -417,19 +417,6 @@ def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     return False
 
 
-def get_enabled_tool_names(ai_tools_config: dict) -> List[str]:
-    """
-    Get list of MCP tool names that should be enabled based on config.
-
-    Returns tool names in the mcp__<server>__<tool> format for allowed_tools.
-    """
-    enabled = []
-    for tool_name in TOOL_CONFIG_MAP:
-        if _is_tool_enabled(tool_name, ai_tools_config):
-            enabled.append(f"mcp__ai-tools__{tool_name}")
-    return enabled
-
-
 # ============================================================================
 # Server Creation
 # ============================================================================
@@ -460,7 +447,7 @@ def create_ai_tools_server(
             the API can serve them.
 
     Returns:
-        McpSdkServerConfig from create_sdk_mcp_server(), or None
+        McpSdkServerConfig from create_tool_server(), or None
     """
     if not ai_tools_config or not tools_dir:
         return None
@@ -534,7 +521,7 @@ def create_ai_tools_server(
 
     logger.info(f"Creating AI tools MCP server with {len(enabled_tools)} tools: {[t.name for t in enabled_tools]}")
 
-    return patch_sdk_server(create_sdk_mcp_server(
+    return patch_sdk_server(create_tool_server(
         name="ai-tools",
         version="1.0.0",
         tools=enabled_tools,

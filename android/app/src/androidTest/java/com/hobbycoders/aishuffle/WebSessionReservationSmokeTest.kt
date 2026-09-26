@@ -112,6 +112,8 @@ class WebSessionReservationSmokeTest {
             val request = chain.request()
             check(request.url.host == "reservation-fixture.example" && request.method == "POST")
             check(request.header("Authorization") == "Bearer ${server.apiKey}" && request.header("Cookie") == null)
+            if (request.url.encodedPath == "/api/v1/mobile/key/renew")
+                return@addInterceptor PresenceFixture.renewDeviceKey(request, server)
             val bytes = Buffer(); request.body!!.writeTo(bytes)
             val body = JSONObject(bytes.readUtf8())
             if (request.url.encodedPath == reservePath) check(body.length() == 0)

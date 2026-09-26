@@ -52,7 +52,6 @@ class TestBuiltinSubagentSeeding:
         }
 
         with patch("app.core.builtin_subagents.database") as mock_db, \
-             patch("app.core.builtin_subagents._update_builtin_defaults"), \
              patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
@@ -106,66 +105,3 @@ class TestBuiltinSubagentSeeding:
             # No modifications should be made
             mock_db.set_subagent_builtin.assert_not_called()
             mock_db.create_subagent.assert_not_called()
-
-    def test_seed_force_update_updates_defaults(self):
-        """Seeding with force_update updates default values."""
-        from app.core.builtin_subagents import seed_builtin_subagents
-
-        existing_subagent = {
-            "id": "chat-history-summarizer",
-            "name": "Chat History Summarizer",
-            "is_builtin": True,
-            "default_prompt": "Old prompt"
-        }
-
-        with patch("app.core.builtin_subagents.database") as mock_db, \
-             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update, \
-             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
-            mock_db.get_subagent.return_value = existing_subagent
-
-            results = seed_builtin_subagents(force_update=True)
-
-            assert results.get("chat-history-summarizer") == "updated"
-            mock_update.assert_called_once()
-
-
-# =============================================================================
-# Subagent Provider-Model Validation Tests (Chunk S4)
-# =============================================================================
-
-def _provider_row(
-    provider_id="prov-openai",
-    name="My OpenAI",
-    provider_type="openai",
-    enabled=True,
-    model_ids=("gpt-4o", "gpt-4o-mini"),
-):
-    """Build a model_providers row dict, mirroring the DB shape.
-
-    ``models_json`` is the parsed list of ``{id, label}`` dicts the DB layer
-    returns after JSON-column parsing.
-    """
-    return {
-        "id": provider_id,
-        "name": name,
-        "provider_type": provider_type,
-        "enabled": enabled,
-        "models_json": [{"id": mid, "label": mid} for mid in model_ids],
-    }
-
-
-def _created(subagent_id, model):
-    """Minimal created/updated subagent record for response building."""
-    return {
-        "id": subagent_id,
-        "name": "Sub",
-        "description": "Desc",
-        "prompt": "Prompt",
-        "tools": None,
-        "model": model,
-        "is_builtin": False,
-        "created_at": datetime(2024, 1, 1, 0, 0, 0),
-        "updated_at": datetime(2024, 1, 1, 0, 0, 0),
-    }
-
-

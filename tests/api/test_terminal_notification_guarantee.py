@@ -53,7 +53,7 @@ from app.core.task_registry import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from claude_agent_sdk import TaskUpdatedMessage
+from app.core.provider.events import TaskUpdatedMessage
 
 
 SESSION = "sess-guarantee"
@@ -324,7 +324,6 @@ def test_surface_terminal_notification_records_only_never_spawns():
     body = src.split('"""', 2)[-1]  # drop the docstring (which explains the strip)
     assert "_deliver_unpark_impl(" not in body, "step 3 unpark handoff must be gone"
     assert "HeadlessChatHandler(" not in body, "must not instantiate a headless runner"
-    assert "StreamingContext(" not in body, "must not build the pending husk"
 
 
 async def test_callback_durable_chip_only_when_no_live_client():
@@ -418,41 +417,32 @@ async def test_force_cleanup_reap_stamps_server_shutdown():
 
 # ===========================================================================
 # (c) USER-initiated stop of a LIVE background sub-agent must mark the
-#     registry row terminal ITSELF — not rely on a CLI "stopped" frame that a
-#     parked session has no reader for (phantom "running" agent bug, live-repro
-#     2026-07-10). Exactly-once terminal surface with user attribution.
+#     registry row terminal ITSELF, with user attribution — the adapter has no
+#     per-task stop and no CLI "stopped" frame flows back. Exactly-once
+#     terminal surface.
 # ===========================================================================
 
 
 def _live_agent_state():
-    """A mock pooled state for a LIVE, connected session with a stoppable
-    background sub-agent (async ``stop_task`` that records nothing itself — the
-    registry transition must come from ``stop_session_task``)."""
+    """A mock pooled state for a LIVE, connected session."""
     state = MagicMock()
     state.is_connected = True
-    state.client = MagicMock()
-    state.client.stop_task = AsyncMock(return_value=None)
     return state
 
 
 async def test_stop_session_task_live_agent_marks_registry_killed():
-    """User "x" on a RUNNING background agent with a LIVE client: the registry
-    row must reach ``killed`` (with user attribution) even though the SDK
-    ``stop_task`` emits no terminal frame back through the streaming loop."""
+    """User "x" on a RUNNING background agent on a LIVE session: the registry
+    row reaches ``killed`` with user attribution."""
     from app.core.query_session_lifecycle import stop_session_task
 
     _own_task("t-userstop", "tu-userstop")
     assert task_registry.get_task(SESSION, "t-userstop")["status"] == "running"
 
-    state = _live_agent_state()
     with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
+        gp.return_value.peek = MagicMock(return_value=_live_agent_state())
         result = await stop_session_task(SESSION, "t-userstop")
 
-    # SDK stop was issued...
-    state.client.stop_task.assert_awaited_once_with("t-userstop")
     assert result["ok"] is True and result["kind"] == "agent"
-    # ...AND the registry row is now terminal (no phantom "running").
     rec = task_registry.get_task(SESSION, "t-userstop")
     assert rec["status"] == "killed", rec
     assert rec["summary"] == USER_STOP_SUMMARY
@@ -472,13 +462,12 @@ async def test_stop_session_task_live_agent_surfaces_terminal_exactly_once():
     cwh.register_terminal_notification_callback()
     _own_task("t-once", "tu-once")
 
-    state = _live_agent_state()
     with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
+        gp.return_value.peek = MagicMock(return_value=_live_agent_state())
         result = await stop_session_task(SESSION, "t-once")
     assert result["ok"] is True
 
-    # A CLI "stopped" TaskUpdated arriving LATE (drain pump) must be a no-op.
+    # A CLI "stopped" TaskUpdated arriving LATE must be a no-op.
     late = TaskUpdatedMessage(
         subtype="task_updated",
         data={"task_id": "t-once", "patch": {"status": "killed"}},
@@ -509,9 +498,8 @@ async def test_stop_session_task_live_agent_calls_terminal_callback_once():
     task_registry.set_terminal_notification_callback(spy)
     _own_task("t-cb", "tu-cb")
 
-    state = _live_agent_state()
     with patch("app.core.query_session_lifecycle.get_session_pool") as gp:
-        gp.return_value.peek = MagicMock(return_value=state)
+        gp.return_value.peek = MagicMock(return_value=_live_agent_state())
         await stop_session_task(SESSION, "t-cb")
 
     spy.assert_called_once()
@@ -519,6 +507,7 @@ async def test_stop_session_task_live_agent_calls_terminal_callback_once():
     assert wire["id"] == "t-cb"
     assert wire["status"] == "killed"
     assert wire.get("reason") == USER_STOP_REASON
+
 
 async def test_unexpected_kill_without_reader_queues_once_but_stop_never_wakes(monkeypatch):
     from app.core import turn_scheduler

@@ -7,7 +7,6 @@ BASE checkout (mutating the main checkout instead of the parent's worktree) and
 the composer showed registry defaults.
 """
 
-import json
 
 import pytest
 from psycopg2.extras import Json

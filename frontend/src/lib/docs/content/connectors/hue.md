@@ -1,6 +1,6 @@
 <!--
 title: Philips Hue
-description: Control Philips Hue smart lights through Claude
+description: Control Philips Hue smart lights through your AI Shuffle agent
 order: 11
 -->
 
@@ -8,7 +8,7 @@ order: 11
 
 ## Overview
 
-The Philips Hue connector lets Claude control your Philips Hue smart lighting system through AI Shuffle. Once connected, you can use natural language to turn lights on and off, adjust brightness and color, activate scenes, and manage light groups -- all by chatting with Claude.
+The Philips Hue connector lets your agent control your Philips Hue smart lighting system through AI Shuffle. Once connected, you can use natural language to turn lights on and off, adjust brightness and color, activate scenes, and manage light groups -- all by chatting with your agent.
 
 Philips Hue uses a local bridge device that communicates with your bulbs via the Zigbee protocol. The connector talks directly to the Hue Bridge's REST API on your local network, so all commands are fast and do not depend on Philips' cloud services. You will need the bridge's IP address and an API key (historically called a "username" in Hue terminology) to get started.
 
@@ -82,28 +82,16 @@ You should see JSON objects describing your lights, rooms, and scenes.
 
 ### 4. Create the Hue connector in AI Shuffle
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Philips Hue",
-    "connector_type": "hue",
-    "config": {
-      "bridge_ip": "192.168.1.42",
-      "api_key": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
-    }
-  }'
-```
+1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Philips Hue**.
+2. Click **Install Philips Hue** if prompted, then click **Connect account**.
+3. Fill in **Bridge IP Address** and **API Key (Username)**.
+4. Click **Create Connector**.
 
-Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Philips Hue**.
+To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
 
 ### 5. Activate the connector
 
-```bash
-curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
-  -H "Authorization: Bearer aih_your_key"
-```
+Turn on the connection's **Activate** switch.
 
 ### 6. Test with a command
 
@@ -136,16 +124,13 @@ The Philips Hue connector supports the following capabilities:
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-### AI Actions (Action Gateway)
+### AI Actions
 
-While a Hue connector is running, every AI session gets two MCP tools:
+See [How AI actions work](/docs/connectors#how-ai-actions-work). While a Hue connector is active, every agent session gets its tools.
 
-- **`hue_actions`** -- discovery. Returns the action catalog (12 actions across control and discovery: set/turn on/off lights, color temperature presets, effects, group/room control, scene activation, and listings for lights, groups, scenes, and the bridge config), each with its input schema, filtered by this install's `enabled_action_categories`.
-- **`hue_invoke`** -- execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Hue Bridge REST API.
+Your agent can use 12 actions across control and discovery: set/turn on/off lights, color temperature presets, effects, group/room control, scene activation, and listings for lights, groups, scenes and the bridge config. Hue has no destructive actions, so nothing asks for approval. Your agent uses `list_lights`, `list_groups` and `list_scenes` to find valid IDs before acting on them.
 
-Every action is `safe` or `write` risk -- Hue has no destructive actions, since this non-messaging connector has no interactive approval surface to route them through. Use `list_lights`, `list_groups`, and `list_scenes` to discover valid IDs before acting on them.
-
-What that lets Claude do:
+What that lets your agent do:
 
 - **Individual light control** -- Turn lights on/off, set brightness/hue/saturation, adjust color temperature, set dynamic effects
 - **Room/group control** -- Control all lights in a room at once (e.g., "turn off the bedroom"), including group_id "0" for every light
@@ -174,7 +159,7 @@ What that lets Claude do:
 ### Lights respond slowly or not at all
 
 - **Zigbee range.** Hue lights communicate via Zigbee. If a light is far from the bridge and other lights, the signal may be weak. Adding more Hue lights between the bridge and the distant light extends the mesh network.
-- **Bridge overload.** The Hue Bridge has a rate limit of approximately 10 commands per second for individual lights and 1 command per second for groups. If Claude sends many commands at once, some may be dropped. For bulk operations, use group or scene commands rather than individual light commands.
+- **Bridge overload.** The Hue Bridge has a rate limit of approximately 10 commands per second for individual lights and 1 command per second for groups. If your agent sends many commands at once, some may be dropped. For bulk operations, use group or scene commands rather than individual light commands.
 
 ### Bridge IP address changed
 

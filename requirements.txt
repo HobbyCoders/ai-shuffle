@@ -13,9 +13,10 @@ websockets>=12,<17
 # Binary realtime frames for fal.ai PersonaPlex.
 msgpack>=1.1,<2
 bcrypt==4.2.1
-cryptography>=42.0.0
+cryptography>=44.0.0  # 44 adds the Argon2id KDF used for the owner password
 asyncssh==2.24.0  # Pinned-host remote administration for explicitly granted Chat resources
-claude-agent-sdk==0.2.126
+# MCP protocol client for external tool servers (independent of any agent SDK).
+mcp>=1.27.2,<2
 # fluid agent harness — REQUIRED: it is the only provider backend
 # (app/core/provider/factory.py). Not listed here as a pinned dep because it
 # lives in this repo under fluid/ (its own pyproject.toml); the Docker image

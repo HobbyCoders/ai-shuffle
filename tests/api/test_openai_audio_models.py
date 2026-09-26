@@ -136,6 +136,22 @@ async def test_openai_tts_bytes_maps_auth_error():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 503, 400])
+async def test_openai_upstream_failures_are_502(status):
+    from fastapi import HTTPException
+
+    for call in (
+        lambda c: _openai_tts_bytes(c, "sk", "openai/tts-1", "hi", "alloy", 1.0, "mp3",
+                                    TTS_MODELS["openai/tts-1"]),
+        lambda c: _openai_transcribe(c, "sk", "openai/whisper-1", b"b", "a.webm", "audio/webm"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await call(_FakeClient(_FakeResponse(status_code=status, text="upstream down")))
+        assert exc.value.status_code == 502
+        assert exc.value.detail.endswith("failed: upstream down")
+
+
+@pytest.mark.asyncio
 async def test_openai_transcribe_posts_multipart_and_returns_text():
     client = _FakeClient(_FakeResponse(status_code=200, payload={"text": " hi there "}))
     text = await _openai_transcribe(

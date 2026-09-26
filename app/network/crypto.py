@@ -34,7 +34,6 @@ NONCE_BYTES = 12
 KEY_BYTES = 32
 WRAP_INFO = b"shuffle-network-key-wrap-v1"
 RECOVERY_INFO = b"shuffle-network-recovery-v1"
-TOKEN_INFO = b"shuffle-device-token-v1"
 
 
 class CryptoError(ValueError):
@@ -213,11 +212,16 @@ def unwrap_key(recipient_private: bytes, wrapped: Mapping[str, Any]) -> bytes:
     private = _encryption_private(recipient_private)
     recipient_public = private.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    shared = private.exchange(_encryption_public(ephemeral_public))
-    kek = _hkdf(shared, WRAP_INFO + ephemeral_public + recipient_public)
     try:
+        shared = private.exchange(_encryption_public(ephemeral_public))
+        kek = _hkdf(shared, WRAP_INFO + ephemeral_public + recipient_public)
         key = AESGCM(kek).decrypt(nonce, ciphertext, ephemeral_public)
-    except InvalidTag as exc:
+    except CryptoError:
+        raise
+    except (InvalidTag, ValueError) as exc:
+        # ValueError: a low-order ephemeral key or a nonce of the wrong size.
+        # Callers treat CryptoError as "this wrap does not open"; anything
+        # else would escape them as an unexpected failure.
         raise CryptoError("Key wrap does not open with this device key") from exc
     if len(key) != KEY_BYTES:
         raise CryptoError("Unwrapped key has the wrong size")
@@ -330,7 +334,7 @@ def unwrap_key_with_recovery(recovery_key: bytes, network_id: str, wrapped: Mapp
     kek = _hkdf(recovery_key, RECOVERY_INFO, salt=network_id.encode("utf-8"))
     try:
         key = AESGCM(kek).decrypt(nonce, ciphertext, network_id.encode("utf-8"))
-    except InvalidTag as exc:
+    except (InvalidTag, ValueError) as exc:
         raise CryptoError("Recovery key does not open this network") from exc
     if len(key) != KEY_BYTES:
         raise CryptoError("Unwrapped key has the wrong size")
@@ -340,15 +344,3 @@ def unwrap_key_with_recovery(recovery_key: bytes, network_id: str, wrapped: Mapp
 def recovery_key_check(recovery_key: bytes, network_id: str) -> str:
     """Public check value the hub may store to reject a mistyped key early."""
     return sha256_hex(_hkdf(recovery_key, RECOVERY_INFO + b"-check", salt=network_id.encode("utf-8")))
-
-
-# ---------------------------------------------------------------------------
-# Device tokens (HMAC over a challenge, keyed from a shared secret)
-# ---------------------------------------------------------------------------
-
-def derive_token_key(shared_secret: bytes, salt: bytes) -> bytes:
-    return _hkdf(shared_secret, TOKEN_INFO, salt=salt)
-
-
-def constant_time_equal(left: str, right: str) -> bool:
-    return hmac.compare_digest((left or "").encode("utf-8"), (right or "").encode("utf-8"))

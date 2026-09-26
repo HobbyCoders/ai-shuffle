@@ -10,11 +10,20 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 from app.core.plugin_models import MarketplaceInfo
+from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
+
+
+def _git_error(e: subprocess.CalledProcessError) -> str:
+    """git's stderr for a client-facing error, with URL credentials removed."""
+    stderr = e.stderr or b""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return redact_url_credentials(stderr)
 
 
 def get_marketplaces(svc) -> List[MarketplaceInfo]:
@@ -66,7 +75,7 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
 
     if not re.match(r'^https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*$', url) and \
        not re.match(r'^git@[\w\-.]+:[\w\-./]+$', url):
-        raise ValueError(f"Invalid git URL: {url[:100]}")
+        raise ValueError(f"Invalid git URL: {redact_url_credentials(url)[:100]}")
 
     # Derive name from URL if not provided
     if not name:
@@ -80,22 +89,26 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
 
     install_location = str(svc.MARKETPLACES_DIR / name)
 
+    # Refuse (409) before cloning if the registry cannot be read back.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+
     # Clone the repository
     if not Path(install_location).exists():
         try:
+            # "--" so a URL can never be read as a git option (e.g. --upload-pack=...).
             subprocess.run(
-                ["git", "clone", "--depth", "1", url, install_location],
+                ["git", "clone", "--depth", "1", "--", url, install_location],
                 check=True,
                 capture_output=True,
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to clone marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to clone marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace clone timed out")
 
     # Update known_marketplaces.json
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
     data[name] = {
         "source": {
             "source": "git",
@@ -126,7 +139,10 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
     Returns:
         True if successful
     """
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    # Refuse (409) before removing anything if any file this writes cannot be
+    # read back; the entry, clone and cache stay for a retry.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE, svc.INSTALLED_FILE, svc.SETTINGS_FILE)
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
 
     if marketplace_id not in data:
         raise ValueError(f"Marketplace not found: {marketplace_id}")
@@ -142,7 +158,7 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
         shutil.rmtree(install_location, ignore_errors=True)
 
     # Remove installed plugins from this marketplace
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
     plugins_to_remove = [
         pid for pid in installed.get("plugins", {})
         if pid.endswith(f"@{marketplace_id}")
@@ -151,8 +167,17 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
         del installed["plugins"][pid]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
+    # Remove those plugins' cached files too (only a direct child of the cache).
+    cache_dir = svc.CACHE_DIR / marketplace_id
+    if (
+        marketplace_id not in ("", ".", "..")
+        and "/" not in marketplace_id and "\\" not in marketplace_id
+        and cache_dir.is_dir() and not cache_dir.is_symlink()
+    ):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
     # Remove from enabled plugins in settings
-    settings = svc._read_json_file(svc.SETTINGS_FILE, {})
+    settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
     enabled = settings.get("enabledPlugins", {})
     for pid in plugins_to_remove:
         enabled.pop(pid, None)
@@ -173,7 +198,9 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     Returns:
         True if successful
     """
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    # Refuse (409) before re-cloning or pulling if the registry cannot be read back.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
 
     if marketplace_id not in data:
         raise ValueError(f"Marketplace not found: {marketplace_id}")
@@ -218,13 +245,13 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
         shutil.rmtree(install_path, ignore_errors=True)
         try:
             subprocess.run(
-                ["git", "clone", "--depth", "1", source_url, install_location],
+                ["git", "clone", "--depth", "1", "--", source_url, install_location],
                 check=True,
                 capture_output=True,
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to re-clone marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace re-clone timed out")
     else:
@@ -237,7 +264,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 timeout=120
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to sync marketplace: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to sync marketplace: {_git_error(e)}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace sync timed out")
 

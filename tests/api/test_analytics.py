@@ -86,7 +86,7 @@ class TestGetDefaultDateRange:
         start_date, end_date = get_default_date_range()
 
         assert end_date == "2024-02-15"
-        assert start_date == "2024-01-16"
+        assert start_date == "2024-01-17"
 
     @freeze_time("2024-01-15")
     def test_get_default_date_range_crosses_year(self):
@@ -96,7 +96,7 @@ class TestGetDefaultDateRange:
         start_date, end_date = get_default_date_range()
 
         assert end_date == "2024-01-15"
-        assert start_date == "2023-12-16"
+        assert start_date == "2023-12-17"
 
 
 # =============================================================================
@@ -180,6 +180,9 @@ class TestAnalyticsSummaryEndpoint:
 
             # Verify database was called with correct dates
             mock_db.get_analytics_usage_stats.assert_called_with("2024-01-01", "2024-01-31", api_user_id=None)
+            # "Last 7 days" with inclusive bounds is Jan 25..31.
+            mock_db.get_analytics_usage_trends.assert_called_with(
+                "2024-01-25", "2024-01-31", interval="day", api_user_id=None)
 
     def test_get_summary_with_only_start_date(self, authenticated_client):
         """Should use default end date when only start date provided."""
@@ -227,8 +230,8 @@ class TestAnalyticsSummaryEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            # Start date should be 30 days before current date when not provided
-            assert data["start_date"] == "2024-01-16"
+            # Start date defaults to the first day of the 30-day window ending today
+            assert data["start_date"] == "2024-01-17"
             assert data["end_date"] == "2024-02-10"
 
     def test_get_summary_invalid_date_format(self, authenticated_client):
@@ -928,3 +931,79 @@ class TestAnalyticsEdgeCases:
             assert response.status_code == 200
             data = response.json()
             assert data["total_cost_usd"] == 0.000003
+
+
+# =============================================================================
+# Estimated usage marker (usage_log.usage_estimated, schema v90)
+# =============================================================================
+
+class TestEstimatedUsageFields:
+    """The Stats page marks aggregates that include harness-estimated turns."""
+
+    def test_summary_carries_the_estimated_turn_count(self, authenticated_client):
+        with patch("app.api.analytics.database") as mock_db:
+            mock_db.get_analytics_usage_stats.return_value = {
+                "total_tokens_in": 100, "total_tokens_out": 50, "total_cost_usd": 0.5,
+                "session_count": 2, "query_count": 4, "estimated_query_count": 1,
+            }
+            mock_db.get_analytics_cost_breakdown.return_value = [{
+                "key": "default", "name": "Default", "total_cost_usd": 0.5,
+                "total_tokens_in": 100, "total_tokens_out": 50, "query_count": 4,
+                "estimated_query_count": 1,
+            }]
+            mock_db.get_analytics_usage_trends.return_value = [{
+                "date": "2024-01-01", "tokens_in": 100, "tokens_out": 50,
+                "cost_usd": 0.5, "query_count": 4, "estimated_query_count": 1,
+            }]
+            data = authenticated_client.get("/api/v1/analytics/summary").json()
+        assert data["usage_stats"]["estimated_query_count"] == 1
+        assert data["usage_stats"]["query_count"] == 4  # estimates stay inside the totals
+        assert data["top_profiles"][0]["estimated_query_count"] == 1
+        assert data["recent_trend"][0]["estimated_query_count"] == 1
+
+    def test_costs_trends_and_top_sessions_carry_the_marker(self, authenticated_client):
+        with patch("app.api.analytics.database") as mock_db:
+            mock_db.get_analytics_cost_breakdown.return_value = [{
+                "key": "2024-01-01", "name": "2024-01-01", "total_cost_usd": 0.1,
+                "total_tokens_in": 10, "total_tokens_out": 5, "query_count": 2,
+                "estimated_query_count": 2,
+            }]
+            mock_db.get_analytics_usage_trends.return_value = [{
+                "date": "2024-01-01", "tokens_in": 10, "tokens_out": 5,
+                "cost_usd": 0.1, "query_count": 2, "estimated_query_count": 0,
+            }]
+            mock_db.get_analytics_top_sessions.return_value = [
+                {"session_id": "s-est", "title": None, "profile_id": None,
+                 "profile_name": None, "total_cost_usd": 0.1, "total_tokens_in": 10,
+                 "total_tokens_out": 5, "created_at": None, "usage_estimated": True},
+                {"session_id": "s-measured", "title": None, "profile_id": None,
+                 "profile_name": None, "total_cost_usd": 0.05, "total_tokens_in": 5,
+                 "total_tokens_out": 2, "created_at": None, "usage_estimated": False},
+            ]
+            costs = authenticated_client.get("/api/v1/analytics/costs?group_by=date").json()
+            trends = authenticated_client.get("/api/v1/analytics/trends").json()
+            top = authenticated_client.get("/api/v1/analytics/top-sessions").json()
+        assert costs["items"][0]["estimated_query_count"] == 2
+        assert trends["data_points"][0]["estimated_query_count"] == 0
+        assert [s["usage_estimated"] for s in top] == [True, False]
+
+    def test_rows_without_the_fields_read_as_measured(self, authenticated_client):
+        """A DB layer that omits the keys (older rows, other callers) is not an error."""
+        with patch("app.api.analytics.database") as mock_db:
+            mock_db.get_analytics_usage_stats.return_value = {
+                "total_tokens_in": 1, "total_tokens_out": 1, "total_cost_usd": 0.0,
+                "session_count": 1, "query_count": 1,
+            }
+            mock_db.get_analytics_cost_breakdown.return_value = []
+            mock_db.get_analytics_usage_trends.return_value = []
+            mock_db.get_analytics_top_sessions.return_value = [{
+                "session_id": "s", "title": None, "profile_id": None, "profile_name": None,
+                "total_cost_usd": 0.0, "total_tokens_in": 0, "total_tokens_out": 0,
+                "created_at": None,
+            }]
+            summary = authenticated_client.get("/api/v1/analytics/summary")
+            top = authenticated_client.get("/api/v1/analytics/top-sessions")
+        assert summary.status_code == 200
+        assert summary.json()["usage_stats"]["estimated_query_count"] == 0
+        assert top.status_code == 200
+        assert top.json()[0]["usage_estimated"] is False

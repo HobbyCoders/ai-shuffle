@@ -13,9 +13,6 @@ Tests cover:
 """
 
 import pytest
-import tempfile
-import shutil
-from pathlib import Path
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 
@@ -30,14 +27,6 @@ from app.api.auth import require_auth, require_admin
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
 
 @pytest.fixture
 def mock_settings(temp_dir):
@@ -73,8 +62,9 @@ def mock_api_user():
 def app(mock_database, mock_settings, mock_api_user):
     """Create a FastAPI app with the projects router and mocked dependencies."""
     # Path composition happens in app.core.project_utils (get_project_working_dir*),
-    # which reads project_utils.settings.workspace_dir; projects.py also references
-    # settings.workspace_dir directly. Patch both so the temp workspace applies.
+    # which reads project_utils.settings.effective_workspace_dir; projects.py also
+    # references settings.effective_workspace_dir directly. Patch both so the temp
+    # workspace applies.
     with patch("app.api.projects.settings", mock_settings), \
          patch("app.core.project_utils.settings", mock_settings):
         app = FastAPI()
@@ -103,23 +93,6 @@ def sample_project():
         "description": "A test project",
         "path": "test-project",
         "settings": {},
-        "created_at": "2024-01-15T10:30:00",
-        "updated_at": "2024-01-15T10:30:00"
-    }
-
-
-@pytest.fixture
-def sample_project_with_settings():
-    """Sample project with settings."""
-    return {
-        "id": "test-project-settings",
-        "name": "Test Project with Settings",
-        "description": "A test project with settings",
-        "path": "test-project-settings",
-        "settings": {
-            "default_profile_id": "custom-profile",
-            "custom_instructions": "Some instructions"
-        },
         "created_at": "2024-01-15T10:30:00",
         "updated_at": "2024-01-15T10:30:00"
     }
@@ -158,7 +131,7 @@ class TestValidateProjectPath:
     def test_valid_path_within_workspace(self, temp_dir):
         """Valid path within workspace should be accepted."""
         mock_settings = MagicMock()
-        mock_settings.workspace_dir = temp_dir
+        mock_settings.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings):
             # Create the path first
@@ -171,7 +144,7 @@ class TestValidateProjectPath:
         """Path traversal attempts should be rejected."""
         from fastapi import HTTPException
         mock_settings = MagicMock()
-        mock_settings.workspace_dir = temp_dir
+        mock_settings.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings):
             with pytest.raises(HTTPException) as exc_info:
@@ -186,7 +159,7 @@ class TestNormalizeDockerPath:
     def test_absolute_workspace_path_normalized_in_docker_mode(self, temp_dir):
         """Absolute workspace path should be converted to relative in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -196,7 +169,7 @@ class TestNormalizeDockerPath:
     def test_absolute_workspace_root_normalized_in_docker_mode(self, temp_dir):
         """Absolute workspace root path should be normalized to empty string in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -206,7 +179,7 @@ class TestNormalizeDockerPath:
     def test_nested_workspace_path_normalized_in_docker_mode(self, temp_dir):
         """Nested absolute workspace path should be converted to relative in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -216,7 +189,7 @@ class TestNormalizeDockerPath:
     def test_absolute_path_outside_workspace_unchanged_in_docker_mode(self, temp_dir):
         """Absolute path outside workspace should remain unchanged in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -226,7 +199,7 @@ class TestNormalizeDockerPath:
     def test_absolute_path_unchanged_in_local_mode(self, temp_dir):
         """Absolute paths should be unchanged in local mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=True):
@@ -237,7 +210,7 @@ class TestNormalizeDockerPath:
     def test_relative_path_unchanged(self, temp_dir):
         """Relative paths should be returned unchanged."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -247,7 +220,7 @@ class TestNormalizeDockerPath:
     def test_validate_accepts_absolute_workspace_path_in_docker_mode(self, temp_dir):
         """validate_project_path should accept absolute workspace paths in Docker mode."""
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         # Create the target directory
         project_dir = temp_dir / "ai-dungeon"
@@ -262,7 +235,7 @@ class TestNormalizeDockerPath:
         """validate_project_path should reject absolute paths outside workspace in Docker mode."""
         from fastapi import HTTPException
         mock_settings_obj = MagicMock()
-        mock_settings_obj.workspace_dir = temp_dir
+        mock_settings_obj.effective_workspace_dir = temp_dir
 
         with patch("app.api.projects.settings", mock_settings_obj), \
              patch("app.api.projects.is_local_mode", return_value=False):
@@ -924,6 +897,107 @@ class TestListProjectFiles:
         assert response.status_code == 400
         assert "not a directory" in response.json()["detail"].lower()
 
+    def test_list_files_rejects_traversal_outside_project(self, client, mock_database, sample_project, temp_dir, mock_settings):
+        """A ``../`` path must not list a sibling directory of the project."""
+        mock_database.get_project.return_value = sample_project
+        (temp_dir / "test-project").mkdir()
+        (temp_dir / "other-project").mkdir()
+
+        response = client.get("/api/v1/projects/test-project/files?path=../other-project")
+
+        assert response.status_code == 400
+
+
+class TestListProjectFilesSessionCheckout:
+    """GET /projects/{id}/files?session_id= lists a session's checkout, confined to it."""
+
+    @pytest.fixture
+    def checkout(self, temp_dir):
+        checkout = temp_dir / "checkout"
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "main.py").write_text("x")
+        (temp_dir / "outside").mkdir()
+        (temp_dir / "outside" / "secret.txt").write_text("s")
+        with patch("app.core.project_resolver.resolve_existing_cwd", return_value=str(checkout)):
+            yield checkout
+
+    def _session(self, project_id="test-project", **extra):
+        return {"id": "s1", "project_id": project_id, **extra}
+
+    def test_lists_session_checkout(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1&path=src")
+
+        assert response.status_code == 200
+        assert [f["name"] for f in response.json()["files"]] == ["main.py"]
+
+    @pytest.mark.parametrize("path", ["..", "../outside", "src/../../outside"])
+    def test_rejects_relative_traversal(self, client, mock_database, checkout, path):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get("/api/v1/projects/test-project/files", params={"session_id": "s1", "path": path})
+
+        assert response.status_code == 400
+        assert "secret.txt" not in response.text
+
+    def test_rejects_absolute_path(self, client, mock_database, checkout, temp_dir):
+        mock_database.get_session.return_value = self._session()
+
+        response = client.get(
+            "/api/v1/projects/test-project/files",
+            params={"session_id": "s1", "path": str(temp_dir / "outside")},
+        )
+
+        assert response.status_code == 400
+
+    def test_session_from_another_project_is_not_found(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session(project_id="other-project")
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1")
+
+        assert response.status_code == 404
+        mock_database.get_project.assert_not_called()
+
+    def test_restricted_api_user_denied_foreign_profile_session(self, client, mock_database, mock_api_user, checkout):
+        mock_api_user.return_value = {"id": "u1", "project_id": "test-project", "profile_ids": ["mine"]}
+        mock_database.get_session.return_value = self._session(profile_id="theirs")
+
+        response = client.get("/api/v1/projects/test-project/files?session_id=s1")
+
+        assert response.status_code == 403
+
+    def test_chat_history_rejects_session_from_another_project(self, client, mock_database, checkout):
+        mock_database.get_session.return_value = self._session(project_id="other-project")
+
+        with patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?session_id=s1")
+
+        assert response.status_code == 404
+        listing.assert_not_called()
+
+    def test_chat_history_rejects_worktree_from_another_project(self, client, mock_database):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-other", "worktree_path": "/elsewhere"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        with patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?worktree_id=wt1")
+
+        assert response.status_code == 404
+        mock_database.get_git_repository_by_project.assert_called_once_with("test-project")
+        listing.assert_not_called()
+
+    def test_chat_history_lists_worktree_of_this_project(self, client, mock_database):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-mine", "worktree_path": "/wt"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        with patch("app.api.projects.get_worktree_working_dir", return_value="/wt"), \
+             patch("app.core.jsonl_parser.list_chat_history_sessions", return_value=[]) as listing:
+            response = client.get("/api/v1/projects/test-project/chat-history?worktree_id=wt1")
+
+        assert response.status_code == 200
+        assert listing.call_args.kwargs["working_dir"] == "/wt"
+
 
 # =============================================================================
 # Test Upload File Endpoint
@@ -1333,6 +1407,205 @@ class TestDeleteFileOrFolder:
         assert response.status_code == 404
 
 
+class TestProjectFileRoutesStayInProject:
+    """Download, create-folder, rename, delete and upload are confined to the project.
+
+    The workspace boundary alone lets ``../other-project`` through, so each route
+    must also reject paths that leave the project directory, and upload must reject
+    a session or worktree that belongs to another project.
+    """
+
+    TRAVERSALS = ["..", "../other-project", "sub/../../other-project"]
+
+    @pytest.fixture
+    def layout(self, mock_database, sample_project, temp_dir, mock_settings):
+        mock_database.get_project.return_value = sample_project
+        project_dir = temp_dir / "test-project"
+        (project_dir / "sub").mkdir(parents=True)
+        other = temp_dir / "other-project"
+        other.mkdir()
+        (other / "secret.txt").write_text("secret")
+        return project_dir, other
+
+    @pytest.mark.parametrize("path", ["../other-project/secret.txt", "sub/../../other-project/secret.txt"])
+    def test_download_rejects_traversal(self, client, layout, path):
+        response = client.get("/api/v1/projects/test-project/files/download", params={"path": path})
+
+        assert response.status_code == 400
+        assert "secret" not in response.text
+
+    def test_download_rejects_traversal_for_project_scoped_api_user(self, client, layout, mock_api_user):
+        mock_api_user.return_value = {"id": "u1", "project_id": "test-project"}
+
+        response = client.get(
+            "/api/v1/projects/test-project/files/download", params={"path": "../other-project/secret.txt"}
+        )
+
+        assert response.status_code == 400
+
+    def test_download_absolute_path_stays_in_project(self, client, layout):
+        _, other = layout
+
+        response = client.get(
+            "/api/v1/projects/test-project/files/download", params={"path": str(other / "secret.txt")}
+        )
+
+        assert response.status_code == 404
+        assert "secret" not in response.text
+
+    @pytest.mark.parametrize("path", TRAVERSALS)
+    def test_create_folder_rejects_traversal(self, client, layout, temp_dir, path):
+        response = client.post(
+            "/api/v1/projects/test-project/files/folder", params={"path": path}, json={"name": "planted"}
+        )
+
+        assert response.status_code == 400
+        assert not (temp_dir / "other-project" / "planted").exists()
+        assert not (temp_dir / "planted").exists()
+
+    def test_create_folder_rejects_dotdot_name(self, client, layout):
+        response = client.post("/api/v1/projects/test-project/files/folder", json={"name": ".."})
+
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("path", ["../other-project/secret.txt", "sub/../../other-project/secret.txt"])
+    def test_rename_rejects_traversal(self, client, layout, path):
+        _, other = layout
+
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": "moved.txt"}
+        )
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
+
+    @pytest.mark.parametrize("path", ["", "."])
+    def test_rename_rejects_project_root(self, client, layout, temp_dir, path):
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": "renamed"}
+        )
+
+        assert response.status_code == 400
+        assert (temp_dir / "test-project").is_dir()
+        assert not (temp_dir / "renamed").exists()
+
+    @pytest.mark.parametrize("path", TRAVERSALS)
+    def test_delete_rejects_traversal(self, client, layout, path):
+        project_dir, other = layout
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": path})
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
+        assert project_dir.is_dir()
+
+    def test_delete_absolute_path_stays_in_project(self, client, layout):
+        _, other = layout
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": str(other)})
+
+        assert response.status_code == 404
+        assert (other / "secret.txt").exists()
+
+    def test_delete_inside_project_still_works(self, client, layout):
+        project_dir, _ = layout
+        (project_dir / "sub" / "gone.txt").write_text("x")
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "sub/gone.txt"})
+
+        assert response.status_code == 200
+        assert not (project_dir / "sub" / "gone.txt").exists()
+
+    @pytest.fixture
+    def alias(self, layout):
+        """``real/keep.txt`` plus ``alias -> real`` and ``sub/link.txt -> ../real/keep.txt``."""
+        project_dir, _ = layout
+        real = project_dir / "real"
+        real.mkdir()
+        (real / "keep.txt").write_text("keep")
+        (project_dir / "alias").symlink_to(real, target_is_directory=True)
+        (project_dir / "sub" / "link.txt").symlink_to(real / "keep.txt")
+        return project_dir
+
+    @pytest.mark.parametrize("path", ["alias", "/alias", "sub/link.txt"])
+    def test_delete_removes_the_symlink_not_its_target(self, client, alias, path):
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": path})
+
+        assert response.status_code == 200
+        assert not (alias / path.lstrip("/")).is_symlink()
+        assert (alias / "real" / "keep.txt").read_text() == "keep"
+
+    def test_delete_removes_a_dangling_symlink(self, client, alias):
+        (alias / "real" / "keep.txt").unlink()
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "sub/link.txt"})
+
+        assert response.status_code == 200
+        assert not (alias / "sub" / "link.txt").is_symlink()
+
+    @pytest.mark.parametrize("path, new_name", [("alias", "renamed"), ("sub/link.txt", "moved.txt")])
+    def test_rename_renames_the_symlink_not_its_target(self, client, alias, path, new_name):
+        response = client.put(
+            "/api/v1/projects/test-project/files/rename", params={"path": path}, json={"new_name": new_name}
+        )
+
+        assert response.status_code == 200
+        link = alias / path
+        renamed = link.parent / new_name
+        assert not link.is_symlink()
+        assert renamed.is_symlink()
+        assert response.json()["path"] == str(renamed.relative_to(alias))
+        assert (alias / "real" / "keep.txt").read_text() == "keep"
+        assert not (alias / "real" / new_name).exists()
+
+    def test_delete_through_a_symlinked_directory_stays_confined(self, client, layout, temp_dir):
+        project_dir, other = layout
+        (project_dir / "out").symlink_to(other, target_is_directory=True)
+
+        response = client.delete("/api/v1/projects/test-project/files", params={"path": "out/secret.txt"})
+
+        assert response.status_code == 400
+        assert (other / "secret.txt").exists()
+
+    def test_upload_rejects_session_from_another_project(self, client, mock_database, layout):
+        mock_database.get_session.return_value = {"id": "s1", "project_id": "other-project"}
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 404
+        mock_database.get_worktree_by_session.assert_not_called()
+
+    def test_upload_rejects_worktree_from_another_project(self, client, mock_database, layout):
+        mock_database.get_worktree.return_value = {"id": "wt1", "repository_id": "repo-other", "worktree_path": "wt"}
+        mock_database.get_git_repository_by_project.return_value = {"id": "repo-mine"}
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"worktree_id": "wt1"},
+        )
+
+        assert response.status_code == 404
+
+    def test_upload_with_own_session_still_works(self, client, mock_database, layout):
+        project_dir, _ = layout
+        mock_database.get_session.return_value = {"id": "s1", "project_id": "test-project"}
+        mock_database.get_worktree_by_session.return_value = None
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 200
+        assert (project_dir / "uploads" / "a.txt").read_bytes() == b"x"
+
+
 # =============================================================================
 # Test Sync Worktrees Endpoint
 # =============================================================================
@@ -1557,3 +1830,50 @@ class TestFileInfoDetails:
         assert dir_idx_z < file_idx_a  # dirs before files
         assert dir_idx_a < dir_idx_z  # adir before zdir
         assert file_idx_a < file_idx_z  # afile before zfile
+
+
+# =============================================================================
+# Test Session Sync Agent
+# =============================================================================
+
+class TestSyncSessionsAgent:
+    """sync-sessions files imports under a real agent; there is no "default"."""
+
+    @pytest.fixture
+    def sync(self):
+        with patch("app.core.session_sync.session_sync_service") as svc:
+            svc.sync_project_sessions.return_value = {"imported_count": 0, "skipped_count": 0, "errors": [], "sessions": []}
+            yield svc.sync_project_sessions
+
+    def test_defaults_to_first_agent(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_all_profiles.return_value = [{"id": "agent-a"}, {"id": "agent-b"}]
+
+        assert client.post("/api/v1/projects/test-project/sync-sessions").status_code == 200
+        assert sync.call_args.kwargs["profile_id"] == "agent-a"
+
+    def test_prefers_project_default_agent(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = {**sample_project, "settings": {"default_profile_id": "agent-b"}}
+        mock_database.get_profile.return_value = {"id": "agent-b"}
+
+        assert client.post("/api/v1/projects/test-project/sync-sessions").status_code == 200
+        assert sync.call_args.kwargs["profile_id"] == "agent-b"
+
+    def test_no_agents_is_a_clear_conflict(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_all_profiles.return_value = []
+
+        response = client.post("/api/v1/projects/test-project/sync-sessions")
+
+        assert response.status_code == 409
+        assert "create an agent" in response.json()["detail"]
+        sync.assert_not_called()
+
+    def test_unknown_agent_is_rejected(self, client, mock_database, sample_project, sync):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_profile.return_value = None
+
+        response = client.post("/api/v1/projects/test-project/sync-sessions?profile_id=missing")
+
+        assert response.status_code == 404
+        sync.assert_not_called()

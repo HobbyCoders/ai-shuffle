@@ -11,8 +11,8 @@ allowed workspace paths.
 
 This module is a thin shim over ``app.api.media_serve``; the shared serve
 logic lives there. The symbols below (``settings``, ``is_path_safe``,
-``ALLOWED_EXTENSIONS``, ``MEDIA_TYPES``, ``router`` and the named handlers)
-are preserved for backwards compatibility with importers and tests.
+``ALLOWED_EXTENSIONS``, ``MEDIA_TYPES`` and ``router``) are preserved
+for backwards compatibility with importers and tests.
 """
 
 from app.core.config import settings  # noqa: F401  (re-exported; tests patch this)
@@ -48,6 +48,3 @@ _config = MediaConfig(
 _module = build_media_module(_config, lambda: settings.effective_workspace_dir)
 
 router = _module["router"]
-get_image_by_path = _module["by_path"]
-get_generated_image = _module["by_filename"]
-list_generated_images = _module["list_media"]

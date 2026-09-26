@@ -7,9 +7,136 @@ commit, push, pull, stash, and conflict detection.
 
 import logging
 import os
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _is_link_like(path: str) -> bool:
+    """True for a symlink or a Windows junction: removed as a link, never followed."""
+    isjunction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(isjunction and isjunction(path))
+
+
+def _remove_link(path: str) -> None:
+    """Remove the link *path* itself (a directory junction needs rmdir)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        os.rmdir(path)
+
+
+def _is_ntfs_dotgit(name: str) -> bool:
+    """Whether NTFS reads path component *name* as ``.git``.
+
+    Mirrors git's ``is_ntfs_dotgit``: case-insensitive, trailing dots and spaces
+    ignored, an alternate data stream suffix (``.git::$INDEX_ALLOCATION``)
+    ignored, and the 8.3 short name ``GIT~1``.
+    """
+    base = name.split(":", 1)[0].rstrip(" .").lower()
+    return base in (".git", "git~1")
+
+
+# Code points HFS+ drops when it compares names (git's ``next_hfs_char``):
+# zero-width joiners and direction marks, the deprecated format characters and
+# the byte-order mark. ``.g\u200cit`` names the ``.git`` directory there.
+_HFS_IGNORED = frozenset(
+    [0x200C, 0x200D, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
+)
+
+
+def _is_hfs_dotgit(name: str) -> bool:
+    """Whether HFS+ reads path component *name* as ``.git``.
+
+    Mirrors git's ``is_hfs_dotgit``: the ignorable code points above are
+    dropped and the comparison folds case. The name is compared in both NFC
+    and NFD, since HFS+ stores decomposed names and the caller may not.
+    """
+    for form in ("NFC", "NFD"):
+        folded = "".join(
+            ch for ch in unicodedata.normalize(form, name) if ord(ch) not in _HFS_IGNORED
+        )
+        if folded.casefold() == ".git":
+            return True
+    return False
+
+
+def _is_dotgit_alias(name: str) -> bool:
+    """Whether NTFS or HFS+ reads path component *name* as ``.git``."""
+    return _is_ntfs_dotgit(name) or _is_hfs_dotgit(name)
+
+
+def _untracked_discard_target(
+    working_dir: str, real_working_dir: str, rel_path: str
+) -> Optional[str]:
+    """Return the path to delete when discarding untracked *rel_path*, or None.
+
+    Only the final component is left unresolved, so an untracked symlink or
+    junction is removed itself rather than the directory it points at. The
+    target must sit strictly inside the checkout and outside its ``.git``
+    metadata: discarding ``.`` or ``.git`` would otherwise delete the whole
+    checkout or its history. The ``.git`` check applies to the spelling (every
+    NTFS and HFS+ alias git itself refuses) and to the resolved identity, since
+    ``realpath`` expands an 8.3 short name that ``relpath`` leaves as written
+    and does not fold an HFS+ ignorable code point at all.
+    """
+    lexical = os.path.normpath(os.path.join(working_dir, rel_path))
+    target = os.path.join(
+        os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical)
+    )
+    if not target.startswith(real_working_dir + os.sep):
+        return None
+    first = os.path.relpath(target, real_working_dir).split(os.sep)[0]
+    if _is_dotgit_alias(first):
+        return None
+    if not _is_link_like(target):
+        real = os.path.realpath(target)
+        if not real.startswith(real_working_dir + os.sep):
+            return None
+        if _is_dotgit_alias(os.path.relpath(real, real_working_dir).split(os.sep)[0]):
+            return None
+        try:
+            if os.path.samefile(target, os.path.join(real_working_dir, ".git")):
+                return None
+        except OSError:
+            pass
+    return target
+
+
+_REFNAME_FORBIDDEN = frozenset(" ~^:?*[\\")
+
+
+def _is_plain_branch_name(branch: str) -> bool:
+    """Whether *branch* is a plain branch name, never a refspec or an option.
+
+    ``git push <remote> <branch>`` takes a refspec there, so ``:main`` deletes
+    the remote branch, ``+x:main`` force-pushes past the lease and
+    ``HEAD:refs/tags/v1`` overwrites any ref; a leading ``-`` parses as an
+    option. The rules are ``git check-ref-format --branch``'s: no control
+    characters, space or ``~^:?*[\\``, no ``..`` or ``@{``, no leading ``-``,
+    no component that starts with ``.`` or ends with ``.lock``, and no leading,
+    trailing or doubled ``/``. A leading ``+`` (a forced refspec) is refused too.
+    """
+    if not branch or branch == "@" or branch[0] in "-+" or branch.endswith((".", "/")):
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _REFNAME_FORBIDDEN for ch in branch):
+        return False
+    if ".." in branch or "@{" in branch:
+        return False
+    return all(
+        part and not part.startswith(".") and not part.endswith(".lock")
+        for part in branch.split("/")
+    )
+
+
+def _push_refspec(branch: str) -> str:
+    """The fully qualified refspec that pushes local *branch* to the same name.
+
+    Qualified on both sides, so the remote side cannot resolve to a tag or
+    another namespace, and nothing in it can parse as an option.
+    """
+    return f"refs/heads/{branch}:refs/heads/{branch}"
 
 
 class GitCommitMixin:
@@ -141,13 +268,15 @@ class GitCommitMixin:
 
             # Delete untracked files (with path traversal protection)
             for f in untracked:
-                full_path = os.path.realpath(os.path.join(working_dir, f))
-                if not full_path.startswith(real_working_dir + os.sep) and full_path != real_working_dir:
-                    logger.warning(f"Path traversal attempt blocked: {f}")
+                full_path = _untracked_discard_target(working_dir, real_working_dir, f)
+                if full_path is None:
+                    logger.warning(f"Refusing to delete path outside the checkout: {f}")
                     failed.append(f)
                     continue
                 try:
-                    if os.path.isdir(full_path):
+                    if _is_link_like(full_path):
+                        _remove_link(full_path)
+                    elif os.path.isdir(full_path):
                         import shutil
                         shutil.rmtree(full_path)
                     elif os.path.exists(full_path):
@@ -224,10 +353,14 @@ class GitCommitMixin:
             Tuple of (success: bool, error_message: Optional[str])
         """
         try:
+            if remote.startswith("-"):
+                return False, f"Invalid remote name: {remote}"
+            if branch is not None and not _is_plain_branch_name(branch):
+                return False, f"Invalid branch name: {branch!r}"
             if set_upstream and branch:
-                args = ["push", "--set-upstream", remote, branch]
+                args = ["push", "--set-upstream", remote, _push_refspec(branch)]
             elif branch:
-                args = ["push", remote, branch]
+                args = ["push", remote, _push_refspec(branch)]
             else:
                 args = ["push", remote]
 

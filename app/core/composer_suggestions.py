@@ -1,4 +1,4 @@
-"""Best-effort, ephemeral next-reply hints after the session's work is done.
+"""Best-effort, session-retained next-reply hints after the session's work is done.
 
 No transcript writes and no session runner: the configured one-shot generation
 adapter has tools disabled. Every asynchronous boundary is followed by a fresh
@@ -127,7 +127,12 @@ async def _eligible(session_id: str, turn_id: str) -> bool:
 
 async def _publish(session_id: str, turn_id: str, text: str) -> None:
     from app.core.sync_engine import SyncEvent, sync_engine
+    from app.db import composer_suggestions
 
+    # Persist before notifying: watch_session only covers the open session.
+    # Returning to a session (or reconnecting) reads this without another model call.
+    if not await asyncio.to_thread(composer_suggestions.save, session_id, turn_id, text):
+        return
     await sync_engine.broadcast_event(SyncEvent(
         event_type="stream_frame", session_id=session_id,
         data={"type": "composer_suggestion", "session_id": session_id,

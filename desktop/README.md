@@ -11,23 +11,38 @@ Download the Windows installer at <https://hobbycoders.com/desktop> and run it.
 For an existing installation, keep the same installation location. Continue using
 your normal AI Shuffle shortcut. The installer includes a ready-to-run app,
 Python, Node and PostgreSQL; startup does not need to build or download code.
-No account is needed for downloads or updates.
+Downloading the installer needs no account. In-app updates need an active AI
+Shuffle license while the hub's license gate is on: the app sends its worker's
+license lease, or on a first install asks once for the license key
+(`src/main/source-updates.ts`).
 
 Stable milestones include an NSIS installer, built by `desktop-installer.yml`.
-Between releases, the installed app downloads and builds signed code from `main`
-through its in-app update controls. No new tag or installer build is required.
+Between installers, the installed app downloads and builds signed release code
+through its in-app update controls. No new installer build is required.
 Build processes run with hidden consoles and show progress inside the app.
 The installed EXE remains the shortcut and restart target. It selects the updated
 code and matching runtimes while preserving the original Electron profile,
 browser session, settings and PostgreSQL directory. Source versions and caches
 live in the existing desktop profile's `updates` subdirectory.
 
-Updates follow `main`, not tagged releases. The small `desktop-source.yml` job
-stores GitHub's source ZIP as an immutable asset in the private `desktop-sources`
-GitHub release and signs its revision, checksum and size. It uses a standard
+Installed apps follow the **stable** channel: tagged releases signed by
+`release.yml` after the release image passed verification
+(docs/ci/release-channels.md). The updater accepts a manifest only when its
+signed `channel` is the one this install follows, it carries a signed source
+`tree` digest, and the signature, size, checksum and sequence checks pass. It
+recomputes the tree digest over the extracted files and refuses to build on a
+mismatch. For your own testing you can follow **edge** (every `main` revision)
+on one install by writing `{"channel": "edge"}` to `update-channel.json` in the
+profile's `updates` folder; delete the file to return to stable.
+
+The `desktop-source.yml` job publishes an edge build of `main` when the owner
+dispatches it manually: it stores the runtime-only source archive as an immutable asset in the private
+`desktop-sources` GitHub release and signs its revision, checksum, size, channel,
+version, release notes and tree digest. It uses a standard
 GitHub-hosted runner and performs no application or installer build. The existing
 account-hub D1 database holds signed metadata and the GitHub asset ID. No R2
-subscription is needed. Downloads and updates are public and require no account.
+subscription is needed. Installer downloads are public; the update feed answers
+402 without a license lease or key while the hub's license gate is on.
 The existing hub streams only CI-published archives using its `DESKTOP_GITHUB_TOKEN` Worker secret,
 scoped to Contents: read on this repository. Clients never receive that GitHub
 credential or an upstream signed URL. The publisher uses the `ACCOUNT_HUB_DATABASE_ID` GitHub environment
@@ -46,8 +61,8 @@ but does not automatically run old code over a potentially migrated database.
 PostgreSQL major-version upgrades still require a deliberate data migration; never
 change the pinned major version without adding and testing that migration.
 
-The repository stays private, but each published desktop source ZIP is available
-to anyone through the hub. `source-auth.ts` is now a credential-free transport;
+The repository stays private; the hub serves each published desktop source ZIP
+(behind the license gate when it is on). `source-auth.ts` carries no GitHub credential;
 signature verification and local building remain independent of hosting.
 
 Existing installer-based versions need this installer upgrade once to gain the
@@ -70,8 +85,7 @@ settings, browser session, provider credentials, workspace and PostgreSQL data.
 Later launches use `--root <same-folder>`; Update and restart preserves the profile.
 Isolated roots cannot overlap the normal application or its data, and neither
 listener can claim ports 8000/8001. The window is labelled **AI Shuffle Isolated**,
-does not take foreground focus, and does not register a tray icon or replace the
-normal URL handler.
+does not take foreground focus, and does not register a tray icon.
 
 For Windows acceptance testing, install the desktop and browser-mcp Node
 dependencies, build the desktop TypeScript, then run
@@ -95,24 +109,50 @@ hosted public downloads or GitHub download permissions.
   user's worker, a Docker container or a manual run is reported as "in use by
   another AI Shuffle worker that this app did not start" and no second worker
   is spawned. An orphan of our own from a crashed run is stopped by pid and
-  replaced. Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
+  replaced. Every spawn also gets a fresh listener token
+  (`SHUFFLE_DESKTOP_LISTENER_TOKEN`, see `src/main/listener.ts`). The main
+  process adds it as `X-Shuffle-Desktop-Listener` to requests to the worker's
+  exact origin, WebSocket handshakes included, when they are top-level page
+  loads or come from a document under a worker-origin top frame (so an OAuth,
+  hub or Plaid pop-up cannot use it); a service worker's own requests, which
+  have no frame, carry it only when their referrer is the worker origin. It is
+  stripped from every other request, and no page can read it. The app never
+  keeps a service worker: its partition's are cleared at startup and whenever
+  a pop-up closes, and a sized pop-up opened straight at another site gets a
+  window in a separate in-memory session (`src/main/navigation.ts`). The worker uses it to tell this app from any other local process
+  that reaches its loopback port.
+  Set `SHUFFLE_DESKTOP_ATTACH_ANY=1` to attach to any local worker
   (developers running the worker by hand). Preview builds refuse occupied ports
   and never attach. Exit the old app before opening Preview. Quitting stops the
   worker and database that this app started. A worker that crashes after it was
   ready is restarted, at most twice in five minutes, before the status page
   reports it.
+- Says plainly that agents run as you. Before the first worker ever starts,
+  a dialog explains that agents run on this computer as the signed-in user,
+  with the user's own `claude` login and every file that user can reach
+  (`src/main/disclosure.ts`). Quit leaves nothing running and asks again next
+  launch; the acknowledgement lives in `<userData>/agent-access.json`, and
+  raising `AGENT_ACCESS_VERSION` asks again after an upgrade. The same text
+  stays under Help > Agent Access… and in the web UI's Settings > General.
+  Automated acceptance runs set `SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS=1`.
 - Needs no database setup. The first run creates a cluster in
   `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
   password, `scram-sha-256`); every start picks a free loopback port and
-  hands the connection to the worker. The password is stored with the OS
-  keyring (DPAPI, Keychain, or libsecret). Before startup the supervisor writes
-  the private `data/managed-postgres.json` descriptor; no database credentials
+  hands the connection to the worker. The password is stored in
+  `<userData>/worker-settings.json`, encrypted with the OS keyring (DPAPI,
+  Keychain, or libsecret) when one is available. Before startup the supervisor
+  writes the private `managed-postgres.json` descriptor into the worker's data
+  directory (see below); no database credentials
   are handed to the app through environment variables or `.env`. The transient
   descriptor is removed on shutdown; retain the private profile for persistence.
 - PostgreSQL is managed-only. There is no connection form, external-server mode,
   or database environment configuration. Worker → Worker Status… shows lifecycle
   and failure details; Show PostgreSQL Log opens the database log.
-- Restart and log actions in the Worker menu and the tray.
+- Restart, status and log actions in the Worker menu; restart, status,
+  Open in Browser and Quit in the tray. The tray's Quit first stops sessions
+  like any other quit; if the worker does not confirm within the grace period
+  it is ended anyway, so a stuck worker cannot keep the app open. Closing the
+  window instead offers "Quit Anyway" after a second failed attempt.
 - Frameless window with the OS window controls overlaid. The web UI's top
   strip is the drag handle and keeps clear of the buttons through the Window
   Controls Overlay API; see the `html.desktop` rules in `frontend/src/app.css`
@@ -121,8 +161,10 @@ hosted public downloads or GitHub download permissions.
   sidebar toggle, breadcrumb, the current page's actions and the account badge
   on the right. Feature pages lend their header actions to the strip through
   `$lib/stores/page-header.svelte`.
-- Native menu with the usual accelerators, native notifications, window
-  placement that survives restarts, and signed source updates from `main`.
+- Native menu with the usual accelerators, native notifications, and window
+  placement that survives restarts. Windows installs take signed source
+  updates from the **stable** channel (tagged releases); macOS and Linux check
+  the hub's signed installer list and offer the newer installer.
 - The sidebar update button checks, downloads and prepares updates, then offers
   Update and restart. Preview builds keep their updates disabled.
 
@@ -137,7 +179,7 @@ ships under `resources/worker`:
 
 | Path | Contents |
 | --- | --- |
-| `python/` | CPython 3.12 from python-build-standalone, with `requirements.txt`, `requirements-native.txt` and the `fluid` harness installed into its site-packages (that includes the bundled Claude CLI) |
+| `python/` | CPython 3.12 from python-build-standalone, with `requirements.txt`, `requirements-native.txt` and the `fluid` harness installed into its site-packages. No Claude CLI is bundled: agents use the user's own `claude` install |
 | `node/` | Node.js 22 for the AI tools and the browser MCP server |
 | `server/app/` | the backend, with the built frontend in `app/static` |
 | `server/tools/`, `server/browser-mcp/` | the two Node packages, built, with production dependencies |
@@ -152,16 +194,27 @@ release, pinned in `scripts/postgres-binaries.mjs` and verified against the
 release's `.sha256` sidecar. The worker manifest records it under
 `postgres: {version, target}`. The runtime is built on a runner of the target
 architecture: Windows x64, macOS arm64, Linux x64. Installers are large
-(several hundred MB); updates download only the changed blocks.
+(several hundred MB).
 
 The database lives in `<userData>/postgres/data` (for example
 `%APPDATA%\AI Shuffle\postgres\data` on Windows,
 `~/Library/Application Support/AI Shuffle/postgres/data` on macOS,
 `~/.config/AI Shuffle/postgres/data` on Linux) and the server log next to the
-worker's under `<userData>/logs/postgres.log`. To back up AI Shuffle, back up
-that data directory with the app closed (or use `pg_dump` from
-`resources/postgres/bin` against the connection in `<userData>/worker/.env`).
-Uninstalling the app leaves the data directory in place.
+worker's under `<userData>/logs/postgres.log`. The worker log is
+`<userData>/logs/worker.log`. It moves to `worker.prev.log` at each start and
+whenever it passes 20 MB during a run, so `worker.prev.log` holds either the
+previous run's log or, after a mid-run move, this run's earlier output (the
+previous run's log is then gone). Windows source-update builds log to
+`<userData>/updates/build.log`.
+
+The worker's own data directory (`DATA_DIR`) holds its app data, the
+credential keys the database contents depend on, and the transient
+`managed-postgres.json`: `%USERPROFILE%\.ai-shuffle` on Windows,
+`~/Library/Application Support/ai-shuffle` on macOS and
+`~/.local/share/ai-shuffle` on Linux. To back up AI Shuffle, close the app and
+back up both that directory and `<userData>/postgres/data`; keep them together.
+The worker's `.env` carries no database credentials (see above), so it cannot
+be used for a manual `pg_dump`. Uninstalling the app leaves both in place.
 
 Optional tools the worker looks for on PATH, as on any native install: the
 GitHub CLI for pull-request features, and a Chrome, Chromium or Edge for
@@ -169,11 +222,20 @@ browser automation.
 
 ## The bridge
 
-The preload exposes `window.shuffleDesktop` to the worker page: window and
-theme control, native notifications, menu commands, update state, and the
-worker's state with restart/log/status actions. The bundled
-status page additionally gets `window.shuffleDesktopWorker` for the database
-lifecycle and worker log; neither page exposes credentials or connection forms.
+The preload exposes `window.shuffleDesktop` to the worker page: window state
+and title-bar colours, menu commands, the agent-access disclosure, and update
+state and install. The web UI's side, and the members it uses, are in
+`frontend/src/lib/services/desktop.ts`; `window.close`, `worker.getState` and
+`updates.check` remain only for the CI verification scripts
+(`scripts/verify-*.mjs`). The bundled status page additionally gets
+`window.shuffleDesktopWorker` for the database lifecycle, the worker log and
+restart. The main process answers IPC only from the main window's main frame
+while it shows the bundled status page (that exact file) or the worker's own
+origin (`src/main/ipc.ts`); redirects and links that would leave those two go
+to the system browser (`src/main/navigation.ts`). Only the worker origin gets
+browser permissions: microphone, clipboard write and fullscreen. Neither page
+exposes credentials, the listener token or connection forms. The app registers
+no URL scheme (`aishuffle://` was dropped: nothing produced or read such links).
 
 ## Develop
 
@@ -226,46 +288,15 @@ for the bundled file; missing or invalid downloads fail the build.
 Both installer configurations also verify the copied cloudflared binary in
 their final resources directory before producing an installer.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
-installers. Pull-request CI packages a stub runtime on every platform and
-assembles a real one on Linux.
+installers. Pull-request CI (`desktop.yml`) runs the typecheck and unit tests;
+with the `ci:full` label it also packages a Windows shell around a stub runtime
+and installs and exercises a Windows preview with a real runtime. Assembling
+the Linux runtime is a manual `workflow_dispatch` opt-in.
 
 ## Release
 
-`.github/workflows/release.yml` creates the GitHub release, then assembles the
-runtime and builds the installer on each supported target and uploads them,
-with the `latest*.yml` update metadata, to that release. The desktop version
-is stamped from the tag, so the app carries the same version number as the
-server it ships. Supported downloads are the Windows x64 EXE, the macOS arm64
-DMG (plus an arm64 ZIP for updates), and the Linux x64 AppImage or amd64
-Debian package. The workflow no longer publishes standalone server archives;
-Docker remains the headless option.
-
-Older releases may retain Windows ARM update files so the shared Windows
-update feed does not hand an ARM client an x64 installer. Windows ARM is no
-longer built or listed as a supported download.
-
-### Test desktop updates
-
-Use a packaged stable app on Windows with a lower version than the target
-release. To test the Settings controls, the starting build must already include
-them; an older installed UI cannot acquire the controls before updating.
-
-1. Publish the higher stable GitHub release with its Windows installer and
-   `latest.yml` metadata. Drafts and prereleases are not the stable update feed.
-2. In the older app, open Settings → Downloads and choose Check for updates.
-   Confirm that the new version and download progress appear.
-3. Choose Restart and update once the download is ready. Confirm that the app
-   reopens, the installed version changes, and existing data is still available.
-4. Check again and confirm that the UI says it is up to date.
-
-For an older starting build without the Settings controls, the automatic check
-runs about 15 seconds after launch, and the notification bell offers Restart
-and update when the download finishes. Preview builds and development runs
-cannot exercise the release update path.
-
-Code signing is not configured yet. Windows and Linux builds install and
-update unsigned (Windows shows a SmartScreen prompt on first install). macOS
-requires a Developer ID certificate and notarisation before the built-in
-updater can replace the app, and until then Gatekeeper may also quarantine the
-bundled Python: after copying the app to Applications run
-`xattr -dr com.apple.quarantine "/Applications/AI Shuffle.app"` once.
+See [RELEASING.md](RELEASING.md): which workflow builds which installer,
+Windows Authenticode, macOS Developer ID signing and notarization, unsigned
+Linux packages with checksums, every GitHub secret involved, and how update
+checks work. Installed Windows apps update in place from signed stable-channel
+source (above); macOS and Linux installers are rebuilt and downloaded again.

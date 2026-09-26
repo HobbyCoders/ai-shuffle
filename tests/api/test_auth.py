@@ -91,6 +91,11 @@ def _make_provider(provider_id: str, *, auth_token=None, enabled: bool = True):
     )
 
 
+def _cli(signed_in: bool) -> dict:
+    return {"installed": True, "signed_in": signed_in, "email": "me@example.com" if signed_in else None,
+            "cli_version": "2.1.280", "error": None}
+
+
 async def _auth_status(claude_authenticated: bool = False, session_token: str | None = None):
     """Call the status endpoint with the Claude/OAuth side stubbed out."""
     from app.api import auth as auth_api
@@ -99,20 +104,14 @@ async def _auth_status(claude_authenticated: bool = False, session_token: str | 
     request.cookies = {"session": session_token} if session_token else {}
     request.headers = {}
 
-    oauth = MagicMock()
-    oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
-
     # The gh signal is behind a process-wide TTL cache; start from a clean
     # slate so this call's own stub is what answers.
     auth_api.reset_github_auth_cache()
 
     with patch.object(auth_api, "auth_service") as mock_auth, \
-         patch.object(auth_api, "direct_oauth", oauth), \
-         patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
+         patch.object(auth_api, "claude_cli_summary", AsyncMock(return_value=_cli(claude_authenticated))):
         mock_auth.validate_session.return_value = False
         mock_auth.is_setup_required.return_value = False
-        mock_auth.is_claude_authenticated.return_value = claude_authenticated
-        mock_auth.get_claude_token_status.return_value = {"token_valid": claude_authenticated}
         mock_auth.is_github_authenticated.return_value = False
         mock_auth.is_onboarding_complete.return_value = True
         return await auth_api.get_auth_status(request)
@@ -130,8 +129,10 @@ async def test_auth_status_reports_preview_limit_even_for_local_owner(mock_db, l
     assert status["preview_access"] is True
 
 
+@pytest.mark.real_agent_gate
 class TestAuthStatusAnyCredential:
-    """``has_any_credential`` = claude subscription OR a configured provider."""
+    """``has_any_credential`` = the active Claude Code mode's credential (CLI
+    sign-in, or the stored key in api_key mode) OR a configured provider."""
 
     @pytest.mark.asyncio
     async def test_false_when_nothing_configured(self, mock_db):
@@ -162,6 +163,14 @@ class TestAuthStatusAnyCredential:
     @pytest.mark.asyncio
     async def test_true_via_claude_auth_without_providers(self, mock_db):
         status = await _auth_status(claude_authenticated=True)
+        assert status["has_any_credential"] is True
+
+    @pytest.mark.asyncio
+    async def test_true_via_stored_anthropic_key(self, mock_db):
+        from app.db import database as db
+        db.set_system_setting("anthropic_api_key", "sk-ant-api03-plaintext-for-test")
+        status = await _auth_status(claude_authenticated=False)
+        assert status["claude_authenticated"] is False
         assert status["has_any_credential"] is True
 
     @pytest.mark.asyncio
@@ -292,16 +301,11 @@ class TestGithubAuthStatusCaching:
             request = MagicMock()
             request.cookies = {}
             request.headers = {}
-            oauth = MagicMock()
-            oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
 
             with patch.object(auth_api, "auth_service") as mock_auth, \
-                 patch.object(auth_api, "direct_oauth", oauth), \
-                 patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
+                 patch.object(auth_api, "claude_cli_summary", AsyncMock(return_value=_cli(False))):
                 mock_auth.validate_session.return_value = False
                 mock_auth.is_setup_required.return_value = False
-                mock_auth.is_claude_authenticated.return_value = False
-                mock_auth.get_claude_token_status.return_value = {"token_valid": False}
                 mock_auth.is_onboarding_complete.return_value = True
                 mock_auth.is_github_authenticated.side_effect = lambda: (
                     calls.append(1) or True
@@ -335,17 +339,12 @@ class TestGithubAuthStatusCaching:
         request = MagicMock()
         request.cookies = {}
         request.headers = {}
-        oauth = MagicMock()
-        oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
 
         reset_github_auth_cache()
         with patch.object(auth_api, "auth_service") as mock_auth, \
-             patch.object(auth_api, "direct_oauth", oauth), \
-             patch.object(auth_api, "_sync_back_active_account_safe", MagicMock()):
+             patch.object(auth_api, "claude_cli_summary", AsyncMock(return_value=_cli(False))):
             mock_auth.validate_session.return_value = False
             mock_auth.is_setup_required.return_value = False
-            mock_auth.is_claude_authenticated.return_value = False
-            mock_auth.get_claude_token_status.return_value = {"token_valid": False}
             mock_auth.is_onboarding_complete.return_value = True
             mock_auth.is_github_authenticated.side_effect = _probe
 

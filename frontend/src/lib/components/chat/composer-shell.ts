@@ -153,8 +153,3 @@ export function composerShell(): ComposerShellHooks {
 export function registerComposerShell(next: Partial<ComposerShellHooks>): void {
 	hooks = { ...DESKTOP_HOOKS, ...next };
 }
-
-/** Test hook: back to the desktop defaults. */
-export function resetComposerShell(): void {
-	hooks = DESKTOP_HOOKS;
-}

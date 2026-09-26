@@ -18,15 +18,9 @@ import app.core.history_backfill as hb
 from app.core.history_backfill import convert_messages_to_events, ensure_backfilled
 from app.db import session_events as se
 from app.db import sessions as sessions_db
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 SID = "sess-backfill"
-
-
-@pytest.fixture(autouse=True)
-def _reset_memo():
-    hb._reset_memo()
-    yield
-    hb._reset_memo()
 
 
 def _one(msg):
@@ -181,7 +175,7 @@ def test_subagent_history_preserves_transcript_and_launch_ids(worker_session_id)
 def test_subagent_children_payloads_translated_to_v2_shape():
     """Legacy children carry v1 camelCase keys (toolName/toolId/toolInput/
     toolResult/toolStatus); the converter must emit the snake_case payloads the
-    v2 reducer reads (golden shape = team_transcript_watcher's live events)."""
+    v2 reducer reads (the shape the live progress events carry)."""
     events = convert_messages_to_events(SID, [{
         "role": "assistant", "type": "subagent",
         "toolId": "task_2", "agentStatus": "complete",

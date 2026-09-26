@@ -22,26 +22,38 @@
 	let error = $state('');
 	let confirmingRevoke = $state<string | null>(null);
 	let busy = $state(false);
+	// Refreshes are event-driven: the broker sends a session-scoped
+	// chat_access_changed on every request, action and grant change (including
+	// expiry), plus the owner-wide `chat-access` resource when a saved connection
+	// is saved or deleted (every session's panel lists them), and live-sync
+	// invalidates every resource after a reconnect or on
+	// return to the tab. A timer runs only as a safety net while a request or
+	// approval is waiting (2 s doubling to 30 s), and after transient failures.
+	// An empty or grant-only snapshot is not polled. An authorization denial
+	// stops all requests until the sign-in changes or the browser comes online.
+	const PENDING_MIN_MS = 2000, PENDING_MAX_MS = 30_000;
 	let refreshing = false;
+	let sent = false;
 	let alive = true;
 	let enabled = false;
 	let verified = false;
 	let dirty = false;
+	let denied = false;
 	let failures = 0;
-	let retryMs = 30_000;
 	let retryAt = 0;
+	let pollMs = PENDING_MIN_MS;
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	function schedule() {
+	function schedule(ms: number | undefined) {
 		clearTimeout(timer);
-		if (alive && !document.hidden && (!verified || enabled)) {
-			timer = setTimeout(() => void refresh(), Math.max(0, retryAt - Date.now()));
+		if (ms !== undefined && alive && !document.hidden && !denied && (!verified || enabled)) {
+			timer = setTimeout(() => void refresh(true), Math.max(0, ms));
 		}
 	}
 	const base = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}`);
-	async function refresh() {
-		if (!alive || document.hidden) return;
-		// Resource broadcasts cannot shorten an authorization/error backoff.
-		if (failures && Date.now() < retryAt) { schedule(); return; }
+	async function refresh(poll = false) {
+		if (!alive || document.hidden || denied) return;
+		// Resource broadcasts cannot shorten an error backoff.
+		if (failures && Date.now() < retryAt) { schedule(retryAt - Date.now()); return; }
 		// Preview cookies cannot use private resources, even on the owner's PC.
 		// This is a capability limit, not a failure of the conversation.
 		if (auth.current.status?.preview_access) {
@@ -52,9 +64,12 @@
 			error = '';
 			return;
 		}
-		if (refreshing) { dirty = true; return; }
+		// A change seen before the snapshot request is sent is covered by it.
+		if (refreshing) { if (sent) dirty = true; return; }
 		clearTimeout(timer);
 		refreshing = true;
+		dirty = false;
+		let wait: number | undefined;
 		try {
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
@@ -71,25 +86,32 @@
 				error = '';
 				return;
 			}
+			sent = true;
 			const next = await api.get<typeof data>(base);
 			if (!alive) return;
 			data = next;
 			error = '';
 			failures = 0;
-			retryMs = next.requests.length || next.actions.length || next.grants.length ? 2000 : 30_000;
-			retryAt = Date.now() + retryMs;
+			if (next.requests.length || next.actions.length) {
+				pollMs = poll ? Math.min(PENDING_MAX_MS, pollMs * 2) : PENDING_MIN_MS;
+				wait = pollMs;
+			}
 		} catch (e) {
 			if (!alive) return;
 			error = getErrorMessage(e, 'Private access is unavailable.');
 			const status = (e as {status?: number})?.status;
-			failures++;
-			retryMs = [401, 403, 404, 405].includes(status ?? 0)
-				? 300_000 : Math.min(300_000, 5000 * 2 ** Math.min(failures - 1, 6));
-			retryAt = Date.now() + retryMs;
+			if ([401, 403, 404, 405].includes(status ?? 0)) {
+				denied = true;
+			} else {
+				failures++;
+				wait = Math.min(300_000, 5000 * 2 ** Math.min(failures - 1, 6));
+				retryAt = Date.now() + wait;
+			}
 		} finally {
 			refreshing = false;
-			if (dirty && alive && !document.hidden) { dirty = false; void refresh(); }
-			else schedule();
+			sent = false;
+			if (dirty && alive && !document.hidden && !denied) void refresh();
+			else schedule(wait);
 		}
 	}
 	onMount(() => {
@@ -97,8 +119,15 @@
 			clearTimeout(timer);
 			if (!document.hidden) void refresh();
 		};
-		const reverify = () => { verified = false; resume(); };
-		const recover = () => { if (!document.hidden) retryAt = 0; reverify(); };
+		const reverify = () => { verified = false; if (refreshing) dirty = true; resume(); };
+		// Coalesce with live-sync's own resume invalidation (same 100 ms batch)
+		// so a return to the tab or reconnect checks the session and snapshot once.
+		const recover = () => {
+			if (document.hidden) { clearTimeout(timer); return; }
+			retryAt = 0;
+			resourceSync.invalidate([`sessions:${sessionId}`, `chat-access:${sessionId}`]);
+		};
+		const online = () => { denied = false; recover(); };
 		// Access mutations already carry a session-scoped invalidation. Refresh the
 		// snapshot directly so approvals/grants do not also query the session row.
 		// Session invalidations still re-check ownership and persisted mode before
@@ -109,16 +138,24 @@
 		const unsubscribeAccess = resourceSync.subscribe(
 			['chat-access', `chat-access:${sessionId}`], resume
 		);
+		// A denial only changes with the signed-in principal or preview status.
+		let principal: string | undefined;
+		const unsubscribeAuth = auth.subscribe(({status: s}) => {
+			const next = JSON.stringify([s?.authenticated, s?.is_admin, s?.username, s?.preview_access, s?.preference_identity]);
+			if (principal !== undefined && next !== principal) { denied = false; failures = 0; retryAt = 0; reverify(); }
+			principal = next;
+		});
 		document.addEventListener('visibilitychange', recover);
-		window.addEventListener('online', recover);
+		window.addEventListener('online', online);
 		void refresh();
 		return () => {
 			alive = false;
 			clearTimeout(timer);
 			unsubscribeSession();
 			unsubscribeAccess();
+			unsubscribeAuth();
 			document.removeEventListener('visibilitychange', recover);
-			window.removeEventListener('online', recover);
+			window.removeEventListener('online', online);
 		};
 	});
 	async function revoke(id: string) {

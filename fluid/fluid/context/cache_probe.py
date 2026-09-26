@@ -125,13 +125,12 @@ def _canonical(value: Any) -> str:
 
 # ─── system-section diff support ─────────────────────────────────────────────
 #
-# Round 9: 21 misses were "prefix_changed changed=system" on the first call
-# after a park, and the hash alone could not say WHAT in the 21k-token system
-# section had changed. The fingerprint now also carries a per-paragraph hash
-# list (4 hex chars each, ~750 bytes for a 20k-token prompt), so the first
-# differing paragraph can be located even across a process boundary, and the
-# engine records that paragraph's text (up to SYSTEM_DIFF_HEAD_CHARS) with the
-# section it belongs to.
+# A system-section hash alone cannot say WHAT changed in a large system prompt.
+# The fingerprint also carries a per-paragraph hash list (4 hex chars each,
+# ~750 bytes for a 20k-token prompt), so the first differing paragraph can be
+# located even across a process boundary, and the engine records that
+# paragraph's text (up to SYSTEM_DIFF_HEAD_CHARS) with the section it belongs
+# to.
 
 SYSTEM_PARAGRAPHS_KEY = "_system_paragraphs"
 SYSTEM_DIFF_HEAD_CHARS = 300

@@ -4,6 +4,7 @@
  import type { Session } from '$lib/api/client';
  import type { ViewType } from '$lib/stores/layout.svelte';
  import { createSearchSources, searchPages, matches, type SearchGroup, type SearchItem } from '$lib/api/search';
+ import { focusTrap } from '$lib/components/ui/focus-trap';
 
  interface Props {
   visible: boolean;
@@ -17,10 +18,9 @@
   onOpenSettings: () => void;
   onImportSession?: () => void;
   onManageTags?: () => void;
-  onManageKnowledge?: () => void;
  }
  let { visible, currentProjectId, onClose, onSelectSession, onSelectAgent, onOpenFeature,
-  onNewChat, onOpenSettings, onImportSession, onManageTags, onManageKnowledge }: Props = $props();
+  onNewChat, onOpenSettings, onImportSession, onManageTags }: Props = $props();
  let query = $state('');
  let selectedIndex = $state(0);
  let input = $state<HTMLInputElement>();
@@ -34,8 +34,7 @@
   { id: 'new', label: 'New conversation', action: onNewChat },
   { id: 'settings', label: 'Open settings', action: onOpenSettings },
   ...(onImportSession ? [{ id: 'import', label: 'Import session', action: onImportSession }] : []),
-  ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : []),
-  ...(currentProjectId && onManageKnowledge ? [{ id: 'knowledge', label: 'Manage project knowledge', action: onManageKnowledge }] : [])
+  ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : [])
  ]);
  const groups = $derived<SearchGroup[]>([
   ...results,
@@ -85,7 +84,12 @@
  async function handleKeyDown(event: KeyboardEvent) {
   if (!visible) return;
   if (event.key === 'Escape') { event.preventDefault(); onClose(); }
-  else if (event.key === 'Enter') { event.preventDefault(); if (items[selectedIndex]) select(items[selectedIndex]); }
+  else if (event.key === 'Enter') {
+   // A Tab-focused result button opens itself; only Enter from the search
+   // field (or the dialog) opens the arrow-key selection.
+   if (event.target instanceof Element && event.target.closest('button')) return;
+   event.preventDefault(); if (items[selectedIndex]) select(items[selectedIndex]);
+  }
   else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
    event.preventDefault();
    if (!items.length) return;
@@ -101,7 +105,7 @@
 
 <svelte:window onkeydown={handleKeyDown} />
 {#if visible}
- <div class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] px-3" role="dialog" aria-modal="true" aria-label="Search everything" tabindex="-1">
+ <div class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] px-3" role="dialog" aria-modal="true" aria-label="Search everything" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
   <button class="absolute inset-0 w-full h-full bg-black/60 backdrop-blur-xs border-none p-0 cursor-default" onclick={onClose} tabindex="-1" aria-label="Close search"></button>
   <div class="relative w-full max-w-xl bg-card border border-border rounded-xl overflow-hidden" style="box-shadow: var(--shadow-l)">
    <div class="flex items-center gap-3 px-4 py-3 border-b border-border">

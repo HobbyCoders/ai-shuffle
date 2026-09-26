@@ -12,7 +12,7 @@ import logging
 import time
 from collections import deque
 
-from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect
 
 from app.db import database
@@ -26,44 +26,6 @@ MAX_FRAME_BYTES = 48_000
 MAX_CONNECTIONS = 4
 calls: dict[str, VoiceStream] = {}
 _workers: set[asyncio.Task] = set()
-
-
-def validate_delegation_options(options: dict, voice_provider_id: str | None) -> None:
-    """Reject unavailable/cross-account Responses models before saving or starting."""
-    from app.core.query_options import decode_provider_model
-    from app.core.provider_agent import validate_provider_model
-    from app.core.model_effort import effort_capabilities
-    selected = options["delegation_model"]
-    responses = options["delegation_type"] == "responses"
-    if not selected:
-        if responses or options["delegation_effort"]:
-            raise HTTPException(400, "Choose a delegated model first.")
-        return  # Client mode may inherit the call composer's selection.
-    decoded = decode_provider_model(selected)
-    provider = None
-    if decoded:
-        pid, model = decoded
-        validation = validate_provider_model(pid, model)
-        if not validation.ok:
-            raise HTTPException(400, validation.reason)
-        provider = validation.provider
-    else:
-        from app.core.model_registry import get_model
-        if get_model(selected) is None:
-            raise HTTPException(400, "Choose a configured delegated model.")
-        model = selected
-    if responses:
-        from app.api.voice import _resolve_provider_row
-        funding = _resolve_provider_row(None, voice_provider_id)
-        if not decoded or decoded[0] != funding["id"]:
-            raise HTTPException(400, "Responses delegation must use a model on the voice call's OpenAI API provider.")
-    effort = options["delegation_effort"]
-    if effort:
-        levels = effort_capabilities(model, provider)["effort_levels"]
-        if not levels or effort not in levels:
-            raise HTTPException(400, "This effort is not declared for the selected model.")
-        if responses and effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
-            raise HTTPException(400, "This effort is not accepted by Live Responses delegation.")
 
 
 def live_session_config(config: dict, history: list[dict]) -> dict:
@@ -138,7 +100,7 @@ def commentary_chunks(text: str):
 
 
 async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None) -> str:
-    from app.core import turn_manager
+    from app.core import api_user_scope, turn_manager
     from app.core.provider_agent import validate_provider_model
     from app.core.query_options import decode_provider_model
 
@@ -161,13 +123,19 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
     overrides.update(model=selected, provider=provider_id,
                      system_prompt_append=options["delegation_instructions"] or DELEGATION_INSTRUCTIONS)
+    # VoiceStream flushes the spoken exchange before handing off. Keep the
+    # context for the engine without adding a second giant user bubble.
+    payload: dict = {"user_message_already_recorded": True}
+    # The delegated turn runs as the key that owns the session, never as the
+    # owner (a key may open the audio socket on its own session).
+    api_user_id = await run_sync(api_user_scope.session_api_user_id, row)
+    if api_user_id:
+        payload["api_user_id"] = api_user_id
     turn_id = await turn_manager.submit_async(
         session_id, "user", prompt=transcript, profile_id=row["profile_id"],
         project_id=row.get("project_id"), worktree_id=row.get("worktree_id"),
         overrides=overrides,
-        # VoiceStream flushes the spoken exchange before handing off. Keep the
-        # context for the engine without adding a second giant user bubble.
-        payload={"user_message_already_recorded": True},
+        payload=payload,
     )
     if on_submitted is not None:
         # The call-wide event subscriber follows progress, parking and later

@@ -22,7 +22,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb as _parse_json
 from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
@@ -32,17 +32,6 @@ def project_v2_id_for_origin(origin: str) -> str:
     """Deterministic ``projects_v2.id`` for an ``origin`` — identical on every
     install and stable across re-runs (matches the v60 collapse migration)."""
     return "pv2-" + hashlib.sha256(origin.encode()).hexdigest()[:24]
-
-
-def _parse_json(raw: Any) -> Any:
-    """Decode a JSONB column that the test shim stores as TEXT (dict/list pass
-    through untouched; None stays None)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-    return raw
 
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

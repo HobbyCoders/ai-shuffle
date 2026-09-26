@@ -15,8 +15,8 @@ Eviction has two triggers:
     not at all while the pool is empty), so a subprocess's ~100-300MB is
     released when it goes stale rather than on some unrelated 5-minute tick.
 
-The lifecycle is: connect() -> [query() -> receive_response()]* -> disconnect()
-This module keeps adapters in the [query -> receive_response]* phase between
+The lifecycle is: connect() -> [query() -> receive_events()]* -> disconnect()
+This module keeps adapters in the [query -> receive_events]* phase between
 user messages, avoiding repeated subprocess spawns and JSONL history replays.
 """
 
@@ -28,12 +28,9 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, Awaitable, TYPE_CHECKING
+from typing import Optional, Dict, Any, Callable, Awaitable
 
-from claude_agent_sdk import ClaudeAgentOptions
-
-if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient
+from app.core.agent_types import AgentOptions
 
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import mcp_servers_equivalent
@@ -45,14 +42,14 @@ logger = logging.getLogger(__name__)
 # provider/account and must be respawned — this is the canonical definition.
 # Deliberately NOT full env-dict equality (benign env churn would force
 # respawns that kill background subagents) and NOT a narrower 3-key tuple
-# (would miss provider config edits) — see docs/MULTI_PROVIDER_PLAN.md R3.
+# (would miss provider config edits).
 #
 # SPLIT into identity vs overlay keys (see provider_env_requires_reconnect):
 #   * IDENTITY keys select the provider/account and are ALWAYS compared.
 #   * OVERLAY keys (small/fast + subagent model, output/compaction tuning,
 #     upstream-mitigation flags) are only meaningful for a PROVIDER (gateway)
 #     session; comparing them on a NATIVE session wrongly forces a respawn.
-#     Concretely: native sessions no longer emit CLAUDE_CODE_AUTO_COMPACT_WINDOW
+#     Concretely: native sessions do not emit CLAUDE_CODE_AUTO_COMPACT_WINDOW
 #     at all (the CLI derives per-model windows), but a profile-preset value can
 #     still appear/disappear across native model switches, which must stay a
 #     hot-swap (respawning kills every background subagent). So overlay keys are
@@ -64,16 +61,14 @@ PROVIDER_IDENTITY_ENV_KEYS = (
 )
 PROVIDER_OVERLAY_ENV_KEYS = (
     "ANTHROPIC_SMALL_FAST_MODEL",
-    # TRANSITION GUARD (S6). Dead as a write-target: since S3, subagent model
-    # selection moved to per-agent frontmatter stamping and NOTHING emits this
-    # var anymore (see app/core/environment.py — it is intentionally not set).
-    # It stays in this overlay set ONLY to purge pre-S3 pooled sessions: such a
-    # session still carries CLAUDE_CODE_SUBAGENT_MODEL in its old_env, and S0
-    # proved the env var OVERRIDES every frontmatter pin — so a surviving pinned
-    # session would silently ignore per-subagent config. Keeping the key here
-    # makes the key-present→absent diff force the one respawn that drops the pin.
-    # Do NOT remove until no pre-S3 pooled session can plausibly still be alive
-    # (a future cleanup, not now).
+    # TRANSITION GUARD. Dead as a write-target: subagent model selection is
+    # per-agent frontmatter stamping and NOTHING emits this var (see
+    # app/core/environment.py — it is intentionally not set). It stays in this
+    # overlay set ONLY to purge pooled sessions that still carry
+    # CLAUDE_CODE_SUBAGENT_MODEL in their old_env: the env var OVERRIDES every
+    # frontmatter pin, so a surviving pinned session would silently ignore
+    # per-subagent config. Keeping the key here makes the key-present→absent
+    # diff force the one respawn that drops the pin.
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -82,8 +77,6 @@ PROVIDER_OVERLAY_ENV_KEYS = (
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK",
 )
-# Kept as the union for existing importers/tests.
-PROVIDER_ENV_KEYS = PROVIDER_IDENTITY_ENV_KEYS + PROVIDER_OVERLAY_ENV_KEYS
 
 
 def provider_env_requires_reconnect(
@@ -101,7 +94,7 @@ def provider_env_requires_reconnect(
     Logs the differing key NAME only, never its value (provider env carries the
     decrypted auth token).
 
-    POST-S3 LEG SEMANTICS (S6) — the designed contract, DO NOT "fix":
+    LEG SEMANTICS — the designed contract, DO NOT "fix":
     With frontmatter stamping, the ONLY leg-driven respawn is the legs
     empty↔non-empty flip on an anthropic-provider main, because that flips
     ANTHROPIC_BASE_URL identity between direct and gateway (caught by the
@@ -175,14 +168,12 @@ def adapter_lane(adapter: Any) -> str:
 class SessionState:
     """Track state for an active provider session.
 
-    The adapter field holds the provider-agnostic interface. The `client`
-    property provides backward-compatible access to the underlying SDK client
-    during the migration period.
+    The adapter field holds the provider-agnostic interface.
 
     - callback_refs: Mutable dict for indirect callback references (broadcast_func, etc.)
       These are updated at the start of each query so the can_use_tool callback
       (bound at connect() time) always references the current WebSocket.
-    - connect_options: The ClaudeAgentOptions used at connect() time, for detecting
+    - connect_options: The AgentOptions used at connect() time, for detecting
       whether a reconnect is needed when options change between queries.
     """
     adapter: ProviderAdapter
@@ -190,16 +181,13 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
-    # True while the between-turns idle reader (app/core/idle_reader.py) holds
-    # this pooled client. Set at reader start and cleared in the reader's exit
-    # ``finally`` (run_idle_reader), so a crashed or cancelled reader can never
-    # leave it stuck. Checked by the LRU/idle eviction guards: during the
-    # CLI-wake grace window the reader legitimately holds the client with
-    # ``is_streaming`` False and ZERO running background work (it is waiting up
-    # to ``cli_wake_grace_seconds`` for the CLI's own delayed wake turn), and it
-    # reads via ``peek`` (no LRU promote) so ``last_activity`` never bumps —
-    # without this flag either eviction path would tear the subprocess down
-    # mid-wait and kill the wake.
+    # True while the drain reader (app/core/idle_reader.py) holds this pooled
+    # client. Set at reader start and cleared in the reader's exit ``finally``
+    # (run_idle_reader), so a crashed or cancelled reader can never leave it
+    # stuck. Checked by the LRU/idle eviction guards: the reader holds the
+    # client with ``is_streaming`` False and reads via ``peek`` (no LRU
+    # promote), so ``last_activity`` never bumps; the reader does its own
+    # eviction once the wedge resolves.
     idle_reader_active: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # When the LAST device (browser/app) watching this session disconnected, or
@@ -224,17 +212,16 @@ class SessionState:
     })
 
     # Options snapshot from connect() time — for reconnect detection
-    connect_options: Optional[ClaudeAgentOptions] = None
+    connect_options: Optional[AgentOptions] = None
 
     # Live capture list for this subprocess's stderr, shared with the wrapped
     # stderr callback registered at connect() time (see _wrap_stderr_capture).
     # Persisted here so the streaming exception handlers can log the captured
     # CLI output at ERROR when the subprocess dies MID-STREAM — at that point
-    # the connect-scoped cli_stderr_lines local is long out of scope, which is
-    # why mid-stream exit-1 crashes previously recorded no reason. None until a
+    # the connect-scoped cli_stderr_lines local is long out of scope. None until a
     # client is created (a reused pooled client keeps the ring from creation).
     # A bounded ``deque(maxlen=50)`` (see _wrap_stderr_capture) — an unbounded
-    # list leaked for the subprocess's whole lifetime.
+    # list would leak for the subprocess's whole lifetime.
     cli_stderr_lines: "Optional[deque[str]]" = None
 
     @property
@@ -248,17 +235,6 @@ class SessionState:
         """
         return adapter_lane(self.adapter)
 
-    @property
-    def client(self) -> Optional["ClaudeSDKClient"]:
-        """Backward-compatible access to the underlying SDK client.
-
-        Legacy callers may inspect this optional client. HarnessAdapter has
-        no SDK client, so its callers use the adapter interface and get None
-        here.
-        """
-        # Fluid adapters have no SDK client; callers must handle None.
-        return getattr(self.adapter, "sdk_client", None)
-
 
 def is_subprocess_alive(state: SessionState) -> bool:
     """Check if the subprocess for a session state is still running."""
@@ -266,19 +242,17 @@ def is_subprocess_alive(state: SessionState) -> bool:
 
 
 def subprocess_pid(state: SessionState) -> Optional[int]:
-    """Best-effort PID of the SDK subprocess for a session, or None.
+    """PID of the session's CLI subprocess (``adapter.subprocess_pid()``), or None.
 
-    Used by the dead-tree reaper to record which process tree to reap once
-    the SDK subprocess has terminated. Never raises.
+    None for native sessions (in-process) and for a delegated session whose CLI
+    has not spawned yet. Used by the dead-tree reaper and the OOM-score
+    adjustment. Never raises.
     """
     try:
-        client = state.adapter.sdk_client
-        if client is None:
-            return None
-        from app.core.sdk_process_handle import SdkProcessHandle
-        return SdkProcessHandle(client).pid
+        pid = state.adapter.subprocess_pid()
     except Exception:
         return None
+    return pid if isinstance(pid, int) and pid > 0 else None
 
 
 def _host_available_mb() -> Optional[float]:
@@ -301,7 +275,7 @@ def _host_available_mb() -> Optional[float]:
 
 
 def mark_subprocess_oom_killable(state: SessionState) -> None:
-    """Make the SDK subprocess the kernel's preferred OOM-kill victim.
+    """Make the session's CLI subprocess the kernel's preferred OOM-kill victim.
 
     Writes a positive ``oom_score_adj`` to the subprocess; subagents it forks
     afterward inherit the value. Under a host OOM the kernel then reaps one
@@ -337,7 +311,7 @@ async def graceful_disconnect(
     """
     try:
         # Pass the session id so the adapter can flag an intentional teardown:
-        # the SDK reader-task "Fatal error in message reader" that a force-
+        # the reader-task "Fatal error in message reader" that a force-
         # terminate provokes is then demoted to WARNING instead of persisted as
         # a durable error_log ERROR (see app/core/expected_shutdown.py).
         if preserve_session:
@@ -351,7 +325,7 @@ async def graceful_disconnect(
 
 # ─── Dead process-tree reaper ─────────────────────────────────────────────
 #
-# When an SDK subprocess terminates (natural exit, eviction-disconnect, or a
+# When a CLI subprocess terminates (natural exit, eviction-disconnect, or a
 # silently-dead subprocess we removed), it can leave behind orphaned descendant
 # processes — e.g. the node CLIs spawned for each subagent in a large fan-out.
 # These orphans never get cleaned up by the normal lifecycle and show up as the
@@ -363,14 +337,19 @@ async def graceful_disconnect(
 # tree of a subprocess that has ALREADY terminated — it never signals a live
 # session. (Note: once the parent PID is gone the OS reparents orphans, so we
 # snapshot the descendant set at record time and reap by that snapshot.)
+#
+# Each descendant is recorded with its process start time, and the reaper only
+# signals a pid whose start time still matches: the snapshot can sit here for a
+# whole resource-monitor interval, long enough for the kernel to hand a dead
+# descendant's pid to an unrelated process (a hook shell, git, an MCP server).
 
-# Bounded set of (pid, [descendant_pids]) snapshots awaiting reaping.
-_terminated_trees: "OrderedDict[int, list[int]]" = OrderedDict()
+# Bounded set of (pid, [(descendant_pid, create_time)]) snapshots awaiting reaping.
+_terminated_trees: "OrderedDict[int, list[tuple[int, float]]]" = OrderedDict()
 _TERMINATED_TREES_MAX = 256
 
 
-def snapshot_descendants(pid: Optional[int]) -> list[int]:
-    """Return the PIDs of all live descendants of `pid` (recursive), or [].
+def snapshot_descendants(pid: Optional[int]) -> list[tuple[int, float]]:
+    """Return ``(pid, create_time)`` for every live descendant of `pid`, or [].
 
     Must be called WHILE the parent is still alive — once the parent exits the
     OS reparents orphans and they can no longer be discovered via the parent.
@@ -383,22 +362,57 @@ def snapshot_descendants(pid: Optional[int]) -> list[int]:
     except ImportError:
         return []
     try:
-        return [c.pid for c in psutil.Process(pid).children(recursive=True)]
+        children = psutil.Process(pid).children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
         return []
+    snapshot: list[tuple[int, float]] = []
+    for child in children:
+        try:
+            snapshot.append((child.pid, child.create_time()))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            continue
+    return snapshot
 
 
-def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list[int]] = None) -> None:
-    """Record a now-terminated SDK subprocess's descendant tree for reaping.
+def _with_create_times(descendants: list) -> list[tuple[int, float]]:
+    """Normalise a descendant list to ``(pid, create_time)`` pairs.
+
+    A bare pid gets the start time of whatever holds it now; a pid that is
+    already gone (or unreadable) is dropped.
+    """
+    pairs: list[tuple[int, float]] = []
+    bare: list[int] = []
+    for entry in descendants:
+        if isinstance(entry, tuple):
+            pairs.append(entry)
+        else:
+            bare.append(entry)
+    if bare:
+        try:
+            import psutil
+        except ImportError:
+            return pairs
+        for dpid in bare:
+            try:
+                pairs.append((dpid, psutil.Process(dpid).create_time()))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                continue
+    return pairs
+
+
+def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list] = None) -> None:
+    """Record a now-terminated CLI subprocess's descendant tree for reaping.
 
     Pass `descendants` captured via snapshot_descendants() BEFORE the parent
     exited; if omitted we try to snapshot now (only useful if the parent is
-    still resolvable). Safe to call with None / without psutil — no-ops.
+    still resolvable). Bare pids are accepted and stamped with their current
+    start time. Safe to call with None / without psutil — no-ops.
     """
     if not pid:
         return
     if descendants is None:
         descendants = snapshot_descendants(pid)
+    descendants = _with_create_times(descendants or [])
     if not descendants:
         return
     _terminated_trees[pid] = descendants
@@ -407,32 +421,34 @@ def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list[
         _terminated_trees.popitem(last=False)
 
 
-def reap_terminated_process_trees() -> int:
-    """Kill orphaned descendants of subprocesses that have already terminated.
+# A descendant counts as the SAME process when its start time is within this
+# many seconds of the snapshot. psutil derives create_time() from the boot time,
+# which the kernel shifts when the wall clock is stepped (NTP, host resync), so
+# exact float equality would silently disable the reaper after a small step.
+# A recycled pid belongs to a process started later than the original, so a
+# 1 s window does not let an unrelated process through.
+_START_TIME_TOLERANCE_SECONDS = 1.0
 
-    Walks each recorded terminated-subprocess descendant snapshot and, for any
-    descendant PID that is BOTH still alive AND no longer has a live ancestor
-    inside our own server process, sends SIGTERM (then SIGKILL on stragglers).
 
-    This is process hygiene only — it operates exclusively on the recorded
-    descendants of subprocesses that have already exited, so it can never kill
-    a live session. Returns the number of orphans reaped.
+def _is_same_process(current: float, recorded: float) -> bool:
+    """True when `current` start time matches the `recorded` one.
 
-    Safe no-op if psutil is unavailable or there is nothing to reap.
+    Anything that cannot be compared (NaN, a non-number) counts as a mismatch,
+    so an undeterminable identity skips the kill.
     """
-    if not _terminated_trees:
-        return 0
     try:
-        import psutil
-    except ImportError:
-        _terminated_trees.clear()
-        return 0
+        return abs(float(current) - float(recorded)) < _START_TIME_TOLERANCE_SECONDS
+    except (TypeError, ValueError):
+        return False
 
-    reaped = 0
-    own_pid = os.getpid()
-    # PIDs of all SDK subprocesses we currently know are LIVE — descendants of
-    # these must never be touched (they belong to an active session).
-    live_subprocess_pids: set[int] = set()
+
+def _live_subprocess_pids() -> set[int]:
+    """PIDs of every CLI subprocess currently LIVE in the pool.
+
+    Descendants of these belong to an active session and must never be touched.
+    Runs on the event loop: it reads the pool, which only the loop mutates.
+    """
+    live: set[int] = set()
     try:
         if _session_pool is not None:
             # Snapshot — the pool dict can be mutated (evictions/removals) while
@@ -441,16 +457,35 @@ def reap_terminated_process_trees() -> int:
             for st in list(_session_pool._pool.values()):
                 p = subprocess_pid(st)
                 if p and is_subprocess_alive(st):
-                    live_subprocess_pids.add(p)
+                    live.add(p)
     except Exception:
         pass
+    return live
+
+
+def _reap_trees(
+    trees: list[tuple[int, list[tuple[int, float]]]],
+    live_subprocess_pids: set[int],
+) -> int:
+    """Blocking psutil half of the reaper; runs in a worker thread.
+
+    Walks process ancestry and waits up to 2 s for SIGTERM stragglers, so it
+    must stay off the event loop. Touches no shared app state.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+
+    reaped = 0
+    own_pid = os.getpid()
 
     def _has_live_protected_ancestor(proc: "psutil.Process") -> bool:
-        """True if the process descends from a still-live SDK subprocess.
+        """True if the process descends from a still-live CLI subprocess.
 
         Guards against killing a descendant that, after the original parent
         died, happens to share a PID-reuse or got reparented under a new live
-        session. We walk up to our own server PID; if we cross a live SDK
+        session. We walk up to our own server PID; if we cross a live CLI
         subprocess PID on the way, the process is protected.
         """
         try:
@@ -467,25 +502,25 @@ def reap_terminated_process_trees() -> int:
         return False
 
     to_kill: list["psutil.Process"] = []
-    for parent_pid, descendant_pids in list(_terminated_trees.items()):
+    for parent_pid, descendant_pids in trees:
         # If the recorded parent is somehow alive again, skip — only reap trees
         # whose parent has genuinely terminated.
         try:
             if psutil.pid_exists(parent_pid) and psutil.Process(parent_pid).is_running():
                 # Parent still around (rare PID reuse) — leave its tree alone.
-                _terminated_trees.pop(parent_pid, None)
                 continue
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             pass
-        for dpid in descendant_pids:
+        for dpid, created in descendant_pids:
             try:
                 proc = psutil.Process(dpid)
+                if not _is_same_process(proc.create_time(), created):
+                    continue  # pid reused by an unrelated process
             except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-                continue
+                continue  # identity cannot be confirmed: never signal it
             if _has_live_protected_ancestor(proc):
                 continue
             to_kill.append(proc)
-        _terminated_trees.pop(parent_pid, None)
 
     if not to_kill:
         return 0
@@ -504,7 +539,36 @@ def reap_terminated_process_trees() -> int:
             reaped += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             continue
+    return reaped
 
+
+async def reap_terminated_process_trees() -> int:
+    """Kill orphaned descendants of subprocesses that have already terminated.
+
+    Walks each recorded terminated-subprocess descendant snapshot and, for any
+    descendant PID that is still alive, is still the SAME process (its start
+    time matches the snapshot within ``_START_TIME_TOLERANCE_SECONDS``, so a
+    recycled pid is never signalled) AND no longer has a live ancestor inside
+    our own server process, sends SIGTERM (then SIGKILL on stragglers).
+
+    This is process hygiene only — it operates exclusively on the recorded
+    descendants of subprocesses that have already exited, so it can never kill
+    a live session. Returns the number of orphans reaped.
+
+    The registry and pool are read on the event loop; the psutil work (process
+    table reads plus up to 2 s of ``wait_procs``) runs in a worker thread so it
+    never stalls other sessions.
+
+    Safe no-op if psutil is unavailable or there is nothing to reap.
+    """
+    if not _terminated_trees:
+        return 0
+    # Every recorded tree is consumed by this pass, reaped or not.
+    trees = list(_terminated_trees.items())
+    _terminated_trees.clear()
+    live_subprocess_pids = _live_subprocess_pids()
+
+    reaped = await asyncio.to_thread(_reap_trees, trees, live_subprocess_pids)
     if reaped:
         logger.warning(
             f"[Pool] Reaped {reaped} orphaned descendant process(es) of "
@@ -513,7 +577,7 @@ def reap_terminated_process_trees() -> int:
     return reaped
 
 
-# ─── Tiered idle policy (F1) ──────────────────────────────────────────────
+# ─── Tiered idle policy ───────────────────────────────────────────────────
 #
 # One pooled session == one long-lived Node CLI subprocess at 100-300+MB RSS,
 # so the pool's steady-state occupancy IS the app's idle-RAM floor. The policy
@@ -655,7 +719,7 @@ class AdmissionSnapshot:
 
 class SessionPool:
     """
-    Bounded LRU pool of SDK client sessions.
+    Bounded LRU pool of provider adapter sessions.
 
     - OrderedDict for O(1) LRU tracking (move_to_end on access)
     - Configurable max_size (``settings.sdk_session_pool_size``)
@@ -683,7 +747,7 @@ class SessionPool:
         self._pool: OrderedDict[str, SessionState] = OrderedDict()
         self._max_size = max(1, max_size)
         self._eviction_lock = asyncio.Lock()
-        # Tiered idle policy (F1) — the single source of truth for "when may
+        # Tiered idle policy — the single source of truth for "when may
         # this subprocess be reclaimed". Defaults are used when no settings are
         # available (tests construct bare pools).
         self._idle_policy: IdlePolicy = idle_policy or IdlePolicy()
@@ -730,16 +794,16 @@ class SessionPool:
     def _has_background_work(self, session_id: str) -> bool:
         """True iff in-flight background work is still running for this session.
 
-        Covers BOTH a backgrounded sub-agent (``kind=="agent"``) AND an
-        SDK-backgrounded shell command (``local_bash`` run_in_background, tracked
+        Covers BOTH a backgrounded sub-agent (``kind=="agent"``) AND a
+        backgrounded shell command (``local_bash`` run_in_background, tracked
         in the registry's ``_sdk_background_tasks``) — both park the parent turn and
-        deliver their completion LATER on the pooled SDK client.
+        deliver their completion LATER on the pooled adapter.
 
         Lazy-imports the task registry (a leaf module that imports nothing back)
         to avoid an import cycle while keeping ONE source of truth for the busy
         signal. A session parked on such work looks idle to ``is_streaming`` (its
         parent turn already returned), so without this check LRU/idle eviction would
-        disconnect the pooled SDK client out from under the running work — killing it
+        disconnect the pooled adapter out from under the running work — killing it
         mid-run, dropping the completion notification, and stranding the parent so the
         frontend never unparks. Defensive: any failure resolves to ``False`` (never
         block eviction on a registry hiccup; the hard-cap force path remains the
@@ -909,7 +973,7 @@ class SessionPool:
         admit a new session rather than killing a running one.
 
         ``lane`` says what the new session will cost. On the DEFAULT delegated
-        lane every check applies, exactly as before. On the native lane the
+        lane every check applies. On the native lane the
         subprocess cap is skipped — a native session is coroutines in this
         process — while every REAL resource guard below still applies: host
         memory, descendant processes, tree RSS, and the optional native soft
@@ -1052,13 +1116,12 @@ class SessionPool:
 
             # Find the LRU session that is neither streaming, NOR held by the
             # between-turns idle reader, NOR parked on an in-flight background
-            # sub-agent. Evicting any of these would disconnect the pooled SDK
-            # client out from under live work: a streaming turn, a backgrounded
+            # sub-agent. Evicting any of these would disconnect the pooled
+            # adapter out from under live work: a streaming turn, a backgrounded
             # sub-agent whose parent turn already returned (parked), or — the
-            # idle-reader case — the CLI-wake grace window, where the reader
-            # legitimately holds the client with zero running background work
-            # while it waits for the CLI's delayed wake turn (evicting mid-wait
-            # kills the wake). Snapshot the items so a mutation from
+            # drain-reader case — a wedged client the reader keeps until its
+            # background work resolves, then evicts itself while settling the
+            # draining turn. Snapshot the items so a mutation from
             # concurrently-scheduled code (remove/remove_broken/evict_dead run
             # WITHOUT this lock) can never raise "dictionary changed size during
             # iteration".
@@ -1237,11 +1300,13 @@ class SessionPool:
             return None
         state.is_connected = False
         pid = subprocess_pid(state)
-        # Snapshot while the parent is still alive — orphans are undiscoverable
-        # after it exits.
-        descendants = snapshot_descendants(pid)
 
         async def _teardown() -> None:
+            # Snapshot while the parent is still alive (the disconnect below is
+            # what ends it) — orphans are undiscoverable after it exits.
+            # psutil's recursive children() scans the whole process table, so
+            # it runs off the loop.
+            descendants = await asyncio.to_thread(snapshot_descendants, pid)
             try:
                 await graceful_disconnect(state.adapter, session_id)
             finally:
@@ -1273,10 +1338,9 @@ class SessionPool:
         ``is_streaming`` is False (the parked turn already returned),
         ``_has_background_work`` goes False the instant the task finishes, and
         ``last_activity`` is as stale as the park was long. A park longer than
-        the session's idle tier therefore had its client evicted milliseconds
-        before the wake tried to use it — which was the closed-client crash
-        before PR #1104 and is a full client respawn plus conversation resume
-        after it. Neither is what the wake asked for.
+        the session's idle tier would therefore have its client evicted just
+        before the wake tries to use it, forcing a full client respawn plus
+        conversation resume.
 
         Also bumps ``last_activity``: the wake IS activity, and leaving the
         stamp at park time makes the session look idle for the whole park.
@@ -1319,11 +1383,10 @@ class SessionPool:
 
         The turn is live but produces nothing while it waits, and the wait is
         bounded by ``user_question_timeout_seconds`` (1h) — comfortably past the
-        pool's 30-minute hot idle tier. An audited session had its subprocess
-        reclaimed out from under a blocked ``AskUser`` at exactly 1800s: fluid's
-        MRTR round-trip turned the lost answer into ``input_required round-trip
-        interrupted`` while the durable row still advertised an hour, leaving a
-        live modal on the user's device that nothing was listening to.
+        pool's 30-minute hot idle tier. Reclaiming the subprocess under a
+        blocked ``AskUser`` would turn the lost answer into ``input_required
+        round-trip interrupted`` while the durable row still advertises an hour,
+        leaving a live modal on the user's device that nothing is listening to.
 
         Reads the in-process waiter registry, not the DB: it is populated for
         exactly as long as ``interaction_wait.await_interaction`` blocks, so it
@@ -1342,9 +1405,9 @@ class SessionPool:
     def _is_busy(self, session_id: str, state: SessionState) -> bool:
         """True when live work forbids evicting this session.
 
-        Streaming turns, the between-turns idle reader (which holds the client
-        through the CLI-wake grace window while looking idle to
-        ``is_streaming``), in-flight background sub-agents / SDK-backgrounded
+        Streaming turns, the drain reader (which holds a wedged client until
+        its background work resolves while looking idle to ``is_streaming``,
+        then evicts it itself), in-flight background sub-agents / backgrounded
         shells, an enqueued-but-unstarted wake, and a turn blocked on a user
         question all mean "disconnecting would kill running work". This guard is
         checked BEFORE any deadline arithmetic and is never overridden by the
@@ -1427,7 +1490,7 @@ class SessionPool:
         ``max_idle_seconds=None`` (the default) applies the tiered
         :class:`IdlePolicy` — recency tier, detach grace, and activity floor.
         Passing an explicit ``max_idle_seconds`` applies that FLAT timeout to
-        every session instead, which is what the legacy callers/tests expect and
+        every session instead, which is what the flat-timeout callers/tests expect and
         what an operator wants from a one-off "reclaim everything older than N"
         sweep.
 
@@ -1587,12 +1650,12 @@ class SessionPool:
     async def evict_dead(self) -> list[str]:
         """Evict sessions whose subprocess has died silently.
 
-        SDK subprocesses can die without the pool being notified (e.g., OOM kill,
+        CLI subprocesses can die without the pool being notified (e.g., OOM kill,
         signal). This method checks ALL sessions — including streaming ones — and
         removes those with dead subprocesses.
 
-        Previously, streaming sessions were skipped, which meant an OOM-killed
-        subprocess during streaming would leave is_streaming=True forever,
+        Streaming sessions are included because an OOM-killed subprocess during
+        streaming would otherwise leave is_streaming=True forever,
         preventing all eviction paths from cleaning it up.
 
         Returns:
@@ -1627,17 +1690,16 @@ class SessionPool:
     def report_long_streaming(self, warn_after_seconds: int = 600) -> list[tuple[str, float]]:
         """OBSERVE-ONLY report of sessions that have been streaming a long time.
 
-        WHY THIS IS NOT AN EVICTION ANYMORE
-        -----------------------------------
+        WHY THIS IS NOT AN EVICTION
+        ---------------------------
         Elapsed wall-clock streaming time cannot distinguish a legitimately busy
         long orchestration (e.g. driving 30+ subagents overnight) from a
-        genuinely hung session. The previous `evict_stuck_streaming` force-
-        terminated LIVE sessions on a timer, which in production SIGTERM'd a
-        healthy orchestrator mid-run, discarded its in-memory transcript,
-        truncated the Postgres mirror, and orphaned the subagent child trees —
-        i.e. the watchdog CREATED the very leak it existed to detect.
+        genuinely hung session. Force-terminating LIVE sessions on a timer would
+        SIGTERM a healthy orchestrator mid-run, discard its in-memory
+        transcript, truncate the Postgres mirror, and orphan the subagent child
+        trees — creating the very leak the watchdog exists to detect.
 
-        The SDK owns query lifecycle and is the ONLY thing that ends a live
+        The adapter owns query lifecycle and is the ONLY thing that ends a live
         session (completion or user interrupt). Genuinely dead subprocesses are
         reaped by evict_dead() + the dead-tree reaper. This method therefore
         only OBSERVES: it returns (session_id, streaming_seconds) for sessions
@@ -1722,10 +1784,6 @@ class SessionPool:
         """
         return list(self._pool.items())
 
-    def active_session_ids(self) -> list:
-        """Get list of session IDs with connected clients."""
-        return [sid for sid, s in list(self._pool.items()) if s.is_connected]
-
     def streaming_session_ids(self) -> list:
         """Get list of session IDs currently streaming."""
         return [sid for sid, s in list(self._pool.items()) if s.is_streaming]
@@ -1754,12 +1812,13 @@ def _agents_equivalent(old: Optional[Dict], new: Optional[Dict]) -> bool:
     return True
 
 
-def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions) -> list[str]:
+def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> list[str]:
     """Check if option changes between queries require a fresh subprocess.
 
-    Some options (model, permission_mode) can be changed at runtime via SDK methods.
-    Others (system_prompt, cwd, mcp_servers, plugins, and the resolved provider
-    binding) are fixed at spawn/connect time and require a new subprocess.
+    Some options (model, permission_mode) can be changed at runtime via adapter methods.
+    Others (system_prompt, cwd, mcp_servers, plugins, the resolved provider
+    binding, effort, fast mode, the context window) are fixed at spawn/connect
+    time and require a new subprocess.
     """
     changed = []
     old = state.connect_options
@@ -1787,11 +1846,11 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     if provider_env_requires_reconnect(old.env, new_options.env):
         changed.append("provider_env")
 
-    # Resolved provider BINDING (PA13 / W-R4). The env comparison above only
-    # sees the gateway overlay vars, which are identical (absent) on two
-    # different NATIVE-leg providers and can coincide across rows — so a
-    # cross-provider switch was invisible here and the wrong client got silently
-    # reused (wrong credentials, wrong leg, wrong base URL). The binding is
+    # Resolved provider BINDING. The env comparison above only sees the
+    # gateway overlay vars, which are identical (absent) on two different
+    # NATIVE-leg providers and can coincide across rows — so without this a
+    # cross-provider switch would be invisible here and the wrong client
+    # silently reused (wrong credentials, wrong leg, wrong base URL). The binding is
     # stamped on the options object by ``query_options`` (None = native), so
     # comparing it catches every provider change, including
     # provider→native-Claude. A provider change MUST evict + reconnect: the
@@ -1809,7 +1868,17 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     ):
         changed.append("aih_context_window")
 
-    # Per-session fast mode (v81) is baked in at connect time the same way — a
+    # Reasoning effort is baked in at connect time too: the delegated leg's
+    # ``--effort`` CLI arg, the native leg's NativeLoop ``effort`` (and the
+    # ``app_caller_effort`` its Task children inherit), both set once in
+    # ``HarnessAdapter.connect``. The reuse call sites only hot-swap model and
+    # permission mode, so without this a reused client ran every later turn at
+    # the connect-time effort. Compared as sent (before the adapter's
+    # per-model normalization) — the same raw value every turn when unchanged.
+    if getattr(old, "effort", None) != getattr(new_options, "effort", None):
+        changed.append("effort")
+
+    # Per-session fast mode is baked in at connect time the same way — a
     # ``--settings {"fastMode": true}`` CLI arg on the delegated leg, a
     # ``service_tier`` on the native request builder — so a flip must rebuild
     # the leg rather than ride an in-place set_model. Compared as a bool so
@@ -1863,16 +1932,18 @@ def reconnect_option_names(state: SessionState, new_options: ClaudeAgentOptions)
     ):
         changed.append("disallowed_tools")
 
-    # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
+    # NOTE: the CLI refreshing its own login is deliberately NOT a reconnect
     # reason. Respawning kills every background task/sub-agent parented to the
-    # subprocess, and the delegated CLI re-reads credentials from its config dir
-    # when it needs to re-auth — so a rotation on disk is picked up in place.
+    # subprocess, and the delegated CLI handles its own re-auth in place.
 
     # These can be changed at runtime — no reconnect needed
-    # (model via client.set_model(), permission_mode via client.set_permission_mode())
+    # (model via client.set_model(), permission_mode via client.set_permission_mode()).
+    # ``thinking`` is deliberately neither: the delegated leg does not take it,
+    # and the native leg pins it per session from the recorded turns
+    # (NativeLoop._resolve_session_thinking), so a rebuild could not apply it.
     return changed
 
-def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> bool:
+def requires_reconnect(state: SessionState, new_options: AgentOptions) -> bool:
     return bool(reconnect_option_names(state, new_options))
 
 

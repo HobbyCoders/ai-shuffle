@@ -13,61 +13,12 @@ from app.core.session_modes import normalize_session_mode
 
 
 # ============================================================================
-# Authentication Models
-# ============================================================================
-
-class SetupRequest(BaseModel):
-    """First-run admin setup request"""
-    username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
-
-
-class LoginRequest(BaseModel):
-    """Login request"""
-    username: str
-    password: str
-
-
-class ChangePasswordRequest(BaseModel):
-    """Admin password change request"""
-    current_password: str
-    new_password: str = Field(..., min_length=8)
-
-
-class AuthStatus(BaseModel):
-    """Authentication status response"""
-    authenticated: bool
-    is_admin: bool = True
-    setup_required: bool
-    claude_authenticated: bool
-    username: Optional[str] = None
-
-
-# ============================================================================
-# Subagent Models
-# ============================================================================
-
-class SubagentDefinition(BaseModel):
-    """Definition for a subagent that can be invoked by the main agent"""
-    description: str = Field(..., min_length=1, description="When to use this agent")
-    prompt: str = Field(..., min_length=1, description="System prompt for the agent")
-    tools: Optional[List[str]] = Field(None, description="Allowed tools (inherits all if not specified)")
-    model: Optional[str] = Field(None, description="Model override: sonnet, opus, haiku, or inherit")
-    skills: Optional[List[str]] = Field(None, description="Skills the agent can use")
-    memory: Optional[str] = Field(None, description="Memory scope: user, project, or local")
-    mcp_servers: Optional[List[Any]] = Field(None, description="MCP servers the agent can access (names or config dicts)")
-
-
-# ============================================================================
 # Profile Models
 # ============================================================================
 
 # AIToolsConfig is dynamically generated from the AI_TOOLS registry
 # This ensures the model always matches available tools - no manual sync needed
 from app.core.ai_tools import AIToolsConfig  # noqa: E402
-
-# Single source of truth for selectable Claude models.
-from app.core.model_registry import DEFAULT_MODEL  # noqa: E402
 
 
 class SystemPromptConfig(BaseModel):
@@ -93,10 +44,10 @@ class ComputerUseConfig(BaseModel):
 
 
 class ProfileConfig(BaseModel):
-    """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
+    """Agent configuration stored on a profile; query_options maps it onto ``AgentOptions``."""
     # Core settings.
     #
-    # An agent does NOT pin a model any more (v79): the model, effort and
+    # An agent does NOT pin a model: the model, effort and
     # permission mode are picked when a session is created and live on the
     # session row. These fields stay for two consumers only — the built-in
     # "Default AI" agent, whose model still drives internal generation (commit
@@ -124,21 +75,19 @@ class ProfileConfig(BaseModel):
     effort: Optional[str] = None  # low, medium, high, max, xhigh - for Opus 4.6+ models
     max_turns: Optional[int] = None
 
-    # Tool configuration - SDK 0.1.12+ supports new 'tools' option
-    # tools: Explicit list of tools to enable, or "claude_code" preset (new SDK way)
-    # allowed_tools: Legacy - only these tools allowed (if tools not set)
-    # disallowed_tools: Block these tools (can be combined with tools or allowed_tools)
-    tools: Optional[List[str]] = None  # New SDK 0.1.12+ - explicit tool list
-    tools_preset: Optional[str] = None  # "claude_code" to use preset (SDK 0.1.12+)
+    # Tool configuration. ``tools`` / ``tools_preset`` are SDK-shaped fields
+    # the harness adapter ignores; ``tool_selection_mode`` below decides access
+    # and reads allowed_tools / disallowed_tools.
+    tools: Optional[List[str]] = None
+    tools_preset: Optional[str] = None  # "claude_code" preset
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    # The RUNTIME AUTHORITY for tool access (ruling T2): "all", "none",
-    # "allow" or "disallow". Both legs resolve through
+    # The RUNTIME AUTHORITY for tool access: "all", "none", "allow" or
+    # "disallow". Both legs resolve through
     # ``app.core.tool_access.resolve_tool_access``, which reads this and only
-    # then the lists — it no longer infers intent from list emptiness, so
-    # "Disable all tools" is a real deny instead of an empty allow list every
-    # path read as unrestricted. Absent (a config the v82 migration never saw)
-    # falls back to the legacy inference.
+    # then the lists, so "Disable all tools" is a real deny instead of an empty
+    # allow list read as unrestricted. Absent (an unmigrated config) falls back
+    # to inferring the mode from the lists.
     tool_selection_mode: Optional[str] = None
 
     # AI tools configuration - individual toggles for each AI tool
@@ -174,11 +123,11 @@ class ProfileConfig(BaseModel):
     # User identification
     user: Optional[str] = None  # User identifier
 
-    # Agent IDs DECLARED into this agent's context (2026-08-17 ruling,
-    # superseding A10): they ride the compiled prompt's agents index as
+    # Agent IDs DECLARED into this agent's context: they ride the compiled prompt's agents index as
     # name+description so the model knows they exist. Never an allowlist —
     # Task dispatch runs any agent that resolves, declared or not. Interpreted
-    # together with ``agent_invoke_mode`` below (see app.core.agent_context).
+    # together with ``agent_invoke_mode`` below (see
+    # app.core.agent_provider_models.available_subagents).
     enabled_agents: Optional[List[str]] = None
 
     # Context-declaration mode — "all" = declare every agent, "custom" =
@@ -186,7 +135,7 @@ class ProfileConfig(BaseModel):
     # (a non-empty enabled_agents declares those ids, empty/absent = all).
     agent_invoke_mode: Optional[str] = None
 
-    # Per-agent memory (agents-program ruling A11): durable text owned by THIS
+    # Per-agent memory: durable text owned by THIS
     # agent, injected into the compiled system prompt whenever the agent runs,
     # in any session — "the same agent learning and growing with you". Written
     # by the agent itself through the Memory builtin tool; edited in the
@@ -198,17 +147,16 @@ class ProfileConfig(BaseModel):
     # Paths can be relative (resolved from workspace) or absolute
     enabled_plugins: Optional[List[str]] = None
 
-    # File checkpointing for rewind (SDK 0.1.15+)
-    enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
+    # SDK-shaped flag; the harness adapter ignores it.
+    enable_file_checkpointing: bool = False
 
     # App configuration tools - allows the agent to manage hooks, automations,
     # MCP servers, and profiles through conversation. Only effective for admin
     # sessions (never exposed to API users regardless of this setting).
     app_config_tools: bool = False
 
-    # Lock MCP server set deterministically per session (SDK 0.1.74+).
-    # When True, the SDK validates that no MCP server is added or removed
-    # mid-session; prevents tool-set drift across turns.
+    # SDK-shaped flag carried onto AgentOptions; the harness adapter does not
+    # read it (fluid's DelegatedLoop passes ``--strict-mcp-config`` itself).
     strict_mcp_config: bool = False
 
     @field_validator("agent_invoke_mode")
@@ -358,11 +306,6 @@ class SessionBase(BaseModel):
     title: Optional[str] = None
 
 
-class SessionCreate(SessionBase):
-    """Session creation - typically automatic"""
-    pass
-
-
 class SessionTag(BaseModel):
     """Tag attached to a session (minimal tag info)"""
     id: str
@@ -407,13 +350,13 @@ class Session(SessionBase):
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
     worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
-    # V2 branch-intake (Phase 3): a NEW branch session records only its logical
+    # Branch intake: a NEW branch session records only its logical
     # branch here (no legacy worktree row); the deterministic per-runner checkout
     # is materialized lazily at spawn. Legacy worktree sessions leave this NULL and
     # keep using worktree_branch. The UI badge falls back to this when
     # worktree_branch is absent.
     branch: Optional[str] = None
-    # Persisted pull-request lifecycle (v85). NULL = unknown. The sidepanel
+    # Persisted pull-request lifecycle. NULL = unknown. The sidepanel
     # renders PR Opened / PR Merged from these so a glance doesn't need GitHub.
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
@@ -423,16 +366,16 @@ class Session(SessionBase):
     # list badges them to differentiate from interactive chats.
     automation_id: Optional[str] = None
     # Multi-provider provenance — the provider this session is bound to (NULL =
-    # native Claude). Persisted on the row since v66; surfaced on the response
-    # model so clients can tell a ProviderAgent-bound session from a native one
+    # native Claude). Persisted on the row; surfaced on the response
+    # model so clients can tell a provider-bound session from a native one
     # without a second round-trip.
     provider_id: Optional[str] = None
-    # The run binding this session was created with (v79): the model, effort
-    # and permission mode the user picked in the composer. Agents no longer
+    # The run binding this session was created with: the model, effort
+    # and permission mode the user picked in the composer. Agents do not
     # pin any of these, so the client hydrates its controls from here — that is
     # what makes the pick survive a reload and show up the same on every
-    # device. NULL on pre-v79 rows, where resolution falls back to
-    # launched_model and then the agent's legacy config.
+    # device. NULL on rows written before the columns existed, where resolution
+    # falls back to launched_model and then the agent's legacy config.
     model: Optional[str] = None
     effort: Optional[str] = None
     permission_mode: Optional[str] = None
@@ -445,18 +388,18 @@ class Session(SessionBase):
     # written before the column existed.
     launched_model: Optional[str] = None
     first_model: Optional[str] = None
-    # Per-session fast mode (v81): True asks the leg for its expedited service.
-    # NULL on every pre-v81 row, which runs standard — left uncoalesced so the
+    # Per-session fast mode: True asks the leg for its expedited service.
+    # NULL (never picked) runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.
     fast: Optional[bool] = None
     # Sidepanel mode: 'code' (the full agentic surface), 'chat' (web-only chat)
-    # or 'voice' (an OpenAI Realtime call — v74, ruling VM4). The column is
+    # or 'voice' (an OpenAI Realtime call). The column is
     # nullable and NULL means 'code', so the validator below coalesces — that
     # covers every construction site at once (sessions are handed to FastAPI as
     # raw row dicts through ``response_model``, never built field-by-field).
     # See ``app.core.session_modes`` for why NULL is the code case.
     mode: str = "code"
-    # List-visibility flag (v75): True keeps the session out of the sessions
+    # List-visibility flag: True keeps the session out of the sessions
     # list (wake-word "command" voice sessions are born hidden). The column is
     # nullable and NULL means visible, so the validator below coalesces — same
     # single-point coverage as ``mode`` above.
@@ -470,7 +413,7 @@ class Session(SessionBase):
     device_online: bool = True  # Owning install seen recently (heartbeat)
     is_remote: bool = False  # Owned by another install (not this one)
     controllable: bool = True  # Live send/interrupt available (owner install online; DB-relayed, no base_url)
-    # V2 Q7: transient, derive-on-read (never persisted). True when a session has
+    # Transient, derive-on-read (never persisted). True when a session has
     # a queued turn but NO capable runner is online to execute it — i.e. it is
     # waiting, read-only, until an owning device comes back. Derived by the API
     # enrichment layer via ``placement.resolve_placement`` (the single oracle);
@@ -485,15 +428,14 @@ class Session(SessionBase):
     # response model FastAPI strips it and the board falls back to project_id,
     # rendering the same repo as a separate card per install.
     link_group_id: Optional[str] = None
-    # V2 projects (Phase 3): the origin-keyed project this session belongs to
-    # (install-independent identity) and its origin token. Populated by the API
-    # enrichment layer (unconditional since PR-B). ``origin`` is 1:1 with
+    # The origin-keyed project this session belongs to (install-independent
+    # identity) and its origin token. Populated by the API enrichment layer. ``origin`` is 1:1 with
     # ``link_group_id`` for grouped projects, so the board folds identically
     # whether it groups by ``origin`` or ``link_group_id`` (no regroup flash).
     project_v2_id: Optional[str] = None
     origin: Optional[str] = None
-    # V2 streaming path marker. Forced TRUE on every session (V2 Phase 1
-    # deletion); the model default stays False for unset/legacy construction.
+    # V2 streaming path marker. Forced TRUE on every session; the model default
+    # stays False for unset/legacy construction.
     v2_stream: bool = False
 
     @field_validator("mode", mode="before")
@@ -501,7 +443,7 @@ class Session(SessionBase):
     def _coalesce_mode(cls, value):
         """NULL/empty/unknown ``sessions.mode`` reads as 'code'.
 
-        Every session predating v74 carries NULL, and code sessions keep
+        Every session predating the column carries NULL, and code sessions keep
         carrying NULL, so the coalesce lives here rather than at each of the
         many places a row dict is fed to this response model. Routing through
         ``normalize_session_mode`` also means a value the client has no branch
@@ -514,7 +456,7 @@ class Session(SessionBase):
     def _coalesce_hidden(cls, value):
         """NULL ``sessions.hidden`` reads as False (visible).
 
-        Every session predating v75 carries NULL, and normal sessions keep
+        Every session predating the column carries NULL, and normal sessions keep
         carrying NULL/FALSE, so the coalesce lives here — the same
         single-point coverage as ``_coalesce_mode`` above.
         """
@@ -623,7 +565,7 @@ class QueryOverrides(BaseModel):
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
     effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
     context_window: Optional[int] = Field(None, gt=0)
-    # Fast mode for this turn (v81). True asks the leg for its expedited
+    # Fast mode for this turn. True asks the leg for its expedited
     # service, False explicitly turns it off, None defers to the session row.
     fast: Optional[bool] = None
 
@@ -665,43 +607,6 @@ class QueryResponse(BaseModel):
 
 
 # ============================================================================
-# SSE Event Models
-# ============================================================================
-
-class SSETextEvent(BaseModel):
-    """SSE text content event"""
-    type: str = "text"
-    content: str
-
-
-class SSEToolUseEvent(BaseModel):
-    """SSE tool use event"""
-    type: str = "tool_use"
-    name: str
-    input: Dict[str, Any]
-
-
-class SSEToolResultEvent(BaseModel):
-    """SSE tool result event"""
-    type: str = "tool_result"
-    name: str
-    output: str
-
-
-class SSEDoneEvent(BaseModel):
-    """SSE completion event"""
-    type: str = "done"
-    session_id: str
-    metadata: QueryMetadata
-
-
-class SSEErrorEvent(BaseModel):
-    """SSE error event"""
-    type: str = "error"
-    message: str
-
-
-# ============================================================================
 # System Models
 # ============================================================================
 
@@ -731,6 +636,9 @@ class StatsResponse(BaseModel):
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
+    # Turns whose token counts the harness estimated (provider reported no
+    # usage, or the reply was interrupted). Included in every total above.
+    estimated_queries: int = 0
 
 
 # ============================================================================
@@ -768,12 +676,6 @@ class RewindExecuteResponse(BaseModel):
     checkpoint_index: Optional[int] = None
     restore_option: Optional[int] = None
     error: Optional[str] = None
-
-
-class RewindStatus(BaseModel):
-    """Current rewind status"""
-    has_pending: bool
-    pending_rewind: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -820,6 +722,10 @@ class UsageStats(BaseModel):
     total_cost_usd: float = 0.0
     session_count: int = 0
     query_count: int = 0
+    # How many of ``query_count`` booked harness-estimated token counts. Their
+    # amounts are inside the totals; a non-zero value means the totals are
+    # partly estimates and the panel shows the "estimated" marker.
+    estimated_query_count: int = 0
 
 
 class CostBreakdownItem(BaseModel):
@@ -830,6 +736,7 @@ class CostBreakdownItem(BaseModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     query_count: int = 0
+    estimated_query_count: int = 0
 
 
 class CostBreakdownResponse(BaseModel):
@@ -848,6 +755,7 @@ class UsageTrend(BaseModel):
     tokens_out: int = 0
     cost_usd: float = 0.0
     query_count: int = 0
+    estimated_query_count: int = 0
 
 
 class UsageTrendsResponse(BaseModel):
@@ -868,6 +776,8 @@ class TopSession(BaseModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     created_at: Optional[str] = None
+    # True when any booked turn of the session has estimated token counts.
+    usage_estimated: bool = False
 
 
 class AnalyticsSummaryResponse(BaseModel):
@@ -917,73 +827,13 @@ class Template(TemplateBase):
 
 
 # ============================================================================
-# Webhook Models
-# ============================================================================
-
-class WebhookBase(BaseModel):
-    """Base webhook fields"""
-    url: str = Field(..., min_length=1)
-    events: List[str] = Field(default_factory=list)
-    secret: Optional[str] = None
-
-
-class WebhookCreate(WebhookBase):
-    """Webhook creation request"""
-    pass
-
-
-class WebhookUpdate(BaseModel):
-    """Webhook update request - all fields optional"""
-    url: Optional[str] = Field(None, min_length=1)
-    events: Optional[List[str]] = None
-    secret: Optional[str] = None
-    is_active: Optional[bool] = None
-
-
-class Webhook(WebhookBase):
-    """Full webhook response"""
-    id: str
-    is_active: bool = True
-    created_at: datetime
-    last_triggered_at: Optional[datetime] = None
-    failure_count: int = 0
-
-
-class WebhookEventData(BaseModel):
-    """Data payload within a webhook event"""
-    session_id: Optional[str] = None
-    title: Optional[str] = None
-    profile_id: Optional[str] = None
-    total_cost: Optional[float] = None
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    duration_seconds: Optional[float] = None
-    error_message: Optional[str] = None
-
-
-class WebhookEvent(BaseModel):
-    """Webhook event payload structure"""
-    event: str  # Event type: session.complete, session.error, etc.
-    timestamp: str  # ISO format timestamp
-    data: WebhookEventData
-
-
-class WebhookTestResponse(BaseModel):
-    """Response from testing a webhook"""
-    success: bool
-    status_code: Optional[int] = None
-    response_time_ms: Optional[int] = None
-    error: Optional[str] = None
-
-
-# ============================================================================
 # Agent Export/Import Models
 # ============================================================================
 
 class AgentExportData(BaseModel):
     """Agent configuration data for export.
 
-    Carries only config the fluid harness honors (ruling A12): provider
+    Carries only config the fluid harness honors: provider
     models, max_turns, custom system-prompt content, tool allow/deny lists,
     enabled_agents, ai_tools, memory, include_partial_messages,
     app_config_tools, env. SDK-era fields (thinking_mode, preset prompts,
@@ -991,8 +841,8 @@ class AgentExportData(BaseModel):
     honors it as its scope filter); legacy files are still
     importable via AgentImportData.
 
-    ``model`` / ``permission_mode`` / ``effort`` are no longer part of an
-    agent's identity (v79 — a session carries its own). They round-trip only
+    ``model`` / ``permission_mode`` / ``effort`` are not part of an
+    agent's identity (a session carries its own). They round-trip only
     so an export written by an older build imports without loss, and so the
     built-in "Default AI" agent keeps its internal-generation model.
     """
@@ -1006,9 +856,9 @@ class AgentExportData(BaseModel):
     system_prompt_content: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    # The tool-access mode (ruling T2). Exported so an agent round-trips its
-    # intent rather than having it re-inferred from list emptiness on import;
-    # a file written before T2 carries None and imports by inference.
+    # The tool-access mode. Exported so an agent round-trips its intent rather
+    # than having it re-inferred from list emptiness on import; an older file
+    # carries None and imports by inference.
     tool_selection_mode: Optional[str] = None
     enabled_agents: Optional[List[str]] = None
     agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" (see ProfileConfig)
@@ -1026,7 +876,7 @@ class AgentExportData(BaseModel):
 class AgentImportData(AgentExportData):
     """Legacy-tolerant agent data for the import path.
 
-    Pre-A12 export files carry SDK-era fields the fluid harness ignores. They
+    Older export files carry SDK-era fields the fluid harness ignores. They
     are accepted here so old files still import: a preset-shaped prompt's
     append text is mapped onto the custom prompt content; everything else is
     silently dropped.
@@ -1085,12 +935,6 @@ class GenerationResponseModel(BaseModel):
     generation_type: Optional[str] = Field(None, description="'profile' or 'subagent'")
 
 
-class ClarificationAnswersModel(BaseModel):
-    """User's answers to clarification questions"""
-    description: str = Field(..., min_length=10, max_length=2000, description="Original description")
-    answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
-
-
 class AuditLogEntry(BaseModel):
     """A single audit log entry"""
     id: str
@@ -1109,75 +953,6 @@ class AuditLogResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-# ============================================================================
-# Rate Limit Models
-# ============================================================================
-
-class RateLimitConfigBase(BaseModel):
-    """Base rate limit configuration fields"""
-    requests_per_minute: int = 20
-    requests_per_hour: int = 200
-    requests_per_day: int = 1000
-    concurrent_requests: int = 3
-    priority: int = 0
-    is_unlimited: bool = False
-
-
-class RateLimitConfigCreate(RateLimitConfigBase):
-    """Create a rate limit configuration"""
-    user_id: Optional[str] = None
-    api_key_id: Optional[str] = None
-
-
-class RateLimitConfigUpdate(BaseModel):
-    """Update a rate limit configuration"""
-    requests_per_minute: Optional[int] = None
-    requests_per_hour: Optional[int] = None
-    requests_per_day: Optional[int] = None
-    concurrent_requests: Optional[int] = None
-    priority: Optional[int] = None
-    is_unlimited: Optional[bool] = None
-
-
-class RateLimitConfig(RateLimitConfigBase):
-    """Full rate limit configuration response"""
-    id: str
-    user_id: Optional[str] = None
-    api_key_id: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class RateLimitStatus(BaseModel):
-    """Current rate limit status for a user"""
-    minute_count: int = 0
-    minute_limit: int = 20
-    minute_remaining: int = 20
-    minute_reset: datetime
-    hour_count: int = 0
-    hour_limit: int = 200
-    hour_remaining: int = 200
-    hour_reset: datetime
-    day_count: int = 0
-    day_limit: int = 1000
-    day_remaining: int = 1000
-    day_reset: datetime
-    concurrent_count: int = 0
-    concurrent_limit: int = 3
-    concurrent_remaining: int = 3
-    is_limited: bool = False
-    is_unlimited: bool = False
-    priority: int = 0
-
-
-class QueueStatus(BaseModel):
-    """Queue position and wait time"""
-    position: int = 0
-    estimated_wait_seconds: int = 0
-    total_queued: int = 0
-    is_queued: bool = False
 
 
 # ============================================================================
@@ -1262,15 +1037,13 @@ class HookBase(BaseModel):
     """Base hook fields"""
     name: str = Field(..., min_length=1, max_length=100)
     event: str = Field(..., description="Hook event type")
-    hook_type: str = Field(..., pattern=r'^(bash|webhook|message)$', description="Type: 'bash', 'webhook', or 'message'")
+    hook_type: str = Field(..., pattern=r'^(bash|webhook)$', description="Type: 'bash' or 'webhook'")
     # For bash hooks
     command: Optional[str] = Field(None, description="Shell command to execute")
     timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
     # For webhook hooks
     url: Optional[str] = Field(None, description="Webhook URL to POST to")
     secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
-    # For message hooks
-    message_template: Optional[str] = Field(None, description="Prompt template sent as a message in the active chat")
     # Common
     enabled: bool = True
     tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
@@ -1285,12 +1058,11 @@ class HookUpdate(BaseModel):
     """Hook update request - all fields optional"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     event: Optional[str] = None
-    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook|message)$')
+    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook)$')
     command: Optional[str] = None
     timeout: Optional[int] = Field(None, ge=1000, le=300000)
     url: Optional[str] = None
     secret: Optional[str] = None
-    message_template: Optional[str] = None
     enabled: Optional[bool] = None
     tool_matcher: Optional[str] = None
 
@@ -1357,12 +1129,6 @@ class MobileDeviceRegisterResponse(BaseModel):
     scopes: List[str] = Field(default_factory=list)
 
 
-class MobileDeviceCapabilitiesRequest(BaseModel):
-    """Request to update device capabilities"""
-    device_id: str
-    capabilities: DeviceCapabilities
-
-
 class MobileDevice(BaseModel):
     """Full mobile device response"""
     id: str
@@ -1376,58 +1142,6 @@ class MobileDevice(BaseModel):
     revoked_at: Optional[datetime] = None
     created_at: datetime
     last_seen: Optional[datetime] = None
-
-
-class PendingActionStatus(BaseModel):
-    """Status values for pending actions"""
-    PENDING: str = "pending"
-    APPROVED: str = "approved"
-    REJECTED: str = "rejected"
-    EXPIRED: str = "expired"
-
-
-class PendingAction(BaseModel):
-    """A pending action waiting for mobile confirmation"""
-    id: str
-    device_id: str
-    action_type: str
-    params: Dict[str, Any] = Field(default_factory=dict)
-    security_level: str = "normal"  # normal, high, critical
-    created_at: datetime
-    expires_at: datetime
-    status: str = "pending"
-
-
-class ActionConfirmRequest(BaseModel):
-    """Request to confirm or reject an action"""
-    approved: bool
-    biometric_verified: bool = False
-
-
-class PushTokenRequest(BaseModel):
-    """Request to register FCM push token"""
-    device_id: str
-    fcm_token: str = Field(..., min_length=1)
-
-
-class UnifiedPushEndpointRequest(BaseModel):
-    """Request to register/update a device's UnifiedPush endpoint URL.
-
-    The app gets this URL from its UnifiedPush distributor (e.g. ntfy) and
-    registers it so a self-hosted server can deliver notifications without a
-    shared Firebase project.
-    """
-    device_id: str
-    endpoint: str = Field(..., min_length=1)
-
-
-class TrustedAction(BaseModel):
-    """A trusted action pattern for auto-approval"""
-    id: str
-    device_id: str
-    action_pattern: str
-    auto_approve: bool = True
-    require_preview: bool = False
 
 
 # ============================================================================
@@ -1519,36 +1233,6 @@ VALID_CONNECTOR_EVENTS = [
 ]
 
 
-class ConnectorConfigTelegram(BaseModel):
-    """Telegram-specific connector config"""
-    bot_token: str = Field(..., min_length=1)
-    allowed_chat_ids: Optional[List[str]] = None
-    welcome_message: Optional[str] = None
-
-
-class ConnectorConfigDiscord(BaseModel):
-    """Discord-specific connector config"""
-    bot_token: str = Field(..., min_length=1)
-    guild_ids: Optional[List[str]] = None
-    allowed_channel_ids: Optional[List[str]] = None
-    command_prefix: str = "!"
-
-
-class ConnectorConfigWhatsApp(BaseModel):
-    """WhatsApp Cloud API connector config"""
-    phone_number_id: str = Field(..., min_length=1)
-    access_token: str = Field(..., min_length=1)
-    verify_token: str = Field(..., min_length=1)
-    allowed_phone_numbers: Optional[List[str]] = None
-
-
-class ConnectorConfigWebhook(BaseModel):
-    """Generic webhook connector config (replaces old webhook system)"""
-    url: str = Field(..., min_length=1)
-    secret: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-
-
 class ConnectorBase(BaseModel):
     """Base connector fields for creation/update"""
     name: str = Field(..., min_length=1, max_length=100)
@@ -1630,30 +1314,6 @@ class ConnectorEventLog(BaseModel):
     created_at: datetime
 
 
-class ConnectorTriggerInfo(BaseModel):
-    """Trigger definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    payload_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ConnectorActionInfo(BaseModel):
-    """Action definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ConnectorToolInfo(BaseModel):
-    """AI tool definition from a connector type."""
-    id: str
-    name: str
-    description: str
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
 # ============================================================================
 # Automation Models
 # ============================================================================
@@ -1664,13 +1324,6 @@ class AutomationTriggerType(str, Enum):
     CONNECTOR_EVENT = "connector_event"
     WEBHOOK = "webhook"
     CONNECTOR_TRIGGER = "connector_trigger"
-
-
-class AutomationOutputType(str, Enum):
-    CONNECTOR = "connector"
-    WEBHOOK = "webhook"
-    SESSION = "session"
-    NONE = "none"
 
 
 VALID_AUTOMATION_TRIGGER_TYPES = [t.value for t in AutomationTriggerType]
@@ -1760,6 +1413,9 @@ class Automation(BaseModel):
     requires_approval: bool = False
     created_at: datetime
     updated_at: datetime
+    # Advice returned by create/update, e.g. "use an API key for scheduled
+    # runs" while Claude Code runs on the user's subscription.
+    notices: List[str] = Field(default_factory=list)
 
 
 class AutomationRun(BaseModel):

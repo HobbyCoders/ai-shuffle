@@ -23,13 +23,11 @@ correct rather than merely fast:
 Companion patterns: tests/api/test_chat_ws_offload.py, tests/core/test_turn_manager.py.
 """
 
-import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core import webhook_service
 from app.core.automation_manager import AutomationManager
 from app.core.connectors.base import IncomingMessage
 from app.core.connectors.manager import ConnectorManager
@@ -47,13 +45,6 @@ class _ThreadSpy:
     def __call__(self, *args, **kwargs):
         self.threads.append(threading.get_ident())
         return self._fn(*args, **kwargs)
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — everything blocking must
-    happen somewhere else."""
-    return threading.get_ident()
 
 
 @pytest.fixture
@@ -256,8 +247,7 @@ async def test_dispatch_event_reads_subscribers_off_the_loop(
     conn_manager, mock_db, loop_thread
 ):
     read_spy = _ThreadSpy(lambda event_type: [])
-    with patch.object(database, "get_connectors_for_event", read_spy), \
-         patch("app.core.webhook_service.dispatch_webhook", new_callable=AsyncMock):
+    with patch.object(database, "get_connectors_for_event", read_spy):
         await conn_manager.dispatch_event("session.complete", {})
 
     assert read_spy.threads and loop_thread not in read_spy.threads
@@ -266,8 +256,8 @@ async def test_dispatch_event_reads_subscribers_off_the_loop(
 async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
     conn_manager, mock_db, loop_thread
 ):
-    """The inbound path's five routing reads (connector session, connector row,
-    API user, profile fallback) share ONE hop; the "no session yet → create
+    """The inbound path's routing reads (connector row, API user, connector
+    session) share ONE hop; the "no session yet → create
     one" decision inside it stays atomic. LOOP-AFFINITY SPLIT: the durable turn
     submit stays on the loop, because its scheduler kick needs a running loop
     (see turn_manager.submit_async)."""
@@ -275,8 +265,8 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
         lambda cid, chat: {"id": "cs-1", "session_id": "sess-ai"}
     )
     connector_spy = _ThreadSpy(lambda cid: {"id": cid, "type": "webhook",
-                                            "name": "wh", "api_user_id": None})
-    profiles_spy = _ThreadSpy(lambda: [{"id": "default"}])
+                                            "name": "wh", "api_user_id": "api-1"})
+    api_user_spy = _ThreadSpy(lambda uid: {"id": uid, "profile_ids": ["default"]})
     log_spy = _ThreadSpy(lambda **kw: None)
     submit_threads = []
 
@@ -295,7 +285,7 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
 
     with patch.object(database, "get_connector_session", session_spy), \
          patch.object(database, "get_connector", connector_spy), \
-         patch.object(database, "get_all_profiles", profiles_spy), \
+         patch.object(database, "get_api_user", api_user_spy), \
          patch.object(database, "create_connector_event_log", log_spy), \
          patch.object(database, "update_connector_event_dispatched",
                       lambda cid, success: None), \
@@ -308,7 +298,7 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
                return_value="hi back"):
         await conn_manager.handle_incoming_message(message)
 
-    routing = session_spy.threads + connector_spy.threads + profiles_spy.threads
+    routing = session_spy.threads + connector_spy.threads + api_user_spy.threads
     assert routing, "the routing reads never ran"
     assert loop_thread not in routing
     assert len(set(routing)) == 1, "routing reads were split across hops"
@@ -316,51 +306,6 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
     assert log_spy.threads and loop_thread not in log_spy.threads
     # ...and the turn submit still happened ON the loop.
     assert submit_threads == [loop_thread]
-
-
-# ═══ webhook_service — fan-out ══════════════════════════════════════════════
-
-
-async def test_dispatch_webhook_reads_off_loop_and_delivers_on_the_loop(
-    mock_db, loop_thread
-):
-    """LOOP-AFFINITY SPLIT: the subscriber read moves off-loop, but the
-    per-webhook delivery tasks are ``asyncio.create_task`` and must still be
-    created (and run) on the caller's loop."""
-    read_spy = _ThreadSpy(
-        lambda event_type: [{"id": "wh-1", "url": "https://example.invalid", "secret": None}]
-    )
-    delivered = []
-
-    async def _deliver(webhook, payload, retry=True):
-        delivered.append(threading.get_ident())
-        return True
-
-    with patch.object(database, "get_webhooks_for_event", read_spy), \
-         patch.object(webhook_service, "_deliver_webhook", _deliver):
-        await webhook_service.dispatch_webhook("session.complete", {"session_id": "s"})
-        await asyncio.sleep(0)  # let the delivery task run
-
-    assert read_spy.threads and loop_thread not in read_spy.threads
-    assert delivered == [loop_thread]
-
-
-async def test_deliver_webhook_status_write_is_off_the_loop(mock_db, loop_thread):
-    write_spy = _ThreadSpy(lambda webhook_id, success: None)
-    response = MagicMock(status_code=200, text="ok")
-    client = MagicMock()
-    client.post = AsyncMock(return_value=response)
-
-    with patch.object(database, "update_webhook_triggered", write_spy), \
-         patch("app.core.http_client.get_http_client", return_value=client):
-        ok = await webhook_service._deliver_webhook(
-            {"id": "wh-2", "url": "https://example.invalid", "secret": None},
-            {"event": "test", "data": {}},
-            retry=False,
-        )
-
-    assert ok is True
-    assert write_spy.threads and loop_thread not in write_spy.threads
 
 
 # ═══ hook_executor / worktree_manager ═══════════════════════════════════════

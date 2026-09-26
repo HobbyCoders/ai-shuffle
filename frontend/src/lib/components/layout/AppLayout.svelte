@@ -22,15 +22,15 @@
 	import MainPanel from './MainPanel.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
+	import LicenseBanner from '../LicenseBanner.svelte';
+	import ClaudeReloginBanner from '../ClaudeReloginBanner.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
-		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
-		onOpenPlugins?: () => void;
 		onOpenSpotlight?: () => void;
 	}
 
@@ -38,10 +38,8 @@
 		isAdmin = false,
 		onNewSession,
 		onSettledOpenSession,
-		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
-		onOpenPlugins,
 		onOpenSpotlight
 	}: Props = $props();
 
@@ -121,6 +119,8 @@
 
 <div class="app-shell" class:narrow>
 	<CredentialStorageBanner />
+	<LicenseBanner />
+	<ClaudeReloginBanner />
 
 	<div class="app-body">
 		{#if sidebarFloating}
@@ -155,9 +155,6 @@
 
 		<MainPanel
 			{onOpenSession}
-			{onOpenPlugins}
-			{onNewSession}
-			{onNewSessionForProject}
 			sidebarCollapsed={$sidebarCollapsed}
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>

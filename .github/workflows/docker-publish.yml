@@ -9,6 +9,11 @@ on:
         description: 'Rebuild an existing vX.Y.Z tag using the verification tools from this workflow ref'
         required: false
         type: string
+      promote_latest:
+        description: 'Also move latest, X.Y and X to this release (only for the newest final release)'
+        required: false
+        type: boolean
+        default: false
       no_cache:
         description: 'Build without Docker cache (forces full rebuild)'
         required: false
@@ -20,10 +25,19 @@ on:
         description: 'Immutable release tag to build and verify'
         required: true
         type: string
+      promote_latest:
+        description: 'Move latest, X.Y and X to this release after verification'
+        required: false
+        type: boolean
+        default: false
       no_cache:
         required: false
         type: boolean
         default: false
+    outputs:
+      image:
+        description: 'Private image repository the release was pushed to'
+        value: ${{ jobs.build.outputs.image }}
 
 # Serialize a release tag without cancelling a publish; manual branch rebuilds
 # can still supersede each other. Different release versions do not conflict.
@@ -33,15 +47,19 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ${{ github.repository_owner }}/ai-shuffle-server
 
 jobs:
   build:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     timeout-minutes: 45
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
 
     steps:
       - name: Checkout repository
@@ -71,6 +89,12 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
+          # The release tag is the version source: "0.8.18" on a tag,
+          # "0.8.18-dev.N+g<sha>" on main. Empty (tags not fetched) falls back
+          # to the checked-in app.__version__.
+          echo "app_version=$(python3 "$GITHUB_WORKSPACE/android/ci/resolve-version-name.py" --release-tag "$RELEASE_TAG" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
 
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v2
@@ -88,7 +112,10 @@ jobs:
 
       # Docker requires lowercase image names but github.repository preserves casing
       - name: Lowercase image name
-        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+        id: image
+        run: |
+          echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+          echo "image=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata (tags, labels)
         id: meta
@@ -97,16 +124,17 @@ jobs:
           images: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          # A release always gets its exact version. latest, X.Y and X move
+          # only when the caller promotes a final release (release.yml does);
+          # rebuilding an old tag never drags them backwards. Prereleases
+          # never get X.Y or X (metadata-action skips them).
           tags: |
-            # Tag with 'latest' on main/master branch
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with version on tags (v1.2.3 -> 1.2.3)
-            type=semver,pattern={{version}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with major.minor on tags (v1.2.3 -> 1.2)
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with major on tags (v1.2.3 -> 1)
-            type=semver,pattern={{major}},value=${{ inputs.release_tag || github.ref_name }}
-            # Tag with branch name (only for push events, not PRs)
+            type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
+            type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
+            type=raw,value=latest,enable=${{ inputs.release_tag != '' && inputs.promote_latest && !contains(inputs.release_tag, '-') }}
+            # Manual main builds are the edge channel.
+            type=raw,value=edge,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
             # Tag with git short SHA (simple prefix, works for all events)
             type=raw,value=sha-${{ steps.source.outputs.short_sha }}
@@ -128,6 +156,7 @@ jobs:
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
             GIT_SHA=${{ steps.source.outputs.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+            APP_VERSION=${{ steps.source.outputs.app_version }}
           # Layer caching is automatic via Blacksmith's sticky disk:
           # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
           # runs, so no cache-from/cache-to registry round-trip is needed.

@@ -80,22 +80,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.autocomplete-back-btn {
-  color: var(--primary);
-  font-size: var(--text-xs, 0.6875rem);
-  font-weight: 500;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: var(--space-1, 4px) var(--space-2, 8px);
-  border-radius: var(--radius-sm, calc(var(--radius, 0.75rem) * 0.5));
-  transition: background 80ms ease;
-}
-
-.autocomplete-back-btn:hover {
-  background: color-mix(in oklch, var(--primary) 10%, transparent);
-}
-
 /* ========================================
    Keyboard Hints
    ======================================== */

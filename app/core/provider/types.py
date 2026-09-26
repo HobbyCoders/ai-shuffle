@@ -18,7 +18,7 @@ These dataclasses are the typed equivalent. The migration path is:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -38,15 +38,17 @@ class SessionOptions:
     # Tool configuration
     tools: Optional[list] = None
     # PERMISSION allowlist (SDK vocabulary): entries that may run without
-    # prompting. NOT a tool-surface restriction — see ``tool_allowlist``.
+    # prompting. NOT a tool-surface restriction (see ``tool_allowlist``). Only
+    # the delegated leg reads it, as CLI grants for the app's MCP tools.
     allowed_tools: Optional[list] = None
     disallowed_tools: Optional[list] = None
-    # TOOL-SURFACE restriction (ruling CE12). A non-empty list is the session's
+    # TOOL-SURFACE restriction (CE12). A non-empty list is the session's
     # ENTIRE tool surface: on a native leg it becomes
     # ``NativeLoop(allowed_tools=...)``, so a filtered tool's schema is never
     # sent, ToolSearch will not load it, and calling it errors in-context. None
-    # (the default) means unrestricted. Set today by Task dispatch for a
-    # file/plugin agent whose definition carries a ``tools:`` list.
+    # (the default) means unrestricted. query_options sets it from the agent's
+    # ``allow`` list intersected with a Task-dispatched file/plugin agent's
+    # ``tools:`` list.
     tool_allowlist: Optional[list] = None
 
     # MCP servers: {name: {command, args, env, ...}}
@@ -59,7 +61,7 @@ class SessionOptions:
     thinking: Optional[Any] = None
     effort: Optional[str] = None
 
-    # Per-session fast mode (v81). True asks the leg for its expedited service:
+    # Per-session fast mode. True asks the leg for its expedited service:
     # the delegated CLI gets ``--settings {"fastMode": true}``, the OpenAI
     # Responses native lane gets ``service_tier: priority`` on the request body.
     # The anthropic and openrouter native lanes have no equivalent and ignore
@@ -97,9 +99,6 @@ class SessionOptions:
     # Stderr callback
     stderr: Optional[Any] = None
 
-    # Maximum buffer size
-    max_buffer_size: Optional[int] = None
-
     # User identifier
     user: Optional[str] = None
 
@@ -111,18 +110,6 @@ class SessionOptions:
 
     # Token budget management (SDK 0.1.51+)
     task_budget: Optional[int] = None
-
-    # Session store (SDK 0.1.65+) — PgSessionStore instance or None
-    session_store: Optional[object] = None
-
-    # Session store flush mode (SDK 0.1.65+) — "eager" | None
-    session_store_flush: Optional[str] = None
-
-    # Hook event forwarding (SDK 0.1.81+) — emit HookEventMessage to stream
-    include_hook_events: bool = True
-
-    # Strict MCP config validation (SDK 0.1.81+) — raise on unknown MCP fields
-    strict_mcp_config: bool = False
 
     # Arbitrary extra options (for forward-compatibility with new SDK fields)
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -192,9 +179,9 @@ class PermissionRequestEvent(ProviderEvent):
     fluid HarnessAdapter). The caller responds via
     ``adapter.respond_to_permission(tool_use_id, allow, remember=...)``.
 
-    The Claude Agent SDK path does NOT emit this — it handles permissions
-    out-of-band through the ``can_use_tool`` callback — so this type is additive
-    and only appears on the harness path.
+    When a ``can_use_tool`` callback is wired the adapter routes prompts to it
+    out-of-band instead; on the delegated leg with no callback the adapter
+    answers from the permission mode, so the event is not yielded there either.
     """
     tool_use_id: str
     name: str

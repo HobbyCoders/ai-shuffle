@@ -135,7 +135,54 @@ MEM_ARGS=(
 # --no-sandbox: Chrome's user-namespace sandbox is unavailable under Docker's
 #   default seccomp profile; the container provides isolation.
 # --disable-gpu: render via Chrome's bundled SwiftShader.
-exec "$CHROME_BIN" \
+#
+# Egress proxy: Chromium runs behind browser-mcp's egress-launch.js, a
+# loopback-only proxy on a random port that receives EVERY connection the
+# browser makes (WebSockets and loopback included; the launcher adds
+# --proxy-server and --proxy-bypass-list=<-loopback>). It resolves each host
+# once and connects only to addresses the SSRF policy allows, which closes the
+# WebSocket and DNS-rebinding gaps the CDP request guard cannot. The launcher
+# forwards signals and exits with Chromium's status, so chrome-supervisor sees
+# the same exit codes. No launcher, no browser: we never start Chromium without
+# its proxy.
+EGRESS_ENTRY="${BROWSER_EGRESS_ENTRY:-/opt/browser-mcp/dist/egress-launch.js}"
+if [ ! -f "$EGRESS_ENTRY" ]; then
+    echo "start-chrome: browser egress proxy missing ($EGRESS_ENTRY); refusing to start Chromium without it" >&2
+    exit 1
+fi
+# The proxy enforces the app's base browser policy (loopback default, the
+# worker's deny ports), computed by the app itself so the two cannot drift. If
+# that fails twice, fall back to the strict default: public addresses only.
+# The command's stderr goes to this script's stderr (chrome.log), so the reason
+# is on record, and BROWSER_EGRESS_POLICY_SOURCE makes the launcher label its
+# policy line as the fallback. In the fallback Chromium refuses loopback too,
+# so a preview the agent starts is reported as "blocked by the browser's egress
+# proxy", not as a server that is down.
+APP_ROOT="${AIS_APP_ROOT:-/app}"
+EGRESS_POLICY=""
+EGRESS_POLICY_OK=0
+for attempt in 1 2; do
+    if EGRESS_POLICY="$(cd "$APP_ROOT" && python -m app.core.browser_egress)"; then
+        EGRESS_POLICY_OK=1
+        break
+    fi
+    echo "start-chrome: browser egress policy command failed (attempt $attempt of 2)" >&2
+    if [ "$attempt" -lt 2 ]; then sleep 1; fi
+done
+if [ "$EGRESS_POLICY_OK" = 1 ]; then
+    while IFS='=' read -r key value; do
+        case "$key" in
+            BROWSER_SSRF_ALLOW|BROWSER_SSRF_BLOCK|BROWSER_SSRF_DENY_PORTS|CHROME_CDP_PORT)
+                export "$key=$value" ;;
+        esac
+    done <<< "$EGRESS_POLICY"
+    export BROWSER_EGRESS_POLICY_SOURCE=app
+else
+    echo "start-chrome: could not compute the browser egress policy; FALLBACK: allowing public addresses only (loopback and private addresses are refused)" >&2
+    unset BROWSER_SSRF_ALLOW
+    export BROWSER_EGRESS_POLICY_SOURCE=fallback
+fi
+exec node "$EGRESS_ENTRY" -- "$CHROME_BIN" \
     --ozone-platform=headless \
     --no-sandbox \
     --disable-gpu \

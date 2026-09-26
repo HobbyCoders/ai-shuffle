@@ -166,11 +166,11 @@ async def test_user_message_fanout_does_not_block_on_stalled_consumer(engine):
 
 @pytest.mark.asyncio
 async def test_usage_snapshot_fanout_does_not_block_on_stalled_consumer(engine):
-    """broadcast_usage_snapshot fans out cluster-wide; it must not await sockets."""
+    """broadcast_usage_snapshot fans out to every owner socket; it must not await sockets."""
     hung = _HungWebSocket()
     healthy = _HealthyWebSocket()
-    await engine.register_user_device("u1", "dev-hung", hung)
-    await engine.register_user_device("u2", "dev-ok", healthy)
+    await engine.register_user_device("admin", "dev-hung", hung)
+    await engine.register_user_device("paired:p1", "dev-ok", healthy)
 
     started = time.perf_counter()
     await engine.broadcast_usage_snapshot({"windows": [], "generation": 1})
@@ -179,6 +179,26 @@ async def test_usage_snapshot_fanout_does_not_block_on_stalled_consumer(engine):
     assert elapsed < 0.5
     assert await _until(lambda: len(healthy.sent) == 1)
     assert json.loads(healthy.sent[0])["type"] == "usage_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_usage_snapshot_reaches_owner_sockets_only(engine):
+    """R10-5: the snapshot is the owner's Claude windows and install names;
+    REST refuses it to an API key, so a key's socket must not get it either."""
+    owner = _HealthyWebSocket()
+    paired = _HealthyWebSocket()
+    key = _HealthyWebSocket()
+    await engine.register_user_device("admin", "dev-owner", owner)
+    await engine.register_user_device("paired:p1", "dev-phone", paired)
+    await engine.register_user_device("key-1", "dev-key", key)
+
+    await engine.broadcast_usage_snapshot({"windows": [{"id": "five_hour"}], "generation": 2})
+
+    assert await _until(lambda: len(owner.sent) == 1 and len(paired.sent) == 1)
+    assert json.loads(paired.sent[0])["type"] == "usage_snapshot"
+    # The owner frames were delivered; the key's socket saw nothing.
+    await asyncio.sleep(0.05)
+    assert key.sent == []
 
 
 # ─── ordering ───────────────────────────────────────────────────────────────

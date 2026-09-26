@@ -17,7 +17,7 @@ from app.core.models import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_admin, get_api_user_from_request
+from app.api.auth import require_admin
 from app.api.common import check_project_access
 
 router = APIRouter(prefix="/api/v1/hooks", tags=["Hooks"])
@@ -44,11 +44,6 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Webhook hooks must have a URL"
-            )
-        if hook_type == 'message' and not hook_data.message_template:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Message hooks must have a message template"
             )
 
 
@@ -95,7 +90,6 @@ async def create_app_hook(
         secret=hook_data.secret,
         enabled=hook_data.enabled,
         tool_matcher=hook_data.tool_matcher,
-        message_template=hook_data.message_template
     )
     return hook
 
@@ -166,7 +160,6 @@ async def create_project_hook(
             secret=hook_data.secret,
             enabled=hook_data.enabled,
             tool_matcher=hook_data.tool_matcher,
-            message_template=hook_data.message_template
         )
 
     return await run_sync(_create)
@@ -235,7 +228,6 @@ async def update_hook(
             secret=hook_data.secret,
             enabled=hook_data.enabled,
             tool_matcher=hook_data.tool_matcher,
-            message_template=hook_data.message_template
         )
 
     return await run_sync(_update)

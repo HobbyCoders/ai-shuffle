@@ -80,3 +80,19 @@ test('cleanup error has no destructive action', async () => {
     p.dialog.querySelector('.quit-cancel').dispatchEvent(new Event('click'));
     assert.equal(await pending, false);
 });
+
+test('NC-11: a repeated cleanup error offers Quit Anyway, and only that button confirms', async () => {
+    const p = page();
+    const pending = p.show({error: true, offerForce: true});
+    const confirm = p.dialog.querySelector('.quit-confirm');
+    assert.equal(confirm.isConnected, true);
+    assert.equal(confirm.textContent, 'Quit Anyway');
+    assert.match(p.dialog.querySelector('p').textContent, /may be interrupted/);
+    assert.equal(p.document.activeElement, p.dialog.querySelector('.quit-cancel'), 'Keep Open stays the default');
+    confirm.dispatchEvent(new Event('click'));
+    assert.equal(await pending, true);
+    const q = page();
+    const kept = q.show({error: true, offerForce: true});
+    q.dialog.close();
+    assert.equal(await kept, false, 'Escape never quits');
+});

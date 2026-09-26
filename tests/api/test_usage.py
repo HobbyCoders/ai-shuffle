@@ -64,6 +64,24 @@ class TestUsageLimitsEndpoint:
         # New cluster fields present.
         assert body["snapshots"] == []
         assert body["self_instance_id"] == "local-1"
+        # Windows persisted before per-window dating carry no observed_at.
+        assert body["windows"][0]["observed_at"] is None
+
+    def test_windows_carry_their_own_observation_time(self):
+        snapshot = {
+            "windows": [{"type": "five_hour", "utilization": 12.0, "observed_at": 1_700_000_000_000}],
+            "fetched_at": 1_700_000_100.0, "available": True, "generation": 1,
+            "snapshots": [{"instance_id": "local-1", "windows": [
+                {"type": "seven_day", "utilization": 50.0, "observed_at": 1_600_000_000_000}],
+                "fetched_at": 1_700_000_100_000, "available": True}],
+            "self_instance_id": "local-1",
+        }
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=snapshot)
+            body = _client().get("/api/v1/usage/limits").json()
+        assert body["windows"][0]["observed_at"] == 1_700_000_000_000
+        assert body["snapshots"][0]["windows"][0]["observed_at"] == 1_600_000_000_000
+
     def test_accepts_int_epoch_resets_at(self):
         """Newer Claude CLI usage payloads carry ``resets_at`` as int epoch
         seconds; cross-install rows persisted that way can't be retro-fixed, so
@@ -133,7 +151,7 @@ class TestUsageLimitsEndpoint:
             "provider_refreshing": False, "attempted_at": None, "last_error_kind": None,
             "claude_source": body["claude_source"],
         }
-        assert body["claude_source"]["support"] == "unofficial_subscription"
+        assert body["claude_source"]["support"] == "response_metadata"
         assert body["claude_source"]["dashboard_url"] == "https://claude.ai/settings/usage"
 
     def test_cluster_join_and_unknown_install_excluded(self):
@@ -170,16 +188,10 @@ class TestUsageLimitsEndpoint:
             )
             # A second install: registry entry + snapshot → joins device_name/online.
             db.register_install("worker-1", "Worker", "http://w:1455", "docker", "1.0", {})
-            db.create_claude_account(
-                account_id="acct-w", name="Worker Acct", credentials="enc:x",
-                credential_fingerprint=None, expires_at=None, has_refresh_token=True,
-                subscription_type="max",
-            )
             db.upsert_usage_snapshot(
                 "worker-1",
                 windows=[{"type": "five_hour", "utilization": 88.0, "resets_at": "r"}],
                 available=True, generation=2, fetched_at=222,
-                account_id="acct-w", account_email="w@example.com", account_name="Worker Acct",
             )
             # An install with NO registry row → must be excluded.
             db.upsert_usage_snapshot(
@@ -210,13 +222,9 @@ class TestUsageLimitsEndpoint:
         worker = by_id["worker-1"]
         assert worker["device_name"] == "Worker"
         assert worker["online"] is True
-        assert worker["account_email"] == "w@example.com"
-        assert worker["account_name"] == "Worker Acct"
-        # The account's subscription tier survives the response model (the
-        # popover's Claude header reads it per install).
-        assert worker["plan_type"] == "max"
-        # Self has no account stamped on its row → null, never missing.
-        assert by_id[iid]["plan_type"] is None
+        # No Claude account identity or plan travels with a snapshot.
+        for entry in (worker, by_id[iid]):
+            assert not {"account_id", "account_email", "account_name", "plan_type"} & entry.keys()
         assert worker["windows"][0]["utilization"] == 88.0
         # Unknown install (no registry row) excluded.
         assert "ghost-9" not in by_id
@@ -372,7 +380,9 @@ class TestUsageLimitsProviders:
         assert router["last_success_at"] == router["last_attempt_at"] == fetched
         assert router["source_info"]["measure"] == "reported_spend"
         assert router["source_info"]["scope"] == "api_key"
-        assert body["claude_source"]["id"] == "claude_oauth_usage"
+        assert body["claude_source"]["id"] == "claude_rate_limit_events"
+        assert body["claude_source"]["collection"] == "passive"
+        assert body["claude_source"]["dashboard_url"] == "https://claude.ai/settings/usage"
 
     def test_refresh_returns_cached_data_while_provider_work_is_pending(self, cached_provider_poll):
         cached_provider_poll.refreshing = True
@@ -381,7 +391,7 @@ class TestUsageLimitsProviders:
             response = _client().get("/api/v1/usage/limits?refresh=true")
         assert response.status_code == 200
         assert response.json()["provider_refreshing"] is True
-        cached_provider_poll.request_refresh.assert_called_once_with(force=True)
+        cached_provider_poll.request_refresh.assert_called_once_with(force=True, cooldown=30)
         cached_provider_poll.poll_once.assert_not_called()
 
     @pytest.mark.parametrize("balance", [None, 0.0, 12.5])
@@ -692,9 +702,10 @@ class TestUsageLimitsProviders:
         providers = resp.json()["providers"]
         assert providers == []
 
-    def test_provider_load_exception_yields_empty_providers_with_200(self):
-        """A DB hiccup inside _load_provider_usage degrades to providers: [] and
-        must NOT turn the endpoint into an error or drop Claude fields."""
+    def test_provider_load_exception_yields_null_providers_with_200(self):
+        """A DB hiccup inside _load_provider_usage degrades to providers: null
+        (clients keep their last-good rows instead of blanking) and must NOT
+        turn the endpoint into an error or drop Claude fields."""
         with patch("app.api.usage.usage_limits_monitor") as mon, patch(
             "app.db.database.get_all_provider_usage_snapshots",
             side_effect=RuntimeError("db down"),
@@ -705,7 +716,7 @@ class TestUsageLimitsProviders:
         assert resp.status_code == 200
         body = resp.json()
         _assert_claude_fields_unchanged(body)
-        assert body["providers"] == []
+        assert body["providers"] is None
 
 
 class TestCachedUsageToolSnapshot:
@@ -731,3 +742,59 @@ class TestCachedUsageToolSnapshot:
         assert payload["available"] is True
         assert payload["windows"][0]["utilization"] == 25
         monitor.get_cluster_snapshot.assert_not_awaited()
+
+
+class TestApiKeyUsage:
+    """Usage rows are the owner's account data: an API key reads none of them."""
+
+    _OWNER = {"available": True, "windows": [{"type": "five_hour", "utilization": 40}],
+              "snapshots": [], "providers": [{"provider_id": "owner-or", "credits": {"balance": 9}}]}
+
+    def test_rest_key_gets_an_empty_snapshot_and_starts_no_refresh(self, cached_provider_poll):
+        from app.api import usage
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_auth] = lambda: "api_key:u-key"
+        with patch.object(usage, "usage_limits_monitor") as mon, patch.object(
+            usage, "_load_provider_usage", new=AsyncMock(return_value=[])
+        ) as load:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(self._OWNER))
+            body = TestClient(app).get("/api/v1/usage/limits?refresh=true").json()
+        assert body["available"] is False and body["windows"] == [] and body["providers"] == []
+        cached_provider_poll.request_refresh.assert_not_called()
+        mon.get_cluster_snapshot.assert_not_called()
+        load.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("row", "owner"), [
+        ({"id": "s", "api_user_id": None}, True),
+        ({"id": "s", "api_user_id": "u-key"}, False),
+        (None, False),  # unknown session: fail closed
+    ])
+    async def test_get_usage_host_snapshot_follows_session_ownership(self, row, owner):
+        from app.api import usage
+
+        with patch("app.db.database.get_session", return_value=row), patch.object(
+            usage, "get_cached_usage_payload", new=AsyncMock(return_value=dict(self._OWNER))
+        ) as cached:
+            payload = await usage.get_session_usage_payload("s")
+        if owner:
+            assert payload == self._OWNER
+        else:
+            cached.assert_not_awaited()
+            # [] (not None): None makes Fluid replay the last rows it read.
+            assert payload["providers"] == [] and payload["windows"] == [] and payload["snapshots"] == []
+            assert payload["reason"] == usage.API_KEY_USAGE_REASON
+
+    @pytest.mark.asyncio
+    async def test_unresolved_session_is_refused(self):
+        from app.api import usage
+
+        def boom():
+            raise RuntimeError("no id")
+
+        with patch.object(usage, "get_cached_usage_payload", new=AsyncMock()) as cached:
+            assert (await usage.session_usage_callback(lambda: None)())["denied"] is True
+            assert (await usage.session_usage_callback(boom)())["denied"] is True
+        cached.assert_not_awaited()

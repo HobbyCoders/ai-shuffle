@@ -8,12 +8,10 @@ Login Attempts, Account Lockouts, and API Key Sessions.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
-from app.core.config import settings
 
 
 # ============================================================================
@@ -53,28 +51,6 @@ class AuthSessionRow(TypedDict):
     created_at: str
 
 
-class AccountLockoutRow(TypedDict):
-    """Full account lockout row from SELECT * FROM account_lockouts."""
-    id: int
-    ip_address: Optional[str]
-    username: Optional[str]
-    locked_until: str
-    reason: Optional[str]
-    created_at: str
-
-
-class ApiKeySessionRow(TypedDict):
-    """API key session with joined api_user fields."""
-    token: str
-    api_user_id: str
-    expires_at: str
-    created_at: str
-    user_name: str
-    project_id: Optional[str]
-    is_active: bool
-    profile_ids: Optional[List[str]]
-
-
 # ============================================================================
 # Admin Operations
 # ============================================================================
@@ -101,17 +77,6 @@ def create_admin(username: str, password_hash: str) -> AdminCreateResult:
             (username, password_hash)
         )
         return {"id": 1, "username": username}
-
-
-def update_admin_password(password_hash: str) -> bool:
-    """Update admin password"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE admin SET password_hash = %s WHERE id = 1",
-            (password_hash,)
-        )
-        return cursor.rowcount > 0
 
 
 # ============================================================================
@@ -214,9 +179,6 @@ def create_auth_session(token: str, expires_at: datetime) -> AuthSessionRow:
         return {"token": token, "expires_at": expires_at}
 
 
-_auth_session_empty_logged = False  # Rate-limit the verbose empty-table diagnostic
-
-
 def get_auth_session(token: str) -> Optional[AuthSessionRow]:
     """Legacy password sessions never qualify; only console-issued recovery."""
     from app.core.owner_auth import local_session
@@ -254,105 +216,15 @@ def clear_all_sessions():
 # Login Attempt Operations
 # ============================================================================
 
-def record_login_attempt(ip_address: str, username: Optional[str], success: bool):
-    """Record a login attempt for rate limiting"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO login_attempts (ip_address, username, success, created_at)
-               VALUES (%s, %s, %s, %s)""",
-            (ip_address, username, success, datetime.now(timezone.utc).isoformat())
-        )
-
-
-def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
-    """Get the number of failed login attempts from an IP in the time window"""
-    from datetime import timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT COUNT(*) as count FROM login_attempts
-               WHERE ip_address = %s AND success = FALSE AND created_at > %s""",
-            (ip_address, cutoff)
-        )
-        row = cursor.fetchone()
-        return row["count"]
-
-
-def get_failed_attempts_for_username(username: str, window_minutes: int = 15) -> int:
-    """Get the number of failed login attempts for a username in the time window"""
-    from datetime import timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT COUNT(*) as count FROM login_attempts
-               WHERE username = %s AND success = FALSE AND created_at > %s""",
-            (username, cutoff)
-        )
-        row = cursor.fetchone()
-        return row["count"]
-
 
 # ============================================================================
 # Account Lockout Operations
 # ============================================================================
 
-def create_lockout(ip_address: Optional[str], username: Optional[str],
-                   duration_minutes: int, reason: str):
-    """Create a lockout for an IP or username"""
-    from datetime import timedelta
-    locked_until = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (ip_address, username, locked_until, reason, datetime.now(timezone.utc).isoformat())
-        )
-
-
-def is_ip_locked(ip_address: str) -> Optional[AccountLockoutRow]:
-    """Check if an IP address is currently locked out"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT * FROM account_lockouts
-               WHERE ip_address = %s AND locked_until > %s
-               ORDER BY locked_until DESC LIMIT 1""",
-            (ip_address, now)
-        )
-        return row_to_dict(cursor.fetchone())
-
-
-def is_username_locked(username: str) -> Optional[AccountLockoutRow]:
-    """Check if a username is currently locked out"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT * FROM account_lockouts
-               WHERE username = %s AND locked_until > %s
-               ORDER BY locked_until DESC LIMIT 1""",
-            (username, now)
-        )
-        return row_to_dict(cursor.fetchone())
-
 
 # ============================================================================
 # API Key Session Operations
 # ============================================================================
-
-def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
-    """Get profile IDs for an API user from junction table"""
-    cursor.execute(
-        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
-        (user_id,)
-    )
-    return [row["profile_id"] for row in cursor.fetchall()]
-
 
 def cleanup_expired_sessions() -> dict:
     """Remove expired auth sessions, API key sessions, login attempts, and lockouts.
@@ -395,8 +267,3 @@ def cleanup_expired_sessions() -> dict:
         logger.debug("Session cleanup: nothing to remove")
 
     return results
-
-
-def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
-    """Human web sessions for integration users are retired; use scoped API keys."""
-    return None

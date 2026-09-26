@@ -15,12 +15,13 @@
  */
 import { app, BrowserWindow, nativeTheme, shell } from 'electron';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { attachNavigationPolicy } from './navigation';
 import { WindowStateStore } from './state';
 import { managedContext } from './managed-context';
 
 export const PARTITION = 'persist:shuffle';
-export const TITLE_BAR_HEIGHT = 52;
+const TITLE_BAR_HEIGHT = 52;
 
 export interface TitleBarTheme {
 	background: string;
@@ -57,14 +58,32 @@ export class MainWindow {
 		return this.page;
 	}
 
+	/** The bundled status page, the only file the main window may show. */
+	get bundledPagePath(): string {
+		return path.join(app.getAppPath(), 'src/pages/worker.html');
+	}
+
+	/** The same page as a file URL, for comparing against frame and navigation URLs. */
+	get bundledPageUrl(): string {
+		return pathToFileURL(this.bundledPagePath).href;
+	}
+
 	isOwnSender(webContentsId: number): boolean {
 		return this.browserWindow?.webContents.id === webContentsId;
 	}
 
-	async ensure(): Promise<BrowserWindow> {
-		const existing = this.browserWindow;
-		if (existing) return existing;
+	private creating: Promise<BrowserWindow> | null = null;
 
+	ensure(): Promise<BrowserWindow> {
+		const existing = this.browserWindow;
+		if (existing) return Promise.resolve(existing);
+		// A second caller while the saved bounds load (a dock click during the
+		// first open) shares this window instead of creating an untracked one.
+		this.creating ??= this.create().finally(() => { this.creating = null; });
+		return this.creating;
+	}
+
+	private async create(): Promise<BrowserWindow> {
 		const state = await this.stateStore.load();
 		const initialTheme = nativeTheme.shouldUseDarkColors ? DARK_TITLE_BAR : LIGHT_TITLE_BAR;
 		const isMac = process.platform === 'darwin';
@@ -106,7 +125,8 @@ export class MainWindow {
 		attachNavigationPolicy(
 			win,
 			() => this.currentWorkerUrl,
-			(message) => this.onLoadFailure(message)
+			(message) => this.onLoadFailure(message),
+			this.bundledPageUrl
 		);
 
 		win.once('ready-to-show', () => {
@@ -164,7 +184,7 @@ export class MainWindow {
 	async showPage(mode: PageMode, query: Record<string, string> = {}): Promise<void> {
 		const win = await this.ensure();
 		this.page = mode;
-		await win.loadFile(path.join(app.getAppPath(), 'src/pages/worker.html'), { query: { mode, ...query } }).catch(() => {
+		await win.loadFile(this.bundledPagePath, { query: { mode, ...query } }).catch(() => {
 			/* The window is closing, or a newer navigation replaced this one. */
 		});
 	}

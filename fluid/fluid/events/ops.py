@@ -40,8 +40,10 @@ class UserTurn(Op):
 class Resume(Op):
     """Run the agent loop again from the session head without appending a
     user node. Valid only when the head is a user-role node the model has
-    not answered yet (a text prompt or tool results); otherwise the engine
-    ends the turn with an ErrorEvent saying there is nothing to resume."""
+    not answered yet (a text prompt or tool results), or a partial reply to
+    one that a provider error cut off (marked ``interrupted``); otherwise the
+    engine ends the turn with an ErrorEvent saying there is nothing to
+    resume."""
 
     source: str = "user"  # copied onto TurnStarted, as on UserTurn
 
@@ -116,7 +118,7 @@ class AgentMessage(Op):
     wake: bool = True
     # A receiver that is parked on background tasks (a parent waiting for
     # its subagents) queues an ordinary message until its next wake instead
-    # of waking for it, avoiding needless billed turns.
+    # of waking for it, since such a wake costs a model call for nothing.
     # ``urgent`` skips the hold: the receiver wakes, or with wake=False the
     # submit raises so the host can schedule the wake itself.
     urgent: bool = False

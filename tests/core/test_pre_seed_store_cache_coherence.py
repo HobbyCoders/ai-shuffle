@@ -33,42 +33,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.core import jsonl_parser as jp
-
-
-def setup_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def teardown_function(_func):
-    jp.invalidate_parse_cache()
-
-
-def _entries(pairs):
-    """Build minimal SDK user/assistant entries from (user_text, asst_text) pairs."""
-    out = []
-    for i, (u, a) in enumerate(pairs):
-        out.append(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": u},
-                "uuid": f"u{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2:02d}Z",
-            }
-        )
-        out.append(
-            {
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": a}],
-                    "usage": {"input_tokens": 5, "output_tokens": 3},
-                    "model": "claude-x",
-                },
-                "uuid": f"a{i}",
-                "timestamp": f"2024-01-01T00:00:{i * 2 + 1:02d}Z",
-            }
-        )
-    return out
+from tests.core.jsonl_cache_helpers import sdk_entries, setup_function, teardown_function  # noqa: F401  (module hooks)
 
 
 def _counting_loader(entries):
@@ -128,8 +93,8 @@ def _projects_empty():
 def test_pre_seed_refreshes_store_parse_cache_with_jsonl():
     """The post-turn pre-seed must overwrite a store cache primed pre-turn."""
     sid = "coherence-sess-1"
-    pre = _entries([("Hi", "Hello")])  # 1 turn  -> 2 messages
-    post = _entries([("Hi", "Hello"), ("Bye", "Goodbye")])  # 2 turns -> 4 messages
+    pre = sdk_entries([("Hi", "Hello")])  # 1 turn  -> 2 messages
+    post = sdk_entries([("Hi", "Hello"), ("Bye", "Goodbye")])  # 2 turns -> 4 messages
 
     # Canonical post-turn messages, exactly as the live store hands them to
     # pre_seed_parse_cache (clean parse, no caching side effects).
@@ -174,7 +139,7 @@ def test_pre_seed_refreshes_store_parse_cache_with_jsonl():
 def test_pre_seed_seeds_store_cache_without_jsonl():
     """postgres_only machines may have no local JSONL — seed the store cache anyway."""
     sid = "coherence-sess-2"
-    msgs_loader, _ = _counting_loader(_entries([("Q", "A")]))
+    msgs_loader, _ = _counting_loader(sdk_entries([("Q", "A")]))
     msgs, usage = jp.parse_session_history_from_store(
         "tmp-parse-only-2", "/workspace", msgs_loader, use_cache=False
     )
@@ -190,7 +155,7 @@ def test_pre_seed_seeds_store_cache_without_jsonl():
 
     # A subsequent read hits the seeded store cache; a sentinel loader carrying
     # DIFFERENT data must not be consulted.
-    sentinel_loader, sentinel_calls = _counting_loader(_entries([("X", "SENTINEL")]))
+    sentinel_loader, sentinel_calls = _counting_loader(sdk_entries([("X", "SENTINEL")]))
     served, _ = jp.parse_session_history_from_store(
         sid, "/workspace", sentinel_loader, use_cache=True,
         store_version_loader=version_loader,

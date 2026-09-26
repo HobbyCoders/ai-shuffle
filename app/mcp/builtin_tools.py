@@ -2,11 +2,11 @@
 Claude Code builtin tools MCP server — adapts harness-level tools for AI Shuffle.
 
 Claude Code CLI ships several "builtin" tools that normally require harness
-cooperation (ScheduleWakeup, Monitor, CronCreate, EnterWorktree, etc). When
-running under the Claude Agent SDK those tools don't exist natively, so we
-expose equivalent implementations as MCP tools that bridge to AI Shuffle's
+cooperation (ScheduleWakeup, Monitor, CronCreate, EnterWorktree, etc). The app
+exposes its own implementations as MCP tools that bridge to AI Shuffle's
 existing infrastructure (session pool, worktree manager, automation manager,
-push notification service).
+push notification service); on the delegated leg the CLI's own copies of the
+overlapping tools are disallowed (``harness_adapter.DELEGATED_BANNED_TOOLS``).
 
 Tools are registered per-session so that session-scoped actions
 (ScheduleWakeup firing a new prompt, EnterWorktree tying a worktree to the
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a successful tool result for the SDK MCP envelope.
+    """Format a successful tool result for the MCP tool-result envelope.
 
     Uses ``_json_default`` so DB-sourced datetime/date values (e.g. an
     automation's ``last_run_at``) ISO-normalize instead of crashing the tool
@@ -66,12 +66,10 @@ def _monitor_description() -> str:
     """Monitor's description on the DELEGATED (Claude Code CLI) leg.
 
     The native leg splices fluid's park doctrine into Monitor's description;
-    this copy carried none of it and read as a tool for dev servers ("a server
-    started here keeps running…"). The audited consequence: an Opus session on
-    this lane never called Monitor once and spent 26.7 of its 45 minutes in
-    blocking Bash sleep-polls, one of which looped for ten minutes and returned
-    nothing. So the trigger is stated outright — anything expected to outlast a
-    Bash call — and the doctrine comes from fluid's own fragment.
+    this copy states it too, because a description that reads as a tool for
+    dev servers leaves models sleep-polling in blocking Bash calls instead. So
+    the trigger is stated outright — anything expected to outlast a Bash call —
+    and the doctrine comes from fluid's own fragment.
     """
     return (
         "Run a long-running shell command in the background and be woken when "
@@ -126,10 +124,9 @@ def _running_task_rows(session_id: Optional[str]) -> List[Dict[str, Any]]:
 def _task_not_found(tid: str, session_id: Optional[str]) -> Dict[str, Any]:
     """The "task not found" reply, naming what IS running.
 
-    Round-9 finding F6: after a compaction dropped the Monitor receipt, models
-    invented eight-hex ids for TaskStop/TaskGet five times and got a bare
-    "task not found" each time, then spent a TaskList call to learn the real
-    ones. The candidates ride the error itself.
+    After a compaction drops the Monitor receipt, models invent task ids for
+    TaskStop/TaskGet; a bare "task not found" costs them a TaskList call to
+    learn the real ones. The candidates ride the error itself.
     """
     rows = _running_task_rows(session_id)
     if rows:
@@ -144,7 +141,7 @@ def _task_not_found(tid: str, session_id: Optional[str]) -> Dict[str, Any]:
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
-    """Format an error tool result for the SDK MCP envelope."""
+    """Format an error tool result for the MCP tool-result envelope."""
     import json as _json
     return {
         "content": [{
@@ -163,9 +160,9 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 _TASK_OUTPUT_DEFAULT_LINES = 150
 
 #: Prepended to a TaskList/TaskGet result that carries no news. Polling these
-#: tools is the failure mode they invite: an audited parent called TaskList
-#: three times and then re-did its own child's work. Completions wake the
-#: session, so a result where everything is still running has nothing in it.
+#: tools is the failure mode they invite (a parent that polls tends to redo its
+#: own child's work). Completions wake the session, so a result where
+#: everything is still running has nothing in it.
 _PARK_NUDGE = "all tasks still running — park; you will be woken on completion."
 
 #: Attached when the task belongs to a worker this session dispatched. It is
@@ -177,8 +174,11 @@ _WORKER_TASK_SCOPE_NOTE = (
 )
 
 
-# Bound GetAppErrors output on the server, including repeated stack traces and the serialized envelope. Tool-
-# description guidance alone cannot guarantee the response size.
+# ── GetAppErrors output bounds ────────────────────────────────────────────────
+#
+# An uncapped call can return enough repeated stack traces to fill a large
+# share of the model's context. The caps below are server-side on purpose: the
+# tool description can ask for restraint, but only the server can guarantee it.
 _APP_ERRORS_MAX_LIMIT = 50
 #: Whole-payload ceiling. Entries are emitted until it is reached.
 _APP_ERRORS_MAX_CHARS = 20_000
@@ -198,9 +198,9 @@ _APP_ERROR_LEVELS = {
 #
 # The ring buffer behind ``GET /api/v1/logs`` holds ~5000 formatted lines. The
 # endpoint is admin-cookie-only, which a Bearer key does not satisfy, so an
-# audited session that needed INFO logs spent user round-trips and needless money
-# driving a browser through a Cloudflare login to read them. Same buffer, same
-# filters, in-process — with the same server-side bounds GetAppErrors uses,
+# agent could otherwise read INFO logs only by driving a browser through a
+# login. Same buffer, same filters, in-process — with the same server-side
+# bounds GetAppErrors uses,
 # because a full-text log is the easiest way there is to fill a context window.
 _APP_LOGS_DEFAULT_LIMIT = 50
 _APP_LOGS_MAX_LIMIT = 300
@@ -329,22 +329,18 @@ def _all_still_running(tasks: Any) -> bool:
 def _agent_report_fields(task_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """``report_head``/``report_path``/``report_chars`` for a finished worker.
 
-    The retrieval seam TaskGet was missing. A background Task worker finishes
-    long after the call that launched it returned, so its report reaches the
-    parent only through this record — and until now TaskGet answered with
-    id/status/summary and nothing else. The audited parent guessed the sync
-    path, found no file (background never wrote one), searched the filesystem,
-    and redid half an hour of its child's research.
+    TaskGet's retrieval seam. A background Task worker finishes long after the
+    call that launched it returned, so its report reaches the parent only
+    through this record; without these fields a parent would have to guess
+    where the report lives, or redo its child's work.
 
     The stored path is preferred; ``final_turn_outcome`` is the fallback for
     workers that completed BEFORE the path was recorded. Never raises — a
     failure here degrades TaskGet to what it already returned.
 
     ``report_path`` is ALWAYS in the returned dict, ``None`` when there is no
-    readable file. It used to appear only when the file read succeeded, so a
-    report whose worktree had been removed came back with ``report_head`` and
-    no path at all — and the caller's ``j['report_path']`` raised a KeyError
-    that aborted its whole code cell.
+    readable file (for example, a removed worktree), so a caller's
+    ``j['report_path']`` never raises a KeyError.
     """
     fields: Dict[str, Any] = {"report_path": None}
     try:
@@ -443,10 +439,9 @@ _BACKGROUND_LINE_LIMIT = 5000  # avoid unbounded growth
 #: How much the output reader pulls off the pipe per read. Chunked on purpose:
 #: ``StreamReader.readline()`` raises ``ValueError`` (from
 #: ``LimitOverrunError``) on a line longer than its 64 KiB limit AND discards
-#: the buffered chunk, which killed the reader outright — a live production
-#: occurrence, after which the task's output stalled while its process kept
-#: running and the task looked stuck. Reading chunks and splitting lines here
-#: has no such limit.
+#: the buffered chunk, which would kill the reader outright: the task's output
+#: stalls while its process keeps running and the task looks stuck. Reading
+#: chunks and splitting lines here has no such limit.
 _READ_CHUNK_BYTES = 64 * 1024
 
 #: Longest single line kept intact. A minified bundle, a one-line JSON dump or
@@ -514,13 +509,10 @@ def _resolve_task_scope(
     at any depth) or ``"foreign"``; ``None`` when the id is unknown here.
 
     The leak this closes: ``_background_tasks`` is a process-global dict, and
-    both task tools read it with no session check. An audited parent asked
-    ``TaskGet`` about a task id its WORKER had named, got another session's
-    live shell back — with "all tasks still running — park; you will be woken
-    on completion" attached — parked, was never woken (it was subscribed to
-    nothing), and on its own unrelated wake found the task reaped and re-ran
-    the build by hand. Reading a worker's task is legitimate; being told you
-    will be woken by it is not.
+    a caller could otherwise read another session's live shell and be told to
+    "park; you will be woken on completion" by a task whose completion wakes
+    someone else. Reading a worker's task is legitimate; being told you will be
+    woken by it is not.
     """
     shell = _background_tasks.get(task_id)
     owner = shell.session_id if shell is not None else None
@@ -555,7 +547,7 @@ def _sessions_holding_task(task_id: str) -> List[str]:
 
 
 def _foreign_task_error(task_id: str, owner_session_id: Optional[str]) -> Dict[str, Any]:
-    """The "not yours" answer, which used to be an indistinguishable "not found".
+    """The "not yours" answer, distinct from "not found".
 
     Two different failures wore the same message: an id that never existed, and
     an id that exists in another session. The second is recoverable — read the
@@ -587,36 +579,33 @@ async def stop_background_shell_task(
     before answering. Shared by the ``TaskStop`` MCP tool and the UI "stop
     task" endpoint.
 
-    The verification is the point. Terminating the shell used to be reported
-    as a stop even when the thing the shell had started — a dev server three
-    processes down under Git Bash's nested bash — was still holding its
-    listening socket, so ``TaskStop`` answered ``running: false`` while
-    ``netstat`` showed the port bound and the agent had to ``taskkill`` by
-    hand. When descendants survive, this says so: ``running`` stays true and
-    ``warning`` names the pids (and the ports they still hold).
+    The verification is the point. Terminating the shell is not a stop while
+    the thing the shell started (say, a dev server three processes down under
+    Git Bash's nested bash) still holds its listening socket. When descendants
+    survive, this says so: ``running`` stays true and ``warning`` names the
+    pids (and the ports they still hold).
 
     ``summary``/``reason`` attribute the kill on the registry row (and so on the
     terminal chip built from it). Optional and never destructive: an attribution
     already on the record — the one ``monitor_spawn._enforce_deadline`` stamps
     before it calls here, for instance — always wins, and a shell stopped with
-    no attribution at all falls back to a plain "stopped" line rather than the
-    blank one it used to get.
+    no attribution at all falls back to a plain "stopped" line rather than a
+    blank one.
 
     ``suppress_wake`` (ON by default, because every caller but one is a
     DELIBERATE stop) means the terminal frame the watcher fires a moment from
-    now must not reach the model: no wake turn and no mid-turn steer. The
-    audited case is an agent stopping its own stale CI watcher and then being
-    interrupted twenty seconds later with a ``<task-notification>`` telling it
-    the thing it just stopped had stopped. The engine is still told the task is
-    terminal HERE, since the suppressed frame will not get that far — without
-    it fluid keeps the dead id in ``_background_pending`` and lists it on every
-    later ``SessionParked``. The deadline enforcer passes ``suppress_wake
-    =False``: a task killed by its own time budget is news the parent does not
-    have, and being woken with it is the point.
+    now must not reach the model: no wake turn and no mid-turn steer (an agent
+    that stopped its own stale watcher does not need a ``<task-notification>``
+    telling it the thing it just stopped had stopped). The engine is still told
+    the task is terminal HERE, since the suppressed frame will not get that
+    far — without it fluid keeps the dead id in ``_background_pending`` and
+    lists it on every later ``SessionParked``. The deadline enforcer passes
+    ``suppress_wake=False``: a task killed by its own time budget is news the
+    parent does not have, and being woken with it is the point.
 
     Returns a small status dict when ``task_id`` is a known shell task, or
     ``None`` when no such shell task exists — letting callers fall through to
-    SDK agent-task handling.
+    agent-task handling.
     """
     task = _background_tasks.get(task_id)
     if not task:
@@ -627,8 +616,8 @@ async def stop_background_shell_task(
     # touched. The watcher polls ``is_running`` and settles the moment the
     # process dies; when the registry writes came AFTER the kill, a fast
     # settle read an unattributed exit and delivered an "error"/"killed"
-    # <task-notification> steer for a task the model had just stopped itself
-    # (round-9 finding F14, four sessions). Orphans do NOT keep the row
+    # <task-notification> steer for a task the model had just stopped itself.
+    # Orphans do NOT keep the row
     # running — the shell itself is gone and nothing would ever settle it —
     # but they are reported to the caller.
     if session_id:
@@ -726,8 +715,7 @@ async def _settle_reaped_shell(session_id: str, task_id: str) -> None:
     the reader's own ``complete_task`` never runs — without an explicit settle
     the task stays "running" forever: the in-memory registry row (when it still
     exists), the durable ``background_tasks`` mirror, and the UI chip built from
-    it (live 2026-08-29, task a0270e18 — stuck 45+ minutes after its process
-    died).
+    it.
 
     Two shapes, matching teardown ordering at the call sites:
 
@@ -874,11 +862,12 @@ async def _emit_shell_start_frame(
     """Durable RUNNING chip row for a freshly spawned Monitor shell.
 
     A Monitor shell is the one background task with NO durable start-phase
-    surface of its own: the SDK/fluid ``TaskStarted`` mirror only exists on the
+    surface of its own: the fluid ``TaskStarted`` mirror only exists on the
     native leg, and the terminal-surface guarantee
     (``chat_ws_handler._surface_terminal_notification``) fires on FAILURE only.
-    So "I asked the agent to run the app" left nothing in the log to replay and
-    the running server vanished from the chip strip on reload or session switch.
+    Without this row a running server started by the agent would leave nothing
+    in the log to replay and vanish from the chip strip on reload or session
+    switch.
 
     Latched once per task lifetime, sharing the ``mark_chipped(..., "start")``
     latch with the in-stream mirror (``turn_recorder._translate_shared``), so
@@ -902,11 +891,11 @@ async def _emit_shell_settle_frame(
     """Durable terminal chip row for a Monitor shell that ran to completion.
 
     ``complete_task``'s guaranteed terminal notification covers error/killed
-    only, so before this a CLEANLY completed shell settled in the registry and
-    in ``background_tasks`` but appended nothing to the event log — and the
-    reducer deliberately exempts ``kind === 'shell'`` summaries from the
-    turn-completed staleness heal, so the chip this task's start row painted
-    would have replayed as "running" forever.
+    only, so without this a CLEANLY completed shell would settle in the
+    registry and in ``background_tasks`` but append nothing to the event log —
+    and the reducer deliberately exempts ``kind === 'shell'`` summaries from
+    the turn-completed staleness heal, so the chip this task's start row
+    painted would replay as "running" forever.
 
     Shares the ``mark_chipped(..., "terminal")`` latch with every other terminal
     producer, so the failure path (which routes through the terminal-surface
@@ -967,10 +956,9 @@ def sh_fallback_command(command: str, cwd: Optional[str]) -> str:
     """``command``, or ``sh <path>`` when it names a script with no exec bit.
 
     A launch script a worker wrote without ``chmod +x`` fails with
-    ``/bin/sh: 1: …/launch-backend.sh: Permission denied`` and exit 126 — one
-    audited session lost a whole Monitor cycle and a steer before prefixing
-    ``sh`` by hand. Nothing has run at that point, so running it through the
-    shell instead is safe and loses nothing.
+    ``/bin/sh: 1: …/launch-backend.sh: Permission denied`` and exit 126, which
+    costs the agent a whole Monitor cycle. Nothing has run at that point, so
+    running it through the shell instead is safe and loses nothing.
 
     Deliberately narrow: the command must be exactly one token, that token must
     resolve to an existing regular file that is readable but not executable,
@@ -1063,10 +1051,10 @@ async def _spawn_background(
             # Scrub terminal control sequences at the SOURCE, so every consumer
             # of this buffer (TaskOutput, TaskGet, the completion summary the
             # parent is woken with) is clean. The app overrides fluid's
-            # supervision here (ruling A13), so fluid's own supervisor-side
-            # strip never runs for these lines and the model was being handed
-            # colour codes — a baseline session burned a 34s vitest re-run on an
-            # ANSI-mismatched regex. Line-at-a-time is safe: an escape sequence
+            # supervision here, so fluid's own supervisor-side strip never
+            # runs for these lines and the model would otherwise be handed
+            # colour codes (which break regexes run over the output).
+            # Line-at-a-time is safe: an escape sequence
             # never spans a newline.
             task.lines.append(_strip_ansi(decoded))
             if len(task.lines) > _BACKGROUND_LINE_LIMIT:
@@ -1129,11 +1117,12 @@ def _discover_agent_registry(cwd: Optional[str]) -> Optional[Dict[str, Any]]:
     The shape ``app.core.task_dispatch.dispatch_task_tool`` expects for its
     ``agent_registry`` seam — identical to the mapping ``NativeLoop`` publishes
     on ``ctx.extra["agent_registry"]``, built from the same
-    ``fluid.context.agents.discover_agents`` walk (project ``.claude/agents``,
-    the global dir, and enabled plugins, ruling CE6).
+    ``fluid.context.agents.discover_agents`` walk (project ``.fluid/agents``
+    and ``.agents/agents``, the global ``~/.fluid/agents``, and enabled
+    plugins; ruling CE6).
 
     This exists because the DELEGATED (claude CLI) leg runs no fluid engine:
-    its Task tool is this MCP one, so without a registry a ``.claude/agents``
+    its Task tool is this MCP one, so without a registry a ``.fluid/agents``
     definition is advertised in the prompt yet answers "Unknown agent" on
     dispatch. Best effort in every direction — no cwd, no fluid, or a bad
     definition returns None and dispatch falls back to DB agents only.
@@ -1154,7 +1143,7 @@ def _discover_agent_registry(cwd: Optional[str]) -> Optional[Dict[str, Any]]:
 # ============================================================================
 
 def _fluid_outcome_result(outcome: Any) -> Dict[str, Any]:
-    """A fluid ``ToolOutcome`` as the SDK MCP envelope (plain text, not JSON —
+    """A fluid ``ToolOutcome`` as the MCP tool-result envelope (plain text, not JSON —
     the fluid handlers already format for the model)."""
     result: Dict[str, Any] = {
         "content": [{"type": "text", "text": getattr(outcome, "text", "") or ""}]
@@ -1272,8 +1261,10 @@ def create_builtin_tools_server(
             target the wakeup prompt back at the correct session).
         profile_id: Profile to use when firing scheduled/wake prompts.
         project_id: Project context for worktree and cron tools.
-        is_admin: Whether the caller has admin permissions (gated for
-            destructive operations like CronDelete).
+        is_admin: Whether the caller is the owner (``False`` for an API
+            key's session). The automation tools (Cron*, RemoteTrigger) and
+            the install-wide logs (GetAppErrors, GetAppLogs) have no
+            per-key ownership, so they refuse non-owner sessions.
         model: The current turn's effective model, persisted by ScheduleWakeup
             so the wake replays it instead of running on the profile default.
         provider_id: The current turn's effective model-provider row. ``None``
@@ -1285,12 +1276,13 @@ def create_builtin_tools_server(
             without it those agents are advertised but not dispatchable.
 
     Returns:
-        SDK MCP server config, or ``None`` if the SDK is unavailable.
+        In-process MCP server config, or ``None`` if the tool helpers are
+        unavailable.
     """
     try:
-        from claude_agent_sdk import tool, create_sdk_mcp_server
+        from app.mcp.inproc import tool, create_tool_server
     except ImportError:
-        logger.debug("claude_agent_sdk not available — builtin tools disabled")
+        logger.debug("Fluid tool helpers not available — builtin tools disabled")
         return None
 
     from app.mcp.sdk_compat import patch_sdk_server
@@ -1392,10 +1384,10 @@ def create_builtin_tools_server(
             return _err("prompt is required.")
         reason = (args.get("reason") or "").strip()
 
-        # #598: persist the wake BEFORE arming its timer so an app restart
-        # rehydrates and re-arms it (the old bare in-process asyncio.sleep task
-        # was dropped on restart). wakeup_service owns the claim-on-fire + boot
-        # rehydration; the actual wake still re-fires through
+        # Persist the wake BEFORE arming its timer so an app restart
+        # rehydrates and re-arms it (a bare in-process asyncio.sleep task
+        # would be dropped on restart). wakeup_service owns the claim-on-fire
+        # + boot rehydration; the actual wake still re-fires through
         # execute_query_with_failover (a genuine CLI-owned new turn).
         from app.core import wakeup_service
 
@@ -1409,19 +1401,33 @@ def create_builtin_tools_server(
             model=model,
             source="schedule_wakeup",
         )
-        return _ok({
+        result = {
             "scheduled": True,
             "delay_seconds": delay,
             "fire_at_unix": row.get("fire_at"),
             "wakeup_id": row.get("id"),
             "reason": reason,
             "model": model,
-        })
+        }
+        # Subscription mode: the wake runs on the user's Claude plan while
+        # they may be away. Say so where the user sees the wake being armed.
+        try:
+            from app.core import loop_guard
+            from app.core.profiles import get_profile
+
+            notice = await asyncio.to_thread(
+                lambda: loop_guard.scheduled_run_guidance(get_profile(profile_id) if profile_id else None)
+            )
+        except Exception:  # noqa: BLE001 — advice never fails the tool
+            notice = None
+        if notice:
+            result["notice"] = notice
+        return _ok(result)
 
     all_tools.append(schedule_wakeup)
 
     # ------------------------------------------------------------------
-    # Task — dispatch work to a subagent (P2c, rulings A6/A8/A9/A10).
+    # Task — dispatch work to a subagent (see app.core.task_dispatch).
     # Delegated-leg surface (mcp__builtins__Task); native legs get fluid's
     # bare-named Task builtin instead (the bridge filters this copy out).
     # ------------------------------------------------------------------
@@ -1485,19 +1491,20 @@ def create_builtin_tools_server(
                      for spec, handler in orchestration_specs)
 
     # ------------------------------------------------------------------
-    # NotifyDevices (formerly PushNotification; renamed for issue #610)
+    # NotifyDevices (formerly PushNotification)
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Send a push notification to all registered mobile devices. "
-        "Use for alerting the user to long-running task completion or important "
-        "events.\n"
+        "Send a push notification to registered mobile devices that can "
+        "receive push. Use for alerting the user to long-running task "
+        "completion or important events.\n"
         "\n"
-        "This install may have NO registered devices, in which case nothing is "
-        "delivered and the result says so explicitly (sent: 0, delivered: "
-        "false). Treat that as 'the user has not been told' — say it in chat "
-        "instead. A non-zero `sent` with `successful: 0` means every device "
-        "rejected the push; that is also undelivered.",
+        "Current app versions do not receive push, so usually no device can: "
+        "the result then says delivered: false with reason 'no device can "
+        "receive push notifications'. `delivered` is true only when a device "
+        "that receives push acknowledged the message. Whenever delivered is "
+        "false the user has not been told — say it in chat instead; the "
+        "in-app notification center is the channel that reaches them.",
         {
             "type": "object",
             "properties": {
@@ -1514,30 +1521,57 @@ def create_builtin_tools_server(
         if not title or not body:
             return _err("title and body are required.")
         try:
-            from app.services.push_notification import push_notification_service
-            results = await push_notification_service.send_to_all_devices(
-                title=title, body=body, data=args.get("data"),
+            from app.services.push_notification import (
+                DEVICE_LIST_UNAVAILABLE_REASON,
+                IN_APP_CHANNEL_NOTE,
+                NO_PUSH_RECEIVER_REASON,
+                DeviceListUnavailable,
+                delivered_count,
+                push_notification_service,
             )
-            successful = sum(1 for r in results if getattr(r, "success", False))
+            lookup_failed = False
+            try:
+                results = await push_notification_service.send_to_all_devices(
+                    title=title, body=body, data=args.get("data"),
+                    raise_lookup_errors=True,
+                )
+            except DeviceListUnavailable:
+                results, lookup_failed = [], True
+            # ``successful`` counts only acknowledgements from a device that
+            # receives push: a mock-mode send left nothing on this server.
+            successful = delivered_count(results)
             payload: Dict[str, Any] = {
                 "sent": len(results),
                 "successful": successful,
                 "delivered": successful > 0,
             }
             # A bare {"sent": 0, "successful": 0} reads as success. It is the
-            # opposite: an audited monitoring session announced a release
-            # through this tool, reached nobody, and moved on believing the
-            # user had been told. Not an exception — there is nothing to
-            # retry — but not a green light either.
+            # opposite: the model would move on believing the user had been
+            # told. Not an exception — there is nothing to retry — but not a
+            # green light either.
             if not results:
-                payload["note"] = (
-                    "no registered devices — nothing was delivered; tell the "
-                    "user in chat instead."
+                payload["reason"] = (
+                    DEVICE_LIST_UNAVAILABLE_REASON if lookup_failed else NO_PUSH_RECEIVER_REASON
                 )
             elif not successful:
+                simulated = sum(1 for r in results if getattr(r, "simulated", False))
+                rejected = len(results) - simulated
+                if not rejected:
+                    payload["reason"] = (
+                        "push is in mock mode (no Firebase credentials); nothing "
+                        "left this server"
+                    )
+                elif simulated:
+                    payload["reason"] = (
+                        f"{rejected} device(s) rejected the push and {simulated} "
+                        "send(s) were mock mode (no Firebase credentials)"
+                    )
+                else:
+                    payload["reason"] = f"all {rejected} device(s) rejected the push"
+            if not successful:
                 payload["note"] = (
-                    f"all {len(results)} device(s) rejected the push — nothing "
-                    "was delivered; tell the user in chat instead."
+                    f"{payload['reason']} — nothing was delivered; tell the "
+                    f"user in chat instead. {IN_APP_CHANNEL_NOTE}"
                 )
             return _ok(payload)
         except Exception as e:
@@ -1594,9 +1628,10 @@ def create_builtin_tools_server(
                     "create_new_branch was not set)."
                 )
             # BIND THE SESSION TO THE BRANCH, exactly as the HTTP intake paths
-            # do (app/api/sessions_worktree.py:329 and :521). Without this the
-            # tool materialized a checkout and told nobody: `sessions.branch`
-            # stayed NULL, the sidebar showed the session on no branch, the
+            # do (sessions_worktree._create_remote_branch_session and
+            # _create_v2_branch_session). Without this the tool would
+            # materialize a checkout and tell nobody: `sessions.branch` would
+            # stay NULL, the sidebar would show the session on no branch, the
             # turn-finalize resync could not repair it (with no branch it
             # resolves the BASE checkout, whose branch it deliberately refuses
             # to adopt), and PR reconciliation — which matches on session_id,
@@ -1684,6 +1719,8 @@ def create_builtin_tools_server(
         },
     )
     async def cron_create(args: dict) -> dict:
+        if not is_admin:
+            return _err("CronCreate requires an owner session.")
         if not profile_id:
             return _err("CronCreate requires a profile context.")
         name = (args.get("name") or "").strip()
@@ -1731,6 +1768,8 @@ def create_builtin_tools_server(
         {"type": "object", "properties": {}},
     )
     async def cron_list(args: dict) -> dict:
+        if not is_admin:
+            return _err("CronList requires an owner session.")
         try:
             from app.db import automations as auto_db
             rows = await asyncio.to_thread(auto_db.get_all_automations)
@@ -1806,6 +1845,8 @@ def create_builtin_tools_server(
         },
     )
     async def remote_trigger(args: dict) -> dict:
+        if not is_admin:
+            return _err("RemoteTrigger requires an owner session.")
         aid = (args.get("automation_id") or "").strip()
         if not aid:
             return _err("automation_id is required.")
@@ -1894,10 +1935,9 @@ def create_builtin_tools_server(
     )
     async def task_output(args: dict) -> dict:
         tid = (args.get("task_id") or "").strip()
-        # SCOPED: the buffer belongs to a session, and until now any session
-        # could read any other's. A worker's own task stays readable by the
-        # parent that dispatched it — that is the case an audited parent could
-        # not serve and re-ran a whole test suite over.
+        # SCOPED: the buffer belongs to a session, so no session can read
+        # another's. A worker's own task stays readable by the parent that
+        # dispatched it, so the parent never has to re-run the work itself.
         task, owner_session_id, relation = _resolve_task_scope(tid, session_id)
         if relation == "foreign" and task is None:
             return _foreign_task_error(tid, owner_session_id)
@@ -1921,7 +1961,7 @@ def create_builtin_tools_server(
                     }
                     # Task-tool workers (kind=agent, task id == worker session
                     # id): serve the worker's report from its durable event
-                    # log so background dispatches are collectable (A8).
+                    # log so background dispatches are collectable.
                     if record.get("kind") == "agent":
                         try:
                             from app.core import provider_agent as pa
@@ -1966,9 +2006,9 @@ def create_builtin_tools_server(
         if since > 0:
             lines = lines[since:]
         available = len(lines)
-        # Default to a tail. Round-9 finding F7: models pulled 40-157 KB
-        # buffers after the exit code was already known because the default
-        # was "everything". ``tail`` is the older spelling of ``lines``.
+        # Default to a tail: a whole-buffer default makes models pull large
+        # buffers after the exit code is already known. ``tail`` is the older
+        # spelling of ``lines``.
         limit: Optional[int] = _TASK_OUTPUT_DEFAULT_LINES
         if args.get("full"):
             limit = None
@@ -2015,7 +2055,7 @@ def create_builtin_tools_server(
         tid = (args.get("task_id") or "").strip()
         result = await stop_background_shell_task(tid, session_id=session_id)
         if result is None:
-            # A background AGENT task (SDK-managed) can't be force-stopped from
+            # A background AGENT task can't be force-stopped from
             # here — this tool only owns Monitor shell subprocesses. Say so
             # clearly instead of "not found" when the id is a real agent task the
             # registry knows.
@@ -2024,19 +2064,19 @@ def create_builtin_tools_server(
                 record = task_registry.get_task(session_id, tid)
                 if record is not None:
                     return _err(
-                        "Background agent tasks are managed by the SDK and cannot "
-                        "be stopped from here; they finish on their own and notify "
-                        "via <task-notification>. Only Monitor shell tasks support "
-                        "TaskStop.",
+                        "Agent tasks are run by the harness and tracked in the "
+                        "app's task registry; TaskStop cannot stop them. They "
+                        "finish on their own and notify via <task-notification>. "
+                        "Only Monitor shell tasks support TaskStop.",
                         task_id=tid,
                         kind=record.get("kind"),
                         status=record.get("status"),
                     )
             return _task_not_found(tid, session_id)
         if result.get("survivors"):
-            # Never claim a stop the OS did not give us. The audited failure was
-            # exactly this line answering success/running:false while port 8010
-            # stayed LISTENING and the model believed the server was down.
+            # Never claim a stop the OS did not give us: answering
+            # success/running:false while a descendant still holds its port
+            # would make the model believe the server is down.
             return _err(
                 result["warning"],
                 task_id=tid,
@@ -2135,10 +2175,9 @@ def create_builtin_tools_server(
             return _err("task_id is required.")
         from app.core.task_registry import task_registry
 
-        # SCOPED. ``_background_tasks`` is process-global: one audited parent
-        # named an id it had read in a WORKER's report, was handed that other
-        # session's live shell plus "you will be woken on completion", parked,
-        # and was never woken — nothing had subscribed it to that task. A
+        # SCOPED. ``_background_tasks`` is process-global, and a parent that
+        # names an id from a WORKER's report must not be told "you will be
+        # woken on completion" by a task nothing subscribed it to. A
         # worker's task is still readable here (the parent dispatched it), but
         # it is labelled as the worker's and never carries the park nudge.
         shell, owner_session_id, relation = _resolve_task_scope(tid, session_id)
@@ -2148,7 +2187,7 @@ def create_builtin_tools_server(
         # WOKEN about a finished task, and the wake can land long after the
         # in-memory record has been evicted with its session. The registry
         # resolves live → retained snapshot → durable row, so "task not found"
-        # now means genuinely never seen rather than merely no longer resident.
+        # means genuinely never seen rather than merely no longer resident.
         lookup_session = owner_session_id if relation == "lineage" else session_id
         record = task_registry.get_task(lookup_session, tid, durable=True)
         if record is None and shell is None:
@@ -2175,11 +2214,9 @@ def create_builtin_tools_server(
         if record is not None and record.get("kind") == "agent":
             if record.get("status") == "completed":
                 out.update(_agent_report_fields(tid, record))
-            # ALWAYS present, null when there is no readable file. It used to be
-            # written only inside the read-success branch, so an unreadable
-            # report returned no key at all and the caller's `j['report_path']`
-            # raised KeyError — which, in a code cell, took the rest of the
-            # cell with it (one audited call, one dropped queued command).
+            # ALWAYS present, null when there is no readable file, so a
+            # caller's `j['report_path']` never raises KeyError (which, in a
+            # code cell, would take the rest of the cell with it).
             out.setdefault("report_path", None)
         still_running = (
             out.get("running") if shell is not None else _all_still_running([record])
@@ -2219,7 +2256,7 @@ def create_builtin_tools_server(
             return _err("query is required.")
         max_results = int(args.get("max_results") or 5)
         try:
-            # The live surface (ruling T1): fluid's builtins plus the app's own
+            # The live surface: fluid's builtins plus the app's own
             # bridge tools. Deliberately NOT the MCP groups — enumerating those
             # spawns every configured server, which is far too much for a
             # keyword lookup inside a turn.
@@ -2305,6 +2342,8 @@ def create_builtin_tools_server(
         },
     )
     async def get_app_errors(args: dict) -> dict:
+        if not is_admin:
+            return _err("GetAppErrors requires an owner session.")
         try:
             from app.db import error_logs
 
@@ -2427,6 +2466,8 @@ def create_builtin_tools_server(
         },
     )
     async def get_app_logs(args: dict) -> dict:
+        if not is_admin:
+            return _err("GetAppLogs requires an owner session.")
         try:
             from app.api.logs import ring_handler
 
@@ -2516,6 +2557,11 @@ def create_builtin_tools_server(
         {"type": "object", "properties": {}, "additionalProperties": False},
     )
     async def get_usage(args: dict) -> dict:
+        if not is_admin:
+            # Owner account data with no per-key subset (see app.api.usage).
+            from app.api.usage import key_denied_usage_result
+
+            return _ok(key_denied_usage_result())
         try:
             from app.api.usage import get_cached_usage_payload
             from fluid.tools.builtins.usage import _payload as format_usage_payload
@@ -2573,7 +2619,7 @@ def create_builtin_tools_server(
         len(all_tools), session_id, project_id, is_admin,
     )
     return patch_sdk_server(
-        create_sdk_mcp_server(name="builtins", version="1.0.0", tools=all_tools),
+        create_tool_server(name="builtins", version="1.0.0", tools=all_tools),
         all_tools,
     )
 

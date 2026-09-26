@@ -10,16 +10,11 @@ import pytest
 
 from app.core import codex_oauth, encryption
 from app.db import database as db
+from tests.helpers import unlock_encryption
 
 
 ROOT = "/api/v1/model-providers"
 PROVIDER_ID = "prov-codex-api"
-
-
-def _unlock(mock_db):
-    # mock_db activates the SQLite shim as app.db.database; set_encryption_key
-    # wants the database MODULE, not the raw connection the fixture yields.
-    encryption.set_encryption_key("test-password", db)
 
 
 def _make_provider():
@@ -45,7 +40,7 @@ class TestUnauthenticated:
 
 class TestDeviceStart:
     def test_start_returns_user_code(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
 
         async def _fake_start(*, client=None):
@@ -69,7 +64,7 @@ class TestDeviceStart:
         assert "dev-1" not in resp.text
 
     def test_start_unknown_provider_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         resp = authenticated_client.post(
             f"{ROOT}/nope/codex/device/start", json={}
         )
@@ -91,7 +86,7 @@ class TestDevicePoll:
         assert r.status_code == 200, r.text
 
     def test_poll_pending(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -106,7 +101,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "pending"
 
     def test_poll_slow_down(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -120,7 +115,7 @@ class TestDevicePoll:
         assert resp.json()["status"] == "slow_down"
 
     def test_poll_without_start_400(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         resp = authenticated_client.post(
             f"{ROOT}/{PROVIDER_ID}/codex/device/poll", json={}
@@ -130,7 +125,7 @@ class TestDevicePoll:
     def test_poll_complete_persists_encrypted_and_hides_blobs(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -170,7 +165,7 @@ class TestDevicePoll:
         assert encryption.decrypt_value(stored["codex_refresh_token"]) == SECRET_REFRESH
 
     def test_poll_terminal_error_400(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
@@ -188,7 +183,7 @@ class TestClearReauth:
     def test_clear_reauth_clears_flag_preserves_bundle(
         self, authenticated_client, mock_db
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         db.set_codex_token_bundle(
             PROVIDER_ID,
@@ -208,18 +203,49 @@ class TestClearReauth:
         assert encryption.decrypt_value(stored["codex_refresh_token"]) == "ref"
 
     def test_clear_reauth_unknown_provider_404(self, authenticated_client, mock_db):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         resp = authenticated_client.post(
             f"{ROOT}/nope/codex/clear-reauth", json={}
         )
         assert resp.status_code == 404
+
+    def test_clear_reauth_without_a_chatgpt_sign_in_is_404(
+        self, authenticated_client, mock_db
+    ):
+        """An API-key provider must not be relabelled ``auth_mode='chatgpt'``
+        (the docs: auth_mode cannot be set through the API)."""
+        unlock_encryption(mock_db)
+        _make_provider()
+        resp = authenticated_client.post(
+            f"{ROOT}/{PROVIDER_ID}/codex/clear-reauth", json={}
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Model provider has no ChatGPT sign-in"
+        assert db.get_codex_tokens(PROVIDER_ID)["auth_mode"] is None
+
+    def test_clear_reauth_leaves_a_grok_provider_alone(
+        self, authenticated_client, mock_db
+    ):
+        unlock_encryption(mock_db)
+        _make_provider()
+        db.set_codex_token_bundle(
+            PROVIDER_ID, access_token=encryption.encrypt_value("acc"),
+            refresh_token=encryption.encrypt_value("ref"), account_id=None,
+            needs_reauth=True, auth_mode="grok",
+        )
+        resp = authenticated_client.post(
+            f"{ROOT}/{PROVIDER_ID}/codex/clear-reauth", json={}
+        )
+        assert resp.status_code == 404
+        stored = db.get_codex_tokens(PROVIDER_ID)
+        assert (stored["auth_mode"], bool(stored["needs_reauth"])) == ("grok", True)
 
 
 class TestDeleteRevoke:
     def test_delete_best_effort_revokes_codex(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         db.set_codex_token_bundle(
             PROVIDER_ID,
@@ -245,7 +271,7 @@ class TestDeleteRevoke:
     def test_delete_never_blocked_by_revoke_failure(
         self, authenticated_client, mock_db, monkeypatch
     ):
-        _unlock(mock_db)
+        unlock_encryption(mock_db)
         _make_provider()
         db.set_codex_token_bundle(
             PROVIDER_ID,

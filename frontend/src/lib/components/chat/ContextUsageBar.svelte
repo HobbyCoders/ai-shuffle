@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
-	 * ContextUsageBar — the single chat-toolbar usage pill. Merges the former
-	 * ContextUsageBar (context-window %) and UsageLimitIndicator (plan usage
-	 * limits) into ONE glass pill + ONE popover.
+	 * ContextUsageBar — the single chat-toolbar usage pill. Shows the
+	 * context-window % and the plan usage limits in ONE glass pill + ONE
+	 * popover.
 	 *
 	 * The pill is a single circular progress ring (context-window fraction),
 	 * coloured by the current chat's context severity. No inline text — the
@@ -72,6 +72,11 @@
 		reportedRemainingPct,
 		remainingFromUsedPct,
 		formatCountdown,
+		formatAsOf,
+		bucketObservedAt,
+		isBucketStale,
+		parseResetMs,
+		providerStatusAt,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
@@ -85,6 +90,9 @@
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	const usageNumber = createUsageNumberAnimation();
+
+	/** The user's own usage page; AI Shuffle never fetches it. */
+	const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage';
 
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
@@ -339,6 +347,7 @@
 		label: string;
 		countdown: string;
 		hasReset: boolean;
+		rolledOver: boolean;
 	}
 
 	/** Mirror the used-quota thresholds against a remaining-quota value. */
@@ -360,6 +369,11 @@
 		};
 	}
 
+	function isRolledOver(usageWindow: UsageWindow, nowMs: number): boolean {
+		const resetMs = parseResetMs(usageWindow.resets_at);
+		return resetMs != null && resetMs <= nowMs;
+	}
+
 	function itemsFor(bucket: UsageBucket): WindowItem[] {
 		return displayWindows(bucket.windows).map((usageWindow) => {
 			const pct = reportedRemainingPct(usageWindow, now);
@@ -370,6 +384,7 @@
 				label: windowLabel(usageWindow.type),
 				countdown: formatCountdown(usageWindow.resets_at, now),
 				hasReset: usageWindow.resets_at != null,
+				rolledOver: isRolledOver(usageWindow, now),
 			};
 		});
 	}
@@ -383,8 +398,9 @@
 		return typeof v === 'number' && Number.isFinite(v) ? v : null;
 	}
 
-	function providerStatusText(pb: ProviderUsageBucket): string | null {
-		if (pb.status !== 'stale' && pb.status !== 'unavailable' && pb.status !== 'never_fetched') return null;
+	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
+		const status = providerStatusAt(pb, nowMs);
+		if (status !== 'stale' && status !== 'unavailable' && status !== 'never_fetched') return null;
 		// Keep credential problems actionable without narrating background refreshes.
 		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
 		if (pb.lastErrorKind === 'billing_access_denied') {
@@ -469,29 +485,25 @@
 	// agents-UI picker can never drift apart.
 	//
 	// Claude: "Claude" + its subscription plan ("max"/"pro"), or "API" on
-	// API-key auth. Two sources feed that, in this order:
+	// API-key auth, from the local registry's `claude` block (which reads what
+	// the Claude Code CLI reports about its own sign-in). It describes THIS
+	// install only, so it is consulted just for the self install; usage
+	// snapshots carry no account or plan.
 	//
-	//   1. the RESOLVED INSTALL's own usage snapshot (`planType`, joined from
-	//      that install's `claude_accounts` row) — authoritative for any
-	//      install, including a remote worker on a different account;
-	//   2. the local registry's `claude` block — it describes THIS install only,
-	//      so it is consulted just for the self install (it is also the only
-	//      carrier of API-key auth, which snapshots never report).
-	//
-	// With neither known the subtext falls back to the resolved install's device
+	// Without it the subtext falls back to the resolved install's device
 	// name / "Other device" hint rather than dropping that disambiguation.
 	const isSelf = $derived(target == null || target === $rateLimit.selfInstanceId ||
 		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
 	// Empty usage buckets also exist on installs without Claude. Subscription
-	// display metadata defaults to "subscription", so it is not proof of an account.
+	// display metadata defaults to "subscription", so it is not proof of a login.
 	const hasClaude = $derived(Boolean(
-		resolvedBucket?.available || resolvedBucket?.accountId || resolvedBucket?.accountEmail ||
+		resolvedBucket?.available ||
 		(isSelf && ($claudeAuthenticated || getClaudeAuth().auth_kind === 'api'))
 	));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
 	const claudeDisplay = $derived<ProviderDisplay>(
 		getClaudeDisplay({
-			planType: resolvedBucket?.planType ?? (isSelf ? getClaudeAuth().plan_type : null),
+			planType: isSelf ? getClaudeAuth().plan_type : null,
 			authKind: isSelf ? getClaudeAuth().auth_kind : null
 		})
 	);
@@ -812,6 +824,8 @@
 										<span class="row-reset-inline">
 											{#if item.countdown}
 												resets in {item.countdown}
+											{:else if item.rolledOver}
+												reset · awaiting next report
 											{:else if item.hasReset}
 												resets soon
 											{:else}
@@ -826,10 +840,20 @@
 								</div>
 							</div>
 						{/each}
+						{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
+							<div class="row-reset usage-as-of">Updated {formatAsOf(bucketObservedAt(resolvedBucket), now)}</div>
+						{/if}
 					{:else}
-						<div class="row-reset no-data">No usage data yet</div>
+						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
 					{/if}
-					{@render sourceDetails($claudeUsageSource.source)}
+					<!-- AI Shuffle only sees the windows the CLI reports during a run;
+					     the full picture is on the user's own claude.ai usage page. -->
+					<a
+						class="provider-dashboard-link claude-usage-link"
+						href={CLAUDE_USAGE_URL}
+						target="_blank"
+						rel="noopener noreferrer">See all usage on claude.ai</a
+					>
 				{/if}
 			{/if}
 
@@ -846,7 +870,7 @@
 				{@const pbWindows = displayWindows(pb.windows)}
 				{@const pbShowsRemaining = providerShowsRemaining(pb)}
 				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-				{@const pbStatus = providerStatusText(pb)}
+				{@const pbStatus = providerStatusText(pb, now)}
 				<div class="popover-section">
 					<div class="provider-header">
 						<button
@@ -911,6 +935,8 @@
 									<span class="row-reset-inline">
 										{#if countdown}
 											resets in {countdown}
+										{:else if isRolledOver(w, now)}
+											reset · awaiting next report
 										{:else if w.resets_at != null}
 											resets soon
 										{:else}
@@ -930,6 +956,10 @@
 					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
 						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
+					{/if}
+					{#if providerStatusAt(pb, now) === 'stale' && pb.fetchedAt != null}
+						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
+						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
 					{/if}
 				{/if}
 			{/each}
@@ -1367,6 +1397,10 @@
 		color: var(--muted-foreground);
 		text-decoration: underline;
 		text-underline-offset: 2px;
+	}
+	.claude-usage-link {
+		display: inline-block;
+		margin-top: 2px;
 	}
 	.provider-dashboard-link:focus-visible {
 		outline: 2px solid var(--ring, var(--primary));

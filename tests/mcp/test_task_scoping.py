@@ -23,6 +23,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mcp.tool_helpers import tool_result_json
+
 
 PARENT = "s-parent"
 WORKER = "s-worker"
@@ -30,29 +32,25 @@ STRANGER = "s-stranger"
 
 
 def _handlers(session_id=PARENT):
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as sdk
 
     from app.mcp import builtin_tools
 
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = sdk.create_tool_server
 
     def _spy(name, version, tools):
         captured["tools"] = tools
         return real_create(name=name, version=version, tools=tools)
 
-    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+    with patch.object(sdk, "create_tool_server", side_effect=_spy):
         builtin_tools.create_builtin_tools_server(session_id=session_id)
 
     return {tool.name: tool for tool in captured["tools"]}
 
 
-def _body(result):
-    return json.loads(result["content"][0]["text"])
-
-
 def _call(name, args, session_id=PARENT):
-    return _body(asyncio.run(_handlers(session_id)[name].handler(args)))
+    return tool_result_json(asyncio.run(_handlers(session_id)[name].handler(args)))
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
 Unit tests for permission handler module.
 
 Tests cover:
-- PermissionDecision and RememberScope enums
+- PermissionDecision enum
 - PermissionRequest dataclass
 - PermissionRule matching logic (pattern matching for all tool types)
 - PermissionHandler queue management
@@ -23,13 +23,26 @@ from unittest.mock import AsyncMock, patch
 
 from app.core.permission_handler import (
     PermissionDecision,
-    RememberScope,
     PermissionRequest,
     PermissionRule,
     PermissionHandler,
     permission_handler,
-    _DeferSentinel,
 )
+
+
+async def _wait_until(condition, timeout=10.0):
+    """Poll ``condition`` until it holds; fail if it never does.
+
+    ``request_permission`` creates the durable row in a worker thread before it
+    broadcasts, and the connector funnel after it may import the connector
+    stack on first use, so a fixed sleep only passed on an idle machine.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            raise AssertionError("condition never became true")
+        await asyncio.sleep(0.01)
 
 
 # =============================================================================
@@ -51,27 +64,6 @@ class TestPermissionDecision:
         """PermissionDecision should be a string enum."""
         assert isinstance(PermissionDecision.ALLOW, str)
         assert PermissionDecision.ALLOW == "allow"
-
-
-class TestRememberScope:
-    """Test RememberScope enum."""
-
-    def test_none_value(self):
-        """NONE should have correct string value."""
-        assert RememberScope.NONE.value == "none"
-
-    def test_session_value(self):
-        """SESSION should have correct string value."""
-        assert RememberScope.SESSION.value == "session"
-
-    def test_profile_value(self):
-        """PROFILE should have correct string value."""
-        assert RememberScope.PROFILE.value == "profile"
-
-    def test_enum_is_string(self):
-        """RememberScope should be a string enum."""
-        assert isinstance(RememberScope.SESSION, str)
-        assert RememberScope.SESSION == "session"
 
 
 # =============================================================================
@@ -422,7 +414,6 @@ class TestPermissionHandler:
 
     def test_initial_state(self, handler):
         """Handler should start with empty state."""
-        assert handler._pending_requests == {}
         assert handler._session_rules == {}
 
     def test_get_pending_requests_empty(self, handler):
@@ -627,11 +618,8 @@ class TestPermissionHandler:
                 )
             )
 
-            # Give time for request to be queued. V2 creates the durable row via
-            # asyncio.to_thread before broadcasting, so the previous legacy-path
-            # sleep(0.01) is occasionally too short for the broadcast to have
-            # fired yet (flaky under V2); 0.05 gives the thread-pool hop margin.
-            await asyncio.sleep(0.05)
+            # Wait for the request to be queued and broadcast.
+            await _wait_until(lambda: mock_broadcast.called)
 
             # Check it was queued
             assert handler.get_queue_count("session-1") == 1
@@ -666,7 +654,9 @@ class TestPermissionHandler:
         """Should return allow result when user allows."""
         with patch("app.db.database.get_permission_rules", return_value=[]):
             async def respond_after_delay():
-                await asyncio.sleep(0.01)
+                # Answer once the durable row exists: an answer that arrives
+                # first finds nothing and the request waits out its full TTL.
+                await _wait_until(lambda: handler.get_queue_count("session-1") == 1)
                 await handler.respond(
                     request_id="req-1",
                     session_id="session-1",
@@ -693,7 +683,9 @@ class TestPermissionHandler:
         """Should return deny result when user denies."""
         with patch("app.db.database.get_permission_rules", return_value=[]):
             async def respond_after_delay():
-                await asyncio.sleep(0.01)
+                # Answer once the durable row exists: an answer that arrives
+                # first finds nothing and the request waits out its full TTL.
+                await _wait_until(lambda: handler.get_queue_count("session-1") == 1)
                 await handler.respond(
                     request_id="req-1",
                     session_id="session-1",
@@ -731,149 +723,12 @@ class TestPermissionHandler:
         assert result == {"error": "Request not found"}
 
     # -------------------------------------------------------------------------
-    # Auto-resolve Tests
-    # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_resolve_matching_requests(self, handler):
-        """Should auto-resolve matching queued requests."""
-        # Create multiple pending requests
-        req1 = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "npm install"}
-        )
-        req2 = PermissionRequest(
-            request_id="req-2",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "npm run build"}
-        )
-        req3 = PermissionRequest(
-            request_id="req-3",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "git status"}  # Should NOT match
-        )
-        handler._pending_requests["session-1"] = {
-            "req-1": req1,
-            "req-2": req2,
-            "req-3": req3
-        }
-
-        # Create a rule that matches npm commands
-        rule = PermissionRule(
-            id="rule-1",
-            session_id="session-1",
-            profile_id=None,
-            tool_name="Bash",
-            tool_pattern="npm *",
-            decision=PermissionDecision.ALLOW
-        )
-
-        mock_broadcast = AsyncMock()
-        resolved = await handler._resolve_matching_requests("session-1", rule, mock_broadcast)
-
-        # req-1 and req-2 should be resolved, req-3 should remain
-        assert "req-1" in resolved
-        assert "req-2" in resolved
-        assert "req-3" not in resolved
-
-        # Check responses were set
-        assert req1.response["behavior"] == "allow"
-        assert req2.response["behavior"] == "allow"
-        assert req1.response_event.is_set()
-        assert req2.response_event.is_set()
-
-        # req-3 should still be pending
-        assert "req-3" in handler._pending_requests["session-1"]
-        assert not req3.response_event.is_set()
-
-    @pytest.mark.asyncio
-    async def test_resolve_matching_requests_deny(self, handler):
-        """Should set deny response for matching requests with DENY rule."""
-        req = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "rm -rf /"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        rule = PermissionRule(
-            id="rule-1",
-            session_id="session-1",
-            profile_id=None,
-            tool_name="Bash",
-            tool_pattern="rm *",
-            decision=PermissionDecision.DENY
-        )
-
-        resolved = await handler._resolve_matching_requests("session-1", rule, None)
-
-        assert "req-1" in resolved
-        assert req.response["behavior"] == "deny"
-
-    @pytest.mark.asyncio
-    async def test_resolve_matching_requests_broadcasts(self, handler):
-        """Should broadcast queue update when requests are resolved."""
-        req = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "npm install"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        rule = PermissionRule(
-            id="rule-1",
-            session_id="session-1",
-            profile_id=None,
-            tool_name="Bash",
-            tool_pattern="npm *",
-            decision=PermissionDecision.ALLOW
-        )
-
-        mock_broadcast = AsyncMock()
-        await handler._resolve_matching_requests("session-1", rule, mock_broadcast)
-
-        mock_broadcast.assert_called_once()
-        call_args = mock_broadcast.call_args[0][0]
-        assert call_args["type"] == "permission_queue_update"
-        assert call_args["session_id"] == "session-1"
-        assert "req-1" in call_args["resolved_ids"]
-
-    @pytest.mark.asyncio
-    async def test_resolve_matching_requests_empty_session(self, handler):
-        """Should handle session with no pending requests."""
-        rule = PermissionRule(
-            id="rule-1",
-            session_id="session-1",
-            profile_id=None,
-            tool_name="Bash",
-            tool_pattern=None,
-            decision=PermissionDecision.ALLOW
-        )
-
-        resolved = await handler._resolve_matching_requests("unknown-session", rule, None)
-
-        assert resolved == []
-
-    # -------------------------------------------------------------------------
     # Cancel Request Tests
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_cancel_request_not_found(self, handler):
         """Should return False when request not found."""
-        handler._pending_requests["session-1"] = {}
-
         result = await handler.cancel_request("unknown-req", "session-1")
 
         assert result is False
@@ -1122,9 +977,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             # Inspect the broadcast that was fired
             assert mock_broadcast.called
@@ -1156,9 +1009,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["type"] == "permission_request"
@@ -1189,9 +1040,7 @@ class TestEnrichmentFields:
                 )
             )
 
-            # V2 creates the durable row via asyncio.to_thread before
-            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_broadcast.called)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["title"] == "Only title set"
@@ -1336,7 +1185,6 @@ class TestConnectorFunnelHook:
 
     @pytest.mark.asyncio
     async def test_funnel_invoked_with_request_details(self, handler, mock_broadcast=None):
-        from unittest.mock import MagicMock
 
         broadcast = AsyncMock()
         captured = {}
@@ -1356,7 +1204,7 @@ class TestConnectorFunnelHook:
                     broadcast_func=broadcast,
                 )
             )
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: bool(captured))
             await handler.cancel_request("req-funnel", "session-1")
             await task
 
@@ -1370,7 +1218,10 @@ class TestConnectorFunnelHook:
         """A connector-side explosion must leave the durable flow intact."""
         broadcast = AsyncMock()
 
+        raised = []
+
         async def boom(**kwargs):
+            raised.append(kwargs["request_id"])
             raise RuntimeError("discord down")
 
         with patch("app.db.database.get_permission_rules", return_value=[]), \
@@ -1385,7 +1236,7 @@ class TestConnectorFunnelHook:
                     broadcast_func=broadcast,
                 )
             )
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: bool(raised))
 
             # The durable row exists and the WS broadcast still happened.
             assert handler.get_queue_count("session-1") == 1

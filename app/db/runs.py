@@ -7,9 +7,9 @@ carries a strictly monotonic ``fence_token`` that stamps every event append
 has lost ownership.
 
 Ownership is time-bounded: a claim sets ``lease_expires_at`` from a ttl, and the
-runner must ``renew_run`` (heartbeat) before it lapses. Lapsed leases are reaped
-by ``expire_due_runs`` (or opportunistically at the next ``claim_run``), which
-frees the session for a fresh claim with an incremented fence token.
+runner must ``renew_run`` (heartbeat) before it lapses. A lapsed lease is
+reaped at the next ``claim_run``, which frees the session for a fresh claim with
+an incremented fence token.
 
 Every transition is a single guarded UPDATE/INSERT so concurrency is resolved by
 the database, not by read-modify-write races in Python.
@@ -100,36 +100,6 @@ def release_run(run_id: str, fence_token: int) -> bool:
         return cursor.rowcount > 0
 
 
-def transfer_run(
-    session_id: str, new_runner_id: str, ttl_seconds: int
-) -> Optional[Dict[str, Any]]:
-    """Transfer ownership to a new runner, superseding any active run.
-
-    Marks the current active run (if any) ``transferred`` and inserts a fresh
-    active run for ``new_runner_id`` with an incremented fence token. Returns
-    the new run row.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE runs SET state='transferred', updated_at=NOW() "
-            "WHERE session_id=%s AND state='active'",
-            (session_id,),
-        )
-        run_id = str(uuid.uuid4())
-        cursor.execute(
-            "INSERT INTO runs "
-            "(id, session_id, runner_id, fence_token, state, lease_expires_at) "
-            "VALUES (%s, %s, %s, "
-            "(SELECT COALESCE(MAX(fence_token), 0) + 1 FROM runs WHERE session_id=%s), "
-            "'active', NOW() + (%s * INTERVAL '1 second')) "
-            "RETURNING *",
-            (run_id, session_id, new_runner_id, session_id, ttl_seconds),
-        )
-        row = cursor.fetchone()
-    return dict(row) if row else None
-
-
 def get_active_run(session_id: str) -> Optional[Dict[str, Any]]:
     """Return the session's active run, or None."""
     with get_db() as conn:
@@ -140,14 +110,3 @@ def get_active_run(session_id: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
     return dict(row) if row else None
-
-
-def expire_due_runs() -> int:
-    """Expire every active run whose lease has lapsed. Returns the count."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE runs SET state='expired', updated_at=NOW() "
-            "WHERE state='active' AND lease_expires_at < NOW()"
-        )
-        return cursor.rowcount

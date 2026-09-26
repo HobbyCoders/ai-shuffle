@@ -15,12 +15,11 @@ the store loader and the database module are both mocked.
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 import app.core.rewind_db_sync as rds
-from app.core.config import settings
 from app.core.jsonl_rewind import jsonl_rewind_service
 
 

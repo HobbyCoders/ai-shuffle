@@ -17,7 +17,7 @@ Everything else the compiler gathers itself:
                       manifests (``fluid.context.environment``); the date and
                       git state ride each turn as a reminder instead
 * instruction stack — Fluid-native AGENTS.md discovery
-                      (``fluid.context.instructions.build_instruction_stack``);
+                      (``fluid.context.instructions.build_instruction_blocks``);
 * skills index      — name+description only; bodies load on demand via the
                       ``Skill`` builtin (progressive disclosure). Omitted when
                       ``PromptInputs.tools`` says the session has no ``Skill``;
@@ -33,13 +33,15 @@ Layering order (stable — prompt-cache friendly):
 
 Two views of the same compilation:
 
-* :func:`compile_system_prompt` — the joined string every engine consumes;
-* :func:`compile_prompt` — a :class:`CompiledPrompt` that keeps the same text
+* :func:`compile_prompt` — a :class:`CompiledPrompt` that keeps the joined text
   *plus* the labeled sections it was built from (one per instruction file, with
-  its path). ``compile_system_prompt`` is exactly ``compile_prompt(...).text``,
-  so the two can never drift. The sections exist for the context-usage
-  breakdown (``loop.get_context_usage()``): pricing "memory files" separately
-  from "system prompt" needs attribution the joined string has already lost.
+  its path); hosts send ``.text``;
+* :func:`compile_system_prompt` — just the joined string, exactly
+  ``compile_prompt(...).text``, so the two can never drift.
+
+The sections exist for the context-usage breakdown (``loop.get_context_usage()``):
+pricing "memory files" separately from "system prompt" needs attribution the
+joined string has already lost.
 
 The delegated (claude CLI) leg in *append* mode must NOT use this compiler for
 env/instructions — the CLI gathers its own; compiling both would duplicate.
@@ -73,7 +75,7 @@ AGENTS_HEADER = (
 
 @dataclass(kw_only=True)
 class PromptInputs:
-    """Inputs to :func:`compile_system_prompt`. App-supplied fields first."""
+    """Inputs to :func:`compile_prompt`. App-supplied fields first."""
 
     base: str | None = None
     extra_blocks: Sequence[str] = field(default_factory=tuple)
@@ -210,8 +212,7 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
 
     The instruction stack contributes ONE section per instruction file (in the
     stack's own order), so per-file attribution survives; every other input is a
-    single section. ``text`` is the sections joined with blank lines — i.e. the
-    exact string :func:`compile_system_prompt` has always returned.
+    single section. ``text`` is the sections joined with blank lines.
     """
     sections: list[PromptSection] = []
     # Source gating (setting_sources): "user" turns the ~/.fluid tree and

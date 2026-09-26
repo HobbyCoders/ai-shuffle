@@ -22,8 +22,8 @@ from fastapi.testclient import TestClient
 from app.core.session_modes import CHAT_UPLOADS_DIRNAME, chat_mode_read_permitted
 
 
-@pytest.fixture
-def workspace_client(tmp_path, monkeypatch):
+@pytest.fixture(params=["true", "false"], ids=["local", "docker"])
+def workspace_client(tmp_path, monkeypatch, request):
     """The workspace router alone, rooted at a temp dir.
 
     Mounted without the full app so no lifespan, migration or DB machinery runs;
@@ -37,6 +37,11 @@ def workspace_client(tmp_path, monkeypatch):
 
     import app.core.config as config
 
+    # Exercise both deployment modes independently of the test runner's host.
+    # The project producer still reads the settings object directly, while the
+    # workspace producer reads the runtime override: both must use this root.
+    monkeypatch.setenv("LOCAL_MODE", request.param)
+    monkeypatch.setattr(config.settings, "workspace_dir", tmp_path)
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
 
     app = FastAPI()

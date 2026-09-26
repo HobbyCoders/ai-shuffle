@@ -37,8 +37,9 @@ or a Python kernel. Agent-level tool denials still apply. The delegated bridge
 resolves the host bundle's transport-qualified names to registered names for
 permission checks and warm-cache surface filtering; foreign prefixes and
 unregistered names remain untrusted. Provider-owned memory is not required. A snapshot has its own
-budget; leaving a fact out of the prompt does not delete it. Tool-only and
-conflicted facts are withheld from normal answers. Recall exposes a conflict's
+budget; leaving a fact out of the prompt does not delete it. Conflicted facts
+are withheld from normal answers. Facts whose only evidence is tool output
+render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
@@ -59,7 +60,7 @@ Current per-owner defaults:
 | Retained fact revisions | At most 2, for at most 30 days |
 | Fact text | 500 characters; oversize saves fail rather than truncate meaning |
 | Fact document | 2 MiB; commit rejected if exceeded |
-| Prompt fact lines | 8,000 characters, with profile facts prioritized |
+| Prompt fact lines | 8,000 characters. Unprotected facts (inferred or harvested) claim up to 3,000 first; the rest goes to profile facts, then other protected facts |
 | Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, the oldest unsynthesized lines (never explicit ones) are dropped down to half the cap with a warning; events may still be skipped under lock contention |
 | Model-assisted inference | At most 48 attempted calls per UTC day, per store; input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice, then the skill library); output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
 | Recent deletion records | 256, plus a fixed 16 KiB monotonic deletion filter (32 KiB as hexadecimal JSON) |

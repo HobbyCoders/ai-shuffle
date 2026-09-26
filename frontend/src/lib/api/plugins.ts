@@ -12,6 +12,11 @@ import { api } from './client';
 
 // ============================================================================
 // Types
+//
+// These mirror the Pydantic response models in app/api/plugins.py. Real payloads
+// live in ./__fixtures__/plugin-responses.json (regenerated and checked by
+// tests/api/test_plugins_frontend_contract.py); plugins.contract.test.ts fails
+// when these interfaces and that fixture disagree on a key.
 // ============================================================================
 
 export interface MarketplaceInfo {
@@ -30,21 +35,27 @@ export interface PluginInfo {
 	version: string;
 	scope: string;
 	install_path: string;
-	installed_at: string;
+	/** ISO timestamp; null for marketplace (not installed) details or an unreadable record. */
+	installed_at: string | null;
 	enabled: boolean;
 	has_commands: boolean;
 	has_agents: boolean;
 	has_skills: boolean;
 	has_hooks: boolean;
 	has_mcp: boolean;
-	connector_type?: string | null;
+	connector_type: string | null;
 }
 
+/**
+ * GET /plugins/{id}. Commands, agents and skills are listed by name; hooks are
+ * reported only as `has_hooks` (the backend does not enumerate them).
+ * For a not-yet-installed plugin `scope` is "marketplace", `version` is
+ * "available" and `installed_at` is null.
+ */
 export interface PluginDetails extends PluginInfo {
 	commands: string[];
 	agents: string[];
 	skills: string[];
-	hooks: string[];
 	readme: string | null;
 }
 
@@ -52,42 +63,35 @@ export interface AvailablePlugin {
 	id: string;
 	name: string;
 	marketplace: string;
+	/** Local directory of the plugin in its marketplace, or the JSON-encoded external source. */
+	marketplace_path: string;
 	description: string;
-	path: string;
-	installed: boolean;
-	installed_version: string | null;
 	has_commands: boolean;
 	has_agents: boolean;
 	has_skills: boolean;
 	has_hooks: boolean;
 	has_mcp: boolean;
-	connector_type?: string | null;
+	connector_type: string | null;
+	installed: boolean;
+	enabled: boolean;
 }
 
 export interface FileBasedAgent {
+	/** `<plugin id>:<agent file stem>` */
 	id: string;
 	name: string;
 	description: string;
-	plugin_id: string;
-	plugin_name: string;
-	file_path: string;
-	tools: string[] | null;
 	model: string | null;
+	tools: string[] | null;
+	prompt: string;
+	/** Id of the plugin that provides the agent (`name@marketplace`). */
+	source_plugin: string;
+	file_path: string;
 }
 
-export interface InstallPluginRequest {
-	plugin_id: string;
-	scope?: string;
-}
-
-export interface InstallPluginsBatchRequest {
-	plugin_ids: string[];
-	scope?: string;
-}
-
-export interface AddMarketplaceRequest {
-	url: string;
-	name: string;
+export interface MarketplaceSyncResult {
+	status: 'synced';
+	marketplace_id: string;
 }
 
 export interface PluginUpdateInfo {
@@ -142,8 +146,8 @@ export async function removeMarketplace(marketplaceId: string): Promise<void> {
 /**
  * Sync a marketplace (git pull)
  */
-export async function syncMarketplace(marketplaceId: string): Promise<{ success: boolean; message: string }> {
-	return api.post<{ success: boolean; message: string }>(`/plugins/marketplaces/${marketplaceId}/sync`);
+export async function syncMarketplace(marketplaceId: string): Promise<MarketplaceSyncResult> {
+	return api.post<MarketplaceSyncResult>(`/plugins/marketplaces/${marketplaceId}/sync`);
 }
 
 // ============================================================================

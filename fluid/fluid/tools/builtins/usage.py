@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -26,6 +27,12 @@ SPEC = ToolSpec(
 )
 
 
+# The last provider rows this process read successfully. A host reports
+# ``providers: null`` when it could not read its provider rows (as opposed to
+# ``[]``, no providers), and the tool then reports these instead of "none".
+_last_providers: list[dict[str, Any]] | None = None
+
+
 def _percent(value: Any) -> float | None:
     try:
         value = float(value)
@@ -36,6 +43,27 @@ def _percent(value: Any) -> float | None:
     return round(max(0.0, min(100.0, value)), 2)
 
 
+def _reset_passed(resets_at: Any) -> bool:
+    """True when ``resets_at`` (epoch s, epoch ms or ISO 8601) is in the past."""
+    if resets_at is None or isinstance(resets_at, bool):
+        return False
+    try:
+        stamp = float(resets_at)
+    except (TypeError, ValueError):
+        try:
+            parsed = datetime.fromisoformat(str(resets_at).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        # Host timestamps are UTC; a zone-less one must not read as local time.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        stamp = parsed.timestamp()
+    else:
+        if stamp >= 1e12:
+            stamp /= 1000.0
+    return stamp <= time.time()
+
+
 def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -43,13 +71,54 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
     if value is None:
         return None
     remaining = value if remaining_input else 100.0 - value
-    return {
+    rolled_over = _reset_passed(raw.get("resets_at"))
+    if rolled_over:
+        remaining = 100.0
+    window = {
         "type": str(raw.get("type") or "unknown"),
         "used_percent": round(100.0 - remaining, 2),
         "remaining_percent": round(remaining, 2),
         "resets_at": raw.get("resets_at"),
         "source": source,
     }
+    if rolled_over:
+        window["rolled_over"] = True
+    observed_at = _epoch_seconds(raw.get("observed_at"))
+    if observed_at is not None:
+        window["observed_at"] = raw.get("observed_at")
+    return window
+
+
+def _epoch_seconds(value: Any) -> float | None:
+    """Epoch seconds from an epoch-seconds or epoch-ms stamp, else None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if stamp != stamp or stamp <= 0 or stamp in (float("inf"), float("-inf")):
+        return None
+    # App snapshots use seconds for Claude and milliseconds for provider rows
+    # and per-window observations.
+    return stamp / 1000.0 if stamp > 10_000_000_000 else stamp
+
+
+def _oldest_observation(fetched_at: Any, windows: Any) -> Any:
+    """When the least recently reported Claude window was observed.
+
+    One CLI event dates one window, so a snapshot's ``fetched_at`` (moved by
+    any window) overstates the others' freshness. The usage panel dates the
+    section by its oldest window; the tool does the same. Windows without
+    their own ``observed_at`` fall back to ``fetched_at``.
+    """
+    fallback = _epoch_seconds(fetched_at)
+    stamps = [
+        observed if (observed := _epoch_seconds(w.get("observed_at"))) is not None else fallback
+        for w in windows or () if isinstance(w, dict)
+    ]
+    stamps = [s for s in stamps if s is not None]
+    return min(stamps) if stamps else fetched_at
 
 
 def _freshness(fetched_at: Any, *, available: bool = True) -> str:
@@ -87,13 +156,12 @@ def _payload(raw: Any) -> dict[str, Any]:
         accounts.append({
             "instance_id": account.get("instance_id"),
             "device_name": account.get("device_name"),
-            "account_id": account.get("account_id"),
-            "account_email": account.get("account_email"),
-            "account_name": account.get("account_name"),
-            "plan_type": account.get("plan_type"),
             "available": bool(account.get("available")),
             "source": "cached_host_snapshot",
-            "freshness": _freshness(account_fetched_at, available=bool(account.get("available"))),
+            "freshness": _freshness(
+                _oldest_observation(account_fetched_at, account.get("windows")),
+                available=bool(account.get("available")),
+            ),
             "fetched_at": account_fetched_at,
             "windows": [
                 item for value in account.get("windows") or ()
@@ -103,6 +171,8 @@ def _payload(raw: Any) -> dict[str, Any]:
     claude_available = claude_available or any(
         account.get("available") is True for account in accounts
     )
+    global _last_providers
+    providers_unread = "providers" in raw and raw["providers"] is None
     providers: list[dict[str, Any]] = []
     for provider in raw.get("providers") or ():
         if not isinstance(provider, dict):
@@ -130,10 +200,26 @@ def _payload(raw: Any) -> dict[str, Any]:
         if isinstance(credits, dict):
             entry["credits"] = {
                 key: credits[key]
-                for key in ("unlimited", "balance_remaining", "limit_remaining", "balance", "usage", "total_available", "spend_month")
+                for key in ("unlimited", "balance_remaining", "limit_remaining", "limit", "balance", "usage",
+                            "total_available", "total_credits", "total_usage", "spend_month", "currency")
                 if key in credits
             }
         providers.append(entry)
+    if providers_unread:
+        # Replayed rows are what was read last time, not what the host holds
+        # now: never label them fresh (their fetched_at still says when).
+        providers = []
+        for cached in _last_providers or ():
+            entry = dict(cached)
+            entry["source"] = "last_known_provider_snapshot"
+            entry["last_known"] = True
+            if entry.get("freshness") == "fresh":
+                entry["freshness"] = "stale"
+            if entry.get("status") == "fresh":
+                entry["status"] = "stale"
+            providers.append(entry)
+    else:
+        _last_providers = [dict(entry) for entry in providers]
 
     fetched_at = raw.get("fetched_at")
     provider_available = any(
@@ -143,7 +229,9 @@ def _payload(raw: Any) -> dict[str, Any]:
         for entry in providers
     )
     available = claude_available or provider_available
-    claude_freshness = _freshness(fetched_at, available=claude_available)
+    claude_freshness = _freshness(
+        _oldest_observation(fetched_at, raw.get("windows")), available=claude_available,
+    )
     provider_freshness = {entry["freshness"] for entry in providers}
     aggregate_freshness = (
         claude_freshness
@@ -169,8 +257,20 @@ def _payload(raw: Any) -> dict[str, Any]:
             "reason": "host did not provide session usage in this snapshot",
         },
     }
+    if providers_unread:
+        result["providers_unavailable"] = True
+        result["providers_reason"] = (
+            "provider usage rows are temporarily unavailable (the host could "
+            "not read them); "
+            + ("these are the last values read" if providers
+               else "this does not mean no providers are configured")
+        )
     if not available and not windows:
-        result["reason"] = "no cached subscription usage is available"
+        result["reason"] = (
+            "provider usage rows are temporarily unavailable and no cached "
+            "subscription usage is available" if providers_unread
+            else "no cached subscription usage is available"
+        )
     return result
 
 

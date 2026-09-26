@@ -32,15 +32,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
 from app.api.auth import get_api_user_from_request, require_auth
-from app.api.common import is_path_safe, is_path_served, require_file_access
+from app.api.common import is_path_safe, require_file_access
 from app.api.sessions_helpers import require_session
 from app.core.config import settings
 from app.db.async_database import run_sync
 from app.network import control, tokens
 from app.network.files import forward_download
 
-# Re-exported so importers can keep doing ``from app.api.media_serve import ...``.
-__all__ = ["MediaConfig", "build_media_module", "is_path_safe", "is_path_served", "settings"]
+__all__ = ["MediaConfig", "build_media_module"]
 
 
 @dataclass(frozen=True)

@@ -17,11 +17,8 @@ count here goes up and the test fails.
 """
 
 import asyncio
-import shutil
-import tempfile
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -115,13 +112,6 @@ def recorder(sink, value=None, factory=None):
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-
-@pytest.fixture
-def temp_dir():
-    tmpdir = tempfile.mkdtemp()
-    yield Path(tmpdir)
-    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture

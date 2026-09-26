@@ -1,9 +1,9 @@
-"""Cross-install upload delivery — lift at send, materialize at spawn (D8).
+"""Cross-install upload delivery — lift at send, materialize at spawn.
 
 An upload is staged on the disk of whichever install served the upload endpoint.
 When the turn that references it runs on ANOTHER install, that path means
 nothing there. This module is the whole transport, and it is DB-mediated by
-ruling: there is no device-to-device HTTP in this cluster (``base_url`` is
+design: there is no device-to-device HTTP in this cluster (``base_url`` is
 optional and guessed; the legacy relay was deleted and is not to be rebuilt).
 
 Two halves:
@@ -155,8 +155,8 @@ def materialize_blobs_for_turn(
     local file is still present — the turn is a retry and the file is already on
     disk. When the bytes are gone AND the file is missing, this raises
     :class:`UploadLiftError`: running with a dead path would send the agent
-    looking for a file that does not exist, which is exactly the silent loss D8
-    exists to prevent.
+    looking for a file that does not exist, which is exactly the silent loss
+    this module exists to prevent.
 
     Synchronous (filesystem + DB) — call via ``run_sync``/``to_thread``.
     """

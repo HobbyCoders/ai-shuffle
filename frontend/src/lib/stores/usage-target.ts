@@ -15,7 +15,7 @@
  *   2. No sessionId (new chat) → self (null).
  *   3. Row not found → self (null).
  *
- * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
+ * Plain `.ts` (no $state runes) so it can be imported before component init.
  */
 
 import { createStore } from './store-utils';

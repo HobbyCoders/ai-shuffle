@@ -38,12 +38,9 @@ async def peer_link(device_id: str):
         raise HTTPException(503, UNAVAILABLE)
     link = transport._links.get(device_id)
     if link is None:
+        from app.network.endpoints import peer_endpoints
         row = await run_sync(store.get_member, device_id)
-        presence = engine.presence_of(device_id) or {}
-        link = transport.PeerLink(
-            device_id,
-            list(presence.get("endpoints") or (row or {}).get("endpoints") or []),
-        )
+        link = transport.PeerLink(device_id, peer_endpoints(row, engine.presence_of(device_id)))
         transport._links[device_id] = link
     if not link.endpoints:
         raise HTTPException(503, UNAVAILABLE)
@@ -105,7 +102,21 @@ async def forward_http(
         raise HTTPException(503, UNAVAILABLE) from None
 
 
-async def relay(websocket: WebSocket, upstream) -> None:
+async def _until_not_member(device_id: str) -> None:
+    """Return once ``device_id`` stops being an active member (checked every few seconds).
+
+    The peer side re-checks the viewer's device token as often; this is the
+    viewer side's half, so removing the owning device ends the relay.
+    """
+    while True:
+        await asyncio.sleep(AUTH_CHECK_SECONDS)
+        ctx = engine.context()
+        member = ctx.member(device_id) if ctx is not None else None
+        if member is None or member.status != "active":
+            return
+
+
+async def relay(websocket: WebSocket, upstream, device_id: str | None = None) -> None:
     async def to_peer():
         while True:
             message = await websocket.receive()
@@ -130,6 +141,8 @@ async def relay(websocket: WebSocket, upstream) -> None:
                 await websocket.send_text(payload)
 
     tasks = [asyncio.create_task(to_peer()), asyncio.create_task(to_viewer())]
+    if device_id is not None:
+        tasks.append(asyncio.create_task(_until_not_member(device_id)))
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
@@ -168,7 +181,7 @@ async def forward_websocket(
                         max_queue=2,
                     ) as upstream:
                         transport.note_contact(device_id)
-                        await relay(websocket, upstream)
+                        await relay(websocket, upstream, device_id)
                     break
                 except InvalidStatusCode as exc:
                     if exc.status_code == 401 and attempt == 0:

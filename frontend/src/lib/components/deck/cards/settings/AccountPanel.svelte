@@ -15,7 +15,7 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import {
 		beginAccountConnection, disconnectAccount, getAccountConnection, getAccountProfile, normalizeUsername,
-		setAccountUsername, USERNAME_HINT, USERNAME_PATTERN, type AccountConnection, type AccountProfile
+		openSettingsTab, setAccountUsername, USERNAME_HINT, USERNAME_PATTERN, type AccountConnection, type AccountProfile
 	} from '$lib/api/account';
 
 	let { workerName = 'My worker', variant = 'settings', profile = $bindable<AccountProfile | null>(null), inventoryReady = $bindable(false) }: {
@@ -48,12 +48,15 @@
 	const signedIn = $derived(Boolean(connection?.signed_in));
 	const needsUsername = $derived(signedIn && profile !== null && !profile.account.profile_complete);
 	const accountWorkers = $derived(profile?.servers ?? []);
+	/** The account service refused this worker a remote connection (tunnel_limit). */
+	const refusal = $derived(connection?.signed_in && connection.refusal?.code === 'tunnel_limit' ? connection.refusal : null);
 	const browserSignedInThroughAccount = $derived(variant === 'settings' && auth.current.status?.auth_mode === 'account');
 	const remoteAccess = $derived.by(() => {
 		switch (connection?.status) {
 			case 'connected': return 'Remote access is on';
 			case 'connecting': return 'Turning on remote access…';
 			case 'reconnecting': return 'Remote access is reconnecting';
+			case 'limited': return 'Remote access is off: connection limit reached';
 			case 'locked': case 'unavailable': return connection?.error ? '' : 'Remote access is unavailable on this worker';
 			default: return '';
 		}
@@ -192,7 +195,7 @@
 					<span class="status" role="status">
 						{#if connection}
 							{#if connection.signed_in}
-								{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if connection.profile_ready === false}Signed in · finishing connection…{:else if profileError}Signed in{:else}Signed in · loading profile…{/if}
+								{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if refusal}Signed in · remote access off{:else if connection.profile_ready === false}Signed in · finishing connection…{:else if profileError}Signed in{:else}Signed in · loading profile…{/if}
 							{:else}Not signed in{/if}
 						{:else}{checking ? 'Checking account…' : 'Account status unavailable'}{/if}
 					</span>
@@ -279,7 +282,18 @@
 	{#if statusError}
 		<div class="error-row"><p role="alert">{statusError}</p><button type="button" class="btn" disabled={busy} onclick={refresh}>Retry account status</button></div>
 	{/if}
-	{#if actionError || connection?.error}<p id="account-panel-error" class="error" role="alert">{actionError || connection?.error}</p>{/if}
+	{#if refusal}
+		<div class="refusal" role="alert">
+			<p>{refusal.message}</p>
+			<p class="muted">{refusal.used} of {refusal.limit} remote {refusal.limit === 1 ? 'connection' : 'connections'} in use on this account. This worker keeps working here and on your local network. It asks again every hour, and right away when you add a license key.</p>
+			{#if variant === 'settings'}
+				<button type="button" class="btn" onclick={() => openSettingsTab('license')}>Open Settings &gt; License</button>
+			{:else}
+				<p class="muted">You can add a license key in Settings &gt; License once setup is done.</p>
+			{/if}
+		</div>
+	{/if}
+	{#if actionError || (connection?.error && !refusal)}<p id="account-panel-error" class="error" role="alert">{actionError || connection?.error}</p>{/if}
 </section>
 
 <style>
@@ -328,6 +342,9 @@
 	.workers ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 	.workers li { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; }
 	.error, .error-row p { color: var(--destructive); margin: 8px 0 0; }
+	.refusal { margin-top: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; font-size: 12px; }
+	.refusal p { margin: 0; }
+	.refusal p:first-child { color: var(--warning, var(--destructive)); }
 	.error-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 	@media (max-width: 480px) { .account { padding: 12px; } .head { flex-direction: column; } .head-actions { justify-content: flex-start; } .btn { min-height: 44px; } }
 </style>

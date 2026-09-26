@@ -42,6 +42,7 @@ from app.api.sessions_helpers import (
     require_session,
 )
 from app.api.ws_auth import authenticate_websocket
+from app.api.ws_key_watch import watch_api_key
 from app.api.ws_utils import safe_ws_send
 from app.core import browser_control, browser_stream
 from app.core import browser_panel_registry as registry
@@ -307,11 +308,13 @@ async def browser_panel_websocket(
         await websocket.close(code=4003, reason="Access denied")
         return
 
-    owner = control.owner_of(session)
-    if owner:
-        await remote_panel.forward_websocket(websocket, owner, session_id)
-        return
-    await serve_browser_panel(websocket, session_id)
+    # A revoked API key loses the panel (app.api.ws_key_watch).
+    async with watch_api_key(websocket):
+        owner = control.owner_of(session)
+        if owner:
+            await remote_panel.forward_websocket(websocket, owner, session_id)
+            return
+        await serve_browser_panel(websocket, session_id)
 
 
 async def serve_browser_panel(
@@ -368,6 +371,8 @@ async def serve_browser_panel(
                 raw = await websocket.receive_text()
             except WebSocketDisconnect:
                 break
+            except RuntimeError:
+                break  # this side already closed it (a revoked key, app.api.ws_key_watch)
 
             try:
                 if len(raw.encode("utf-8")) > 32768:

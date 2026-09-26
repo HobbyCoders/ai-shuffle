@@ -36,9 +36,11 @@ export function jsonResult(body: Record<string, unknown>, trailing?: string): Mc
 }
 
 /**
- * Cap a text payload to `maxChars`, cutting at a UTF-16 boundary. Returns the
- * (possibly shortened) text plus the original length so callers can attach a
- * self-describing truncation note in their own vocabulary.
+ * Cap a text payload to `maxChars`, cutting at a UTF-16 boundary that never
+ * splits a surrogate pair (a lone surrogate is not valid Unicode, and strict
+ * JSON consumers reject its escape). Returns the (possibly shortened) text plus
+ * the original length so callers can attach a self-describing truncation note
+ * in their own vocabulary.
  */
 export function capText(
   value: string,
@@ -46,7 +48,10 @@ export function capText(
 ): { text: string; truncated: boolean; fullChars: number } {
   const fullChars = value.length;
   if (fullChars <= maxChars) return { text: value, truncated: false, fullChars };
-  return { text: value.slice(0, maxChars), truncated: true, fullChars };
+  let end = maxChars;
+  const last = value.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return { text: value.slice(0, end), truncated: true, fullChars };
 }
 
 /**

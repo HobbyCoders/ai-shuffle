@@ -222,8 +222,6 @@ def wired_capabilities(
             "task_dispatch", "swarm", "monitor_spawn", "agent_roster", "agent_message",
         })
     wired.update({"recall_store", "memory_store"})
-    if config.continual:
-        wired.add("continual_journal")
     if not is_delegated_provider(config, provider_name):
         wired.update(NATIVE_WIRED_CAPABILITIES)
     return frozenset(wired)

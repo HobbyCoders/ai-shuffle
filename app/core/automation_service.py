@@ -2,7 +2,6 @@
 Automation service — business logic for CRUD, budget checking, and prompt rendering.
 """
 
-import hashlib
 import logging
 import re
 import secrets
@@ -11,11 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core import encryption
 from app.core.config import settings
 from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
-from app.core.project_links import (  # noqa: F401 — re-exported for existing callers/tests
-    _link_group_siblings,
-    _local_candidate,
-    resolve_runnable_local_project,
-)
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -105,10 +99,10 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
 # onto whatever clone THIS install has. The cross-install election helpers
 # (``_local_candidate`` / ``_link_group_siblings``, plus
 # ``resolve_runnable_local_project`` for the worktree-recreate rebind) live in
-# ``app/core/project_links.py`` and are re-imported above. NOTE: these serve
-# distributed runner election / worktree recreation, NOT cwd/adopt resolution
-# (which the origin resolver now owns) — that is why they survived PR-B's ladder
-# deletion (``resolve_local_project`` did not).
+# ``app/core/project_links.py``. NOTE: these serve distributed runner election
+# / worktree recreation, NOT cwd/adopt resolution (which the origin resolver
+# now owns) — that is why they survived PR-B's ladder deletion
+# (``resolve_local_project`` did not).
 # ---------------------------------------------------------------------------
 
 def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
@@ -247,6 +241,31 @@ def decrypt_webhook_secret(trigger_config: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Failed to decrypt webhook secret: {e}")
     return config
+
+
+def reveal_webhook_secrets(automation: Any) -> Any:
+    """Return a copy of ``automation`` with its webhook secrets decrypted.
+
+    For owner-only API responses: the edit form shows the secret so the
+    owner can sign requests, and ciphertext is useless for that. Covers the
+    legacy ``trigger_config`` and every webhook entry in ``triggers``. A
+    secret that cannot be decrypted is left as stored, so a save round-trips
+    it unchanged instead of rotating it.
+    """
+    if not isinstance(automation, dict):
+        return automation
+    revealed = dict(automation)
+    if revealed.get("trigger_type") == "webhook" and isinstance(revealed.get("trigger_config"), dict):
+        revealed["trigger_config"] = decrypt_webhook_secret(revealed["trigger_config"])
+    triggers = revealed.get("triggers")
+    if isinstance(triggers, list):
+        revealed["triggers"] = [
+            {**trig, "config": decrypt_webhook_secret(trig["config"])}
+            if isinstance(trig, dict) and trig.get("type") == "webhook" and isinstance(trig.get("config"), dict)
+            else trig
+            for trig in triggers
+        ]
+    return revealed
 
 
 # ---------------------------------------------------------------------------

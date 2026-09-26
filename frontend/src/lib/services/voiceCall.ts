@@ -1,5 +1,5 @@
 /**
- * WebRTC voice-call controller (wave VW2 of docs/VOICE_MODE_PLAN.md).
+ * WebRTC voice-call controller (wave VW2).
  *
  * One singleton per active call. Transport is ruling VM2: the browser talks
  * DIRECTLY to OpenAI over WebRTC (audio never transits our backend) and the
@@ -37,7 +37,6 @@
 
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
-import { openNativeVoice } from './nativeVoice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
 import type { VoiceAudioStream } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
@@ -470,6 +469,24 @@ async function openConnection(
 	return { pc, dc, callId };
 }
 
+/**
+ * End the call with an error when the LIVE connection fails mid-call. Armed on
+ * the first connection and again on each re-handshake's replacement.
+ */
+function watchForDrop(conn: Connection, owner: string, epoch: number): void {
+	conn.pc.addEventListener('connectionstatechange', () => {
+		if (epoch !== generation || connection !== conn) return;
+		if (conn.pc.connectionState !== 'failed') return;
+		// teardown() resets the store once its awaits settle; the reason is
+		// written after that, or it would be wiped.
+		const ending = teardown({ notifyBackend: true, status: 'error' });
+		const endedGeneration = generation;
+		void ending.then(() => {
+			if (endedGeneration === generation) patch({ sessionId: owner, error: 'The voice connection dropped.' });
+		});
+	});
+}
+
 function closeConnection(conn: Connection | null): void {
 	if (!conn) return;
 	try {
@@ -570,6 +587,7 @@ async function reconnect(): Promise<void> {
 		}
 
 		connection = next;
+		watchForDrop(next, sessionId, myGeneration);
 		applyMicMuted(get(voiceCallState).micMuted);
 		if (next.callId) await attachVoiceCall(sessionId, next.callId);
 		if (myGeneration !== generation) {
@@ -619,7 +637,7 @@ function applyMicMuted(muted: boolean): void {
 }
 
 /** Mute/unmute the microphone (the track stays attached; it is just disabled). */
-export function setMicMuted(muted: boolean): void {
+function setMicMuted(muted: boolean): void {
 	applyMicMuted(muted);
 	patch({ micMuted: muted });
 }
@@ -629,7 +647,7 @@ export function toggleMic(): void {
 }
 
 /** Mute/unmute the agent's voice (playback only — the model keeps talking). */
-export function setAgentMuted(muted: boolean): void {
+function setAgentMuted(muted: boolean): void {
 	if (audioEl) audioEl.muted = muted;
 	audioStream?.muteOutput(muted);
 	patch({ agentMuted: muted });
@@ -642,17 +660,6 @@ export function toggleAgent(): void {
 // ============================================================================
 // Lifecycle
 // ============================================================================
-
-async function handoffNativeVoice(owner: string, attempt: number): Promise<boolean> {
-	if (!(await openNativeVoice(owner))) return false;
-	if (attempt === generation) {
-		// The native foreground service owns capture and call controls. Preserve
-		// the resolved session/context without claiming a browser WebRTC call.
-		sessionId = null;
-		patch({ sessionId: owner, status: 'idle', error: null, notice: 'Voice opened in the Android app.' });
-	}
-	return true;
-}
 
 /**
  * Start a call on `sessionIdIn` using an already-minted credential (the one
@@ -682,8 +689,6 @@ export async function startCall(
 	});
 
 	try {
-		if (!usesAudioStream(cred.model) && await handoffNativeVoice(sessionIdIn, myGeneration)) return;
-		if (myGeneration !== generation) return;
 		const acquired = await acquireMic();
 		if (myGeneration !== generation) {
 			acquired.getTracks().forEach(track => track.stop());
@@ -727,14 +732,7 @@ export async function startCall(
 		if (conn.callId) await attachVoiceCall(sessionIdIn, conn.callId);
 		if (myGeneration !== generation) return;
 
-		conn.pc.addEventListener('connectionstatechange', () => {
-			if (myGeneration !== generation) return;
-			const s = conn.pc.connectionState;
-			if (s === 'failed') {
-				void teardown({ notifyBackend: true, status: 'error' });
-				patch({ sessionId: sessionIdIn, status: 'error', error: 'The voice connection dropped.' });
-			}
-		});
+		watchForDrop(conn, sessionIdIn, myGeneration);
 
 		patch({ status: 'live', startedAt: Date.now() });
 		armReconnectTimer();
@@ -776,8 +774,6 @@ export async function startCallForSession(sessionIdIn: string): Promise<void> {
 	patch({ sessionId: sessionIdIn, status: 'connecting', error: null, notice: null });
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
-		if (await handoffNativeVoice(sessionIdIn, attempt)) return;
-		if (attempt !== generation) return;
 		cred = await mintVoiceSecret(sessionIdIn);
 		if (attempt !== generation) return;
 	} catch (e) {

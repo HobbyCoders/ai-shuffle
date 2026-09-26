@@ -27,7 +27,7 @@ export type IconType =
 	| 'stop'
 	| 'send';
 
-export const TOOL_ICON_MAP: Record<string, IconType> = {
+const TOOL_ICON_MAP: Record<string, IconType> = {
 	// Image generation
 	generateImage: 'image', editImage: 'image', generateWithReference: 'image',
 	// Video generation

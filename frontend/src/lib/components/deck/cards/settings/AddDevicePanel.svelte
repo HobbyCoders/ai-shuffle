@@ -115,7 +115,7 @@
 				<h4>{grant.grant.purpose === 'network:join' ? 'Worker invite' : grant.grant.purpose === 'runner' ? 'Worker enrollment code' : 'Phone or browser code'}</h4>
 				<p class="hint">
 					{#if grant.grant.purpose === 'network:join'}
-						On the other worker choose <strong>Join with an invite</strong> during setup or in Settings → Devices, then scan this code or paste the link. It joins immediately.
+						On the other worker choose <strong>Join with an invite</strong> during setup or in Settings → Providers → Devices, then scan this code or paste the link. It joins immediately.
 					{:else if grant.grant.purpose === 'runner'}
 						On the worker configured for this database, run the command below.
 					{:else if link}
@@ -154,7 +154,7 @@
 		</div>
 		<p class="hint">
 			{#if kind === 'worker'}
-				Another computer running Shuffle joins this worker's network: it gets your settings, profiles and provider keys, and every device can see and drive sessions on either worker. The invite carries this worker's address, so the other worker must be able to reach it (same network, Tailscale, or a public address).
+				Another computer running Shuffle joins this worker's network: it gets your settings, profiles and provider keys, and every device can see and drive sessions on either worker. The invite carries this worker's address and is for a worker on your home network or a VPN such as Tailscale; workers signed in to the same Shuffle account find each other and always talk over the encrypted tunnel.
 			{:else if kind === 'runner'}
 				Enroll a worker that shares this worker's database. Code only; no address is embedded.
 			{:else}

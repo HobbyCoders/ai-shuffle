@@ -3,28 +3,10 @@ import json
 
 from app.db import database
 from app.db import session_events as events_db
-from app.network import engine, tokens, transport
+from app.network import engine
 from scripts import network_migrate
-from tests.core.network.harness import Worker, converge, join
+from tests.core.network.harness import converge, join
 
-import pytest
-
-
-@pytest.fixture
-def workers(tmp_path):
-    made = []
-
-    def make(name):
-        worker = Worker(name, tmp_path)
-        made.append(worker)
-        return worker
-
-    yield make
-    for worker in made:
-        worker.close()
-    engine.reset_for_tests()
-    tokens.reset_for_tests()
-    transport.reset_for_tests()
 
 
 def test_export_import_moves_an_installs_sessions(workers, tmp_path):

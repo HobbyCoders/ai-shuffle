@@ -3,22 +3,20 @@ Settings API routes - audio (TTS/STT) endpoints.
 """
 
 import logging
-import os
-import uuid
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_input_settings import get_voice_input_model
-from app.api.auth import require_admin, require_auth
+from app.api.auth import get_api_user_from_request, require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
 from app.api.settings_media import get_model_params
+from app.core.environment import resolve_api_credential_with_policy
 from app.services.fal_schema import schema_service, ModelSchema
 
 logger = logging.getLogger(__name__)
@@ -279,27 +277,6 @@ class TTSGenerateRequest(BaseModel):
     params: Optional[dict[str, Any]] = None
 
 
-class TTSGenerateResponse(BaseModel):
-    """Response from TTS generation"""
-    success: bool
-    audio_url: Optional[str] = None
-    file_path: Optional[str] = None
-    duration_seconds: Optional[float] = None
-    error: Optional[str] = None
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-
-def get_generated_audio_dir() -> Path:
-    """Get the directory for generated audio files."""
-    audio_dir = Path(os.environ.get("GENERATED_AUDIO_DIR", "generated-audio"))
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    return audio_dir
-
-
 # ============================================================================
 # Provider resolution (fal vs OpenAI)
 # ============================================================================
@@ -329,6 +306,37 @@ def _openai_voice(voice: Optional[str], model_info: Optional[dict]) -> str:
     if voice and voice in voices:
         return voice
     return voices[0] if voices else "alloy"
+
+
+FAL_KEY_MISSING = "fal.ai API key not configured. Go to Settings > Integrations to add your key."
+FAL_KEY_USER_PROVIDED = (
+    "Your credential policy requires your own fal.ai API key, and none is stored "
+    "for this API key. Ask the owner to store your key or change your fal.ai policy."
+)
+
+
+def _resolve_fal_key(api_user: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
+    """The fal.ai key a caller may spend, and the policy that chose it.
+
+    The owner (and the owner's paired devices, which carry no API user) spend
+    the owner's key. An API user gets the same resolution agent sessions apply
+    (``resolve_api_credential_with_policy``): ``user_provided`` only their own
+    stored key, ``optional`` their key else the owner's, ``admin_provided`` the
+    owner's. Returns ``(key or None, policy or None for the owner)``.
+    Synchronous: call via ``run_sync``.
+    """
+    if api_user is None:
+        return get_decrypted_api_key("fal_api_key"), None
+    return resolve_api_credential_with_policy("fal_api_key", api_user["id"])
+
+
+def _require_fal_key(fal_key: Optional[str], policy: Optional[str]) -> str:
+    """The resolved fal key, or the error that explains why there is none."""
+    if fal_key:
+        return fal_key
+    if policy == "user_provided":
+        raise HTTPException(status_code=403, detail=FAL_KEY_USER_PROVIDED)
+    raise HTTPException(status_code=400, detail=FAL_KEY_MISSING)
 
 
 def _resolve_openai_api_key() -> Optional[str]:
@@ -404,7 +412,7 @@ async def _openai_tts_bytes(
         error_detail = response.text
         logger.error(f"OpenAI TTS failed: {response.status_code} - {error_detail}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"TTS generation failed: {error_detail}",
         )
     return response.content
@@ -439,7 +447,7 @@ async def _openai_transcribe(
         error_detail = response.text
         logger.error(f"OpenAI transcription failed: {response.status_code} - {error_detail}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"Transcription failed: {error_detail}",
         )
     result = response.json()
@@ -678,13 +686,18 @@ async def _upload_to_fal_storage(
 
 
 @audio_router.get("/integrations/audio/models")
-async def get_audio_models(token: str = Depends(require_auth)):
+async def get_audio_models(http_request: Request, token: str = Depends(require_auth)):
     """
     Get available TTS and STT models.
+
+    ``available`` and ``fal_configured`` describe the fal.ai key the caller may
+    spend: an API user's own credential policy decides it, as for synthesis.
     """
+    api_user = get_api_user_from_request(http_request)
+
     def _load() -> tuple[str | None, str | None, str, str]:
         """Both key reads (+ decrypt) and both model settings in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
+        fal_key, _policy = _resolve_fal_key(api_user)
         openai_key = _resolve_openai_api_key()
         current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
         current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
@@ -772,8 +785,11 @@ async def update_tts_settings(
             if model:
                 database.set_system_setting("tts_model", model)
 
-        if request.voice:
-            database.set_system_setting("tts_voice", request.voice.strip())
+        # A blank voice is ignored like a blank model; storing "" would drop
+        # the saved voice back to the default.
+        voice = (request.voice or "").strip()
+        if voice:
+            database.set_system_setting("tts_voice", voice)
 
         if request.speed is not None:
             if request.speed < 0.1 or request.speed > 5.0:
@@ -811,81 +827,6 @@ async def update_stt_model(
     return {"success": True, "model": model}
 
 
-@audio_router.get("/integrations/tts/models")
-async def get_tts_models(token: str = Depends(require_auth)):
-    """
-    Get available TTS models with voice options.
-    """
-    def _load() -> tuple[str | None, str | None, str]:
-        """Both key reads (+ decrypt) and the current model in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
-        openai_key = _resolve_openai_api_key()
-        current_tts = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
-        return fal_key, openai_key, current_tts
-
-    fal_key, openai_key, current_tts = await run_sync(_load)
-
-    models = [
-        {
-            "id": model_id,
-            "name": info["name"],
-            "description": info["description"],
-            "price_display": info["price_display"],
-            "provider": (provider := _model_provider(model_id, info)),
-            "available": bool(openai_key) if provider == "openai" else bool(fal_key),
-            "is_current": model_id == current_tts,
-            "voices": info.get("voices", []),
-            "supports_speed": info.get("supports_speed", False),
-            "speed_range": info.get("speed_range", [0.1, 5.0]),
-        }
-        for model_id, info in TTS_MODELS.items()
-    ]
-
-    return {
-        "models": models,
-        "current_model": current_tts,
-        "fal_configured": bool(fal_key),
-        "openai_configured": bool(openai_key)
-    }
-
-
-@audio_router.get("/integrations/stt/models")
-async def get_stt_models(token: str = Depends(require_auth)):
-    """
-    Get available STT models.
-    """
-    def _load() -> tuple[str | None, str | None, str]:
-        """Both key reads (+ decrypt) and the current model in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
-        openai_key = _resolve_openai_api_key()
-        current_stt = database.get_system_setting("stt_model") or "fal-ai/whisper"
-        return fal_key, openai_key, current_stt
-
-    fal_key, openai_key, current_stt = await run_sync(_load)
-
-    models = [
-        {
-            "id": model_id,
-            "name": info["name"],
-            "description": info["description"],
-            "price_display": info["price_display"],
-            "provider": (provider := _model_provider(model_id, info)),
-            "available": bool(openai_key) if provider == "openai" else bool(fal_key),
-            "is_current": model_id == current_stt,
-            "supports_diarization": info.get("supports_diarization", False)
-        }
-        for model_id, info in STT_MODELS.items()
-    ]
-
-    return {
-        "models": models,
-        "supported_formats": ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac"],
-        "current_model": current_stt,
-        "fal_configured": bool(fal_key),
-        "openai_configured": bool(openai_key)
-    }
-
-
 # ============================================================================
 # Voice Transcription
 # ============================================================================
@@ -893,6 +834,7 @@ async def get_stt_models(token: str = Depends(require_auth)):
 
 @audio_router.post("/transcribe", response_model=TranscriptionResponse)
 async def transcribe_audio(
+    http_request: Request,
     file: UploadFile = File(...),
     token: str = Depends(require_auth)
 ):
@@ -943,13 +885,15 @@ async def transcribe_audio(
     # Resolve the model + both keys in ONE hop. A SECOND hop overall: the request
     # body read (``await file.read()``) and the size/format validation that can
     # reject it sit before this, so it cannot share a closure with anything above.
-    def _load_stt() -> tuple[str, str | None, str | None]:
-        stt_model = get_voice_input_model()
-        fal_key = get_decrypted_api_key("fal_api_key")
-        openai_key = _resolve_openai_api_key()
-        return stt_model, fal_key, openai_key
+    api_user = get_api_user_from_request(http_request)
 
-    stt_model, fal_key, openai_key = await run_sync(_load_stt)
+    def _load_stt() -> tuple[str, str | None, str | None, str | None]:
+        stt_model = get_voice_input_model()
+        fal_key, fal_policy = _resolve_fal_key(api_user)
+        openai_key = _resolve_openai_api_key()
+        return stt_model, fal_key, fal_policy, openai_key
+
+    stt_model, fal_key, fal_policy, openai_key = await run_sync(_load_stt)
     if STT_MODELS.get(stt_model, {}).get("realtime_only"):
         raise HTTPException(
             status_code=400,
@@ -963,11 +907,8 @@ async def transcribe_audio(
                 status_code=400,
                 detail="No OpenAI provider with a stored API key is configured. Add one in Settings > Providers."
             )
-    elif not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    else:
+        fal_key = _require_fal_key(fal_key, fal_policy)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -1013,7 +954,7 @@ async def transcribe_audio(
                     error_detail = response.text
                     logger.error(f"fal.ai Whisper failed: {response.status_code} - {error_detail}")
                     raise HTTPException(
-                        status_code=500,
+                        status_code=502,
                         detail=f"Transcription failed: {error_detail}"
                     )
 
@@ -1028,9 +969,9 @@ async def transcribe_audio(
 
             if not transcribed_text:
                 # Silence is a normal outcome, not a server fault. Answering 200
-                # with empty text lets the client say "no speech detected"; the
-                # 500 this used to raise made that branch unreachable and showed
-                # the user a failure instead. The log keeps the diagnostic, since
+                # with empty text lets the client say "no speech detected"; a
+                # 500 would make that branch unreachable and show the user a
+                # failure instead. The log keeps the diagnostic, since
                 # an unexpected upstream response shape also lands here.
                 logger.warning(
                     "Transcription returned empty text (model %s, %d bytes)",
@@ -1049,6 +990,14 @@ async def transcribe_audio(
             status_code=504,
             detail="Transcription timed out. Please try with a shorter audio clip."
         )
+    except httpx.TransportError:
+        # The upstream could not be reached (refused, reset, DNS): a gateway
+        # failure, not a fault in this server.
+        logger.exception("Transcription upstream unreachable")
+        raise HTTPException(
+            status_code=502,
+            detail="Transcription failed"
+        )
     except Exception:
         logger.exception("Transcription failed")
         raise HTTPException(
@@ -1058,176 +1007,27 @@ async def transcribe_audio(
 
 
 # ============================================================================
-# Text-to-Speech Generation
+# Text-to-Speech
 # ============================================================================
-
-
-@audio_router.post("/tts/generate", response_model=TTSGenerateResponse)
-async def generate_tts(
-    request: TTSGenerateRequest,
-    token: str = Depends(require_auth)
-):
-    """
-    Generate TTS audio using fal.ai.
-
-    Returns a URL to the generated audio file.
-    """
-    def _load_config() -> tuple[str | None, str | None, str, str, float]:
-        """Both key reads (+ decrypt) and the three TTS settings in ONE hop.
-
-        Each ``request.*`` override short-circuits its read exactly as before,
-        so an override still costs no query. The key requirement is enforced
-        after the model (hence provider) is known.
-        """
-        fal_key = get_decrypted_api_key("fal_api_key")
-        openai_key = _resolve_openai_api_key()
-
-        # Get configured model or use request override. Any fal.ai TTS model is
-        # accepted — curated models get tuned payloads, others are schema-driven.
-        # OpenAI (GPT) models are routed to OpenAI instead of fal.
-        tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
-
-        # Get voice and other settings
-        voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
-        speed = request.speed
-        if speed is None:
-            speed_str = database.get_system_setting("tts_speed")
-            speed = float(speed_str) if speed_str else 1.0
-        return fal_key, openai_key, tts_model, voice, speed
-
-    fal_key, openai_key, tts_model, voice, speed = await run_sync(_load_config)
-    model_info = TTS_MODELS.get(tts_model)
-    provider = _model_provider(tts_model, model_info)
-
-    if provider == "openai":
-        if not openai_key:
-            raise HTTPException(
-                status_code=400,
-                detail="No OpenAI provider with a stored API key is configured. Add one in Settings > Providers."
-            )
-    elif not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
-
-    # Validate text
-    text = request.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-    if len(text) > 4096:
-        raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
-
-    # Validate speed for curated models that declare a supported range.
-    if model_info and model_info.get("supports_speed"):
-        speed_range = model_info.get("speed_range", [0.5, 2.0])
-        if speed < speed_range[0] or speed > speed_range[1]:
-            raise HTTPException(status_code=400, detail=f"Speed must be between {speed_range[0]} and {speed_range[1]}")
-
-    output_format = request.output_format or "mp3"
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            if provider == "openai":
-                audio_data = await _openai_tts_bytes(
-                    client, openai_key, tts_model, text,
-                    _openai_voice(voice, model_info), speed, output_format, model_info,
-                )
-            else:
-                # Stored schema-driven params (set via the dynamic settings form)
-                # are used when the request doesn't override them.
-                extra_params = request.params
-                if extra_params is None:
-                    extra_params = await run_sync(get_model_params, "tts_model")
-
-                # Build the fal payload (curated shape, or schema-driven otherwise)
-                payload = await _resolve_tts_payload(
-                    tts_model, text, voice, speed, model_info, fal_key, extra_params
-                )
-
-                response = await client.post(
-                    f"https://fal.run/{tts_model}",
-                    headers={
-                        "Authorization": f"Key {fal_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-
-                if response.status_code == 401:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="fal.ai API key is invalid. Please update it in Settings > Integrations."
-                    )
-                elif response.status_code == 429:
-                    raise HTTPException(
-                        status_code=429,
-                        detail="Rate limit exceeded. Please wait and try again."
-                    )
-                elif response.status_code != 200:
-                    error_detail = response.text
-                    logger.error(f"fal.ai TTS failed: {response.status_code} - {error_detail}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"TTS generation failed: {error_detail}"
-                    )
-
-                result = response.json()
-                audio_url_from_fal = _extract_audio_url(result)
-
-                if not audio_url_from_fal:
-                    logger.error(f"No audio URL in fal.ai response for {tts_model}: {result}")
-                    raise HTTPException(status_code=500, detail="No audio URL in fal.ai response")
-
-                # Download the audio and save locally
-                audio_response = await client.get(audio_url_from_fal, timeout=60.0)
-                if audio_response.status_code != 200:
-                    raise HTTPException(status_code=500, detail="Failed to download generated audio")
-
-                audio_data = audio_response.content
-
-            audio_dir = get_generated_audio_dir()
-            local_filename = f"tts-{uuid.uuid4().hex[:8]}.{output_format}"
-            file_path = audio_dir / local_filename
-
-            with open(file_path, "wb") as f:
-                f.write(audio_data)
-
-            encoded_path = str(file_path).replace("\\", "/")
-            local_audio_url = f"/api/generated-audio/by-path?path={encoded_path}"
-
-            return TTSGenerateResponse(
-                success=True,
-                audio_url=local_audio_url,
-                file_path=str(file_path)
-            )
-
-    except HTTPException:
-        raise
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="TTS generation timed out. Please try with shorter text."
-        )
-    except Exception:
-        logger.exception("TTS generation failed")
-        raise HTTPException(
-            status_code=500,
-            detail="TTS generation failed"
-        )
 
 
 @audio_router.post("/tts/stream")
 async def stream_tts(
     request: TTSGenerateRequest,
+    http_request: Request,
     token: str = Depends(require_auth)
 ):
     """
     Stream TTS audio directly from fal.ai without saving to disk.
+
+    An API user spends the fal.ai key its credential policy allows (see
+    ``_resolve_fal_key``), never the owner's key by default.
     """
-    def _load_config() -> tuple[str | None, str | None, str, str, float]:
+    api_user = get_api_user_from_request(http_request)
+
+    def _load_config() -> tuple[str | None, str | None, str | None, str, str, float]:
         """Both key reads (+ decrypt) and the three TTS settings in ONE hop."""
-        fal_key = get_decrypted_api_key("fal_api_key")
+        fal_key, fal_policy = _resolve_fal_key(api_user)
         openai_key = _resolve_openai_api_key()
 
         tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
@@ -1237,9 +1037,9 @@ async def stream_tts(
         if speed is None:
             speed_str = database.get_system_setting("tts_speed")
             speed = float(speed_str) if speed_str else 1.0
-        return fal_key, openai_key, tts_model, voice, speed
+        return fal_key, fal_policy, openai_key, tts_model, voice, speed
 
-    fal_key, openai_key, tts_model, voice, speed = await run_sync(_load_config)
+    fal_key, fal_policy, openai_key, tts_model, voice, speed = await run_sync(_load_config)
     model_info = TTS_MODELS.get(tts_model)
     provider = _model_provider(tts_model, model_info)
 
@@ -1249,11 +1049,8 @@ async def stream_tts(
                 status_code=400,
                 detail="No OpenAI provider with a stored API key is configured. Add one in Settings > Providers."
             )
-    elif not fal_key:
-        raise HTTPException(
-            status_code=400,
-            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
-        )
+    else:
+        fal_key = _require_fal_key(fal_key, fal_policy)
 
     text = request.text.strip()
     if not text:
@@ -1303,19 +1100,19 @@ async def stream_tts(
                     raise HTTPException(status_code=429, detail="Rate limit exceeded.")
                 elif response.status_code != 200:
                     logger.error(f"fal.ai TTS failed: {response.status_code} - {response.text}")
-                    raise HTTPException(status_code=500, detail=f"TTS generation failed: {response.text}")
+                    raise HTTPException(status_code=502, detail=f"TTS generation failed: {response.text}")
 
                 result = response.json()
                 audio_url_from_fal = _extract_audio_url(result)
 
                 if not audio_url_from_fal:
                     logger.error(f"No audio URL in fal.ai response for {tts_model}: {result}")
-                    raise HTTPException(status_code=500, detail="No audio URL in fal.ai response")
+                    raise HTTPException(status_code=502, detail="No audio URL in fal.ai response")
 
                 # Stream directly from fal.ai CDN to the client (no disk round-trip)
                 audio_response = await client.get(audio_url_from_fal, timeout=60.0)
                 if audio_response.status_code != 200:
-                    raise HTTPException(status_code=500, detail="Failed to download generated audio")
+                    raise HTTPException(status_code=502, detail="Failed to download generated audio")
                 audio_bytes = audio_response.content
 
             return Response(
@@ -1328,6 +1125,10 @@ async def stream_tts(
         raise
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="TTS generation timed out. Try shorter text.")
+    except httpx.TransportError:
+        # The upstream could not be reached: a gateway failure (502).
+        logger.exception("TTS upstream unreachable")
+        raise HTTPException(status_code=502, detail="TTS generation failed")
     except Exception:
         logger.exception("TTS streaming failed")
         raise HTTPException(status_code=500, detail="TTS generation failed")

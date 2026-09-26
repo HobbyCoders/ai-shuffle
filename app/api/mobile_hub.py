@@ -2,6 +2,7 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -31,6 +32,64 @@ class _HubRoute(APIRoute):
 
 router = APIRouter(prefix='/hub', tags=['Mobile account hub'], route_class=_HubRoute)
 _limiter = _ExchangeRateLimiter(limit=30)
+
+
+def require_worker_approver(request: Request):
+    from app.api.auth import (
+        get_api_key,
+        get_paired_client_from_token,
+        get_session_token,
+    )
+    from app.core import owner_auth, preview_access
+    preview_access.enforce_limits(request)
+    cookie, bearer = get_session_token(request), get_api_key(request)
+    candidate = bearer or cookie
+    if candidate:
+        if owner_auth.owner_session(request, candidate):
+            if not bearer and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                owner_auth.same_origin(request)
+            return 'local-owner'
+        client = get_paired_client_from_token(candidate, touch=False)
+        if client and client.get('account_owner_admin') is True:
+            if not bearer and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                owner_auth.same_origin(request)
+            return client['id']
+        raise HTTPException(403, 'A worker-authenticated owner must confirm this device')
+    if owner_auth.loopback_request(request) and owner_auth.local_access(request):
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            owner_auth.same_origin(request)
+        return 'local-owner'
+    raise HTTPException(403, 'Sign in to the local worker or use an already-confirmed owner device')
+
+
+class DeviceConfirmation(BaseModel):
+    paired_client_id: str = Field(min_length=1, max_length=128)
+    mobile_record_id: str = Field(min_length=1, max_length=128)
+    approved: bool
+
+
+@router.get('/devices/confirmations')
+def device_confirmations(_owner: Annotated[str, Depends(require_worker_approver)]):
+    from fastapi.encoders import jsonable_encoder
+    return JSONResponse(jsonable_encoder(store.list_confirmations()), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/devices/{device_id}/confirmation')
+def confirm_device(device_id: str, body: DeviceConfirmation, _owner: Annotated[str, Depends(require_worker_approver)]):
+    owner = store.ownership(device_id)
+    binding = store.get_binding()
+    if (not owner or not binding or not binding['active']
+            or owner['server_id'] != binding['server_id']
+            or owner['paired_client_id'] != body.paired_client_id):
+        raise HTTPException(409, 'Device authorization changed')
+    # The hub is a veto, never the source of this approval.
+    if body.approved:
+        account_hub.require_active(owner)
+    try:
+        decision = store.confirm_device(owner, body.approved, mobile_record_id=body.mobile_record_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse({'confirmation': decision}, headers={'Cache-Control': 'no-store'})
 
 
 class ManagedLinkRequest(BaseModel):
@@ -264,7 +323,8 @@ def enroll(body: EnrollRequest):
     account_hub.require_active({'server_id': binding['server_id'],
                                 'account_id': identity['account_id'], 'hub_device_id': identity['device_id']})
     key = 'aim_' + secrets.token_urlsafe(32)
-    expires = datetime.now(timezone.utc) + timedelta(days=365)
+    from app.core.device_keys import KEY_LIFETIME_DAYS
+    expires = datetime.now(timezone.utc) + timedelta(days=KEY_LIFETIME_DAYS)
     scopes = list(pairing.DEFAULT_MOBILE_SCOPES)
     try:
         store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes, scoped=True)
@@ -276,5 +336,6 @@ def enroll(body: EnrollRequest):
     # Android keeps its account identity on the wire; rows and credentials are
     # distinct per worker even when both workers share the same database.
     return JSONResponse({'api_key': key, 'device_id': identity['device_id'],
-                         'expires_at': expires.isoformat(), 'scopes': scopes},
+                         'expires_at': expires.isoformat(), 'scopes': scopes,
+                         'confirmation': 'pending'},
                         headers={'Cache-Control': 'no-store'})

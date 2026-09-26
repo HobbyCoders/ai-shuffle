@@ -6,7 +6,6 @@ for each platform against faked httpx clients — no network, no MCP
 transport, no real Spotify/Hue API calls.
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,10 +14,7 @@ from app.core.connectors import hue_actions, spotify_actions
 from app.core.connectors.hue import HueConnector
 from app.core.connectors.spotify import SpotifyConnector
 from app.mcp.connector_gateway_sdk import build_gateway_tools, get_gateway_tool_names
-
-
-def _payload(result):
-    return json.loads(result["content"][0]["text"])
+from tests.mcp.tool_helpers import tool_result_json
 
 
 def _resp(status=200, body=None, content=b"x"):
@@ -490,7 +486,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["spotify_invoke"]({
+            res = tool_result_json(await tools["spotify_invoke"]({
                 "action": "pause", "params": {},
             }))
         assert res["success"] is True
@@ -508,7 +504,7 @@ class TestRegistration:
             side_effect=fake_running,
         ):
             tools = {t.name: t.handler for t in build_gateway_tools("ai-1")}
-            res = _payload(await tools["hue_actions"]({}))
+            res = tool_result_json(await tools["hue_actions"]({}))
         assert res["success"] is True
         ids = {a["id"] for a in res["actions"]}
         assert {"set_light", "turn_on", "list_lights", "activate_scene"} <= ids

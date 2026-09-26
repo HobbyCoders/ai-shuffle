@@ -458,16 +458,16 @@ describe('ProviderList — Anthropic API key row', () => {
 });
 
 describe('ProviderList — Claude subscription row', () => {
-	it('reads as not connected when unauthenticated with no saved accounts', async () => {
+	it('reads as not signed in when the CLI reports no login', async () => {
 		mocks.listModelProviders.mockResolvedValue({ providers: [] });
 		await providers.loadProviders();
 
 		const { getByText } = render(ProviderList);
-		// Default auth store is unauthenticated and no accounts were loaded.
-		expect(getByText('Not connected — sign in with your Claude account.')).toBeTruthy();
+		// Default auth store: the CLI reports no login.
+		expect(getByText('Not signed in — sign in to the Claude Code CLI above.')).toBeTruthy();
 	});
 
-	it('offers Sign in and the built-in model list, and no Remove without an account', async () => {
+	it('offers Sign in (pointing at the CLI panel) and the built-in model list, never Remove', async () => {
 		mocks.listModelProviders.mockResolvedValue({ providers: [] });
 		await providers.loadProviders();
 

@@ -26,9 +26,6 @@ import { registry } from '../providers/registry.js';
 import { VideoResult, ProviderCredentials } from '../providers/types.js';
 import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
-// Re-export VideoResponse for backwards compatibility
-export { VideoResponse } from './shared.js';
-
 export interface ImageToVideoInput {
   /**
    * Path to the source image file to animate.

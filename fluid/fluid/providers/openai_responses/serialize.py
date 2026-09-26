@@ -10,20 +10,18 @@ The Responses stream is stateful (item ids, lazily-opened blocks, authoritative
 final items delivered only on ``response.output_item.done``), so unlike the
 Anthropic per-event ``sse_to_chunk`` this side is a small stateful normalizer.
 
-Event-mapping knowledge is ported from a production translator gateway
-(``responses_to_anthropic.py``) and ``docs/CODEX_SPIKE_FINDINGS.md`` — fluid's
-chunk model is simpler, so this is a port of the *knowledge*, not the code:
+Event-mapping rules the Responses stream imposes:
 
-  * ``response.completed.output`` is ALWAYS empty (spike surprise #2); the
+  * ``response.completed.output`` is ALWAYS empty; the
     authoritative message/function_call/reasoning items arrive only via
     ``response.output_item.done``. Each ``block_stop`` therefore carries the
     complete done item under ``payload["block"]`` so the engine can rebuild the
     reasoning envelope (encrypted_content) and full function-call arguments.
   * ``function_call_arguments.delta`` fragments pass through byte-for-byte as
-    ``tool_args_delta``; the ``obfuscation`` padding field is ignored (surprise
-    #10 — only ``delta`` is load-bearing).
-  * On stateless resend every input item strips ``id`` AND ``status`` (surprise
-    #6); ``encrypted_content`` / ``call_id`` / ``arguments`` / ``summary`` /
+    ``tool_args_delta``; the ``obfuscation`` padding field is ignored (only
+    ``delta`` is load-bearing).
+  * On stateless resend every input item strips ``id`` AND ``status``;
+    ``encrypted_content`` / ``call_id`` / ``arguments`` / ``summary`` /
     ``content`` are preserved verbatim.
   * Usage: ``input_tokens_details.cached_tokens`` → ``cache_read_input_tokens``
     (Anthropic-style keys the engine merges); Responses ``input_tokens``
@@ -48,13 +46,20 @@ from fluid.messages import (
     ToolUseBlock,
     UnknownBlock,
 )
-from fluid.providers._retry import is_retriable_status
+from fluid.providers._retry import (
+    BILLING_STATUS,
+    billing_error_code,
+    coerce_status,
+    is_retriable_status,
+)
 from fluid.providers._sse import KEEPALIVE_EVENT
+from fluid.providers._transport import billing_summary, provider_error_summary
 from fluid.providers.base import (
     INTERNAL_EXTRA_PREFIX,
     ErrorClass,
     ProviderRequest,
     StreamChunk,
+    flatten_system,
 )
 
 # Fields echoed on output items that MUST be removed before a stateless
@@ -64,10 +69,6 @@ _RESEND_STRIP_KEYS = ("id", "status")
 _EFFORT_LOW_CEIL = 4096
 _EFFORT_MEDIUM_CEIL = 16384
 
-_SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
-    ("image/png", "image/jpeg", "image/gif", "image/webp")
-)
-
 
 # ─── request: Message[] → Responses input items ──────────────────────────────
 
@@ -75,19 +76,6 @@ _SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
 def _strip_for_resend(item: dict[str, Any]) -> dict[str, Any]:
     """Copy an echoed output item minus the fields a stateless resend forbids."""
     return {k: v for k, v in item.items() if k not in _RESEND_STRIP_KEYS}
-
-
-def _instructions_from_system(system: Any) -> str | None:
-    if system is None:
-        return None
-    if isinstance(system, str):
-        return system
-    if isinstance(system, list):
-        parts = [
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system
-        ]
-        return "".join(parts)
-    return str(system)
 
 
 def _image_part(block: Image) -> dict[str, Any]:
@@ -251,15 +239,15 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": request.model,
         "input": input_items,
-        # Stateless-history mode invariants (spike surprises #3 / E4): always
-        # stream, never persist server-side, always ask for the encrypted
-        # reasoning blob so it round-trips.
+        # Stateless-history mode invariants: always stream, never persist
+        # server-side, always ask for the encrypted reasoning blob so it
+        # round-trips.
         "store": False,
         "stream": True,
         "include": ["reasoning.encrypted_content"],
     }
 
-    instructions = _instructions_from_system(request.system)
+    instructions = flatten_system(request.system)
     if instructions is not None:
         body["instructions"] = instructions
 
@@ -330,6 +318,17 @@ def retry_after_hint(err: Any) -> float | None:
     if match.group(2).lower().startswith("m"):
         value /= 1000.0
     return value
+
+
+# In-stream error codes whose HTTP twin is unambiguous, so a host reads an
+# in-stream rate limit exactly like a 429 response. Only codes that are
+# already retried are mapped: the status also feeds classify_error, and a
+# mapping must not make a fatal code retriable.
+_CODE_STATUS = {
+    "rate_limit_exceeded": 429,
+    "server_error": 500,
+    "server_is_overloaded": 503,
+}
 
 
 def _error_fields(err: Any) -> tuple[str | None, str | None, Any]:
@@ -758,11 +757,24 @@ class ResponsesStreamNormalizer:
             payload: dict[str, Any] = {
                 "message": str(err), "retriable": classify_error(err).retriable,
             }
-            code, etype, _status = _error_fields(err)
+            code, etype, status = _error_fields(err)
             if code is not None:
                 payload["code"] = code
             if etype is not None:
                 payload["type"] = etype
+            status = coerce_status(status)
+            if status is None and code in _CODE_STATUS:
+                status = _CODE_STATUS[code]
+            summary = provider_error_summary(err)
+            billing = billing_error_code(err)
+            if billing is not None:
+                # Out of credit, the same verdict the HTTP path gives an
+                # ``insufficient_quota`` 429: a 402, never a rate limit.
+                status = BILLING_STATUS
+                summary = billing_summary(billing, summary)
+            if status is not None:
+                payload["status"] = status
+            payload["provider_message"] = summary
             out.append(StreamChunk("error", payload))
             return out
 

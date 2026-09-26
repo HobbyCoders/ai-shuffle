@@ -29,7 +29,6 @@
 	} from '$lib/stores/derived/git-action-options';
 
 	interface Props {
-		projectId: string;
 		isStreaming?: boolean;
 		/** True while a git operation (commit/push/PR/ship) is in flight.
 		 *  Disables the mutating action buttons + branch switch so the user can't
@@ -70,7 +69,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
 
 	// Mutating git buttons are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while

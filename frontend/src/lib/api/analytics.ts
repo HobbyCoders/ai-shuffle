@@ -14,6 +14,11 @@ export interface AnalyticsSummary {
 	total_cost: number;
 	session_count: number;
 	average_cost_per_session: number;
+	/** Turns in range whose token counts the harness estimated (the provider
+	 *  reported no usage, or the reply was interrupted). Their amounts are
+	 *  inside every total above; non-zero means the totals are partly
+	 *  estimates and the panel shows the "est." marker. */
+	estimated_query_count: number;
 }
 
 export interface CostBreakdownItem {
@@ -21,6 +26,8 @@ export interface CostBreakdownItem {
 	cost: number;
 	tokens: number;
 	percentage: number;
+	/** True when any turn behind this row has estimated token counts. */
+	estimated: boolean;
 }
 
 export interface TrendDataPoint {
@@ -28,6 +35,8 @@ export interface TrendDataPoint {
 	input_tokens: number;
 	output_tokens: number;
 	cost: number;
+	/** True when any turn in this bucket has estimated token counts. */
+	estimated: boolean;
 }
 
 export interface TopSession {
@@ -38,6 +47,8 @@ export interface TopSession {
 	total_tokens_in: number;
 	total_tokens_out: number;
 	created_at: string;
+	/** True when any booked turn of the session has estimated token counts. */
+	usage_estimated: boolean;
 }
 
 // ============================================================================
@@ -50,6 +61,7 @@ interface BackendUsageStats {
 	total_cost_usd: number;
 	session_count: number;
 	query_count: number;
+	estimated_query_count?: number;
 }
 
 interface BackendAnalyticsSummaryResponse {
@@ -67,6 +79,7 @@ interface BackendCostBreakdownItem {
 	total_tokens_in: number;
 	total_tokens_out: number;
 	query_count: number;
+	estimated_query_count?: number;
 }
 
 interface BackendCostBreakdownResponse {
@@ -83,6 +96,7 @@ interface BackendUsageTrend {
 	tokens_out: number;
 	cost_usd: number;
 	query_count: number;
+	estimated_query_count?: number;
 }
 
 interface BackendUsageTrendsResponse {
@@ -101,6 +115,7 @@ interface BackendTopSession {
 	total_tokens_in: number;
 	total_tokens_out: number;
 	created_at: string | null;
+	usage_estimated?: boolean;
 }
 
 // ============================================================================
@@ -124,7 +139,8 @@ export async function getAnalyticsSummary(startDate: string, endDate: string): P
 		total_output_tokens: stats.total_tokens_out,
 		total_cost: totalCost,
 		session_count: sessionCount,
-		average_cost_per_session: sessionCount > 0 ? totalCost / sessionCount : 0
+		average_cost_per_session: sessionCount > 0 ? totalCost / sessionCount : 0,
+		estimated_query_count: stats.estimated_query_count ?? 0
 	};
 }
 
@@ -142,7 +158,8 @@ export async function getCostBreakdown(startDate: string, endDate: string, group
 		name: item.name || 'Unknown',
 		cost: item.total_cost_usd,
 		tokens: item.total_tokens_in + item.total_tokens_out,
-		percentage: totalCost > 0 ? (item.total_cost_usd / totalCost) * 100 : 0
+		percentage: totalCost > 0 ? (item.total_cost_usd / totalCost) * 100 : 0,
+		estimated: (item.estimated_query_count ?? 0) > 0
 	}));
 }
 
@@ -158,7 +175,8 @@ export async function getUsageTrends(startDate: string, endDate: string): Promis
 		date: point.date,
 		input_tokens: point.tokens_in,
 		output_tokens: point.tokens_out,
-		cost: point.cost_usd
+		cost: point.cost_usd,
+		estimated: (point.estimated_query_count ?? 0) > 0
 	}));
 }
 
@@ -177,7 +195,8 @@ export async function getTopSessions(startDate: string, endDate: string, limit: 
 		total_cost_usd: session.total_cost_usd,
 		total_tokens_in: session.total_tokens_in,
 		total_tokens_out: session.total_tokens_out,
-		created_at: session.created_at || new Date().toISOString()
+		created_at: session.created_at || new Date().toISOString(),
+		usage_estimated: session.usage_estimated === true
 	}));
 }
 

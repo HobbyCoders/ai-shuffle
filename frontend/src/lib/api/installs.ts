@@ -34,19 +34,6 @@ export interface InstallsResponse {
 	self_instance_id: string;
 }
 
-export interface ClusterSecretStatus {
-	configured: boolean;
-	env_pinned: boolean; // pinned via CLUSTER_SECRET env (regenerate is a no-op)
-}
-
-export interface AdvertiseStatus {
-	url: string | null; // current peer-reachable URL (null = view-only)
-	source: 'config' | 'observed' | 'guess' | 'none';
-	env_pinned: boolean; // pinned via CLUSTER_ADVERTISE_URL env (override ignored)
-	override: string | null; // the stored admin override, if any
-	instance_id: string;
-}
-
 /** List every registered install (annotated with `is_self`). */
 export async function listInstalls(): Promise<InstallsResponse> {
 	return api.get<InstallsResponse>('/cluster/installs');
@@ -65,26 +52,6 @@ export async function deleteInstall(id: string): Promise<void> {
 /** Approve a quarantined runner or revoke an existing one. */
 export async function setInstallApproval(id: string, approved: boolean): Promise<Install & { restart_required?: boolean }> {
 	return api.put<Install & { restart_required?: boolean }>(`/cluster/installs/${id}/approval`, { approved });
-}
-
-/** Report how the cluster secret is sourced — never returns the secret itself. */
-export async function getClusterSecretStatus(): Promise<ClusterSecretStatus> {
-	return api.get<ClusterSecretStatus>('/cluster/secret/status');
-}
-
-/** Rotate the auto-generated cluster secret (no-op when env-pinned). */
-export async function regenerateClusterSecret(): Promise<{ ok: boolean; env_pinned: boolean }> {
-	return api.post<{ ok: boolean; env_pinned: boolean }>('/cluster/secret/regenerate', {});
-}
-
-/** This install's advertised peer address (and override status). */
-export async function getAdvertiseStatus(): Promise<AdvertiseStatus> {
-	return api.get<AdvertiseStatus>('/cluster/advertise');
-}
-
-/** Override the URL this install advertises to peers (blank = auto-detect). */
-export async function setAdvertiseUrl(base_url: string): Promise<AdvertiseStatus> {
-	return api.put<AdvertiseStatus>('/cluster/advertise', { base_url });
 }
 
 // ─── Cluster git state (W3 / ruling D6) ──────────────────────────────────────
@@ -182,42 +149,4 @@ export interface ClusterProjectsResponse {
 /** Origin-keyed catalog of projects available across approved online installs. */
 export async function listClusterProjects(): Promise<ClusterProjectsResponse> {
 	return api.get<ClusterProjectsResponse>('/cluster/projects');
-}
-
-/** One queued ``refresh_status`` op — POST never fans out to every runner. */
-export interface GitStateRefreshOp {
-	id: string;
-	runner_id: string;
-}
-
-export interface GitStateRefreshResponse {
-	ops: GitStateRefreshOp[];
-}
-
-/**
- * Queue a ``refresh_status`` git op for one runner of this project.
- * Pass exactly one of ``projectId`` / ``projectV2Id``. ``runnerId`` is required.
- */
-export async function refreshClusterGitState(opts: {
-	projectId?: string;
-	projectV2Id?: string;
-	runnerId: string;
-}): Promise<GitStateRefreshResponse> {
-	const body: Record<string, string> = { runner_id: opts.runnerId };
-	if (opts.projectId) body.project_id = opts.projectId;
-	if (opts.projectV2Id) body.project_v2_id = opts.projectV2Id;
-	return api.post<GitStateRefreshResponse>('/cluster/git-state/refresh', body);
-}
-
-export interface AdvertiseReachability {
-	ok: boolean;
-	url: string | null;
-	source: 'config' | 'observed' | 'guess' | 'none';
-	detail: string;
-}
-
-/** Self-test the advertised address (resolves + answers its health route).
- *  Catches unresolvable host names / wrong ports before peers hit them. */
-export async function testAdvertiseReachability(): Promise<AdvertiseReachability> {
-	return api.post<AdvertiseReachability>('/cluster/advertise/test', {});
 }

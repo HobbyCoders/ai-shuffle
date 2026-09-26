@@ -7,7 +7,6 @@ from app.api.sessions_helpers import _annotate_cluster_fields
 from app.db import database, runs, interactions, background_tasks
 from app.network import engine, catalog, session_runtime
 from tests.core.network.harness import join, converge
-from tests.core.network.test_control import workers  # noqa: F401
 
 
 def test_owner_runtime_transitions_and_project_label_on_mirror(workers):

@@ -553,9 +553,9 @@ class ToolRegistry:
                 assert entry.handler is not None
                 call_input = input
                 if input_responses is not None:
-                    # The builtin leg of the input-required round-trip
-                    # (AskUser): collected answers ride a reserved key so the
-                    # handler's second dispatch can read them.
+                    # The builtin/in-proc leg of the input-required round-trip:
+                    # collected answers ride a reserved key so the handler's
+                    # second dispatch can read them.
                     call_input = {**input, "__input_responses__": dict(input_responses)}
                 call = entry.handler(call_input, ctx)
                 if entry.spec.source == "inproc":

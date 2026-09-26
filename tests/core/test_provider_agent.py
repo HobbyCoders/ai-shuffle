@@ -1656,7 +1656,6 @@ class TestWorkerWakesItsCaller:
         assert frame["task_id"] == outcome.session_id
         assert frame["status"] == "completed"
         assert frame["summary"] == "the worker's report"
-        assert frame["origin"] == "provider_agent"
 
     def test_errored_worker_wakes_the_caller_with_the_failure_summary(
         self, dispatch_env, monkeypatch

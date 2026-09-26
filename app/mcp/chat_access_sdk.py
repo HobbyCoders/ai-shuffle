@@ -2,7 +2,7 @@
 import json
 import logging
 
-from claude_agent_sdk import create_sdk_mcp_server, tool
+from app.mcp.inproc import create_tool_server, tool
 from app.core.chat_access import AccessDenied, broker
 from app.mcp.sdk_compat import patch_sdk_server
 
@@ -83,4 +83,4 @@ def create_chat_access_server(session_id: str):
         return await invoke("command", args)
 
     tools = [request, resources, listing, read, write, command]
-    return patch_sdk_server(create_sdk_mcp_server(name="chat-access", version="1.0.0", tools=tools), tools)
+    return patch_sdk_server(create_tool_server(name="chat-access", version="1.0.0", tools=tools), tools)

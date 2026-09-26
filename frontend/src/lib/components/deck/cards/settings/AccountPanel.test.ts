@@ -251,3 +251,34 @@ it('distinguishes an old hub from an account with no phone or browser registrati
 	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }));
 	expect(await screen.findByText('No phones or browsers registered to this account.')).toBeTruthy();
 });
+
+it('explains a tunnel_limit refusal and links to Settings > License', async () => {
+	const message = 'Remote access is off: this account already uses its one remote connection. Remote access for more workers needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. Local use is not affected.';
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
+		refusal: { code: 'tunnel_limit', limit: 1, used: 1, licensed: false, message } });
+	const opened = vi.fn();
+	window.addEventListener('shuffle-open-settings-tab', opened);
+	render(AccountPanel);
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toContain('needs an AI Shuffle license');
+	expect(alert.textContent).toContain('1 of 1 remote connection in use');
+	expect(screen.getByText('Signed in · remote access off')).toBeTruthy();
+	expect(screen.getByText('Remote access is off: connection limit reached')).toBeTruthy();
+	// The message shows once, not again as a plain error.
+	expect(screen.getAllByText(message)).toHaveLength(1);
+	await fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings > License' }));
+	expect(opened).toHaveBeenCalledTimes(1);
+	expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ tab: 'license' });
+	window.removeEventListener('shuffle-open-settings-tab', opened);
+});
+
+it('points to Settings > License in words during setup, where there is no Settings card', async () => {
+	const message = 'Remote access is off.';
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
+		refusal: { code: 'tunnel_limit', limit: 3, used: 3, licensed: true, message } });
+	render(AccountPanel, { variant: 'setup' });
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toContain('3 of 3 remote connections in use');
+	expect(alert.textContent).toContain('Settings > License once setup is done');
+	expect(within(alert).queryByRole('button')).toBeNull();
+});

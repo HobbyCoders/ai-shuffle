@@ -22,7 +22,6 @@ Companion behavioural coverage lives in test_config_profiles.py /
 test_config_subagents.py; this file only asserts where the work runs.
 """
 
-import json
 import threading
 from unittest.mock import patch
 
@@ -35,21 +34,11 @@ from app.mcp.config_connectors import _create_connector_tools
 from app.mcp.config_hooks import _create_hook_tools
 from app.mcp.config_profiles import _create_profile_tools
 from app.mcp.config_subagents import _create_subagent_tools
+from tests.mcp.tool_helpers import get_tool, tool_result_json
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _get_tool(tools: list, name: str):
-    for t in tools:
-        if t.name == name:
-            return t
-    raise KeyError(f"Tool '{name}' not found in tool list")
-
-
-def _decode(result: dict) -> dict:
-    return json.loads(result["content"][0]["text"])
-
 
 class _ThreadSpy:
     """Stand in for a DB function, recording the thread each call ran on."""
@@ -88,13 +77,6 @@ class _HopCounter:
             return await real(fn, *args, **kwargs)
 
         return patch.object(async_database, "run_sync", counting)
-
-
-@pytest.fixture
-def loop_thread():
-    """The thread the test's event loop runs on — every DB call must land
-    somewhere else."""
-    return threading.get_ident()
 
 
 @pytest.fixture
@@ -163,9 +145,9 @@ class TestReadToolsOffload:
         spy = _ThreadSpy(return_value=[_automation()])
         with hops.install():
             tools = _create_automation_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "listAutomations")
+        tool = get_tool(tools, "listAutomations")
         with patch("app.db.database.get_all_automations", spy):
-            body = _decode(await tool.handler({}))
+            body = tool_result_json(await tool.handler({}))
 
         assert body["count"] == 1
         assert spy.threads and loop_thread not in spy.threads
@@ -179,10 +161,10 @@ class TestReadToolsOffload:
         runs_spy = _ThreadSpy(return_value=[{"id": "r1", "status": "success"}])
         with hops.install():
             tools = _create_automation_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "getAutomation")
+        tool = get_tool(tools, "getAutomation")
         with patch("app.db.database.get_automation", get_spy), \
              patch("app.db.database.get_automation_runs", runs_spy):
-            body = _decode(await tool.handler({"automation_id": "auto-1"}))
+            body = tool_result_json(await tool.handler({"automation_id": "auto-1"}))
 
         assert [r["id"] for r in body["recent_runs"]] == ["r1"]
         assert hops.hops == 1
@@ -195,10 +177,10 @@ class TestReadToolsOffload:
         runs_spy = _ThreadSpy(return_value=[])
         with hops.install():
             tools = _create_automation_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "getAutomation")
+        tool = get_tool(tools, "getAutomation")
         with patch("app.db.database.get_automation", _ThreadSpy(return_value=None)), \
              patch("app.db.database.get_automation_runs", runs_spy):
-            body = _decode(await tool.handler({"automation_id": "nope"}))
+            body = tool_result_json(await tool.handler({"automation_id": "nope"}))
 
         assert body["success"] is False
         assert "not found" in body["error"].lower()
@@ -212,10 +194,10 @@ class TestReadToolsOffload:
         app_spy = _ThreadSpy(return_value=[])
         with hops.install():
             tools = _create_hook_tools(is_admin=True, project_id="proj-1")
-        tool = _get_tool(tools, "listHooks")
+        tool = get_tool(tools, "listHooks")
         with patch("app.db.database.get_hooks_for_project", project_spy), \
              patch("app.db.database.get_app_hooks", app_spy):
-            body = _decode(await tool.handler({"scope": "project"}))
+            body = tool_result_json(await tool.handler({"scope": "project"}))
 
         assert body["count"] == 1
         assert app_spy.calls == []
@@ -226,9 +208,9 @@ class TestReadToolsOffload:
         spy = _ThreadSpy(return_value=[_profile()])
         with hops.install():
             tools = _create_profile_tools(is_admin=True)
-        tool = _get_tool(tools, "listProfiles")
+        tool = get_tool(tools, "listProfiles")
         with patch("app.db.database.get_all_profiles", spy):
-            body = _decode(await tool.handler({}))
+            body = tool_result_json(await tool.handler({}))
 
         assert body["count"] == 1
         assert spy.threads and loop_thread not in spy.threads
@@ -238,9 +220,9 @@ class TestReadToolsOffload:
         spy = _ThreadSpy(return_value=[_subagent()])
         with hops.install():
             tools = _create_subagent_tools(is_admin=True)
-        tool = _get_tool(tools, "listSubagents")
+        tool = get_tool(tools, "listSubagents")
         with patch("app.db.database.get_all_subagents", spy):
-            body = _decode(await tool.handler({}))
+            body = tool_result_json(await tool.handler({}))
 
         assert body["count"] == 1
         assert spy.threads and loop_thread not in spy.threads
@@ -250,9 +232,9 @@ class TestReadToolsOffload:
         spy = _ThreadSpy(return_value=[{"id": "c1", "name": "C1", "type": "telegram"}])
         with hops.install():
             tools = _create_connector_tools(is_admin=True)
-        tool = _get_tool(tools, "listConnectors")
+        tool = get_tool(tools, "listConnectors")
         with patch("app.db.database.get_all_connectors", spy):
-            body = _decode(await tool.handler({}))
+            body = tool_result_json(await tool.handler({}))
 
         assert body["count"] == 1
         assert spy.threads and loop_thread not in spy.threads
@@ -268,7 +250,7 @@ class TestReadToolsOffload:
         p = _ThreadSpy(return_value=[_profile()])
         with hops.install():
             tools = _create_discovery_tools()
-        tool = _get_tool(tools, "getConfigCapabilities")
+        tool = get_tool(tools, "getConfigCapabilities")
         with patch("app.db.database.get_app_hooks", h), \
              patch("app.db.database.get_all_automations", a), \
              patch("app.db.database.get_all_profiles", p):
@@ -306,10 +288,10 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_profile(name="P1"), log=order, label="write")
         with hops.install():
             tools = _create_profile_tools(is_admin=True)
-        tool = _get_tool(tools, "updateProfile")
+        tool = get_tool(tools, "updateProfile")
         with patch("app.db.database.get_profile", read), \
              patch("app.db.database.update_profile", write):
-            body = _decode(await tool.handler(
+            body = tool_result_json(await tool.handler(
                 {"profile_id": "p1", "thinking_mode": "think"}
             ))
 
@@ -328,10 +310,10 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_hook(name="Hook One"), log=order, label="write")
         with hops.install():
             tools = _create_hook_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "updateHook")
+        tool = get_tool(tools, "updateHook")
         with patch("app.db.database.get_hook", read), \
              patch("app.db.database.update_hook", write):
-            body = _decode(await tool.handler({"hook_id": "hook-1", "name": "New"}))
+            body = tool_result_json(await tool.handler({"hook_id": "hook-1", "name": "New"}))
 
         assert body["success"] is True
         assert hops.hops == 1
@@ -345,10 +327,10 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_hook(), log=order, label="write")
         with hops.install():
             tools = _create_hook_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "toggleHook")
+        tool = get_tool(tools, "toggleHook")
         with patch("app.db.database.get_hook", read), \
              patch("app.db.database.update_hook", write):
-            body = _decode(await tool.handler({"hook_id": "hook-1", "enabled": False}))
+            body = tool_result_json(await tool.handler({"hook_id": "hook-1", "enabled": False}))
 
         assert body["success"] is True
         assert hops.hops == 1
@@ -366,11 +348,11 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_automation(), log=order, label="write")
         with hops.install():
             tools = _create_automation_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "updateAutomation")
+        tool = get_tool(tools, "updateAutomation")
         with patch("app.db.database.get_automation", read), \
              patch("app.db.database.get_profile", prof), \
              patch("app.db.database.update_automation", write):
-            body = _decode(await tool.handler(
+            body = tool_result_json(await tool.handler(
                 {"automation_id": "auto-1", "profile_id": "p1", "name": "New"}
             ))
 
@@ -388,12 +370,12 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_automation(), log=order, label="write")
         with hops.install():
             tools = _create_automation_tools(is_admin=True, project_id=None)
-        tool = _get_tool(tools, "toggleAutomation")
+        tool = get_tool(tools, "toggleAutomation")
         # The scheduler update after the write is a coroutine on the loop; it is
         # allowed to fail (the tool logs and continues), which is unchanged.
         with patch("app.db.database.get_automation", read), \
              patch("app.db.database.update_automation", write):
-            body = _decode(await tool.handler(
+            body = tool_result_json(await tool.handler(
                 {"automation_id": "auto-1", "enabled": False}
             ))
 
@@ -411,10 +393,10 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_subagent(name="S1"), log=order, label="write")
         with hops.install():
             tools = _create_subagent_tools(is_admin=True)
-        tool = _get_tool(tools, "updateSubagent")
+        tool = get_tool(tools, "updateSubagent")
         with patch("app.db.database.get_subagent", read), \
              patch("app.db.database.update_subagent", write):
-            body = _decode(await tool.handler({"subagent_id": "s1", "name": "S2"}))
+            body = tool_result_json(await tool.handler({"subagent_id": "s1", "name": "S2"}))
 
         assert body["success"] is True
         assert hops.hops == 1
@@ -432,10 +414,10 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=_profile(id="new-one"), log=order, label="write")
         with hops.install():
             tools = _create_profile_tools(is_admin=True)
-        tool = _get_tool(tools, "createProfile")
+        tool = get_tool(tools, "createProfile")
         with patch("app.db.database.get_profile", read), \
              patch("app.db.database.create_profile", write):
-            body = _decode(await tool.handler({"name": "New One"}))
+            body = tool_result_json(await tool.handler({"name": "New One"}))
 
         assert body["success"] is True
         assert hops.hops == 1
@@ -454,11 +436,11 @@ class TestReadModifyWriteIsAtomic:
         write = _ThreadSpy(return_value=True, log=order, label="delete")
         with hops.install():
             tools = _create_profile_tools(is_admin=True)
-        tool = _get_tool(tools, "deleteProfile")
+        tool = get_tool(tools, "deleteProfile")
         with patch("app.db.database.get_profile", read), \
              patch("app.db.database.get_automations_for_profile", blocking), \
              patch("app.db.database.delete_profile", write):
-            body = _decode(await tool.handler({"profile_id": "p1", "confirm": True}))
+            body = tool_result_json(await tool.handler({"profile_id": "p1", "confirm": True}))
 
         assert body["success"] is True
         assert hops.hops == 1
@@ -490,12 +472,12 @@ class TestReadModifyWriteIsAtomic:
 
         with patch.object(async_database, "run_sync", tracing):
             tools = _create_profile_tools(is_admin=True)
-        tool = _get_tool(tools, "updateProfile")
+        tool = get_tool(tools, "updateProfile")
         with patch("app.db.database.get_profile",
                    _ThreadSpy(return_value=_profile(), log=order, label="read")), \
              patch("app.db.database.update_profile",
                    _ThreadSpy(return_value=_profile(), log=order, label="write")):
-            body = _decode(await tool.handler(
+            body = tool_result_json(await tool.handler(
                 {"profile_id": "p1", "thinking_mode": "think"}
             ))
 

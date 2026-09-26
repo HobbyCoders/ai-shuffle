@@ -11,16 +11,13 @@ import httpx
 import pytest
 
 from app.core import xai_oauth
+from tests.fakes.http import mock_transport_client
 
 
 def _form(request: httpx.Request) -> dict:
     """Parse a form-urlencoded request body into a flat str→str map."""
     parsed = parse_qs(request.content.decode(), keep_blank_values=True)
     return {k: v[0] if v else "" for k, v in parsed.items()}
-
-
-def _client(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 class TestDeviceStart:
@@ -42,7 +39,7 @@ class TestDeviceStart:
                 "expires_in": 900,
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             start = await xai_oauth.start_device_code(client=c)
 
         assert start.user_code == "WXYZ-1234"
@@ -61,7 +58,7 @@ class TestDeviceStart:
         def handler(request):
             return httpx.Response(200, json={"device_code": "only-this"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthError) as ei:
                 await xai_oauth.start_device_code(client=c)
         assert ei.value.code == "invalid_device_response"
@@ -70,7 +67,7 @@ class TestDeviceStart:
         def handler(request):
             return httpx.Response(400, json={"error": "invalid_client"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthError) as ei:
                 await xai_oauth.start_device_code(client=c)
         assert ei.value.code == "invalid_client"
@@ -85,7 +82,7 @@ class TestDevicePoll:
             assert body["device_code"] == "dev-1"
             return httpx.Response(400, json={"error": "authorization_pending"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthPending) as ei:
                 await xai_oauth.poll_device_code("dev-1", client=c)
         assert ei.value.slow_down is False
@@ -94,7 +91,7 @@ class TestDevicePoll:
         def handler(request):
             return httpx.Response(400, json={"error": "slow_down"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthPending) as ei:
                 await xai_oauth.poll_device_code("dev-1", client=c)
         assert ei.value.slow_down is True
@@ -107,7 +104,7 @@ class TestDevicePoll:
                 "id_token": None,
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await xai_oauth.poll_device_code("dev-1", client=c)
         assert bundle.access_token == "access-1"
         assert bundle.refresh_token == "refresh-1"
@@ -119,7 +116,7 @@ class TestDevicePoll:
                 "error_description": "user denied",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthError) as ei:
                 await xai_oauth.poll_device_code("dev-1", client=c)
         assert ei.value.code == "access_denied"
@@ -129,7 +126,7 @@ class TestDevicePoll:
         def handler(request):
             return httpx.Response(400, json={"error": "expired_token"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthError) as ei:
                 await xai_oauth.poll_device_code("dev-1", client=c)
         assert ei.value.code == "expired_token"
@@ -147,7 +144,7 @@ class TestRefresh:
                 "refresh_token": "refresh-new",
             })
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await xai_oauth.refresh_token("refresh-old", client=c)
         assert bundle.access_token == "access-new"
         assert bundle.refresh_token == "refresh-new"
@@ -159,7 +156,7 @@ class TestRefresh:
         def handler(request):
             return httpx.Response(200, json={"access_token": "access-new"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             bundle = await xai_oauth.refresh_token("refresh-old", client=c)
         assert bundle.refresh_token == "refresh-old"
 
@@ -167,7 +164,7 @@ class TestRefresh:
         def handler(request):
             return httpx.Response(400, json={"error": "invalid_grant"})
 
-        async with _client(handler) as c:
+        async with mock_transport_client(handler) as c:
             with pytest.raises(xai_oauth.XaiAuthError) as ei:
                 await xai_oauth.refresh_token("dead", client=c)
         assert ei.value.code == "invalid_grant"

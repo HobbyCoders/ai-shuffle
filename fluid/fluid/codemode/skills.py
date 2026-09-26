@@ -19,18 +19,15 @@ Alongside the skills the store keeps:
 - ``memories.json`` — the learner's declarative half: short remembered facts
   (stated preferences, environment conventions, corrections) rendered into
   every session's prompt as a frozen snapshot (``render_memory_section``).
-  Only the synthesizer writes the file itself; the model *proposes* through
-  the ``Remember`` builtin, which journals a high-salience entry the
-  synthesizer consolidates on its next pass (propose-then-curate: the model
-  flags what seemed durable while context was hot, the learner with global
-  view decides what lands). The store caps the count, archiving the least
-  recalled instead of growing without bound; the ``Recall`` builtin searches
-  live and archived entries and feeds the usage counters that drive that
-  eviction.
+  Written through :class:`fluid.codemode.facts.FactStore` by the synthesizer,
+  by the ``Remember`` builtin (``save_memory`` directly, protected) and by
+  runtime-fact provisioning. The store caps the count, moving the least
+  recalled into the file's ``archived`` list instead of growing without
+  bound; the ``Recall`` builtin searches live and archived entries and feeds
+  the usage counters that drive that eviction.
 
 Every one of those files is BOUNDED and the harness owns the cleanup. The
-model has no reaping control at all — its only write path stays the
-propose-only ``Remember`` flow. Reaping is deterministic, best-effort (a
+model has no reaping control at all. Reaping is deterministic, best-effort (a
 failure never breaks journaling or synthesis) and rides machinery that
 already exists: :meth:`SkillStore.reap`, called from the interval-gated
 lifecycle pass (:meth:`SkillStore.curate`) and from the synthesizer's
@@ -80,6 +77,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fluid._filelock import file_lock
+from fluid.codemode.os_sandbox import REQUIRED_REFUSAL_MARK
 
 _log = logging.getLogger(__name__)
 
@@ -135,6 +133,12 @@ def journal_metrics() -> dict:
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
+
+
+def _is_infra_verdict(error: object) -> bool:
+    """Whether a verification error is the ``required`` sandbox's refusal to
+    start the kernel: a host condition, never a verdict on the skill."""
+    return isinstance(error, str) and REQUIRED_REFUSAL_MARK in error
 # Live skills past this many are archived, least useful first (the memory cap
 # has the same posture): a library the synthesizer must re-read every pass
 # cannot grow without bound.
@@ -176,16 +180,14 @@ JOURNAL_REAP_FRACTION = 0.5
 # dropped down to the reap target (explicit kinds excepted). Inference is
 # allowed to be lossy; a store that refuses every new line because synthesis
 # keeps failing is not. A failed pass never advances the cursor, so after a
-# run of failures nothing is consumed, nothing is reapable, and every new
-# event is refused: the Unraid journal sat at its 1 MiB cap from 2026-09-14
-# on while every pass failed.
+# run of failures nothing is consumed and nothing is reapable.
 JOURNAL_OVERFLOW_FRACTION = 0.9
 # Journal kinds a person (or the model on their behalf) wrote on purpose. An
 # append that cannot land one of these raises instead of logging, so the
 # caller can surface the loss instead of reporting "recorded".
 JOURNAL_EXPLICIT_KINDS = frozenset({"remember"})
-# memories-archive.jsonl: overflow past MAX_MEMORIES lands here and Recall
-# searches it, so it is real storage, not a graveyard — but it is capped.
+# The ``archived`` list inside memories.json: overflow past MAX_MEMORIES lands
+# there and Recall searches it, so it is real storage — but it is capped.
 MAX_ARCHIVED_MEMORIES = 200
 # .archive/*.py: skills curation archives rather than deletes; the oldest
 # archived modules are dropped for good past this count.
@@ -324,8 +326,7 @@ def load_json_document(path: Path, default: dict) -> dict:
 
     An absent file is the normal empty case. A file that exists but does not
     parse, or parses to something other than an object, is set aside with a
-    warning rather than silently treated as empty — a truncated
-    ``memories.json`` used to make every memory vanish and the next save
+    warning rather than silently treated as empty, so the next save cannot
     overwrite the evidence.
     """
     try:
@@ -709,8 +710,12 @@ class SkillStore:
         source = path.read_text(encoding="utf-8")
         info = self._load_meta().get("skills", {}).get(name, {})
         broken = info.get("broken")
-        # A broken verdict only holds for the exact source it was issued on.
-        if broken is not None and info.get("verified_mtime") != self._mtime_ns(name):
+        # A broken verdict only holds for the exact source it was issued on,
+        # and never when it was the host's sandbox refusal, not the skill's.
+        if broken is not None and (
+            info.get("verified_mtime") != self._mtime_ns(name)
+            or _is_infra_verdict(broken)
+        ):
             broken = None
         return Skill(
             name=name,
@@ -754,10 +759,20 @@ class SkillStore:
         """True when the skill was never verified for its current source."""
         info = self._load_meta().get("skills", {}).get(name, {})
         mtime = self._mtime_ns(name)
+        if _is_infra_verdict(info.get("broken")):
+            # Recorded by an older fluid while the required sandbox was
+            # unavailable: the skill never ran, so it still needs a verdict.
+            return True
         return mtime is None or info.get("verified_mtime") != mtime
 
     def mark_verified(self, name: str, error: str | None = None) -> None:
-        """Record a verification verdict for the skill's current source."""
+        """Record a verification verdict for the skill's current source.
+
+        A sandbox refusal is not a verdict (the skill never ran) and is not
+        recorded; the skill stays stale and is verified once a kernel starts.
+        """
+        if _is_infra_verdict(error):
+            return
         meta = self._load_meta()
         entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
         entry["verified_mtime"] = self._mtime_ns(name)
@@ -1113,10 +1128,10 @@ class SkillStore:
             pass
         return out, reached
 
-    # ─── memories (the declarative half — synthesizer-written only) ──────
+    # ─── memories (the declarative half; see FactStore) ─────────────────────
     @property
     def archive_dir(self) -> Path:
-        """Where evicted memories and archived skill modules live."""
+        """Where archived skill modules live."""
         return self.root / ".archive"
 
     @property
@@ -1174,8 +1189,7 @@ class SkillStore:
         """Delete one fact. ``explicit`` means the user asked (the Forget
         tool); only that purges the journal evidence written before it. A
         learner or consolidation delete retires the fact and leaves the
-        journal and the synthesis cursor alone: it used to wipe every
-        unsynthesized entry on the store and leave the cursor past the end.
+        journal and the synthesis cursor alone.
         """
         deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
         if deleted and explicit:
@@ -1222,9 +1236,8 @@ class SkillStore:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
-        rather than nothing: a fresh install used to never mention memory at
-        all, so the model never learned that Remember/Recall existed until a
-        fact happened to exist. With a ``project`` key, only global entries
+        rather than nothing, so the model learns Remember/Recall exist before
+        any fact does. With a ``project`` key, only global entries
         and that project's entries render — other projects' facts stay out of
         this session's prompt (a count line says they exist). Unprotected
         facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``)
@@ -1481,9 +1494,8 @@ class SkillStore:
     #
     # Shared through meta.json so every session's synthesizer over this store
     # honors it; a per-instance guard would reset with each new session.
-    # Without any guard a provider that rejects every request spends the
-    # whole day's budget at once: the Codex backend answered HTTP 400 to 48
-    # learner calls in five minutes on 2026-09-13.
+    # Without it a provider that rejects every request spends the whole
+    # day's budget at once.
     # Keyed by model so one broken provider does not stop another from
     # learning.
     MAX_BACKOFF_MODELS = 16
@@ -1579,9 +1591,7 @@ class SkillStore:
 
 
 # A learner that has run passes for this long without writing anything is
-# reported (Synthesizer._track_yield, and the app's journal diagnostics). Both
-# replicas' learners were silent for 13 days in September 2026 and nothing
-# said so.
+# reported (Synthesizer._track_yield, and the app's journal diagnostics).
 LEARNER_SILENCE_ALARM_SECONDS = 3 * 86400.0
 
 

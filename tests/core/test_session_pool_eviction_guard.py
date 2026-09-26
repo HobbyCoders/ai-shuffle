@@ -36,13 +36,13 @@ def _make_state(
     """Build a SessionState backed by a mock adapter with an awaitable disconnect.
 
     `idle_seconds` backdates last_activity so evict_idle can be exercised without
-    sleeping. The adapter's subprocess PID resolves to None (sdk_client=None), so
-    no real process is ever touched.
+    sleeping. The adapter's subprocess PID resolves to None, so no real process
+    is ever touched.
     """
     adapter = MagicMock()
     adapter.is_alive.return_value = alive
     adapter.is_connected.return_value = connected
-    adapter.sdk_client = None
+    adapter.subprocess_pid.return_value = None
     adapter.disconnect = AsyncMock()
 
     last_activity = datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)
@@ -390,7 +390,7 @@ async def test_idle_reader_flag_clears_on_reader_cancellation(monkeypatch):
 
     monkeypatch.setattr(idle_reader, "_drain", _blocking_drain)
 
-    task = asyncio.create_task(idle_reader.run_idle_reader("cancel-me"))
+    task = asyncio.create_task(idle_reader.run_idle_reader("cancel-me", drain_turn_id="t-cancel"))
     await entered.wait()
     assert state.idle_reader_active is True  # held while the reader runs
 
@@ -419,7 +419,7 @@ async def test_idle_reader_flag_clears_on_reader_exception(monkeypatch):
 
     monkeypatch.setattr(idle_reader, "_drain", _crashing_drain)
 
-    await idle_reader.run_idle_reader("crash-me")  # must not raise
+    await idle_reader.run_idle_reader("crash-me", drain_turn_id="t-crash")  # must not raise
 
     assert state.idle_reader_active is False  # cleared despite the crash
 

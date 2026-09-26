@@ -7,7 +7,7 @@ Also includes the WhatsApp webhook verification endpoint.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import PlainTextResponse
@@ -83,7 +83,7 @@ async def create_connector_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except RuntimeError as e:
+    except RuntimeError:
         logger.exception("Failed to create connector")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create connector")
 
@@ -164,6 +164,77 @@ async def discover_discord_resources(
         )
 
 
+# ---- Generic Inbound Webhook ----
+#
+# NOTE: declared BEFORE the ``/{connector_id}/...`` routes. POST
+# ``/hooks/test`` (or activate/deactivate/restart) would otherwise match
+# ``/{connector_id}/test`` with connector_id="hooks" and never reach the hook.
+
+@router.post("/hooks/{webhook_slug}")
+async def inbound_webhook(webhook_slug: str, request: Request):
+    """
+    Generic inbound webhook endpoint.
+
+    External services POST JSON here to trigger AI processing.
+    The webhook_slug must match a webhook connector's inbound_path config.
+    Auth via Bearer token (Authorization header or X-Webhook-Token) or
+    HMAC signature (X-Webhook-Signature header).
+    """
+    # Parse body
+    try:
+        body = await request.body()
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body"
+        )
+
+    # Find matching webhook connector
+    from app.core.connectors.manager import connector_manager
+
+    matched = False
+    for connector_id, connector in connector_manager.get_running_connectors("webhook"):
+        config = connector.config
+        if config.get("inbound_path") != webhook_slug:
+            continue
+        mode = config.get("mode", "outbound")
+        if mode not in ("inbound", "bidirectional"):
+            continue
+
+        # Verify auth
+        token = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        else:
+            token = request.headers.get("x-webhook-token")
+
+        signature = request.headers.get("x-webhook-signature")
+
+        if not connector.verify_inbound_request(
+            body.decode("utf-8", errors="replace"), token=token, signature=signature
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid authentication",
+            )
+
+        # Dispatch to AI
+        async with api_error_handler("process inbound webhook"):
+            await connector.handle_webhook_payload(payload)
+
+        matched = True
+        break
+
+    if not matched:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No inbound webhook connector found for slug: {webhook_slug}",
+        )
+
+    return {"status": "ok", "message": "Webhook received and processing"}
+
+
 @router.get("/{connector_id}/dependencies")
 async def get_connection_dependencies(connector_id: str, token: str = Depends(require_admin)):
     """Automations that must be considered before removing a connection."""
@@ -203,7 +274,29 @@ async def update_connector_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
-    return result
+    if kwargs.get("is_active") is None:
+        return result
+
+    # ``is_active`` is the same switch as activate/deactivate, so apply it to
+    # the live client too; otherwise a disabled connector keeps answering.
+    # update_connector has already claimed an unowned row, so the re-read
+    # runner_id says whether this install runs it.
+    from app.core.config import settings
+    from app.core.connector_service import mask_config
+
+    row = await run_sync(database.get_connector, connector_id)
+    owns_locally = row.get("runner_id") == settings.effective_instance_id
+    if owns_locally:
+        from app.core.connectors.manager import connector_manager
+        if kwargs["is_active"]:
+            await connector_manager.start_connector(connector_id)
+        else:
+            await connector_manager.stop_connector(connector_id)
+        row = await run_sync(database.get_connector, connector_id)
+    else:
+        row["applies_on"] = row.get("runner_id")
+    row["config"] = mask_config(row.get("config", {}), row.get("type", ""))
+    return row
 
 
 @router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -298,6 +391,13 @@ async def activate_connector(connector_id: str, token: str = Depends(require_adm
     # this single second hop.
     updated = await run_sync(_read_masked)
     if not success:
+        from app.core.connector_service import ALLOWLIST_REQUIRED_MESSAGE
+
+        if updated.get("last_error") == ALLOWLIST_REQUIRED_MESSAGE:
+            # A configuration problem the owner fixes in the form, not a crash.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=ALLOWLIST_REQUIRED_MESSAGE,
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start connector: {updated.get('last_error', 'unknown error')}",
@@ -596,7 +696,6 @@ async def whatsapp_webhook_receive(request: Request):
     from app.core.connectors.manager import connector_manager
     from app.core.connector_service import decrypt_config
 
-    any_handled = False
     any_error = False
 
     # Extract phone_number_id from payload to match the correct connector
@@ -624,22 +723,33 @@ async def whatsapp_webhook_receive(request: Request):
         matched connectors are kept, so this is no larger than the running set.
         """
         recipients = []
+        rejected = 0
         for connector_id, connector in connector_manager.get_running_connectors("whatsapp"):
             conn_row = database.get_connector(connector_id)
             config = conn_row.get("config", {}) if conn_row else {}
             decrypted = decrypt_config(config, "whatsapp")
 
-            # Verify signature using the connector's app_secret if configured
+            # Every payload must carry a valid Meta signature. Without the app
+            # secret there is no way to tell Meta from anyone who found the URL,
+            # so a connector with no app_secret accepts nothing.
             app_secret = decrypted.get("app_secret")
-            if app_secret and signature:
-                expected = "sha256=" + _hmac.new(
-                    app_secret.encode(), body, _hashlib.sha256
-                ).hexdigest()
-                if not _hmac.compare_digest(expected, signature):
-                    logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
-                    continue
-            elif app_secret and not signature:
+            if not app_secret:
+                logger.warning(
+                    "WhatsApp webhook rejected for connector %s: no app_secret configured",
+                    connector_id,
+                )
+                rejected += 1
+                continue
+            if not signature:
                 logger.warning(f"WhatsApp webhook missing signature for connector {connector_id}")
+                rejected += 1
+                continue
+            expected = "sha256=" + _hmac.new(
+                app_secret.encode(), body, _hashlib.sha256
+            ).hexdigest()
+            if not _hmac.compare_digest(expected, signature):
+                logger.warning(f"WhatsApp webhook signature mismatch for connector {connector_id}")
+                rejected += 1
                 continue
 
             # Match by phone_number_id if available
@@ -648,10 +758,13 @@ async def whatsapp_webhook_receive(request: Request):
                 continue
 
             recipients.append((connector_id, connector))
-        return recipients
+        return recipients, rejected
 
-    for connector_id, connector in await run_sync(_select_recipients):
-        any_handled = True
+    recipients, rejected = await run_sync(_select_recipients)
+    if rejected and not recipients:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+
+    for connector_id, connector in recipients:
         try:
             await connector.handle_webhook_payload(payload)
         except Exception as e:
@@ -665,71 +778,3 @@ async def whatsapp_webhook_receive(request: Request):
         )
 
     return {"status": "ok"}
-
-
-# ---- Generic Inbound Webhook ----
-
-@router.post("/hooks/{webhook_slug}")
-async def inbound_webhook(webhook_slug: str, request: Request):
-    """
-    Generic inbound webhook endpoint.
-
-    External services POST JSON here to trigger AI processing.
-    The webhook_slug must match a webhook connector's inbound_path config.
-    Auth via Bearer token (Authorization header or X-Webhook-Token) or
-    HMAC signature (X-Webhook-Signature header).
-    """
-    # Parse body
-    try:
-        body = await request.body()
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body"
-        )
-
-    # Find matching webhook connector
-    from app.core.connectors.manager import connector_manager
-    from app.core.connector_service import decrypt_config
-
-    matched = False
-    for connector_id, connector in connector_manager.get_running_connectors("webhook"):
-        config = connector.config
-        if config.get("inbound_path") != webhook_slug:
-            continue
-        mode = config.get("mode", "outbound")
-        if mode not in ("inbound", "bidirectional"):
-            continue
-
-        # Verify auth
-        token = None
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-        else:
-            token = request.headers.get("x-webhook-token")
-
-        signature = request.headers.get("x-webhook-signature")
-
-        if not connector.verify_inbound_request(
-            body.decode("utf-8", errors="replace"), token=token, signature=signature
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid authentication",
-            )
-
-        # Dispatch to AI
-        async with api_error_handler("process inbound webhook"):
-            await connector.handle_webhook_payload(payload)
-
-        matched = True
-        break
-
-    if not matched:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No inbound webhook connector found for slug: {webhook_slug}",
-        )
-
-    return {"status": "ok", "message": "Webhook received and processing"}

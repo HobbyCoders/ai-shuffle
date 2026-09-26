@@ -32,7 +32,7 @@ def _make_state(*, idle_seconds: float = 0.0, is_streaming: bool = False) -> Ses
     adapter = MagicMock()
     adapter.is_alive.return_value = True
     adapter.is_connected.return_value = True
-    adapter.sdk_client = None
+    adapter.subprocess_pid.return_value = None
     adapter.disconnect = AsyncMock()
     return SessionState(
         adapter=adapter,

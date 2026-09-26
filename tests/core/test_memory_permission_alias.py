@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
-from claude_agent_sdk import PermissionResultDeny
+from app.core.agent_types import PermissionResultDeny
 from fluid.engine.delegated import DelegatedLoop
 from fluid.tools.registry import ToolRegistry, ToolSpec
 from app.core.provider.harness_adapter import HarnessAdapter

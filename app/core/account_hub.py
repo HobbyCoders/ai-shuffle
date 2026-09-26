@@ -22,8 +22,6 @@ from app.db import mobile_hub as store
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HUB = 'https://hobbycoders.com'
-
 # Username rules mirror the hub's PATCH .../account validation.
 USERNAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_.-]{2,63}$')
 USERNAME_HINT = 'Use 3–64 letters, numbers, underscores, periods or hyphens, starting with a letter or number.'
@@ -122,15 +120,6 @@ def _verdict_age(key):
     return None if confirmed_at is None else time.monotonic() - confirmed_at
 
 
-def _record_verdict(key):
-    with _VERDICT_LOCK:
-        _verdicts[key] = time.monotonic()
-        if len(_verdicts) > _VERDICT_CAP:
-            oldest = sorted(_verdicts.items(), key=lambda item: item[1])
-            for stale, _ in oldest[:len(_verdicts) - _VERDICT_CAP]:
-                _verdicts.pop(stale, None)
-
-
 def _forget_verdict(key):
     with _VERDICT_LOCK:
         _verdicts.pop(key, None)
@@ -193,6 +182,100 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 
 _recent_authorization = {}
 
+# The hub answers 503 with Retry-After when an operator kill switch is on
+# (android/hub/src/switches.ts). Until then every call is answered locally, so
+# no loop on this worker keeps asking a paused hub. Keyed by hub origin.
+_paused_until = {}
+_MAX_RETRY_AFTER = 6 * 3600.0
+
+
+class HubResponseError(HTTPException):
+    """A failed hub call.
+
+    ``status_code`` stays 503 so existing callers keep treating it as
+    "unavailable". ``hub_status`` is what the hub answered (None when it was
+    not reached) and ``retry_after`` its Retry-After in seconds, if any.
+    """
+
+    def __init__(self, detail, hub_status=None, retry_after=None):
+        super().__init__(status_code=503, detail=detail)
+        self.hub_status = hub_status
+        self.retry_after = retry_after
+
+
+class TunnelLimitError(HubResponseError):
+    """The hub refused a new managed tunnel: the account is at its cap.
+
+    The hub answers 409 ``{"code": "tunnel_limit", "limit", "used",
+    "licensed"}`` on activate and connector calls (android/hub
+    src/tunnel-capacity.ts). Only those three numbers are kept; the hub's own
+    text is not echoed.
+    """
+
+    def __init__(self, limit, used, licensed, retry_after=None):
+        super().__init__('Account tunnel limit reached', 409, retry_after)
+        self.limit = limit
+        self.used = used
+        self.licensed = licensed
+
+
+# Calls that may make the hub build a managed tunnel. They carry the worker's
+# license lease (X-Shuffle-Lease) so a licensed account gets its larger cap.
+LEASE_SUFFIXES = ('activate', 'connector')
+
+
+def _lease_headers(suffix):
+    if suffix not in LEASE_SUFFIXES:
+        return {}
+    try:
+        from app.core import license as licensing
+        lease = licensing.lease_header()
+    except Exception:  # noqa: BLE001 - a license problem must never block the hub call
+        logger.warning('Could not read the license lease for the account hub', exc_info=True)
+        return {}
+    # A header value must be one printable line; the lease is base64url.
+    if not lease or len(lease) > 4096 or not re.fullmatch(r'[A-Za-z0-9_-]+', lease):
+        return {}
+    return {licensing.LEASE_HEADER: lease}
+
+
+def _tunnel_limit(response, retry):
+    """The hub's tunnel_limit refusal, or None for any other 409 body."""
+    try:
+        body = json.loads(response.read(4097)[:4096])
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(body, dict) or body.get('code') != 'tunnel_limit':
+        return None
+    count = lambda v: v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1000 else None
+    limit, used = count(body.get('limit')), count(body.get('used'))
+    if limit is None or used is None:
+        return None
+    return TunnelLimitError(limit, used, body.get('licensed') is True, retry)
+
+
+def tunnel_limit(exc):
+    """The TunnelLimitError behind a failed hub call, or None."""
+    return exc if isinstance(exc, TunnelLimitError) else None
+
+
+def hub_status(exc):
+    return getattr(exc, 'hub_status', None)
+
+
+def retry_after(exc):
+    return getattr(exc, 'retry_after', None)
+
+
+def _parse_retry_after(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None  # HTTP-date form is not used by the hub.
+    if seconds != seconds or seconds < 0:
+        return None
+    return min(seconds, _MAX_RETRY_AFTER)
+
 
 def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384, timeout=None):
     """Bounded, nonredirecting request; never include hub bodies or secrets in errors.
@@ -202,20 +285,38 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
     """
     conn = None
     detail = 'Account hub authorization unavailable'
+    status = wait = None
     try:
         origin = trusted_origin(binding['hub_url'])
         server = identifier(binding['server_id'])
+        remaining = _paused_until.get(origin, 0) - time.monotonic()
+        if remaining > 0:
+            raise HubResponseError('Account hub is paused', 503, remaining)
         if timeout is None:
             timeout = 65 if suffix in ('activate', 'connector') else 4
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
+        # The lease goes only here: to the administrator-selected hub origin,
+        # on the two calls that can build a tunnel.
         conn.request(method, f'/v1/servers/{server}/{suffix}',
                      body=json.dumps(body) if body is not None else None,
                      headers={'Authorization': 'Bearer ' + (credential if credential is not None else secret_for(binding)),
-                              'Content-Type': 'application/json', 'Accept': 'application/json'})
+                              'Content-Type': 'application/json', 'Accept': 'application/json',
+                              **_lease_headers(suffix)})
         response = conn.getresponse()
         if response.status != 200:
+            status = response.status
+            getheader = getattr(response, 'getheader', None)  # Test doubles may omit headers.
+            wait = _parse_retry_after(getheader('Retry-After') if getheader else None)
+            if status == 503 and wait:
+                _paused_until[origin] = time.monotonic() + wait
             if response.status in (401, 403):
                 _recent_authorization.pop(_authorization_key(binding), None)
+            if response.status == 409 and suffix in LEASE_SUFFIXES:
+                refused = _tunnel_limit(response, wait)
+                if refused:
+                    logger.warning('Account hub refused a remote connection: tunnel limit %s of %s (licensed: %s)',
+                                   refused.used, refused.limit, refused.licensed)
+                    raise refused
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
             if suffix.startswith('account/') and response.status in (401, 403, 404, 409):
@@ -242,7 +343,6 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if not isinstance(result, dict):
             raise ValueError('Invalid hub response')
         if suffix == 'network/pending' or (suffix == 'status' and result.get('active') is True):
-            import time
             # One worker binding, bounded cache, no identity/provider secrets.
             if len(_recent_authorization) >= 16:
                 _recent_authorization.clear()
@@ -255,7 +355,9 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         # JSON, or the status line above); hub bodies and credentials never
         # appear in it.
         logger.warning('Account hub %s %s failed: %s: %s', method, suffix, type(exc).__name__, exc)
-        raise HTTPException(status_code=503, detail=detail) from None
+        if status == 503 and wait:
+            detail = 'Account hub is paused'
+        raise HubResponseError(detail, status, wait) from None
     finally:
         if conn:
             conn.close()
@@ -361,22 +463,45 @@ def require_active(owner):
 def mobile_hub_ownership(device):
     """Live-checked ownership dict or None for direct pairing. device is DB row."""
     owner = store.ownership(device['device_id'])
+    require_worker_confirmation(owner)
     require_active(owner)
     return owner
+
+
+def require_worker_confirmation(owner):
+    if owner is not None:
+        decision = store.confirmation(owner)
+        if decision == 'denied':
+            raise HTTPException(status_code=403, detail='This device was denied by the worker owner')
+        if decision != 'approved':
+            raise HTTPException(status_code=403, detail='Confirm this device on the worker before connecting')
 
 
 def check_paired_client(client):
     """Validate the device live and derive this installation owner's authority.
 
-    Only administrator-started managed connections delegate administration to
-    the hub's single owner account. Direct/controller-linked connections do not.
-    The result is request-local evidence, never a stored or caller-selected role.
+    The hub may veto a device, but cannot approve one. Both a worker-local
+    confirmation and a live managed binding are required. Direct/controller-linked
+    connections do not delegate administration.
     """
+    from datetime import datetime, timezone
+
+    from app.core.device_keys import key_expiry
+    from app.db.mobile import get_mobile_device
+
     owner = store.ownership(paired_client_id=client['id'])
     if owner is None:
+        # Direct-paired phones cannot keep using a derived web/native session
+        # after the originating key expires or its mobile record is removed.
+        device = get_mobile_device(client.get('device_id'))
+        if device:
+            if (device.get('revoked_at') or device.get('paired_client_id') != client['id']
+                    or key_expiry(device) <= datetime.now(timezone.utc)):
+                raise HTTPException(status_code=401, detail='Mobile authorization expired or revoked')
+        elif client.get('client_type') == 'mobile':
+            raise HTTPException(status_code=401, detail='Mobile authorization revoked')
         return False
-    from app.db.mobile import get_mobile_device
-    from datetime import datetime, timezone
+    require_worker_confirmation(owner)
     device = get_mobile_device(owner['device_id'])
     if (not device or device.get('revoked_at') or device.get('paired_client_id') != client['id']
             or owner['paired_client_id'] != client['id']
@@ -384,10 +509,7 @@ def check_paired_client(client):
             or owner['device_id'] != client.get('device_id')
             or not store.valid_device_identity(owner)):
         raise HTTPException(status_code=401, detail='Mobile authorization revoked')
-    expires = device.get('api_key_expires_at')
-    if isinstance(expires, str):
-        expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
-    if not expires or expires <= datetime.now(timezone.utc):
+    if key_expiry(device) <= datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail='Mobile authorization expired')
     binding = require_active(owner)
     from app.core.config import settings

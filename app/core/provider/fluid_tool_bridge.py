@@ -1,32 +1,19 @@
-"""fluid_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto fluid's registry.
+"""fluid_tool_bridge: the app's in-process ``@tool`` servers on fluid's ToolRegistry.
 
-AI-Shuffle's ~10 in-process tool modules under ``app/mcp/`` all follow the
-Claude Agent SDK pattern:
+The app's tool modules (``app.mcp.inproc``: ``@tool`` handlers assembled by
+``create_tool_server``) share their surface with fluid's ``fluid.tools.inproc``,
+and ``ToolRegistry._normalize`` accepts the SDK result envelope
+(``{"content": [{"type": "text", "text": ...}]}``), so conversion is mechanical.
 
-    from claude_agent_sdk import tool, create_sdk_mcp_server
-
-    @tool("Name", "description", {json-schema})
-    async def handler(args: dict) -> dict:            # -> {"content": [{"type":"text",...}]}
-        ...
-
-    server = create_sdk_mcp_server(name="builtins", version="1.0.0", tools=[handler, ...])
-
-fluid's ``fluid.tools.inproc`` mirrors that surface deliberately, and its
-``ToolRegistry._normalize`` already accepts the SDK envelope
-(``{"content":[{"type":"text","text":...}]}``) as a handler return. So porting a
-module is *mechanical*: hand this bridge the same list of ``@tool``-decorated
-objects the module already passes to ``create_sdk_mcp_server`` and it produces a
-fluid ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
-
-This module ships the generic converters used to port every module, plus a
-worked example (``bridge_builtins_tools``) proving the pattern for
-``app/mcp/builtin_tools.py``. The remaining modules are the same one-liner.
+``register_recorded_sdk_servers`` (called by the harness adapter) re-registers
+every recorded in-proc server with per-tool risk classes. The lower-level
+converters are ``sdk_tool_to_inproc`` and ``register_sdk_tools``.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, List, Mapping, Optional, is_typeddict
+from typing import Any, Iterable, List, Mapping, Optional
 
 from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server
 from fluid.tools.registry import ToolRegistry
@@ -35,19 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def _input_schema(schema: Any) -> dict:
-    # The pinned SDK accepts both JSON Schema and Python annotation shorthand.
-    # Its server normalizes the latter for list_tools, but recorded @tool
-    # objects retain the raw types. Match that conversion at this bridge too.
-    from claude_agent_sdk import _python_type_to_json_schema
-
-    if isinstance(schema, dict):
-        if isinstance(schema.get("type"), str):
-            return schema
-        properties = {name: _python_type_to_json_schema(value) for name, value in schema.items()}
-        return {"type": "object", "properties": properties, "required": list(properties)}
-    if is_typeddict(schema):
-        return _python_type_to_json_schema(schema)
-    return {"type": "object"}
+    from fluid.tools.inproc import input_schema
+    return input_schema(schema)
 
 
 def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
@@ -71,28 +47,6 @@ def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
         handler=handler,
         risk=risk,
     )
-
-
-def sdk_tools_to_inproc_server(
-    server_name: str,
-    sdk_tools: Iterable[Any],
-    *,
-    version: str = "1.0.0",
-    risk_map: Optional[Mapping[str, str]] = None,
-) -> InprocServer:
-    """Bundle a list of SDK ``@tool`` objects into a named fluid ``InprocServer``.
-
-    ``risk_map`` optionally assigns per-tool risk (``"safe"|"write"|"destructive"``)
-    by tool name; anything unlisted defaults to ``"safe"``. This is where a
-    module declares that, e.g., ``CronDelete`` is ``destructive`` so fluid's
-    PermissionEngine gates it.
-    """
-    risk_map = risk_map or {}
-    tools: List[InprocTool] = [
-        sdk_tool_to_inproc(t, risk=risk_map.get(getattr(t, "name", ""), "safe"))
-        for t in sdk_tools
-    ]
-    return create_inproc_server(server_name, tools, version=version)
 
 
 def register_sdk_tools(
@@ -141,9 +95,6 @@ def register_sdk_tools(
 #   computer-use    computer_use_sdk.py
 #   provider-agent  provider_agent_sdk.py
 #
-# (phone_tools.py exports raw definitions but is not wired into any SDK server,
-# so there is nothing to bridge for it.)
-#
 # Every server passes through sdk_compat.patch_sdk_server, which records the
 # raw @tool objects (see provider/sdk_tool_records.py);
 # ``register_recorded_sdk_servers`` below re-registers them on a fluid
@@ -163,7 +114,8 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "StartSession": "write",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
-    "Monitor": "safe",
+    # Monitor runs a host shell command; fluid rates its own Monitor "write".
+    "Monitor": "write",
     "TaskOutput": "safe",
     "TaskGet": "safe",
     "TaskList": "safe",
@@ -279,7 +231,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 })
 
 # Builtins whose ``mcp__builtins__`` copies are skipped on EVERY native leg:
-# fluid registers its own bare-named versions there (ruling A13), so bridging
+# fluid registers its own bare-named versions there, so bridging
 # the copy would show the model two of each. One set, two readers — the harness
 # adapter's ``skip_tools`` (what actually drops them) and the tool catalog's
 # availability marking (what tells the picker why the row is greyed). The

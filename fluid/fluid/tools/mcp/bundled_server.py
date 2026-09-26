@@ -238,6 +238,14 @@ async def _gate_call(
             deny_message = non_interactive_denial(name)
         if verdict == "deny":
             return ToolOutcome(text=deny_message or "permission denied", is_error=True)
+    if hooks is not None:
+        # The CLI only calls a tool it allowed (its own rules, hooks and
+        # prompts) and this gate let it through: observers hear of it
+        # before it runs, as on the native loop.
+        await hooks.tool_allowed({
+            "session_id": ctx.session_id, "name": name, "input": args,
+            "tool_use_id": None,
+        })
     outcome = await registry.dispatch(name, args, ctx)
     if hooks is not None:
         decision = await hooks.emit(
@@ -299,8 +307,8 @@ async def _answer(
             registry, ctx, name, req.get("arguments") or {},
             permissions=permissions, hooks=hooks, on_stop=on_stop,
         )
-        # MRTR: the tool paused to ask the user something (AskUser).
-        # This bridge is a request/response socket with no event
+        # MRTR: the tool paused on input_required (an MCP server or a
+        # builtin/in-proc tool). This bridge is a request/response socket with no event
         # bus and no user on the far end — the delegated CLI owns the loop — so
         # the round-trip cannot happen here. Its first leg is an EMPTY result
         # carrying the marker; forwarding that text would tell the CLI's model
@@ -327,11 +335,17 @@ def bundled_server_config(socket_path: str, token: str | None = None) -> dict[st
     ``socket_path`` must be the *resolved* address — for the TCP form that means
     the real bound port, not ``tcp:127.0.0.1:0``. ``token`` rides in the
     entry's ``env`` (not ``args``: a process list is world-readable).
+
+    ``alwaysLoad`` keeps the bridge's tools in every request. Without it a
+    claude CLI that has ToolSearch defers every MCP tool behind it (the
+    default since 2.1.x, not threshold based), so the model would have to
+    search before calling the tools its prompt names. Older CLIs drop the key.
     """
     config: dict[str, Any] = {
         "type": "stdio",
         "command": sys.executable,
         "args": ["-m", "fluid.tools.mcp.bundled_server", "--socket", socket_path],
+        "alwaysLoad": True,
     }
     if token is not None:
         config["env"] = {TOKEN_ENV: token}

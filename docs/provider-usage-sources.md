@@ -18,9 +18,11 @@ the dashboard link.
 The usage API (`GET /api/v1/usage/limits`) returns the registry entry with each
 provider row (`source_info`) and with the local Claude reading
 (`claude_source`). Rows also carry `last_success_at` and `last_attempt_at`; a
-failed attempt moves only the second. The usage popover shows the source, the
-support label, the scope, what the figure measures, both timestamps and the
-dashboard link.
+failed attempt moves only the second. `cooldown_until` is the earliest time a
+refresh will request that provider again. The usage popover shows the dashboard
+link and, once a reading is stale, when it was last updated and when the next
+check can run. If the cached rows cannot be read, `providers` is null and the
+popover keeps the rows it already shows.
 
 ### Matrix
 
@@ -34,7 +36,6 @@ dashboard link.
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Separate management key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
 | `fal_billing` | `GET https://api.fal.ai/v1/account/billing?expand=credits` | Separate fal Admin key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Billing](https://fal.ai/dashboard/billing) |
-| `claude_oauth_usage` | `GET https://api.anthropic.com/api/oauth/usage` | Claude subscription sign-in of the active account | Subscription | Subscription allowance | Polled in the background, 300 s | Unofficial, subscription-specific | [Usage](https://claude.ai/settings/usage) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
 
@@ -66,7 +67,7 @@ thing and never come from these sources. The Stats card labels them
 
 ### Subscription-specific endpoints
 
-`claude_oauth_usage`, `grok_subscription` and `codex_headers` are labeled
+`grok_subscription` and `codex_headers` are labeled
 "Unofficial, subscription-specific" in the registry, the API and the popover.
 They are used by the providers' own subscription clients and are not published
 as third-party APIs. The app reads them only for the account the owner signed
@@ -91,18 +92,56 @@ capability is cached per credential revision:
 - 404, 429, 5xx and timeouts are not negative-cached. They back off
   exponentially to one hour and honor `Retry-After`.
 
+A refusal is remembered for as long as the credential revision lasts, not for a
+fixed time. A timed expiry would re-probe a revoked key several times an hour.
+To retry after granting access, re-save the credential.
+
+### Refresh cooldown
+
+Opening the popover asks for a forced refresh (`refresh=true`). A forced
+refresh skips the monitor's 300 s spacing, but it cannot bypass any of these
+limits:
+
+- A worker starts at most one poll pass every 30 s. Inside that window the API
+  returns the cached rows with `cooldown_until`.
+- A pass skips any provider whose snapshot was written or attempted in the last
+  30 s. This applies to every worker that shares the database. It needs no
+  budget claim and no round trip to the coordinator. The snapshot timestamp is
+  the point where workers coordinate.
+- The per-credential request budget still limits upstream requests to one per
+  endpoint interval (300 s, or 900 s for OpenAI Admin). If several workers
+  claim at the same moment, one request is made and the others are deferred.
+- Refreshes started by saving a credential have no cooldown, so a new key is
+  probed at once.
+
+On the Claude side, `refresh=true` re-persists and re-broadcasts the in-memory
+windows at most once per 30 s. It never makes a request.
+
 The last successful reading is kept after a failure, and the API reports the
 failure time separately from the last success.
 
-## Claude subscription reads
+### Banked resets
 
-Ordinary reads of `/api/v1/usage/limits` never wait on the Claude endpoint. A
-stale read returns the cached snapshot and starts one shared background
-refresh; further stale reads within 60 seconds of an attempt do not start
-another. An explicit refresh uses the same task and the same budget, so it
-cannot bypass the 300-second minimum. Workers with the same Claude sign-in
-share one budget through the network founder, so simultaneous reads on several
-workers produce one upstream request.
+When a Codex or SuperGrok banked reset is consumed with outcome `reset`, windows
+already at 100% used are removed from that provider's snapshot. The popover
+then stops showing the exhausted window on its next read. The consume response
+does not say which windows were reset, so windows below 100% keep their last
+reading until the next observation: Codex headers on the next inference, or the
+next budgeted SuperGrok poll. The reset does not shorten the SuperGrok request
+budget.
+
+## Claude usage
+
+AI Shuffle never reads the Claude Code CLI's credentials, so it calls no
+Claude usage or profile endpoint. The only Claude source is
+`claude_rate_limit_events`: the rate-limit events the running CLI reports in
+its own output stream. Each event refines one window, so the popover shows
+only the windows the CLI has reported, and nothing before the first agent run.
+Each window carries its own `observed_at`. A window the CLI last reported long
+ago still counts as stale when a newer event has refreshed another window.
+The popover links to the user's own usage page,
+[claude.ai/settings/usage](https://claude.ai/settings/usage), for the full
+picture. Snapshots carry no Claude account identity or plan.
 
 ## OpenRouter setup and account separation
 
@@ -144,9 +183,8 @@ inference key does not establish access to either administration API.
 
 The [Claude Code authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)
 distinguishes an end user's login in the unmodified native client from collecting
-or intermediating subscription OAuth credentials in a third-party app. This
-review does not establish support for this app's direct OAuth usage reader.
-Likewise, xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
+or intermediating subscription OAuth credentials in a third-party app, which is
+why the app has no Claude usage reader of its own. xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
 does not establish support for the existing SuperGrok proxy endpoints. Those
 readers are labeled unofficial and subscription-specific; deciding their
 supported replacement or default behavior remains part of issue #1387.

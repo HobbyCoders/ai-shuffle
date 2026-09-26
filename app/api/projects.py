@@ -20,7 +20,8 @@ from app.core.platform import is_local_mode
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.api.common import check_project_access, format_file_size, api_error_handler
+from app.api.common import check_project_access, format_file_size, get_file_extension, api_error_handler, is_path_safe
+from app.api.sessions_helpers import check_session_access_for_api_user
 from app.core.project_links import is_link_locked
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def normalize_docker_path(path: str) -> str:
     if not is_absolute_project_path(path) or is_local_mode():
         return path
 
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
     try:
         resolved = Path(path).resolve()
         rel = resolved.relative_to(workspace)
@@ -146,10 +147,13 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
         return full_path
 
     # Relative path - resolve within workspace and enforce boundary
-    full_path = (settings.workspace_dir / path).resolve()
+    # The effective workspace (the one chosen during setup), not the start-up
+    # value: project_utils resolves stored relative paths against it too.
+    workspace = settings.effective_workspace_dir.resolve()
+    full_path = (workspace / path).resolve()
 
     try:
-        full_path.relative_to(settings.workspace_dir.resolve())
+        full_path.relative_to(workspace)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -450,10 +454,89 @@ async def unlink_project(project_id: str, token: str = Depends(require_admin)):
     return await run_sync(_unlink)
 
 
-def get_file_extension(name: str) -> str:
-    """Get lowercase file extension without the dot"""
-    ext = Path(name).suffix.lower()
-    return ext[1:] if ext else ""
+def _get_project_session(session_id: str, project_id: str, api_user: Optional[dict]) -> Optional[dict]:
+    """Load a session for a project-scoped route; 404 if it is another project's, 403 if denied."""
+    session = database.get_session(session_id)
+    if session:
+        if session.get("project_id") != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session not found: {session_id}"
+            )
+        check_session_access_for_api_user(api_user, session)
+    return session
+
+
+def _get_project_worktree(worktree_id: str, project_id: str) -> Optional[dict]:
+    """Load a worktree for a project-scoped route; 404 if it belongs to another project's repository."""
+    worktree = database.get_worktree(worktree_id)
+    if worktree:
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo or worktree.get("repository_id") != repo["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found in this project: {worktree_id}"
+            )
+    return worktree
+
+
+def _resolve_in_project(project: dict, rel: str) -> tuple[Path, Path]:
+    """Resolve ``rel`` inside the project's working dir; 400 if it escapes it.
+
+    Returns ``(full_path, base_path)``, both resolved. The workspace boundary
+    alone is not enough: ``../other-project`` stays inside the workspace. A
+    leading slash is project-relative, as it was when paths were string-joined.
+    """
+    base_path = get_project_working_dir_as_path(project).resolve()
+    rel = rel.lstrip("/\\")
+    full_path = (base_path / rel).resolve() if rel else base_path
+    if not is_path_safe(full_path, base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project directory"
+        )
+    return full_path, base_path
+
+
+def _resolve_leaf_in_project(project: dict, rel: str) -> tuple[Path, Path]:
+    """``_resolve_in_project`` for delete and rename: a symlink is never followed.
+
+    The path must still resolve inside the project, but when its last component
+    is a symlink the returned path is the link itself (in its resolved parent
+    directory), so deleting or renaming ``alias -> real`` acts on ``alias``.
+    """
+    full_path, base_path = _resolve_in_project(project, rel)
+    rel = rel.lstrip("/\\")
+    lexical = base_path / rel
+    if not rel or lexical.name in ("", ".", "..") or not lexical.is_symlink():
+        return full_path, base_path
+    parent = lexical.parent.resolve()
+    if not is_path_safe(parent, base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project directory"
+        )
+    return parent / lexical.name, base_path
+
+
+def _refuse_git_metadata(*paths: str) -> None:
+    """400 when any path names the repository metadata directory.
+
+    Every component is checked, in every spelling git itself refuses (case,
+    trailing dots and spaces, ``.git::$INDEX_ALLOCATION``, the 8.3 name
+    ``GIT~1``, HFS+ ignorable code points such as ``.g\\u200cit``): ``.git``
+    controls what the app's own git runs execute (hooks, config), so file
+    routes must never write into it or move it.
+    """
+    from app.core.git_commit_ops import _is_dotgit_alias
+
+    for path in paths:
+        for name in str(path).replace("\\", "/").split("/"):
+            if name and _is_dotgit_alias(name):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path is inside the repository metadata directory (.git)",
+                )
 
 
 @router.get("/{project_id}/files")
@@ -467,6 +550,7 @@ async def list_project_files(
 ):
     """List files in a project directory. API users can only access their assigned project."""
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
 
     def _list():
         # ONE hop for the whole listing. Everything here is blocking: the
@@ -479,7 +563,7 @@ async def list_project_files(
         if session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = database.get_session(session_id)
+            session = _get_project_session(session_id, project_id, api_user)
             if session:
                 cwd = resolve_existing_cwd(session)
                 if cwd:
@@ -488,6 +572,11 @@ async def list_project_files(
         if session_cwd is not None:
             base_path = session_cwd
             full_path = base_path / path if path else base_path
+            if not is_path_safe(full_path, base_path):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Path escapes session checkout"
+                )
 
             if not full_path.exists():
                 raise HTTPException(
@@ -529,12 +618,7 @@ async def list_project_files(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Build the full path
-        base_path = get_project_working_dir_as_path(project)
-        if path:
-            full_path = validate_project_path(f"{project['path']}/{path}")
-        else:
-            full_path = base_path
+        full_path, base_path = _resolve_in_project(project, path)
 
         if not full_path.exists():
             raise HTTPException(
@@ -638,6 +722,9 @@ def _perform_project_upload(
         if worktree_full.exists():
             base_project_path = worktree["worktree_path"]
 
+    # Uploads are confined without following links, so the spelling is the target.
+    _refuse_git_metadata(path, filename)
+
     # Build target directory path using Path joining (avoid mixed slashes on Windows)
     base = Path(base_project_path)
     if path:
@@ -697,6 +784,8 @@ async def upload_file(
         )
 
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
+    _refuse_git_metadata(path, file.filename or "")
 
     def _load_project():
         project = database.get_project(project_id)
@@ -705,6 +794,12 @@ async def upload_file(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Project not found: {project_id}"
             )
+        # The destination may come from session_id / worktree_id; both must
+        # belong to this project, or the file lands in another project's checkout.
+        if session_id:
+            _get_project_session(session_id, project_id, api_user)
+        if worktree_id:
+            _get_project_worktree(worktree_id, project_id)
         return project
 
     # TWO hops here, deliberately: the 404 is decided before the body is read
@@ -751,8 +846,7 @@ async def download_file(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Validate and build full path
-        full_path = validate_project_path(f"{project['path']}/{path}")
+        full_path, _ = _resolve_in_project(project, path)
 
         if not full_path.exists():
             raise HTTPException(
@@ -795,6 +889,7 @@ async def create_folder(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid folder name"
         )
+    _refuse_git_metadata(path, folder_name)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -804,11 +899,11 @@ async def create_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Build the folder path
-        if path:
-            folder_path = validate_project_path(f"{project['path']}/{path}/{folder_name}")
-        else:
-            folder_path = validate_project_path(f"{project['path']}/{folder_name}")
+        folder_path, base_path = _resolve_in_project(
+            project, f"{path}/{folder_name}" if path else folder_name
+        )
+        # The resolved identity too: a link to .git is followed in the parent.
+        _refuse_git_metadata(folder_path.relative_to(base_path).as_posix())
 
         if folder_path.exists():
             raise HTTPException(
@@ -816,7 +911,7 @@ async def create_folder(
                 detail="Folder already exists"
             )
 
-        return folder_path, get_project_working_dir_as_path(project)
+        return folder_path, base_path
 
     # TWO hops on purpose: ``api_error_handler`` today wraps ONLY the mkdir, so
     # a DB failure keeps surfacing as itself rather than as "Failed to create
@@ -852,6 +947,7 @@ async def rename_file_or_folder(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid name"
         )
+    _refuse_git_metadata(path, new_name)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -861,23 +957,37 @@ async def rename_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Get current path
-        current_path = validate_project_path(f"{project['path']}/{path}")
-        if not current_path.exists():
+        current_path, base_path = _resolve_leaf_in_project(project, path)
+        if not current_path.exists() and not current_path.is_symlink():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File or folder not found"
             )
+        if current_path == base_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot rename project root directory"
+            )
 
         # Build new path
         new_path = current_path.parent / new_name
+        if not is_path_safe(new_path, base_path):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid name"
+            )
+        # The resolved identities too: a link to .git is followed in the parent.
+        _refuse_git_metadata(
+            current_path.relative_to(base_path).as_posix(),
+            new_path.relative_to(base_path).as_posix(),
+        )
         if new_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A file or folder with that name already exists"
             )
 
-        return current_path, new_path, get_project_working_dir_as_path(project)
+        return current_path, new_path, base_path
 
     # TWO hops: ``api_error_handler`` must keep wrapping only the rename, as it
     # does today, so a DB error is not relabelled as a rename failure.
@@ -907,6 +1017,7 @@ async def delete_file_or_folder(
 ):
     """Delete a file or folder within the project."""
     check_project_access(request, project_id)
+    _refuse_git_metadata(path)
 
     def _resolve():
         project = database.get_project(project_id)
@@ -916,21 +1027,22 @@ async def delete_file_or_folder(
                 detail=f"Project not found: {project_id}"
             )
 
-        # Get the path to delete
-        target_path = validate_project_path(f"{project['path']}/{path}")
-        if not target_path.exists():
+        target_path, base_path = _resolve_leaf_in_project(project, path)
+        if not target_path.exists() and not target_path.is_symlink():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File or folder not found"
             )
 
         # Don't allow deleting the project root
-        base_path = get_project_working_dir_as_path(project)
-        if target_path.resolve() == base_path.resolve():
+        if target_path == base_path:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot delete project root directory"
             )
+        # The resolved identity too: a link to .git is followed in the parent
+        # (a link that IS the leaf is removed itself, which is harmless).
+        _refuse_git_metadata(target_path.relative_to(base_path).as_posix())
 
         return target_path
 
@@ -939,7 +1051,9 @@ async def delete_file_or_folder(
     target_path = await run_sync(_resolve)
 
     def _remove():
-        if target_path.is_dir():
+        if target_path.is_symlink():  # the link itself, never its target
+            target_path.unlink()
+        elif target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()
@@ -991,6 +1105,7 @@ async def list_chat_history(
     from app.core.jsonl_parser import list_chat_history_sessions
 
     check_project_access(request, project_id)
+    api_user = get_api_user_from_request(request)
 
     def _load():
         # ONE hop for the working-dir resolution AND the history scan. The scan
@@ -1002,7 +1117,7 @@ async def list_chat_history(
         if not worktree_id and session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = database.get_session(session_id)
+            session = _get_project_session(session_id, project_id, api_user)
             if session:
                 cwd = resolve_existing_cwd(session)
                 if cwd:
@@ -1013,7 +1128,7 @@ async def list_chat_history(
         # Resolve working directory: worktree takes priority over project
         working_dir: str
         if worktree_id:
-            worktree = database.get_worktree(worktree_id)
+            worktree = _get_project_worktree(worktree_id, project_id)
             if worktree:
                 working_dir = get_worktree_working_dir(worktree)
             else:
@@ -1114,11 +1229,32 @@ class SessionSyncResponse(BaseModel):
     sessions: List[dict]
 
 
+def _resolve_sync_profile_id(requested: Optional[str], project: dict) -> str:
+    """The agent imported sessions are filed under.
+
+    The app seeds no agents, so there is no "default" to fall back on.
+    """
+    if requested:
+        if not database.get_profile(requested):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent not found: {requested}")
+        return requested
+    default_id = (project.get("settings") or {}).get("default_profile_id")
+    if default_id and database.get_profile(default_id):
+        return default_id
+    profiles = database.get_all_profiles()
+    if not profiles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No agents are configured; create an agent before importing sessions.",
+        )
+    return profiles[0]["id"]
+
+
 @router.post("/{project_id}/sync-sessions", response_model=SessionSyncResponse)
 async def sync_project_sessions(
     request: Request,
     project_id: str,
-    profile_id: str = Query("default", description="Profile to use for imported sessions"),
+    profile_id: Optional[str] = Query(None, description="Agent for imported sessions; defaults to the project's default agent, else the first agent"),
     token: str = Depends(require_auth)
 ):
     """
@@ -1138,7 +1274,8 @@ async def sync_project_sessions(
 
     Args:
         project_id: The project to sync sessions for
-        profile_id: The profile to associate with imported sessions (default: 'default')
+        profile_id: The agent for imported sessions. Defaults to the project's
+            default agent, else the first agent; 409 when there are no agents.
 
     Returns:
         imported_count: Number of sessions successfully imported
@@ -1166,7 +1303,7 @@ async def sync_project_sessions(
         # Run session sync
         return session_sync_service.sync_project_sessions(
             project_id=project_id,
-            profile_id=profile_id
+            profile_id=_resolve_sync_profile_id(profile_id, project),
         )
 
     result = await run_sync(_sync)

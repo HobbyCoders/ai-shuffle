@@ -105,9 +105,9 @@
 	}
 
 	// Escape discards. Bound on the window in the capture phase rather than
-	// through registerShortcut: that registry is keyed by combo, so claiming
-	// 'Escape' would evict the app's close-modal binding and unregistering would
-	// delete it outright.
+	// through registerShortcut: that registry lets only the newest owner of a
+	// combo fire, so claiming 'Escape' would shadow the app's close-modal binding
+	// while the recorder is open.
 	$effect(() => {
 		if (!expanded || $globalSttState.source !== 'composer') return;
 		const onKey = (event: KeyboardEvent) => {

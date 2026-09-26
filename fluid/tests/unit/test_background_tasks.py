@@ -7,7 +7,7 @@ import pytest
 
 import fluid.engine.native as native_module
 from fluid.engine.background import _BACKGROUND_WAKE_MAX_ATTEMPTS
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import CLAUDE_CLI_MISSING_MESSAGE, DelegatedLoop
 from fluid.engine.native import NativeLoop
 from fluid.events import (
     BackgroundTaskFinished,
@@ -308,7 +308,8 @@ async def test_delegated_failed_wake_does_not_retry_forever() -> None:
     ]
     # One attempt per retry in the budget, then the latch: no more spawns.
     assert len(errors) == _BACKGROUND_WAKE_MAX_ATTEMPTS
-    assert all("spawn failed" in e.message for e in errors)
+    # A missing binary is reported as the setup message, not a raw spawn error.
+    assert all(e.message == CLAUDE_CLI_MISSING_MESSAGE for e in errors)
     assert loop._background_wake_blocked
     assert "task-fail-wake" in loop._background_completions
     await loop.aclose()

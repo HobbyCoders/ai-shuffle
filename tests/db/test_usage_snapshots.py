@@ -17,9 +17,6 @@ class TestUpsertUsageSnapshot:
             available=True,
             generation=1000,
             fetched_at=1234567890000,
-            account_id="acct-1",
-            account_email="a@example.com",
-            account_name="Account One",
         )
 
         rows = db.get_all_usage_snapshots()
@@ -29,9 +26,7 @@ class TestUpsertUsageSnapshot:
         assert row["available"] is True
         assert row["generation"] == 1000
         assert row["fetched_at"] == 1234567890000
-        assert row["account_id"] == "acct-1"
-        assert row["account_email"] == "a@example.com"
-        assert row["account_name"] == "Account One"
+        assert not any(k.startswith("account_") for k in row)
 
         # A second upsert for the same instance_id REPLACES the row (no dup).
         db.upsert_usage_snapshot(
@@ -40,17 +35,12 @@ class TestUpsertUsageSnapshot:
             available=False,
             generation=2000,
             fetched_at=999,
-            account_id="acct-2",
-            account_email=None,
-            account_name="Account Two",
         )
         rows = db.get_all_usage_snapshots()
         assert len(rows) == 1
         row = rows[0]
         assert row["generation"] == 2000
         assert row["available"] is False
-        assert row["account_id"] == "acct-2"
-        assert row["account_email"] is None
         assert row["windows"][0]["type"] == "seven_day"
 
     def test_windows_json_round_trips_through_shim(self, mock_db):
@@ -66,16 +56,13 @@ class TestUpsertUsageSnapshot:
         assert isinstance(row["windows"], list)
         assert row["windows"] == windows
 
-    def test_empty_windows_and_optional_account_meta(self, mock_db):
+    def test_empty_windows(self, mock_db):
         db.upsert_usage_snapshot(
             "inst-C", windows=[], available=False, generation=None, fetched_at=None,
         )
         row = next(r for r in db.get_all_usage_snapshots() if r["instance_id"] == "inst-C")
         assert row["windows"] == []
         assert row["available"] is False
-        assert row["account_id"] is None
-        assert row["account_email"] is None
-        assert row["account_name"] is None
 
     def test_multiple_installs_listed(self, mock_db):
         db.upsert_usage_snapshot("inst-1", windows=[], available=True, generation=1, fetched_at=1)

@@ -383,7 +383,7 @@ def result_digest(text: str, *, unordered: bool = False) -> str:
     ).hexdigest()
 
 
-def repeat_search_pointer(text: str, header_lines: int = 1) -> str:
+def repeat_search_pointer(text: str) -> str:
     """The result an identical, already-run search gets *instead of* its rows.
 
     Appending "you already ran this" underneath a second full copy of the rows
@@ -393,8 +393,8 @@ def repeat_search_pointer(text: str, header_lines: int = 1) -> str:
     find), the size of what is not being repeated, and where it is.
     """
     lines = text.splitlines()
-    head = "\n".join(lines[:header_lines]).strip()
-    withheld = max(0, len(lines) - header_lines)
+    head = lines[0].strip() if lines else ""
+    withheld = max(0, len(lines) - 1)
     plural = "line" if withheld == 1 else "lines"
     return (
         (f"{head}\n" if head else "")

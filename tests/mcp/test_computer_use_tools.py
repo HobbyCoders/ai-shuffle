@@ -13,10 +13,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PIL import Image
 
 from app.mcp import computer_use_sdk as sdk
 from app.mcp.computer_use import abort, access, activity, scaling, safety
+
+# Pillow ships only in requirements-native.txt; skip, not error, without it.
+Image = pytest.importorskip("PIL.Image")
 
 
 def payload(result):

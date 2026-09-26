@@ -3,10 +3,8 @@
 Reads a line, submits a ``UserTurn``, subscribes to the engine's EventBus, and
 renders the stream: ``TextDelta``/``ThinkingDelta`` inline, tool use + results,
 permission prompts (y/n on stdin → ``RespondPermission``), and per-turn usage on
-``TurnComplete``. Slash commands ``/model``, ``/fork``, ``/rewind``, ``/exit`` map
-to the corresponding ops; ``/context`` (alias ``/usage``), ``/tools`` and
-``/skills`` are read-only views over the engine's context breakdown, tool
-registry and discovered skills.
+``TurnComplete``. Slash commands are handled by :meth:`Repl.dispatch_slash`
+(full list in docs/cli.md).
 
 Everything routes through :func:`stream_turn` and the small ``on_permission`` /
 ``input_fn`` seams so the one-shot ``run`` path and the unit tests reuse the exact
@@ -78,8 +76,6 @@ async def auto_answer(event: QuestionRequest) -> str:
     """Non-interactive question responder: unblock the turn, never guess."""
     return NO_USER_ANSWER
 
-_TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
-
 # A second Ctrl-C inside this many seconds quits instead of interrupting again.
 SIGINT_EXIT_WINDOW = 2.0
 # The exit code a Ctrl-C ended the process with (128 + SIGINT).
@@ -89,9 +85,9 @@ SIGINT_EXIT_CODE = 130
 class LineReader:
     """Blocking ``input_fn`` calls on one daemon thread, handed back as futures.
 
-    ``asyncio.to_thread`` ran the read on the default executor, whose threads
-    are joined at shutdown, so a Ctrl-C at the prompt hung the process until
-    stdin produced a line. This thread is a daemon: exit never waits for it. A
+    Not ``asyncio.to_thread``: the default executor's threads are joined at
+    shutdown, so a Ctrl-C at the prompt would hang the process until stdin
+    produced a line. This thread is a daemon: exit never waits for it. A
     read the signal handler abandons keeps blocking here; the line it finally
     gets is kept and answers the next request, so nothing typed after an
     interrupt is lost.
@@ -279,7 +275,6 @@ def _switch_mode(out: TextIO, mode: str) -> None:
         out.write("\n  [thinking] " + ("\x1b[2m" if dim else ""))
     else:
         out.write(("\x1b[0m" if dim else "") + "\n\n")
-    _mode[key] = mode
 
 
 def _end_stream(out: TextIO) -> None:
@@ -595,7 +590,6 @@ class Repl:
     ) -> None:
         self.engine = engine
         self.session_id = session_id
-        self.input_fn = input_fn or input
         self._reader = stdin_reader() if input_fn is None else LineReader(input_fn)
         self.out = out or sys.stdout
         self.prompt = prompt
@@ -764,8 +758,15 @@ class Repl:
                 self.out.write(f"no running task {arg}\n")
         elif cmd == "/model":
             if arg:
-                await set_model(self.engine, arg)
-                self.out.write(f"model → {arg}\n")
+                try:
+                    await set_model(self.engine, arg)
+                except RuntimeError as exc:
+                    # The delegated leg records a switch only once the CLI
+                    # acknowledges it; a refused or unanswered one keeps the
+                    # old model.
+                    self.out.write(f"model not changed: {exc}\n")
+                else:
+                    self.out.write(f"model → {arg}\n")
             else:
                 self.out.write(f"model = {self.engine.model}\n")
         elif cmd == "/fork":

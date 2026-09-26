@@ -7,8 +7,10 @@
 	 * routes there (the app owns the session and passes a Bearer token), there
 	 * is no service worker, and an expired session shows a reconnect message.
 	 *
-	 * There is no sign-in anywhere: the worker trusts its local listener, so a
-	 * browser it does not recognise sees a local-network notice, never a login.
+	 * A browser the worker does not recognise sees the owner-password sign-in
+	 * (or, before any password exists, the step that creates it), or a notice
+	 * when it cannot sign in from where it is. An owner whose install has no
+	 * password yet sees the blocking "set an owner password" step first.
 	 */
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -22,6 +24,8 @@
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
 	import ComputerUseBanner from '$lib/components/ComputerUseBanner.svelte';
+	import OwnerAccessGate from '$lib/components/OwnerAccessGate.svelte';
+	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
@@ -66,6 +70,14 @@
 	let authPollTimer: ReturnType<typeof setInterval> | null = null;
 
 	// Unknown/loading/error states cannot substitute for a confirmed denial.
+	// An owner on an install without a password (typically after an upgrade)
+	// must set one before anything else. Desktop installs never require it.
+	const ownerPasswordBlocking = $derived(
+		!mobileApp && currentPath !== '/pair' && $auth.status?.authenticated === true
+			&& $auth.status?.is_admin === true && ownerAccess.status?.required === true
+			&& ownerAccess.status?.password_set === false
+	);
+
 	const authDestination = $derived.by(() => {
 		const { status, loading, error } = $auth;
 		// Widened: SvelteKit types the pathname per app, and the mobile app has
@@ -100,6 +112,8 @@
 	});
 
 	async function refreshAuth() {
+		// Owner password state first, so a blocking step never flashes the app.
+		await ownerAccess.refresh();
 		try { await auth.checkAuth(); }
 		catch { /* The store retains prior auth and exposes a connection error. */ }
 	}
@@ -200,14 +214,11 @@
 		</div>
 	</div>
 {:else if !mobileApp && currentPath !== '/pair' && initialized && !$auth.loading && !$auth.error && $auth.status?.authenticated === false}
-	<!-- No sign-in exists: only the trusted local listener makes a browser the owner. -->
-	<div class="min-h-screen flex items-center justify-center p-4">
-		<div class="text-center max-w-md">
-			<p role="status" class="text-foreground mb-2">AI Shuffle only accepts direct connections from its local network.</p>
-			<p class="text-muted-foreground mb-4">Open it on this machine, your LAN, or your Tailscale network using localhost, the worker's IP or Tailscale address, or a hostname allowed by SHUFFLE_LOCAL_HOSTNAMES. Connections through reverse proxies or public tunnels are not treated as local.</p>
-			<button type="button" class="btn" onclick={() => void refreshAuth()}>Try again</button>
-		</div>
-	</div>
+	<!-- Sign in with the owner password, create the first one, or a notice. -->
+	<OwnerAccessGate status={ownerAccess.status} authenticated={false} firstRun={$auth.status?.onboarding_complete === false} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
+{:else if ownerPasswordBlocking && initialized && !$auth.loading}
+	<!-- The blocking "set an owner password" step. -->
+	<OwnerAccessGate status={ownerAccess.status} authenticated={true} firstRun={$auth.status?.onboarding_complete === false} onDone={refreshAuth} onRetry={() => void refreshAuth()} />
 {:else if (mobileApp && !initialized) || (!mobileApp && currentPath !== '/pair' && (!initialized || authDestination || (currentPath !== '/setup' && !$isAuthenticated)))}
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">

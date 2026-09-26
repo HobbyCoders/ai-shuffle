@@ -1,11 +1,9 @@
 """Read windows — which LINES of a file the session has actually seen.
 
 ``ToolCtx.read_files`` says a file was Read; it does not say how much of it.
-That was enough for the original gate, and it is exactly what an audited
-code-mode session exploited: ``_ = Read(path, limit=5)`` unlocked Edit for the
-whole file, and the Edit that followed carried an ``old_string`` recalled from
-memory rather than copied from the file. The gate fired, the edit missed, the
-turn burned on a diagnosis of a mismatch that a real Read would have prevented.
+On its own it would let ``_ = Read(path, limit=5)`` unlock Edit for the whole
+file, followed by an ``old_string`` recalled from memory rather than copied
+from the file.
 
 So Read and Write also record the window they delivered, as inclusive
 1-based line spans (``end`` ``None`` = to the end of the file), and Edit asks
