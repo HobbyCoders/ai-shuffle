@@ -411,13 +411,6 @@ class ConnectorManager:
             else:
                 await self._deliver_connector_event(conn_row, event_type, data)
 
-        # Also dispatch to legacy webhooks
-        try:
-            from app.core.webhook_service import dispatch_webhook
-            await dispatch_webhook(event_type, data)
-        except Exception as e:
-            logger.error(f"Legacy webhook dispatch failed: {e}")
-
         # Dispatch to automations triggered by connector events
         try:
             from app.core.automation_manager import automation_manager

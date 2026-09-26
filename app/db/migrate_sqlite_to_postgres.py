@@ -51,7 +51,6 @@ PHASE_2 = [
     "paired_clients",
     "pairing_grants",
     "mobile_devices",
-    "webhooks",
     "project_hooks",
     "worktrees",
     "sessions",
@@ -84,6 +83,13 @@ PHASE_3 = [
 ]
 
 ALL_TABLES = PHASE_1 + PHASE_2 + PHASE_3
+
+# Legacy SQLite columns the current PostgreSQL schema no longer has. A row's
+# other values still migrate; these are dropped (v90 retired the UnifiedPush
+# endpoint together with the routes that set it).
+RETIRED_COLUMNS = {
+    "mobile_devices": ("unifiedpush_endpoint",),
+}
 
 # Tables whose ``id`` column is backed by a BIGSERIAL sequence in Postgres.
 SERIAL_TABLES = [
@@ -204,6 +210,12 @@ def _migrate_table(
     target_types = dict(pg_cur.fetchall())
     aliases = {"is_favorite": "is_active"} if table_name == "sessions" else {}
     col_names = [aliases.get(column, column) for column in col_names]
+    # Columns the current schema retired: their values are not carried over.
+    retired = RETIRED_COLUMNS.get(table_name, ())
+    if retired:
+        keep = [i for i, column in enumerate(col_names) if column not in retired]
+        col_names = [col_names[i] for i in keep]
+        rows = [tuple(row[i] for i in keep) for row in rows]
     unknown = set(col_names) - target_types.keys()
     if unknown:
         raise RuntimeError(f"Unsupported legacy columns in {table_name}: {', '.join(sorted(unknown))}")

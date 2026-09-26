@@ -252,32 +252,6 @@ class TestSessionUpdateExtended:
 
 
 # =============================================================================
-# Webhook Extended Tests
-# =============================================================================
-
-
-class TestWebhookExtended:
-    """Test extended webhook operations."""
-
-    def test_update_webhook_events(self, mock_db):
-        """update_webhook should update events."""
-        db.create_webhook("wh-1", "https://example.com", ["event.one"])
-
-        result = db.update_webhook("wh-1", events=["event.one", "event.two"])
-
-        assert result is not None
-        assert "event.two" in result["events"]
-
-    def test_update_webhook_secret(self, mock_db):
-        """update_webhook should update secret."""
-        db.create_webhook("wh-1", "https://example.com", ["event"])
-
-        result = db.update_webhook("wh-1", secret="new_secret")
-
-        assert result["secret"] == "new_secret"
-
-
-# =============================================================================
 # Subagent Extended Tests
 # =============================================================================
 

@@ -240,12 +240,7 @@ _register(Collection(
 _register(Collection(
     name="project_hooks", table="project_hooks", keys=("id",),
     fields=("id", "project_id", "name", "event", "hook_type", "command", "timeout", "url", "secret",
-            "enabled", "tool_matcher", "message_template", "created_at", "updated_at"),
-    local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
-
-_register(Collection(
-    name="webhooks", table="webhooks", keys=("id",),
-    fields=("id", "url", "secret", "events", "is_active", "created_at"), json_fields=("events",),
+            "enabled", "tool_matcher", "created_at", "updated_at"),
     local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
 
 _register(Collection(

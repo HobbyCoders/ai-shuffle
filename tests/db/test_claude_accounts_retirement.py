@@ -159,4 +159,5 @@ def test_fresh_schema_has_no_claude_account_storage(cursor):
 
 def test_schema_version_bumped_in_both_modules():
     from app.db import schema_postgres
-    assert db.SCHEMA_VERSION == schema_postgres.SCHEMA_VERSION == 89
+    assert db.SCHEMA_VERSION == schema_postgres.SCHEMA_VERSION
+    assert db.SCHEMA_VERSION >= 89  # v89 retired claude_accounts; later versions build on it

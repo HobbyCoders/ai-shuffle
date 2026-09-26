@@ -1147,52 +1147,6 @@ class TestTemplateOperations:
 
 
 # =============================================================================
-# Webhook Operations Tests
-# =============================================================================
-
-class TestWebhookOperations:
-    """Test webhook operations."""
-
-    def test_create_webhook(self, mock_db):
-        """create_webhook should create webhook."""
-        result = db.create_webhook(
-            "webhook-1",
-            "https://example.com/webhook",
-            ["session.created", "session.completed"],
-            secret="secret123"
-        )
-
-        assert result["id"] == "webhook-1"
-        assert result["url"] == "https://example.com/webhook"
-        assert result["events"] == ["session.created", "session.completed"]
-
-    def test_get_webhook(self, mock_db):
-        """get_webhook should return webhook by ID."""
-        db.create_webhook("webhook-1", "https://example.com", ["event"])
-        result = db.get_webhook("webhook-1")
-
-        assert result is not None
-        assert result["id"] == "webhook-1"
-
-    def test_get_all_webhooks(self, mock_db):
-        """get_all_webhooks should return all webhooks."""
-        db.create_webhook("w-1", "https://a.com", ["event"])
-        db.create_webhook("w-2", "https://b.com", ["event"])
-
-        result = db.get_all_webhooks()
-
-        assert len(result) == 2
-
-    def test_delete_webhook(self, mock_db):
-        """delete_webhook should delete webhook."""
-        db.create_webhook("webhook-1", "https://example.com", ["event"])
-        result = db.delete_webhook("webhook-1")
-
-        assert result is True
-        assert db.get_webhook("webhook-1") is None
-
-
-# =============================================================================
 # Clear All Sessions Test
 # =============================================================================
 
@@ -1732,44 +1686,6 @@ class TestUserCredentials:
 
         assert result is True
         assert db.get_user_credential("user-1", "openai_api_key") is None
-
-
-# =============================================================================
-# Webhook Update Tests
-# =============================================================================
-
-class TestWebhookUpdates:
-    """Test webhook update operations."""
-
-    def test_update_webhook(self, mock_db):
-        """update_webhook should update webhook fields."""
-        db.create_webhook("wh-1", "https://old.com", ["event"])
-
-        result = db.update_webhook("wh-1", url="https://new.com", is_active=False)
-
-        assert result["url"] == "https://new.com"
-        assert not result["is_active"]
-
-    def test_get_active_webhooks(self, mock_db):
-        """get_active_webhooks should return only active webhooks."""
-        db.create_webhook("wh-1", "https://a.com", ["event"])
-        db.create_webhook("wh-2", "https://b.com", ["event"])
-        db.update_webhook("wh-2", is_active=False)
-
-        result = db.get_active_webhooks()
-
-        assert len(result) == 1
-        assert result[0]["id"] == "wh-1"
-
-    def test_get_webhooks_for_event(self, mock_db):
-        """get_webhooks_for_event should return webhooks for specific event."""
-        db.create_webhook("wh-1", "https://a.com", ["session.created", "session.updated"])
-        db.create_webhook("wh-2", "https://b.com", ["session.deleted"])
-
-        result = db.get_webhooks_for_event("session.created")
-
-        assert len(result) == 1
-        assert result[0]["id"] == "wh-1"
 
 
 # =============================================================================

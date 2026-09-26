@@ -122,7 +122,7 @@ curl -X POST http://localhost:8000/api/v1/connectors/hooks/custom \
 
 ### 5. Test outbound webhooks
 
-Event notifications are sent only for sessions started through this connector's inbound endpoint, and only for the events the connector subscribes to. So they need `bidirectional` mode with `events` set. For install-wide event delivery, use the Webhooks API (`/api/v1/webhooks`) instead.
+Event notifications are sent only for sessions started through this connector's inbound endpoint, and only for the events the connector subscribes to. So they need `bidirectional` mode with `events` set. For install-wide reactions to session events, use an automation with an event trigger instead.
 
 To test, start a simple HTTP listener:
 

@@ -9,8 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -61,25 +60,20 @@ def device_receives_push(device: Dict[str, Any]) -> bool:
     """Whether ``device``'s registration came from a client that raises push.
 
     A client declares ``capabilities.supports_push`` when it pairs. Every
-    current client declares ``false``: the Android app dropped its UnifiedPush
-    receiver, and ``ApiClient.registerDevice``, hub enroll and managed repair
-    all send ``supports_push: false``. A UnifiedPush endpoint or FCM token on
-    such a row points at a distributor with no app to hand the message to, so
-    a 2xx from it is not a delivery, and posting the title and body there only
-    copies them to a third party.
+    current client declares ``false``: the Android app has no push receiver,
+    and ``ApiClient.registerDevice``, hub enroll and managed repair all send
+    ``supports_push: false``. An FCM token on such a row points at nothing
+    that can show the message, so a 2xx from the sender is not a delivery.
 
-    A UnifiedPush endpoint is never receivable, whatever the row declares.
     Android builds from abe482c3 (2026-06-24) up to e6c025e1 (2026-09-06)
-    registered ``supports_push: true`` together with an endpoint; e6c025e1
-    removed the receiver (03cc6ec1 the leftovers). A phone upgraded since then
-    never re-registers its capabilities, and the registration stores no
-    client version or build date to tell those rows apart, so the endpoint's
-    presence is the only reliable marker of that legacy registration.
+    registered ``supports_push: true`` together with a UnifiedPush endpoint;
+    e6c025e1 removed the receiver. The v90 migration cleared the FCM token of
+    every such row and dropped the endpoint column, so a row passes here only
+    with the declared capability AND a token — and no current client sets
+    either.
     """
     capabilities = device.get("capabilities") or {}
     if not isinstance(capabilities, dict) or capabilities.get("supports_push") is not True:
-        return False
-    if device.get("unifiedpush_endpoint"):
         return False
     return bool(device.get("fcm_token"))
 
@@ -90,32 +84,6 @@ def delivered_count(results: List["NotificationResult"]) -> int:
         1 for r in results
         if getattr(r, "success", False) and not getattr(r, "simulated", False)
     )
-
-
-def _resolve_public(host: str) -> Tuple[Optional[str], Optional[str]]:
-    """``(address, None)`` when every address of ``host`` is public, else
-    ``(None, reason)``. Module-level so tests can stub DNS."""
-    from fluid.tools.builtins.web import resolve_public
-
-    return resolve_public(host)
-
-
-def unifiedpush_endpoint_problem(endpoint: str) -> Optional[str]:
-    """Why ``endpoint`` may not receive notifications, or None when it may.
-
-    A paired device supplies the endpoint and the worker POSTs to it, so it
-    must be HTTPS and resolve only to public addresses: otherwise a device
-    could point the worker at services on its own network.
-    """
-    parsed = urlparse(endpoint or "")
-    if parsed.scheme != "https":
-        return "UnifiedPush endpoint must be an https:// URL"
-    if not parsed.hostname:
-        return "UnifiedPush endpoint has no host"
-    _address, reason = _resolve_public(parsed.hostname)
-    if reason:
-        return f"UnifiedPush endpoint is not a public address ({reason})"
-    return None
 
 
 class PushNotificationService:
@@ -185,20 +153,16 @@ class PushNotificationService:
         body: str,
         data: Optional[Dict[str, Any]] = None,
         priority: NotificationPriority = NotificationPriority.NORMAL,
-        unifiedpush_endpoint: Optional[str] = None,
     ) -> NotificationResult:
         """
         Send a push notification to a specific device.
 
         Args:
-            device_id: FCM registration token (or device id, for UnifiedPush)
+            device_id: FCM registration token
             title: Notification title
             body: Notification body text
             data: Optional custom data payload
             priority: Notification priority
-            unifiedpush_endpoint: If set, deliver via UnifiedPush (HTTP POST to
-                this endpoint) instead of FCM. Used for self-hosted servers that
-                push to the user's own distributor without Firebase.
 
         Returns:
             NotificationResult with success status and message ID or error
@@ -214,13 +178,6 @@ class PushNotificationService:
             "priority": priority.value,
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
-
-        # UnifiedPush is selected per-device and is NOT gated by FCM mock mode —
-        # it is the primary transport for self-hosted servers with no Firebase.
-        if unifiedpush_endpoint:
-            return await self._send_unifiedpush_notification(
-                notification_data, unifiedpush_endpoint
-            )
 
         if self._mock_mode:
             return await self._send_mock_notification(notification_data)
@@ -293,83 +250,6 @@ class PushNotificationService:
                 device_id=notification_data["device_id"],
             )
 
-    async def _send_unifiedpush_notification_checked(
-        self, notification_data: Dict[str, Any], endpoint: str
-    ) -> Optional[NotificationResult]:
-        """Refusal result when ``endpoint`` is not a public HTTPS URL, else None."""
-        import asyncio
-
-        problem = await asyncio.to_thread(unifiedpush_endpoint_problem, endpoint)
-        if problem is None:
-            return None
-        logger.warning(f"UnifiedPush endpoint refused: {problem}")
-        return NotificationResult(
-            success=False, error=problem, device_id=notification_data.get("device_id"),
-        )
-
-    async def _send_unifiedpush_notification(
-        self, notification_data: Dict[str, Any], endpoint: str
-    ) -> NotificationResult:
-        """Deliver a notification via UnifiedPush (HTTP POST to the device endpoint).
-
-        The body is a small JSON payload the Android app parses to raise a local
-        notification (title/body/data + a type for deep-linking into a session).
-        This path is independent of FCM/mock mode. The endpoint comes from a
-        paired device, so it must be HTTPS to a public address, and the POST
-        connects to the address that passed that check.
-        """
-        refused = await self._send_unifiedpush_notification_checked(notification_data, endpoint)
-        if refused is not None:
-            return refused
-        payload = {
-            "title": notification_data["title"],
-            "body": notification_data["body"],
-            "priority": notification_data.get("priority", NotificationPriority.NORMAL.value),
-            "data": notification_data.get("data", {}),
-            "timestamp": notification_data.get("timestamp"),
-        }
-        try:
-            import httpx
-
-            from fluid.tools.builtins.web import PinnedTransport
-
-            async with httpx.AsyncClient(
-                timeout=10.0,
-                follow_redirects=False,
-                transport=PinnedTransport(resolver=_resolve_public),
-            ) as client:
-                resp = await client.post(endpoint, json=payload)
-
-            success = 200 <= resp.status_code < 300
-            message_id = resp.headers.get("X-Message-ID") if success else None
-            notification_data["message_id"] = message_id
-
-            if not success:
-                logger.warning(
-                    f"UnifiedPush POST returned {resp.status_code} for endpoint "
-                    f"{endpoint[:60]}..."
-                )
-                return NotificationResult(
-                    success=False,
-                    error=f"HTTP {resp.status_code}",
-                    device_id=notification_data.get("device_id"),
-                )
-
-            logger.debug(f"UnifiedPush notification delivered to {endpoint[:60]}...")
-            return NotificationResult(
-                success=True,
-                message_id=message_id,
-                device_id=notification_data.get("device_id"),
-            )
-
-        except Exception as e:
-            logger.error(f"UnifiedPush notification failed: {e}")
-            return NotificationResult(
-                success=False,
-                error=str(e),
-                device_id=notification_data.get("device_id"),
-            )
-
     async def send_to_all_devices(
         self,
         title: str,
@@ -388,8 +268,7 @@ class PushNotificationService:
             device_tokens: Explicit FCM tokens. If provided, those are used
                 directly (legacy/back-compat). If None, every registered device
                 whose registration can receive push (``device_receives_push``)
-                is sent to its FCM token. Other registrations, including
-                every legacy UnifiedPush endpoint, are skipped, not posted to.
+                is sent to its FCM token. Other registrations are skipped.
             raise_lookup_errors: Raise :class:`DeviceListUnavailable` when the
                 registered devices cannot be read, instead of returning the
                 empty list that also means "no device can receive push".
@@ -428,7 +307,6 @@ class PushNotificationService:
 
         results = []
         for d in devices:
-            # Only an FCM token can pass: UnifiedPush rows are legacy.
             if not device_receives_push(d):
                 continue
             results.append(
@@ -456,28 +334,13 @@ async def deliver_local_notification(
     body: str,
     data: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Deliver a notification to THIS install's connected devices only.
+    """Deliver a notification to the devices registered in this database.
 
-    Publishes to local SSE streams (the app's embedded foreground service —
-    push without Firebase or a UnifiedPush distributor app) and to any locally
-    registered UnifiedPush/FCM transports. All errors are swallowed.
+    Sends to every registration that can receive push (an FCM token from a
+    client that declared the capability). All errors are swallowed.
 
     Called by ``fire_and_forget_notify``.
     """
-    from app.services.mobile_push_hub import mobile_push_hub
-
-    # Deliver to connected SSE streams (the app's embedded foreground service).
-    event = {
-        "type": (data or {}).get("type", "notification"),
-        "title": title,
-        "body": body,
-        "data": data or {},
-    }
-    try:
-        await mobile_push_hub.publish(event)
-    except Exception as e:  # pragma: no cover - defensive
-        logger.debug(f"Hub publish failed: {e}")
-    # Also deliver to devices that registered a UnifiedPush/FCM transport.
     try:
         await push_notification_service.send_to_all_devices(
             title=title, body=body, data=data

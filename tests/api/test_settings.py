@@ -151,36 +151,6 @@ class TestSetEncryptedApiKey:
                 mock_db.set_system_setting.assert_not_called()
 
 
-class TestComputeEffectiveStatus:
-    """Test credential policy effective status computation."""
-
-    def test_admin_provided_with_key(self):
-        """Should return admin_provides when admin has key."""
-        from app.api.settings import _compute_effective_status
-        assert _compute_effective_status("admin_provided", True) == "admin_provides"
-
-    def test_admin_provided_without_key(self):
-        """Should return needs_admin_key when admin missing key."""
-        from app.api.settings import _compute_effective_status
-        assert _compute_effective_status("admin_provided", False) == "needs_admin_key"
-
-    def test_user_provided(self):
-        """Should return user_must_provide for user_provided policy."""
-        from app.api.settings import _compute_effective_status
-        assert _compute_effective_status("user_provided", True) == "user_must_provide"
-        assert _compute_effective_status("user_provided", False) == "user_must_provide"
-
-    def test_optional_with_fallback(self):
-        """Should return optional_with_fallback when admin has key."""
-        from app.api.settings import _compute_effective_status
-        assert _compute_effective_status("optional", True) == "optional_with_fallback"
-
-    def test_optional_no_fallback(self):
-        """Should return optional_no_fallback when admin missing key."""
-        from app.api.settings import _compute_effective_status
-        assert _compute_effective_status("optional", False) == "optional_no_fallback"
-
-
 # =============================================================================
 # Module Import Tests
 # =============================================================================
@@ -215,13 +185,6 @@ class TestModuleImports:
         assert STT_MODELS is not None
         assert isinstance(STT_MODELS, dict)
         assert len(STT_MODELS) > 0
-
-    def test_credential_policy_info_defined(self):
-        """CREDENTIAL_POLICY_INFO should be defined."""
-        from app.api.settings import CREDENTIAL_POLICY_INFO
-        assert CREDENTIAL_POLICY_INFO is not None
-        # Consolidated to fal.ai for all AI tools; github_pat for repo access.
-        assert "fal_api_key" in CREDENTIAL_POLICY_INFO
 
 
 # NOTE: TestImageModels / TestVideoModels removed — the IMAGE_MODELS / VIDEO_MODELS
@@ -262,27 +225,6 @@ class TestSTTModels:
             assert "name" in model_info
 
 
-class TestCredentialPolicyInfo:
-    """Test CREDENTIAL_POLICY_INFO constant."""
-
-    def test_has_fal_credential(self):
-        """Should have fal_api_key credential (drives all AI tools)."""
-        from app.api.settings import CREDENTIAL_POLICY_INFO
-        assert "fal_api_key" in CREDENTIAL_POLICY_INFO
-
-    def test_has_github_credential(self):
-        """Should have github_pat credential (repo access)."""
-        from app.api.settings import CREDENTIAL_POLICY_INFO
-        assert "github_pat" in CREDENTIAL_POLICY_INFO
-
-    def test_credential_has_required_fields(self):
-        """Each credential should have required fields."""
-        from app.api.settings import CREDENTIAL_POLICY_INFO
-        for cred_id, info in CREDENTIAL_POLICY_INFO.items():
-            assert "name" in info
-            assert "description" in info
-
-
 # NOTE: TestPydanticModels removed — OpenAIKeyRequest no longer exists. OpenAI-specific
 # key handling was replaced by the unified fal.ai credential flow (#175).
 
@@ -314,20 +256,6 @@ class TestModelValidation:
 
 # NOTE: TestVideoProviders removed — provider metadata derived from VIDEO_MODELS,
 # which no longer exists (FAL consolidation, #175).
-
-
-# =============================================================================
-# Credential Types Tests
-# =============================================================================
-
-class TestCredentialTypes:
-    """Test credential type constants."""
-
-    def test_valid_credential_policies(self):
-        """Should have valid credential policies."""
-        from app.api.settings import CREDENTIAL_POLICY_INFO
-        # Just verify it exists
-        assert len(CREDENTIAL_POLICY_INFO) > 0
 
 
 # =============================================================================

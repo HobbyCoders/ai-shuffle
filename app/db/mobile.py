@@ -21,7 +21,6 @@ class MobileDeviceRow(TypedDict):
     platform: str
     api_key_hash: str
     fcm_token: Optional[str]
-    unifiedpush_endpoint: Optional[str]
     capabilities: Dict[str, Any]
     paired_client_id: Optional[str]
     api_key_expires_at: Optional[str]
@@ -212,51 +211,6 @@ def get_all_mobile_devices() -> List[MobileDeviceRow]:
             parsed for row in rows
             if (parsed := _parse_mobile_device(row)) is not None
         ]
-
-
-def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, Any]) -> Optional[MobileDeviceRow]:
-    """Update capabilities for a mobile device"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET capabilities = %s, last_seen = %s WHERE device_id = %s
-        """, (json.dumps(capabilities), now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
-
-
-def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[MobileDeviceRow]:
-    """Update FCM push token for a mobile device"""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET fcm_token = %s, last_seen = %s WHERE device_id = %s
-        """, (fcm_token, now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
-
-
-def update_mobile_device_unifiedpush_endpoint(
-    device_id: str, endpoint: str
-) -> Optional[MobileDeviceRow]:
-    """Update the UnifiedPush endpoint URL for a mobile device.
-
-    UnifiedPush lets self-hosted servers POST notifications directly to the
-    user's own push distributor (e.g. ntfy) without a shared Firebase project.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE mobile_devices SET unifiedpush_endpoint = %s, last_seen = %s WHERE device_id = %s
-        """, (endpoint, now, device_id))
-        if cursor.rowcount == 0:
-            return None
-    return get_mobile_device(device_id)
 
 
 def update_mobile_device_last_seen(device_id: str) -> None:

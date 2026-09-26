@@ -348,31 +348,6 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/tasks/task_123/st
 
 A task that had already finished returns `"ok": true` with `"detail": "already finished"`, so a stale row in the UI clears. A task the app can no longer reach is marked stopped and also returns `"ok": true`. `"ok": false` (still `200`, with a `detail` message) means the stop did not fully work: a background shell whose child processes outlived it, or a task the app cannot find (`detail` is `session not active`, `session not connected` or `task not found`).
 
-### GET /api/v1/sessions/{session_id}/provider-workers
-
-Background workers the session's agent started on other model providers, with their token use and cost while they run.
-
-**Auth:** Required
-
-```json
-{
-  "session_id": "sess_abc123",
-  "workers": [
-    { "workerSessionId": "...", "taskId": "...", "toolUseId": "...", "provider": "prov_123", "model": "...", "label": "Review the diff", "startedAt": 1758790000.0, "usage": { "tokens_in": 1200, "tokens_out": 300, "total_cost_usd": 0.004 } }
-  ],
-  "providers": { "prov_123": { "tokens_in": 1200, "tokens_out": 300, "cache_creation_tokens": 0, "cache_read_tokens": 0, "total_cost_usd": 0.004, "workers": 1 } },
-  "totals": { "tokens_in": 1200, "tokens_out": 300, "cache_creation_tokens": 0, "cache_read_tokens": 0, "total_cost_usd": 0.004, "workers": 1 }
-}
-```
-
-`workers` is empty when none are running.
-
-### POST /api/v1/sessions/{session_id}/provider-workers/stop
-
-Stop every running background worker of the session. No body. Returns `{"session_id": "...", "stopped": 2, "workers": [...]}`; `stopped` is `0` when none were running.
-
-**Auth:** Required
-
 ## Rewind
 
 ### GET /api/v1/commands/rewind/checkpoints/{session_id}

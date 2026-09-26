@@ -23,7 +23,7 @@ from app.core.cors import configured_origins
 from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
-from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import voice_context
 from app.api import tools as tools_api
 from app.api import events as events_api
@@ -328,11 +328,6 @@ async def lifespan(app: FastAPI):
     if monitor_task is not None:
         await stop_resource_monitor(monitor_task)
     stop_loop_watchdog()
-    try:
-        from app.core.team_transcript_watcher import team_transcript_watcher
-        await team_transcript_watcher.stop_all()
-    except Exception:
-        logger.exception("team_transcript_watcher.stop_all failed")
     from app.core import browser_runtime
     await browser_runtime.shutdown()
     # Close any live voice sideband: the socket belongs to this process,
@@ -545,9 +540,6 @@ app.include_router(query.router)
 app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
-app.include_router(teams.router)
-app.include_router(permission_rules.router)
-app.include_router(import_export.router)
 app.include_router(settings_api.router)
 app.include_router(settings_import.router)
 app.include_router(generated_images.router)
@@ -557,7 +549,6 @@ app.include_router(shared_files.router)
 app.include_router(tags.router)
 app.include_router(analytics.router)
 app.include_router(templates.router)
-app.include_router(webhooks.router)
 app.include_router(connectors.router)
 app.include_router(api_users.router)
 app.include_router(automations.router)

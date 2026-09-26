@@ -267,31 +267,6 @@ Disable a single nested agent.
 
 **Auth:** Owner only
 
-## Remembered Permission Rules
-
-A rule answers a permission prompt for one agent without asking. Ticking **Always do this for** *tool* on a prompt saves one with no `tool_pattern`, so it matches every call of that tool. Rules apply to every session of the agent, and are checked only when a call would otherwise show a prompt.
-
-**Auth:** Owner only, for every route below.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/permission-rules` | List rules, newest first. Optional `profile_id` and `tool_name` query filters |
-| `GET` | `/api/v1/permission-rules/profile/{profile_id}` | The agent's rules (404 for an unknown agent) |
-| `POST` | `/api/v1/permission-rules` | Create a rule |
-| `DELETE` | `/api/v1/permission-rules/{rule_id}` | Delete one rule. Returns `{"deleted": true, "id": "..."}` |
-| `DELETE` | `/api/v1/permission-rules/profile/{profile_id}` | Delete all of an agent's rules. Returns `{"deleted": <count>, "profile_id": "..."}` |
-
-**Create body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `profile_id` | string | Yes | Agent the rule belongs to (404 if unknown) |
-| `tool_name` | string | Yes | Tool name, or `*` for every tool |
-| `tool_pattern` | string | No | Glob matched against the call: the command for `Bash`, the file path for `Read`/`Write`/`Edit`/`Glob`, the path for `Grep`, the URL for `WebFetch`, any string input for other tools (e.g. `npm *`, `/workspace/*`) |
-| `decision` | string | Yes | `allow` or `deny` (400 otherwise) |
-
-A rule is returned as `id`, `profile_id`, `tool_name`, `tool_pattern`, `decision` and `created_at`.
-
 ## Export & Import
 
 ### GET /api/v1/agents/{agent_id}/export

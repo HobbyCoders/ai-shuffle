@@ -1,8 +1,7 @@
 """
-Mobile device API routes: pairing, key renewal, push registration and devices
+Mobile device API routes: pairing, key renewal, web sessions and devices
 """
 
-import asyncio
 import json
 import secrets
 import logging
@@ -12,18 +11,11 @@ from typing import List, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Depends, Request, Response, status
 from pydantic import BaseModel, ConfigDict
-from fastapi.responses import StreamingResponse
-from starlette.requests import ClientDisconnect
 
-from app.api.sse_utils import is_client_disconnect
-from app.services.mobile_push_hub import mobile_push_hub
 from app.core.models import (
     MobileDevice,
     MobileDeviceRegisterRequest,
     MobileDeviceRegisterResponse,
-    MobileDeviceCapabilitiesRequest,
-    PushTokenRequest,
-    UnifiedPushEndpointRequest,
 )
 from app.api.auth import require_admin, get_api_key, hash_api_key
 from app.core.config import settings
@@ -228,163 +220,6 @@ async def register_device(request: MobileDeviceRegisterRequest):
         from fastapi.responses import JSONResponse
         return JSONResponse(registration.model_dump(mode='json'), headers={'Cache-Control': 'no-store'})
     return registration
-
-
-@router.post("/capabilities")
-async def update_capabilities(
-    request: Request,
-    caps_request: MobileDeviceCapabilitiesRequest
-):
-    """
-    Update device capabilities.
-
-    Called when device capabilities change (e.g., biometric becomes available).
-    """
-    device = await run_sync(get_device_with_scope, request, "controller")
-
-    # Verify device_id matches
-    if public_device_id(device) != caps_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    capabilities_dict = caps_request.capabilities.model_dump()
-    updated = await run_sync(db.update_mobile_device_capabilities, device['device_id'], capabilities_dict)
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    return {"status": "ok", "message": "Capabilities updated"}
-
-
-@router.post("/push/token")
-async def register_push_token(
-    request: Request,
-    token_request: PushTokenRequest
-):
-    """
-    Register or update FCM push notification token.
-
-    Called when the app obtains a new FCM token.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    # Verify device_id matches
-    if public_device_id(device) != token_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    updated = await run_sync(db.update_mobile_device_fcm_token, device['device_id'], token_request.fcm_token)
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    logger.debug(f"Updated FCM token for device {token_request.device_id}")
-
-    return {"status": "ok", "message": "Push token registered"}
-
-
-@router.post("/push/unifiedpush")
-async def register_unifiedpush_endpoint(
-    request: Request,
-    up_request: UnifiedPushEndpointRequest,
-):
-    """
-    Register or update the device's UnifiedPush endpoint URL.
-
-    The Android app obtains this URL from its UnifiedPush distributor (e.g. ntfy)
-    and registers it so this server can deliver notifications without Firebase.
-    """
-    device = await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    if public_device_id(device) != up_request.device_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device ID mismatch"
-        )
-
-    from app.services.push_notification import unifiedpush_endpoint_problem
-
-    problem = await run_sync(unifiedpush_endpoint_problem, up_request.endpoint)
-    if problem:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=problem)
-
-    updated = await run_sync(
-        db.update_mobile_device_unifiedpush_endpoint, device['device_id'], up_request.endpoint
-    )
-
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found"
-        )
-
-    logger.debug(f"Updated UnifiedPush endpoint for device {up_request.device_id}")
-
-    return {"status": "ok", "message": "UnifiedPush endpoint registered"}
-
-
-@router.get("/notifications/stream")
-async def notifications_stream(request: Request):
-    """
-    Server-Sent Events stream of notification events for this device.
-
-    The Android app's foreground service holds this connection open and raises a
-    local notification for each event, delivering push without Firebase *and*
-    without a separate UnifiedPush distributor app. Authenticated via the aim_
-    Bearer key.
-
-    Emits ``event: notification`` frames whose data is the JSON event
-    ``{type, title, body, data}``, plus periodic ``: keepalive`` comments so idle
-    connections survive proxy/timeout cutoffs.
-    """
-    # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
-    await run_sync(get_device_with_scope, request, "mobile:notifications")
-
-    async def event_generator():
-        queue = mobile_push_hub.subscribe()
-        try:
-            # Initial comment flushes proxy buffers and confirms the stream.
-            yield ": connected\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
-                yield f"event: notification\ndata: {json.dumps(event)}\n\n"
-        except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
-            # A normal SSE client disconnect must end the stream cleanly, NOT
-            # bubble a cancellation out of the generator where it collapses into
-            # an anyio ExceptionGroup and surfaces as an unhandled 500 through the
-            # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
-            # disconnect/cancellation is re-raised unchanged.
-            if not is_client_disconnect(exc):
-                raise
-            logger.debug("SSE notification stream closed (client disconnect)")
-        finally:
-            mobile_push_hub.unsubscribe(queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 class WebSessionMintRequest(BaseModel):

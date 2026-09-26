@@ -77,15 +77,11 @@ async def test_delivery_is_ordered_and_survives_failure(monkeypatch):
 
 
 async def test_automations_receive_events_without_outbound_subscriptions(monkeypatch):
-    from app.core import webhook_service
     from app.db import database
     monkeypatch.setattr(database, "get_connectors_for_event", lambda event: [])
-    webhook = AsyncMock()
     automation = AsyncMock()
-    monkeypatch.setattr(webhook_service, "dispatch_webhook", webhook)
     monkeypatch.setattr(automation_manager, "handle_connector_event", automation)
     await ConnectorManager().dispatch_event("session.complete", {"session_id": "s"})
-    webhook.assert_awaited_once()
     automation.assert_awaited_once()
 
 

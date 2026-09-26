@@ -3,7 +3,7 @@ and relay, trigger routing, and the inbound message -> queued turn -> reply path
 
 tests/test_connector_manager.py covers the accessors and encryption helpers;
 this file covers the lifecycle and routing logic around them. The database
-layer, network ownership, the turn queue and the automation/webhook sinks are
+layer, network ownership, the turn queue and the automation sinks are
 replaced per test, so nothing here touches a real connector platform.
 """
 
@@ -396,12 +396,10 @@ class TestStartConnector:
 
 @pytest.fixture
 def sinks(monkeypatch):
-    from app.core import webhook_service
     from app.core.automation_manager import automation_manager
     from app.core.connectors import lifecycle_relay
 
-    s = SimpleNamespace(webhook=AsyncMock(), automations=AsyncMock(), trigger=AsyncMock(), publish=MagicMock())
-    monkeypatch.setattr(webhook_service, "dispatch_webhook", s.webhook)
+    s = SimpleNamespace(automations=AsyncMock(), trigger=AsyncMock(), publish=MagicMock())
     monkeypatch.setattr(automation_manager, "handle_connector_event", s.automations)
     monkeypatch.setattr(automation_manager, "handle_connector_trigger", s.trigger)
     monkeypatch.setattr(lifecycle_relay, "publish", s.publish)
@@ -429,7 +427,6 @@ class TestDispatchEvent:
         log = db.create_connector_event_log.call_args.kwargs
         assert (log["status"], log["direction"], log["error"]) == ("delivered", "outbound", None)
         db.update_connector_event_dispatched.assert_called_once_with("c1", success=True)
-        sinks.webhook.assert_awaited_once_with("session.complete", data)
         sinks.automations.assert_awaited_once_with("session.complete", data)
 
     async def test_remote_owner_is_relayed_not_delivered(self, mgr, db, me, not_enrolled, sinks):
@@ -443,7 +440,7 @@ class TestDispatchEvent:
         sinks.publish.side_effect = RuntimeError("pg notify failed")
         db.get_connectors_for_event.return_value = [connector_row(runner_id="runner-2")]
         await mgr.dispatch_event("session.error", {})
-        sinks.webhook.assert_awaited_once()
+        sinks.automations.assert_awaited_once()
 
     async def test_enrolled_non_owner_skips(self, mgr, db, me, sinks, monkeypatch):
         inst = running(mgr)
@@ -454,8 +451,12 @@ class TestDispatchEvent:
         assert inst.notifications == [] and not sinks.publish.called
 
     async def test_sink_failures_are_isolated(self, mgr, db, me, not_enrolled, sinks):
-        sinks.webhook.side_effect = RuntimeError("webhook down")
-        await mgr.dispatch_event("session.started", {})
+        inst = running(mgr)
+        db.get_connectors_for_event.return_value = [connector_row()]
+        db.get_connector_sessions_for_ai_session.return_value = [{"connector_id": "c1", "platform_chat_id": "chat-A"}]
+        sinks.automations.side_effect = RuntimeError("automations down")
+        await mgr.dispatch_event("session.complete", {"session_id": "ai-1"})
+        assert inst.notifications == [("chat-A", "session.complete", {"session_id": "ai-1"})]
         sinks.automations.assert_awaited_once()
 
     async def test_all_notifications_failing_logs_failed(self, mgr, db, me, not_enrolled, sinks):

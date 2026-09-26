@@ -89,13 +89,11 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/github",
     "/api/v1/settings",
     "/api/settings",
-    "/api/v1/export-import",
     "/api/v1/internal",
     "/api/v1/cluster",
     "/api/v1/network",
     "/api/v1/plugins",
     "/api/v1/connectors",
-    "/api/v1/webhooks",
     "/api/v1/computer-use",
     "/api/v1/chat-access",
 )

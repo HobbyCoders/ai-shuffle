@@ -1423,50 +1423,6 @@ async def stop_session_background_task(
         return {"session_id": session_id, "task_id": task_id, **result}
 
 
-@router.get("/{session_id}/provider-workers")
-async def list_provider_workers(
-    request: Request,
-    session_id: str,
-    token: str = Depends(require_auth),
-):
-    """Live ProviderAgent workers for a session, with per-provider attribution.
-
-    The read side of the live attribution + stop-all controls: worker
-    token/spend attributed to the worker's provider, visible WHILE the parent
-    turn runs rather than only once every tool call has returned. Returns
-    ``{"workers": [], "providers": {}, "totals": {...}}`` when nothing is live.
-    """
-    await require_session(request, session_id)
-
-    from app.core import provider_agent_supervisor
-
-    async with api_error_handler("list provider workers"):
-        return {"session_id": session_id, **provider_agent_supervisor.attribution(session_id)}
-
-
-@router.post("/{session_id}/provider-workers/stop")
-async def stop_provider_workers(
-    request: Request,
-    session_id: str,
-    token: str = Depends(require_auth),
-):
-    """Stop EVERY live ProviderAgent worker for this session — the stop-all control.
-
-    Kills each worker's SESSION and subprocess tree, not just its registry row:
-    a terminal registry row alone leaves child processes issuing upstream
-    requests. Settles each worker's card and leaves ONE coalesced note rather
-    than a chip per worker (worker fan-out is uncapped). Idempotent — stopping when nothing is live returns
-    ``stopped: 0``.
-    """
-    await require_session(request, session_id)
-
-    from app.core import provider_agent_supervisor
-
-    async with api_error_handler("stop provider workers"):
-        result = await provider_agent_supervisor.stop_all_workers(session_id)
-        return {"session_id": session_id, **result}
-
-
 async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], project_id: Optional[str]):
     """Background cleanup: stop workers, terminate the pool, and delete SDK JSONL.
 

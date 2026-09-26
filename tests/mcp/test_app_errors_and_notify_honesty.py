@@ -258,43 +258,16 @@ def test_a_real_delivery_carries_no_note(mock_db):
     assert "reason" not in body
 
 
-def test_legacy_endpoint_from_a_client_without_push_is_not_delivered(mock_db):
-    """NC-2: an endpoint saved by an old app on a row whose client declares
-    no push is never posted to, so a distributor's 2xx cannot read as
-    delivered."""
+def test_legacy_row_left_by_the_v90_migration_is_not_delivered(mock_db):
+    """R10-13 / NC-2: Android builds from 2026-06-24 to 2026-09-06 registered
+    ``supports_push: true`` with a UnifiedPush endpoint. v90 dropped the
+    endpoint and cleared the token, so what remains declares push with no
+    transport; the current app has no receiver, so NotifyDevices must not
+    send to it or count it."""
     from app.services.push_notification import push_notification_service
 
     devices = [{
         "device_id": "phone",
-        "unifiedpush_endpoint": "https://ntfy.example/up_old",
-        "fcm_token": None,
-        "capabilities": {"supports_push": False},
-    }]
-    posted = AsyncMock()
-    with patch("app.db.mobile.get_all_mobile_devices", return_value=devices), \
-            patch.object(push_notification_service, "send_notification", posted):
-        body = tool_result_json(
-            asyncio.run(
-                _builtin_handlers()["NotifyDevices"].handler(
-                    {"title": "Release", "body": "v1.2.3 is live"}
-                )
-            )
-        )
-
-    posted.assert_not_awaited()
-    assert body["delivered"] is False
-    assert body["reason"] == "no device can receive push notifications"
-
-
-def test_real_legacy_row_declaring_push_is_not_delivered(mock_db):
-    """R10-13: the rows old Android builds really wrote declare
-    ``supports_push: true`` with a UnifiedPush endpoint. The current app
-    has no receiver, so NotifyDevices must not post there or count it."""
-    from app.services.push_notification import push_notification_service
-
-    devices = [{
-        "device_id": "phone",
-        "unifiedpush_endpoint": "https://ntfy.example/up_old",
         "fcm_token": None,
         "capabilities": {"supports_push": True, "supports_biometric": True},
     }]

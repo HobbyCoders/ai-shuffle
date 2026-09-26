@@ -54,13 +54,15 @@ PG_ONLY_COLUMN_CHANGES = {
     ("sessions", "total_tokens_out"): "ALTER COLUMN total_tokens_out TYPE BIGINT",
 }
 
-#: Tables older releases created that today's schema no longer defines and no
-#: migration drops (the rate-limit feature was removed). Upgraded databases
-#: keep them, unused; a fresh one never has them.
-RETIRED_TABLES_KEPT = {
+#: Tables older releases created that today's schema no longer defines. Since
+#: v90 ``_retire_webhooks_and_legacy_push`` drops them on upgrade (until then
+#: the rate-limit tables were left behind), so an upgraded database matches a
+#: fresh one, which never has them.
+RETIRED_TABLES_DROPPED = {
     "rate_limits": ("idx_rate_limits_api_key", "idx_rate_limits_user"),
     "request_log": ("idx_request_log_api_key", "idx_request_log_timestamp",
                     "idx_request_log_user"),
+    "webhooks": ("idx_webhooks_active",),
 }
 
 #: Indexes only ``_run_column_migrations`` creates (the bootstrap leaves them
@@ -109,15 +111,10 @@ def test_missing_history_fails_instead_of_skipping_when_required(tmp_path, monke
 
 
 def _comparable(snapshot):
-    """Drop the documented PG-only and retired-table differences."""
+    """Drop the documented PG-only differences."""
     out = {}
-    retired_indexes = {i for names in RETIRED_TABLES_KEPT.values() for i in names}
     for key, value in snapshot.items():
         kind, name = key
-        if kind == "table" and name in RETIRED_TABLES_KEPT:
-            continue
-        if kind == "index" and name in retired_indexes:
-            continue
         if kind == "table":
             columns = dict(value["columns"])
             for (table, column) in PG_ONLY_COLUMN_CHANGES:
@@ -311,11 +308,25 @@ def test_pg_only_column_changes_are_still_in_the_migration_pass():
         assert statement in source, f"{table}.{column}: {statement!r} no longer in the pass"
 
 
+def _assert_no_retired_tables(raw):
+    names = {r[0] for r in raw.execute("SELECT name FROM sqlite_master")}
+    for table, indexes in RETIRED_TABLES_DROPPED.items():
+        assert table not in names and not set(indexes) & names, table
+
+
 def test_retired_tables_are_not_part_of_the_current_schema(tmp_path):
-    fresh = _fresh(tmp_path)
-    names = {r[0] for r in fresh.execute("SELECT name FROM sqlite_master")}
-    for table, indexes in RETIRED_TABLES_KEPT.items():
-        assert table not in names and not set(indexes) & names
+    _assert_no_retired_tables(_fresh(tmp_path))
+
+
+def test_upgrade_from_v49_drops_the_retired_tables(tmp_path):
+    """v49 created every retired table; v90 drops them all on upgrade."""
+    old = _old(tmp_path, V49_COMMIT, with_column_pass=True)
+    names = {r[0] for r in old.execute("SELECT name FROM sqlite_master")}
+    assert set(RETIRED_TABLES_DROPPED) <= names
+
+    lifecycle.boot(old)
+
+    _assert_no_retired_tables(old)
 
 
 @pytest.mark.parametrize("commit, with_column_pass", [
@@ -431,6 +442,86 @@ def test_upgrade_from_v88_preserves_rows(tmp_path):
     for table, rows in before.items():
         assert _count(old, table) == len(rows), table
     assert old.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_upgrade_from_v88_retires_message_hooks(tmp_path):
+    """v90: the never-delivered ``message`` hook type is gone. Its rows and
+    their sync envelopes are deleted, ``message_template`` is dropped, and
+    the bash and webhook hooks next to them are untouched."""
+    old = _old(tmp_path, V88_COMMIT, with_column_pass=False)
+    _seed(old, V88_SEED)
+    _seed(old, {
+        "project_hooks": [
+            {"id": "hook-msg", "project_id": "proj-old", "name": "Say hi", "event": "Stop",
+             "hook_type": "message", "message_template": "Summarize {event}"},
+            {"id": "hook-msg-app", "project_id": None, "name": "App hi", "event": "Stop",
+             "hook_type": "message", "message_template": "hi"},
+            {"id": "hook-bash", "project_id": "proj-old", "name": "Echo", "event": "Stop",
+             "hook_type": "bash", "command": "echo done"},
+        ],
+        "sync_records": [
+            {"collection": "project_hooks", "record_id": "hook-msg", "clock": 1,
+             "origin_device_id": "dev-1"},
+            {"collection": "project_hooks", "record_id": "hook-bash", "clock": 2,
+             "origin_device_id": "dev-1"},
+        ],
+    })
+
+    lifecycle.boot(old)
+
+    ids = sorted(r[0] for r in old.execute("SELECT id FROM project_hooks"))
+    assert ids == ["hook-bash"]
+    assert old.execute("SELECT command FROM project_hooks WHERE id = 'hook-bash'").fetchone()[0] == "echo done"
+    columns = {c[1] for c in old.execute("PRAGMA table_info('project_hooks')")}
+    assert "message_template" not in columns
+    synced = sorted(r[0] for r in old.execute(
+        "SELECT record_id FROM sync_records WHERE collection = 'project_hooks'"))
+    assert synced == ["hook-bash"]
+    # Idempotent: a second boot has nothing left to retire.
+    lifecycle.boot(old)
+    assert sorted(r[0] for r in old.execute("SELECT id FROM project_hooks")) == ["hook-bash"]
+
+
+def test_upgrade_from_v88_retires_webhooks_and_legacy_push(tmp_path):
+    """v90: storage no route reaches any more. The standalone ``webhooks``
+    table goes with its sync envelopes; a phone row that carried a UnifiedPush
+    endpoint loses the endpoint column AND its FCM token, so it stays unable
+    to receive push once the marker column is gone; a row without an endpoint
+    keeps its token."""
+    old = _old(tmp_path, V88_COMMIT, with_column_pass=False)
+    _seed(old, V88_SEED)
+    _seed(old, {
+        "webhooks": [{"id": "wh-1", "url": "https://example.invalid/hook",
+                      "events": json.dumps(["session.complete"])}],
+        "sync_records": [
+            {"collection": "webhooks", "record_id": "wh-1", "clock": 1,
+             "origin_device_id": "dev-1"},
+            {"collection": "tags", "record_id": "tag-1", "clock": 2,
+             "origin_device_id": "dev-1"},
+        ],
+        "mobile_devices": [
+            {"id": "m1", "device_id": "phone-legacy", "device_name": "Old phone",
+             "platform": "android", "api_key_hash": "h1", "fcm_token": "fcm-old",
+             "unifiedpush_endpoint": "https://ntfy.example/up_old",
+             "capabilities": json.dumps({"supports_push": True})},
+            {"id": "m2", "device_id": "phone-fcm", "device_name": "Phone",
+             "platform": "android", "api_key_hash": "h2", "fcm_token": "fcm-live",
+             "capabilities": json.dumps({"supports_push": True})},
+        ],
+    })
+
+    lifecycle.boot(old)
+
+    _assert_no_retired_tables(old)
+    synced = [r[0] for r in old.execute("SELECT collection FROM sync_records")]
+    assert synced == ["tags"]
+    columns = {c[1] for c in old.execute("PRAGMA table_info('mobile_devices')")}
+    assert "unifiedpush_endpoint" not in columns
+    tokens = dict(old.execute("SELECT device_id, fcm_token FROM mobile_devices"))
+    assert tokens == {"phone-legacy": None, "phone-fcm": "fcm-live"}
+    # Idempotent: a second boot has nothing left to retire.
+    lifecycle.boot(old)
+    assert dict(old.execute("SELECT device_id, fcm_token FROM mobile_devices")) == tokens
 
 
 # ---------------------------------------------------------------------------

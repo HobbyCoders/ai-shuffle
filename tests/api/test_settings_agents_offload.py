@@ -24,7 +24,6 @@ import pytest
 import app.api.agents as agents_api
 import app.api.settings as settings_api
 import app.api.settings_audio as audio_api
-import app.api.settings_credentials as creds_api
 import app.api.settings_media as media_api
 from tests.api.helpers import fake_request
 
@@ -301,61 +300,6 @@ async def test_update_tts_settings_keeps_the_pre_validation_writes(mock_db):
 
     assert exc.value.status_code == 400
     assert written == [("tts_model", "m"), ("tts_voice", "v")]
-
-
-# ═══ settings_credentials.py ════════════════════════════════════════════════
-
-
-async def test_credential_policies_summary_probes_admin_keys_off_the_loop(
-    mock_db, loop_thread
-):
-    """One listing plus one admin-key probe per policy — each probe is itself a
-    settings read and a decrypt."""
-    policies = [
-        {"id": "fal_api_key", "policy": "optional", "description": "",
-         "updated_at": "2026-08-28T00:00:00+00:00"},
-    ]
-    listing = _ThreadSpy(lambda: [dict(p) for p in policies])
-    probe = _ThreadSpy(creds_api.get_decrypted_api_key)
-
-    with patch.object(creds_api.database, "get_all_credential_policies", listing), \
-         patch.object(creds_api, "get_decrypted_api_key", probe):
-        payload = await creds_api.get_credential_policies_summary(token=None)
-
-    assert payload["policies"][0]["effective_status"] == "optional_no_fallback"
-    _assert_one_worker_hop(loop_thread, listing, probe)
-
-
-async def test_set_user_credential_policy_keeps_check_and_write_atomic(
-    mock_db, loop_thread
-):
-    """The user lookup gates the write; both must share one hop."""
-    lookup = _ThreadSpy(lambda uid: {"id": uid, "name": "u"})
-    write = _ThreadSpy(lambda *a: True)
-
-    with patch.object(creds_api.database, "get_api_user", lookup), \
-         patch.object(creds_api.database, "set_user_credential_policy", write):
-        result = await creds_api.set_user_credential_policy(
-            "user-1", "fal_api_key",
-            creds_api.SetUserCredentialPolicyRequest(policy="user_provided"),
-            token=None,
-        )
-
-    assert result["success"] is True
-    _assert_one_worker_hop(loop_thread, lookup, write)
-
-
-async def test_set_user_credential_policy_404s_for_an_unknown_user(mock_db):
-    from fastapi import HTTPException
-
-    with patch.object(creds_api.database, "get_api_user", lambda _uid: None), \
-            pytest.raises(HTTPException) as exc:
-        await creds_api.set_user_credential_policy(
-            "nobody", "fal_api_key",
-            creds_api.SetUserCredentialPolicyRequest(policy="user_provided"),
-            token=None,
-        )
-    assert exc.value.status_code == 404
 
 
 # ═══ settings_media.py ══════════════════════════════════════════════════════

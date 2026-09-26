@@ -106,7 +106,7 @@ def test_queue_and_dedup_memory_bounded(monkeypatch):
 
 
 async def test_dispatch_relays_remote_but_globals_only_once(monkeypatch):
-    from app.core import automation_manager, webhook_service
+    from app.core import automation_manager
     from app.core.config import settings
     from app.db import database
 
@@ -116,22 +116,19 @@ async def test_dispatch_relays_remote_but_globals_only_once(monkeypatch):
     monkeypatch.setattr(database, "get_connectors_for_event", lambda event: rows)
     publish = Mock()
     local = AsyncMock()
-    webhook = AsyncMock()
     automation = AsyncMock()
     monkeypatch.setattr(lifecycle_relay, "publish", publish)
     monkeypatch.setattr(manager, "_deliver_connector_event", local)
-    monkeypatch.setattr(webhook_service, "dispatch_webhook", webhook)
     monkeypatch.setattr(automation_manager.automation_manager, "handle_connector_event", automation)
     data = envelope()["data"]
     await manager.dispatch_event("session.complete", data)
     publish.assert_called_once_with("remote", "another-owner", "session.complete", data)
     local.assert_awaited_once_with(rows[1], "session.complete", data)
-    webhook.assert_awaited_once_with("session.complete", data)
     automation.assert_awaited_once_with("session.complete", data)
 
 
 async def test_relay_receiver_rechecks_owner_active_subscription_and_chat(monkeypatch):
-    from app.core import automation_manager, webhook_service
+    from app.core import automation_manager
     from app.core.config import settings
     from app.db import database
 
@@ -146,8 +143,7 @@ async def test_relay_receiver_rechecks_owner_active_subscription_and_chat(monkey
     monkeypatch.setattr(database, "update_connector_event_dispatched", Mock())
     send = AsyncMock(return_value=True)
     manager._connectors["c1"] = SimpleNamespace(send_notification=send)
-    webhook, automation = AsyncMock(), AsyncMock()
-    monkeypatch.setattr(webhook_service, "dispatch_webhook", webhook)
+    automation = AsyncMock()
     monkeypatch.setattr(automation_manager.automation_manager, "handle_connector_event", automation)
     data = envelope()["data"]
     await manager._deliver_relayed_event("c1", "session.complete", data)
@@ -159,7 +155,6 @@ async def test_relay_receiver_rechecks_owner_active_subscription_and_chat(monkey
         await manager._deliver_relayed_event("c1", "session.complete", data)
         row[key] = original
     assert send.await_count == 1
-    webhook.assert_not_awaited()
     automation.assert_not_awaited()
 
 

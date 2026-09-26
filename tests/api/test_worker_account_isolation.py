@@ -89,12 +89,6 @@ def test_same_phone_enrolls_both_workers_without_replacing_credentials(client, m
     assert get_paired_client_from_token(first_session) is None
     with pytest.raises(HTTPException):
         mobile.get_device_from_api_key(request(first_key))
-    # Existing Android sends its account phone ID. The API updates only the row
-    # selected by this worker's API key, never the other worker's phone row.
-    result = client.post('/api/v1/mobile/capabilities', headers={'Authorization': 'Bearer ' + second_key},
-                        json={'device_id': PHONE, 'capabilities': {'supports_push': True}})
-    assert result.status_code == 200, result.text
-    assert database.get_mobile_device_by_api_key_hash(hash_api_key(first_key))['capabilities']['supports_push'] is False
     monkeypatch.setattr(settings, 'instance_id', 'first')
     assert get_paired_client_from_token(first_session)
     assert mobile.get_device_from_api_key(request(first_key))['device_id'] != second_device['device_id']

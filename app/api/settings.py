@@ -34,11 +34,7 @@ from app.api.stt_realtime import stt_stream_router  # noqa: F401
 from app.api.settings_media import (  # noqa: F401
     media_router,
 )
-from app.api.settings_credentials import (  # noqa: F401
-    credentials_router,
-    CREDENTIAL_POLICY_INFO,
-    _compute_effective_status,
-)
+from app.api.settings_credentials import credentials_router  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
