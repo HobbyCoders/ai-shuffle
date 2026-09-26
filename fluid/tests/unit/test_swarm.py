@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from fluid.swarm import MAX_TASKS, SwarmCoordinator, current_launch, recover, validate
-from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx
+from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 
 
 def spec(key, deps=()):

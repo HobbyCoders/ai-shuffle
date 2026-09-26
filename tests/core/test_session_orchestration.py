@@ -30,15 +30,15 @@ def peers(mock_db, monkeypatch):
 async def test_mcp_adapter_uses_same_owner_fence_and_idempotency(peers, monkeypatch):
     from app.mcp.builtin_tools import create_builtin_tools_server
     from app.core import turn_scheduler
-    import claude_agent_sdk as sdk
+    import app.mcp.inproc as inproc
     monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
     monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda sid: None)
     captured = {}
-    real_create = sdk.create_sdk_mcp_server
+    real_create = inproc.create_tool_server
     def capture(**kwargs):
         captured.update({item.name: item for item in kwargs["tools"]})
         return real_create(**kwargs)
-    monkeypatch.setattr(sdk, "create_sdk_mcp_server", capture)
+    monkeypatch.setattr(inproc, "create_tool_server", capture)
     create_builtin_tools_server(session_id="caller", profile_id="agent")
     assert {"ListSessions", "MessageSession", "StartSession"} <= captured.keys()
     args = {"session_id": "peer", "message": "coordinate", "request_id": "mcp"}
