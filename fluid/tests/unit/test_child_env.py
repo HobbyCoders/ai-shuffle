@@ -87,3 +87,11 @@ def test_delegated_child_env_disables_the_clis_background_tasks(monkeypatch) -> 
     loop = DelegatedLoop.__new__(DelegatedLoop)
     loop.env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}
     assert loop._child_env()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+
+def test_delegated_child_env_turns_off_the_clis_bash_first_steer(monkeypatch) -> None:
+    """Bypass mode must not push the model's reads and edits onto Bash."""
+    monkeypatch.setenv("CLAUDE_CODE_THRIFTY_SONIC", "1")
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {"CLAUDE_CODE_THRIFTY_SONIC": "1"}
+    assert loop._child_env()["CLAUDE_CODE_THRIFTY_SONIC"] == "0"

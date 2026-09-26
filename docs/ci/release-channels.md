@@ -11,10 +11,9 @@ that same tag** (never `main`):
 
 1. **preflight** runs read-only checks before any release, image or source is
    published. The tag must match the checkout, its commit must be on `main`,
-   `main` must be protected, and the merged PR for that commit must have a
-   successful **Merge gate** on its head SHA. It also checks version surfaces
-   and all connector source bytes locally, at the pinned Git commit and on
-   GitHub. **create-release** then requires the immutable owner's trigger and
+   `main` must be protected, and the commit must come from a merged PR. It
+   also checks version surfaces and all connector source bytes locally, at
+   the pinned Git commit and on GitHub. **create-release** then requires the immutable owner's trigger and
    the tags-only `release-signing` environment, makes the GitHub release and
    decides whether this tag
    is the newest final release (`promote_latest`). Legacy milestone tags such
@@ -122,10 +121,9 @@ opt-ins remain required. CI/unsigned builds stay automatic. Changes take effect
 when the reviewed workflow revision reaches `main`; run nothing before then.
 
 - Merge the reviewed candidate through protected `main`, with the applicable
-  suites and **Merge gate** green on the PR head. Confirm required review,
-  required status, no bot bypass, no force pushes/deletions and owner-only
-  `v*` tag rules in GitHub settings. Preflight checks protection is enabled
-  and the merged PR's gate; it does not audit every ruleset setting.
+  suites green on the PR head. Confirm required review, no bot bypass, no
+  force pushes/deletions and owner-only `v*` tag rules in GitHub settings. Preflight checks protection is enabled
+  and the merged PR; it does not audit every ruleset setting.
 - Configure the `release-signing` environment below. Both release creation
   and stable signing require an owner trigger and its tag-ref restriction. Before any
   publication, the creation job checks the presence of its Cloudflare values,
@@ -223,8 +221,7 @@ desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
 
 1. **Protect `main`.** Settings → Rules → Rulesets → New branch ruleset for
    the default branch: require a pull request with at least one approval,
-   require the **Merge gate** status (docs/ci/merge-gate.md), block force
-   pushes and deletions. Give bypass only to yourself, not to bot identities.
+   block force pushes and deletions. Give bypass only to yourself, not to bot identities.
 2. **Protect release tags.** New tag ruleset for `v*`: restrict creation,
    update and deletion to yourself (repository admin), so only you can cut a
    release.

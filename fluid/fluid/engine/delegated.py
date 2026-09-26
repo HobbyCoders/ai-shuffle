@@ -723,6 +723,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # would report into a between-turn wake no one reads. A no-op on a
         # CLI that predates the switch.
         env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        # In bypass mode the CLI can attach a per-turn "do your work through
+        # Bash" steer (a GrowthBook cohort, 2.1.265) that pushes reads,
+        # searches and edits off Read/Grep/Glob/Edit onto cat/grep/sed. This
+        # override turns it off. It is undocumented, so a CLI that renames
+        # it simply ignores the variable.
+        env["CLAUDE_CODE_THRIFTY_SONIC"] = "0"
         return env
 
     async def _stop_process(self, *, grace: float = 5.0) -> None:

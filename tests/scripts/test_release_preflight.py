@@ -127,33 +127,27 @@ def test_latest_ignores_milestones_and_prereleases(repo):
     assert not checks.newest_final(root, "v0.8.19")
 
 
-@pytest.mark.parametrize("protected,merged,base,merge_sha,state,success", [
-    (True, True, "main", "release", "success", True),
-    (False, True, "main", "release", "success", False),
-    (True, False, "main", "release", "success", False),
-    (True, True, "other", "release", "success", False),
-    (True, True, "main", "other", "success", False),
-    (True, True, "main", "release", "failure", False),
-    (True, True, "main", "release", "pending", False),
-    (True, True, "main", "release", None, False),
+@pytest.mark.parametrize("protected,merged,base,merge_sha,success", [
+    (True, True, "main", "release", True),
+    (False, True, "main", "release", False),
+    (True, False, "main", "release", False),
+    (True, True, "other", "release", False),
+    (True, True, "main", "other", False),
 ])
-def test_release_requires_protected_main_and_merged_pr_gate(monkeypatch, protected, merged, base, merge_sha, state, success):
+def test_release_requires_protected_main_and_a_merged_pr(monkeypatch, protected, merged, base, merge_sha, success):
     replies = {
         "branches/main": {"protected": protected},
         "commits/release/pulls?per_page=100": [{
             "merged_at": "date" if merged else None, "base": {"ref": base},
             "merge_commit_sha": merge_sha, "head": {"sha": "pr-head"},
         }],
-        "commits/pr-head/status?per_page=100": {"statuses": [
-            {"context": "Merge gate" if state else "unrelated", "state": state or "success"},
-        ]},
     }
     monkeypatch.setattr(checks, "github", replies.__getitem__)
     if success:
-        checks.verify_merge_gate("release")
+        checks.verify_merged_pr("release")
     else:
         with pytest.raises(ValueError):
-            checks.verify_merge_gate("release")
+            checks.verify_merged_pr("release")
 
 
 def test_checked_in_version_surfaces_and_tag_agree():

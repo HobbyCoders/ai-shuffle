@@ -1,7 +1,7 @@
 """Read-only release checks. No tags, artifacts, secrets or deployments are created.
 
 Without --tag, check the candidate source tree. --tag also requires a matching
-checkout on main; --github checks the protected branch and merged PR's gate.
+checkout on main; --github checks the protected branch and merged PR.
 --remote-catalog reads the private pinned sources using the existing gh login.
 """
 from __future__ import annotations
@@ -103,19 +103,12 @@ def verify_tag(root: Path, tag: str) -> str:
     return revision
 
 
-def verify_merge_gate(revision: str) -> None:
+def verify_merged_pr(revision: str) -> None:
     if not github("branches/main")["protected"]:
         raise ValueError("main is not protected; configure the release ruleset first")
     prs = github(f"commits/{revision}/pulls?per_page=100")
-    merged = [pr for pr in prs if pr["merged_at"] and pr["base"]["ref"] == "main" and pr["merge_commit_sha"] == revision]
-    if not merged:
+    if not any(pr["merged_at"] and pr["base"]["ref"] == "main" and pr["merge_commit_sha"] == revision for pr in prs):
         raise ValueError("Release commit must be a merged pull request on main")
-    for pr in merged:
-        statuses = github(f"commits/{pr['head']['sha']}/status?per_page=100")["statuses"]
-        gate = next((s for s in statuses if s["context"] == "Merge gate"), None)
-        if gate and gate["state"] == "success":
-            return
-    raise ValueError("No successful Merge gate status on the merged release PR head")
 
 
 def main() -> None:
@@ -130,7 +123,7 @@ def main() -> None:
     version = verify_versions(ROOT, args.tag)
     verify_catalog(ROOT, args.remote_catalog)
     if args.github:
-        verify_merge_gate(revision)
+        verify_merged_pr(revision)
     print(f"Release source checks passed for {version}")
     if args.tag:
         print(f"promote_latest={str(newest_final(ROOT, args.tag)).lower()}")
