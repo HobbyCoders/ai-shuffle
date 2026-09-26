@@ -24,6 +24,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 
 ### Install and packaging
 
+- The code-mode sandbox around agents' Python code is now on by default: the compose file and the Unraid template pass the Docker security options it needs (`seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined`, which relax Docker's default filters for the whole container). Remove those lines or set `CODE_MODE_OS_SANDBOX=off` to opt out. **Settings → System** shows whether the sandbox is active and, when it is not, why. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
 - The Docker image is now private. You download it from `registry.hobbycoders.com` with the pull token from your license email; the token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
 - New buyer compose file with a pinned version, the right shared-memory size for the built-in browser, a 90-second clean shutdown, and a volume for the built-in browser's profile. It listens on this computer only until you choose an address.
 - New Unraid template (v2): pinned version, everything under `appdata/ai-shuffle`, the web interface bound to one address, a browser-profile path, and the shared-memory and shutdown settings the image needs.
@@ -86,7 +87,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Pending device challenges are counted per requester, and a flood from unknown addresses is refused instead of pushing out a member's pending challenge.
 - Prompts, permission answers and Stop never go to a device that was removed from the network; its sessions stay read-only copies you can fork. A browser panel relayed from a removed device closes.
 - Agents' Python code (code mode) keeps its safety checks and its connection to the app out of the code's reach, including after a restore from a checkpoint.
-- On Linux, code mode now runs agents' Python inside a bubblewrap sandbox with no network and none of the server's files when the system allows it. The new `CODE_MODE_OS_SANDBOX` setting chooses `auto` (the default: sandbox when available), `required` (refuse to run code without it) or `off`. The Docker image includes bubblewrap; the sandbox needs the Docker security options `seccomp=unconfined` and `systempaths=unconfined` (plus `apparmor=unconfined` on AppArmor hosts), which the error message and the log name. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional).
+- On Linux, code mode now runs agents' Python inside a bubblewrap sandbox with no network and none of the server's files when the system allows it. The new `CODE_MODE_OS_SANDBOX` setting chooses `auto` (the default: sandbox when available), `required` (refuse to run code without it) or `off`. The Docker image includes bubblewrap; the sandbox needs the Docker security options `seccomp=unconfined` and `systempaths=unconfined` (plus `apparmor=unconfined` on AppArmor hosts), which the error message and the log name. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
 - The permission prompt's Enter and Space shortcuts approve only once the prompt has been on screen for half a second, so a key meant for the message box or a held key no longer approves a request. Enter on a focused Deny button or in a text field no longer approves either.
 - Each permission request gets its own prompt: a ticked "Always do this" no longer carries over to the next request, a double-click answers only one request, and clicks right as a new request appears are ignored.
 - API keys of 10 or 11 characters are now fully masked instead of shown whole.
@@ -97,7 +98,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
 - Plugin names in a repository's own settings can no longer point outside the plugin folders.
 - Code mode no longer treats a Python cell as safe while the kernel runs without the sandbox, as it does with the stock compose file. Note: in Ask mode, each cell then asks first. With the sandbox active, cells run without a prompt once its self-test has passed. The self-test now runs when the app starts; a cell sent while it is still running asks first.
-- On Linux, the app now hides its own process memory and start-up settings from the programs agents start, which run as the same user. Note: this also blocks core dumps and debuggers on the app process; `ALLOW_PROCESS_INTROSPECTION=true` allows them again (see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox-optional)).
+- On Linux, the app now hides its own process memory and start-up settings from the programs agents start, which run as the same user. Note: this also blocks core dumps and debuggers on the app process; `ALLOW_PROCESS_INTROSPECTION=true` allows them again (see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox)).
 - In Docker, the database and the built-in browser no longer start with the app's secrets (such as `SECRET_KEY`, the owner password and provider keys) in their environment, where other programs running as the same user could read them.
 - A team name written by an agent can no longer make the app read files outside the teams folder or signal an unrelated process.
 - Unpairing a device or signing it out closes its open connections at once; before, they stayed open until it next used a session. A device whose session token was replaced loses them within about 30 seconds. An outage of the connection service never drops a live connection.
@@ -131,7 +132,6 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Each hook's own timeout now applies; before, every hook stopped at 60 seconds. A hook that times out is stopped together with everything it started.
 - PostToolUse, UserPromptSubmit, SessionStart, SessionEnd, SubagentStop, PreCompact and Notification hooks now run. Before, only PreToolUse and Stop hooks did.
 - A Stop webhook can block by returning `{"decision": "block"}`, a bad tool pattern no longer skips the event's other hooks, and hook data over 64 KiB is shortened but stays valid JSON.
-- Message hooks are not supported. They now report an error instead of appearing to succeed, and the hook editor no longer offers them.
 - `Notification` and `SessionEnd` hooks now fire on Claude subscription sessions too.
 - The `jq` that hook commands get now behaves like the real `jq` in many more cases, stops runaway programs, and hands anything it does not support to a real `jq` if one is installed.
 - Messages you send while an agent is working are no longer lost or delivered twice when the turn ends, fails or waits for background work at that moment, and removing a queued message works with every provider.
@@ -149,9 +149,11 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Other providers: an out-of-credit refusal (such as OpenAI's `insufficient_quota`, which arrives as a 429) is reported as HTTP 402, is not retried and no longer shows the usage-limit notice. Any other 402 shows the provider's own message, for example OpenRouter asking for fewer `max_tokens`.
 - Other providers: an OpenRouter reply that carries an error mid-stream is reported as an error, with its partial text kept and marked, instead of saved as a finished answer. **Resume** works after a reply interrupted by a provider error and sends the failed request again.
 - Other providers: tool calls sent without an id each get their own, a tool call cut off by an error shows the error, and replies without usage figures are accepted and estimated instead of dropped or counted as free.
+- Usage figures AI Shuffle had to estimate (a provider that reported no token counts, or a reply you stopped before its counts arrived) are now marked: **≈** next to the cost under the reply and **est.** on the Stats tiles and rows that include them, with the reason on hover. The amounts still count toward budgets. Local models are never given a dollar price, even when the model's name matches a hosted one; before, such a model could be billed at the hosted rate. See [Modes and costs](/docs/getting-started/modes-and-costs#when-usage-numbers-are-estimates).
 - OpenRouter-only request fields are sent only to OpenRouter.
 - Sessions on other providers still set to the retired Auto mode now run as Ask everywhere; before, their prompts were approved automatically.
 - Runs nobody watches (automations, connectors, API turns) follow the permission mode as a watched session would. Note: on other providers, Accept Edits and Bypass now run the calls the mode allows instead of waiting 15 minutes and denying them; Ask still waits. Screen control still asks, and is denied when nobody can answer.
+- Accept Edits now means what it says: file edits (Edit, Write, MultiEdit, NotebookEdit) run without asking, and every other tool asks as in Ask. Note: before, it ran every tool except screen control on other providers and approved every prompt the Claude Code CLI raised; an agent that relied on that for shell commands, Python cells or web fetches now gets a prompt (and, where nobody can answer, the call is denied or waits as in Ask). Choose Bypass for an agent that should run everything.
 
 ### Sessions and interface
 
@@ -200,6 +202,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 - Starting a connection that is already running no longer answers every message twice.
 - Incoming hooks whose name is `test`, `activate`, `deactivate` or `restart` are reachable again.
 - Connections stop on a worker that a network membership change removed them from, including ones still connecting, and a connection stuck on connecting is replaced.
+- Connector fixes, offered as a connector update in **Plugins** after this release: Philips Hue prefers a light whose name matches exactly over a longer name that contains it, reports a change the bridge refused (for example brightness on a light that is off) instead of claiming success, and no longer fails on an unexpected bridge answer; Home Assistant keeps the case of values (`set house mode to Away`) and `set <device> to off` turns the device off instead of on; Spotify searches with `&` or `#` in the title work; Gmail keeps a blank line in a message body out of the subject, and a reply whose original message could not be read no longer fails to send; Discord refuses to delete the bound channel however its ID is spelled; Hue, Home Assistant, Spotify and Gmail connections leave the error state on their own once the device or service answers again.
 
 ### Desktop app (beta)
 
@@ -231,6 +234,7 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 
 ### Remote access and accounts
 
+- Workers signed in to the same Shuffle account now always talk to each other over the encrypted tunnel, even on the same local network and even if they were paired with an invite code; the plain local address is used only between workers that are not signed in. A worker whose tunnel does not answer shows as offline instead of being contacted over plain http. Invite codes are for your home network or a VPN: a plain `http://` invite to a public address is refused, and the Devices panel says so.
 - Remote access keeps working through short outages of the connection service.
 - The connection service no longer stores synced data. Sync between your workers stays end to end encrypted.
 - Account devices that ask for owner access must be approved on each worker (**Settings → Providers → Devices**).
@@ -251,8 +255,13 @@ Not yet released. This entry collects everything merged since 0.8.18 and becomes
 
 ### Removed
 
+- Message hooks. This hook type never delivered anything and only reported failures. It is gone from the API, the hook editor and the agent's configuration tools; on upgrade, any message hooks still in the database are deleted. Bash and webhook hooks are unchanged. See [Hooks](/docs/features/hooks).
+- The team status bar above the chat and the `/api/v1/teams` routes behind it. Nothing has recorded agent teams since the streaming rewrite, so the bar was always empty. Team cards in the history of old sessions still show.
 - The voice "command" session mode. No app used it; voice sessions are always chat.
 - The CLI bridge WebSocket (`/api/v1/ws/cli/{session_id}`). No app used it, and it accepted any API key for any session. See Action needed.
+- Standalone outbound webhooks (`/api/v1/webhooks`). No app could create or list one, so none existed in practice; connectors and automations already receive the same session events. Any rows left by an old build are removed on upgrade.
+- Endpoints no app calls: `/api/v1/permission-rules` (rules you save from a permission prompt still apply), the credential-policy routes under `/api/v1/settings`, `/api/v1/export-import` (an agent's own **Export** and **Import** remain), and `/api/v1/sessions/{id}/provider-workers` and `/stop`.
+- The Android push registration routes (`/api/v1/mobile/capabilities`, `/push/token`, `/push/unifiedpush`) and the `/api/v1/mobile/notifications/stream` feed. No app version registers for push or reads the feed; the bell remains the channel that reaches you. A device's stored UnifiedPush address is dropped on upgrade, and the unused `rate_limits` and `request_log` tables from the removed rate-limit feature are dropped too.
 - Code that nothing used any more. No change in behaviour.
 
 ### Fixed
