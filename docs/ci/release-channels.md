@@ -91,7 +91,7 @@ The source check without `--tag` cannot prove release ancestry, GitHub gates,
 signing credentials, deployment access or hardware behavior. A shallow clone
 must fetch history containing the catalog pin before running it.
 
-The connector pin is `06fac67853c2907e4e6fb2eac7e171d63df035d8`. The preflight
+The connector pin is `4c5b610b50f7953ea4a1d93f558b3f191d795991`. The preflight
 checks all 28 listed files against that Git commit and, with
 `--remote-catalog`, GitHub's authenticated raw contents API. Local digest
 agreement alone is insufficient. After any catalog change, set `release` to
