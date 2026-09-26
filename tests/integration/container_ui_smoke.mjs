@@ -1,7 +1,11 @@
 // Actual bundled UI and credential gate, with no credentials or model calls.
 // The exported checks also run in the installed Windows preview acceptance test.
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export async function workerJson(page, url, method = 'GET', body) {
@@ -96,9 +100,50 @@ export async function configurePersistenceFixture(page, workspace) {
   return url;
 }
 
+/**
+ * A plain headless Chromium for this check, in place of the container's
+ * supervised one. That browser is the agent's: it runs behind the egress
+ * proxy, whose policy refuses the worker's own ports on any local address
+ * (a page there must never act as the owner). A user's browser is not behind
+ * that proxy, so the bundled UI is exercised from a Chromium of its own.
+ */
+export async function launchPlainChromium(port = 9333) {
+  const executable = process.env.CHROME_EXECUTABLE || '/usr/bin/google-chrome-stable';
+  const profile = mkdtempSync(path.join(tmpdir(), 'container-ui-smoke-'));
+  const stderr = [];
+  const child = spawn(executable, [
+    '--headless=new', '--ozone-platform=headless', '--no-sandbox', '--disable-gpu',
+    '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
+    '--disable-features=Translate,BackForwardCache,DBus,MediaSessionService',
+    '--window-size=1280,800', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`,
+    'about:blank',
+  ], {
+    env: { ...process.env, HOME: profile, DBUS_SESSION_BUS_ADDRESS: 'disabled:', DBUS_SYSTEM_BUS_ADDRESS: 'disabled:' },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.stderr.on('data', chunk => { stderr.push(String(chunk)); if (stderr.length > 200) stderr.shift(); });
+  const endpoint = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30000;
+  let lastError = 'no answer';
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`plain Chromium exited with ${child.exitCode}:\n${stderr.join('')}`);
+    try {
+      const response = await fetch(`${endpoint}/json/version`);
+      if (response.ok) return { child, endpoint };
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  child.kill('SIGKILL');
+  throw new Error(`plain Chromium did not open its DevTools port (${lastError}):\n${stderr.join('')}`);
+}
+
 async function main() {
   const { chromium } = await import('/opt/browser-mcp/node_modules/playwright-core/index.mjs');
-  const browser = await chromium.connectOverCDP('http://127.0.0.1:9221', { timeout: 30000 });
+  const plain = await launchPlainChromium();
+  const browser = await chromium.connectOverCDP(plain.endpoint, { timeout: 30000 });
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
   const pageErrors = [], completed = [];
@@ -149,6 +194,7 @@ async function main() {
     await page.screenshot({ path: '/tmp/container-ui.png', mask: [page.locator('code, input[type="password"]')] });
     await context.close();
     await browser.close();
+    plain.child.kill('SIGKILL');
   }
 }
 
