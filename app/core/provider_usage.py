@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.core import encryption, usage_sources
+from app.core import codex_usage, encryption, usage_sources
 from app.core.usage_polling import UsageDeferred, capability_fingerprint, usage_get
 from app.db.async_database import run_sync
 
@@ -155,15 +155,9 @@ def _as_bool(value: Any) -> Optional[bool]:
     return None
 
 
-def _window_type_for_minutes(minutes: Optional[int]) -> Optional[str]:
-    """Map a rate-limit window's minutes to a stable window-type key."""
-    if minutes is None or minutes <= 0:
-        return None
-    if minutes == 10080:
-        return "seven_day"
-    if minutes == 300:
-        return "five_hour"
-    return f"window_{minutes}m"
+#: Header captures and the usage poll describe the same windows, so they share
+#: one mapping — a drift between the two would split one window into two rows.
+_window_type_for_minutes = codex_usage.window_type_for_minutes
 
 
 def _resets_at(
@@ -825,8 +819,12 @@ def normalize_grok_billing(payload: Any) -> ProviderUsage:
         return ProviderUsage(windows=[], credits=None, plan_type=None, raw={})
 
 
-def _decrypt_grok_access_token(blob: Any) -> Optional[str]:
-    """Decrypt a SuperGrok OAuth access token. Never log the return value."""
+def _decrypt_subscription_access_token(blob: Any) -> Optional[str]:
+    """Decrypt a subscription OAuth access token. Never log the return value.
+
+    Shared by the SuperGrok and Codex pollers: both keep their access token in
+    the row's ``codex_access_token`` column.
+    """
     if not blob or not isinstance(blob, str):
         return None
     try:
@@ -895,6 +893,43 @@ async def _maybe_refresh_grok_on_401(
             "Grok token refresh after 401 for provider %s failed: %s",
             provider_id,
             e,
+        )
+        return False
+
+
+async def _codex_usage_get(
+    headers: Mapping[str, str],
+) -> Tuple[Optional[Any], int]:
+    """GET the pinned Codex usage URL. Never follows redirects."""
+    if not codex_usage.url_is_pinned(codex_usage.USAGE_URL):
+        raise ValueError("refusing non-pinned Codex usage host")
+    resp = await _registered_get(
+        "codex_usage",
+        codex_usage.USAGE_URL,
+        headers=dict(headers),
+        timeout=codex_usage.USAGE_TIMEOUT,
+    )
+    try:
+        body: Optional[Any] = resp.json()
+    except Exception:  # noqa: BLE001 — a malformed body is a failed reading
+        body = None
+    return body, resp.status_code
+
+
+async def _maybe_refresh_codex_on_401(provider_id: str, stale_access: str) -> bool:
+    """Refresh the Codex token once after a usage 401. Never raises."""
+    try:
+        from app.core import codex_token_refresh
+
+        return bool(
+            await codex_token_refresh.refresh_on_401_once(
+                provider_id, stale_access_token=stale_access
+            )
+        )
+    except Exception as e:  # noqa: BLE001 — refresh internals stay private
+        logger.warning(
+            "Codex token refresh after a usage 401 for provider %s failed: %s",
+            provider_id, e,
         )
         return False
 
@@ -1243,7 +1278,7 @@ class ProviderUsageMonitor:
             stored = await run_sync(db.get_codex_tokens, provider_id)
             if not stored or stored.get("needs_reauth"):
                 return
-            access = _decrypt_grok_access_token(stored.get("codex_access_token"))
+            access = _decrypt_subscription_access_token(stored.get("codex_access_token"))
             if not access:
                 return
 
@@ -1262,7 +1297,7 @@ class ProviderUsageMonitor:
                                    "billing_access_denied", denied_fingerprint=fingerprint)
                     return
                 stored = await run_sync(db.get_codex_tokens, provider_id)
-                access = _decrypt_grok_access_token(
+                access = _decrypt_subscription_access_token(
                     (stored or {}).get("codex_access_token")
                 )
                 if not access:
@@ -1342,6 +1377,106 @@ class ProviderUsageMonitor:
                 f"grok-poll:{provider_id}",
                 "Grok usage poll for provider %s failed: %s", provider_id, e,
             )
+
+    async def _poll_codex_provider(self, row: Dict[str, Any]) -> None:
+        """Fetch ChatGPT/Codex subscription usage and upsert a snapshot.
+
+        Never raises. Uses the Codex OAuth access token in
+        ``codex_access_token`` — the same credential the app already refreshes
+        for inference and the model catalog. Passive ``x-codex-*`` capture
+        writes the same snapshot; this poll is what refreshes it when the
+        allowance was spent outside the app or the window rolled over while it
+        sat idle.
+        """
+        from app.core.usage_polling import UsageDeferred
+        from app.db import database as db
+
+        provider_id = row.get("id")
+        try:
+            if not provider_id or row.get("needs_reauth"):
+                return
+
+            access, account_id = await self._codex_credentials(provider_id)
+            if not access:
+                return
+
+            headers = codex_usage.usage_headers(access, account_id)
+            fingerprint = capability_fingerprint("codex_usage", headers)
+            if await _capability_denied(provider_id, fingerprint):
+                return
+            body, status = await _codex_usage_get(headers)
+
+            if status == 401:
+                refreshed = await _maybe_refresh_codex_on_401(provider_id, access)
+                if not refreshed:
+                    await run_sync(
+                        db.record_provider_usage_failure, provider_id, "chatgpt",
+                        "billing_access_denied", denied_fingerprint=fingerprint,
+                    )
+                    return
+                access, account_id = await self._codex_credentials(provider_id)
+                if not access:
+                    return
+                headers = codex_usage.usage_headers(access, account_id)
+                fingerprint = capability_fingerprint("codex_usage", headers)
+                body, status = await _codex_usage_get(headers)
+
+            if status != 200 or not isinstance(body, dict):
+                _log_poll_failure(
+                    f"codex-usage:{provider_id}",
+                    "Codex usage fetch for provider %s failed: HTTP %s",
+                    provider_id, status,
+                )
+                await run_sync(
+                    db.record_provider_usage_failure, provider_id, "chatgpt",
+                    _failure_kind(status),
+                    denied_fingerprint=fingerprint if _is_capability_refusal(status) else None,
+                )
+                return
+
+            u = codex_usage.normalize_usage(body)
+            if not u.windows:
+                # A reading with no usable window must not erase the windows the
+                # last good observation (poll or header capture) reported.
+                _log_poll_failure(
+                    f"codex-usage:{provider_id}",
+                    "Codex usage for provider %s carried no usable window", provider_id,
+                )
+                return
+
+            _clear_poll_failure(f"codex-usage:{provider_id}")
+            _clear_poll_failure(f"codex-poll:{provider_id}")
+            await run_sync(
+                db.upsert_provider_usage_snapshot,
+                provider_id,
+                "chatgpt",
+                u.plan_type,
+                u.windows,
+                u.credits,
+                u.raw,
+                int(time.time() * 1000),
+            )
+        except UsageDeferred:
+            return
+        except Exception as e:
+            # Never include the bearer token here.
+            _log_poll_failure(
+                f"codex-poll:{provider_id}",
+                "Codex usage poll for provider %s failed: %s", provider_id, e,
+            )
+
+    @staticmethod
+    async def _codex_credentials(
+        provider_id: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Decrypted Codex access token + account id, or ``(None, None)``."""
+        from app.db import database as db
+
+        stored = await run_sync(db.get_codex_tokens, provider_id)
+        if not stored or stored.get("needs_reauth"):
+            return None, None
+        access = _decrypt_subscription_access_token(stored.get("codex_access_token"))
+        return (access, stored.get("codex_account_id")) if access else (None, None)
 
     async def _poll_openai_provider(self, row: Dict[str, Any]) -> bool:
         from app.core.config import settings

@@ -85,7 +85,7 @@ def test_every_source_has_a_complete_capability_definition():
 
 
 def test_subscription_endpoints_are_labeled_unofficial():
-    for source_id in ("grok_subscription", "codex_headers"):
+    for source_id in ("grok_subscription", "codex_headers", "codex_usage"):
         source = usage_sources.SOURCES[source_id]
         assert source.subscription_specific
         assert source.public()["support_label"] == "Unofficial, subscription-specific endpoint"
@@ -101,6 +101,7 @@ def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
     assert measure["fal_billing"] == usage_sources.MONETARY_CREDIT
     assert measure["claude_rate_limit_events"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["grok_subscription"] == usage_sources.SUBSCRIPTION_ALLOWANCE
+    assert measure["codex_usage"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["openai_headers"] == usage_sources.RATE_LIMIT
     assert "prepaid credit balance" in usage_sources.SOURCES["openai_admin"].unavailable
 
@@ -114,7 +115,8 @@ def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
     ({"provider_type": "grok"}, {"grok_subscription"}),
     ({"provider_type": "custom", "auth_mode": "grok"}, {"grok_subscription"}),
     ({"provider_type": "xai"}, set()),
-    ({"provider_type": "chatgpt"}, set()),
+    ({"provider_type": "chatgpt"}, {"codex_usage"}),
+    ({"provider_type": "custom", "auth_mode": "chatgpt"}, {"codex_usage"}),
     ({"provider_type": "anthropic"}, set()),
 ])
 def test_polled_sources_follow_the_registry(row, expected):

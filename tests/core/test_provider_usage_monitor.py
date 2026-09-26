@@ -88,16 +88,24 @@ class TestRefreshScheduling:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("success", [True, False])
     async def test_api_result_does_not_trigger_subscription_billing(self, success):
+        """Each row gets only its own registry sources.
+
+        The Admin-API poll's outcome must not cascade into the ChatGPT
+        subscription poll, and the API-key row must never be handed to it.
+        """
         monitor = ProviderUsageMonitor()
         rows = [{"id": "api", "provider_type": "openai", "base_url": "https://api.openai.com"},
                 {"id": "sub", "provider_type": "chatgpt"}]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
             monitor, "_poll_openai_provider", new=AsyncMock(return_value=success)
-        ) as poll, patch("app.db.database.get_codex_tokens") as tokens, patch.object(
+        ) as poll, patch.object(
+            monitor, "_poll_codex_provider", new=AsyncMock()
+        ) as codex, patch("app.db.database.get_codex_tokens") as tokens, patch.object(
             monitor, "_poll_fal", new=AsyncMock()
         ):
             await monitor.poll_once()
         poll.assert_awaited_once_with(rows[0])
+        codex.assert_awaited_once_with(rows[1])
         tokens.assert_not_called()
 
 

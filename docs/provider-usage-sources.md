@@ -31,7 +31,8 @@ popover keeps the rows it already shows.
 | `anthropic_headers` | `anthropic-ratelimit-*` response headers | Anthropic API key | Organization | Request/token rate limits | Passive; **not wired yet** (normalizer only) | Response metadata | [Limits](https://console.anthropic.com/settings/limits) |
 | `openai_headers` | `x-ratelimit-*` response headers | OpenAI API key | Project | Request/token rate limits | Passive; stored, hidden in the popover | Response metadata | [Limits](https://platform.openai.com/settings/organization/limits) |
 | `compatible_headers` | `x-ratelimit-*` from xAI and custom OpenAI-compatible hosts | Provider API key | API key | Request/token rate limits | Passive; stored, hidden | Response metadata | [xAI console](https://console.x.ai/) |
-| `codex_headers` | `x-codex-*` headers on Codex inference responses | ChatGPT sign-in | Subscription | Subscription allowance | Passive; no extra request | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
+| `codex_headers` | `x-codex-*` headers on Codex inference responses | ChatGPT sign-in | Subscription | Subscription allowance | Passive; stored, hidden in the popover | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
+| `codex_usage` | `GET https://chatgpt.com/backend-api/wham/usage` | ChatGPT sign-in used for Codex inference | Subscription | Subscription allowance and plan | Polled on demand, 300 s | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
 | `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (local only) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Separate management key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
@@ -45,6 +46,17 @@ endpoint has no account balance). The popover shows these as "Not reported by
 this source" next to the dashboard link.
 
 Intervals are application limits, not provider-approved rate guarantees.
+
+Two snapshot types have both a passive and a polled writer. `codex_headers` and
+`codex_usage` describe the same ChatGPT subscription windows, and the header
+capture is free, so it keeps writing whenever a Codex turn runs. The polled
+source is the one the row is labeled with, because only a poll bounds how stale
+the reading can get: an allowance spent in the ChatGPT web client, in the Codex
+CLI or on another worker, or a window that rolled over while the app sat idle,
+reaches the panel on the next poll rather than on the next turn. A poll is
+skipped when the snapshot was already refreshed inside the interval, so an
+actively used account rarely costs a request. A poll that returns no usable
+window leaves the previous windows in place instead of erasing them.
 
 Banked reset-credit inventories for Codex and SuperGrok are read only when the
 owner opens that settings panel. They are not usage readings and are not in the
@@ -67,7 +79,7 @@ thing and never come from these sources. The Stats card labels them
 
 ### Subscription-specific endpoints
 
-`grok_subscription` and `codex_headers` are labeled
+`grok_subscription`, `codex_headers` and `codex_usage` are labeled
 "Unofficial, subscription-specific" in the registry, the API and the popover.
 They are used by the providers' own subscription clients and are not published
 as third-party APIs. The app reads them only for the account the owner signed

@@ -158,6 +158,12 @@ def is_grok_subscription_row(row: Mapping[str, Any] | None) -> bool:
     return r.get("provider_type") == "grok" or r.get("auth_mode") == "grok"
 
 
+def is_codex_subscription_row(row: Mapping[str, Any] | None) -> bool:
+    """ChatGPT sign-in rows used for Codex. OpenAI API keys are ``openai``."""
+    r = row or {}
+    return r.get("provider_type") == "chatgpt" or r.get("auth_mode") == "chatgpt"
+
+
 def is_official_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     try:
         url = urlsplit((row or {}).get("base_url") or "")
@@ -181,6 +187,7 @@ OPENAI_ADMIN_BASE = "https://api.openai.com/v1/organization"
 FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
@@ -243,6 +250,25 @@ _SOURCES: tuple[UsageSource, ...] = (
         dashboard_url="https://chatgpt.com/codex/settings/usage",
         failure_policy=PASSIVE_FAILURE_POLICY,
         unavailable=("OpenAI API spend", "OpenAI API credit balance"),
+        # Stored on the ChatGPT row but not the label; the row headlines the
+        # polled reading, which is the one that refreshes without a turn.
+        shown=False,
+    ),
+    UsageSource(
+        id="codex_usage",
+        snapshot_type="chatgpt",
+        label="Codex subscription usage endpoint",
+        credential="ChatGPT sign-in used for Codex inference",
+        scope="subscription",
+        scope_label="ChatGPT subscription usage windows; not API credit",
+        measure=SUBSCRIPTION_ALLOWANCE,
+        collection=POLLED,
+        support=UNOFFICIAL_SUBSCRIPTION,
+        dashboard_url="https://chatgpt.com/codex/settings/usage",
+        endpoints=(Endpoint(CODEX_USAGE_URL, 300),),
+        unavailable=("OpenAI API spend", "OpenAI API credit balance"),
+        poller="_poll_codex_provider",
+        applies=is_codex_subscription_row,
     ),
     UsageSource(
         id="openai_admin",
@@ -342,14 +368,17 @@ _SOURCES: tuple[UsageSource, ...] = (
 
 SOURCES: dict[str, UsageSource] = {s.id: s for s in _SOURCES}
 
-# Snapshot rows -> the source that labels them in the usage API. OpenAI rows
-# carry both passive headers and Admin data; Admin usage is the displayed one.
+# Snapshot rows -> the source that labels them in the usage API. Two snapshot
+# types are written by both a passive and a polled source; the polled one is
+# the label, because it is what bounds how stale the row can get. OpenAI rows
+# headline Admin usage over rate-limit headers, ChatGPT rows the usage endpoint
+# over Codex quota headers.
 _SNAPSHOT_SOURCES = {
     "anthropic": "anthropic_headers",
     "openai": "openai_admin",
     "xai": "compatible_headers",
     "openai_compatible": "compatible_headers",
-    "chatgpt": "codex_headers",
+    "chatgpt": "codex_usage",
     "openrouter": "openrouter_key",
     "openrouter_account": "openrouter_credits",
     "fal": "fal_billing",
