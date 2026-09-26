@@ -28,7 +28,7 @@ import { hooks, hookStats, hookSaving, hookTesting, hooksError } from './hooks.s
 function hook(id: string, extra: Partial<Hook> = {}): Hook {
 	return {
 		id, project_id: null, name: id, event: 'PreToolUse' as Hook['event'], hook_type: 'bash',
-		command: 'true', timeout: 30, url: null, secret: null, message_template: null, enabled: true,
+		command: 'true', timeout: 30, url: null, secret: null, enabled: true,
 		tool_matcher: null, created_at: '2026-09-25T00:00:00Z', updated_at: '2026-09-25T00:00:00Z',
 		last_triggered_at: null, failure_count: 0, ...extra
 	};

@@ -12,7 +12,6 @@ from app.core.models import (
     HookCreate,
     HookUpdate,
     HookTestResult,
-    MESSAGE_HOOKS_NOT_CREATABLE,
     PluginHookInfo,
     VALID_HOOK_EVENTS,
 )
@@ -34,11 +33,6 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
         )
 
     hook_type = getattr(hook_data, 'hook_type', None)
-    if hook_type == 'message':
-        raise HTTPException(
-            status_code=422,
-            detail=MESSAGE_HOOKS_NOT_CREATABLE,
-        )
     if is_create:
         # For create, validate that required fields are provided based on type
         if hook_type == 'bash' and not hook_data.command:
@@ -96,7 +90,6 @@ async def create_app_hook(
         secret=hook_data.secret,
         enabled=hook_data.enabled,
         tool_matcher=hook_data.tool_matcher,
-        message_template=hook_data.message_template
     )
     return hook
 
@@ -167,7 +160,6 @@ async def create_project_hook(
             secret=hook_data.secret,
             enabled=hook_data.enabled,
             tool_matcher=hook_data.tool_matcher,
-            message_template=hook_data.message_template
         )
 
     return await run_sync(_create)
@@ -236,7 +228,6 @@ async def update_hook(
             secret=hook_data.secret,
             enabled=hook_data.enabled,
             tool_matcher=hook_data.tool_matcher,
-            message_template=hook_data.message_template
         )
 
     return await run_sync(_update)

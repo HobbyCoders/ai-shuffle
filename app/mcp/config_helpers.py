@@ -16,8 +16,6 @@ from app.core.models import VALID_HOOK_EVENTS
 # Constants
 # ============================================================================
 
-# Creatable hook types. Existing "message" hooks are still listed and can be
-# deleted, but new ones are refused (MESSAGE_HOOKS_NOT_CREATABLE).
 VALID_HOOK_TYPES = ["bash", "webhook"]
 
 VALID_TRIGGER_TYPES = ["cron", "interval", "webhook"]

@@ -177,69 +177,6 @@ def test_project_less_sessions_register_app_level_observed_hooks(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_a_message_hook_reports_failure_and_writes_nothing(monkeypatch, tmp_path):
-    """R-3: message hooks used to write a legacy session_messages row that the
-    transcript never reads for a current session, broadcast a message the
-    frontend drops, and report success. Nothing was shown or read. The run now
-    fails honestly (last-run status false, error says why) and writes nothing."""
-    import asyncio
-
-    from app.core import hook_executor
-    from app.core.sync_engine import sync_engine
-
-    hook = {
-        "id": "h-msg", "name": "After tool", "hook_type": "message", "enabled": True,
-        "event": "PostToolUse", "tool_matcher": None,
-        "message_template": "{tool_name} ran in {session_id}",
-    }
-    monkeypatch.setattr(hook_service, "_project_has_db_pretooluse_hooks", lambda _p: False)
-    monkeypatch.setattr(hook_service.database, "get_all_hooks_for_project", lambda _p: [hook])
-    monkeypatch.setattr(hook_executor.database, "get_hooks_for_project_and_event",
-                        lambda _p, _e: [hook])
-    added: list[dict] = []
-    triggered: list[tuple] = []
-    broadcast: list[dict] = []
-    monkeypatch.setattr(hook_executor.database, "add_session_message",
-                        lambda **kw: added.append(kw))
-    monkeypatch.setattr(hook_executor.database, "update_hook_triggered",
-                        lambda hook_id, ok: triggered.append((hook_id, ok)))
-
-    async def _broadcast(**kw):
-        broadcast.append(kw)
-
-    monkeypatch.setattr(sync_engine, "broadcast_message_added", _broadcast)
-    results: list[dict] = []
-    real_execute = hook_executor.execute_hook
-
-    async def _record(h, data, session_id=None):
-        results.append(await real_execute(h, data, session_id=session_id))
-        return results[-1]
-
-    monkeypatch.setattr(hook_executor, "execute_hook", _record)
-
-    options = SimpleNamespace(cwd=str(tmp_path), plugins=[], env={}, hooks=None,
-                              aih_session_id="app-session-1")
-    hook_service.attach_hooks_to_options(options, project_id="proj-1")
-
-    adapter = HarnessAdapter()
-    adapter._sdk_hook_bus = sdk_hooks_bus(options.hooks, str(tmp_path))
-    decision = await adapter.hooks.emit("PostToolUse", {
-        **_pre_tool_payload("Bash"), "output": {"stdout": "ok"},
-    })
-    await asyncio.gather(*list(hook_executor._active_hook_tasks))
-
-    assert decision.action != "deny"
-    assert added == [] and broadcast == []
-    assert triggered == [("h-msg", False)]
-    assert results[0]["success"] is False
-    assert results[0]["error"] == hook_executor.MESSAGE_HOOKS_UNSUPPORTED
-
-    preview = await hook_executor.test_hook(hook)
-    assert preview["success"] is False and "ExampleTool ran in" in preview["output"]
-    assert preview["error"] == hook_executor.MESSAGE_HOOKS_UNSUPPORTED
-
-
-@pytest.mark.asyncio
 async def test_a_hook_timeout_above_the_bridge_default_applies(monkeypatch, tmp_path):
     """A DB PreToolUse guard runs under its own timeout, not a deadline shared
     by every hook of the event. The bridge's fallback is shrunk to 0.2 s so the

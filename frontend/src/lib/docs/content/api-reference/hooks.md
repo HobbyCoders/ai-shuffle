@@ -11,11 +11,11 @@ Endpoints for managing hooks — custom bash scripts or webhook calls attached t
 Every endpoint on this page needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
 > **How hooks run.**
-> - `PreToolUse` — bash hooks only, before the tool. They can block it (see [Blocking a tool call](#blocking-a-tool-call)). Webhook and message hooks on `PreToolUse` are skipped.
+> - `PreToolUse` — bash hooks only, before the tool. They can block it (see [Blocking a tool call](#blocking-a-tool-call)). Webhook hooks on `PreToolUse` are skipped.
 > - `Stop` — bash and webhook hooks. A bash hook's stdout or a webhook's 2xx JSON response body can keep the agent working with `{"decision": "block"}`.
 > - `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification` — bash and webhook hooks run in the background. They cannot block or change anything.
 >
-> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Message hooks (`hook_type: "message"`) are not supported: creating one, or changing a hook to one, returns `422`, and an existing one delivers nothing (each run is recorded as failed) but can still be disabled or deleted. Hooks contributed by plugins are not affected by these limits.
+> `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-level hooks). Hooks contributed by plugins are not affected by these limits.
 >
 > `timeout` applies to each hook on its own. Hooks that match the same event run one after another, each with its full timeout. Together they have a deadline of the sum of their timeouts plus 5 s per hook (at least 60 s); `PreToolUse` hooks that pass it deny the call.
 >
@@ -123,16 +123,15 @@ curl -X POST http://localhost:8000/api/v1/hooks/project/proj_abc123 \
 |-------|------|----------|-------------|
 | `name` | string | Yes | Display name (1-100 chars) |
 | `event` | string | Yes | Hook event type |
-| `hook_type` | string | Yes | "bash" or "webhook" ("message" returns `422`) |
+| `hook_type` | string | Yes | "bash" or "webhook" |
 | `command` | string | Bash only | Shell command to execute |
 | `url` | string | Webhook only | URL to POST to |
 | `secret` | string | Webhook only | HMAC-SHA256 signing secret |
-| `message_template` | string | Message only | Message template. Message hooks are not delivered yet |
 | `timeout` | integer | No | Timeout in ms for this hook (1000-300000, default: 30000) |
 | `enabled` | boolean | No | Whether hook is active (default: true) |
 | `tool_matcher` | string | No | Tool name or regex the whole tool name must match (`PreToolUse`, `PostToolUse`). A pattern that is not a valid regex is compared as plain text |
 
-Returns `201` with the hook. Errors: `400` for an unknown `event`, a bash hook without `command` or a webhook hook without `url`; `404` if the project does not exist; `422` for `hook_type: "message"` or a field out of range.
+Returns `201` with the hook. Errors: `400` for an unknown `event`, a bash hook without `command` or a webhook hook without `url`; `404` if the project does not exist; `422` for an unknown `hook_type` or a field out of range.
 
 ### GET /api/v1/hooks/{hook_id}
 
@@ -142,7 +141,7 @@ Get hook details.
 
 ### PATCH /api/v1/hooks/{hook_id}
 
-Update a hook. All fields are optional. Returns `400` for an unknown `event`, `404` if the hook does not exist, and `422` when changing a hook to `hook_type: "message"`.
+Update a hook. All fields are optional. Returns `400` for an unknown `event`, `404` if the hook does not exist, and `422` for an unknown `hook_type`.
 
 **Auth:** Owner only
 
@@ -156,7 +155,7 @@ Delete a hook.
 
 ### POST /api/v1/hooks/{hook_id}/test
 
-Test a hook with sample data. For a message hook nothing is sent: the response has `success: false`, the rendered message in `output`, and an `error` saying message hooks are not supported.
+Test a hook with sample data.
 
 **Auth:** Owner only
 

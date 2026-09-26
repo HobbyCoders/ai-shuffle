@@ -25,7 +25,7 @@ export const HOOK_EVENT_TYPES = [
 
 export type HookEventType = (typeof HOOK_EVENT_TYPES)[number];
 
-export type HookType = 'bash' | 'webhook' | 'message';
+export type HookType = 'bash' | 'webhook';
 
 export interface Hook {
 	id: string;
@@ -37,7 +37,6 @@ export interface Hook {
 	timeout: number;
 	url: string | null;
 	secret: string | null;
-	message_template: string | null;
 	enabled: boolean;
 	tool_matcher: string | null;
 	created_at: string;
@@ -54,7 +53,6 @@ export interface HookCreate {
 	timeout?: number;
 	url?: string;
 	secret?: string;
-	message_template?: string;
 	enabled?: boolean;
 	tool_matcher?: string;
 }
@@ -67,7 +65,6 @@ export interface HookUpdate {
 	timeout?: number;
 	url?: string | null;
 	secret?: string | null;
-	message_template?: string | null;
 	enabled?: boolean;
 	tool_matcher?: string | null;
 }

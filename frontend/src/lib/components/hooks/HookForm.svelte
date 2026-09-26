@@ -31,7 +31,6 @@
 		url: hook?.url || '',
 		secret: hook?.secret || '',
 		toolMatcher: hook?.tool_matcher || '',
-		messageTemplate: hook?.message_template || '',
 		enabled: hook?.enabled ?? true,
 	}));
 
@@ -45,7 +44,6 @@
 	let url = $state(initial.url);
 	let secret = $state(initial.secret);
 	let toolMatcher = $state(initial.toolMatcher);
-	let messageTemplate = $state(initial.messageTemplate);
 	let enabled = $state(initial.enabled);
 
 	// Validation
@@ -59,9 +57,6 @@
 		if (!name.trim()) return false;
 		if (hookType === 'bash' && !command.trim()) return false;
 		if (hookType === 'webhook' && !url.trim()) return false;
-		// Message hooks never run and can no longer be saved (existing ones are
-		// shown read-only so they can be switched to another type or deleted).
-		if (hookType === 'message') return false;
 		return true;
 	}
 
@@ -99,7 +94,7 @@
 		Notification: 'Fires when Claude sends a notification'
 	};
 	let remoteChange = $state('');
-	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, messageTemplate, enabled]); }
+	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, enabled]); }
 	let baseline = snapshot();
 	export function refreshRemote(fresh: Hook | undefined, saving = false): boolean {
 		if (saving || snapshot() !== baseline) {
@@ -116,7 +111,6 @@
 		url = fresh.url || '';
 		secret = fresh.secret || '';
 		toolMatcher = fresh.tool_matcher || '';
-		messageTemplate = fresh.message_template || '';
 		enabled = fresh.enabled;
 		baseline = snapshot();
 		remoteChange = '';
@@ -199,13 +193,6 @@
 		<div class="set-row">
 			<div class="lab"><h4>Secret</h4><p>Signs the payload via the X-Hook-Signature header. Optional.</p></div>
 			<div class="ctl"><input type="password" bind:value={secret} placeholder="HMAC secret for signature" class="inp" /></div>
-		</div>
-	{:else if hookType === 'message'}
-		<div class="set-row stack">
-			<div class="lab"><h4>Message template (unsupported)</h4><p>Message hooks are not supported and never run. Switch this hook to Bash or Webhook, or delete it.</p></div>
-			<div class="ctl">
-				<textarea value={messageTemplate} readonly class="fld" rows="4"></textarea>
-			</div>
 		</div>
 	{/if}
 </div>

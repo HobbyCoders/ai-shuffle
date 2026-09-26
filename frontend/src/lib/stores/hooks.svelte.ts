@@ -313,7 +313,6 @@ export const hookStats = createDerived(() => {
 	let totalProject = 0;
 	let bash = 0;
 	let webhook = 0;
-	let message = 0;
 
 	for (const h of _state.hooks) {
 		if (h.enabled) totalEnabled++;
@@ -321,7 +320,6 @@ export const hookStats = createDerived(() => {
 		else totalProject++;
 		if (h.hook_type === 'bash') bash++;
 		else if (h.hook_type === 'webhook') webhook++;
-		else if (h.hook_type === 'message') message++;
 	}
 
 	return {
@@ -330,6 +328,6 @@ export const hookStats = createDerived(() => {
 		totalApp,
 		totalProject,
 		totalPlugin: _state.pluginHooks.length,
-		byType: { bash, webhook, message }
+		byType: { bash, webhook }
 	};
 });

@@ -977,14 +977,8 @@ def _db_observed_hook_events(project_id: Optional[str]) -> List[str]:
     return [event for event in _OBSERVED_DB_HOOK_EVENTS if event in events]
 
 
-def create_db_event_hook_handler(event: str, project_id: Optional[str],
-                                 session_id: Optional[str] = None):
-    """SDK callback dispatching ``event``'s DB hooks; never blocks the turn.
-
-    ``session_id`` is the app session id (hook_input only carries the engine's),
-    passed through for message hooks, which are not delivered and report
-    failure (``hook_executor.execute_message_hook``).
-    """
+def create_db_event_hook_handler(event: str, project_id: Optional[str]):
+    """SDK callback dispatching ``event``'s DB hooks; never blocks the turn."""
     async def db_event_hook_handler(hook_input: HookInput, tool_use_id: Optional[str],
                                     context: HookContext) -> SyncHookJSONOutput:
         if hook_input.get("hook_event_name") == event:
@@ -992,7 +986,7 @@ def create_db_event_hook_handler(event: str, project_id: Optional[str],
             try:
                 await execute_hooks_for_event(
                     project_id, event, data,
-                    tool_name=data.get("tool_name"), session_id=session_id,
+                    tool_name=data.get("tool_name"),
                 )
             except Exception:  # an observational hook must never fail the turn
                 logger.exception(f"[HookService] DB {event} hooks failed to dispatch")
@@ -1007,7 +1001,6 @@ def build_hooks_config(
     stderr_callback: StderrCallback = None,
     *,
     translated_main: bool = False,
-    session_id: Optional[str] = None,
 ) -> Optional[Dict[str, List[HookMatcher]]]:
     """
     Build SDK hooks configuration from all sources.
@@ -1025,7 +1018,6 @@ def build_hooks_config(
         project_id: Optional project ID for database hooks
         plugin_paths: List of enabled plugin paths
         stderr_callback: Optional async callback for broadcasting stderr to frontend
-        session_id: The app session id, where message hooks post their message
 
     Returns:
         Dict of hook configurations for SDK, or None if no hooks needed
@@ -1070,7 +1062,7 @@ def build_hooks_config(
 
     for event in _db_observed_hook_events(project_id):
         hooks_config.setdefault(event, []).append(
-            HookMatcher(hooks=[create_db_event_hook_handler(event, project_id, session_id)])
+            HookMatcher(hooks=[create_db_event_hook_handler(event, project_id)])
         )
         logger.debug(f"[HookService] Registered DB {event} handler for project {project_id}")
 
@@ -1128,8 +1120,6 @@ def attach_hooks_to_options(
         plugin_paths=plugin_paths,
         stderr_callback=stderr_callback,
         translated_main=translated_main,
-        # Stamped by query_options; message hooks post into this session.
-        session_id=getattr(options, "aih_session_id", None),
     )
     if hooks_config:
         options.hooks = hooks_config

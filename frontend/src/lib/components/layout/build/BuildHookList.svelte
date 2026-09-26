@@ -10,7 +10,7 @@
 	import type { Hook, PluginHookInfo, HookTestResult } from '$lib/api/hooks';
 	import Banner from '$lib/components/Banner.svelte';
 	import {
-		Search, Plus, Terminal, Globe, MessageSquare, Zap, Play, Trash2,
+		Search, Plus, Terminal, Globe, Zap, Play, Trash2,
 		AlertCircle, X, Loader2, FileCode
 	} from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
@@ -139,14 +139,12 @@
 	// Icon by hook delivery type.
 	function typeIcon(t: string) {
 		if (t === 'webhook') return Globe;
-		if (t === 'message') return MessageSquare;
 		if (t === 'bash') return Terminal;
 		return Zap;
 	}
 	function detailText(h: Hook): string {
 		if (h.hook_type === 'bash') return h.command ?? '';
 		if (h.hook_type === 'webhook') return h.url ?? '';
-		if (h.hook_type === 'message') return h.message_template ?? '';
 		return '';
 	}
 
@@ -271,7 +269,7 @@
 								{#if detailText(hook)}<p class="bhl-desc" class:mono={hook.hook_type === 'bash'}>{detailText(hook)}</p>{/if}
 							</div>
 							<div class="bhl-meta">
-								<span class="bhl-tag" title={hook.hook_type === 'message' ? 'Message hooks are not supported and never run' : undefined}>{hook.hook_type === 'message' ? 'message · unsupported' : hook.hook_type}</span>
+								<span class="bhl-tag">{hook.hook_type}</span>
 							</div>
 							<div class="bhl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 								<RowActionMenu
@@ -332,7 +330,7 @@
 							{#if hook.description}<p class="bhl-desc">{hook.description}</p>{/if}
 						</div>
 						<div class="bhl-meta">
-							<span class="bhl-tag" title={hook.hook_type === 'message' ? 'Message hooks are not supported and never run' : undefined}>{hook.hook_type === 'message' ? 'message · unsupported' : hook.hook_type}</span>
+							<span class="bhl-tag">{hook.hook_type}</span>
 						</div>
 					</div>
 				{/each}

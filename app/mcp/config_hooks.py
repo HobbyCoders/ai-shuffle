@@ -9,7 +9,6 @@ import logging
 import secrets as _secrets
 from typing import Any, Dict, Optional
 
-from app.core.models import MESSAGE_HOOKS_NOT_CREATABLE
 from app.mcp.config_helpers import (
     VALID_HOOK_EVENTS,
     VALID_HOOK_TYPES,
@@ -163,8 +162,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if hook_type == "webhook" and not args.get("url"):
             return _error("Webhook hooks require a 'url' field.")
         if hook_type not in VALID_HOOK_TYPES:
-            return _error(MESSAGE_HOOKS_NOT_CREATABLE if hook_type == "message"
-                          else f"Invalid hook_type '{hook_type}'. Valid: {VALID_HOOK_TYPES}")
+            return _error(f"Invalid hook_type '{hook_type}'. Valid: {VALID_HOOK_TYPES}")
 
         # PreToolUse/PostToolUse should have a tool_matcher
         if event in ("PreToolUse", "PostToolUse") and not args.get("tool_matcher"):
@@ -196,7 +194,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             url=args.get("url"),
             enabled=args.get("enabled", True),
             tool_matcher=args.get("tool_matcher"),
-            message_template=args.get("message_template"),
         )
 
         if not hook:
@@ -233,7 +230,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {"type": "string", "enum": VALID_HOOK_TYPES},
                 "command": {"type": "string"},
                 "url": {"type": "string"},
-                "message_template": {"type": "string"},
                 "tool_matcher": {"type": "string"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds."},
                 "enabled": {"type": "boolean"},
@@ -246,8 +242,6 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         hook_id = args["hook_id"]
-        if args.get("hook_type") == "message":
-            return _error(MESSAGE_HOOKS_NOT_CREATABLE)
 
         def _read_validate_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -267,7 +261,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             # Build update kwargs — only include provided fields
             kwargs: Dict[str, Any] = {}
             for field in ("name", "event", "hook_type", "command", "url",
-                          "message_template", "tool_matcher", "enabled"):
+                          "tool_matcher", "enabled"):
                 if field in args and args[field] is not None:
                     kwargs[field] = args[field]
 

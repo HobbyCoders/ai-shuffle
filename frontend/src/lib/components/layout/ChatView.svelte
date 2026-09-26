@@ -11,7 +11,6 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
-	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
@@ -283,9 +282,6 @@
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</div>
-				{/if}
-				{#if $activeSession.sessionId}
-					<TeamStatusBar sessionId={$activeSession.sessionId} />
 				{/if}
 				<!-- No call surface here any more (VM18): the call controls live in the
 				     composer slot below, so the transcript column looks the same during

@@ -1,6 +1,5 @@
 """
-Hook execution service for running bash commands and webhook calls (message
-hooks are accepted but not delivered; see execute_message_hook)
+Hook execution service for running bash commands and webhook calls
 """
 
 import asyncio
@@ -446,42 +445,9 @@ async def execute_webhook_hook(
         }
 
 
-#: Why a message hook run fails. See execute_message_hook.
-MESSAGE_HOOKS_UNSUPPORTED = (
-    "Message hooks are not supported: there is no delivery path into the "
-    "session transcript, so the message would not be shown or read"
-)
-
-
-async def execute_message_hook(
-    hook: Dict[str, Any],
-    event_data: Dict[str, Any],
-    session_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Report a message hook run as failed, without writing anything.
-
-    Sessions render and resume from the session event log. The old path wrote
-    a ``session_messages`` row and broadcast ``message_added``; the transcript
-    reads neither for a current session and the engine never saw the text, yet
-    the hook reported success. Injecting into the event log or queueing a turn
-    needs a design (a UserPromptSubmit message hook would start a turn that
-    fires it again), so until then the run fails honestly: a live run only
-    bumps the hook's failure count (the reason is not stored), and **Test**
-    shows ``MESSAGE_HOOKS_UNSUPPORTED``.
-    """
-    return {
-        "success": False,
-        "duration_ms": 0,
-        "output": None,
-        "error": MESSAGE_HOOKS_UNSUPPORTED,
-    }
-
-
 async def execute_hook(
     hook: Dict[str, Any],
     event_data: Dict[str, Any],
-    session_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Execute a hook based on its type.
@@ -489,7 +455,6 @@ async def execute_hook(
     Args:
         hook: Hook configuration from database
         event_data: Event data to pass to the hook
-        session_id: Active session ID (required for message hooks)
 
     Returns:
         Dict with success, duration_ms, output, and error fields
@@ -500,8 +465,6 @@ async def execute_hook(
         result = await execute_bash_hook(hook, event_data)
     elif hook_type == "webhook":
         result = await execute_webhook_hook(hook, event_data)
-    elif hook_type == "message":
-        result = await execute_message_hook(hook, event_data, session_id=session_id)
     else:
         result = {
             "success": False,
@@ -551,7 +514,6 @@ async def execute_hooks_for_event(
     event: str,
     event_data: Dict[str, Any],
     tool_name: Optional[str] = None,
-    session_id: Optional[str] = None
 ) -> None:
     """
     Execute all enabled hooks for a project (+ app hooks) that match the given event.
@@ -562,7 +524,6 @@ async def execute_hooks_for_event(
         event: Event type (e.g., "PreToolUse", "SessionStart")
         event_data: Event data to pass to hooks
         tool_name: Tool name for PreToolUse/PostToolUse events (for filtering)
-        session_id: Active session ID (required for message hooks)
     """
     try:
         # Exactly one of these reads runs per call, so this costs a single
@@ -590,8 +551,8 @@ async def execute_hooks_for_event(
             }
 
             # Execute hook asynchronously with result logging
-            async def _execute_and_log(h: Dict[str, Any], data: Dict[str, Any], sid: Optional[str]) -> None:
-                result = await execute_hook(h, data, session_id=sid)
+            async def _execute_and_log(h: Dict[str, Any], data: Dict[str, Any]) -> None:
+                result = await execute_hook(h, data)
                 if not result.get("success"):
                     logger.warning(
                         f"Hook {h.get('id')} ({h.get('name', 'unnamed')}) failed for event {event}: "
@@ -603,7 +564,7 @@ async def execute_hooks_for_event(
                 if not t.cancelled() and t.exception():
                     logger.error(f"Hook task crashed: {t.exception()}")
 
-            task = asyncio.create_task(_execute_and_log(hook, full_event_data, session_id))
+            task = asyncio.create_task(_execute_and_log(hook, full_event_data))
             _active_hook_tasks.add(task)
             task.add_done_callback(_on_hook_done)
 
@@ -615,17 +576,12 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
     """
     Test a hook with sample event data.
 
-    For message hooks, renders the template as a preview and reports failure:
-    message hooks are not delivered (see execute_message_hook).
-
     Args:
         hook: Hook configuration from database
 
     Returns:
         Dict with success, duration_ms, output, and error fields
     """
-    hook_type = hook.get("hook_type")
-
     # Create test event data
     test_event_data = {
         "event": hook.get("event", "Test"),
@@ -639,35 +595,5 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
             "message": "This is a test event",
         }
     }
-
-    # For message hooks, preview the rendered template; nothing is sent, and
-    # the result says a real run would not deliver it.
-    if hook_type == "message":
-        template = hook.get("message_template", "")
-        if not template:
-            return {
-                "success": False,
-                "duration_ms": 0,
-                "output": None,
-                "error": "No message template specified"
-            }
-
-        variables = {
-            "event": test_event_data["event"],
-            "timestamp": test_event_data["timestamp"],
-            "session_id": "test-session-id",
-            "tool_name": "ExampleTool",
-            "hook_name": hook.get("name", ""),
-        }
-        rendered = template
-        for key, value in variables.items():
-            rendered = rendered.replace(f"{{{key}}}", str(value))
-
-        return {
-            "success": False,
-            "duration_ms": 0,
-            "output": f"[Preview] Rendered message:\n{rendered}",
-            "error": MESSAGE_HOOKS_UNSUPPORTED,
-        }
 
     return await execute_hook(hook, test_event_data)

@@ -51,7 +51,6 @@ async def _noop(*args, **kwargs):
 class TestAttachHooksToOptions:
     def test_attaches_hooks_and_forwards_args(self):
         options = _make_options()
-        options.aih_session_id = "app-session-1"
         stderr_cb = object()
         with patch.object(
             hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
@@ -66,7 +65,6 @@ class TestAttachHooksToOptions:
             plugin_paths=["/plugins/ralph-loop"],
             stderr_callback=stderr_cb,
             translated_main=False,
-            session_id="app-session-1",
         )
 
     def test_translated_main_passed_when_env_marker_present(self):

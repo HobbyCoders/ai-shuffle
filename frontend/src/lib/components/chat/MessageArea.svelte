@@ -2075,7 +2075,7 @@
 	{:else if message.type === 'team_member'}
 		<div class="w-full">
 			<div class="min-w-0">
-				<TeamMemberMessage {message} parentSessionId={$activeSession.sessionId ?? ''} />
+				<TeamMemberMessage {message} />
 			</div>
 		</div>
 	{/if}

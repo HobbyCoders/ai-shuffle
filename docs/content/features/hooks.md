@@ -14,17 +14,16 @@ A hook is a piece of logic -- a shell command or a webhook call -- that AI Shuff
 
 **What runs today:**
 
-- `PreToolUse` runs bash hooks before a tool and can block it. Webhook and message hooks on `PreToolUse` are skipped.
+- `PreToolUse` runs bash hooks before a tool and can block it. Webhook hooks on `PreToolUse` are skipped.
 - `Stop` runs bash and webhook hooks when the agent finishes its turn. A bash hook's output or a webhook's JSON response can keep it working.
 - The other seven events (`PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `SubagentStop`, `PreCompact`, `Notification`) run bash and webhook hooks in the background. They cannot block or change anything.
 - `PreToolUse` and `Stop` hooks run only in sessions that belong to a project. Hooks on the other seven events also run in sessions with no project (app-wide hooks only).
-- Message hooks are not supported. New ones cannot be created, and an existing one delivers nothing: each run is recorded as failed. See [Message Hooks](#message-hooks).
 - Hooks that plugins contribute through `hooks.json` are not affected by these limits; see [Plugin-Contributed Hooks](#plugin-contributed-hooks).
 
 Key concepts:
 
 - **Project or app-wide:** A hook belongs to one project, or to the whole app (`/api/v1/hooks/app`) and runs for every project
-- **Types:** Bash (run a shell command) and Webhook (HTTP POST to a URL). A third type, Message, cannot be created; existing message hooks are shown as unsupported
+- **Types:** Bash (run a shell command) and Webhook (HTTP POST to a URL)
 - **Blocking:** Only a bash `PreToolUse` hook can block a tool. A bash or webhook `Stop` hook can keep the agent working. Hooks on every other event run in the background
 - **Tool matching:** Optionally filter tool events (`PreToolUse`, `PostToolUse`) by tool name pattern
 - **Plugin hooks:** Installed plugins can contribute read-only hooks
@@ -107,7 +106,7 @@ A single hook that times out, crashes or exits with another code does not block:
 - the `PreToolUse` hooks together run past their deadline (see [Bash Hooks](#bash-hooks)), or the hook runner itself fails;
 - on Claude subscription sessions, where the Claude CLI runs the tools, the `PreToolUse` hooks for one call have not decided within 570 seconds. The CLI is told to wait 600 seconds for them, so it never runs the call on its own after giving up.
 
-The deny carries the reason, and the agent sees the call as denied. Output that is not valid JSON is ignored, so a JSON decision with a typo does not block anything. When several hooks match, the first one that returns a decision wins. Only bash hooks can block a tool; webhook and message hooks on `PreToolUse` are skipped.
+The deny carries the reason, and the agent sees the call as denied. Output that is not valid JSON is ignored, so a JSON decision with a typo does not block anything. When several hooks match, the first one that returns a decision wins. Only bash hooks can block a tool; webhook hooks on `PreToolUse` are skipped.
 
 ### Stop Hooks
 
@@ -129,14 +128,6 @@ Send an HTTP POST request to a URL when the event fires. Optionally sign the pay
 | `timeout`| integer| Timeout in milliseconds (1000-300000, default 30000)  |
 
 The body is JSON describing the event: `{"event": ..., "timestamp": ..., "data": {...}}`. A `Stop` hook also sends `working_dir` and `project_id`, and its `data` holds the same stop payload a bash hook gets in `HOOK_DATA`. A `Stop` webhook can keep the agent working through its response (see [Stop Hooks](#stop-hooks)); on other events the response is ignored. Before sending, passwords in URLs anywhere in the body (for example `postgres://user:***@db/app`) are masked. Every request carries `X-Hook-Event` and `X-Hook-Timestamp` headers. When a `secret` is set, it also carries `X-Hook-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw body keyed by the secret, so the receiving server can check the request is authentic.
-
-### Message Hooks
-
-Message hooks are not supported, and new ones cannot be created (the API returns `422`). No run of an existing message hook delivers its message: it would not appear in the chat or reach the agent. Each run is recorded as failed, and testing one shows the rendered message together with that error. Delete it, or switch it to a webhook or bash hook.
-
-| Field              | Type   | Description                                              |
-|--------------------|--------|----------------------------------------------------------|
-| `message_template` | string | Message template (`{event}`, `{tool_name}` and other event fields). Not delivered |
 
 ## Hook Events
 

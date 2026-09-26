@@ -324,9 +324,9 @@ def _child_payload(kind: str, child: Dict[str, Any]) -> Dict[str, Any]:
 
     Legacy children carry v1 message keys (toolName/toolId/toolInput/
     toolResult/toolStatus), but the v2 reducer reads snake_case progress
-    payloads. Golden shape = the live progress events built by
-    ``team_transcript_watcher`` (tool_use: id/name/input; tool_result:
-    tool_use_id/output/is_error; chunk: content).
+    payloads (tool_use: id/name/input; tool_result: tool_use_id/output/
+    is_error; chunk: content), the shape the live subagent progress events
+    carry.
     """
     if kind == "tool_use":
         return {

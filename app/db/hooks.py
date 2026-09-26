@@ -25,7 +25,6 @@ class HookRow(TypedDict):
     secret: Optional[str]
     enabled: bool
     tool_matcher: Optional[str]
-    message_template: Optional[str]
     created_at: str
     updated_at: str
     last_triggered_at: Optional[str]
@@ -106,7 +105,6 @@ def create_hook(
     secret: Optional[str] = None,
     enabled: bool = True,
     tool_matcher: Optional[str] = None,
-    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
     """Create a new hook (project-scoped or app-level)"""
     now = datetime.now(timezone.utc).isoformat()
@@ -114,9 +112,9 @@ def create_hook(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO project_hooks
-               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, now, now)
+               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, now, now)
         )
     return get_hook(hook_id)
 
@@ -132,7 +130,6 @@ def update_hook(
     secret: Optional[str] = None,
     enabled: Optional[bool] = None,
     tool_matcher: Optional[str] = None,
-    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
     """Update a hook"""
     existing = get_hook(hook_id)
@@ -169,9 +166,6 @@ def update_hook(
     if tool_matcher is not None:
         updates.append("tool_matcher = %s")
         values.append(tool_matcher if tool_matcher else None)
-    if message_template is not None:
-        updates.append("message_template = %s")
-        values.append(message_template if message_template else None)
 
     if updates:
         updates.append("updated_at = %s")
