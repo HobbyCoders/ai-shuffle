@@ -526,7 +526,9 @@
 								>
 									<GitBranch size={13} strokeWidth={1.5} />
 									<span class="branch-item-name">{wt.branch_name}</span>
-									{#if wt.git_status && !wt.git_status.is_clean}
+									{#if wt.status_error}
+										<span class="broken-badge" title={`Git status unavailable: ${wt.status_error}`}>!</span>
+									{:else if wt.git_status && !wt.git_status.is_clean}
 										<span class="dirty-badge">M</span>
 									{/if}
 								</button>
@@ -879,6 +881,15 @@
 		color: var(--warning);
 		padding: 1px 4px;
 		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		border-radius: 4px;
+	}
+
+	.broken-badge {
+		font-size: 0.625rem;
+		font-weight: 600;
+		color: var(--destructive);
+		padding: 1px 4px;
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 		border-radius: 4px;
 	}
 

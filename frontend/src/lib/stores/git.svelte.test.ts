@@ -105,7 +105,13 @@ describe('git store — selected worker without a session', () => {
 		git.setWorkerTarget(target);
 		await git.loadRepository('canonical-project');
 		expect(mocks.getGitStatus).toHaveBeenLastCalledWith('canonical-project', undefined, undefined, target);
-		expect(mocks.getWorktrees).toHaveBeenCalledWith('canonical-project');
+		expect(mocks.getWorktrees).toHaveBeenCalledWith('canonical-project', undefined);
+	});
+	it('names the open worktree so the server keeps its status fresh', async () => {
+		await git.loadForWorktree('proj-1', 'wt-open');
+		expect(mocks.getWorktrees).toHaveBeenLastCalledWith('proj-1', 'wt-open');
+		await git.loadWorktrees();
+		expect(mocks.getWorktrees).toHaveBeenLastCalledWith('proj-1', 'wt-open');
 	});
 	it('targets both status and pull, isolating same-branch caches by worker', async () => {
 		const a = { workerId: 'worker-a', branch: 'main' };

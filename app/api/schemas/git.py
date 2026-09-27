@@ -384,6 +384,12 @@ class WorktreeInfo(BaseModel):
     active_session: Optional[SessionInfo] = None  # Currently active session
     exists: Optional[bool] = None  # Whether worktree folder exists on disk
     git_status: Optional[WorktreeGitStatus] = None
+    # When git_status was last read (ISO, UTC). Idle worktrees keep their last
+    # known status, so this can trail the response time.
+    status_checked_at: Optional[str] = None
+    # Set when the last status read failed (e.g. a corrupt index); the server
+    # retries it on a back-off rather than every poll.
+    status_error: Optional[str] = None
     # Legacy - deprecated
     session: Optional[SessionInfo] = None
 

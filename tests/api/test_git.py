@@ -1469,37 +1469,33 @@ class TestListWorktrees:
         assert data["worktrees"][0]["session_count"] == 1
         assert data["worktrees"][0]["active_session"]["id"] == "ses-abc123"
 
-    def test_list_worktrees_status_uses_single_gitpool_job(
+    def test_list_worktrees_status_holds_no_gitpool_job(
         self, app, mock_database, mock_git_service,
         mock_worktree_manager, mock_settings, sample_project, sample_worktree
     ):
-        """Per-worktree git status must be gathered in ONE git-pool job.
+        """The per-worktree status fan-out must not hold a main GitPool job.
 
-        Regression guard for the GitPool queue-depth bursts: the endpoint used to
-        submit one ``run_git`` job PER worktree, so a project with N worktrees
-        instantly queued N jobs onto the 4-worker pool (depth ~35 with ~40
-        worktrees). It must now submit a constant number of jobs regardless of
-        worktree count: one ``is_git_repo`` probe + one batched status job, while
-        still gathering ``git status`` for every existing worktree.
+        Regression guard, twice over. 2b98408f stopped the endpoint queuing one
+        ``run_git`` job PER worktree (queue depth ~35 with ~40 worktrees). The
+        single batched job it left then pinned a main git worker for ~9s per
+        poll with ~60 worktrees, so git/status, diff-stats and branches queued
+        behind it. Now the only GitPool job is the ``is_git_repo`` probe, and
+        every ``git status`` read runs on the dedicated fan-out pool.
         """
-        worktrees = []
-        for i in range(12):
-            wt = sample_worktree.copy()
-            wt["id"] = f"wt-{i}"
-            wt["branch_name"] = f"feature/{i}"
-            wt["exists"] = True
-            wt["git_status"] = None
-            worktrees.append(wt)
+        import threading
+
+        worktrees = self._make_worktrees(sample_worktree, 12)
 
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
-        mock_git_service.get_status.return_value = {
-            "is_clean": True,
-            "current_branch": "main",
-            "modified": [],
-            "staged": [],
-            "untracked": [],
-        }
+        read_threads = []
+
+        def status(path):
+            read_threads.append(threading.current_thread().name)
+            return {"is_clean": True, "current_branch": "main",
+                    "modified": [], "staged": [], "untracked": []}
+
+        mock_git_service.get_status.side_effect = status
         mock_worktree_manager.get_worktrees_for_project.return_value = worktrees
 
         submitted = []
@@ -1525,12 +1521,13 @@ class TestListWorktrees:
                             )
 
         assert response.status_code == 200
-        # Constant job count: one is_git_repo probe + one batched status job.
-        # NOT 1 + N (the old per-worktree fan-out) even with 12 worktrees.
-        assert len(submitted) == 2
-        assert submitted.count("_collect_worktree_statuses") == 1
-        # Status is still gathered for every existing worktree.
+        # One GitPool job, the is_git_repo probe, whatever the worktree count.
+        assert len(submitted) == 1
+        # Status is still gathered for every existing worktree (a cold project
+        # waits for its first refresh)...
         assert mock_git_service.get_status.call_count == 12
+        # ...on the dedicated fan-out pool, not a main GitPool worker.
+        assert all(name.startswith("git-wt-status") for name in read_threads)
         data = response.json()
         assert data["total"] == 12
         assert all(
@@ -1606,19 +1603,22 @@ class TestListWorktrees:
         # ...but never exceeded the pool bound.
         assert active["max"] <= _STATUS_FANOUT_MAX_WORKERS
 
-    def test_list_worktrees_status_ttl_cache_serves_and_expires(
+    def test_list_worktrees_status_serves_cached_and_refreshes_hot_in_background(
         self, app, mock_database, mock_git_service,
         mock_worktree_manager, mock_settings, sample_project, sample_worktree
     ):
-        """A burst of polls within the TTL shares one fan-out and skips the pool.
-
-        After the window expires, the fan-out re-runs. Mirrors the "check the TTL
-        cache BEFORE submitting pool work" pattern.
-        """
+        """Polls inside the freshness window read nothing; stale polls re-read
+        only hot worktrees, in the background, while serving the cached map."""
         import time as _t
+        from datetime import datetime, timezone
         from app.api import git_worktrees as _gw
 
         worktrees = self._make_worktrees(sample_worktree, 5)
+        # wt-0 has a session active just now; the rest are idle.
+        worktrees[0]["sessions"] = [{
+            "id": "ses-hot", "title": "t", "status": "active",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }]
 
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
@@ -1628,14 +1628,6 @@ class TestListWorktrees:
         }
         mock_worktree_manager.get_worktrees_for_project.return_value = worktrees
 
-        submitted = []
-
-        async def counting_run_git(fn, *args, **kwargs):
-            submitted.append(getattr(fn, "__name__", str(fn)))
-            if kwargs:
-                return fn(*args, **kwargs)
-            return fn(*args)
-
         with (patch("app.api.git.git_service", mock_git_service),
              patch("app.api.git_worktrees.git_service", mock_git_service),
              patch("app.api.git_ai.git_service", mock_git_service)):
@@ -1643,26 +1635,25 @@ class TestListWorktrees:
                 with (patch("app.api.git.database", mock_database),
                  patch("app.api.git_helpers.database", mock_database),
                  patch("app.api.git_worktrees.database", mock_database)):
-                    with patch("app.api.git_worktrees.run_git", counting_run_git):
-                        with patch("app.api.git.get_api_user_from_request", return_value=None):
-                            client = TestClient(app)
-                            url = "/api/v1/projects/test-project-id/git/worktrees"
-                            r1 = client.get(url)
-                            r2 = client.get(url)  # within TTL -> cache hit
-                            # Force-expire the cached entry, then poll again.
-                            statuses, _ts = _gw._worktree_status_cache["test-project-id"]
-                            _gw._worktree_status_cache["test-project-id"] = (
-                                statuses, _t.monotonic() - (_gw._WORKTREE_STATUS_CACHE_TTL + 1)
-                            )
-                            r3 = client.get(url)
+                    with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        client = TestClient(app)
+                        url = "/api/v1/projects/test-project-id/git/worktrees"
+                        r1 = client.get(url)  # cold: reads all 5 once
+                        r2 = client.get(url)  # fresh: reads nothing
+                        state = _gw._worktree_status_cache["test-project-id"]
+                        state.refreshed_at = _t.monotonic() - (_gw._WORKTREE_STATUS_FRESH_SECONDS + 1)
+                        r3 = client.get(url)  # stale: background refresh of wt-0
+                        inflight = state.inflight
+                        if inflight is not None:
+                            inflight.result(timeout=5)
 
         assert r1.status_code == r2.status_code == r3.status_code == 200
-        # Miss -> fan-out ran (5 statuses); hit -> served from cache (still 5);
-        # expiry -> fan-out ran again (10 total).
-        assert submitted.count("_collect_worktree_statuses") == 2
-        assert mock_git_service.get_status.call_count == 10
-        # Every response still carries fresh per-worktree status.
-        assert all(wt["git_status"]["is_clean"] for wt in r2.json()["worktrees"])
+        assert mock_git_service.get_status.call_count == 6
+        # Every response carries a status for every worktree, cached or not.
+        for r in (r1, r2, r3):
+            assert all(wt["git_status"]["is_clean"] for wt in r.json()["worktrees"])
+            assert all(wt["status_checked_at"] for wt in r.json()["worktrees"])
+            assert all(wt["status_error"] is None for wt in r.json()["worktrees"])
 
     def test_list_worktrees_status_one_error_does_not_poison_others(
         self, app, mock_database, mock_git_service,
