@@ -81,6 +81,38 @@ def test_queued_request_lapses_after_the_request_window(bridge, monkeypatch):
     assert updates.desktop_exchange({"phase": "available"}) == {}
 
 
+@pytest.mark.parametrize("phase", ["checking", "downloading"])
+def test_busy_report_preserves_accepted_download_until_shell_can_accept_it(bridge, phase):
+    updates.desktop_exchange({"phase": "available"})
+    updates.enqueue("download")
+    request = dict(updates._desktop_request)
+    assert updates.desktop_exchange({"phase": phase}) == {}
+    assert updates._desktop_request == request
+    assert updates.status()["phase"] == phase
+    assert updates.desktop_exchange({"phase": "available"}) == request
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+
+
+def test_request_expires_while_shell_is_busy(bridge, monkeypatch):
+    updates.desktop_exchange({"phase": "available"})
+    updates.enqueue("download")
+    expires = updates._desktop_request["expires_at"]
+    assert updates.desktop_exchange({"phase": "checking"}) == {}
+    monkeypatch.setattr(updates.time, "time", lambda: expires + 1)
+    assert updates.desktop_exchange({"phase": "checking"}) == {}
+    assert updates._desktop_request is None
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+
+
+def test_deferred_request_still_requires_update_permission(bridge, monkeypatch):
+    updates.desktop_exchange({"phase": "available"})
+    updates.enqueue("download")
+    assert updates.desktop_exchange({"phase": "checking"}) == {}
+    monkeypatch.setattr(updates.database, "get_system_setting", lambda key: "false")
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+    assert updates._desktop_request is None
+
+
 def test_idle_report_skips_the_settings_read(bridge):
     assert updates.desktop_exchange({"phase": "idle"}) == {}
     assert bridge == []

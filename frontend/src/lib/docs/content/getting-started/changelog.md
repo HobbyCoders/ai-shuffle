@@ -8,6 +8,10 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 0.8.21
+
+- Desktop update downloads now wait for an active update check to finish instead of silently losing the download request.
+
 ## 0.8.20
 
 - Resume project sessions on another worker through Git remotes, without transferring file bundles. Chats without a project move by transferring their history.

@@ -90,6 +90,8 @@ try{
  await launch();await page.evaluate(()=>window.shuffleDesktop.updates.check());
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return state.phase==='available';},'Stable update was not offered',45000);
  await requestUpdate('download');
+ await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return ['downloading','ready'].includes(state.phase);},'Accepted stable download did not start within the request window',90000);
+ passed('Accepted stable download starts through the worker update bridge');
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return state.phase==='ready';},'Stable update did not finish building',1200000);
  const staged=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));assert(staged.pending);report.updatedRevision=staged.pending;
  await screenshot('update-ready');

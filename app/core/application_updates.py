@@ -50,6 +50,12 @@ def desktop_exchange(state):
     with _bridge_lock:
         _desktop_state = dict(state)
         _desktop_seen = time.monotonic()
+        # A phase-change report can race an already accepted action. The shell
+        # refuses actions while checking or downloading, so leave the request
+        # queued until it can accept it, without extending its original expiry.
+        if (_desktop_request and _desktop_request["expires_at"] >= time.time()
+                and state.get("phase") in ("checking", "downloading")):
+            return {}
         request, _desktop_request = _desktop_request, None
     # Most reports carry nothing back: answer those without the settings read.
     if not request or request["expires_at"] < time.time() or not allowed():
