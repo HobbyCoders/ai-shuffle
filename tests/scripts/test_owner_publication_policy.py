@@ -128,3 +128,18 @@ def test_existing_opt_ins_and_success_dependencies_still_fail_closed():
     assert "needs.verify.result == 'success'" in jobs["publish"]["if"]
     assert "needs.build.result == 'success'" in jobs["verify"]["if"]
     assert not permits(jobs["build"]["if"], candidate_run_id="previous-run")
+
+
+def test_windows_installer_requires_tagged_unit_tests_before_building():
+    jobs = workflow("desktop-installer.yml")["jobs"]
+    check = jobs["check"]
+    assert check["runs-on"] == "ubuntu-latest"
+    assert check["if"] == jobs["build"]["if"]
+    assert check["steps"][0]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
+    assert any(step.get("run") == "npm ci && npm test" for step in check["steps"])
+    assert jobs["build"]["needs"] == "check"
+    assert "always()" not in jobs["build"]["if"]
+    assert "continue-on-error" not in check
+    assert all("continue-on-error" not in step for step in check["steps"])
+    assert "windows" in jobs["build"]["runs-on"]
+    assert "windows" in jobs["verify"]["runs-on"]
