@@ -102,10 +102,18 @@ describe('ship it options', () => {
 			'Commit changes', 'Push to remote', 'Merge PR #12', 'Clean up branch'
 		]);
 		await fireEvent.click(screen.getByRole('button', { name: 'Rebase' }));
-		await fireEvent.click(screen.getByRole('switch', { name: 'Delete worktree after merge' }));
+		const cleanupSwitch = screen.getByRole('switch', { name: /^Delete worktree after merge/ });
+		expect(cleanupSwitch.textContent).toContain('Stops any session still running in it');
+		await fireEvent.click(cleanupSwitch);
 		expect(screen.queryByText('Clean up branch')).toBeNull();
 		await fireEvent.click(submit('Ship It'));
 		expect(onShipIt).toHaveBeenCalledWith({ mergeMethod: 'rebase', cleanup: false, includeUnstaged: true });
+	});
+
+	it('only warns about stopping sessions when cleanup removes a worktree', () => {
+		mount('shipit', { isWorktreeMode: false });
+		expect(screen.getByRole('switch', { name: 'Delete branch after merge' })).toBeTruthy();
+		expect(screen.queryByText('Stops any session still running in it')).toBeNull();
 	});
 
 	it('does not ship while busy', async () => {

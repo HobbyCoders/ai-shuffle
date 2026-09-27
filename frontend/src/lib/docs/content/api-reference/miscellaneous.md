@@ -328,7 +328,7 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/ship \
 | `merge_method` | string | `squash` | `merge`, `squash` or `rebase` |
 | `base_branch` | string | repository default | Base of the pull request |
 | `draft` | boolean | `false` | Open the pull request as a draft |
-| `cleanup` | boolean | `false` | Remove the worktree, or delete the local branch, after the merge |
+| `cleanup` | boolean | `false` | Remove the worktree, or delete the local branch, after the merge. Sessions still running in a worktree are stopped first; in the project folder, cleanup is skipped while another session is busy |
 | `worktree_id` | string | | Act on this worktree instead of the project folder |
 | `session_id` | string | | Act on this session's checkout |
 
