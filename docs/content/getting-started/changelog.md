@@ -8,9 +8,16 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## Next release (changes since 0.8.18)
+## 0.8.20
 
-Not yet released. This entry collects everything merged since 0.8.18 and becomes the release notes when the version is tagged.
+- Resume project sessions on another worker through Git remotes, without transferring file bundles. Chats without a project move by transferring their history.
+- See ChatGPT subscription usage refresh without having to send another message.
+- Desktop first-start updates stay visible and no longer lock the app.
+- Choose provider-specific models for delegated tasks.
+- Worktree status refreshes in the background, and the update button avoids polling peers every two seconds.
+- Ship It cleanup stops sessions still running in its worktree before removing it. Shared project checkouts keep their existing behavior.
+
+## 0.8.19
 
 ### Action needed
 
