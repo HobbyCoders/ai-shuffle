@@ -16,7 +16,7 @@ Customer installs follow the **stable** channel only.
 - In-app updates are signed. Your worker accepts only an update signed for the stable channel, checks the signature, size and checksum, and re-checks every source file against the signed list before each start.
 - Unreleased development builds are never offered to customer installs.
 
-Read what changed in the [Changelog](/docs/getting-started/changelog), or in the release notes shown next to the update button.
+Read what changed in the release notes shown next to the update button.
 
 ## Two kinds of update
 

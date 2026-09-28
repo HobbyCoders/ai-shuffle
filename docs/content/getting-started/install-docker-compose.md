@@ -346,7 +346,7 @@ Stop the container (`docker compose stop`), then back up the Docker volumes whos
 
 ## Update
 
-1. Read the release notes for the new version (see [Changelog](/docs/getting-started/changelog)).
+1. Read the release notes for the new version in AI Shuffle.
 2. Set `AI_SHUFFLE_VERSION` in `.env` to the new version.
 3. Run `docker compose up -d`.
 
