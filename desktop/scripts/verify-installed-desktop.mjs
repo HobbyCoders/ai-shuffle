@@ -93,16 +93,18 @@ try{
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return ['downloading','ready'].includes(state.phase);},'Accepted stable download did not start within the request window',90000);
  passed('Accepted stable download starts through the worker update bridge');
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return state.phase==='ready';},'Stable update did not finish building',1200000);
- const staged=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));assert(staged.pending);report.updatedRevision=staged.pending;
+ const staged=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));
+ // Download stages the build; only the explicit install action may activate it.
+ const updatedRevision=staged.staged;assert.equal(updatedRevision,build.revision);assert.equal(staged.pending,undefined);report.updatedRevision=updatedRevision;
  await screenshot('update-ready');
  const disconnected=new Promise(resolve=>browser.once('disconnected',resolve));
  await requestUpdate('install');await Promise.race([disconnected,new Promise((_,reject)=>setTimeout(()=>reject(Error('Installed app did not exit')),90000))]);
- await connect();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+staged.pending.slice(0,12));await persisted();
- await until(async()=>JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8')).active===staged.pending,'Source update did not commit healthy state');
+ await connect();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+updatedRevision.slice(0,12));await persisted();
+ await until(async()=>JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8')).active===updatedRevision,'Source update did not commit healthy state');
  const host=JSON.parse(await fs.readFile(path.join(sourceRoot,'installed-host.json'),'utf8'));assert.equal(host.executable,exe);assert.equal(host.userData,profile);
  const after=await page.evaluate(()=>window.shuffleDesktop.worker.getState());assert(after.logPath.toLowerCase().startsWith(profile.toLowerCase()));assert.notEqual(after.pid,before.worker.pid);
  await screenshot('updated-same-app');await close();passed('Real signed stable code builds through the owner update API and restarts with existing database and unfinished setup');
- await launch();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+staged.pending.slice(0,12));await persisted();await verifyOfflineSetup(page);await close();
+ await launch();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+updatedRevision.slice(0,12));await persisted();await verifyOfflineSetup(page);await close();
  passed('Original installed EXE opens the updated revision on subsequent launches');
  report.gaps=['Offline setup stops at the real credential gate; no provider login, completed onboarding, model call or post-setup sidebar interaction was exercised. Update download and install use the same authenticated owner API as the sidebar.'];
  report.success=true;
