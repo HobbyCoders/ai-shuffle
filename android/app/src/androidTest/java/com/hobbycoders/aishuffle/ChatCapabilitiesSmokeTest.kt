@@ -301,6 +301,35 @@ class ChatCapabilitiesSmokeTest {
         override fun grant(resources: Array<String>) { granted = resources }
         override fun deny() { denied = true }
     }
+    @Test fun filePickerDeliversMultipleContentUrisToWebView() {
+        val second = Uri.parse("content://com.hobbycoders.aishuffle.test.downloads/document/second")
+        fixture({ intent, _ ->
+            assertTrue(intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+            val files = android.content.ClipData.newRawUri("files", destination).apply {
+                addItem(android.content.ClipData.Item(second))
+            }
+            // Multi-selection normally has no Intent.data.
+            Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().apply { clipData = files })
+        }) { scenario, _ ->
+            var delivered = false
+            var selected: Array<Uri>? = null
+            scenario.onActivity { activity ->
+                val params = object : WebChromeClient.FileChooserParams() {
+                    override fun getMode() = MODE_OPEN_MULTIPLE
+                    override fun getAcceptTypes() = arrayOf("text/plain")
+                    override fun isCaptureEnabled() = false
+                    override fun getTitle(): CharSequence? = null
+                    override fun getFilenameHint(): String? = null
+                    override fun createIntent() = Intent(Intent.ACTION_GET_CONTENT).setType("text/plain")
+                }
+                val view = web(activity)
+                view.webChromeClient!!.onShowFileChooser(view, ValueCallback { selected = it; delivered = true }, params)
+            }
+            waitFor("Multi-file picker did not return") { delivered }
+            assertArrayEquals(arrayOf(destination, second), selected)
+        }
+    }
+
     @Test fun microphoneGrantIsAudioOnlyAndFileSelectionRechecksWorkerOwnership() {
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.RECORD_AUDIO)
         fixture({ _, server -> ServerStore.get(context).remove(server.id); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->

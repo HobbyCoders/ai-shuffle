@@ -52,7 +52,33 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
     const registry: NonNullable<typeof host.__aisEditors> = host.__aisEditors ??= { ids: new WeakMap(), nodes: new Map(), initial: new WeakMap() };
     registry.nodes.clear();
     const fields = []; let budget = 24000;
-    const candidates = Array.from(document.querySelectorAll<Field>('input, textarea'));
+    // querySelectorAll stops at shadow boundaries. Reddit's auth fields (and
+    // many other web components) are native inputs inside open shadow roots.
+    function* inputs(root: Document | ShadowRoot): Generator<Field> {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const el = node as Element;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) yield el;
+        if (el.shadowRoot) yield* inputs(el.shadowRoot);
+      }
+    }
+    // Shadow labels commonly contain slots, whose textContent omits the actual
+    // assigned label. Resolve only label text; never collect a field's value.
+    function labelText(node: Node): string {
+      if (node instanceof Element && node.getAttribute('aria-hidden') === 'true') return '';
+      if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+      const assigned = node instanceof HTMLSlotElement ? node.assignedNodes({ flatten: true }) : [];
+      return Array.from(assigned.length ? assigned : node.childNodes, labelText).join('');
+    }
+    function labelFor(el: Field): string {
+      const root = el.getRootNode() as Document | ShadowRoot;
+      const labelled = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/)
+        .map(id => root.getElementById(id)).filter((node): node is HTMLElement => !!node)
+        .map(labelText).join(' ').trim();
+      return (el.getAttribute('aria-label') || labelled || (el.labels?.[0] && labelText(el.labels[0]).trim()) || el.placeholder || el.type)
+        .replace(/\s+/g, ' ').slice(0, 256);
+    }
+    const candidates = Array.from(inputs(document));
     if (registry.pending?.isConnected) {
       const index = candidates.indexOf(registry.pending);
       if (index >= 0) candidates.splice(index, 1);
@@ -77,7 +103,7 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       let id = registry.ids.get(el);
       if (!id) { id = `${seed}-${fields.length}`; registry.ids.set(el, id); }
       registry.nodes.set(id, el);
-      fields.push({ id, type, value, ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: (el.getAttribute('aria-label') || el.labels?.[0]?.textContent || el.placeholder || type).slice(0, 256), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      fields.push({ id, type, value, ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: labelFor(el), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
     }
     return fields;
   }, randomUUID());
@@ -104,6 +130,8 @@ export async function editField(page: Page, args: Record<string, unknown>): Prom
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, value);
     try { el.setSelectionRange(a.start as number, a.end as number); } catch { /* email inputs have no selection API */ }
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: null }));
+    // Native input events cross open shadow roots so host/framework listeners
+    // receive edits just as they do with physical typing.
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: null }));
   }, args);
 }

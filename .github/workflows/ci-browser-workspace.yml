@@ -97,6 +97,9 @@ jobs:
         run: |
           npx --no-install playwright-core install --with-deps chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
+      - name: Verify shadow-root auth editor discovery and edits
+        working-directory: browser-mcp
+        run: npm test -- test/editors.test.ts -t 'nested shadow auth fields'
       - name: Verify shared browser and rendered desktop/mobile UI
         run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
       - name: Upload browser verification screenshots

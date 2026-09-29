@@ -405,7 +405,7 @@
 	let viewportTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function sendViewportNow(width: number, height: number) {
-		if (!humanControl || workspace?.viewport.mode !== 'fit') return;
+		if (!humanControl || keyboardOpen || workspace?.viewport.mode !== 'fit') return;
 		const w = Math.min(3840, Math.max(240, Math.round(width)));
 		const h = Math.min(2160, Math.max(240, Math.round(height)));
 		if (w < 200 || h < 200) return;
@@ -427,7 +427,10 @@
 	// Workspace acknowledgments replace the state object on every command.
 	// Observe stable eligibility/identity, not that object: resetting the last
 	// size on an acknowledgment creates an identical resize-command feedback loop.
-	const fitViewportEnabled = $derived(humanControl && workspace?.viewport.mode === 'fit');
+	// An IME resizes the local WebView. Resizing the remote page too would
+	// trip the frame gate and unmount the native field that opened the IME.
+	// Freeze remote geometry while editing; resync when the field blurs.
+	const fitViewportEnabled = $derived(humanControl && !keyboardOpen && workspace?.viewport.mode === 'fit');
 	const fitViewportTarget = $derived(
 		workspace ? `${workspace.runtime_id}:${workspace.active_tab_id}` : null,
 	);

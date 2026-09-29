@@ -71,6 +71,47 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
       await expect(uploadField(page, {field: file.id, paths: [allowed]})).rejects.toThrow('changed');
     } finally { await browser.close(); rmSync(folder, {recursive:true, force:true}); rmSync(outside, {recursive:true, force:true}); vi.unstubAllEnvs(); }
   });
+  it('discovers nested shadow auth fields and delivers composed edits without exposing passwords', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<input aria-label="Light DOM"><auth-dialog></auth-dialog>');
+      await page.evaluate(() => {
+        const dialog = document.querySelector('auth-dialog')!.attachShadow({ mode: 'open' });
+        dialog.innerHTML = '<faceplate-text-input><span slot="label">Email or username</span></faceplate-text-input><faceplate-text-input id="password"><span slot="label">Password</span></faceplate-text-input><div hidden><input aria-label="Hidden"></div><input disabled><input readonly><textarea aria-label="Notes">before</textarea><input type="file" aria-label="Choose files" accept=".txt" multiple>';
+        for (const host of dialog.querySelectorAll('faceplate-text-input')) {
+          const password = host.id === 'password';
+          host.attachShadow({ mode: 'open' }).innerHTML = `<label><span id="label"><slot name="label"></slot><span aria-hidden="true">*</span></span><input type="${password ? 'password' : 'text'}" aria-labelledby="label" value="${password ? 'synthetic secret' : 'existing'}"></label>`;
+          host.addEventListener('input', e => {
+            // A listener outside the inner root only sees composed events.
+            host.setAttribute('data-edited', String(e.composed));
+          });
+        }
+      });
+      const fields = await readEditors(page);
+      expect(fields.map(f => f.label)).toEqual(['Light DOM', 'Email or username', 'Password', 'Notes', 'Choose files']);
+      expect(fields[4]).toMatchObject({ type: 'file', accept: '.txt', multiple: true, value: '' });
+      await editField(page, { field: fields[3].id, action: 'replace', value: 'multiline\ntext', start: 0, end: 0 });
+      expect(await page.getByRole('textbox', { name: 'Notes', exact: true }).inputValue()).toBe('multiline\ntext');
+      const email = fields[1], password = fields[2];
+      expect(email.value).toBe('existing');
+      expect(password.value).toBe('');
+      const box = await page.getByRole('textbox', { name: 'Email or username' }).boundingBox();
+      expect(email).toMatchObject(box!);
+      await editField(page, { field: email.id, action: 'focus' });
+      await expect(page.getByRole('textbox', { name: 'Email or username' }).evaluate(el => el.matches(':focus'))).resolves.toBe(true);
+      await editField(page, { field: email.id, action: 'replace', value: 'synthetic@example.test', start: 4, end: 4 });
+      expect(await page.getByRole('textbox', { name: 'Email or username' }).inputValue()).toBe('synthetic@example.test');
+      expect(await page.locator('faceplate-text-input').first().getAttribute('data-edited')).toBe('true');
+      expect((await readEditors(page))[1].id).toBe(email.id);
+      expect((await readEditors(page))[2].value).toBe('');
+      await editField(page, { field: email.id, action: 'blur' });
+      expect(await page.getByRole('textbox', { name: 'Email or username' }).evaluate(el => el.matches(':focus'))).toBe(false);
+      await page.locator('faceplate-text-input').first().evaluate(el => el.remove());
+      await expect(editField(page, { field: email.id, action: 'replace', value: 'stale', start: 0, end: 0 })).rejects.toThrow('Text field changed');
+    } finally { await browser.close(); }
+  });
+
   it('discovers real fields, applies edits and rejects replaced nodes without leaking passwords', async () => {
     const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
     try {

@@ -37,6 +37,13 @@ CI sets `ANDROID_VERSION_CODE` to the build time in Unix minutes so signed updat
 
 CI helpers are in `ci/`; run them from this directory. Instrumentation tests reset app state and belong on a disposable emulator, not a phone with saved accounts.
 
+### Mobile input regression checks
+
+- Reddit login: open **Log In**, then tap **Email or username** and **Password**. These controls live inside open Shadow DOM, so the browser worker must discover nested roots and deliver composed input events to the page. Slotted labels should retain their names; password contents must never appear in shared workspace metadata. `browser-mcp/test/editors.test.ts` covers these contracts, and the browser workspace integration exercises a shadow-root field through the desktop/mobile panel. Closed shadow roots and iframe text fields are not covered by this fix.
+
+- Chat attachments: select two files in one picker invocation and confirm both appear in the composer. Repeat with one file and cancellation. The native bridge reads multi-selection `ClipData`, preserves picker order, and accepts only 1–32 `content://` URIs while the originating document and worker remain authorized. `ChatFileChooserTest` covers parsing and limits; `ChatCapabilitiesSmokeTest` covers delivery through the activity callback and ownership rechecks.
+- Browser panel: choose **Fit panel**, tap a text field, type with the Android keyboard, then tap outside it. Remote viewport auto-fit pauses while a native editor is focused so the IME's local resize cannot remove the focused field. Auto-fit resumes on blur. Check both first-tap takeover and an already-controlled page, and confirm scrolling outside a field does not summon the keyboard. `BrowserPanel.test.ts` covers the fit timer/focus regression; desktop browser emulation alone cannot establish Android IME behavior.
+
 The Cloudflare account hub is in `hub/`. Its deployment workflow uses the `account-hub-production` environment in this repository.
 
 The image registry Worker for `registry.hobbycoders.com` is in `registry/`; its deployment workflow (`deploy-registry.yml`) uses the `registry-production` environment. Owner steps: `registry/README.md`.
