@@ -13,7 +13,6 @@ MAIN = "refs/heads/main"
 TAG = "refs/tags/v0.8.19"
 DEPLOY = ["deploy-hub.yml", "deploy-license.yml", "deploy-registry.yml", "deploy-site.yml"]
 JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
-    ("desktop-source.yml", "publish", "main"),
     ("release.yml", "preflight", "tag"),
     ("release.yml", "create-release", "tag"),
     ("release.yml", "source-stable", "tag"),
@@ -52,7 +51,9 @@ def permits(expression, *, actor_id=OWNER, actor="Quickkill0", triggering_actor=
     context = dict(
         github=NS(repository=repo, actor_id=actor_id, actor=actor,
                   triggering_actor=actor if triggering_actor is None else triggering_actor,
-                  event_name=event, ref=ref, event=NS(repository=NS(private=True))),
+                  event_name=event, ref=ref, event=NS(repository=NS(private=True),
+                      workflow_run=NS(event="pull_request", conclusion="success",
+                                      head_repository=NS(full_name=REPO)))),
         inputs=NS(**inputs),
         needs=NS(build=NS(result="success"), verify=NS(result="success"),
                  create_release=NS(outputs=NS(promote_latest="true"))),
@@ -91,8 +92,8 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
         assert permits(condition, ref=TAG, event="push")
 
 
-def test_no_automatic_site_or_source_publication_but_ci_still_automatic():
-    for name in DEPLOY + ["desktop-source.yml"]:
+def test_no_automatic_production_site_publication_but_ci_still_automatic():
+    for name in DEPLOY:
         assert set(workflow(name)["on"]) == {"workflow_dispatch"}
     for name in ["ci-backend.yml", "ci-frontend.yml", "android.yml"]:
         assert "pull_request" in workflow(name)["on"]

@@ -2,8 +2,8 @@
 // Archives live in a private GitHub release; signed metadata lives in the
 // account hub's D1. No R2 and no application or installer build.
 //
-// SOURCE_CHANNEL=edge (default, desktop-source.yml on every main push): the
-//   current main revision, served at /v1/desktop/manifest/edge.
+// SOURCE_CHANNEL=edge (default, desktop-source.yml after merged-main CI passes):
+//   the current main revision, served at /v1/desktop/manifest/edge.
 // SOURCE_CHANNEL=stable (release.yml, after the release image passed container
 //   verification): the commit of RELEASE_TAG, which must be on main. Served at
 //   /v1/desktop/manifest, the address every customer install follows.

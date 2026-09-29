@@ -52,12 +52,25 @@ installer dispatch must select that existing tag as its workflow ref and
 supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
 
-An explicit owner dispatch on `main` publishes an **edge** source update
-(`desktop-source.yml` → `publish-source.mjs` with the default
-`SOURCE_CHANNEL=edge`) at `/v1/desktop/manifest/edge`, signed with
-`channel: "edge"`. Customer containers only accept `stable`; set
-`UPDATE_CHANNEL=edge` on your own workers to follow main. Manual
-`docker-publish.yml` runs on `main` produce the `edge` image tag.
+Merges to protected `main` automatically publish a signed **edge** source update
+at `/v1/desktop/manifest/edge` after all applicable PR workflows pass. The gate
+requires the merged tree to equal the tested PR head, checks the latest run of
+each workflow selected by its path filters, and refuses missing, pending,
+failed, skipped, or cancelled runs. Update a stale PR branch before merging so
+its tested tree includes the current base. Push and CI-completion events both
+check readiness; an owner dispatch can retry a missed or failed publication.
+
+Only the current `main` revision can publish. The read-only gate runs before
+signing secrets are available and is repeated immediately before publication.
+The publisher checks `main` again before writing the signed pointer. These
+checks use trusted main code, not PR artifacts or a PR checkout.
+
+Stable releases still require an owner-created release tag. Existing workers
+stay on their selected channel: publishing edge does not switch, install, or
+restart them. For your own Docker workers set `UPDATE_CHANNEL=edge`; for desktop
+set `{"channel":"edge"}` in `updates/update-channel.json` under the app's user-data
+directory. Both defaults remain stable. Manual `docker-publish.yml` runs on
+`main` produce the `edge` image tag.
 
 ## Prepared candidate: 0.8.19 (not released)
 
@@ -109,10 +122,13 @@ production workflows instead of upgrading billing. This is **not** a native
 reviewer gate: anyone trusted to change protected workflow code must be trusted
 with this policy. Secrets were not read, moved or changed.
 
-Production jobs require repository `HobbyCoders/ai-shuffle`, immutable actor ID
-`76577322` (Quickkill0), and the same triggering actor on reruns. The hub, license,
-registry, website and edge-source deploys accept only manual dispatch from
-`main`; a merge no longer deploys the website or publishes a source update.
+Production deployment jobs require repository `HobbyCoders/ai-shuffle`, immutable
+actor ID `76577322` (Quickkill0), and the same triggering actor on reruns. The hub,
+license, registry and website accept only manual dispatch from `main`; a merge
+does not deploy those services. Edge source publication is the narrow exception:
+protected-main merges publish automatically after the exact-tree CI gate above.
+Its manual retry remains owner-only. This exception does not grant automatic
+stable releases, Play uploads, worker installation, or restarts.
 Stable release jobs accept only the owner-created `v*` tag push or an explicit
 owner dispatch from that tag. Reusable signing/publishing workflows also enforce
 the owner identity and protected ref; another maintainer cannot rerun an owner's
