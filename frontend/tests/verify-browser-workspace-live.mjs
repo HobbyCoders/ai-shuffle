@@ -307,8 +307,8 @@ try {
     assert.equal(bounds.panel.y, bounds.chat.y);
     assert.equal(bounds.panel.height, bounds.chat.height);
     await button(primary, 'Restore browser panel').click();
-    if (name === 'mobile') {
-      phase = 'mobile real keyboard';
+    {
+      phase = `${name} shadow-root native keyboard`;
       await painted(primary, 390, 844);
       const input = primary.getByRole('textbox', { name: 'Message', exact: true });
       await input.click();

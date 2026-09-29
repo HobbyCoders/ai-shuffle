@@ -249,8 +249,19 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         nonlocal fixture_loads
         fixture_loads += 1
         return HTMLResponse("""<!doctype html><html><head><title>Workspace fixture</title></head>
-<body style="margin:0"><input aria-label="Message" style="position:absolute;left:10px;top:10px;width:240px;height:40px"
- oninput="document.querySelector('output').textContent='Typed: '+this.value;document.title='Typed: '+this.value"><main style="padding-top:70px">
+<body style="margin:0"><auth-field><span slot="label">Message</span></auth-field>
+<script>
+// Like Reddit's auth popup: the actual field and its slotted label are inside
+// an open shadow root. The app handler lives outside that root.
+const auth = document.querySelector('auth-field');
+const root = auth.attachShadow({mode:'open'});
+root.innerHTML = '<label><span id="label"><slot name="label"></slot></span><input aria-labelledby="label" style="position:absolute;left:10px;top:10px;width:240px;height:40px"></label>';
+auth.addEventListener('input', () => {
+ const value = root.querySelector('input').value;
+ document.querySelector('output').textContent = 'Typed: ' + value;
+ document.title = 'Typed: ' + value;
+});
+</script><main style="padding-top:70px">
 <h1>Shared browser fixture</h1><output>Typed: </output><button onclick="this.textContent='Clicked'">Click me</button>
 <form style="position:absolute;left:10px;top:200px" action="/fixture-upload" method="post" enctype="multipart/form-data" target="upload-result">
 <label for="documents">Upload documents</label><input id="documents" name="files" type="file" accept=".txt" multiple>
