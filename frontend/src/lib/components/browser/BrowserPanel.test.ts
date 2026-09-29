@@ -42,6 +42,57 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+describe('native keyboard in fit viewport', () => {
+ it.each(['agent', 'human'] as const)('freezes remote resizing while focused and resyncs on blur (initial owner: %s)', async (owner) => {
+  vi.useFakeTimers();
+  const observers = new Map<Element, () => void>();
+  vi.stubGlobal('ResizeObserver', class {
+   target?: Element;
+   constructor(private callback: () => void) {}
+   observe(target: Element) { this.target = target; observers.set(target, this.callback); }
+   disconnect() { if (this.target) observers.delete(this.target); }
+  });
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1; });
+  vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ close: vi.fn() }));
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  let height = 700;
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+   x: 0, y: 0, left: 0, top: 0, right: 375, bottom: height, width: 375, height, toJSON() {},
+  }));
+  try {
+   const workspace = state(owner);
+   workspace.viewport = { mode: 'fit', width: 375, height: 700 };
+   workspace.editors = [{ id: 'field', type: 'text', value: '', label: 'Remote message', x: 10, y: 10, width: 200, height: 40 }];
+   const view = await setup(workspace);
+   mocks.config!.onFrame('AA==', { deviceWidth: 375, deviceHeight: 700, runtime_id: 'runtime', tab_id: 'tab' });
+   await tick(); await Promise.resolve(); await tick();
+   const input = view.getByRole('textbox', { name: 'Remote message' });
+   const body = view.container.querySelector('.panel-body')!;
+   // Focus before the initial fit timer expires, as on first takeover.
+   input.focus();
+   await tick();
+   if (owner === 'agent') {
+    const takeover = mocks.send.mock.calls.map(([p]) => p).find(p => (p as { op?: string }).op === 'takeover') as { id: string };
+    expect(takeover).toBeTruthy();
+    mocks.config!.onWorkspace?.({ ...workspace, control: state('human').control });
+    mocks.config!.onCommandResult?.(takeover.id, true);
+    await tick();
+   }
+   height = 400; // Android IME shrinks the WebView.
+   observers.get(body)?.();
+   await vi.advanceTimersByTimeAsync(150);
+   expect(mocks.send.mock.calls.map(([p]) => p)).not.toContainEqual(expect.objectContaining({ op: 'viewport' }));
+   expect(document.activeElement).toBe(input);
+   input.blur(); await tick();
+   await vi.advanceTimersByTimeAsync(150);
+   expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ op: 'viewport', args: { mode: 'fit', width: 375, height: 400 } }));
+  } finally {
+   cleanup(); vi.useRealTimers(); vi.restoreAllMocks();
+  }
+ });
+});
+
+
 describe('browser control handoff', () => {
  it('releases without taking control and waits for authoritative ownership', async () => {
   const view = await setup();

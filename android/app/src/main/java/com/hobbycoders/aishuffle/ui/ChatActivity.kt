@@ -85,7 +85,7 @@ class ChatActivity : NativeScreen() {
         fileChooserOpen = false
         val callback = fileCallback
         fileCallback = null
-        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        val uris = ChatFileChooser.parseResult(result.resultCode, result.data)
         callback?.onReceiveValue(uris?.takeIf { fileDocument == document && validDocument() &&
             it.size in 1..32 && it.all { uri -> uri.scheme == "content" } })
     }
@@ -141,7 +141,7 @@ class ChatActivity : NativeScreen() {
                 if (!validDocument() || fileChooserOpen) { callback.onReceiveValue(null); return true }
                 fileCallback = callback
                 fileDocument = document
-                return try { fileChooserOpen = true; fileChooser.launch(params.createIntent()); true }
+                return try { fileChooserOpen = true; fileChooser.launch(ChatFileChooser.intent(params)); true }
                 catch (_: Exception) { fileChooserOpen = false; fileCallback = null; callback.onReceiveValue(null); true }
             }
             override fun onPermissionRequest(request: PermissionRequest) {
