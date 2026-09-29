@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
 	createSessionSwitcher,
+	setPersistedRunBinding,
 	gateSnapshotPatch,
 	reconciledSessionMode,
 	type SessionSwitcherDeps,
@@ -446,6 +447,20 @@ describe('session-switcher · authoritative binding hydration', () => {
 });
 
 describe('session-switcher · switchSession isolation', () => {
+	it.each(['', '{"type":"doc","content":[{"type":"paragraph"}]}'])('inherits new permissions after caching an empty composer (%j)', async (draft) => {
+		appMode.set('code', false);
+		const { switcher, getState } = makeSwitcher(fullState({
+			sessionId: null, draft, permissionModeOverride: null,
+			worktreeBranch: '', worktreeId: null, worktreeIntent: 'local',
+		}));
+		await switcher.switchSession('another-session');
+		setPersistedRunBinding('permissionMode', 'bypassPermissions');
+		expect(switcher.newChat()).toBe(false);
+		expect(getState().permissionModeOverride).toBe('bypassPermissions');
+		switcher.destroy();
+	});
+
+
 	it.each(['typed draft', ''])('restores the complete staged branch draft (%j) after visiting a session', async (draft) => {
 		appMode.set('code');
 		const {switcher, getState} = makeSwitcher(fullState({
@@ -702,6 +717,19 @@ describe('session run binding on switch', () => {
 	beforeEach(() => {
 		_mockSessions.current = [];
 		localStorage.clear();
+	});
+
+	it.each(['default', 'auto', 'acceptEdits', 'bypassPermissions'])('inherits %s only for a new session, not existing sessions', async (mode) => {
+		setPersistedRunBinding('permissionMode', mode);
+		_mockSessions.current = [{ id: 'existing-ask', permission_mode: 'default' }, { id: 'legacy' }];
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('existing-ask');
+		expect(getState().permissionModeOverride).toBe('default');
+		await switcher.switchSession('legacy');
+		expect(getState().permissionModeOverride).toBeNull();
+		switcher.newChat();
+		expect(getState().permissionModeOverride).toBe(mode);
+		switcher.destroy();
 	});
 
 	it('restores the complete last-used binding for a new chat', () => {

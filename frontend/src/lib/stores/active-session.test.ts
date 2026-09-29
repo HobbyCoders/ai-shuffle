@@ -51,6 +51,10 @@ vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 import { activeSession } from './active-session';
 import { api, recheckAuthOn401 } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
+import { composerPreferences } from './composer-preferences';
+import { sessionEphemeralCache } from './session-cache';
+import { appMode } from './sessionMode.svelte';
+import { bindSessionOwner } from './session-owner';
 
 describe('chat authentication close recovery', () => {
 	afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -102,6 +106,9 @@ const ids = (arr: Array<{ request_id: string }>) => arr.map((x) => x.request_id)
 
 describe('live permission selection', () => {
 	beforeEach(() => {
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
+		composerPreferences.set('permissionMode', 'default');
+		sessionEphemeralCache.clear();
 		activeSession.current.sessionId = 'live-permissions';
 		activeSession.current.permissionModeOverride = 'default';
 		activeSession.current.isStreaming = true;
@@ -118,12 +125,14 @@ describe('live permission selection', () => {
 		await pending;
 		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 		expect(activeSession.current.isStreaming).toBe(true);
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
 	});
 
 	it('keeps the previous selection when the owner rejects the update', async () => {
 		vi.spyOn(api, 'put').mockRejectedValue(new Error('offline'));
 		await expect(activeSession.setPermissionModeOverride('bypassPermissions')).rejects.toThrow('offline');
 		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(composerPreferences.current.permissionMode).toBe('default');
 	});
 
 	it('does not apply a slow reply to a different session', async () => {
@@ -134,15 +143,71 @@ describe('live permission selection', () => {
 		acknowledge({ permission_mode: 'bypassPermissions' });
 		await pending;
 		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+	});
+	it('does not let an older acknowledgement replace a newer explicit preference', async () => {
+		let acknowledge!: (value: { permission_mode: string }) => void;
+		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setPermissionModeOverride('bypassPermissions');
+		activeSession.current.sessionId = null;
+		await activeSession.setPermissionModeOverride('acceptEdits');
+		acknowledge({ permission_mode: 'bypassPermissions' });
+		await pending;
+		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
+		expect(composerPreferences.current.permissionMode).toBe('acceptEdits');
 	});
 
-	it('keeps a new unsent chat selection local and does not remember bypass as a default', async () => {
+	it('retires an acknowledgement from a previous account', async () => {
+		let acknowledge!: (value: { permission_mode: string }) => void;
+		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setPermissionModeOverride('bypassPermissions');
+		bindSessionOwner('previous-owner', 'new-owner');
+		acknowledge({ permission_mode: 'bypassPermissions' });
+		await pending;
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(composerPreferences.current.permissionMode).toBe('default');
+	});
+
+	it.each(['code', 'voice', 'chat'] as const)('inherits the explicit selection in a fresh %s composer without changing another session', async (lane) => {
+		appMode.set(lane, false);
+		activeSession.current.sessionId = null;
+		await activeSession.setPermissionModeOverride('bypassPermissions');
+		// Viewing an existing Ask session must neither widen it nor erase the default.
+		activeSession.current.sessionId = 'existing-ask';
+		activeSession.current.permissionModeOverride = 'default';
+		activeSession.applyComposerDefaults();
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		Object.assign(activeSession.current, { draft: '', worktreeBranch: '', worktreeId: null });
+		activeSession.newChat();
+		expect(activeSession.current.permissionModeOverride).toBe(lane === 'chat' ? null : 'bypassPermissions');
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+		appMode.set('code', false);
+	});
+
+	it.each([
+		['', false],
+		['{"type":"doc","content":[{"type":"paragraph"}]}', false],
+		['typed draft', true],
+		['{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Keep Ask"}]}]}', true],
+		['{"type":"doc","content":[{"type":"paragraph","content":[{"type":"fileChip"}]}]}', true],
+	] as const)('applies defaults only to semantically empty drafts (%j)', (draft, meaningful) => {
+		composerPreferences.set('permissionMode', 'bypassPermissions');
+		Object.assign(activeSession.current, {
+			sessionId: null, mode: 'code', draft, permissionModeOverride: 'default',
+			worktreeBranch: '', worktreeId: null, isStreaming: false,
+			optimisticStreaming: false, isCreatingWorktree: false, isRestoringSession: false,
+		});
+		activeSession.applyComposerDefaults();
+		expect(activeSession.current.permissionModeOverride).toBe(meaningful ? 'default' : 'bypassPermissions');
+	});
+
+	it('keeps a new unsent chat selection local and remembers explicit bypass for new sessions', async () => {
 		activeSession.current.sessionId = null;
 		const put = vi.spyOn(api, 'put');
 		await activeSession.setPermissionModeOverride('bypassPermissions');
 		expect(put).not.toHaveBeenCalled();
 		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
-		expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('default');
+		expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('bypassPermissions');
 	});
 });
 

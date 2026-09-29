@@ -2,7 +2,9 @@
 
 Every image that enters the conversation through a tool result (builtin file
 reads, MCP screenshots, computer use) passes through :func:`condition_image`
-on its way from a ``ToolImage`` to an ``Image`` content block. Providers bill
+on its way from a ``ToolImage`` to an ``Image`` content block. Provider serializers
+also apply it to persisted images, so older oversized history can resume without
+rewriting or deleting its original content. Providers bill
 images by PIXELS, not bytes — roughly width x height / 750 tokens on
 Anthropic-class vision APIs — so a screenshot downscaled to fit inside the
 billing-optimal long edge costs the same tokens as its multi-megabyte
@@ -12,9 +14,9 @@ The cap follows Anthropic's own guidance (~1568 px long edge): beyond it the
 model does not resolve more detail, so sending more pixels only risks
 provider-side downscale artifacts and oversized requests.
 
-Pillow is optional: when it is missing (or an image cannot be decoded) the
-original bytes pass through unchanged — conditioning degrades to a no-op
-rather than failing a tool call.
+Pillow is a runtime dependency so headless workers also enforce this budget.
+If an image cannot be decoded (or the installation is incomplete), the original
+bytes pass through unchanged rather than failing a tool call.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ _REENCODE_RAW_BYTES = 512_000
 
 
 def _open_image(raw: bytes):
-    from PIL import Image  # imported lazily; Pillow is optional
+    from PIL import Image  # imported lazily for text-only calls
 
     return Image.open(io.BytesIO(raw))
 
@@ -43,8 +45,8 @@ def condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
     """Downscale/re-encode one base64 image to the model-facing budget.
 
     Returns ``(media_type, base64)`` — possibly identical to the input when the
-    image is already within budget, encodes no smaller after conditioning, or
-    cannot be processed.
+    image is already within budget (including when a re-encode is no smaller)
+    or cannot be processed. A successful resize always wins over byte size.
     """
     try:
         raw = base64.b64decode(data_b64, validate=False)
@@ -79,9 +81,10 @@ def condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
             else:
                 src.save(buffer, format="PNG", optimize=True)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        # Keep the original when it encodes smaller anyway (PNG line art can
-        # beat JPEG) — conditioning never makes an image WORSE.
-        if len(encoded) >= len(data_b64):
+        # Byte size is only an optimization AFTER the pixel budget is met.
+        # Compressed line art can grow when resized; restoring that oversized
+        # original poisons every later request, including session resumes.
+        if not resized and len(encoded) >= len(data_b64):
             return media_type, data_b64
         return out_type, encoded
     except Exception:

@@ -195,6 +195,124 @@ def _terminal(events: list) -> Any:
     return terminal
 
 
+@pytest.fixture(scope="module")
+def oversized_webp() -> bytes:
+    import io
+    from PIL import Image
+
+    # A tiny compressed file with a huge pixel count. Resizing to JPEG makes
+    # the bytes larger, which used to restore the unsafe original.
+    with Image.new("RGB", (6240, 6240), "white") as image:
+        buffer = io.BytesIO()
+        image.save(buffer, format="WEBP", lossless=True)
+    return buffer.getvalue()
+
+
+def _wire_images(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from _wire_images(item)
+    elif isinstance(value, dict):
+        if value.get("type") == "image":
+            yield value["source"]["data"]
+        elif value.get("type") in ("image_url", "input_image"):
+            url = value["image_url"]
+            if isinstance(url, dict):
+                url = url["url"]
+            yield url.split(",", 1)[1]
+        else:
+            for item in value.values():
+                yield from _wire_images(item)
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-read", "persisted-resume"])
+async def test_oversized_read_and_persisted_resume(
+    server, tmp_path, monkeypatch, oversized_webp, kind, legacy,
+):
+    """Real Read -> engine -> disk -> restarted Resume -> HTTP serialization.
+
+    Legacy mode reproduces a worker installed without Pillow, not a fixture
+    that merely seeds an Image. History must retain its original bytes while
+    the next request is bounded, with no rewind or new user turn needed.
+    """
+    import base64
+    import io
+    from PIL import Image as PILImage
+    from fluid.events.ops import Resume
+    from fluid.messages import Image
+    from fluid.store.jsonl import JsonlStore
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools import images
+
+    attachment = tmp_path / "attachment.webp"
+    attachment.write_bytes(oversized_webp)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    directory = tmp_path / "history"
+    store = JsonlStore(directory)
+
+    def make_loop(store, session_id=None):
+        return NativeLoop(
+            provider=_client(kind, server.url), store=store, session_id=session_id,
+            model=MODELS[kind], registry=registry,
+            permissions=PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(tmp_path)),
+        )
+
+    loop = make_loop(store)
+    failure = fps.error_reply(400, body={"error": {
+        "type": "invalid_request_error", "code": "invalid_value",
+        "message": "image requires 38025 patches after processing, limit 30000",
+    }})
+    server.script(
+        tool_reply(kind, [{"id": "read-image", "name": "Read",
+                           "args": {"file_path": str(attachment)}}]),
+        failure if legacy else text_reply(kind, "Image received"),
+    )
+    try:
+        with monkeypatch.context() as old_worker:
+            if legacy:
+                def missing_pillow(_raw):
+                    raise ModuleNotFoundError("No module named 'PIL'")
+                old_worker.setattr(images, "_open_image", missing_pillow)
+            await loop.submit(UserTurn(content=f"Read {attachment}"))
+            await asyncio.wait_for(loop.wait_turn(), TURN_BUDGET)
+        sid = loop.session_id
+        terminal = _terminal(loop.bus.log(sid))
+        assert isinstance(terminal, ErrorEvent if legacy else TurnComplete)
+        nodes = await store.load_path(sid)
+        original_nodes = {n.node_id: n.message.to_dict() for n in nodes}
+        [image] = [c for n in nodes for b in n.message.content
+                   if isinstance(b, ToolResultBlock) for c in b.content
+                   if isinstance(c, Image)]
+        with PILImage.open(io.BytesIO(base64.b64decode(image.data))) as decoded:
+            assert max(decoded.size) == (6240 if legacy else images.MAX_IMAGE_EDGE)
+        if legacy:
+            assert base64.b64decode(image.data) == oversized_webp
+            assert list(_wire_images(server.requests[-1].body)) == [image.data]
+            await loop.aclose()
+            await store.aclose()
+            # Reopen the durable store, not the in-memory Image objects.
+            store = JsonlStore(directory)
+            loop = make_loop(store, sid)
+            server.script(text_reply(kind, "Recovered image"))
+            await loop.submit(Resume())
+            await asyncio.wait_for(loop.wait_turn(), TURN_BUDGET)
+            assert isinstance(_terminal(loop.bus.log(sid)), TurnComplete)
+            for node_id, original in original_nodes.items():
+                assert (await store.get_node(sid, node_id)).message.to_dict() == original
+        [sent] = list(_wire_images(server.requests[-1].body))
+        with PILImage.open(io.BytesIO(base64.b64decode(sent))) as decoded:
+            assert decoded.size == (images.MAX_IMAGE_EDGE, images.MAX_IMAGE_EDGE)
+        # The regression specifically needs the larger encoding to win.
+        assert len(base64.b64decode(sent)) > len(oversized_webp)
+        assert attachment.read_bytes() == oversized_webp
+        assert len(server.requests) == (3 if legacy else 2)
+    finally:
+        await loop.aclose()
+        await store.aclose()
+
+
 def _roles(messages: list) -> list[str]:
     return [m.role for m in messages]
 

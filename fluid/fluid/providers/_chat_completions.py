@@ -56,6 +56,7 @@ from fluid.providers._transport import (
     refusal_payload,
 )
 from fluid.providers.base import StreamChunk, flatten_system
+from fluid.tools.images import condition_image
 
 log = logging.getLogger(__name__)
 
@@ -113,9 +114,10 @@ def tool_result_content(block: ToolResultBlock) -> str:
 
 
 def image_part(block: Image) -> dict[str, Any]:
+    media_type, data = condition_image(block.media_type, block.data)
     return {
         "type": "image_url",
-        "image_url": {"url": f"data:{block.media_type};base64,{block.data}"},
+        "image_url": {"url": f"data:{media_type};base64,{data}"},
     }
 
 

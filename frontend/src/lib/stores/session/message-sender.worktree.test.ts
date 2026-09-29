@@ -8,6 +8,7 @@ import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { composerPreferences } from '../composer-preferences';
 
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -52,7 +53,7 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 		stopRequestedBeforeSession: false, worktreeCreationGeneration: 0, worktreeCreateAbort: null,
 	};
 	const wsConn = { isConnected: vi.fn(() => true), connect: vi.fn(), send: vi.fn(() => true), resetReconnectAttempts: vi.fn() };
-	const sendMessage = vi.fn(async () => true);
+	const sendMessage = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>(async () => true);
 	const deps: MessageSenderDeps = {
 		update: (fn) => { state = fn(state); },
 		getState: () => state,
@@ -70,6 +71,27 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 beforeEach(() => {
 	post.mockReset();
 	vi.mocked(feedController.start).mockClear();
+});
+
+describe('remembered permission on worktree creation', () => {
+	it.each(['createWorktree', 'autoCreateWorktree'] as const)('carries the explicit preference through %s', async (entry) => {
+		composerPreferences.set('permissionMode', 'bypassPermissions');
+		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'feat/picked', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		const { sender, sendMessage, wsConn } = setup({ worktreeBranch: 'feat/picked', permissionModeOverride: composerPreferences.current.permissionMode });
+		// Manual branch creation sends the prompt over WS after the POST; exercise
+		// that real second leg rather than stopping at the fixture's delegate.
+		sendMessage.mockImplementation((...args: Parameters<typeof sender.sendMessage>) => sender.sendMessage(...args));
+		await sender[entry]('hello');
+		if (entry === 'createWorktree') {
+			expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({
+				type: 'query', overrides: expect.objectContaining({ permission_mode: 'bypassPermissions' }),
+			}));
+		} else {
+			expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.objectContaining({
+				overrides: expect.objectContaining({ permission_mode: 'bypassPermissions' }),
+			}), { keepalive: true });
+		}
+	});
 });
 
 describe('autoCreateWorktree', () => {

@@ -143,6 +143,29 @@ class TestAnchorFromStoreEntries:
 
         assert anchor is None
 
+    def test_user_anchor_ignores_unrelated_steered_db_rows(
+        self, no_jsonl, store_entries, mock_db
+    ):
+        mock_db.get_session_messages.return_value.insert(1, {
+            "id": 15, "role": "user", "content": "a delivered mid-turn steer",
+            "jsonl_uuid": None,
+        })
+        assert rds._fallback_anchor_by_content(SID, SDK_SID, "/workspace", "u2") == 20
+
+    def test_user_anchor_refuses_ambiguous_duplicate_counts(
+        self, no_jsonl, store_entries, mock_db
+    ):
+        mock_db.get_session_messages.return_value.append({
+            "id": 30, "role": "user", "content": "hello 2", "jsonl_uuid": None,
+        })
+        assert rds._fallback_anchor_by_content(SID, SDK_SID, "/workspace", "u2") is None
+        # The UUID fast path must not bypass the ambiguity guard by stamping
+        # a duplicate (possibly a steer) onto the wrong DB row first.
+        assert rds.backfill_user_jsonl_uuids(SID, SDK_SID, "/workspace") == 1
+        assert [call.args for call in mock_db.set_message_jsonl_uuid.call_args_list] == [
+            (10, "u1"),
+        ]
+
     def test_no_transcript_anywhere_returns_none(self, no_jsonl, mock_db):
         with patch("app.core.pg_session_store._load_entries_by_session_id_sync",
                    return_value=[]), \

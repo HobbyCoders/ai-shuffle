@@ -21,15 +21,27 @@ it('applies account snapshots and explicit clears without echoing saves', async 
  expect(mocks.save).toHaveBeenCalledExactlyOnceWith('composer.profile','agent-a');
 });
 
-it('never remembers bypass as the default, from storage or from another device', async () => {
+it.each(['default','auto','acceptEdits','bypassPermissions'])('remembers explicit %s picks across reload and account sync', async (mode) => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ p.set('permissionMode',mode);
+ expect(p.current.permissionMode).toBe(mode);
+ expect(mocks.save).toHaveBeenCalledWith('composer.permissionMode',mode);
+ expect(localStorage.getItem('aihub_lastPermissionMode')).toBe(mode);
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ expect(reloaded.current.permissionMode).toBe(mode);
+ mocks.adapters.get('composer.permissionMode')!.apply('default');
+ mocks.adapters.get('composer.permissionMode')!.apply(mode);
+ expect(reloaded.current.permissionMode).toBe(mode);
+ expect(localStorage.getItem('ai-shuffle-composer:permissionMode')).toBe(JSON.stringify(mode));
+});
+
+it('migrates legacy bypass without silently replacing the user choice', async () => {
  localStorage.setItem('aihub_lastPermissionMode','bypassPermissions');
  const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.current.permissionMode).toBe('bypassPermissions');
+ mocks.adapters.get('composer.permissionMode')!.apply('plan');
  expect(p.current.permissionMode).toBe('default');
- mocks.adapters.get('composer.permissionMode')!.apply('bypassPermissions');
- expect(p.current.permissionMode).toBe('default');
- expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('default');
- p.set('permissionMode','bypassPermissions');
- expect(mocks.save).toHaveBeenCalledWith('composer.permissionMode','default');
 });
 
 it('resolves only the stable project UUID and never copies a foreign path or guesses by name', async () => {

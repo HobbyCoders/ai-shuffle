@@ -228,6 +228,58 @@ async def test_uploaded_attachment_and_hardlink_through_actual_registry(workspac
         assert "outside marker" not in denied.text
 
 
+@pytest.mark.asyncio
+async def test_uploaded_image_reaches_provider_with_bounded_pixels(workspace):
+    """Exercise Chat's real upload and broker, not just Fluid's builtin Read."""
+    import base64
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image as PILImage
+    from app.core.confined_files import upload
+    from fluid.engine.native import NativeLoop
+    from fluid.events import ToolResult
+    from fluid.messages import Message
+    from fluid.providers.base import ProviderCaps, ProviderRequest
+    from fluid.providers.openai_responses.serialize import build_request_body
+    from fluid.store.base import MemoryStore
+    from fluid.tools.images import MAX_IMAGE_EDGE
+    from fluid.tools.registry import ToolCtx
+
+    buffer = io.BytesIO()
+    with PILImage.new("RGB", (6240, 6240), "white") as image:
+        image.save(buffer, format="WEBP", lossless=True)
+    original = buffer.getvalue()
+    attachment = upload(workspace.parent, workspace.name, "large.webp", original)
+    registry = await HarnessAdapter()._build_registry(_options("chat"), native=True)
+    loop = NativeLoop(
+        provider=SimpleNamespace(name="test", caps=ProviderCaps()),
+        store=MemoryStore(), model="test", registry=registry,
+        permissions=_engine_for("chat"), ctx=ToolCtx(cwd=str(workspace)),
+        allowed_tools=CHAT_SURFACE,
+    )
+    try:
+        result = await loop._dispatch_tool("session", "turn", {
+            "tool_use_id": "read-image", "name": "Read",
+            "input": {"file_path": str(attachment)},
+        })
+        assert not result.is_error
+        body = build_request_body(ProviderRequest(
+            model="test", messages=[Message(role="user", content=[result])],
+        ))
+        [image_part] = [part for part in body["input"][0]["output"]
+                        if part["type"] == "input_image"]
+        data = image_part["image_url"].split(",", 1)[1]
+        with PILImage.open(io.BytesIO(base64.b64decode(data))) as decoded:
+            assert decoded.size == (MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)
+        # Display/event history and the downloadable upload retain the original.
+        [event] = [e for e in loop.bus.log("session") if isinstance(e, ToolResult)]
+        assert base64.b64decode(event.images[0]["data"]) == original
+        assert attachment.read_bytes() == original
+    finally:
+        await loop.aclose()
+
+
 # =============================================================================
 # Delegated leg: what the claude CLI is handed on its command line
 # =============================================================================

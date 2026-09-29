@@ -521,3 +521,118 @@ async def test_execute_rewind_non_v2_session_unchanged(rewind_env, monkeypatch):
     assert resp.success is True
     assert rewind_env.truncate_calls == ["u-1"]
     assert se.get_events(SID) == []  # no transcript.rewound appended
+
+
+async def _produce_failed_attachment_turns(sdk_session_id, tmp_path):
+    """Persist real NativeLoop user nodes, including a rejected image turn."""
+    import asyncio
+
+    from app.core.environment import generate_turn_environment_note
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import database
+    from fluid.engine.native import NativeLoop
+    from fluid.events import UserTurn
+    from fluid.messages import Image, Text
+    from fluid.providers.base import ProviderCaps
+    from fluid.tools.registry import ToolCtx
+
+    class RejectImageProvider:
+        name = "openai_responses"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            raise ValueError("Invalid image data")
+            yield  # make this a streaming provider, without contacting a service
+
+    database.create_profile("rewind-test", "Rewind test", None, {})
+    database.create_session(SID, "rewind-test", derive_provider_from_profile=False)
+    store = PgFluidStore()
+    loop = NativeLoop(
+        provider=RejectImageProvider(), store=store, session_id=sdk_session_id,
+        model="test-model", ctx=ToolCtx(cwd=str(tmp_path)), setting_sources=[],
+    )
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    # Use the host's real context-note producer and send_query enrichment, not
+    # a fixture that pre-populates the cleaned checkpoint text we want to read.
+    adapter._env_note = generate_turn_environment_note
+    prompt = "Inspect @/uploads/map.webp"
+    try:
+        for index in range(2):
+            if index:
+                # Delivered steers are recorded as user rows/events but not
+                # standalone Fluid prompts; this matches the live failure.
+                steer = "Please preserve the map"
+                recorder = TurnRecorder(SID, None, None, None, "test")
+                await recorder.record_steered_user_message(steer)
+                database.add_session_message(SID, "user", steer)
+            recorder = TurnRecorder(SID, None, None, None, "test")
+            await recorder.start(prompt)
+            database.add_session_message(SID, "user", prompt)
+            if index == 0:
+                await adapter.send_query(prompt)
+            else:
+                # Native multimodal UserTurn shape: image + typed text, with
+                # the same host enrichment; failure leaves this node at head.
+                await loop.submit(UserTurn(content=[
+                    Image(media_type="image/webp", data="invalid-image"),
+                    Text(prompt + "\n\n" + adapter._turn_context_note()),
+                ]))
+            await asyncio.wait_for(loop.wait_turn(), timeout=10)
+            await recorder.on_event({"type": "error", "message": "Invalid image data"})
+        events = await store.events_since(sdk_session_id, 0)
+        assert sum(type(event).__name__ == "ErrorEvent" for event in events) == 2
+        path = await store.load_path(sdk_session_id)
+        assert len(path) == 2
+        assert generate_turn_environment_note() in path[-1].message.text()
+        assert any(isinstance(block, Image) for block in path[-1].message.content)
+        return prompt, [node.node_id for node in path]
+    finally:
+        await loop.aclose()
+
+
+async def test_failed_enriched_attachment_turn_rewinds_all_stores(
+    rewind_env, monkeypatch, tmp_path,
+):
+    from app.core import rewind_db_sync
+    from app.core.provider.fluid_transcript import load_fluid_path
+    from app.db import database
+
+    sdk = "ses_failed_attachment"
+    rewind_env.session_row["sdk_session_id"] = sdk
+    prompt, nodes = await _produce_failed_attachment_turns(sdk, tmp_path)
+    monkeypatch.setattr(cmd, "resolve_rewind_anchor", rewind_db_sync.resolve_rewind_anchor)
+    monkeypatch.setattr(cmd, "apply_rewind_delete", rewind_db_sync.apply_rewind_delete)
+
+    # No broad prefix match: an adjacent different prompt still fails closed.
+    uuid_, error = _resolve_checkpoint_uuid_from_content(sdk, WD, "Inspect", 0)
+    assert uuid_ is None and "content guard" in error
+    assert _resolve_checkpoint_uuid_from_content(sdk, WD, prompt, 1) == (nodes[1], None)
+
+    response = await execute_rewind(SID, RewindRequestV2(
+        target_content=prompt, target_occurrence=1, include_response=False,
+    ))
+    assert response.success is True
+    assert response.chat_rewound is True
+    assert [node["node_id"] for node in load_fluid_path(sdk)] == nodes[:1]
+    rows = database.get_session_messages(SID)
+    assert [row["content"] for row in rows] == [prompt, "Please preserve the map"]
+    assert rows[0]["jsonl_uuid"] == nodes[0]
+    assert [row["payload"]["content"] for row in _load_message_events(SID)] == [
+        prompt, "Please preserve the map",
+    ]
+    assert se.get_events(SID)[-1]["payload"]["from_seq"] == 6
+
+    # Rewinding the first unanswered prompt empties Fluid but preserves its
+    # resumable session identity, unlike the legacy JSONL full-reset path.
+    response = await execute_rewind(SID, RewindRequestV2(
+        target_content=prompt, target_occurrence=0, include_response=False,
+    ))
+    assert response.success is True
+    assert load_fluid_path(sdk) == []
+    assert database.get_session_messages(SID) == []
+    assert _load_message_events(SID) == []
+    assert not any(kw.get("sdk_session_id", "unchanged") is None
+                   for _, kw in rewind_env.update_calls)

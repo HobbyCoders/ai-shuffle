@@ -26,6 +26,7 @@ Entry points: :func:`resolve_rewind_anchor` then :func:`apply_rewind_delete`;
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.jsonl_rewind import jsonl_rewind_service
@@ -157,7 +158,7 @@ def backfill_user_jsonl_uuids(
     persisted without it.
 
     Matches DB user rows to transcript user prompt entries **by position** and
-    sanity-checks with a loose text compare (JSONL when present, else the
+    sanity-checks normalized text and duplicate counts (JSONL when present, else the
     session store — see :func:`_load_transcript_entries`). Missing matches are
     skipped silently so one drifted row doesn't poison the rest.
 
@@ -176,6 +177,8 @@ def backfill_user_jsonl_uuids(
 
         db_rows = database.get_session_messages(session_id)
         db_user_rows = [r for r in db_rows if r.get("role") == "user"]
+        transcript_counts = Counter(_normalize(e["text"]) for e in jsonl_user)
+        db_counts = Counter(_normalize(r.get("content")) for r in db_user_rows)
 
         updated = 0
         for idx, db_row in enumerate(db_user_rows):
@@ -184,9 +187,13 @@ def backfill_user_jsonl_uuids(
             if db_row.get("jsonl_uuid"):
                 continue
             jsonl_entry = jsonl_user[idx]
-            if not _texts_match(db_row.get("content") or "", jsonl_entry["text"]):
-                # Position-based alignment has drifted — stop rather than
-                # write the wrong uuid onto the wrong row.
+            text = _normalize(jsonl_entry["text"])
+            if (
+                not text or _normalize(db_row.get("content")) != text
+                or transcript_counts[text] != db_counts[text]
+            ):
+                # Position-based alignment has drifted (possibly an identical
+                # steered prompt) — never stamp its UUID onto the wrong row.
                 logger.debug(
                     "Backfill aborted at idx=%d: db/jsonl text mismatch for session %s",
                     idx, session_id,
@@ -229,8 +236,8 @@ def _fallback_anchor_by_content(
     text against DB rows (JSONL when present, else the session store — see
     :func:`_load_transcript_entries`).
 
-    Strategy: count how many **user prompt** entries precede the target in
-    the transcript. Take the Nth user row in the DB as the anchor. For
+    Strategy: match user prompts by normalized content and occurrence (not
+    global position: mid-turn steers have no standalone transcript node). For
     assistant targets, match by normalised content on assistant rows (they're
     stored with text already, so exact content match is usually fine).
 
@@ -251,27 +258,27 @@ def _fallback_anchor_by_content(
         target_text = jsonl_rewind_service._extract_message_text(target_entry)
 
         if role == "user":
-            # Count user prompt entries at or before target_idx (1-indexed).
-            position = 0
-            for i in range(target_idx + 1):
-                if _is_user_prompt_entry(entries[i]):
-                    position += 1
-            if position == 0:
+            # Mid-turn steers are DB user rows but live inside a tool-result
+            # node in Fluid. Global ordinals therefore drift after a steer.
+            # Pair by exact normalized content + occurrence, and refuse when
+            # duplicate counts disagree rather than guess which row to cut.
+            want = _normalize(target_text)
+            if not want or not _is_user_prompt_entry(target_entry):
                 return None
-            user_rows = [r for r in db_rows if r.get("role") == "user"]
-            if len(user_rows) < position:
+            prompts = [
+                e for e in entries if _is_user_prompt_entry(e)
+                and _normalize(jsonl_rewind_service._extract_message_text(e)) == want
+            ]
+            matches = [
+                r for r in db_rows if r.get("role") == "user"
+                and _normalize(r.get("content")) == want
+            ]
+            if len(matches) != len(prompts):
                 return None
-            anchor_row = user_rows[position - 1]
-            # Sanity check text — if it looks nothing like the target, bail
-            # rather than truncating the wrong part of history.
-            if not _texts_match(anchor_row.get("content") or "", target_text):
-                logger.warning(
-                    "Fallback anchor content mismatch for session %s target %s "
-                    "(position=%d). Refusing to delete.",
-                    session_id, target_uuid, position,
-                )
-                return None
-            return anchor_row["id"]
+            occurrence = next(
+                i for i, e in enumerate(prompts) if e.get("uuid") == target_uuid
+            )
+            return matches[occurrence]["id"]
 
         if role == "assistant":
             # Assistant rows store their final text (and never carry a

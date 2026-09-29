@@ -16,6 +16,7 @@ is equivalent to rewinding the conversation.
 
 import json
 import logging
+import re
 import os
 import tempfile
 import shutil
@@ -155,6 +156,15 @@ def _trim_trailing_queue_ops(
     return keep_count
 
 
+# A tempered body cannot consume a closing tag and erase genuine text between
+# two reminders. Both spellings exist in persisted native/delegated sessions.
+_TRAILING_REMINDERS = re.compile(
+    r'(?:\s*<system[•-]reminder>(?:(?!</system[•-]reminder>).)*'
+    r'</system[•-]reminder>)+\s*$',
+    re.DOTALL,
+)
+
+
 def extract_entry_text(entry: Mapping[str, Any]) -> str:
     """Extract the text content from a transcript entry.
 
@@ -166,17 +176,23 @@ def extract_entry_text(entry: Mapping[str, Any]) -> str:
     content = message.get('content', '')
 
     if isinstance(content, str):
-        return content
+        text = content
+    elif isinstance(content, list):
+        text = ' '.join(
+            block.get('text', '') for block in content
+            if isinstance(block, dict) and block.get('type') == 'text'
+        )
+    else:
+        return ''
 
-    if isinstance(content, list):
-        text_parts = []
-        for block in content:
-            if isinstance(block, dict):
-                if block.get('type') == 'text':
-                    text_parts.append(block.get('text', ''))
-        return ' '.join(text_parts)
-
-    return ''
+    if message.get('role') == 'user':
+        # Fluid persists the prompt AFTER the host appends memory, notes and
+        # environment reminders. The UI/event log stores the original prompt.
+        # Strip only a complete trailing run of host reminders for matching;
+        # never use prefix equality ("retry" must not match "retry later").
+        # Do not alter the stored transcript or assistant/tool-result text.
+        text = _TRAILING_REMINDERS.sub('', text)
+    return text
 
 
 def checkpoints_from_entries(

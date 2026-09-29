@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Bypass is a per-session choice: it must never become the remembered default
-// a new session starts from (SEC-13).
+// The last explicit pick is a default for NEW sessions, not an existing binding.
 
 vi.mock('$lib/api/client', () => ({
 	api: { get: vi.fn(async () => ({})), put: vi.fn(async () => ({})) }
@@ -20,16 +19,16 @@ import { composerPreferences } from '../composer-preferences';
 describe('remembered permission mode', () => {
 	beforeEach(() => localStorage.clear());
 
-	it('never carries bypass into the next session', () => {
+	it('carries an explicit bypass pick into the next session', () => {
 		setPersistedRunBinding('permissionMode', 'bypassPermissions');
-		expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('default');
-		expect(composerPreferences.current.permissionMode).toBe('default');
-		expect(getPersistedPermissionMode()).toBe('default');
+		expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('bypassPermissions');
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+		expect(getPersistedPermissionMode()).toBe('bypassPermissions');
 	});
 
-	it('reads an already-stored bypass as default', () => {
+	it('preserves an already-stored bypass pick', () => {
 		localStorage.setItem('aihub_lastPermissionMode', 'bypassPermissions');
-		expect(getPersistedPermissionMode()).toBe('default');
+		expect(getPersistedPermissionMode()).toBe('bypassPermissions');
 	});
 
 	it('keeps every other mode as chosen', () => {

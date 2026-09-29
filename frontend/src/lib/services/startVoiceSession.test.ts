@@ -12,9 +12,10 @@ mocks.store = writable({ profile: 'agent', project: 'project', projectV2Id: 'pv2
 const { startNewVoiceSession } = await import('./startVoiceSession');
 beforeEach(() => { vi.clearAllMocks(); mocks.settings.mockResolvedValue({voice_model:'gpt-realtime'}); mocks.confirm.mockResolvedValue(true); mocks.create.mockResolvedValue({ session_id: 'new', client_secret: 'test', model: 'realtime' }); });
 describe('voice creation context', () => {
-	it('carries execution bindings without converting the voice lane to code', async () => {
+	it.each(['default', 'auto', 'acceptEdits', 'bypassPermissions'])('carries %s and execution bindings without converting the voice lane to code', async (mode) => {
+		mocks.store.update((state: Record<string, unknown>) => ({ ...state, permissionModeOverride: mode }));
 		expect(await startNewVoiceSession()).toBe(true);
-		expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ profile_id: 'agent', project_id: 'project', project_v2_id: 'pv2', worktree_id: 'wt', worktree_branch: 'feature/voice', base_branch: 'main', target_instance_id: 'runner', execution_mode: 'worktree', model: 'model', effort: 'high', permission_mode: 'default', fast: true }));
+		expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ profile_id: 'agent', project_id: 'project', project_v2_id: 'pv2', worktree_id: 'wt', worktree_branch: 'feature/voice', base_branch: 'main', target_instance_id: 'runner', execution_mode: 'worktree', model: 'model', effort: 'high', permission_mode: mode, fast: true }));
 		expect(mocks.lane).toHaveBeenCalledWith('voice');
 		expect(mocks.start).toHaveBeenCalledWith('new', { client_secret: 'test', model: 'realtime' });
 	});
