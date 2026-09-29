@@ -205,6 +205,43 @@ async def test_ask_permission_allow_then_proceed() -> None:
     assert seen == [("mcp__wx__get_weather", {"city": "Rome"})]
 
 
+@pytest.mark.parametrize("with_approver", [False, True])
+async def test_bypass_repeated_host_call_denies_without_prompt(with_approver) -> None:
+    registry = _wx_registry()
+    asked = []
+
+    async def approve(spec, input):
+        asked.append(spec.name)
+        return True
+
+    bridge = HostBridge(
+        registry, PermissionEngine("never_ask"),
+        on_permission=approve if with_approver else None,
+    )
+    replies = [
+        await bridge.on_host_call("mcp__wx__get_weather", {"city": "Rome"})
+        for _ in range(3)
+    ]
+    assert not replies[0].denied and not replies[1].denied
+    assert replies[2].denied
+    assert "doom-loop guard" in replies[2].message
+    assert asked == []
+
+
+async def test_ask_repeat_guard_still_prompts_for_safe_tools() -> None:
+    asked = []
+
+    async def approve(spec, input):
+        asked.append(spec.name)
+        return True
+
+    bridge = HostBridge(_wx_registry(), PermissionEngine("on_write"), on_permission=approve)
+    for _ in range(3):
+        reply = await bridge.on_host_call("mcp__wx__get_temp", {"city": "Rome"})
+        assert not reply.denied
+    assert asked == ["mcp__wx__get_temp"]
+
+
 async def test_ask_permission_deny_raises_in_kernel() -> None:
     registry = _wx_registry()
 

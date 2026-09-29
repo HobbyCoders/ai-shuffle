@@ -319,7 +319,9 @@ To opt out, remove the `security_opt` lines, or set `CODE_MODE_OS_SANDBOX: "off"
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
-**Settings → System** shows whether the sandbox is active and, when it is not, the reason the self-test recorded. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell.
+**Settings → System** distinguishes an active sandbox, an explicitly disabled sandbox, and one that is unavailable because its self-test failed. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell. Bypass skips ordinary tool approvals whether or not the sandbox is active; private-access consent and other explicit approval requirements still apply.
+
+The OS sandbox currently supports Linux only. Windows and macOS workers run without it. The Python kernel's in-process restrictions and host-side tool permission checks still apply, but those in-process restrictions are not an OS security boundary: code that escapes them can access files and the network as the worker's app account. Leaving the sandbox off does not disable ordinary tools, but it removes this extra protection against malicious code.
 
 The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
 

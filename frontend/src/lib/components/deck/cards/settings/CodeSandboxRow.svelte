@@ -25,7 +25,9 @@
 			? 'Code sandbox: checking…'
 			: status!.active
 				? 'Code sandbox: active'
-				: 'Code sandbox: off, Ask mode prompts before each Python cell'
+				: status!.state === 'off'
+					? 'Code sandbox: off'
+					: 'Code sandbox: unavailable'
 	);
 </script>
 
@@ -33,17 +35,25 @@
 	<div class="set-grouphead">
 		<h3>{#if status?.active}<ShieldCheck />{:else}<ShieldOff />{/if}Code sandbox</h3>
 	</div>
-	<div class="set-row">
+	<div class="set-row stack sandbox-row">
 		<div class="lab">
 			<h4>Agents' Python code</h4>
 		</div>
 		<div class="ctl">
 			<p class="state" class:on={status?.active} class:off={status && !status.active && !checking} data-testid="code-sandbox-state">{label}</p>
-			{#if status && !status.active && status.reason}
+			{#if status && !status.active && !checking && status.reason}
 				<p class="reason" data-testid="code-sandbox-reason">{status.reason}</p>
 			{/if}
 			<p class="hint">
-				With the sandbox, Python cells have no network and none of this server's files.
+				The OS sandbox isolates agents' Python code from this worker's files and network.
+				Tool calls still follow the session's permission mode.
+			</p>
+			<p class="hint" data-testid="code-sandbox-permissions">
+				When the sandbox is unavailable or off, Ask mode prompts before each Python cell.
+				Bypass skips ordinary tool approvals; private access and other explicit consent requests still require your approval.
+			</p>
+			<p class="hint">
+				The current OS sandbox uses bubblewrap on Linux; it is not available on Windows or macOS.
 				<button type="button" class="doclink" onclick={() => layout.openFeaturePage('docs', DOCS_ITEM)}>The code-mode sandbox in the install guide</button>
 			</p>
 		</div>
@@ -51,6 +61,16 @@
 </div>
 
 <style>
+	.sandbox-row .ctl {
+		min-width: 0;
+		max-width: 100%;
+	}
+	.state,
+	.reason,
+	.hint {
+		line-height: 1.5;
+		overflow-wrap: anywhere;
+	}
 	.state {
 		margin: 0;
 		font-size: 13px;
