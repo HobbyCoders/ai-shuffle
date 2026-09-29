@@ -49,7 +49,7 @@ vi.mock('./session/ws-connection', () => ({
 vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 
 import { activeSession } from './active-session';
-import { recheckAuthOn401 } from '$lib/api/client';
+import { api, recheckAuthOn401 } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
 
 describe('chat authentication close recovery', () => {
@@ -99,6 +99,53 @@ function seedQuestions(pending: string[]): void {
 }
 
 const ids = (arr: Array<{ request_id: string }>) => arr.map((x) => x.request_id);
+
+describe('live permission selection', () => {
+	beforeEach(() => {
+		activeSession.current.sessionId = 'live-permissions';
+		activeSession.current.permissionModeOverride = 'default';
+		activeSession.current.isStreaming = true;
+	});
+	afterEach(() => { vi.restoreAllMocks(); activeSession.current.sessionId = null; });
+
+	it('waits for the running device acknowledgement without stopping the stream', async () => {
+		let acknowledge!: (value: { permission_mode: string }) => void;
+		const put = vi.spyOn(api, 'put').mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setPermissionModeOverride('bypassPermissions');
+		expect(put).toHaveBeenCalledWith('/sessions/live-permissions/permission-mode', { permission_mode: 'bypassPermissions' });
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		acknowledge({ permission_mode: 'bypassPermissions' });
+		await pending;
+		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
+		expect(activeSession.current.isStreaming).toBe(true);
+	});
+
+	it('keeps the previous selection when the owner rejects the update', async () => {
+		vi.spyOn(api, 'put').mockRejectedValue(new Error('offline'));
+		await expect(activeSession.setPermissionModeOverride('bypassPermissions')).rejects.toThrow('offline');
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+	});
+
+	it('does not apply a slow reply to a different session', async () => {
+		let acknowledge!: (value: { permission_mode: string }) => void;
+		vi.spyOn(api, 'put').mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setPermissionModeOverride('bypassPermissions');
+		activeSession.current.sessionId = 'other-session';
+		acknowledge({ permission_mode: 'bypassPermissions' });
+		await pending;
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+	});
+
+	it('keeps a new unsent chat selection local and does not remember bypass as a default', async () => {
+		activeSession.current.sessionId = null;
+		const put = vi.spyOn(api, 'put');
+		await activeSession.setPermissionModeOverride('bypassPermissions');
+		expect(put).not.toHaveBeenCalled();
+		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
+		expect(localStorage.getItem('aihub_lastPermissionMode')).toBe('default');
+	});
+});
+
 
 describe('activeSession.resolveInteractionByRequestId (#606 item 4)', () => {
 	beforeEach(() => {

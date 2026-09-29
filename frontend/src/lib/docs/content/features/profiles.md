@@ -64,6 +64,10 @@ Any other string is treated as a custom model ID and passed through unchanged (e
 
 The mode picker appears in code and voice sessions, not in chat sessions. Chat sessions always run in Ask. **Auto** is listed only for models that run on the Claude Code CLI, which are the built-in Claude models. A session on another provider that still has Auto saved runs in Ask. The retired `plan` value is treated as Ask.
 
+Change **Tool access** in the composer while a session is working to apply a new permission mode immediately—no Stop, resend or restart is needed. On mobile, open chat controls to find the same picker. The displayed choice changes after the running device confirms it; connection or provider errors leave the previous choice visible. The new mode also stays with the session for later turns.
+
+Switching to Bypass releases ordinary tool-approval prompts already waiting in that session. Accept Edits releases waiting file-edit prompts only (saved Deny rules still win). Questions, private-access cards, existing screen-access prompts and approvals from already-running child agents still need their own answers. Returning to Ask affects future permission checks; it does not undo tools already allowed or running. Bypass is not remembered as the default for new chats.
+
 In Ask mode:
 
 - **Built-in Claude models (Claude Code CLI):** the app's own read-only tools run without a prompt. The app's tools that change something (for example Monitor, hooks, MCP server settings, scheduling, memory, starting agents, paid image or video generation and screen control) ask first, as do tools from your own MCP servers and the browser. Claude Code's built-in tools follow Claude Code's own rules.

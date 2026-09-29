@@ -33,6 +33,7 @@
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { notify } from '$lib/stores/notifications';
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { anyCredential } from '$lib/stores/auth.svelte';
@@ -375,6 +376,22 @@
 		}
 	});
 
+	let permissionUpdating = $state(false);
+	async function selectPermission(mode: string) {
+		if (permissionUpdating) return;
+		permissionUpdating = true;
+		try {
+			await activeSession.setPermissionModeOverride(mode);
+			closePopover();
+		} catch (error) {
+			notify(error instanceof Error ? error.message : 'Could not change permissions', {
+				severity: 'error', title: 'Permission change failed'
+			});
+		} finally {
+			permissionUpdating = false;
+		}
+	}
+
 	const permissionModes = $derived([
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
 		...(autoPermission ? [{ value: 'auto', label: 'Auto', description: 'Claude Code evaluates tool calls automatically' }] : []),
@@ -451,10 +468,8 @@
 									type="button"
 									class="access-row"
 									class:selected={mode.value === permissionValue}
-									onclick={() => {
-										activeSession.setPermissionModeOverride(mode.value);
-										closePopover();
-									}}
+									disabled={permissionUpdating}
+									onclick={() => selectPermission(mode.value)}
 									role="menuitemradio"
 									aria-checked={mode.value === permissionValue}
 									title={mode.description}
@@ -639,7 +654,7 @@
 	onToggleFast={() => activeSession.setFastMode(!fastMode)}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
-	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}
+	onPermissionSelect={selectPermission}
 	showCodeControls={isCodeLane}
 />
 {/if}

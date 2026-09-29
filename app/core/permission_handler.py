@@ -159,6 +159,7 @@ class PermissionHandler:
         decision_reason: Optional[str] = None,
         blocked_path: Optional[str] = None,
         provider_agent: Optional[Dict[str, Any]] = None,
+        mode_managed: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
@@ -205,6 +206,7 @@ class PermissionHandler:
             decision_reason=decision_reason,
             blocked_path=blocked_path,
             provider_agent=provider_agent,
+            mode_managed=mode_managed,
         )
 
     # ------------------------------------------------------------------
@@ -329,6 +331,7 @@ class PermissionHandler:
         decision_reason: Optional[str] = None,
         blocked_path: Optional[str] = None,
         provider_agent: Optional[Dict[str, Any]] = None,
+        mode_managed: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """Table-backed request_permission."""
         from app.core import interaction_wait
@@ -349,6 +352,8 @@ class PermissionHandler:
             agent_id, title, display_name, description, decision_reason,
             blocked_path, provider_agent,
         )
+        if mode_managed and not provider_agent:
+            payload["mode_managed"] = True
         row = await asyncio.to_thread(
             interactions.create_interaction,
             session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS,
@@ -426,6 +431,13 @@ class PermissionHandler:
         # gateway NOTIFY; a local answer wakes us in-process. The adapter also
         # honours its own local expires_at deadline so a dead sweeper never
         # wedges the turn.
+        # A mode update can race the insert/broadcast above. Recheck after the
+        # row is visible, as well as sweeping existing rows from the setter.
+        if payload.get("mode_managed"):
+            from app.core.session_pool import get_session_pool
+            state = get_session_pool().peek(session_id)
+            if state and state.is_connected:
+                await self.resolve_mode_permissions(session_id, state)
         result_row = await interaction_wait.await_interaction(
             interaction_id, session_id, float(PERMISSION_TTL_SECONDS)
         )
@@ -856,6 +868,35 @@ class PermissionHandler:
         if not row:
             return None
         return row.get("api_user_id") or "admin"
+
+    async def resolve_mode_permissions(self, session_id: str, state) -> None:
+        """Release only this run's ordinary prompts covered by its live mode.
+
+        Private access, questions, screen-access prompts and redirected worker
+        prompts retain their own explicit answer. No remembered rules are added.
+        """
+        from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
+
+        rows = await run_sync(self._v2_pending_permissions, session_id)
+        for row in rows:
+            payload = row.get("payload") or {}
+            if not payload.get("mode_managed") or payload.get("provider_agent"):
+                continue
+            mode = effective_permission_mode(
+                state.callback_refs.get("permission_mode"),
+                delegated=getattr(state.adapter, "_is_delegated", False),
+            )
+            if not mode_approves_without_prompt(mode, payload.get("tool_name", "")):
+                continue
+            if mode != "bypassPermissions":
+                rule = await run_sync(self.saved_rule, session_id, payload.get("profile_id"),
+                                      payload.get("tool_name"), payload.get("tool_input") or {})
+                if rule is not None and rule.decision == PermissionDecision.DENY:
+                    continue
+            await self.respond(
+                request_id=payload["request_id"], session_id=session_id, decision="allow",
+                broadcast_func=state.callback_refs.get("broadcast_func"),
+            )
 
     async def respond(
         self,

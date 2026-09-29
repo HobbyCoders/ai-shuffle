@@ -207,7 +207,13 @@ def _session_active_handler():
     return handle
 
 
+def _permission_mode_handler():
+    from app.api.sessions_permissions import handle
+    return handle
+
+
 _LAZY_HANDLERS = {
+    "permission-mode": _permission_mode_handler,
     "session-active": _session_active_handler,
     "handoff": _handoff_handler,
     "application-update": _application_update_handler,

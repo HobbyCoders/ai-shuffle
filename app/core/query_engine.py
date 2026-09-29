@@ -2270,6 +2270,7 @@ async def _stream_to_websocket_impl(
                         description=_ctx_description,
                         decision_reason=_ctx_decision_reason,
                         blocked_path=_ctx_blocked_path,
+                        mode_managed=True,
                     )
                     if isinstance(result, _DeferSentinel):
                         # Return PreToolUseHookSpecificOutput with defer

@@ -912,12 +912,28 @@ export const activeSession = {
 	//
 	// The model / effort / permission mode this session runs on. Picked when
 	// the session is created and changeable mid-session; the backend stores it
-	// on the session row from the overrides every send carries, so the choice
-	// outlives this tab. Each pick is also remembered as the default for the
-	// NEXT new chat.
+	// on the session row from send overrides; permission changes additionally
+	// update the running engine immediately. Picks outlive this tab and become
+	// defaults for the NEXT new chat, except Bypass (which defaults back to Ask).
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
-	setPermissionModeOverride(mode: string | null) { mode = normalizePermissionMode(mode); _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
+	async setPermissionModeOverride(mode: string | null) {
+		mode = normalizePermissionMode(mode);
+		const sessionId = _state.sessionId;
+		if (sessionId) {
+			const saved = await api.put<{ permission_mode: string }>(
+				`/sessions/${sessionId}/permission-mode`, { permission_mode: mode ?? 'default' }
+			);
+			mode = saved.permission_mode;
+			const cached = sessionEphemeralCache.restore(sessionId);
+			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: mode });
+		}
+		// A slow owner reply must not change the newly opened session.
+		if (_state.sessionId !== sessionId) return;
+		_update(s => ({ ...s, permissionModeOverride: mode }));
+		setPersistedRunBinding('permissionMode', mode);
+		persistSession();
+	},
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
 	setFastMode(on: boolean) { _update(s => ({ ...s, fastMode: on })); setPersistedRunBinding('fastMode', on ? '1' : ''); persistSession(); },
 	async setWorkspaceProjectIds(ids: string[]) {

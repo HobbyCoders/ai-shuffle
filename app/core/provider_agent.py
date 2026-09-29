@@ -716,6 +716,7 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     Voice uses its live session binding rather than a historical typed turn.
     For other sessions, resolution mirrors what actually governed the caller:
 
+    0. the connected caller's live policy, including mid-turn picker changes;
     1. the caller's most recent turn's ``overrides.permission_mode`` — the
        composer's per-session selection, which the FE sends with every query;
     2. else the caller SESSION's own binding — the mode chosen when that
@@ -733,6 +734,13 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     mode: Optional[str] = None
     session_id = caller_row.get("id")
     if session_id and caller_row.get("mode") != "voice":
+        from app.core.session_pool import get_session_pool
+
+        live = get_session_pool().peek(str(session_id))
+        if live is not None and live.is_connected:
+            candidate = live.callback_refs.get("permission_mode")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip() if candidate != "plan" else None
         try:
             from app.db import turns as turns_db
 
