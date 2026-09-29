@@ -1,8 +1,9 @@
 """Chat resource grants and one-shot approvals, owned by this worker process.
 
 Restart revokes everything, including credentials. No grants are replicated or
-inherited by forks. Only the authenticated access API can grant or approve;
-model tools can inspect resources and request operations, never authorize them.
+inherited by forks. Only the authenticated access API can grant access. Writes
+and commands require one-shot approval unless the session is in Bypass; model
+tools cannot grant access or change the session's permission mode.
 """
 from __future__ import annotations
 
@@ -129,6 +130,25 @@ async def session_owner(session_id: str) -> tuple:
     if owner_of(row):
         raise AccessDenied("Manage access on the device which owns this session. Grants do not travel between devices.")
     return (row.get("owner_device_id"), row.get("instance_id"), row.get("api_user_id"))
+
+
+async def session_bypasses_confirmation(session_id: str) -> bool:
+    """Use the running adapter's effective mode, never a tool's build-time mode."""
+    from app.core.session_modes import permission_mode_for_session_mode
+    from app.core.session_pool import get_session_pool
+    from app.db import database
+    from app.db.async_database import run_sync
+
+    row = await run_sync(database.get_session, session_id)
+    if not row:
+        return False
+    mode = row.get("permission_mode")
+    state = get_session_pool().peek(session_id)
+    if state is not None and state.is_connected:
+        live = getattr(state.adapter, "permission_mode", None)
+        # Older adapters expose the live mode through the callback references.
+        mode = live if isinstance(live, str) else state.callback_refs.get("permission_mode")
+    return permission_mode_for_session_mode(mode, row.get("mode")) == "bypassPermissions"
 
 
 class Broker:
@@ -436,9 +456,26 @@ class Broker:
             action.decision.set_result(False)
             raise AccessDenied("This action expired.")
         await self.get(session_id, action.grant_id)
+        if action.decision.done():
+            raise AccessDenied("This action is no longer awaiting approval.")
         action.decision.set_result(allow)
 
+    async def resolve_mode_actions(self, session_id: str):
+        """Release existing confirmations after an owner-applied switch to Bypass."""
+        pending = [a for a in self.actions.values()
+                   if a.session_id == session_id and not a.decision.done()]
+        if not pending or not await session_bypasses_confirmation(session_id):
+            return
+        for action in pending:
+            try:
+                await self.decide(session_id, action.id, True)
+            except AccessDenied:
+                # Expired/revoked/answered actions must never be revived.
+                continue
+
     async def approve(self, grant: Grant, operation: str, arguments: dict):
+        if await session_bypasses_confirmation(grant.session_id):
+            return
         if sum(a.session_id == grant.session_id for a in self.actions.values()) >= 8:
             raise AccessDenied("Too many pending actions; resolve them in Chat access.")
         action = Action(uuid.uuid4().hex, grant.id, grant.session_id, operation,
@@ -447,6 +484,10 @@ class Broker:
         self.actions[action.id] = action
         self._notify(grant.session_id, grant.owner)
         try:
+            # A persisted-mode lookup can complete with an old snapshot after
+            # a mode-change sweep already ran. Recheck with the action visible
+            # so switching to Bypass cannot strand a newly queued confirmation.
+            await self.resolve_mode_actions(grant.session_id)
             allowed = await asyncio.wait_for(action.decision, max(0, action.expires_at - time.time()))
             if not allowed:
                 raise AccessDenied("The action was denied or access was revoked.")

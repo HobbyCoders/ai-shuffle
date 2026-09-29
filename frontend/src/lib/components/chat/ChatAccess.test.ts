@@ -26,11 +26,69 @@ function hidden(value: boolean) {
  document.dispatchEvent(new Event('visibilitychange'));
 }
 beforeEach(() => {
+ HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+ HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new Event('close')); };
  vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current = {status: {preview_access: false}};
  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code' } : snapshot);
  m.post.mockResolvedValue({}); m.delete.mockResolvedValue({});
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
+describe('private access header disclosure', () => {
+ it('keeps Escape inside the dialog instead of triggering global chat shortcuts', async () => {
+  snapshot = {...empty(), actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
+  render(ChatAccess, {sessionId:'s1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  const shortcut = vi.fn();
+  window.addEventListener('keydown', shortcut);
+  try {
+   const dialog = screen.getByRole('dialog') as HTMLDialogElement;
+   // A completed request removes its focused button; Escape then targets body.
+   await fireEvent.keyDown(document.body, {key:'Escape'});
+   expect(dialog.open).toBe(false);
+   expect(shortcut).not.toHaveBeenCalled();
+  } finally { window.removeEventListener('keydown', shortcut); }
+ });
+ it('never reopens the dialog or grants after streaming invalidations and fresh snapshots', async () => {
+  const grant = {id:'g1',label:'Granted folder',kind:'folder',target:'/safe',expires_at:9999999999,writable:true};
+  snapshot = {...empty(), grants:[grant]};
+  const view = render(ChatAccess, {sessionId:'s1'}); await flush();
+  const dialog = view.container.querySelector('dialog')!;
+  const details = view.container.querySelector('details')!;
+  expect(dialog.open).toBe(false);
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  details.open = true; await fireEvent(details, new Event('toggle')); await tick();
+  details.open = false; await fireEvent(details, new Event('toggle')); await tick();
+  for (let i = 0; i < 5; i++) {
+   snapshot = {...empty(), grants:[{...grant}]};
+   resourceSync.invalidate(['sessions', 'chat-access:s1']);
+   await vi.advanceTimersByTimeAsync(100); await tick();
+   await view.rerender({sessionId:'s1'});
+   expect(dialog.open).toBe(true);
+   expect(details.open).toBe(false);
+  }
+  await fireEvent.click(screen.getByRole('button', {name:'Close private access'}));
+  snapshot = {...empty(), grants:[{...grant}], requests:[{id:'r1',kind:'folder',purpose:'Another request',expires_at:9999999999}]};
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(dialog.open).toBe(false);
+  expect(screen.getByText('1 pending')).toBeTruthy();
+  await vi.advanceTimersByTimeAsync(6000); await tick();
+  expect(dialog.open).toBe(false);
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  expect(screen.getByRole('textbox', {name:'Resource name'})).toBeTruthy();
+ });
+ it('preserves an explicitly expanded saved-only panel across refreshes', async () => {
+  const saved = {id:'saved1',label:'Saved server',target:'server',fingerprint:''};
+  snapshot = {...empty(), saved_connections:[saved]};
+  const view = render(ChatAccess, {sessionId:'s1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  const details = view.container.querySelector('details')!;
+  details.open = true; await fireEvent(details, new Event('toggle')); await tick();
+  snapshot = {...empty(), saved_connections:[{...saved}]};
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(details.open).toBe(true);
+ });
+});
+
 describe('private-access recovery and live invalidations', () => {
  it('does not poll owner-only access or render errors in a session preview', async () => {
   accessAuth.current.status.preview_access = true;
@@ -82,6 +140,7 @@ describe('private-access recovery and live invalidations', () => {
   await vi.advanceTimersByTimeAsync(2000);
   expect(accessCalls()).toHaveLength(4);
   snapshot = empty();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
   await fireEvent.click(screen.getByRole('button', {name: 'Approve once'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: true});
   expect(screen.queryByText('Approve this remote command?')).toBeNull();
@@ -89,6 +148,7 @@ describe('private-access recovery and live invalidations', () => {
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};
   render(ChatAccess,{sessionId:'s1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
   const label = screen.getByRole('textbox',{name:'Resource name'}) as HTMLInputElement;
   await fireEvent.input(label,{target:{value:'My folder'}});
   await vi.advanceTimersByTimeAsync(2000); await tick();
@@ -117,6 +177,7 @@ describe('private-access recovery and live invalidations', () => {
    throw { status: 403, detail: 'Denied' };
   });
   render(ChatAccess, {sessionId: 's1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
   expect(screen.getByRole('alert').textContent).toBe('Denied');
   await vi.advanceTimersByTimeAsync(3_600_000); expect(accessCalls()).toHaveLength(1);
   m.get.mockResolvedValue(empty());

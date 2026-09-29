@@ -129,7 +129,7 @@
 				{/if}
 			{:else}
 				<label class="pa-field"><span>Folder on this worker</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
-				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Each write still needs your approval.</small></label>
+				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Writes follow this session’s permission mode; bypass skips repeat approvals.</small></label>
 			{/if}
 
 			<div class="pa-grid">
@@ -142,7 +142,7 @@
 			<p class="pa-note">
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path stroke-linecap="round" d="M8 11V7a4 4 0 118 0v4" /></svg>
 				<span>
-					{#if machine}Sent only to this worker, never to the model or chat history. Commands run with this account’s authority, and each one needs your approval.
+					{#if machine}Sent only to this worker, never to the model or chat history. Commands run with this account’s authority and follow this session’s permission mode. Bypass skips repeat approvals after you grant access.
 					{:else}Sent only to this worker. Linux file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
 				</span>
 			</p>

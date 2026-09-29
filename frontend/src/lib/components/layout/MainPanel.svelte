@@ -50,6 +50,7 @@
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
+	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -860,6 +861,11 @@
 {/snippet}
 
 {#snippet headerActions()}
+	{#if $activeView?.type === 'session' && activeTab?.sessionId}
+		{#key activeTab.sessionId}
+			<ChatAccess sessionId={activeTab.sessionId} />
+		{/key}
+	{/if}
 	{#if activeTab && shouldShowHeaderGitActions({
 		viewType: $activeView?.type,
 		hasProject: !!activeProject,

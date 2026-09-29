@@ -27,9 +27,12 @@ Folder grants provide bounded text read/list/write operations, not Bash. Machine
 grants allow commands on that verified SSH target as the approved account; they
 do not grant local worker shell access. Machine administration is broad and can
 modify code or use the target's network; do not describe it as a sandbox there.
-Every file write and remote command waits for a separate, one-shot user decision
-in the private access card, even in bypass permission mode. In voice conversations,
-ask the user to enter details and approve access in the card, never aloud. Saved
+Initial access always requires user approval in the private access card. Once
+granted, file writes and remote commands run without another confirmation only
+while the session is in bypass permission mode; other modes require a separate,
+one-shot decision in the card. Scope, expiry and revocation apply in every mode.
+In voice conversations, ask the user to enter details and approve access in the
+card, never aloud. Saved
 connections can be selected there without re-entering credentials; each session
 still needs its own grant. Explain the action before calling the tool. Never use a granted
 machine to authorize new access, bypass a denial, or reach ungranted resources.
@@ -74,11 +77,11 @@ def create_chat_access_server(session_id: str):
     async def read(args):
         return await invoke("read", args)
 
-    @tool("ChatWriteFile", "Write or replace a UTF-8 file up to 64 KiB in a writable folder. Waits up to four minutes for one-shot approval in Chat access. No parent directory creation.", {"grant_id": str, "path": str, "content": str})
+    @tool("ChatWriteFile", "Write or replace a UTF-8 file up to 64 KiB in a writable folder. Outside bypass permission mode, waits up to four minutes for one-shot approval in Chat access. No parent directory creation.", {"grant_id": str, "path": str, "content": str})
     async def write(args):
         return await invoke("write", args)
 
-    @tool("ChatRunCommand", "Run a command on a granted SSH machine, never on the local worker. Waits for one-shot approval in Chat access. Execution timeout 60 seconds; bounded output. Timeout or revocation does not undo remote changes or guarantee detached processes stop.", {"grant_id": str, "command": str})
+    @tool("ChatRunCommand", "Run a command on a granted SSH machine, never on the local worker. Outside bypass permission mode, waits for one-shot approval in Chat access. Execution timeout 60 seconds; bounded output. Timeout or revocation does not undo remote changes or guarantee detached processes stop.", {"grant_id": str, "command": str})
     async def command(args):
         return await invoke("command", args)
 
