@@ -10,7 +10,7 @@ token they get a 403 for everything except:
   probes before it knows whether the worker is its own;
 - routes that check their own one-time or per-session token: the desktop's
   browser handoff, the agent browser's preview door, and the agent browser's
-  panel callbacks;
+  panel callbacks and RPC (validated by their per-session panel token);
 - requests carrying a credential that stands on its own: an owner session
   (the browser opened through the handoff), a paired device session, an API
   key, or the agent browser's preview cookie. Such a request is then judged by
@@ -36,6 +36,9 @@ _OPEN_PATHS = frozenset({
     "/api/v1/owner/handoff",
     "/api/v1/auth/preview-access",
     "/api/v1/browser/panel/register",
+    # The agent proxy has only a session panel token, never the desktop token.
+    # This exact route checks that token and session before allocating a runtime.
+    "/api/v1/browser/panel/rpc",
 })
 _OPEN_PREFIXES = ("/health/", "/api/v1/browser/panel/control/")
 
