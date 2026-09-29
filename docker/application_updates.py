@@ -308,7 +308,7 @@ class ContainerUpdates:
             return [sys.executable, "-m", "app.main"], None, env
         manifest = self.manifest(revision)
         if manifest["container"]["runtime"] != self.image["runtime"]:
-            raise UpdateError("Stored application requires a different container runtime; install a newer image")
+            raise UpdateError(self.runtime_mismatch(manifest))
         directory = self.directory(revision)
         source = directory / "source"
         python = directory / "venv/bin/python"
@@ -325,6 +325,24 @@ class ContainerUpdates:
         if not activate:
             self.running = revision
         return [str(python), "-m", "app.main"], str(source), env
+
+    def runtime_mismatch(self, manifest):
+        """Why the installed update cannot start on this image, and the way out.
+
+        Reached only for the active update: a staged one built for another
+        image is dropped at startup, and an image newer than the update never
+        keeps it. So the image is at or behind the update on main, and its
+        bundled code is refused over a database that update may have migrated.
+        """
+        container = manifest["container"]
+        release = manifest.get("version") or manifest["revision"][:12]
+        return (f"The installed application update {release} ({manifest.get('channel', 'stable')} channel, "
+                f"main revision {container['sequence']}) was built for a different container image. "
+                f"This image ({self.image['revision'][:12]}, main revision {self.image['sequence']}) is not newer "
+                "than that update, so its own code is not run over the update's database. Change to an image "
+                f"built from main revision {container['sequence']} or later, or, to run this image's code over "
+                "the existing data anyway, stop the container and delete application-updates/state.json "
+                "from the data volume; files retained.")
 
     def activating(self):
         self.running = self.state["pending"]

@@ -175,6 +175,26 @@ def test_new_image_discards_obsolete_pending_and_never_downgrades(feed):
         newer.launch({}, activate=True)
 
 
+def test_image_behind_the_installed_update_names_both_sides_and_the_way_out(feed):
+    updater, publish, _, _, _ = feed
+    publish(version="1.2.3")
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    # A rebuilt or older image with another runtime contract, not newer on main.
+    image = dict(updater.image, runtime="e" * 64)
+    behind = ContainerUpdates(updater.root, image, updater.public_key, lambda: True, lambda _: {})
+    assert behind.state == {"active": B}, "the installed update is never rolled back silently"
+    with pytest.raises(UpdateError, match=r"update 1\.2\.3 \(stable channel, main revision 2\).*"
+                       r"This image \(aaaaaaaaaaaa, main revision 1\).*main revision 2 or later.*state\.json"):
+        behind.launch({})
+    # The documented way out: discard the update record and run the image's own code.
+    (updater.root / "state.json").unlink()
+    recovered = ContainerUpdates(updater.root, image, updater.public_key, lambda: True, lambda _: {})
+    assert recovered.state == {} and recovered.launch({})[1] is None
+
+
 def test_failed_first_boot_never_rolls_back_and_newer_milestone_can_recover(feed):
     updater, publish, _, _, _ = feed
     publish()

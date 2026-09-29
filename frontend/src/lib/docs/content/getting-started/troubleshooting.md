@@ -107,6 +107,8 @@ Pages crash or the browser closes when the container has too little shared memor
 
 **`This source update needs a newer container release`**: this release changes the container itself. Change the version in `.env` (Compose) or **Repository** (Unraid) and recreate the container. See [Updates](/docs/getting-started/updates).
 
+**The container stops at `The installed application update … was built for a different container image`**: the data folder or volume still holds an in-app update that is newer than the image you changed to, and the two need different container builds. The message names both. Change the version to a release at least as new as the installed update and recreate the container. To run this image's code over the existing data anyway, stop the container, delete `application-updates/state.json` from the data folder or volume (delete the whole `application-updates` folder to reclaim the space of stored builds), and start it again.
+
 **No update is offered:** check **Settings → Account → Application updates → Allow updates**. The worker checks about 15 seconds after it starts and once a day, so restarting the container runs a check. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
 
 ## Stopping and the database
