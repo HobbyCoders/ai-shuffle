@@ -8,6 +8,14 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 0.8.22
+
+- Keep large worker-history syncs from blocking new sessions and other network requests.
+- Save your first message before contacting another worker, so a timeout does not leave an empty local session. Failed requests show the saved session instead of a generic server error.
+- Fix Android account sign-in links reaching a 404 page. This also requires deploying the account-service route update.
+- Verify staged installer updates before activation and explain when a stored update needs a newer container image.
+- Improve oversized-image recovery, rewind matching, permission persistence, and private-access confirmations.
+
 ## 0.8.21
 
 - Desktop update downloads now wait for an active update check to finish instead of silently losing the download request.

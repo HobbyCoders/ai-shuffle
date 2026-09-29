@@ -194,13 +194,14 @@ def _unwrap_keyring(wrapped: Mapping[str, Any], device_identity: identity_mod.De
     return keyring
 
 
-def load_context(_conn=None) -> Optional[NetworkContext]:
-    """(Re)build the in-memory context from the database. None when not enrolled."""
+def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext]:
+    """Read context; snapshot readers must not replace the live context."""
     global _context
     state = store.get_state(_conn)
     if state is None:
-        with _lock:
-            _context = None
+        if publish:
+            with _lock:
+                _context = None
         return None
     device_identity = identity_mod.load(create=False)
     keyring = _unwrap_keyring(state.get("keyring") or {}, device_identity)
@@ -216,8 +217,9 @@ def load_context(_conn=None) -> Optional[NetworkContext]:
     keyring_store.restore(ctx, state.get("keyring") or {})
     if ctx.key_version not in keyring:
         logger.error("Network key version %d is not available on this device", ctx.key_version)
-    with _lock:
-        _context = ctx
+    if publish:
+        with _lock:
+            _context = ctx
     return ctx
 
 
@@ -1360,11 +1362,24 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
                    limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
-    """One signed, encrypted page of a collection's current records.
+    """Legacy offset-addressed snapshot page, with the existing wire format."""
+    chunk, _ = _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn)
+    return chunk
 
-    A retired collection always yields one empty final page, for joiners on
-    older builds that still expect it.
+
+def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional[str] = None,
+                  ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None):
+    """Seek through one repeatable-read export without rescanning earlier pages.
+
+    The record cursor stays local; the signed/encrypted page still uses the
+    numeric offset understood by older workers.
     """
+    return _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn,
+                          keyset=True, after_record_id=after_record_id)
+
+
+def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None):
+    """Build a page and return its private continuation cursor."""
     ctx = ctx or require_context()
     retired = collection in policy.RETIRED_COLLECTIONS
     coll = None if retired else policy.collection(collection)
@@ -1373,8 +1388,16 @@ def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkCon
         if retired:
             versions = []
         else:
-            cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
-                           (collection, limit + 1, offset))
+            if keyset:
+                if after_record_id is None:
+                    cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s",
+                                   (collection, limit + 1))
+                else:
+                    cursor.execute("SELECT * FROM sync_records WHERE collection = %s AND record_id > %s "
+                                   "ORDER BY record_id LIMIT %s", (collection, after_record_id, limit + 1))
+            else:
+                cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
+                               (collection, limit + 1, offset))
             versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
@@ -1399,7 +1422,7 @@ def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkCon
               "content_hash": crypto.sha256_hex(plaintext), "more": more, "count": len(items)}
     signed["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private, crypto.canonical_json(
         {k: v for k, v in signed.items() if k != "signature"})))
-    return signed
+    return signed, versions[-1]["record_id"] if versions else after_record_id
 
 
 def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dict:

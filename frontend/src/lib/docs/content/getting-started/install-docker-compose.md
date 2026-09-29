@@ -38,7 +38,7 @@ services:
   ai-shuffle:
     # A pinned release, pulled through your licensed registry path. The pull
     # token is read-only and is not your license key.
-    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.8.21}
+    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.8.22}
     container_name: ai-shuffle
     restart: unless-stopped
 
@@ -152,7 +152,7 @@ AI_SHUFFLE_PULL_TOKEN=
 
 # The release to run. Pinned on purpose: nothing changes until you change it.
 # To update: set the new version here, then run `docker compose up -d`.
-AI_SHUFFLE_VERSION=0.8.21
+AI_SHUFFLE_VERSION=0.8.22
 
 # --- Where and how it is reachable -------------------------------------------
 
