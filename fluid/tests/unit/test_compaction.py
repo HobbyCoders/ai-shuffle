@@ -95,10 +95,19 @@ def _growing_turn(calls: int, *, metadata: bool = True) -> list[SessionNode]:
 def test_growing_protected_turn_has_no_tiny_optional_rewrites() -> None:
     # Replay the observed 50-call argument-heavy turn, including legacy data
     # whose lack of typed delivery metadata rules out within-turn digestion.
+    #
+    # Updated for plan item 4 (B1). The old version passed partly because the
+    # calls below the trigger armed the retry watermark, so the first real
+    # crossing (call 24) waited until call 31. Those calls now report
+    # below_threshold and arm nothing, and the first batch lands on the first
+    # call over the trigger. What this test pins is unchanged: every batch
+    # clears the 5% floor, batches stay rare, and nothing is digested.
     c = Compactor()
     batches = []
+    reasons = []
     for count in range(1, 51):
         _, promotions = c.apply(_growing_turn(count, metadata=False), turn_boundary=False)
+        reasons.append(c.last_decision["reason"])
         if promotions:
             first = promotions[0]
             assert first.before_tokens - first.after_tokens >= int(first.before_tokens * 0.05)
@@ -107,6 +116,80 @@ def test_growing_protected_turn_has_no_tiny_optional_rewrites() -> None:
     assert batches
     assert len(batches) < 19
     assert not c._digested  # No unsafe fallback to parsing tool text.
+    first_over = next(i for i, r in enumerate(reasons) if r != "below_threshold")
+    assert reasons[first_over] == "meaningful_reclaim"
+    assert "awaiting_reclaimable_growth" not in reasons[:first_over]
+
+
+def test_below_threshold_is_labelled_and_arms_no_watermark() -> None:
+    # Plan item 4 (B1): a call at or below the trigger builds no batch. It
+    # used to be labelled insufficient_reclaim and arm the retry watermark,
+    # which made later mid-turn calls skip the threshold check.
+    nodes = _history(3)
+    c = Compactor(config=_cfg(trigger_tokens=50_000))
+    rendered, promotions = c.apply(nodes, turn_boundary=False)
+    assert not promotions and rendered == c.view(nodes)
+    assert c.last_decision["reason"] == "below_threshold"
+    assert c.last_decision["threshold_tokens"] == 50_000
+    assert c._optional_retry is None
+
+
+def test_later_crossing_fires_at_once() -> None:
+    # Mid-turn calls below the trigger, then one call over it. Here the
+    # overhead grows (a larger system prompt or tool list), so the history
+    # and its reclaimable chars stay the same. The crossing builds its batch
+    # on that call. With the legacy arming the same call waited for
+    # reclaimable growth that never came.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _history(6)
+    size = estimate_tokens_of_messages(Compactor(config=_cfg()).view(nodes))
+    trigger = size + 1_000
+
+    def run(skips: bool) -> tuple[Compactor, list]:
+        c = Compactor(config=_cfg(trigger_tokens=trigger,
+                                  below_threshold_skips_retry=skips))
+        for i in range(3):
+            c.apply(nodes, turn_boundary=False)
+            # Legacy: the first below-threshold call arms the watermark and
+            # every later mid-turn call waits on it without a threshold check.
+            expected = ("below_threshold" if skips or i == 0
+                        else "awaiting_reclaimable_growth")
+            assert c.last_decision["reason"] == expected
+        _, promotions = c.apply(nodes, overhead_tokens=2_000, turn_boundary=False)
+        return c, promotions
+
+    fixed, promotions = run(True)
+    assert promotions
+    assert fixed.last_decision["reason"] == "meaningful_reclaim"
+    assert fixed.last_decision["threshold_tokens"] == trigger
+    legacy, promotions = run(False)
+    assert not promotions
+    assert legacy.last_decision["reason"] == "awaiting_reclaimable_growth"
+
+
+def test_empty_candidate_over_the_trigger_arms_no_watermark() -> None:
+    # Over the trigger with nothing eligible: the candidate equals the
+    # current view, so there is no growth worth waiting for.
+    nodes = _history(1)
+    c = Compactor(config=_cfg())
+    rendered, promotions = c.apply(nodes, overhead_tokens=10_000, turn_boundary=False)
+    assert not promotions and rendered == c.view(nodes)
+    assert c.last_decision["reason"] == "insufficient_reclaim"
+    assert c.last_decision["candidate_after_tokens"] == c.last_decision["before_tokens"]
+    assert c._optional_retry is None
+
+
+def test_trim_only_keeps_the_legacy_watermark() -> None:
+    # The trim-only contract stays byte-identical: the decision is relabelled
+    # but the watermark is armed exactly as before.
+    nodes = _history(3)
+    c = Compactor(config=CompactionConfig(enabled=False, trim=TrimConfig(
+        enabled=True, trigger_tokens=50_000)))
+    c.apply(nodes, turn_boundary=False)
+    assert c.last_decision["reason"] == "below_threshold"
+    assert c.last_decision["threshold_tokens"] == 50_000
+    assert c._optional_retry is not None
 
 
 def test_optional_rejection_rolls_back_and_window_protection_keeps_the_floor() -> None:
@@ -1270,12 +1353,20 @@ def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
     return digest.hexdigest(), promotions
 
 
+# New behaviour flags switched off, so each ladder scenario runs the legacy
+# path. Plan item 4 turned below_threshold_skips_retry on by default; with it
+# on, the ladder, windowed and optional mega-turn scenarios commit earlier.
+# The trim-only scenario needs no flag: that contract keeps the legacy path.
+_LEGACY_FLAGS = {"below_threshold_skips_retry": False}
+
+
 def _parity_ladder() -> CompactionConfig:
     return CompactionConfig(
         trigger_tokens=12_000, keep_recent_turns=2,
         max_resident_span_digests=4, epoch_fold_spans=2,
         trim=TrimConfig(trigger_tokens=12_000, keep_recent_tool_results=3,
                         min_result_chars=500),
+        **_LEGACY_FLAGS,
     )
 
 
@@ -1287,18 +1378,18 @@ _PARITY_SCENARIOS = {
     "windowed_measured": (
         _parity_session,
         lambda: CompactionConfig(trigger_tokens=10_000, trigger_window_ratio=0.3,
-                                 keep_recent_turns=2),
+                                 keep_recent_turns=2, **_LEGACY_FLAGS),
         {"window": 40_000, "measured": True},
     ),
     # One 50-call turn, the shape the redesign targets. On a small window it
     # runs window protection and the guarded escalation; on a large one the
     # optional mid-turn batches and their retry watermark.
     "mega_turn_window_protection": (
-        lambda: _growing_turn(50), CompactionConfig,
+        lambda: _growing_turn(50), lambda: CompactionConfig(**_LEGACY_FLAGS),
         {"window": 100_000, "measured": True},
     ),
     "mega_turn_optional": (
-        lambda: _growing_turn(50), CompactionConfig,
+        lambda: _growing_turn(50), lambda: CompactionConfig(**_LEGACY_FLAGS),
         {"window": 200_000, "measured": True},
     ),
     # The trim-only contract host apps rely on.

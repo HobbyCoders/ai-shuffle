@@ -128,6 +128,14 @@ class CompactionConfig:
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
+    # Retry watermark discipline for the full ladder (plan item 4, B1). On, a
+    # decision below the trigger, or a candidate that reclaimed nothing, does
+    # not arm the watermark, so the first call that really crosses the
+    # trigger builds its batch at once instead of waiting for more
+    # reclaimable growth. Off restores the legacy arming; the parity tests
+    # pin that path. The trim-only contract (``enabled=False``) always keeps
+    # the legacy arming so its renders stay byte-identical.
+    below_threshold_skips_retry: bool = True
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -481,6 +489,11 @@ class Compactor:
     _digest_by_start: dict = field(default_factory=dict)
     _optional_retry: tuple[int, int] | None = None
     last_decision: dict[str, Any] = field(default_factory=dict)
+    # Set by the last candidate build: the trigger it compared against (in
+    # chars/4 units, like ``before_tokens``) and whether the rendered total
+    # stayed at or below it. ``apply`` reads them to label the decision.
+    _candidate_threshold: int | None = None
+    _candidate_below: bool = False
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -668,6 +681,7 @@ class Compactor:
                                       **decision_fields}
                 return before_view, []
         restore = self._tier_snapshot()
+        self._candidate_threshold, self._candidate_below = None, False
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
@@ -685,12 +699,36 @@ class Compactor:
             rendered = self.view(nodes)
         after = overhead_tokens + estimate_tokens_of_messages(rendered)
         reason = "window_protection" if mandatory else "meaningful_reclaim"
+        threshold_fields = (
+            {"threshold_tokens": self._candidate_threshold}
+            if self._candidate_threshold is not None else {}
+        )
         if before - after < minimum:
             restore()
-            self._optional_retry = (eligible_chars, minimum * 4)
-            self.last_decision = {"reason": "insufficient_reclaim",
+            below = self._candidate_below
+            # The retry watermark makes later mid-turn calls wait for more
+            # reclaimable growth before building another candidate. It is
+            # only meant for a prompt over the trigger whose candidate fell
+            # short of the floor. Arming it below the trigger, or when the
+            # candidate reclaimed nothing, made the first real crossing wait
+            # out that growth (B1, plan item 4), so neither case arms it.
+            skip_arm = (
+                self.config.enabled
+                and self.config.below_threshold_skips_retry
+                and (below or after >= before)
+            )
+            if skip_arm:
+                self._optional_retry = None
+            else:
+                self._optional_retry = (eligible_chars, minimum * 4)
+            reason = (
+                "below_threshold" if below and not promotions and not mandatory
+                else "insufficient_reclaim"
+            )
+            self.last_decision = {"reason": reason,
                                   "before_tokens": before, "after_tokens": before,
-                                  "candidate_after_tokens": after, **decision_fields}
+                                  "candidate_after_tokens": after,
+                                  **threshold_fields, **decision_fields}
             return before_view, []
         self._optional_retry = None
         first_changed = next((i for i, (a, b) in enumerate(zip(before_view, rendered))
@@ -698,7 +736,7 @@ class Compactor:
         self.last_decision = {"reason": reason, "before_tokens": before,
                               "after_tokens": after,
                               "first_changed_message": first_changed,
-                              **decision_fields}
+                              **threshold_fields, **decision_fields}
         return rendered, [replace(p, before_tokens=before, after_tokens=after,
                                   decision_reason=reason,
                                   first_changed_message=first_changed,
@@ -753,7 +791,9 @@ class Compactor:
             if promotions:
                 rendered = self._render(nodes)
                 total = overhead_tokens + estimate_tokens_of_messages(rendered)
+        self._candidate_threshold = threshold
         if total <= threshold:
+            self._candidate_below = True
             return rendered, promotions
         # The rungs below stay available mid-turn on purpose: past the trigger
         # the prompt is genuinely close to the window, and a rewrite that costs
@@ -911,7 +951,9 @@ class Compactor:
             if promotions:
                 rendered = self._render(nodes)
                 total = overhead_tokens + estimate_tokens_of_messages(rendered)
+        self._candidate_threshold = threshold
         if total <= threshold:
+            self._candidate_below = True
             return rendered, promotions
         pairs = self.trimmer.trim_batch(nodes)
         if not pairs:
