@@ -1101,6 +1101,9 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
+        opts.extra["automatic_workflows"] = bool(
+            getattr(sdk_options, "aih_automatic_workflows", False)
+        )
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
@@ -3178,7 +3181,8 @@ class HarnessAdapter(ProviderAdapter):
             compiled = compile_prompt(
                 PromptInputs(
                     base=system,
-                    extra_blocks=[append_system] if append_system else [],
+                    extra_blocks=([append_system] if append_system else [])
+                    + _workflow_prompt_blocks(options, permitted),
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
                     include_agents=False,
@@ -3599,6 +3603,38 @@ def _resolve_claude_cmd() -> list:
         if found and not _is_vendored_cli(found):
             return [found]
     raise ClaudeCliMissingError()
+
+
+def _workflow_prompt_blocks(
+    options: SessionOptions, permitted: Optional[frozenset]
+) -> List[str]:
+    """App-owned additions, generated from the same final manifest as schemas.
+
+    Profile strings are never searched, stripped or rewritten by this helper.
+    Query options only stamps provenance; native compilation supplies the wired
+    surface, while delegated compilation supplies its CLI permission surface.
+    """
+    if not options.extra.get("automatic_workflows", False):
+        return []
+    from app.core.agent_provider_models import parent_subagent_guidance
+    from app.core.task_dispatch import subagent_system_prompt
+
+    leaves = None if permitted is None else {name.rsplit("__", 1)[-1] for name in permitted}
+    def available(name):
+        return leaves is None or name in leaves
+
+    parent = parent_subagent_guidance(
+        task_available=available("Task"), monitor_available=available("Monitor"),
+        swarm_available=available("Swarm"),
+        browser_available=all(available(name) for name in (
+            "browser_navigate", "browser_snapshot", "browser_eval", "browser_act",
+            "browser_screenshot", "browser_resize",
+        )),
+    )
+    worker = subagent_system_prompt(
+        options.extra.get("app_session_id"), task_available=available("Task")
+    )
+    return [text for text in (parent, worker) if text]
 
 
 def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:
@@ -5171,6 +5207,7 @@ def _delegated_append_text(
     agents_index, _ = _agent_context(options)
     _, text = _with_agents_index(None, append_system or None, agents_index)
     parts = [text] if text else []
+    parts.extend(_workflow_prompt_blocks(options, _permitted_tool_names(options, registry)))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))
     parts.extend(_delegated_guidance_blocks(options, registry))

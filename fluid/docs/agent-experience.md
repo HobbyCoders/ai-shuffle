@@ -26,6 +26,10 @@ SSRF, timeout and validation barriers still abort; this is not permission to
 catch a denial, retry it through a different tool, or ask a peer to bypass it.
 
 Workflow prose uses the same effective capability surface as the catalog.
+Query options stamp only provenance; the adapter generates automatic parent and
+worker additions after runtime bindings narrow permissions. This applies to the
+full compiled prompt (and delegated preset append), not just its code-mode block.
+User/profile text is preserved even when it mentions an unavailable tool.
 Unavailable browser verification is a reported acceptance gap, not an instruction
 to find another access route and not a reason to call a change verified. Worker
 parking is likewise distinct from a final assignment report (see
@@ -34,7 +38,9 @@ parking is likewise distinct from a final assignment report (see
 AI Shuffle's per-turn memory snapshot can omit recognizable branch-prefixed
 setup receipts for other checkouts. Explicit user/profile facts and general
 conventions remain; omitted receipts are not deleted and Recall still finds
-them. The startup workspace card is an initial baseline: fresh checkout/setup
+them. Receipt matching uses the complete canonical checkout-directory slug,
+not a substring in a sibling or ancestor path; dots and underscores remain
+identity-bearing. The startup workspace card is an initial baseline: fresh checkout/setup
 receipts supersede it. Mobile's lockless package uses its documented same-checkout
 frontend dependency flow, not a blanket npm-ci instruction.
 
