@@ -97,6 +97,7 @@ export function installMenu(actions: MenuActions): void {
 			{ label: 'Focus Composer', accelerator: 'CmdOrCtrl+L', click: () => actions.command('focus-composer') },
 			{ type: 'separator' },
 			{ label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => actions.reload() },
+			{ role: 'forceReload', accelerator: 'CmdOrCtrl+Shift+R' },
 			{ role: 'toggleDevTools' },
 			{ type: 'separator' },
 			{ role: 'resetZoom' },

@@ -176,7 +176,8 @@ export class MainWindow {
 		const win = await this.ensure();
 		this.workerUrl = new URL(url).origin;
 		this.page = null;
-		await win.loadURL(url).catch(() => {
+		// The URL is stable across worker updates; revalidate any HTML cached by an older build.
+		await win.loadURL(url, { extraHeaders: 'Cache-Control: no-cache\r\nPragma: no-cache\r\n' }).catch(() => {
 			/* did-fail-load reports through onLoadFailed. */
 		});
 	}

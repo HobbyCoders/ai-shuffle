@@ -71,8 +71,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "frame-ancestors 'self';"
         )
 
-        # Prevent caching of sensitive pages
-        if request.url.path.startswith("/api/"):
+        # HTML selects the revision's hashed JS/CSS. A cached entry page can keep
+        # showing the previous UI after the worker has been updated. Immutable
+        # assets remain cacheable; API responses still must never be stored.
+        is_html = response.headers.get("content-type", "").split(";", 1)[0] == "text/html"
+        if request.url.path.startswith("/api/") or is_html:
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
 

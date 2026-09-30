@@ -127,6 +127,36 @@ class TestSecurityHeadersMiddleware:
         assert "Pragma" not in response.headers
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["/", "/chat", "/chat/session-1", "/settings", "/static/index.html"])
+    async def test_html_entrypoints_are_not_cached(self, middleware, route):
+        from starlette.requests import Request
+        from starlette.responses import HTMLResponse
+
+        request = Request({"type": "http", "path": route, "headers": []})
+
+        async def respond(_request):
+            return HTMLResponse('<script src="/_app/immutable/new-revision.js"></script>')
+
+        response = await middleware.dispatch(request, respond)
+        assert response.headers["Cache-Control"] == "no-store, no-cache, must-revalidate, max-age=0"
+        assert response.headers["Pragma"] == "no-cache"
+
+    @pytest.mark.asyncio
+    async def test_hashed_asset_keeps_its_cache_policy(self, middleware):
+        from starlette.requests import Request
+        from starlette.responses import Response
+
+        request = Request({"type": "http", "path": "/_app/immutable/new-revision.js", "headers": []})
+
+        async def respond(_request):
+            return Response("export {};", media_type="application/javascript",
+                            headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+        response = await middleware.dispatch(request, respond)
+        assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+        assert "Pragma" not in response.headers
+
+    @pytest.mark.asyncio
     async def test_csp_header_content(self, middleware, mock_request_non_api):
         """CSP header should have correct directives."""
         mock_response = MagicMock()
