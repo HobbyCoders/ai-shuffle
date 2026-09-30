@@ -53,8 +53,10 @@ from __future__ import annotations
 import asyncio
 import atexit
 import faulthandler
+import json
 import logging
 import os
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -333,19 +335,52 @@ def setup_file_logging() -> Optional[Path]:
     return Path(handler.baseFilename)
 
 
-def source_revision() -> str:
+# The directory that holds the ``app`` package: ``server/`` in a packaged
+# desktop worker (``resources/worker/server``), ``/app`` in the container image.
+_APP_ROOT = Path(__file__).resolve().parents[2]
+_REVISION_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _file_revision(app_root: Path) -> str:
+    """The revision stamped next to the code, or ``""`` when there is none.
+
+    The packaged desktop worker ships ``desktop-build.json`` one level above
+    ``server/`` and starts the bundled build without any revision variable, so
+    this file is the only record of what it runs. The container image also
+    writes ``/app/GIT_SHA``. A missing, unreadable or malformed file is
+    ignored.
+    """
+    try:
+        data = json.loads((app_root.parent / "desktop-build.json").read_text(encoding="utf-8"))
+        value = str(data.get("revision") or "").strip() if isinstance(data, dict) else ""
+        if _REVISION_RE.match(value):
+            return value
+    except (OSError, ValueError):
+        pass
+    try:
+        value = (app_root / "GIT_SHA").read_text(encoding="utf-8").strip()
+        if _REVISION_RE.match(value):
+            return value
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def source_revision(app_root: Optional[Path] = None) -> str:
     """The source revision this process runs, for startup log lines.
 
-    The desktop app sets ``SHUFFLE_SOURCE_REVISION`` for the worker it starts,
-    and container images carry ``GIT_SHA``. The app version alone spans many
-    commits, so without this the logs cannot say which build ran. Returns
-    ``"unknown"`` when neither variable is set.
+    The desktop app sets ``SHUFFLE_SOURCE_REVISION`` for a staged or selected
+    source build, and container images carry ``GIT_SHA``. The installed
+    desktop baseline sets neither, so the fallback reads the revision file
+    shipped beside the code (see :func:`_file_revision`). The app version
+    alone spans many commits, so without this the logs cannot say which build
+    ran. Returns ``"unknown"`` when nothing names a revision.
     """
     for name in ("SHUFFLE_SOURCE_REVISION", "GIT_SHA"):
         value = (os.environ.get(name) or "").strip()
         if value:
             return value
-    return "unknown"
+    return _file_revision(_APP_ROOT if app_root is None else app_root) or "unknown"
 
 
 def log_startup_banner() -> None:
