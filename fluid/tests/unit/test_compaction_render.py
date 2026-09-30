@@ -7,6 +7,7 @@ is trimmed, digested or folded; user and peer steers stay verbatim.
 """
 
 import re
+from dataclasses import replace
 
 from fluid.context.compaction import (
     SPAN_DIGEST,
@@ -260,3 +261,124 @@ def test_rolled_back_rung_restores_span_versions() -> None:
     assert c.view(nodes) != before
     restore()
     assert c.view(nodes) == before
+
+
+# ─── Intent pin and caps (plan item 9, B10) ─────────────────────────────────
+
+# The shape of the 51f38b22 brief: a multi-line request whose deciding
+# constraint sits well past the 120 chars version 1 quoted at a fold.
+BRIEF = (
+    "Build the fluid compaction replay harness from the review report.\n"
+    "Use the evidence sessions only as fixtures; never load a live database, "
+    "and keep every replay deterministic so two runs compare byte for byte.\n"
+    "Split the work into lanes by file ownership and run each lane in its own "
+    "worktree. Use sol workers, not opus, for every lane; the budget is "
+    "fixed.\nReport per-session numbers in one table, with the summed prompt "
+    "and the peak, and flag any regression over two percent."
+)
+# The shape of the 33dc66c6 request: the release gate sits past char 120.
+GATE = (
+    "Finish the Android build fixes from yesterday and rerun the device "
+    "matrix once the emulator images are refreshed on the lab host. Release "
+    "gate: do not tag v0.9 until the smoke run passes on a real Pixel device "
+    "and the crash-free rate on the beta channel is at least 99.5 percent."
+)
+
+
+def _pair(t: int, user_text: str) -> list[SessionNode]:
+    return [
+        _node(f"node_{t:02d}a", "user", [Text(user_text)]),
+        _node(f"node_{t:02d}b", "assistant", [Text(f"answer-{t} " + "pad " * 500)]),
+    ]
+
+
+def _wake_texts(size: int) -> list[str]:
+    from fluid.context.peer import format_peer_message
+
+    body = "worker report line with numbers 12345 " * (size // 38)
+    return [
+        # fluid's own unpark wake: one reminder block.
+        f"<system-reminder>\nBackground work completed.\n{body}\n</system-reminder>",
+        # A peer's message waking an idle receiver.
+        format_peer_message("worker-3", body).strip(),
+        # The host's consolidated task notification.
+        f"<task-notification>\n<task-id>bg-1</task-id>\n{body}\n</task-notification>",
+    ]
+
+
+def _epoch_text(message: Message) -> str:
+    return message.content[0].text
+
+
+def test_fold_keeps_the_brief_verbatim() -> None:
+    nodes = _pair(0, BRIEF)
+    for t in range(1, 12):
+        nodes += _pair(t, f"continue with step {t}")
+    config = CompactionConfig(
+        trigger_tokens=1_000, target_ratio=0.5, keep_recent_turns=2,
+        trim=TrimConfig(trigger_tokens=1_000, keep_recent_tool_results=2,
+                        min_result_chars=500),
+        max_resident_span_digests=3, epoch_fold_spans=3,
+    )
+    compactor = Compactor(config=config)
+    rendered, promos = compactor.apply(nodes)
+    assert [p for p in promos if p.tier == 3]
+    epochs = [m for m in rendered if _epoch_text(m).startswith("[epoch node_00a")]
+    assert len(epochs) == 1
+    stub = _epoch_text(epochs[0])
+    assert BRIEF in stub
+    assert "original request (node_00a):" in stub
+    # Byte-identical on the next render.
+    assert compactor.view(nodes) == rendered
+
+    # Version 1 kept 120 chars of it and lost the constraint.
+    v1 = render_epoch_stub(split_spans(nodes[:6]), replace(config, render_version=1))
+    assert "sol workers, not opus" not in _epoch_text(v1)
+    assert "began with:" in _epoch_text(v1)
+
+
+def test_wake_text_does_not_evict_the_governing_or_recent_requests() -> None:
+    # The release gate arrives mid-fold, then wake notices far larger than the
+    # whole pin budget arrive after it.
+    nodes = _pair(0, BRIEF) + _pair(1, GATE)
+    t = 2
+    for text in _wake_texts(8_000) * 2:
+        nodes += _pair(t, text)
+        t += 1
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert BRIEF in stub and GATE in stub
+    assert "worker report line" not in stub
+    assert "<task-notification>" not in stub and "[agent message" not in stub
+    assert stub.index(BRIEF) < stub.index(GATE)
+
+
+def test_pin_orders_later_requests_newest_first_within_budget() -> None:
+    config = CompactionConfig(intent_pin_tokens=1_000, user_turn_text_cap=1_500)
+    nodes = _pair(0, BRIEF)
+    for t in range(1, 8):
+        nodes += _pair(t, f"request {t}: " + "detail " * 200)
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), config))
+    pinned = re.findall(r"later request \((node_\d+a)\)", stub)
+    # 4,000 chars of budget: the brief, then as many 1,411-char requests as
+    # fit, newest first.
+    assert pinned == ["node_07a", "node_06a"]
+    assert "(5 older request(s) not pinned for space" in stub
+    assert BRIEF in stub
+    # Overlong requests are clipped with their size, never silently cut.
+    long_config = CompactionConfig(user_turn_text_cap=200)
+    long_stub = _epoch_text(render_epoch_stub(split_spans(_pair(0, BRIEF)), long_config))
+    assert f"… (+{len(BRIEF) - 200} chars)" in long_stub
+
+
+def test_digest_keeps_real_user_turn_text_to_the_turn_cap() -> None:
+    request = "please do this: " + "carefully " * 180  # about 1,800 chars
+    wake = _wake_texts(3_000)[2]
+    real = render_span_digest(_pair(0, request), CompactionConfig()).content[0].text
+    assert " ".join(request.split()) in real
+    woke = render_span_digest(_pair(1, wake), CompactionConfig()).content[0].text
+    [wake_line] = [ln for ln in woke.splitlines() if ln.startswith("user (")]
+    assert wake_line.endswith(f"… (+{len(' '.join(wake.split())) - 600} chars)")
+    # Version 1 keeps the old 600-char cap for every user text.
+    v1 = render_span_digest(_pair(0, request), CompactionConfig(render_version=1))
+    assert " ".join(request.split()) not in v1.content[0].text
+    assert "… (+" in v1.content[0].text

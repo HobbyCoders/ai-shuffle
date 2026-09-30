@@ -69,6 +69,23 @@ def test_expand_offset_windows_large_content() -> None:
 # ─── search_path ─────────────────────────────────────────────────────────────
 
 
+def test_expand_leaves_out_reminders_appended_to_user_text() -> None:
+    reminder = "<system-reminder>\n" + "deferred tool catalog entry\n" * 200 + "</system-reminder>"
+    nodes = [_node("node_ee55", "user", [Text("use sol workers, not opus" + reminder)])]
+    text, is_error = expand_ref(nodes, "node_ee55")
+    assert not is_error
+    assert "use sol workers, not opus" in text
+    assert "deferred tool catalog" not in text
+    assert f"[{len(reminder)} chars of <system-reminder> harness text omitted]" in text
+
+
+def test_expand_keeps_a_reminder_only_wake_verbatim() -> None:
+    # fluid's own unpark wake is one reminder block holding the task reports.
+    wake = "<system-reminder>\nTask bg-1 (completed):\nreport body\n</system-reminder>"
+    text, _ = expand_ref([_node("node_ff66", "user", [Text(wake)])], "node_ff66")
+    assert wake in text
+
+
 def test_search_finds_and_ranks() -> None:
     hits = search_path(_nodes(), "crimson-42")
     assert hits and hits[0].node_id in ("node_aa11", "node_cc33")

@@ -48,6 +48,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.peer import PEER_OPEN_PREFIX
 from fluid.context.steer_render import (
     CURRENT_RENDER_VERSION,
     RENDER_VERSION_LEGACY,
@@ -129,8 +130,11 @@ class CompactionConfig:
     # pure-function-of-size contract as the user-attachment stub; errors are
     # never stubbed (losing an error message is how doom loops start).
     tool_result_stub_chars: int = 50_000
-    # Digest extraction caps.
+    # Digest extraction caps. ``user_text_cap`` covers user text that is not
+    # a real user's request (wake and harness notices); from render version 2
+    # a real user's turn-start text gets ``user_turn_text_cap`` instead.
     user_text_cap: int = 600
+    user_turn_text_cap: int = 2_000
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
@@ -143,6 +147,10 @@ class CompactionConfig:
     # chars and a HistoryExpand ref. User and peer steers stay verbatim.
     steer_receipt_chars: int = 1_000
     steer_receipt_preview_chars: int = 300
+    # Version 2 epoch stubs pin the folded turns' user requests verbatim
+    # (each at most ``user_turn_text_cap``) within this many tokens, counted
+    # at 4 chars per token like every other estimate here.
+    intent_pin_tokens: int = 4_000
 
     def steer_render(self) -> SteerRenderConfig:
         return SteerRenderConfig(
@@ -346,6 +354,82 @@ def strip_system_reminders(text: str) -> str:
     return _REMINDER_RE.sub("", text).strip()
 
 
+def _user_text(node: SessionNode) -> str:
+    """A user node's own text, harness reminders stripped."""
+    return strip_system_reminders(
+        "".join(b.text for b in node.message.content if isinstance(b, Text))
+    )
+
+
+def is_wake_text(text: str) -> bool:
+    """True for turn-start text the harness wrote rather than the user.
+
+    Judged from the stored text alone, because a SessionNode records no turn
+    source: an empty text once reminders are stripped (fluid's own unpark
+    wake is one reminder block), a peer's message (the agent-message marker)
+    and a task notification (the host's ``<task-notification>`` substring
+    convention). None of these is a request that governs the work.
+    """
+    return (
+        not text
+        or text.startswith(PEER_OPEN_PREFIX)
+        or "<task-notification>" in text
+    )
+
+
+def _clip_verbatim(text: str, cap: int) -> str:
+    """Like ``_clip`` but keeps the text's own line breaks and spacing."""
+    if len(text) <= cap:
+        return text
+    return f"{text[:cap]}… (+{len(text) - cap} chars)"
+
+
+def _intent_pin(
+    spans: list[list[SessionNode]], config: CompactionConfig
+) -> list[str]:
+    """The pinned intent block of a version 2 epoch stub.
+
+    The folded run's first real user request comes first, then the later
+    real user requests newest-first, each clipped to ``user_turn_text_cap``,
+    while they fit in ``intent_pin_tokens``. Wake and harness notices are
+    left out, so they can never push a user's request out of the budget.
+    """
+    requests = [
+        (node.node_id, text)
+        for span in spans
+        for node in span
+        if is_turn_start(node)
+        and not is_wake_text(text := _user_text(node))
+    ]
+    if not requests:
+        return []
+    cap = config.user_turn_text_cap
+    budget = config.intent_pin_tokens * 4
+    first_id, first_text = requests[0]
+    first = _clip_verbatim(first_text, cap)
+    budget -= len(first)
+    lines = [
+        "Pinned intent: the user's own requests in these folded turns, "
+        "verbatim (a later user message outranks them).",
+        f"original request ({first_id}):",
+        first,
+    ]
+    later = requests[1:][::-1]
+    for i, (node_id, text) in enumerate(later):
+        clipped = _clip_verbatim(text, cap)
+        if len(clipped) > budget:
+            omitted = len(later) - i
+            lines.append(
+                f"({omitted} older request(s) not pinned for space"
+                + ("; HistoryExpand the epoch to read them)"
+                   if config.recall_tools else ")")
+            )
+            break
+        budget -= len(clipped)
+        lines.extend([f"later request ({node_id}):", clipped])
+    return lines
+
+
 def _clip(text: str, cap: int) -> str:
     text = " ".join(text.split())  # collapse newlines/runs for one-line-ness
     if len(text) <= cap:
@@ -414,14 +498,13 @@ def render_span_digest(
                     lines.append(
                         f"  ✓ result {size} chars ({node.node_id})"
                     )
-            user_text = strip_system_reminders(
-                "".join(
-                    b.text for b in message.content if isinstance(b, Text)
-                )
-            )
+            user_text = _user_text(node)
             if user_text:
+                cap = config.user_text_cap
+                if steer_cfg is not None and not is_wake_text(user_text):
+                    cap = config.user_turn_text_cap
                 lines.append(
-                    f"user ({node.node_id}): {_clip(user_text, config.user_text_cap)}"
+                    f"user ({node.node_id}): {_clip(user_text, cap)}"
                 )
         elif message.role == "assistant":
             texts = [b for b in message.content if isinstance(b, Text)]
@@ -451,21 +534,24 @@ def render_span_digest(
 def render_epoch_stub(
     spans: list[list[SessionNode]], config: CompactionConfig
 ) -> Message:
-    """One-line stub replacing a run of digested spans. Deterministic;
-    ``config.render_version`` picks how delivered steers render (see
-    ``render_span_digest``)."""
+    """Stub replacing a run of digested spans. Deterministic.
+
+    ``config.render_version`` picks the shape. Version 1 is one line that
+    quotes the first folded turn's first 120 chars, and steers render
+    verbatim. Version 2 drops that quote for a pinned intent block (see
+    ``_intent_pin``) and renders large harness notices as receipts.
+    """
     start = spans[0][0].node_id
     end = spans[-1][-1].node_id
-    first_user = ""
-    for node in spans[0]:
-        if is_turn_start(node):
-            first_user = strip_system_reminders(
-                "".join(
-                    b.text for b in node.message.content if isinstance(b, Text)
-                )
-            )
-            break
-    hint = f"; began with: {_clip(first_user, 120)}" if first_user else ""
+    steer_cfg = _steer_config(config)
+    hint = ""
+    if steer_cfg is None:
+        first_user = ""
+        for node in spans[0]:
+            if is_turn_start(node):
+                first_user = _user_text(node)
+                break
+        hint = f"; began with: {_clip(first_user, 120)}" if first_user else ""
     if config.recall_tools:
         text = (
             f"[epoch {start}..{end} — {len(spans)} older turns folded; "
@@ -477,7 +563,8 @@ def render_epoch_stub(
             f"[epoch {start}..{end} — {len(spans)} older turns folded; their "
             f"content is not recoverable in this session{hint}]"
         )
-    steer_cfg = _steer_config(config)
+    if steer_cfg is not None:
+        text = "\n".join([text, *_intent_pin(spans, config)])
     deliveries = [Text(s) for span in spans for node in span
                   for block in node.message.content if isinstance(block, ToolResultBlock)
                   for s in render_steers(block.delivered_steers, steer_cfg, node=node)]
