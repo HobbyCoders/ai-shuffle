@@ -2,8 +2,8 @@ name: CI Browser Workspace
 
 on:
   pull_request:
-    # Add ci:full when ready to merge. Keeping it applied rechecks every push;
-    # removing it cancels obsolete full runs and makes readiness fail closed.
+    # Platform jobs are deferred on PRs. Add ci:full to run them on every push
+    # (for PRs that really change this platform); removing it cancels them.
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'app/api/browser_panel.py'
@@ -123,8 +123,9 @@ jobs:
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
-      - name: Require successful full checks for this revision
+      - name: Require successful checks for this revision
         env:
           CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
+          CI_DEFERRABLE_JOBS: '["workspace"]'
         run: python3 scripts/ci/require-full-ci.py

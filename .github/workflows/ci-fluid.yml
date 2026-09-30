@@ -8,8 +8,7 @@ name: CI fluid
 # fluid is developed on Windows; this Linux run is the one that catches
 # POSIX-only failures (path separators, os.fork, unix sockets). Before the
 # monorepo merge it ran inside the vendor-sync workflow, once a day plus on
-# every fluid push. The daily canary below keeps that cadence; the gate job
-# skips the paid runner when main has not moved since the last green canary.
+# every fluid push. PRs that touch fluid/ run it; there is no daily canary.
 #
 # It stays a separate workflow because fluid's dev extras need mcp>=2 while
 # the app pins mcp 1.x; the two suites cannot share one environment.
@@ -20,49 +19,18 @@ on:
     paths:
       - 'fluid/**'
       - '.github/workflows/ci-fluid.yml'
-  schedule:
-    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
-  # The canary gate reads run history.
-  actions: read
 
 concurrency:
   group: ci-fluid-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  canary-gate:
-    name: Canary gate
-    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
-    # canary job.
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-fluid.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
-          if [ "$last" = "$GITHUB_SHA" ]; then
-            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
   unit:
     name: fluid unit tests
-    needs: canary-gate
-    # PRs and manual runs always run; the schedule runs only when main moved.
-    # !cancelled() keeps this job alive when the gate is skipped on a PR.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     timeout-minutes: 20
     # Use a smaller runner for the single-process Fluid test suite.
     runs-on: blacksmith-2vcpu-ubuntu-2404

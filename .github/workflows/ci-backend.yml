@@ -29,12 +29,7 @@ on:
       - 'pytest.ini'
       - '.github/workflows/ci-backend.yml'
       - '.github/workflows/release.yml'
-  # Daily main-branch canary catches interactions between merged PRs within
-  # roughly a day. Skip the paid runner when main has not moved since a green
-  # canary; PRs already check each revision before merge.
-  schedule:
-    - cron: '7 6 * * *'
-  # Manual canary (`gh workflow run ci-backend.yml`).
+  # Manual run on any ref (`gh workflow run ci-backend.yml`).
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -45,8 +40,6 @@ on:
 
 permissions:
   contents: read
-  # The canary gate reads run history.
-  actions: read
 
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
@@ -55,35 +48,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  canary-gate:
-    name: Canary gate
-    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
-    # canary job.
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-backend.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
-          if [ "$last" = "$GITHUB_SHA" ]; then
-            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
   backend:
     name: Backend tests
-    needs: canary-gate
-    # PRs and manual runs always run; the schedule runs only when main moved.
-    # !cancelled() keeps this job alive when the gate is skipped on a PR.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
     # for the platform default.
     timeout-minutes: 20

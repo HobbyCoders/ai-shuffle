@@ -1,75 +1,26 @@
 name: Container PostgreSQL
 
 # Builds the production image and exercises a real container: PostgreSQL
-# bootstrap, lifecycle, and the UI through a browser. That is a full image
-# build on a paid runner, so PRs trigger it only when the container packaging
-# itself changes. Application code is covered by the daily canary on main
-# (gated on main having moved) and by `gh workflow run container-postgres.yml`.
+# bootstrap, lifecycle, the buyer Compose install and the UI through a browser.
+# That is a full image build on a paid runner, so it is manual only
+# (`gh workflow run container-postgres.yml --ref <branch>`). Run it on PRs that
+# change container packaging. Every release runs the same container
+# verification in docker-publish.yml before the image is pushed.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
-  pull_request:
-    paths:
-      - 'Dockerfile'
-      - 'entrypoint.sh'
-      - '.dockerignore'
-      - 'docker/**'
-      - 'docker-compose*.yml'
-      - 'docs/install/compose/**'
-      - 'scripts/ci/verify_buyer_compose.py'
-      # The buyer install check also drives the owner password, license and
-      # CLI status APIs of the running container.
-      - 'app/api/owner_login.py'
-      - 'app/core/owner_auth.py'
-      - 'app/api/license.py'
-      - 'app/core/license.py'
-      - 'scripts/backup.sh'
-      - 'scripts/verify_container_postgres.py'
-      - 'tests/integration/container_ui_smoke.mjs'
-      - '.github/workflows/container-postgres.yml'
-  schedule:
-    - cron: '37 6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
-  # The canary gate reads run history.
-  actions: read
 
 concurrency:
-  group: container-postgres-${{ github.event.pull_request.number || github.ref }}
+  group: container-postgres-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  canary-gate:
-    name: Canary gate
-    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
-    # canary job.
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/container-postgres.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
-          if [ "$last" = "$GITHUB_SHA" ]; then
-            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
   container-postgres:
     name: Single-container PostgreSQL and browser
-    needs: canary-gate
-    # PRs and manual runs always run; the schedule runs only when main moved.
-    # !cancelled() keeps this job alive when the gate is skipped on a PR.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Use the smaller image-build runner with the sticky layer cache; retain the full container verification.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40

@@ -48,6 +48,7 @@ class CostPolicyTests(unittest.TestCase):
                 self.assertEqual(step["env"], {
                     "CI_FULL_REQUESTED": "${{ " + FULL + " }}",
                     "CI_REQUIRED_RESULTS": "${{ toJSON(needs) }}",
+                    "CI_DEFERRABLE_JOBS": json.dumps(expensive),
                 })
                 self.assertEqual(step["run"], "python3 scripts/ci/require-full-ci.py")
                 self.assertNotIn("continue-on-error", gate)
@@ -98,11 +99,19 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn("inputs.publish_download", jobs["publish"]["if"])
         self.assertIn("github.event_name != 'pull_request'", jobs["publish"]["if"])
 
-    def test_daily_canaries_still_skip_unchanged_main(self):
-        for name in ["ci-backend.yml", "ci-frontend.yml"]:
-            config = workflow(name)
-            self.assertEqual(config["on"]["schedule"], [{"cron": "7 6 * * *"}])
-            self.assertIn('if [ "$last" = "$GITHUB_SHA" ]', config["jobs"]["canary-gate"]["steps"][0]["run"])
+    def test_no_workflow_runs_on_a_schedule(self):
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                config = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+                self.assertNotIn("schedule", config["on"])
+                self.assertNotIn("canary-gate", config.get("jobs", {}))
+
+    def test_costly_single_purpose_suites_are_manual_only(self):
+        # Releases re-run the container check in docker-publish.yml; Linux
+        # identity coverage stays in CI Backend.
+        for name in ["container-postgres.yml", "ci-instance-identity.yml"]:
+            with self.subTest(workflow=name):
+                self.assertEqual(set(workflow(name)["on"]), {"workflow_dispatch"})
 
     def test_benchmark_defaults_and_worker_count_match(self):
         backend = workflow("ci-backend.yml")
@@ -129,25 +138,39 @@ class CostPolicyTests(unittest.TestCase):
     def test_readiness_rejects_every_non_success_state(self):
         for state in ["skipped", "failure", "cancelled", "pending", None]:
             for requested in ["true", "false", None]:
-                with self.subTest(state=state, requested=requested):
-                    self.assertIsNotNone(readiness.readiness_error(requested, {"smoke": {"result": "success"}, "full": {"result": state}}))
+                for deferrable in [(), ("full",)]:
+                    if state == "skipped" and requested != "true" and deferrable:
+                        continue
+                    with self.subTest(state=state, requested=requested, deferrable=deferrable):
+                        results = {"smoke": {"result": "success"}, "full": {"result": state}}
+                        self.assertIsNotNone(readiness.readiness_error(requested, results, deferrable))
         for results in [None, {}, [], {"full": None}, {"full": {}}, {"full": "success"}]:
             self.assertIsNotNone(readiness.readiness_error("true", results))
+            self.assertIsNotNone(readiness.readiness_error("false", results, ("full",)))
 
-    def test_success_does_not_override_removed_label(self):
-        results = {key: {"result": "success"} for key in ["smoke", "full"]}
-        self.assertIsNone(readiness.readiness_error("true", results))
-        self.assertIsNotNone(readiness.readiness_error("false", results))
+    def test_unlabelled_prs_pass_with_deferred_platform_jobs_only(self):
+        deferred = {"smoke": {"result": "success"}, "full": {"result": "skipped"}}
+        self.assertIsNone(readiness.readiness_error("false", deferred, ("full",)))
+        # A skipped fast job is never acceptable, even without the label.
+        self.assertIsNotNone(readiness.readiness_error("false", {"smoke": {"result": "skipped"}, "full": {"result": "skipped"}}, ("full",)))
+        # With the label, a deferred job must have run and passed.
+        self.assertIsNotNone(readiness.readiness_error("true", deferred, ("full",)))
+        passed = {key: {"result": "success"} for key in ["smoke", "full"]}
+        for requested in ["true", "false"]:
+            self.assertIsNone(readiness.readiness_error(requested, passed, ("full",)))
 
     def test_actual_readiness_entrypoint_and_summary(self):
-        cases = [("false", '{"full":{"result":"skipped"}}', 1, "ci:full"),
+        cases = [("false", '{"full":{"result":"skipped"}}', 0, "ci:full"),
+                 ("false", '{"fast":{"result":"skipped"}}', 1, "did not pass"),
+                 ("true", '{"full":{"result":"skipped"}}', 1, "did not pass"),
                  ("true", '{"full":{"result":"failure"}}', 1, "did not pass"),
                  ("true", '{"full":{"result":"success"}}', 0, "passed"),
                  ("true", "malformed", 1, "missing")]
         with tempfile.TemporaryDirectory() as temporary:
             for index, (requested, results, expected, message) in enumerate(cases):
                 summary = Path(temporary) / str(index)
-                env = dict(os.environ, CI_FULL_REQUESTED=requested, CI_REQUIRED_RESULTS=results, GITHUB_STEP_SUMMARY=str(summary))
+                env = dict(os.environ, CI_FULL_REQUESTED=requested, CI_REQUIRED_RESULTS=results,
+                           CI_DEFERRABLE_JOBS='["full"]', GITHUB_STEP_SUMMARY=str(summary))
                 result = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(message, result.stdout)

@@ -17,10 +17,8 @@ on:
       - "CI Browser Workspace"
       - "CI fluid"
       - "CI JavaScript"
-      - "Instance identity contracts"
       - "License server CI"
       - "Registry CI"
-      - "Container PostgreSQL"
       - "Desktop source update checks"
       - "Desktop CI"
 
