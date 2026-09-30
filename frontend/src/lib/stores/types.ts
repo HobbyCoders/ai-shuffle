@@ -92,6 +92,7 @@ export interface PendingPeerMessage {
 export interface ChatMessage {
 	id: string;
 	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)
+	checkpointBacked?: boolean; // False for mid-turn steers; absent on legacy normal prompts
 	role: 'user' | 'assistant' | 'system';
 	content: string;
 	type?: MessageType;

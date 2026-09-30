@@ -1264,7 +1264,8 @@ class SkillStore:
         over_budget = 0
         held = 0
         other_checkout = 0
-        normalized_checkout = re.sub(r"[^a-z0-9]+", "-", checkout.casefold()) if checkout else None
+        checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
+        normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
         entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -e.updated_at))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
@@ -1298,7 +1299,8 @@ class SkillStore:
                     and not (entry.key or "").startswith("profile.")
                     and re.search(r"(?:\.venv\b|node_modules\b|npm (?:ci|dependencies)|requirements-dev\b)", entry.text)
                     and re.search(r"\b(?:has|created|installed|passed|succeeded|verified)\b", entry.text, re.I)
-                    and re.sub(r"[^a-z0-9]+", "-", branch.group(1).casefold()) not in normalized_checkout
+                    and re.sub(r"[^A-Za-z0-9._-]+", "-", branch.group(1)).strip("-.").casefold()
+                    != normalized_checkout
                 ):
                     other_checkout += 1
                     continue

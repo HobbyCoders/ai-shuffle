@@ -375,6 +375,7 @@ def _convert_one(session_id: str, msg: Dict[str, Any]) -> List[Dict[str, Any]]:
             contract.MessageUser, session_id,
             content=content, kind="user",
             profile_id=profile_id, uuid=uuid_, timestamp=ts,
+            checkpoint_backed=msg.get("checkpoint_backed"),
         )]
     if role == "user" and mtype == "command":
         return [_event(
