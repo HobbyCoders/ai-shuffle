@@ -1821,7 +1821,10 @@ class HarnessAdapter(ProviderAdapter):
         (in-cwd edits under Accept Edits, classifier approvals under Auto,
         every tool on an ``--allowed-tools`` grant), so neither the watched
         approver nor ``_answer_without_approver`` sees them. PreToolUse sees
-        every call, so a saved Deny is enforced here: ``inner``'s denial
+        every call to the CLI's built-in tools (fluid skips it for the
+        bridge-served ``mcp__fluid_bundled__*`` app tools, which the bridge
+        checks against the permission engine and hooks instead), so a saved
+        Deny on a built-in is enforced here: ``inner``'s denial
         (``_delegated_tool_policy``) wins, then unless the live mode is
         Bypass a saved Deny denies with "Denied by saved rule". A failed
         lookup denies too. A saved Allow grants nothing here; asks stay with
@@ -1857,7 +1860,7 @@ class HarnessAdapter(ProviderAdapter):
 
     @staticmethod
     def _fluid_path_prompts(path: List[Any]) -> tuple:
-        """``(last typed user prompt, has a user/assistant pair)`` for a path.
+        """``(typed user prompts oldest first, has a user/assistant pair)``.
 
         A typed prompt is a user node with text and no tool result (tool echoes
         are user nodes too). The pair is a typed prompt followed later by an
@@ -1868,12 +1871,12 @@ class HarnessAdapter(ProviderAdapter):
 
         from app.core.provider.fluid_transcript import prompt_text
 
-        last_prompt: Optional[str] = None
+        prompts: List[str] = []
         has_pair = False
         for node in path:
             message = getattr(node, "message", None)
             role = getattr(message, "role", None)
-            if role == "assistant" and last_prompt is not None:
+            if role == "assistant" and prompts:
                 has_pair = True
                 continue
             if role != "user":
@@ -1886,8 +1889,8 @@ class HarnessAdapter(ProviderAdapter):
                     blocks.append({"type": "text", "text": block.text})
             text = prompt_text(blocks)
             if text is not None:
-                last_prompt = text
-        return last_prompt, has_pair
+                prompts.append(text)
+        return prompts, has_pair
 
     async def _cli_reseed_reason(
         self,
@@ -1900,35 +1903,39 @@ class HarnessAdapter(ProviderAdapter):
         The delegated CLI only ever receives the new user frame; its history is
         whatever ``--resume <handle>`` loads. That is wrong in three cases:
         the session has history but no handle (it ran on another provider),
-        the handle's transcript is not on this worker, or the transcript does
-        not hold fluid's latest prompt (turns ran on another provider since).
+        the CLI would not find the handle's transcript on this worker, or the
+        transcript does not end on fluid's latest prompts (turns ran on
+        another provider since; see ``fluid_transcript.cli_prompts_cover``).
         A session without one user/assistant pair has nothing to hand over.
         """
         from app.core.provider import fluid_transcript
 
         assert self._store is not None
         path = await self._store.load_path(fluid_session_id)
-        last_prompt, has_pair = self._fluid_path_prompts(list(path or ()))
+        fluid_prompts, has_pair = self._fluid_path_prompts(list(path or ()))
         if not has_pair:
             return None
         if not handle:
             return "the session has history but no Claude Code conversation"
         root = fluid_transcript.cli_projects_root(options.env)
         transcript = await asyncio.to_thread(
-            fluid_transcript.find_cli_transcript, handle, root
+            fluid_transcript.find_cli_transcript,
+            handle, root, options.cwd or os.getcwd(),
         )
         if transcript is None:
-            return f"Claude Code transcript {handle}.jsonl is not under {root}"
-        if last_prompt is None:
-            return None
-        prompts = await asyncio.to_thread(
-            fluid_transcript.cli_transcript_prompts, transcript
+            return (
+                f"Claude Code would not find transcript {handle}.jsonl under {root}"
+            )
+        cli_prompts, complete = await asyncio.to_thread(
+            fluid_transcript.cli_transcript_prompt_tail, transcript
         )
-        # Any typed prompt in the tail counts, not only the last one: a
-        # mid-turn steer and the CLI's "[Request interrupted by user]" marker
-        # are user text entries written after the turn's own prompt.
-        if prompts and last_prompt not in prompts:
-            return f"Claude Code transcript {handle}.jsonl lacks the latest prompt"
+        if not fluid_transcript.cli_prompts_cover(
+            fluid_prompts, cli_prompts, complete=complete,
+        ):
+            return (
+                f"Claude Code transcript {handle}.jsonl does not end on the "
+                "session's latest prompts"
+            )
         return None
 
     async def _reseed_cli_session(

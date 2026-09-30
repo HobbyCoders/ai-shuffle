@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid as _uuid
@@ -979,22 +980,35 @@ def cli_projects_root(env: Optional[Dict[str, str]] = None) -> Path:
     return Path(settings.get_claude_projects_dir)
 
 
-def find_cli_transcript(cli_session_id: str, projects_dir: Path) -> Optional[Path]:
-    """The ``<handle>.jsonl`` file under any project dir of ``projects_dir``.
+def find_cli_transcript(
+    cli_session_id: str,
+    projects_dir: Path,
+    working_dir: Optional[str] = None,
+) -> Optional[Path]:
+    """The ``<handle>.jsonl`` file ``--resume <handle>`` would load, or None.
 
-    The CLI resolves ``--resume <handle>`` by the file name across every
-    project dir, so the cwd it lives under does not matter here. Returns None
-    when no such file exists (or the handle is not a plain id).
+    Claude Code 2.1.285 looks in the cwd's project dir first. Failing that it
+    scans every project dir under the root for ``<handle>.jsonl`` and gives up
+    when more than one dir holds it (its "transcript_id_scan_fallback"). This
+    follows the same order: ``working_dir``'s dir (under its absolute and its
+    resolved path), then the scan, which must find exactly one file. Returns
+    None when the CLI would not find the file, or the handle is not a plain id.
     """
     if not cli_session_id or not set(cli_session_id) <= _CLI_HANDLE_CHARS:
         return None
     root = Path(projects_dir)
     if not root.is_dir():
         return None
-    for candidate in root.glob(f"*/{cli_session_id}.jsonl"):
-        if candidate.is_file():
-            return candidate
-    return None
+    name = f"{cli_session_id}.jsonl"
+    if working_dir:
+        for cwd in dict.fromkeys(
+            (os.path.abspath(working_dir), os.path.realpath(working_dir))
+        ):
+            candidate = _cli_project_dir(root, cwd) / name
+            if candidate.is_file():
+                return candidate
+    found = [c for c in root.glob(f"*/{name}") if c.is_file()]
+    return found[0] if len(found) == 1 else None
 
 
 def prompt_text(content: Any) -> Optional[str]:
@@ -1025,8 +1039,20 @@ def cli_transcript_prompts(
     path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
 ) -> List[str]:
     """The typed user prompts in the last ``tail_bytes`` of a CLI transcript,
-    oldest first. A partial first line and lines that are not JSON are
-    skipped, and so are the CLI's meta and compaction-summary entries."""
+    oldest first. See :func:`cli_transcript_prompt_tail`."""
+    return cli_transcript_prompt_tail(path, tail_bytes)[0]
+
+
+def cli_transcript_prompt_tail(
+    path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
+) -> Tuple[List[str], bool]:
+    """``(typed user prompts, whole file read)`` for a CLI transcript.
+
+    The prompts come from the last ``tail_bytes``, oldest first. A partial
+    first line and lines that are not JSON are skipped, and so are the CLI's
+    meta and compaction-summary entries. The flag is False when the file is
+    longer than ``tail_bytes``, so earlier prompts were not read.
+    """
     with open(path, "rb") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
@@ -1052,7 +1078,63 @@ def cli_transcript_prompts(
         text = prompt_text((entry.get("message") or {}).get("content"))
         if text:
             prompts.append(text)
-    return prompts
+    return prompts, start == 0
+
+
+#: How many of fluid's latest prompts :func:`cli_prompts_cover` lines up.
+CLI_PROMPT_MATCH_WINDOW = 3
+
+# "/name args": a command the delegated leg hands the CLI unexpanded. The CLI
+# records its own command entries for it, not this text. "/some/path ..." is
+# not a command.
+_SLASH_COMMAND = re.compile(r"^/[A-Za-z][\w:.-]*(?:\s|$)")
+
+
+def is_slash_command_prompt(text: str) -> bool:
+    """Whether a prompt is a slash command the CLI records in its own form."""
+    return bool(_SLASH_COMMAND.match(text))
+
+
+def cli_prompts_cover(
+    fluid_prompts: Sequence[str],
+    cli_prompts: Sequence[str],
+    *,
+    complete: bool,
+    window: int = CLI_PROMPT_MATCH_WINDOW,
+) -> bool:
+    """Whether a CLI transcript ends on fluid's latest turns.
+
+    ``fluid_prompts`` are the typed prompts on fluid's path, oldest first;
+    ``cli_prompts`` those read from the CLI transcript's tail, and
+    ``complete`` says whether that tail is the whole file.
+
+    CLI entries whose text is not one of fluid's prompts are dropped first:
+    mid-turn steers, "[Request interrupted by user]" markers and command
+    wrappers are written into the CLI transcript but never become prompt
+    nodes in fluid. Slash-command prompts are left out on both sides, because
+    the CLI records its own command entries instead of the typed text. The
+    CLI's remaining prompts must then end with fluid's last ``window``
+    prompts, in order. A turn that ran on another provider is therefore
+    caught even when its prompt repeats an earlier one ("continue"): the
+    CLI's sequence then ends one prompt short.
+
+    When the tail was cut and holds fewer than ``window`` of fluid's prompts,
+    what it holds must be the end of fluid's window. A cut tail with none of
+    them (one very long turn) gives no evidence either way and counts as
+    covered. A steer whose text equals one of fluid's prompts breaks the
+    match and costs a re-seed, which is the safe direction.
+    """
+    ours = [p for p in fluid_prompts if not is_slash_command_prompt(p)]
+    if not ours:
+        return True
+    known = set(ours)
+    theirs = [p for p in cli_prompts if p in known]
+    expected = ours[-window:]
+    if len(theirs) >= len(expected):
+        return theirs[-len(expected):] == expected
+    if complete:
+        return False
+    return not theirs or theirs == expected[-len(theirs):]
 
 
 def _write_cli_transcript(

@@ -9,7 +9,10 @@ tool calls without that approver and use this lookup to keep the same order:
   a prompt raised on a path with no approver (REST, background, automation).
 * the delegated leg's PreToolUse policy: calls the claude CLI approves on its
   own (in-cwd edits under Accept Edits, classifier approvals under Auto) never
-  raise a prompt, so a saved Deny is enforced there.
+  raise a prompt, so a saved Deny is enforced there. That covers the CLI's
+  built-in tools only: ``DelegatedLoop._cli_pre_tool_use`` skips the
+  bridge-served ``mcp__fluid_bundled__*`` app tools, which the bridge checks
+  against fluid's permission engine and hooks, not these saved rules.
 
 Session rules are keyed by the app session id, the agent's rules by its
 profile id; the lookup is ``permission_handler.saved_rule``.

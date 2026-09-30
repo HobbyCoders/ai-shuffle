@@ -97,8 +97,11 @@ def _projects(tmp_path: Path) -> Path:
     return tmp_path / "cfg" / "projects"
 
 
-def _write_cli_jsonl(tmp_path: Path, handle: str, entries: List[dict]) -> Path:
-    path = _projects(tmp_path) / "some-other-project" / f"{handle}.jsonl"
+def _write_cli_jsonl(
+    tmp_path: Path, handle: str, entries: List[dict],
+    project: str = "some-other-project",
+) -> Path:
+    path = _projects(tmp_path) / project / f"{handle}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8",
@@ -137,8 +140,21 @@ def _fake_reseed(monkeypatch, result: ReseedResult) -> list:
     return calls
 
 
+_UNEXPECTED_RESEEDS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_unexpected_reseed():
+    """connect swallows a raising re-seed (it keeps the stored handle), so a
+    re-seed ``_no_reseed`` forbids is recorded and checked here instead."""
+    _UNEXPECTED_RESEEDS.clear()
+    yield
+    assert not _UNEXPECTED_RESEEDS, "connect re-seeded a transcript that was current"
+
+
 def _no_reseed(monkeypatch) -> None:
     def boom(*args: Any, **kwargs: Any):
+        _UNEXPECTED_RESEEDS.append((args, kwargs))
         raise AssertionError("connect re-seeded a transcript that was current")
 
     monkeypatch.setattr(fluid_transcript, "reseed_delegated_cli_session", boom)
@@ -278,6 +294,174 @@ async def test_a_transcript_missing_a_later_native_turn_is_reseeded(monkeypatch,
     captured = await _connect(monkeypatch, store, _options(tmp_path))
     assert captured["cli_session_id"] == "new-uuid"
     assert len(calls) == 1
+
+
+def _turns(*prompts: str) -> list:
+    """A linear path: each prompt followed by an assistant answer."""
+    nodes: list = []
+    parent: Optional[str] = None
+    for i, prompt in enumerate(prompts):
+        user_id, answer_id = f"u{i}", f"a{i}"
+        nodes.append((user_id, parent, "user", prompt))
+        nodes.append((answer_id, user_id, "assistant", f"answer {i}"))
+        parent = answer_id
+    return nodes
+
+
+def _cli_turns(*prompts: str) -> List[dict]:
+    entries: List[dict] = []
+    for prompt in prompts:
+        entries += [_user([{"type": "text", "text": prompt}]), _assistant("ok")]
+    return entries
+
+
+@pytest.mark.asyncio
+async def test_a_missed_native_turn_repeating_an_earlier_prompt_is_reseeded(monkeypatch, tmp_path):
+    """Claude, then another provider, then Claude again, where the other
+    provider's prompt repeats an earlier Claude prompt ("continue"). The
+    prompt is somewhere in the CLI transcript, but the transcript does not
+    end on it."""
+    store = MemoryStore()
+    await _seed(
+        store,
+        _turns("My codename is PELICAN", "continue", "fix the tests", "continue"),
+        handle="cli-handle",
+    )
+    _write_cli_jsonl(
+        tmp_path, "cli-handle",
+        _cli_turns("My codename is PELICAN", "continue", "fix the tests"),
+    )
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "new-uuid"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_prompts_that_all_ran_on_claude_are_current(monkeypatch, tmp_path):
+    store = MemoryStore()
+    await _seed(
+        store,
+        _turns("My codename is PELICAN", "continue", "fix the tests", "continue"),
+        handle="cli-handle",
+    )
+    entries = _cli_turns("My codename is PELICAN", "continue", "fix the tests")
+    entries += [
+        _user([{"type": "text", "text": "continue"}]),
+        _user([{"type": "text", "text": "and run the linter"}]),  # a steer
+        _user([{"type": "text", "text": "[Request interrupted by user]"}]),
+    ]
+    _write_cli_jsonl(tmp_path, "cli-handle", entries)
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+@pytest.mark.asyncio
+async def test_a_slash_command_turn_is_not_staleness(monkeypatch, tmp_path):
+    """The delegated leg hands "/cmd" to the CLI unexpanded; the CLI records
+    its own command entries, never the typed text."""
+    store = MemoryStore()
+    await _seed(
+        store, _turns("My codename is PELICAN", "/review 12\n\nToday is Tuesday"),
+        handle="cli-handle",
+    )
+    entries = _cli_turns("My codename is PELICAN")
+    entries += [
+        _user(
+            "<command-message>review</command-message>\n"
+            "<command-name>/review</command-name>\n<command-args>12</command-args>"
+        ),
+        _user([{"type": "text", "text": "Review PR 12 ..."}], isMeta=True),
+        _assistant("reviewed"),
+    ]
+    _write_cli_jsonl(tmp_path, "cli-handle", entries)
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_the_cli_would_not_pick_is_reseeded(monkeypatch, tmp_path):
+    """Outside the cwd's project dir the CLI takes a transcript only when one
+    dir holds it; with two it gives up."""
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    for project in ("project-a", "project-b"):
+        _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("My codename is PELICAN"), project)
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "new-uuid"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_cwd_project_dir_wins_over_other_copies(monkeypatch, tmp_path):
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    options = _options(tmp_path)
+    own = cli_project_dir_name(os.path.abspath(options.cwd))
+    _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("My codename is PELICAN"), own)
+    # A stale copy elsewhere must not be read.
+    for project in ("project-a", "project-b"):
+        _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("something else"), project)
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, options)
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+# ─── the prompt match itself ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("fluid,cli,complete,covered", [
+    # the reviewer's case: the missed native "continue" repeats an earlier one
+    (["P", "continue", "fix", "continue"], ["P", "continue", "fix"], True, False),
+    (["P", "continue", "fix", "continue"], ["P", "continue", "fix", "continue"], True, True),
+    # steers and markers the fluid path never holds are ignored
+    (["P", "fix"], ["P", "steer", "fix", "[Request interrupted by user]"], True, True),
+    # a missed native turn with a new prompt
+    (["P", "fix", "teal"], ["P", "fix"], True, False),
+    # a whole file with fewer of fluid's prompts than the window is behind
+    (["P", "fix", "go"], ["go"], True, False),
+    # a cut tail holding only the end of fluid's window is fine...
+    (["P", "fix", "go"], ["go"], False, True),
+    # ...but not one that ends on an earlier prompt
+    (["P", "fix", "go"], ["fix"], False, False),
+    # a cut tail inside one long turn holds no prompt at all
+    (["P", "fix", "go"], [], False, True),
+    # only slash-command prompts: nothing to compare
+    (["/compact"], [], True, True),
+])
+def test_cli_prompts_cover(fluid, cli, complete, covered):
+    assert fluid_transcript.cli_prompts_cover(fluid, cli, complete=complete) is covered
+
+
+def test_a_cut_tail_is_reported(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "".join(json.dumps(_user(f"prompt {i}")) + "\n" for i in range(50)),
+        encoding="utf-8",
+    )
+    prompts, complete = fluid_transcript.cli_transcript_prompt_tail(path)
+    assert complete and len(prompts) == 50
+    prompts, complete = fluid_transcript.cli_transcript_prompt_tail(path, tail_bytes=200)
+    assert not complete and prompts[-1] == "prompt 49" and len(prompts) < 50
+
+
+@pytest.mark.parametrize("text,is_command", [
+    ("/review 12", True),
+    ("/compact", True),
+    ("/plugin:cmd arg\n\nnote", True),
+    ("/src/app.py is broken", False),
+    ("continue", False),
+])
+def test_slash_command_prompts(text, is_command):
+    assert fluid_transcript.is_slash_command_prompt(text) is is_command
 
 
 @pytest.mark.asyncio

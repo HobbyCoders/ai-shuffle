@@ -530,6 +530,22 @@ async def _run_background_query_impl(
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
+                    # A 401 on the delegated leg is an expired Claude Code
+                    # sign-in that only the user can fix, and nobody watches
+                    # a background turn, so it still gets the sign-in notice.
+                    # Other statuses keep the silent background behaviour.
+                    from app.core.query_engine import (
+                        _adapter_is_delegated,
+                        _emit_api_error_notification,
+                    )
+
+                    if (
+                        str(api_err) == "401"
+                        and _adapter_is_delegated(state.adapter)
+                    ):
+                        await _emit_api_error_notification(
+                            api_user_id, session_id, api_err, delegated=True,
+                        )
                 # Extract token counts from usage dict.
                 # ResultMessage.usage is CUMULATIVE across every API call in
                 # the agent loop — safe for increment totals, unsafe as a
