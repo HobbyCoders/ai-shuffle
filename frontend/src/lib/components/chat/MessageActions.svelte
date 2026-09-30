@@ -14,6 +14,7 @@
 		messageRole: 'user' | 'assistant';
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
+		rewindEligible?: boolean;
 		canRead?: boolean;
 		isStreaming?: boolean;
 		visible?: boolean;  // Controls button visibility without unmounting (keeps dialog alive)
@@ -30,6 +31,7 @@
 		messageRole,
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
+		rewindEligible = true,
 		canRead = false,
 		isStreaming = false,
 		visible = true,
@@ -114,14 +116,14 @@
 	}
 
 	function handleRewindClick() {
-		if (!sessionId) return;
+		if (!sessionId || !rewindEligible) return;
 		showRewindDialog = true;
 		rewindError = null;
 		rewindMode = 'chat';  // Reset to default mode
 	}
 
 	async function handleRewindConfirm() {
-		if (!sessionId) return;
+		if (!sessionId || !rewindEligible) return;
 
 		// Rewind prefers the message's JSONL entry uuid — the exact, unambiguous
 		// truncation target. Live v2 `message.user` events carry NO uuid, so a
@@ -228,9 +230,10 @@
 	<!-- Rewind button - only available for user messages -->
 	{#if sessionId && !isStreaming && messageRole === 'user'}
 		<button
-			class="action-btn"
+			class="action-btn disabled:opacity-40 disabled:cursor-not-allowed"
 			onclick={handleRewindClick}
-			title={messageRole === 'user' ? "Rewind to before this message" : "Rewind to after this response"}
+			disabled={!rewindEligible}
+			title={rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
 		>
 			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />

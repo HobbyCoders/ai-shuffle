@@ -403,6 +403,7 @@
 			model: {
 				items: [],
 				promptOccurrence: [],
+				rewindEligible: [],
 				subagentToolIds: new Set<string>(),
 				itemIndexByTurnId: new Map<string, number>(),
 				lastAssistantMetadata: null,
@@ -1947,6 +1948,7 @@
 			sessionId={$activeSession.sessionId}
 			messageUuid={message.jsonlUuid}
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
+			rewindEligible={transcript.rewindEligible[messageIndex]}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>

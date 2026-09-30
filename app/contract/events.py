@@ -109,6 +109,7 @@ class MessageUser(EventBase):
     command_args: str | None = None
     profile_id: str | None = None
     uuid: str | None = None  # raw jsonl entry uuid (rewind target)
+    checkpoint_backed: bool | None = None  # False for mid-turn steers; None for legacy events
     timestamp: datetime | None = None  # preferred over created_at when stamping
 
 

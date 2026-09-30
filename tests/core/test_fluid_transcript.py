@@ -391,6 +391,7 @@ def test_live_messages_render_through_the_shared_transform(mock_db):
     # prompt (same for JSONL and store sources) — proof we render through it
     # rather than through a fluid-specific shape.
     assert ("user", None) in rendered
+    assert all(m["checkpoint_backed"] is True for m in messages if m["role"] == "user")
     assert ("assistant", "text") in rendered
     tool_rows = [m for m in messages if m["type"] == "tool_use"]
     assert len(tool_rows) == 1
