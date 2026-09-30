@@ -86,10 +86,11 @@ describe('suggestion keyboard decisions', () => {
 		keyCode: 0,
 		...extra
 	});
-	it.each(['Tab', 'Enter'])('%s accepts, not submits', k =>
+	it.each(['Tab'])('%s accepts, not submits', k =>
 		expect(suggestionKey(key(k))).toBe('accept')
 	);
-	it('Escape dismisses', () => expect(suggestionKey(key('Escape'))).toBe('dismiss'));
+	it('Enter does not accept', () => expect(suggestionKey(key('Enter'))).toBe(null));
+		it('Escape dismisses', () => expect(suggestionKey(key('Escape'))).toBe('dismiss'));
 	it.each(['shiftKey', 'ctrlKey', 'altKey', 'metaKey', 'isComposing', 'repeat'])(
 		'preserves %s',
 		modifier => expect(suggestionKey(key('Enter', { [modifier]: true }))).toBe(null)

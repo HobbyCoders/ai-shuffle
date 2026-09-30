@@ -125,5 +125,5 @@ export function suggestionKey(
 	)
 		return null;
 	if (event.key === 'Escape') return 'dismiss';
-	return event.key === 'Tab' || event.key === 'Enter' ? 'accept' : null;
+	return event.key === 'Tab' ? 'accept' : null;
 }
