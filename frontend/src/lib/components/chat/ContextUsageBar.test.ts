@@ -243,6 +243,45 @@ describe('ContextUsageBar — popover positioning', () => {
 		}
 	});
 
+	it('caps a four-provider popup to the space above its trigger at 1280x800', async () => {
+		const originalWidth = window.innerWidth;
+		const originalHeight = window.innerHeight;
+		const column = document.createElement('div');
+		column.className = 'chat-view';
+		document.body.append(column);
+		let triggerTop = 650;
+		const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+		rectSpy.mockImplementation(function (this: HTMLElement) {
+			if (this === column) return DOMRect.fromRect({ x: 240, y: 52, width: 1040, height: 748 });
+			if (this.querySelector(':scope > .usage-indicator')) return DOMRect.fromRect({ x: 1000, y: triggerTop, width: 32, height: 32 });
+			return DOMRect.fromRect({ x: 700, width: 340, height: 1000 });
+		});
+		try {
+			window.innerWidth = 1280;
+			window.innerHeight = 800;
+			rateLimit.applySnapshot({ available: true, windows: [], providers: ['one', 'two', 'three', 'four'].map(id => ({
+				provider_id: id, provider_name: id, provider_type: 'openrouter', windows: [], credits: { limit_remaining: 10 },
+			})) });
+			const { container, unmount } = render(ContextUsageBar, { target: column });
+			await openPopover(container);
+			const popover = container.querySelector('.usage-popover') as HTMLElement;
+			for (const name of ['one', 'two', 'three', 'four']) {
+				expect(container.querySelector(`[aria-label="${name} usage — collapse"]`)).not.toBeNull();
+			}
+			// Trigger top minus column top, 12px inset and the 6px opening gap.
+			await waitFor(() => expect(popover.style.getPropertyValue('--usage-popover-height')).toBe(`${650 - 52 - 12 - 6}px`));
+			triggerTop = 450;
+			await fireEvent(window, new Event('resize'));
+			await waitFor(() => expect(popover.style.getPropertyValue('--usage-popover-height')).toBe(`${450 - 52 - 12 - 6}px`));
+			await unmount();
+		} finally {
+			rectSpy.mockRestore();
+			window.innerWidth = originalWidth;
+			window.innerHeight = originalHeight;
+			column.remove();
+		}
+	});
+
 	it('keeps translated bounds stable through repeated desktop and mobile resizes', async () => {
 		const originalWidth = window.innerWidth;
 		let unshiftedLeft = 1201;
@@ -353,9 +392,9 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.provider-status')).toBeNull();
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'API credit balance unavailable');
 		expect(container.textContent).not.toMatch(/Last known|Refresh pending|Refresh timed out|Usage unavailable/);
-		expect(container.querySelector('.provider-billing-link')).toBeNull();
+		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
 		if (cached) {
 			expect(container.textContent).toContain('$12.34 left');
 			expect(container.textContent).toContain('42%');
@@ -365,7 +404,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.provider-status')).toBeNull();
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'API credit balance unavailable');
 		if (cached) expect(container.textContent).toContain('$12.34 left');
 	});
 
@@ -387,7 +426,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('$12.34 spent this month (UTC)');
+		expect(container.textContent).toContain('$12.34 organization spend this month (UTC); balance unavailable');
 		expect(container.textContent).not.toContain('$12.34 left');
 	});
 
@@ -401,7 +440,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		// Keep long guidance in the wrapping prose class, not just an account label.
 		const guidance = container.querySelector('.provider-status');
-		expect(guidance?.textContent).toBe('Admin usage access refused; polling paused');
+		expect(guidance?.textContent).toBe(status === 'stale' ? 'Billing access required' : 'API credit balance unavailable');
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
@@ -426,7 +465,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
-		expect(container.querySelector('.provider-billing-link')).toBeNull();
+		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
 		expect(container.textContent).not.toContain('cannot read');
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
 		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
@@ -439,10 +478,10 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('Configure an Admin API key in provider settings');
+		expect(container.textContent).toContain('API credit balance unavailable');
 		expect(container.textContent).not.toContain('Sign in');
-		expect(container.textContent).toContain('Billing access required');
-		expect(container.querySelector('.provider-billing-link')).toBeNull();
+		expect(container.textContent).toContain('Balance unavailable for this key');
+		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
 	});
 
 	it('keeps stale API balances and actionable billing errors without refresh narration', async () => {
@@ -454,7 +493,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
-		expect(container.textContent).toContain('Admin usage access refused; polling paused');
+		expect(container.textContent).toContain('API credit balance unavailable');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });
@@ -910,14 +949,14 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('75% left');
 	});
 
-	it('shows 100% left once a subscription window has rolled over', async () => {
+	it('retains the last Claude reading while a reset awaits another report', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [{ type: 'five_hour', utilization: 42, resets_at: past() }],
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('100% left');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42% left');
 		expect(container.textContent).not.toContain('resets in now');
 		expect(container.querySelector('.popover-row .row-reset-inline')?.textContent?.trim()).toBe(
 			'reset · awaiting next report'
@@ -1292,7 +1331,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(deviceLabels).toEqual(['Claude', 'openrouter']);
 		// An API-key row is always subtexted "API" (the Claude self header stays
 		// unlabeled — no plan data and no device name in this fixture).
-		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
 		expect(accounts).toEqual(['API']);
@@ -1396,14 +1435,14 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 			(e) => e.textContent
 		);
 		expect(deviceLabels).toEqual(['Claude', 'OpenAI', 'OpenAI']);
-		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
 		expect(accounts).toEqual(['prolite', 'API']);
 		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
 
-	it('keeps account and key rows separate without source detail text', async () => {
+	it('shows one remaining account balance instead of a duplicate key-spend row', async () => {
         rateLimit.applySnapshot({ available: false, windows: [], providers: [
             { provider_id: 'or-key', provider_type: 'openrouter', provider_name: 'OpenRouter',
               credits: { usage: 3, limit: 10 }, source: 'OpenRouter key API', scope: 'This model key spend', fetched_at: 1000 },
@@ -1416,7 +1455,9 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
         expect(container.textContent).not.toContain('Source:');
         expect(container.textContent).not.toContain('Account credit ledger (USD)');
         expect(container.textContent).not.toContain('Last successful update:');
-        expect(screen.getByRole('button', { name: 'OpenRouter usage — collapse' })).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'OpenRouter usage — collapse' })).toBeNull();
+        expect(container.textContent).toContain('$20.75 left');
+        expect(container.textContent).not.toContain('$3.00 used');
     });
 
 	it('sorts subscription rows A–Z above API rows A–Z', async () => {
@@ -1469,7 +1510,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const labels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
 		// Claude (native) stays first; then subs A–Z (Grok, OpenAI prolite);
@@ -1527,7 +1568,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.querySelectorAll('.row-bar').length).toBe(0);
 		expect(container.querySelectorAll('.row-fill').length).toBe(0);
 		// The credits line renders from usage / limit_remaining.
-		expect(container.textContent).toContain('$3.10 used · $6.90 left');
+		expect(container.textContent).toContain('$6.90 left on this key');
 	});
 
 	it('renders "Credits: unlimited" when the provider reports unlimited credits', async () => {
@@ -1572,11 +1613,11 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		// No windows → no pct chip; the credits summary rides the collapsed header.
 		const chip = container.querySelector('.sec-credits');
 		expect(chip).not.toBeNull();
-		expect(chip?.textContent).toBe('$12.34 used');
+		expect(chip?.textContent).toBe('$87.66 left on this key');
 		// It is a header summary, not a severity pct chip.
 		expect(container.querySelector('.row-pct.sec-summary')).toBeNull();
 		// Collapsed → the full body credits line is hidden.
-		expect(container.textContent).not.toContain('$12.34 used · $87.66 left');
+		expect(container.querySelector('.usage-credits')).toBeNull();
 	});
 
 	it('expanded credits-only provider renders the full body credits line and no header chip', async () => {
@@ -1598,7 +1639,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		await openPopover(container);
 
 		// Expanded → full credits line in the body, and no collapsed-header chip.
-		expect(container.textContent).toContain('$12.34 used · $87.66 left');
+		expect(container.textContent).toContain('$87.66 left on this key');
 		expect(container.querySelector('.sec-credits')).toBeNull();
 		expect(container.querySelector('.sec-summary')).toBeNull();
 	});
@@ -1628,8 +1669,8 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		await openPopover(container);
 
 		// Balance outranks the key-scoped usage/limit_remaining pair.
-		expect(container.textContent).toContain('$20.75 left · $4.25 used');
-		expect(container.textContent).not.toContain('$3.10 used · $6.90 left');
+		expect(container.textContent).toContain('$20.75 left');
+		expect(container.textContent).not.toContain('$6.90 left on this key');
 	});
 
 	it('collapsed balance provider shows a compact "$X left" chip', async () => {
@@ -1671,7 +1712,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		expect(container.textContent).toContain('$3.10 used · $6.90 left');
+		expect(container.textContent).toContain('$6.90 left on this key');
 	});
 
 	it('collapsed provider WITH windows keeps the % chip (not the credits summary)', async () => {
@@ -1693,7 +1734,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		await openPopover(container);
 
 		// A window exists → the max-window pct chip wins; credits fallback stays hidden.
-		expect(container.querySelector('.row-pct.sec-summary')?.textContent).toBe('30%');
+		expect(container.querySelector('.row-pct.sec-summary')?.textContent).toBe('70% left');
 		expect(container.querySelector('.sec-credits')).toBeNull();
 	});
 });

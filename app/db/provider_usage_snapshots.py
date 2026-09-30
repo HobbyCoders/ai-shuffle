@@ -205,6 +205,13 @@ def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optiona
         if not parent or not supported(parent) or not parent.get("enabled", True):
             return False
         setting = SETTING_PREFIX + parent_id
+        if expected and expected.startswith("model:"):
+            from app.core.openrouter_usage import model_key_generation
+
+            # The model row remains locked through this observation's commit.
+            # Also lock the legacy setting if present, so adding it cannot race.
+            cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
+            return cursor.fetchone() is None and model_key_generation(parent) == expected
     # Lock the credential row until the usage write commits. Credential writes
     # and deletion take this same lock before invalidating the cached balance.
     cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
@@ -266,12 +273,26 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
             "WHEN p.provider_type = 'openrouter_account' THEN 'openrouter_billing_key:' || SUBSTR(p.provider_id, 20) END"
         )
         rows = rows_to_list(cursor.fetchall())
+    # Read encrypted credentials only to validate opaque generations; never
+    # return them with snapshots. Replacing/removing a model key hides old credit.
+    from app.core.openrouter_usage import SNAPSHOT_PREFIX, model_key_generation, supported
+    from app.db.model_providers import get_all_model_providers
+
+    parents = {p["id"]: p for p in get_all_model_providers(include_token=True)} if any(
+        r["provider_type"] == "openrouter_account" for r in rows
+    ) else {}
     valid_rows = []
     for row in rows:
         row["windows"] = _parse_json_list(row.get("windows"))
         row["credits"] = _parse_json_dict(row.get("credits"))
         row["raw"] = _parse_json_dict(row.get("raw"))
         generation = row.pop("credential_generation", None)
+        observed = (row["raw"] or {}).get("credential_generation")
+        if row["provider_type"] == "openrouter_account" and isinstance(observed, str) and observed.startswith("model:"):
+            parent = parents.get(row["provider_id"].removeprefix(SNAPSHOT_PREFIX))
+            if generation or not parent or not supported(parent) or not parent.get("enabled", True):
+                continue
+            generation = model_key_generation(parent)
         if row["provider_type"] not in {"fal", "openrouter_account"} or (generation and
                 (row["raw"] or {}).get("credential_generation") == generation):
             valid_rows.append(row)

@@ -437,7 +437,7 @@ class TestUsageLimitsProviders:
         entries = {entry["provider_id"]: entry for entry in body["providers"]}
         expected = {"prov-chatgpt", "prov-openai", "prov-openai-2"} if configured else {"prov-chatgpt"}
         assert set(entries) == expected
-        assert entries["prov-chatgpt"]["credits"] is None
+        assert entries["prov-chatgpt"]["credits"] == {"balance": 99}
         assert entries["prov-chatgpt"]["windows"][0]["utilization"] == 12
         if configured:
             assert entries["prov-openai"]["last_error_kind"] == "billing_access_denied"
@@ -477,8 +477,8 @@ class TestUsageLimitsProviders:
         assert entry["provider_name"] == "My ChatGPT"
         assert entry["provider_type"] == "chatgpt"
         assert entry["plan_type"] == "plus"
-        # Codex extra-credit headers stay off the ChatGPT quota row.
-        assert entry["credits"] is None
+        # Extra subscription credits are preserved, distinct from API USD.
+        assert entry["credits"] == {"balance": 5.0}
         assert entry["fetched_at"] == 1783739400000
         # Window int-epoch resets_at coerced to decimal string; None preserved.
         assert entry["windows"][0]["type"] == "five_hour"

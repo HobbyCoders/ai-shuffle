@@ -1,6 +1,6 @@
 # Provider usage sources
 
-Source review: 2026-09-22. This describes the implemented readers and their
+Source review: 2026-09-30. This describes the implemented readers and their
 limits. An endpoint returning a successful response does not establish support
 for a third-party integration or permission under a subscription's terms.
 
@@ -35,7 +35,7 @@ popover keeps the rows it already shows.
 | `codex_usage` | `GET https://chatgpt.com/backend-api/wham/usage` | ChatGPT sign-in used for Codex inference | Subscription | Subscription allowance and plan | Polled on demand, 300 s | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
 | `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (local only) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
-| `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Separate management key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
+| `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Existing model key; an already-saved legacy management key is preserved | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
 | `fal_billing` | `GET https://api.fal.ai/v1/account/billing?expand=credits` | Separate fal Admin key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Billing](https://fal.ai/dashboard/billing) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
@@ -46,6 +46,34 @@ endpoint has no account balance). The popover shows these as "Not reported by
 this source" next to the dashboard link.
 
 Intervals are application limits, not provider-approved rate guarantees.
+
+## Remaining-first panel and setup
+
+The panel headlines remaining balances, never lifetime spending. OpenRouter
+reads its account ledger using the already-configured model key on the pinned
+HTTPS official host. A live read on the configured account returned HTTP 200
+with that key on 2026-09-30; other keys may be refused. Refusals pause that
+capability until its credential changes. Key spending limits remain a separately
+labeled fallback ("left on this key"), not account credit. An account balance
+suppresses the duplicate key-spend section. Credential rotation/removal or a
+provider origin change hides an old model-key account snapshot and prevents
+in-flight observations from publishing it.
+
+ChatGPT shows weekly subscription allowance plus extra credits only when their
+reported finite balance is greater than zero. Those credits are **not USD** and
+are unrelated to OpenAI API prepaid billing. OpenAI's model key has no supported
+prepaid balance endpoint here: the panel says unavailable and links to Platform
+billing. Previously configured organization spending access is retained, but
+neither OpenAI nor OpenRouter setup requests another billing/admin key. fal.ai's
+existing account-balance path is unchanged.
+
+Claude remains a credential-free, passive reader of Claude Code's own live
+usage reports; refresh cannot fetch usage spent outside a running CLI session.
+Old readings are labeled last reported, not live. A passed reset does not prove
+100% remains: the panel retains the last reported percentage and says it awaits
+a new report. Compare the provider dashboard for exact idle/external usage.
+No CLI credential extraction, browser scraping, challenge bypass, or balance
+estimate from this app's token costs is introduced.
 
 Two snapshot types have both a passive and a polled writer. `codex_headers` and
 `codex_usage` describe the same ChatGPT subscription windows, and the header

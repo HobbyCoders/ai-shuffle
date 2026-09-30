@@ -344,24 +344,18 @@ function _displayPct(value: number): number {
 	return rounded;
 }
 
-/** Effective utilization for a window, accounting for a rolled-over window. */
-export function effectivePct(w: UsageWindow, nowMs: number): number {
-	const resetMs = parseResetMs(w.resets_at);
-	if (resetMs != null && resetMs <= nowMs) return 0; // window rolled over
+/** Last reported utilization. A reset time is not a fresh observation. */
+export function effectivePct(w: UsageWindow, _nowMs: number): number {
 	return _displayPct(w.utilization);
 }
 
-/** Reported remaining quota, returning a fresh window after rollover. */
-export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
-	const resetMs = parseResetMs(w.resets_at);
-	if (resetMs != null && resetMs <= nowMs) return 100;
+/** Last reported remaining quota; retain it until the provider reports again. */
+export function reportedRemainingPct(w: UsageWindow, _nowMs: number): number {
 	return _displayPct(w.utilization);
 }
 
-/** Convert reported used quota to remaining, returning a fresh window after rollover. */
-export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
-	const resetMs = parseResetMs(w.resets_at);
-	if (resetMs != null && resetMs <= nowMs) return 100;
+/** Convert last reported used quota to remaining, without inventing a refill. */
+export function remainingFromUsedPct(w: UsageWindow, _nowMs: number): number {
 	return _displayPct(100 - _clampPct(w.utilization));
 }
 

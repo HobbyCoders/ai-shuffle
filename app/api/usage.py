@@ -272,11 +272,14 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                         continue
                     fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
                     windows = []
-                # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
-                # are extra-credit crumbs on the subscription quota row — not
-                # prepaid API balance. That figure belongs to configured OpenAI rows.
+                # Codex reports extra subscription credits, not USD or an OpenAI
+                # Platform balance. Only a positive, finite balance is useful here.
                 if ptype == "chatgpt":
-                    credits = None
+                    balance = credits.get("balance") if isinstance(credits, dict) else None
+                    credits = {"balance": balance} if (
+                        isinstance(balance, (int, float)) and not isinstance(balance, bool)
+                        and math.isfinite(balance) and balance > 0
+                    ) else None
                 if ptype == "openrouter" and isinstance(credits, dict):
                     # Old snapshots mixed /key limits with account-wide /credits.
                     credits = {k: v for k, v in credits.items()
@@ -320,6 +323,20 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             except Exception:  # noqa: BLE001 — one unreadable row never hides the others
                 logger.debug("provider usage row %s skipped", row.get("provider_id"), exc_info=True)
 
+        seen = {entry.provider_id for entry in entries}
+        for provider in providers:
+            if (provider["id"] not in seen and provider.get("enabled", True)
+                    and usage_sources.is_openai_platform_row(provider)
+                    and provider.get("auth_mode") != "chatgpt"):
+                source_def = usage_sources.source_for_snapshot("openai")
+                entries.append(ProviderUsageEntry(
+                    provider_id=provider["id"], provider_name=provider.get("name"),
+                    provider_type="openai", status="unavailable",
+                    source=source_def.label if source_def else None,
+                    scope=source_def.scope_label if source_def else None,
+                    source_info=_source_info(source_def),
+                    last_error_kind="unsupported",
+                ))
         return entries
     except Exception:
         logger.debug("provider usage load failed; keeping client rows", exc_info=True)

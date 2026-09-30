@@ -40,6 +40,7 @@
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye } from 'lucide-svelte';
 	import { createUsageNumberAnimation } from './usage-number-animation';
+	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
@@ -158,6 +159,11 @@
 		const minLeft = Math.max(0, column?.left ?? 0) + 12;
 		const maxRight = Math.min(window.innerWidth, column?.right ?? window.innerWidth) - 12;
 		el.style.setProperty("--usage-popover-room", `${Math.max(0, maxRight - minLeft)}px`);
+		// This menu opens upward. Bound it to the actual space above the
+		// trigger (including a reduced chat column), not the whole viewport.
+		const triggerTop = wrapperRef?.getBoundingClientRect().top ?? window.innerHeight;
+		const minTop = Math.max(0, column?.top ?? 0) + 12;
+		el.style.setProperty("--usage-popover-height", `${Math.max(100, triggerTop - minTop - 6)}px`);
 		const r = el.getBoundingClientRect();
 		// Bounds already include the current translation; solve from the unshifted position.
 		const left = r.left - popShift;
@@ -389,86 +395,21 @@
 		});
 	}
 
-	// Provider credits (non-Claude): render a single muted line from the opaque
-	// credits blob when there's no window denominator to draw a bar, or when the
-	// provider reports meaningful credit balances. All reads are shape-guarded.
-	/** A finite number from the untyped credits blob, else null. */
-	function creditsNum(credits: Record<string, unknown> | null, key: string): number | null {
-		const v = credits?.[key];
-		return typeof v === 'number' && Number.isFinite(v) ? v : null;
-	}
-
 	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
+		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'API credit balance unavailable';
 		const status = providerStatusAt(pb, nowMs);
-		if (status !== 'stale' && status !== 'unavailable' && status !== 'never_fetched') return null;
-		// Keep credential problems actionable without narrating background refreshes.
-		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
-		if (pb.lastErrorKind === 'billing_access_denied') {
-			return isOpenAI ? 'Admin usage access refused; polling paused' : 'Billing access required';
-		}
-		if (pb.lastErrorKind === 'missing_credentials') {
-			return isOpenAI ? 'Configure an Admin API key in provider settings' : 'Sign in to view usage';
-		}
-		if (pb.lastErrorKind === 'unsupported') {
-			return 'Not supported for this credential; polling paused';
-		}
+		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') ? 'Balance unavailable for this key' : 'Billing access required';
+		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
+		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
+		if (status === 'stale') return 'Last reported · not live';
 		return null;
 	}
 
-	function creditsSummary(
-		credits: Record<string, unknown> | null,
-		providerType: string | null = null
-	): string | null {
-		if (!credits || typeof credits !== 'object') return null;
-		const spend = creditsNum(credits, 'spend_month');
-		if (spend != null) return `$${spend.toFixed(2)} spent this month (UTC)`;
-		// An account credit BALANCE (OpenRouter's /credits ledger) is the headline
-		// figure and outranks the key-scoped usage/limit fields below it.
-		const remaining = creditsNum(credits, 'balance_remaining');
-		if (remaining != null) {
-			const spent = creditsNum(credits, 'total_usage');
-			return spent != null
-				? `$${remaining.toFixed(2)} left · $${spent.toFixed(2)} used`
-				: `$${remaining.toFixed(2)} left`;
-		}
-		// ChatGPT/Codex extra-credit headers are not prepaid Platform balances.
-		// Keep subscription quotas separate from configured OpenAI API rows;
-		// show an API balance only when billing actually reports one.
-		if ((providerType || '').toLowerCase() === 'chatgpt') return null;
-		if (credits.unlimited === true) return 'Credits: unlimited';
-		const used = typeof credits.usage === 'number' ? credits.usage : null;
-		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
-		if (used != null && left != null) return `$${used.toFixed(2)} used · $${left.toFixed(2)} left`;
-		if (used != null) return `$${used.toFixed(2)} used`;
-		if (left != null) return `$${left.toFixed(2)} left`;
-		// Codex credits shape carries a plain balance instead of usage/limit.
-		const balance = typeof credits.balance === 'number' ? credits.balance : null;
-		if (balance != null) return `Credits: $${balance.toFixed(2)}`;
-		return null;
+	function creditsSummary(credits: Record<string, unknown> | null, type: string | null): string | null {
+		return creditText(credits, type)?.detail ?? null;
 	}
-
-	// Compact one-value credits chip for a collapsed provider header — shown
-	// whenever the account balance is known, and otherwise as the fallback when
-	// the provider has no rate-limit windows to draw a pct from. Same field
-	// semantics as creditsSummary: the account balance first, then usage,
-	// key-limit remaining, and a plain balance.
-	function creditsShort(
-		credits: Record<string, unknown> | null,
-		providerType: string | null = null
-	): string | null {
-		if (!credits || typeof credits !== 'object') return null;
-		const spend = creditsNum(credits, 'spend_month');
-		if (spend != null) return `$${spend.toFixed(2)} spent this month (UTC)`;
-		const remaining = creditsNum(credits, 'balance_remaining');
-		if (remaining != null) return `$${remaining.toFixed(2)} left`;
-		if ((providerType || '').toLowerCase() === 'chatgpt') return null;
-		const used = typeof credits.usage === 'number' ? credits.usage : null;
-		if (used != null) return `$${used.toFixed(2)} used`;
-		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
-		if (left != null) return `$${left.toFixed(2)} left`;
-		const balance = typeof credits.balance === 'number' ? credits.balance : null;
-		if (balance != null) return `$${balance.toFixed(2)}`;
-		return null;
+	function creditsShort(credits: Record<string, unknown> | null, type: string | null): string | null {
+		return creditText(credits, type)?.short ?? null;
 	}
 
 	const target = $derived($usageTargetInstance);
@@ -539,8 +480,16 @@
 	}
 
 	function sortedProviderBuckets() {
-		return Object.values($rateLimit.providerBuckets ?? {})
-			.map((pb) => ({
+		const buckets = Object.values($rateLimit.providerBuckets ?? {});
+		return buckets.filter(pb => {
+			if (pb.providerType === 'openrouter') {
+				return !buckets.some(account => account.providerId === `openrouter-account:${pb.providerId}` && creditsNum(account.credits, 'balance_remaining') != null);
+			}
+			if (pb.providerType === 'openrouter_account' && creditsNum(pb.credits, 'balance_remaining') == null) {
+				return !buckets.some(key => key.providerId === pb.providerId.replace(/^openrouter-account:/, ''));
+			}
+			return true;
+		}).map((pb) => ({
 				pb,
 				name: providerDisplayFor(pb).name,
 				group: isSubscriptionProvider(pb) ? 0 : 1
@@ -563,7 +512,7 @@
 	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = entry?.provider_type ?? pb.providerType ?? '';
-		if (type === 'grok') return true;
+		if (type === 'grok' || type === 'openrouter') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
@@ -792,6 +741,9 @@
 						>
 							<span class="sec-head-labels">
 								<span class="section-device">{claudeDisplay.name}</span>
+								{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
+									<span class="section-account provider-status">Last reported · not live</span>
+								{/if}
 								{#if claudeSubtext}
 									<span class="section-account">{claudeSubtext}</span>
 								{/if}
@@ -900,6 +852,11 @@
 									>
 								{:else if pbCreditsShort}
 									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+								{:else if pb.providerType === 'openrouter'}
+									<span class="sec-summary sec-credits">Balance unavailable</span>
+								{/if}
+								{#if pb.providerType === 'chatgpt' && pbSummary && pbCreditsShort}
+									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{/if}
 							{/if}
 							<svg
@@ -914,7 +871,7 @@
 						</button>
 						{@render hideProvider(sectionId, pbDisplay.name)}
 					</div>
-					{#if pbStatus && pb.providerType?.toLowerCase() === 'openai' && pb.lastErrorKind === 'billing_access_denied'}
+					{#if pb.providerType?.toLowerCase() === 'openai'}
 						<a
 							class="provider-billing-link"
 							href="https://platform.openai.com/settings/organization/billing/overview"
@@ -956,6 +913,8 @@
 					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
 						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
+					{:else if pb.providerType?.startsWith('openrouter') && pbWindows.length === 0}
+						<div class="row-reset usage-credits">Balance unavailable for this key</div>
 					{/if}
 					{#if providerStatusAt(pb, now) === 'stale' && pb.fetchedAt != null}
 						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
@@ -1047,6 +1006,9 @@
 		width: max-content;
 		min-width: min(340px, var(--usage-popover-room, calc(100vw - 24px)));
 		max-width: min(380px, var(--usage-popover-room, calc(100vw - 24px)));
+		max-height: min(var(--usage-popover-height, calc(100dvh - 24px)), calc(100dvh - 24px));
+		overflow-y: auto;
+		overscroll-behavior: contain;
 		padding: 12px 14px;
 		display: flex;
 		flex-direction: column;
