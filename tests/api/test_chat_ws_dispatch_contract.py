@@ -252,7 +252,7 @@ def _queue_frame(session_id, rows):
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": session_id,
-        "data": {"queued_messages": rows},
+        "data": {"queued_messages": rows, "pending_peer_messages": []},
     }
 
 
@@ -575,10 +575,10 @@ async def test_watch_session_sends_the_queue_as_the_documented_sync_frame(ws_env
         assert conn.handler.current_session_id == sid
 
 
-async def test_watch_session_with_an_empty_queue_sends_nothing(ws_env):
+async def test_watch_session_with_an_empty_queue_sends_complete_snapshot(ws_env):
     sid = _make_session("sess-w0")
     async with _connect(ws_env) as conn:
-        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == []
+        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == [_queue_frame(sid, [])]
         assert conn.handler.current_session_id == sid
     ws_env.sync.register_device.assert_awaited_once_with("dev-1", sid, conn.wire.ws)
 
@@ -1069,7 +1069,7 @@ async def test_remove_queued_message_removes_the_chip(ws_env):
         )
     assert replies == [_queue_frame(sid, [_queue_row(keep, sid, 0)])]
     assert turns_db.get_turn(drop["id"])["state"] == "aborted"
-    ws_env.sync.broadcast_queue_updated.assert_awaited_with(sid, [_queue_row(keep, sid, 0)])
+    ws_env.sync.broadcast_queue_updated.assert_awaited_with(sid, [_queue_row(keep, sid, 0)], pending_peer_messages=[])
 
 
 async def test_remove_queued_message_already_delivered_stays(ws_env, monkeypatch):

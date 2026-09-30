@@ -28,6 +28,8 @@ mocked collaborators, no Postgres / SDK required.
 """
 
 import asyncio
+
+import pytest
 import json
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -83,6 +85,9 @@ class _HandlerHarness:
         # path is deleted). Patch that seam instead.
         self.queue_view = s.enter_context(
             patch.object(cwh, "_v2_queue_view", MagicMock(return_value=[]))
+        )
+        self.peer_queue_view = s.enter_context(
+            patch.object(cwh, "_v2_peer_queue_view", MagicMock(return_value=[]))
         )
         # Permission handlers now consult the session row to decide whether to
         # relay to a remote owner. These watch/permission tests exercise the
@@ -193,6 +198,8 @@ async def test_same_principal_and_device_session_sockets_both_receive_events():
         try:
             await first.handle_watch_session(dict(WATCH))
             await second.handle_watch_session(dict(WATCH))
+            first.websocket.sent.clear()
+            second.websocket.sent.clear()
             await engine.broadcast_event(SyncEvent(
                 event_type="session_updated", session_id="sess-1", data={"title": "shared"}))
             async def delivered(ws, count):
@@ -205,6 +212,7 @@ async def test_same_principal_and_device_session_sockets_both_receive_events():
 
             # Switching the first tab only detaches its own old-session socket.
             await first.handle_watch_session({"session_id": "sess-2"})
+            first.websocket.sent.pop()  # Complete empty hydration for the new recipient.
             assert engine.get_device_count("sess-1") == 1
             await engine.broadcast_event(SyncEvent(
                 event_type="session_updated", session_id="sess-1", data={"title": "remaining"}))
@@ -270,7 +278,7 @@ async def test_watch_session_restores_nonempty_queue():
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": "sess-1",
-        "data": {"queued_messages": [{"id": "q1", "content": "later"}]},
+        "data": {"queued_messages": [{"id": "q1", "content": "later"}], "pending_peer_messages": []},
     }]
     assert h.ws.sent[0]["_seq"] == 1
 
@@ -290,22 +298,26 @@ async def test_watch_session_queue_hydrates_from_v2_turns_view():
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": "sess-1",
-        "data": {"queued_messages": [{"id": "t-1", "content": "later"}]},
+        "data": {"queued_messages": [{"id": "t-1", "content": "later"}], "pending_peer_messages": []},
     }]
 
 
-async def test_watch_session_empty_queue_sends_no_frame():
+async def test_watch_session_empty_queue_sends_complete_empty_snapshot():
     with _HandlerHarness() as h:
         await h.make_handler().handle_watch_session(dict(WATCH))
 
-    assert _queue_frames(h.ws) == []
+    assert _queue_frames(h.ws) == [{
+        "type": "sync", "event_type": "queue_updated", "session_id": "sess-1",
+        "data": {"queued_messages": [], "pending_peer_messages": []},
+    }]
 
 
-async def test_watch_session_queue_load_failure_still_registers_silently():
+@pytest.mark.parametrize("failed_view", ["queue_view", "peer_queue_view"])
+async def test_watch_session_queue_load_failure_still_registers_silently(failed_view):
     """Closure parity: a DB failure loading the queue is swallowed — the watch
     registration stands, and neither a queue frame nor an error frame is sent."""
     with _HandlerHarness() as h:
-        h.queue_view.side_effect = RuntimeError("db down")
+        getattr(h, failed_view).side_effect = RuntimeError("db down")
         handler = h.make_handler()
         await handler.handle_watch_session(dict(WATCH))
 

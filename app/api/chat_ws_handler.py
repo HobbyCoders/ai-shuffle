@@ -2104,8 +2104,9 @@ class ChatWebSocketHandler:
                 f"[Queue] Failed to load queued messages for "
                 f"{session_id} on watch: {exc}"
             )
-            watch_queue = []
-            peer_queue = []
+            # Unknown state is not an empty queue; keep existing pending rows
+            # until hydration succeeds or a real delivery event reconciles them.
+            return
         await self.send_json({
             "type": "sync",
             "event_type": "queue_updated",
