@@ -35,7 +35,7 @@ import { runConsole, type ConsoleInput } from "./console.js";
 import { runNetwork, type NetworkInput } from "./network.js";
 import { runTabs, type TabsInput } from "./tabs.js";
 import { runResize, type ResizeInput } from "./resize.js";
-import { runUpload, type UploadInput } from "./upload.js";
+import { runUpload, uploadStatus, type UploadInput } from "./upload.js";
 import { runBatch, type BatchInput, type BatchTool } from "./batch.js";
 import { jsonResult, type McpToolResult } from "./result.js";
 import { runWait, type WaitInput } from "./wait.js";
@@ -48,8 +48,8 @@ export interface ToolDefinition {
 }
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
-  { name: "browser_status", description: "Current shared browser tabs, viewport, busy state and agent/human control. Available during human control; never creates a page.", inputSchema: statusSchema,
-    run: async session => jsonResult(session.workspaceStatus?.() ?? { available: true, control: { owner: "agent", viewer_id: null, pending_viewer_id: null }, busy: session.busy, ...(await session.workspaceMetadata()) }) },
+  { name: "browser_status", description: "Current shared browser tabs, viewport, busy state, agent/human control and effective runtime upload configuration. Optional upload_paths checks eligibility without uploading. Available during human control; never creates a page.", inputSchema: statusSchema,
+    run: async (session, input) => jsonResult({ ...(session.workspaceStatus?.() ?? { available: true, control: { owner: "agent", viewer_id: null, pending_viewer_id: null }, busy: session.busy, ...(await session.workspaceMetadata()) }), uploads: uploadStatus(input.upload_paths) }) },
   { name: "browser_wait", description: "Bounded wait. condition is exactly one of url | text | element — there is no selector condition: for a CSS selector pass condition=element with selector=... (or ref=...). Element state: visible (default), hidden, attached, detached. Default 5s, maximum 15s; interrupted by human takeover.", inputSchema: waitSchema,
     run: (session, input) => runWait(session, input as unknown as WaitInput) },
   {
@@ -137,7 +137,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_upload",
     description:
-      "Set files on a file input (by ref). paths must be under BROWSER_UPLOAD_DIR. No tool-imposed size cap.",
+      "Set files on a file input (by ref). paths must be under the runtime BROWSER_UPLOAD_DIR; preflight with browser_status upload_paths, not the worker shell env. No tool-imposed size cap.",
     inputSchema: uploadSchema,
     run: (session, input) => runUpload(session, input as unknown as UploadInput),
   },

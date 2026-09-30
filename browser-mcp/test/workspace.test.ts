@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Session } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
 import { BrowserWorkspace, HUMAN_LEASE_MS, setWorkspaceRuntimeIdentity } from "../src/workspace.js";
@@ -12,6 +15,91 @@ let seq = 0;
 const command = (ws: BrowserWorkspace, op = "takeover", args = {}, extra = {}) => ({ id: `c${++seq}`, runtime_id: ws.runtimeId, tab_id: null, viewer_id: "alice", op, args, expires_at: Date.now() + 30000, ...extra });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
 afterEach(() => { runtimes.forEach(w => w.stop()); runtimes.length = 0; vi.useRealTimers(); vi.restoreAllMocks(); });
+
+describe("effective runtime upload diagnostics", () => {
+  let folder: string;
+  let allowed: string;
+  let file: string;
+  const status = async (paths?: unknown, session = make().session) => {
+    const result = await TOOL_MAP.get("browser_status")!.run(session, paths === undefined ? {} : { upload_paths: paths });
+    expect(result.isError).toBeUndefined();
+    return JSON.parse((result.content[0] as { text: string }).text);
+  };
+  beforeEach(() => {
+    folder = mkdtempSync(join(tmpdir(), "browser-upload-status-"));
+    allowed = join(folder, "allowed"); mkdirSync(allowed);
+    file = join(allowed, "bundle.aab"); writeFileSync(file, "bundle");
+    vi.stubEnv("BROWSER_UPLOAD_DIR", allowed);
+  });
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(folder, { recursive: true, force: true }); });
+
+  it("checks the effective child root without a page, upload, or private path in shared state", async () => {
+    const { session, ws } = make();
+    const page = vi.spyOn(session, "ensurePage");
+    const refs = vi.spyOn(session, "resolveRef");
+    const result = await status([file], session);
+    expect(result.uploads).toEqual({ source: "browser_runtime", configured: true, enabled: true, check: { eligible: true, total_bytes: 6 } });
+    expect(page).not.toHaveBeenCalled(); expect(refs).not.toHaveBeenCalled();
+    expect(ws.state()).not.toHaveProperty("uploads");
+    expect(JSON.stringify(result)).not.toContain(folder);
+  });
+  it("remains available while a human owns the workspace", async () => {
+    const { session, ws } = make();
+    expect((await ws.receive(command(ws))).ok).toBe(true);
+    const result = await status([file], session);
+    expect(result.control.owner).toBe("human");
+    expect(result.uploads.check.eligible).toBe(true);
+  });
+  it("reports an unset runtime variable as disabled, not a missing worker-shell variable", async () => {
+    vi.stubEnv("BROWSER_UPLOAD_DIR", undefined);
+    expect((await status([file])).uploads).toEqual({ source: "browser_runtime", configured: false, enabled: false, reason: "not_configured", check: { eligible: false, reason: "not_configured" } });
+  });
+  it.each(["missing", "file"])("respects an explicit unusable %s root", async kind => {
+    vi.stubEnv("BROWSER_UPLOAD_DIR", kind === "file" ? file : join(folder, "missing"));
+    expect((await status([file])).uploads).toMatchObject({ configured: true, enabled: false, reason: "upload_root_unavailable", check: { eligible: false } });
+  });
+  it("respects a narrower operator root and diagnoses files missing on the browser host", async () => {
+    const outside = join(folder, "outside.aab"); writeFileSync(outside, "outside");
+    expect((await status([outside])).uploads.check).toEqual({ eligible: false, reason: "outside_upload_root" });
+    expect((await status([join(allowed, "missing.aab")])).uploads.check).toEqual({ eligible: false, reason: "file_not_found" });
+    expect((await status([allowed])).uploads.check.eligible).toBe(false);
+    const subdir = join(allowed, "directory"); mkdirSync(subdir);
+    expect((await status([subdir])).uploads.check).toEqual({ eligible: false, reason: "not_regular_file" });
+  });
+  it("reuses canonical containment for an escaping directory link", async () => {
+    const outside = join(folder, "outside"); mkdirSync(outside);
+    writeFileSync(join(outside, "bundle.aab"), "outside");
+    const link = join(allowed, "escape");
+    // Directory junctions do not require Windows symlink privileges.
+    symlinkSync(outside, link, "junction");
+    try {
+      expect((await status([join(link, "bundle.aab")])).uploads.check).toEqual({ eligible: false, reason: "outside_upload_root" });
+    } finally { unlinkSync(link); }
+  });
+  it("accepts a canonical alias for an approved root", async () => {
+    const alias = join(folder, "alias"); symlinkSync(allowed, alias, "junction");
+    try {
+      vi.stubEnv("BROWSER_UPLOAD_DIR", alias);
+      expect((await status([realpathSync(file)])).uploads.check.eligible).toBe(true);
+    } finally { unlinkSync(alias); }
+  });
+  it.each([
+    { name: "empty", paths: [] },
+    { name: "too many", paths: Array(11).fill("/file") },
+    { name: "relative", paths: ["relative.aab"] },
+    { name: "too long", paths: ["/" + "x".repeat(4096)] },
+    { name: "non-string", paths: [3] },
+  ])("bounds requested paths: $name", async ({ paths }) => {
+    expect((await status(paths)).uploads.check).toEqual({ eligible: false, reason: "invalid_paths" });
+  });
+  it("also reports configuration for a standalone session with no workspace bridge", async () => {
+    const session = new Session(new BrowserManager());
+    expect(session.workspaceStatus).toBeUndefined();
+    const result = await status(undefined, session);
+    expect(result.uploads).toEqual({ source: "browser_runtime", configured: true, enabled: true });
+    expect(result.tabs).toEqual([]);
+  });
+});
 
 describe("runtime identity", () => {
   it("echoes the app-owned identity without affecting other sessions", () => {

@@ -1076,6 +1076,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
 
   it("STDIO MCP runtime authenticates bridge, reports target, and exposes status during human takeover", async () => {
     const reports: any[] = []; const paths: string[] = []; const queue: any[] = [];
+    const uploadRoot = mkdtempSync(join(tmpdir(), "runtime-preflight-"));
+    const uploadPath = join(uploadRoot, "bundle.aab"); writeFileSync(uploadPath, "preflight-only");
+    const parentUploadDir = process.env.BROWSER_UPLOAD_DIR;
+    delete process.env.BROWSER_UPLOAD_DIR;
     let runtime = "";
     const broker = createHttpServer(async (req,res) => {
       let raw = ""; for await (const part of req) raw += part;
@@ -1091,6 +1095,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const address = broker.address() as {port:number};
     const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL("../dist/index.js",import.meta.url))],env:{
       PATH:process.env.PATH ?? "", CHROME_CDP_PORT:new URL(cdpEndpoint).port,
+      BROWSER_UPLOAD_DIR:uploadRoot, AIS_BROWSER_MODE:"runtime", _AIS_BROWSER_RUNTIME_ID:"owned-preflight-child",
       BROWSER_SSRF_ALLOW:"127.0.0.0/8,::1/128", AIS_SESSION_ID:"fixture-session", AIS_PANEL_TOKEN:"fixture-token",
       AIS_PANEL_REGISTER_URL:`http://127.0.0.1:${address.port}/api/v1/browser/panel/register`,
     },stderr:"pipe"});
@@ -1103,6 +1108,12 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await client.connect(transport);
       const tools = await client.listTools();
       expect(tools.tools.some(t=>t.name==="browser_wait")).toBe(true);
+      const preflight = await client.callTool({name:"browser_status",arguments:{upload_paths:[uploadPath]}});
+      const eligibility = JSON.parse((preflight.content as any[])[0].text);
+      expect(process.env.BROWSER_UPLOAD_DIR).toBeUndefined();
+      expect(eligibility).toMatchObject({ runtime_id:"owned-preflight-child", tabs:[], target_id:null,
+        uploads:{ source:"browser_runtime", configured:true, enabled:true, check:{eligible:true,total_bytes:14} } });
+      expect(JSON.stringify(eligibility)).not.toContain(uploadRoot);
       const nav = await client.callTool({name:"browser_navigate",arguments:{url:httpUrl}});
       expect(nav.isError).not.toBe(true);
       await until(()=>reports.some(r=>r.state.target_id && r.state.tabs.some((t:any)=>t.url===httpUrl)));
@@ -1110,8 +1121,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(runtime).toBeTruthy(); expect(state.runtime_id).toBe(runtime);
       queue.push({id:"human-take",runtime_id:runtime,tab_id:null,viewer_id:"human",op:"takeover",args:{},expires_at:Date.now()+30000});
       await until(()=>reports.some(r=>r.results.some((x:any)=>x.id==="human-take" && x.ok)));
-      const status = await client.callTool({name:"browser_status",arguments:{}});
-      expect(JSON.parse((status.content as any[])[0].text).control.owner).toBe("human");
+      const status = await client.callTool({name:"browser_status",arguments:{upload_paths:[uploadPath]}});
+      const humanStatus = JSON.parse((status.content as any[])[0].text);
+      expect(humanStatus.control.owner).toBe("human");
+      expect(humanStatus.uploads.check.eligible).toBe(true);
+      expect(reports.every(r=>!("uploads" in r.state))).toBe(true);
       const denied = await client.callTool({name:"browser_resize",arguments:{preset:"mobile"}});
       expect(denied.isError).toBe(true); expect((denied.content as any[])[0].text).toContain("human_control");
       queue.push({id:"human-release",runtime_id:runtime,tab_id:null,viewer_id:"human",op:"release",args:{},expires_at:Date.now()+30000});
@@ -1121,6 +1135,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(paths.every(path=>path.includes("/control/"))).toBe(true); // no legacy report race
     } finally {
       await client.close(); broker.closeAllConnections(); await new Promise<void>(resolve=>broker.close(()=>resolve()));
+      rmSync(uploadRoot, { recursive:true, force:true });
+      if (parentUploadDir === undefined) delete process.env.BROWSER_UPLOAD_DIR;
+      else process.env.BROWSER_UPLOAD_DIR = parentUploadDir;
     }
   },30000);
 
