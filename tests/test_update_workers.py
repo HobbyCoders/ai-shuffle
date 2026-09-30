@@ -321,3 +321,54 @@ def test_container_reports_running_code_not_staged_status(setup, monkeypatch, tm
     state = updates.status()
     assert state["running_version"] == A
     assert state["version"] == B
+
+
+def test_rejected_duplicate_install_recovers_after_both_workers_reach_target(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer_state = {"supported": True, "allow_updates": True, "phase": "idle",
+                  "version": B[:12], "running_version": A}
+
+    async def call(_device, _kind, body, **kwargs):
+        if body["operation"] == "status":
+            return dict(peer_state)
+        return {"accepted": False, "reason": "No staged update; current version left running",
+                "version": B[:12]}
+
+    remote.side_effect = call
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    updates.enqueue("install")
+    queued = dict(updates._desktop_request)
+    result = asyncio.run(fleet.dispatch("install"))
+    assert not any(row["accepted"] for row in result["results"])
+    assert result["results"][-1]["reason"] == "An update request is already queued"
+    assert updates._desktop_request == queued  # Never enqueue another restart.
+    failed = asyncio.run(fleet.snapshot())["operation"]
+    assert failed["phase"] == "error"
+    # Also recover an error persisted by an older worker revision.
+    fleet.progress.atomic_json(fleet.progress._path(), failed)
+
+    assert updates.desktop_exchange({"phase": "idle", "running_version": B})["action"] == "install"
+    peer_state["running_version"] = B
+    recovered = asyncio.run(fleet.snapshot())["operation"]
+    assert recovered["phase"] == "complete"
+    assert all(row["status"] == "verified" for row in recovered["workers"])
+    assert all(row["accepted"] is False for row in recovered["workers"])
+    assert fleet.progress.load() == recovered
+    assert updates._desktop_request is None
+
+
+@pytest.mark.parametrize("change", [
+    {"online": False}, {"supported": False}, {"running_version": A},
+    {"running_version": None}, {"running_version": "b"},
+])
+def test_declined_install_without_live_matching_revision_stays_unconfirmed(setup, change):
+    fleet.progress.begin("declined", [{"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("declined", "self", target_version=B[:12],
+                          result={"accepted": False, "reason": "Updates disabled"})
+    live = {"device_id": "self", "online": True, "supported": True,
+            "running_version": B, **change}
+    operation = fleet.progress.observe(fleet.progress.load(), [live])
+    assert operation["phase"] == "error"
+    assert operation["workers"][0]["status"] == "skipped"
+    assert updates._desktop_request is None
