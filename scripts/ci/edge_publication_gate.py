@@ -1,4 +1,4 @@
-"""Authorize edge publication using the merged PR's exact tree and applicable CI.
+"""Authorize edge publication using exact-tree PR or owner-started main CI.
 
 Run only from a checkout of protected main, never from a workflow_run artifact.
 This script reads GitHub metadata; it does not receive signing or Cloudflare keys.
@@ -66,7 +66,7 @@ def matches(value, patterns):
     return matched
 
 
-def applicable_workflows(directory, files):
+def applicable_workflows(directory, files=None):
     expected = set()
     for path in sorted(directory.glob("*.yml")):
         config = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueLoader)
@@ -78,10 +78,11 @@ def applicable_workflows(directory, files):
             continue
         if matches("main", filters.get("branches-ignore", [])):
             continue
-        if "paths" in filters and not any(matches(file, filters["paths"]) for file in files):
-            continue
-        if "paths-ignore" in filters and all(matches(file, filters["paths-ignore"]) for file in files):
-            continue
+        if files is not None:
+            if "paths" in filters and not any(matches(file, filters["paths"]) for file in files):
+                continue
+            if "paths-ignore" in filters and all(matches(file, filters["paths-ignore"]) for file in files):
+                continue
         expected.add(f".github/workflows/{path.name}")
     return expected
 
@@ -128,10 +129,10 @@ def publication_readiness(api, revision, directory, trigger_head=None):
     head = pr["head"]["sha"]
     if not re.fullmatch(r"[a-f0-9]{40}", head):
         raise ValueError("Invalid PR head revision")
-    if trigger_head is not None and trigger_head != head:
-        return False, "Completed CI belongs to a different PR revision"
-    if api(f"git/commits/{revision}")["tree"]["sha"] != api(f"git/commits/{head}")["tree"]["sha"]:
-        return False, "Merged tree differs from the PR head; update the branch and test the combined tree"
+    if trigger_head is not None and trigger_head not in {head, revision}:
+        return False, "Completed CI belongs to a different revision"
+    same_tree = api(f"git/commits/{revision}")["tree"]["sha"] == api(f"git/commits/{head}")["tree"]["sha"]
+    main_ci = not same_tree or trigger_head == revision
 
     files = pages(api, f"pulls/{pr['number']}/files")
     if len(files) != pr["changed_files"]:
@@ -139,14 +140,27 @@ def publication_readiness(api, revision, directory, trigger_head=None):
     # A rename must cover both the deleted path and its replacement.
     names = {file["filename"] for file in files}
     names.update(file["previous_filename"] for file in files if "previous_filename" in file)
+    if main_ci:
+        # Include changes merged into the base while the PR's CI was running.
+        # GitHub compares from the common ancestor and caps files at 300; a
+        # capped response requires every PR workflow, never a partial subset.
+        comparison = api(f"compare/{head}...{revision}?per_page=1&page=1")
+        changed = comparison.get("files")
+        if not isinstance(changed, list):
+            raise ValueError("Missing combined-tree file list")
+        names.update(file["filename"] for file in changed)
+        names.update(file["previous_filename"] for file in changed if "previous_filename" in file)
+        if len(changed) >= 300:
+            names = None
     expected = applicable_workflows(directory, names)
     if not expected:
         return False, "No applicable PR CI; no source update will be published"
 
-    runs = pages(api, f"actions/runs?event=pull_request&head_sha={head}", "workflow_runs", limit=10)
+    event, tested = ("workflow_dispatch", revision) if main_ci else ("pull_request", head)
+    runs = pages(api, f"actions/runs?event={event}&head_sha={tested}", "workflow_runs", limit=10)
     latest = {}
     for run in runs:
-        if (run.get("event") != "pull_request" or run.get("head_sha") != head
+        if (run.get("event") != event or run.get("head_sha") != tested
                 or (run.get("head_repository") or {}).get("full_name") != REPOSITORY):
             continue
         path = run["path"]
@@ -154,13 +168,21 @@ def publication_readiness(api, revision, directory, trigger_head=None):
                 latest[path]["id"], latest[path].get("run_attempt", 1)):
             latest[path] = run
     blocked = [path for path in sorted(expected) if path not in latest
-               or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"]
+               or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"
+               or (main_ci and not owner_main_ci(latest[path]))]
     if blocked:
         return False, "CI missing, pending, or unsuccessful: " + ", ".join(blocked)
     # Recheck after the API reads. The publisher also checks main before writing its pointer.
     if api("branches/main")["commit"]["sha"] != revision:
         return False, "main moved during CI verification; skipping superseded revision"
-    return True, f"PR #{pr['number']}: all {len(expected)} applicable workflows passed for the exact merged tree"
+    source = "Combined main revision" if main_ci else f"PR #{pr['number']}"
+    return True, f"{source}: all {len(expected)} applicable workflows passed for the exact merged tree"
+
+
+def owner_main_ci(run):
+    return (run.get("event") == "workflow_dispatch" and run.get("head_branch") == "main"
+            and str((run.get("actor") or {}).get("id")) == OWNER_ID
+            and str((run.get("triggering_actor") or {}).get("id")) == OWNER_ID)
 
 
 def event_allowed(env, event):
@@ -173,7 +195,7 @@ def event_allowed(env, event):
         return (env.get("GITHUB_ACTOR_ID") == OWNER_ID and bool(env.get("GITHUB_ACTOR"))
                 and env.get("GITHUB_TRIGGERING_ACTOR") == env["GITHUB_ACTOR"])
     run = event.get("workflow_run", {})
-    return (kind == "workflow_run" and run.get("event") == "pull_request"
+    return (kind == "workflow_run" and (run.get("event") == "pull_request" or owner_main_ci(run))
             and run.get("conclusion") == "success"
             and (run.get("head_repository") or {}).get("full_name") == REPOSITORY)
 

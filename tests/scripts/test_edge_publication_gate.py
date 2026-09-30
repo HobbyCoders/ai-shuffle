@@ -33,6 +33,9 @@ def evidence(tmp_path):
         f"git/commits/{REVISION}": {"tree": {"sha": TREE}},
         f"git/commits/{HEAD}": {"tree": {"sha": TREE}},
         "pulls/12/files?per_page=100&page=1": [{"filename": "app/main.py"}],
+        f"compare/{HEAD}...{REVISION}?per_page=1&page=1": {"files": [{"filename": "app/main.py"}]},
+        f"actions/runs?event=workflow_dispatch&head_sha={REVISION}&per_page=100&page=1": {
+            "workflow_runs": [], "total_count": 0},
         f"actions/runs?event=pull_request&head_sha={HEAD}&per_page=100&page=1": {
             "workflow_runs": [run], "total_count": 1},
     }
@@ -42,6 +45,137 @@ def evidence(tmp_path):
 
 def check(evidence, trigger=None, api=None):
     return gate.publication_readiness(api or evidence.data.__getitem__, REVISION, evidence.directory, trigger)
+
+
+
+@pytest.fixture
+def main_evidence(evidence):
+    evidence.data[f"git/commits/{REVISION}"]["tree"]["sha"] = "d" * 40
+    run = copy.deepcopy(evidence.run)
+    run.update(event="workflow_dispatch", head_sha=REVISION, head_branch="main",
+               actor={"id": int(gate.OWNER_ID)}, triggering_actor={"id": int(gate.OWNER_ID)})
+    runs = evidence.data[f"actions/runs?event=workflow_dispatch&head_sha={REVISION}&per_page=100&page=1"]
+    runs.update(workflow_runs=[run], total_count=1)
+    evidence.main_run, evidence.main_runs = run, runs
+    return evidence
+
+
+def test_owner_ci_verifies_the_combined_main_tree(main_evidence):
+    ready, reason = check(main_evidence)
+    assert ready and "Combined main revision" in reason
+    assert check(main_evidence, REVISION)[0]
+    assert check(main_evidence, HEAD)[0]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("event", "pull_request"), ("head_sha", HEAD), ("head_branch", "other"),
+    ("actor", {"id": 7}), ("triggering_actor", {"id": 7}),
+    ("actor", None), ("triggering_actor", None),
+    ("head_repository", {"full_name": "other/repo"}),
+    ("status", "in_progress"), ("conclusion", "failure"),
+    ("conclusion", "cancelled"), ("conclusion", "skipped"),
+    ("path", ".github/workflows/unrelated.yml"),
+])
+def test_main_ci_rejects_untrusted_or_incomplete_evidence(main_evidence, field, value):
+    main_evidence.main_run[field] = value
+    assert not check(main_evidence)[0]
+
+
+def test_main_ci_includes_concurrent_merge_and_rename_paths(main_evidence):
+    (main_evidence.directory / "extra.yml").write_text(
+        "name: Extra\non:\n  pull_request:\n    paths: ['fluid/**']\n", encoding="utf-8")
+    main_evidence.data[f"compare/{HEAD}...{REVISION}?per_page=1&page=1"]["files"] = [
+        {"filename": "misc/renamed.py", "previous_filename": "fluid/old.py"}]
+    ready, reason = check(main_evidence)
+    assert not ready and "extra.yml" in reason
+    run = {**main_evidence.main_run, "id": 21, "path": ".github/workflows/extra.yml"}
+    main_evidence.main_runs.update(workflow_runs=[main_evidence.main_run, run], total_count=2)
+    assert check(main_evidence)[0]
+
+
+def test_capped_comparison_requires_every_main_pr_workflow(main_evidence):
+    (main_evidence.directory / "extra.yml").write_text(
+        "name: Extra\non:\n  pull_request:\n    paths: ['not-in-returned-files/**']\n", encoding="utf-8")
+    main_evidence.data[f"compare/{HEAD}...{REVISION}?per_page=1&page=1"]["files"] = [
+        {"filename": f"app/{i}.py"} for i in range(300)]
+    assert "extra.yml" in check(main_evidence)[1]
+
+
+def test_missing_combined_files_and_partial_main_runs_fail_closed(main_evidence):
+    comparison = main_evidence.data[f"compare/{HEAD}...{REVISION}?per_page=1&page=1"]
+    comparison.pop("files")
+    with pytest.raises(ValueError, match="Missing combined-tree"):
+        check(main_evidence)
+    comparison["files"] = []
+    main_evidence.main_runs["total_count"] = 2
+    with pytest.raises(ValueError, match="incomplete run history"):
+        check(main_evidence)
+
+
+def test_main_ci_uses_latest_run_and_rechecks_current_revision(main_evidence):
+    old = {**main_evidence.main_run, "id": 19}
+    main_evidence.main_runs.update(workflow_runs=[old, main_evidence.main_run], total_count=2)
+    main_evidence.main_run["conclusion"] = "failure"
+    assert not check(main_evidence)[0]
+    main_evidence.main_run.update(run_attempt=2, conclusion="success")
+    assert check(main_evidence)[0]
+    calls = 0
+    def api(endpoint):
+        nonlocal calls
+        if endpoint == "branches/main":
+            calls += 1
+            if calls == 2:
+                return {"protected": True, "commit": {"sha": "e" * 40}}
+        return main_evidence.data[endpoint]
+    assert not check(main_evidence, api=api)[0]
+
+
+def test_owner_main_completion_event_reenters_gate(main_evidence):
+    event = {"workflow_run": main_evidence.main_run}
+    env = event_env("workflow_run")
+    assert gate.event_allowed(env, event)
+    main_evidence.main_run["triggering_actor"] = {"id": 7}
+    assert not gate.event_allowed(env, event)
+
+
+
+@pytest.mark.parametrize("field,value,allowed", [
+    ("event", "workflow_dispatch", True), ("head_branch", "other", False),
+    ("actor.id", 7, False), ("triggering_actor.id", 7, False),
+    ("conclusion", "failure", False), ("head_repository.full_name", "other/repo", False),
+])
+def test_workflow_predicate_admits_only_owner_main_ci(field, value, allowed):
+    from test_owner_publication_policy import permits, workflow
+    expression = workflow("desktop-source.yml")["jobs"]["gate"]["if"]
+    fields = {"event": "workflow_dispatch", "head_branch": "main", "actor.id": 76577322,
+              "triggering_actor.id": 76577322, "conclusion": "success",
+              "head_repository.full_name": gate.REPOSITORY}
+    fields[field] = value
+    for key, item in fields.items():
+        expression = expression.replace("github.event.workflow_run." + key, repr(item))
+    assert permits(expression, event="workflow_run") is allowed
+
+
+def test_main_ci_event_produces_entrypoint_authorization(main_evidence, monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    directory = root / ".github/workflows"
+    directory.mkdir(parents=True)
+    (directory / "ci.yml").write_text((main_evidence.directory / "ci.yml").read_text(), encoding="utf-8")
+    event_file = tmp_path / "main-event.json"
+    event_file.write_text(json.dumps({"workflow_run": main_evidence.main_run}), encoding="utf-8")
+    output = tmp_path / "output"
+    for name, value in {**event_env("workflow_run"), "GITHUB_SHA": REVISION,
+                        "GITHUB_EVENT_PATH": str(event_file), "GITHUB_OUTPUT": str(output)}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(gate, "ROOT", root)
+    monkeypatch.setattr(gate, "GitHub", lambda: main_evidence.data.__getitem__)
+    monkeypatch.setattr(gate.subprocess, "check_output", lambda *a, **k: REVISION + "\n")
+    gate.main()
+    assert output.read_text().strip() == "ready=true"
+    main_evidence.main_run["conclusion"] = "failure"
+    gate.main()
+    assert output.read_text().splitlines()[-1] == "ready=false"
 
 
 def test_green_exact_merged_tree_can_publish(evidence):

@@ -53,12 +53,17 @@ supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
 
 Merges to protected `main` automatically publish a signed **edge** source update
-at `/v1/desktop/manifest/edge` after all applicable PR workflows pass. The gate
-requires the merged tree to equal the tested PR head, checks the latest run of
-each workflow selected by its path filters, and refuses missing, pending,
+at `/v1/desktop/manifest/edge` after all applicable workflows pass. To reuse PR
+checks, the merged tree must equal the tested PR head. The gate checks the latest
+run of each workflow selected by its path filters and refuses missing, pending,
 failed, skipped, or cancelled runs. Update a stale PR branch before merging so
-its tested tree includes the current base. Push and CI-completion events both
-check readiness; an owner dispatch can retry a missed or failed publication.
+its tested tree includes the current base. If another PR lands first, the owner
+can dispatch CI on the combined `main` revision. The gate then requires successful
+owner-started and owner-rerun checks on that exact SHA, including workflows for
+changes from the concurrent merge. A truncated comparison requires every PR
+workflow. PR results from an older tree cannot substitute for these checks.
+Push and trusted CI-completion events both check readiness; an owner dispatch
+can retry a missed or failed publication.
 
 Only the current `main` revision can publish. The read-only gate runs before
 signing secrets are available and is repeated immediately before publication.

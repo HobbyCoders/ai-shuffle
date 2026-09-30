@@ -144,17 +144,27 @@ async def test_second_worker_uses_the_snapshot_timestamp(provider, clock, counts
 
 
 @pytest.mark.asyncio
-async def test_concurrent_workers_issue_one_request(provider, clock, counts, upstream):
+@pytest.mark.parametrize("stagger_last", [False, True])
+async def test_concurrent_workers_issue_one_request(provider, clock, counts, upstream,
+                                                    stagger_last):
     respond(upstream)
     workers = [provider_usage.ProviderUsageMonitor() for _ in range(4)]
-    await asyncio.gather(*(w.request_refresh(force=True, cooldown=30) for w in workers))
+    first_batch = workers[:-1] if stagger_last else workers
+    await asyncio.gather(*(w.request_refresh(force=True, cooldown=30) for w in first_batch))
+    initial_claims = counts["claims"]
+    # A worker can read the snapshot after another worker finishes. It then
+    # skips the claim entirely; concurrency does not require four claims.
+    assert 1 <= initial_claims <= len(first_batch)
+    if stagger_last:
+        await workers[-1].request_refresh(force=True, cooldown=30)
+        assert counts["claims"] == initial_claims
     assert upstream.await_count == 1
     clock.now += 15
     # Four more workers that have not polled yet: within the cooldown each
     # serves the snapshot another worker wrote, without any claim.
     later = [provider_usage.ProviderUsageMonitor() for _ in range(4)]
     await asyncio.gather(*(w.request_refresh(force=True, cooldown=30) for w in later))
-    assert counts["claims"] == 4
+    assert counts["claims"] == initial_claims
     assert upstream.await_count == 1
 
 
