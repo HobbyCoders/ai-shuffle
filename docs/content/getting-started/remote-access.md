@@ -38,10 +38,11 @@ This is the easiest way to use AI Shuffle from the Android app, and it works fro
 
 1. On the worker, open **Settings → Providers → Devices** and sign in to (or create) your free HobbyCoders account. Check the worker name.
 2. Install the [Android app](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) and sign in with the same account.
-3. In the app, choose **Add worker**, scan the worker's QR code or enter its pairing code, and review the worker.
-4. Account devices that ask for owner access initially show **Awaiting worker approval**. On the worker, sign in with the owner password (or use an already-confirmed owner device), then open **Settings → Providers → Devices → Account device access to this worker**. Compare the device ID with the one on your phone before selecting **Approve** and **Confirm approval**. Retry the connection on your phone.
+3. Open the worker from your account's worker list. Account-linked workers verify your phone's account and device credential automatically; no separate approval on each worker is required.
 
-An account sign-in or a trusted-LAN connection alone cannot approve owner access. Device names come from the account service and are not proof of identity. Each worker makes its own decision; approve only requests you initiated.
+Account sign-in authorizes access to your linked workers, including running commands. This trusts HobbyCoders' account service: a compromised account or account service could expose those workers. A matching device name, a trusted-LAN connection, or a different account does not grant this access.
+
+Older controller-linked connections and locally repaired credentials still require owner confirmation under **Settings → Providers → Devices → Account device access to this worker**. Compare the device ID with the one on your phone before approving. For a same-account phone that is still waiting after an upgrade, reopen the worker to retry with its saved credential.
 
 To stop access, choose **Deny request** or **Revoke worker access**, then confirm the denial. This immediately blocks that identity on this worker, including existing sessions. A denied identity cannot be approved again; restoring access requires a fresh pairing with a new device identity. Expired keys also require pairing again. Supported Android clients renew still-valid keys automatically; renewal cannot override a denial or revocation.
 

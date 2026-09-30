@@ -374,11 +374,13 @@ def test_owner_browser_can_authorize_only_same_account_native_targets(app, monke
     monkeypatch.setattr(account_hub, 'call', lambda binding, method, suffix, body=None:
                         {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]})
     phone = mobile_hub.local_device_id(SERVER, OTHER)
-    assert identity.authorized_device_ids('browser-chat') == []
-    mobile_hub.confirm_device(mobile_hub.ownership(phone), True)
+    # A verified phone on the owner's account needs no separate worker approval.
     assert identity.authorized_device_ids('browser-chat') == [phone]
+    assert mobile_hub.confirmation(mobile_hub.ownership(phone)) == 'approved'
     # Browser never becomes a native target itself.
     assert browser['device_id'] not in identity.authorized_device_ids('browser-chat')
+    mobile_hub.confirm_device(mobile_hub.ownership(phone), False)
+    assert identity.authorized_device_ids('browser-chat') == []
     mobile_hub.disconnect()
     assert identity.authorized_device_ids('browser-chat') == []
 
