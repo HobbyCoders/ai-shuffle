@@ -123,8 +123,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "CronList": "safe",
     "CronCreate": "write",
     "CronDelete": "destructive",
-    "EnterWorktree": "write",
-    "ExitWorktree": "write",
     "GetAppErrors": "safe",
     "GetAppLogs": "safe",
     "GetUsage": "safe",

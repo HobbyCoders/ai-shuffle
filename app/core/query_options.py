@@ -1274,7 +1274,7 @@ def build_options_from_profile(
         logger.debug("App-config MCP tools added to allowed_tools")
 
     # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
-    # EnterWorktree, CronCreate, NotifyDevices, ToolSearch, etc). These are
+    # CronCreate, NotifyDevices, ToolSearch, etc). These are
     # harness-level tools that the CLI ships natively; the app provides its own
     # implementations bridged to AI Shuffle infrastructure.
     from app.mcp.builtin_tools import get_builtin_tool_names

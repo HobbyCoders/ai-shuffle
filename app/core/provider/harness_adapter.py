@@ -3798,7 +3798,10 @@ def _valid_effort(value: Any) -> Optional[str]:
 # client never reads them and they vanish from app history and cost
 # accounting. The bridged mcp__builtins__ copies (Monitor, TaskOutput,
 # TaskStop, ScheduleWakeup) stay; the app owns their wakes.
+# Worktree lifecycle belongs to the app, not agents; block CLI native copies too.
 DELEGATED_BANNED_TOOLS = frozenset({
+    "EnterWorktree",
+    "ExitWorktree",
     "Task",
     "Agent",
     "Workflow",
