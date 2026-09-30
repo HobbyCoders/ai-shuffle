@@ -22,6 +22,8 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     return route.continue();
   });
   try {
+    // Mount-time timers must use the controllable clock, not the native one.
+    await page.clock.install();
     const url = new URL(fixtureUrl); url.searchParams.set('provider-login', '1');
     await page.goto(url.href);
     const usage = page.getByRole('region', { name: 'OpenAI account usage' });
@@ -65,7 +67,6 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     };
     await assertPassive();
     // Advance timers, not wall-clock sleeps: mounting must not schedule hidden polling.
-    await page.clock.install();
     await page.clock.fastForward(60_000);
     await assertPassive();
     assert.equal(await usage.evaluate(el => el.scrollWidth > el.clientWidth), false);
@@ -78,4 +79,40 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
       additionalKeyInputs: false, apiCalls: calls, automaticPolling: false,
       loginBrowser: false, overflow: false, pageErrors: errors, screenshot }));
   } finally { await page.context().close(); }
+}
+
+// A real pre-mount interval must be detected, not hidden by late clock installation.
+export async function verifyProviderPollingCanary(browser, fixtureUrl, viewport) {
+  const requests = [];
+  const pollingBrowser = {
+    async newPage(options) {
+      const page = await browser.newPage(options);
+      page.on('request', request => {
+        const path = new URL(request.url()).pathname;
+        if (path.startsWith('/api/')) requests.push({ path, method: request.method() });
+      });
+      // Hold the real fixture entry module until its pre-mount timer is scheduled.
+      // This avoids init-script ordering against Playwright's clock installation;
+      // continue the unmodified source, never replace the HTML or component.
+      await page.route(new URL('browser-workspace.ts*', fixtureUrl).href, async route => {
+        assert.equal(await page.evaluate(() => {
+          const beforeMount = !document.querySelector('[aria-label="OpenAI account usage"]');
+          setInterval(() => {
+            void fetch('/api/v1/model-providers/p1/openai-usage').catch(() => {});
+          }, 30_000);
+          return beforeMount;
+        }), true, 'the polling canary must be scheduled before component mount');
+        return route.continue();
+      });
+      return page;
+    },
+  };
+  await assert.rejects(verifyProviderLogin(pollingBrowser, fixtureUrl, viewport), {
+    code: 'ERR_ASSERTION', message: /no usage reads, credential writes or disconnects/,
+  }, 'the verifier must reject polling scheduled before component mount');
+  assert.ok(requests.length > 0, 'the polling canary must actually attempt a request');
+  for (const request of requests) {
+    assert.deepEqual(request, { path: '/api/v1/model-providers/p1/openai-usage', method: 'GET' });
+  }
+  console.log(JSON.stringify({ providerPollingCanary: true, viewport, detectedRequests: requests }));
 }
