@@ -1438,14 +1438,14 @@ class TestErrorPaths:
         messages, _ = parse()
         assert [m["uuid"] for m in messages] == RAW_EXPECTED[variant]
 
-    def test_non_utf8_byte_does_not_drop_the_rest_of_the_file(self, projects):
-        """Regression: a strict decoder raised out of the read loop and the
-        whole (small) transcript came back empty."""
-        write_raw(projects, NON_UTF8_FILE)
+    def test_non_utf8_record_is_reported_without_dropping_surrounding_messages(self, projects, caplog):
+        """Strict decoding is record-local; corrupted text is not silently repaired."""
+        path = write_raw(projects, NON_UTF8_FILE)
         messages, _ = parse()
         assert [(m["uuid"], m["content"]) for m in messages] == [
-            ("v1", "first"), ("v2", "second"), ("v-bad", "caf� cr�me"), ("v3", "third"),
+            ("v1", "first"), ("v2", "second"), ("v3", "third"),
         ]
+        assert f"Skipping undecodable line 3 in {path}" in caplog.text
 
     def test_non_object_lines_are_skipped_not_fatal(self, projects):
         """Regression: ``null`` / ``42`` lines reached the transform, which
