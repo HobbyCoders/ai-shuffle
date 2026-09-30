@@ -66,7 +66,7 @@ export class WorkspaceBridge {
   }
   private async post(endpoint: string, data: object, timeout: number): Promise<unknown> {
     const response = await this.transport(new URL(endpoint, this.config.baseUrl), {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", origin: new URL(this.config.baseUrl).origin },
       body: JSON.stringify({ session_id: this.config.sessionId, token: this.config.token, runtime_id: this.workspace.runtimeId, ...data }),
       signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(timeout)]),
       redirect: "error",

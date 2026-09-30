@@ -107,6 +107,40 @@ async def test_rpc_session_token_passes_desktop_gate(monkeypatch, desktop_rpc_ap
 
 
 @pytest.mark.asyncio
+async def test_rpc_local_owner_requires_origin_and_session_token(monkeypatch):
+    from app.core import owner_auth
+    from app.middleware.csrf import CSRFProtectionMiddleware
+
+    monkeypatch.setattr(owner_auth, "local_access", lambda request: True)
+    monkeypatch.setattr(desktop_listener, "configured", lambda: False)
+    app = FastAPI()
+    app.include_router(panel.router)
+    app.add_middleware(CSRFProtectionMiddleware)
+    monkeypatch.setattr(panel.database, "get_session", lambda sid: {"id": sid})
+    call = AsyncMock(return_value={"content": []})
+    monkeypatch.setattr(runtime, "call", call)
+    token = registry.issue_token("rpc-origin")
+    body = {"session_id": "rpc-origin", "token": token, "tool": "browser_status", "arguments": {}}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
+            for headers in ({}, {"origin": "https://evil.example"}):
+                response = await client.post("/api/v1/browser/panel/rpc", json=body, headers=headers)
+                assert response.status_code == 403
+                assert response.json()["detail"] == "Same-origin request required"
+            call.assert_not_called()
+            headers = {"origin": "http://127.0.0.1:8000"}
+            response = await client.post("/api/v1/browser/panel/rpc", json={**body, "token": "wrong"}, headers=headers)
+            assert response.status_code == 403
+            assert response.json()["detail"] == "Invalid panel token"
+            call.assert_not_called()
+            response = await client.post("/api/v1/browser/panel/rpc", json=body, headers=headers)
+            assert response.status_code == 200
+            call.assert_awaited_once_with("rpc-origin", "browser_status", {})
+    finally:
+        registry.clear("rpc-origin")
+
+
+@pytest.mark.asyncio
 async def test_rpc_exception_does_not_open_other_browser_routes(monkeypatch, desktop_rpc_app):
     call = AsyncMock()
     start = AsyncMock()

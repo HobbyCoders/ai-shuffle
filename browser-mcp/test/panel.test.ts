@@ -76,6 +76,8 @@ describe("reportCurrentTarget", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://panel.local/register");
     expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("origin")).toBe(new URL(url).origin);
+    expect(init.redirect).toBe("error");
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
     expect(JSON.parse(init.body as string)).toEqual({
       session_id: "sess-1",

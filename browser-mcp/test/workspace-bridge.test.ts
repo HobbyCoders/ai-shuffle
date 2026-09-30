@@ -140,6 +140,11 @@ describe("runtime bridge", () => {
     expect(h.calls.filter(c=>c.endpoint==="poll")).toHaveLength(2);
     await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="report" && c.body.state.target_id==="target-1")).toBe(true));
     for (const call of h.calls) {expect(call.body.session_id).toBe("s");expect(call.body.token).toBe("test-token");expect(call.body.runtime_id).toBe(h.bridge.workspace.runtimeId);}
+    expect(new Set(h.calls.map(call => call.endpoint))).toEqual(new Set(["register", "poll", "report"]));
+    for (const [url, init] of h.fetcher.mock.calls) {
+      expect(new Headers(init?.headers).get("origin")).toBe(new URL(String(url)).origin);
+      expect(init?.redirect).toBe("error");
+    }
   });
   it("retains results across report retry without replaying command", async () => {
     const h = harness({reportFail:true});

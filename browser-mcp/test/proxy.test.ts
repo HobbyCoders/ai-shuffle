@@ -12,6 +12,21 @@ describe("shared runtime proxy", () => {
     expect(url.pathname).toBe("/api/v1/browser/panel/rpc");
     expect(JSON.parse(options.body as string)).toEqual({ session_id: "session", token: "private-token", tool: "browser_screenshot", arguments: { full_page: true } });
     expect(options.redirect).toBe("error");
+    expect(new Headers(options.headers).get("origin")).toBe(url.origin);
+  });
+  it.each([
+    "http://localhost:8000",
+    "https://worker.example:8443",
+    "http://[::1]:8000",
+  ])("uses the configured worker origin %s, not the navigation destination", async (origin) => {
+    const transport = vi.fn(async () => new Response(JSON.stringify({ content: [] })));
+    await forwardTool("browser_navigate", { url: "https://example.com" }, {
+      ...env, AIS_PANEL_REGISTER_URL: `${origin}/api/v1/browser/panel/register?ignored=1#ignored`,
+    }, transport);
+    const [url, options] = transport.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(new Headers(options.headers).get("origin")).toBe(origin);
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
   });
   it("does not leak server errors, tokens, or replay failed mutations", async () => {
     const transport = vi.fn(async () => { throw new Error("private-token"); });
