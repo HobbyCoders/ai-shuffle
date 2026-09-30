@@ -1,23 +1,36 @@
 <script lang="ts">
 	/**
-	 * GitHeaderActions - Git controls for the PageHeader
+	 * GitHeaderActions - the chat header's git cluster, folded into one button.
 	 *
-	 * Branch selector dropdown (checkout branches), split action buttons, and diff
-	 * stats. Each mutating action (Commit / Push / Pull / Create PR /
-	 * Ship It) is a split button: the main area runs the action immediately with
-	 * saved defaults, and the chevron opens a compact GitActionOptionsDropdown for
-	 * per-invocation overrides. Branch selector, diff review, and Init Repo remain
-	 * direct git actions. Branch selector is locked during streaming.
+	 * The header shows a single button whose label is whatever needs the user
+	 * first (approvals waiting, merge conflicts, commits behind, uncommitted
+	 * changes, commits to push, an open PR, or "up to date" — see
+	 * computeHeaderSummary). It opens a panel that tells the whole story in
+	 * order: the branch against its base, the Ship It pipeline with the next
+	 * step lit, each git action as a row with its options popover, the changed
+	 * files, and the chat's private access.
+	 *
+	 * Each mutating action (Commit / Push / Pull / Create PR / Ship It) keeps
+	 * its split shape inside the panel: the row runs the action immediately
+	 * with saved defaults, and its chevron opens a compact
+	 * GitActionOptionsDropdown for per-invocation overrides. Firing an action
+	 * closes the panel so the progress popover has the header to itself.
+	 *
+	 * On narrow screens (the mobile shell, or a narrow web window) the panel
+	 * becomes a bottom sheet behind a scrim. Init Repo (non-repo projects) and
+	 * the "Git unavailable" retry stay as direct header buttons: there is no
+	 * panel to open for them.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
-	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
-	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
+	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
+	import { chatAccessSummary } from '$lib/stores/chat-access';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
+	import { computeHeaderSummary, computePipeline } from '$lib/stores/derived/git-header-summary';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
 	import type {
@@ -31,30 +44,26 @@
 	interface Props {
 		isStreaming?: boolean;
 		/** True while a git operation (commit/push/PR/ship) is in flight.
-		 *  Disables the mutating action buttons + branch switch so the user can't
-		 *  fire a second action while work is running. */
+		 *  Disables the mutating action rows so the user can't fire a second
+		 *  action while work is running. */
 		operationInProgress?: boolean;
 		isGitRepo?: boolean;
 		error?: string | null;
-		/** Show the branch checkout selector. Disabled when the branch pill is
-		 *  hosted elsewhere (e.g. the context pill bar above the chat input). */
-		showBranchSelector?: boolean;
-		/** Project name to display alongside the branch (combined badge) */
+		/** Project name shown with the branch in the panel head. */
 		projectName?: string | null;
 		/** When set, forces worktree read-only mode and uses this as the branch display.
 		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
 		worktreeBranch?: string | null;
 		/** Existing PR to merge through Ship It */
 		openPR?: { number: number; title: string; url: string; mergeable?: boolean | null } | null;
-		/** Mutating actions. A bare main-button click passes no options (falling
-		 *  back to the gitActionPreferences defaults); the option popover passes an
+		/** Mutating actions. A bare row click passes no options (falling back to
+		 *  the gitActionPreferences defaults); the option popover passes an
 		 *  explicit bag. Pass the MainPanel handlers directly so both paths flow
 		 *  through one function. */
 		onClickCommit: (opts?: CommitOptions) => void;
 		onClickCreatePR: (opts?: CreatePROptions) => void;
 		onClickPush: (opts?: PushOptions) => void;
 		onClickPull: (opts?: PullOptions) => void;
-		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
 		/** Are the GitHub-backed actions usable? The header itself no longer
 		 *  requires GitHub auth (local git must work without it), so this gates
@@ -67,11 +76,15 @@
 		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
+		/** Download the chat transcript. Rendered as a panel row on narrow
+		 *  screens only, where the header has no room for its own icon. */
+		onDownloadChat?: () => void;
+		downloadingChat?: boolean;
 	}
 
-	let { isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, onDownloadChat, downloadingChat = false }: Props = $props();
 
-	// Mutating git buttons are blocked while streaming OR while another git
+	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
 	// work is running.
 	const actionsBusy = $derived(isStreaming || operationInProgress);
@@ -86,7 +99,7 @@
 	// is false the values on screen belong to the previous context (or are a
 	// cache hit mid-revalidation) and must not be used to derive a NEW action.
 	const snapshotPending = $derived(!snapshot.hydrated);
-	// The mutating action buttons are ALSO disabled while the snapshot is still
+	// The mutating actions are ALSO disabled while the snapshot is still
 	// resolving for this context: what's rendered is the previous coherent
 	// action, greyed out, so the user can't fire it against state we haven't
 	// confirmed yet.
@@ -104,19 +117,21 @@
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
 
-	// --- Dropdown state ---
-	// Driven by the shared store so opening this closes the profile/status dropdowns.
-	const showDropdown = $derived($openHeaderDropdown === 'branch');
-	let dropdownRef = $state<HTMLDivElement | null>(null);
-	let checkingOut = $state(false);
-
-	// Which git-action option popover is open (single-open, shared store — opening
-	// any one closes the branch selector and every sibling git-action popover).
+	// ── Panel + popover state ────────────────────────────────────────────────
+	// Driven by the shared store so opening the panel closes the profile /
+	// notification dropdowns and vice versa. A git-action popover id implies
+	// the panel is open (the popover lives inside it).
+	type GitActionDropdownId = 'git-commit' | 'git-push' | 'git-pull' | 'git-pr' | 'git-shipit';
+	const GIT_ACTION_IDS = new Set<string>(['git-commit', 'git-push', 'git-pull', 'git-pr', 'git-shipit']);
+	const isPanelId = (id: string | null) => id === 'git-panel' || GIT_ACTION_IDS.has(id ?? '');
+	const panelOpen = $derived(isPanelId($openHeaderDropdown));
 	const commitOptsOpen = $derived($openHeaderDropdown === 'git-commit');
 	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
 	const pullOptsOpen = $derived($openHeaderDropdown === 'git-pull');
 	const prOptsOpen = $derived($openHeaderDropdown === 'git-pr');
 	const shipItOptsOpen = $derived($openHeaderDropdown === 'git-shipit');
+	let triggerRef = $state<HTMLButtonElement | null>(null);
+	let panelRef = $state<HTMLDivElement | null>(null);
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
 	const currentBranch = $derived(snapshot.currentBranch ?? worktreeBranch ?? null);
@@ -128,6 +143,7 @@
 	const additions = $derived(snapshot.diffStats?.additions ?? 0);
 	const deletions = $derived(snapshot.diffStats?.deletions ?? 0);
 	const filesChanged = $derived(snapshot.changedFiles?.length ?? snapshot.diffStats?.files_changed ?? 0);
+	const changedFiles = $derived(snapshot.changedFiles ?? []);
 	const commitsAhead = $derived(snapshot.status?.ahead ?? 0);
 	// Whether the branch carries real content over its base branch (non-empty
 	// base...HEAD diff). Distinct from commitsAhead: a branch can be ahead by
@@ -149,14 +165,14 @@
 	const openPr = $derived(openPR ?? snapshot.openPr);
 	const isHeadMerged = $derived(!openPr && isCurrentHeadMerged(snapshot.status, snapshot.prState));
 
-	// Upstream tracking branch state (for push/pull buttons)
+	// Upstream tracking branch state (for push/pull rows)
 	const currentBranchInfo = $derived(snapshot.branches.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
 	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
 	// Diverged = both ahead AND behind (e.g. after rebase/amend or normal development divergence).
-	// Always show Pull as the primary action — pull integrates remote changes safely.
-	// Force push is available as a secondary option in the Pull modal for rebase recovery.
+	// Always offer Pull as the way forward — pull integrates remote changes safely.
+	// Force push is available as a secondary option in the Push popover for rebase recovery.
 	const isDiverged = $derived(commitsAheadUpstream > 0 && commitsBehindUpstream > 0 && hasUpstream);
 	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
 	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
@@ -247,112 +263,93 @@
 		heldOpenPr = openPr;
 	});
 
-	// Local branches for the dropdown (exclude remotes)
-	const localBranches = $derived(
-		snapshot.branches.filter(b => !b.remote)
-	);
-
 	// Local branch names offered as PR base targets in the Create PR popover.
-	const baseBranchNames = $derived(localBranches.map(b => b.name));
+	const baseBranchNames = $derived(snapshot.branches.filter(b => !b.remote).map(b => b.name));
 
-	// Remote branches that don't have a local counterpart. `$derived.by` memoizes
-	// the computed array (recomputed only when its deps change) rather than a
-	// `$derived(() => ...)` whose value is a closure re-run on every call site.
-	const remoteBranches = $derived.by(() => {
-		const localNames = new Set(localBranches.map(b => b.name));
-		return snapshot.branches
-			.filter(b => b.remote)
-			.map(b => ({
-				...b,
-				// Strip "origin/" prefix for display and checkout
-				shortName: b.name.replace(/^[^/]+\//, '')
-			}))
-			// Exclude remotes that already have a local branch (e.g. origin/main when main exists)
-			.filter(b => !localNames.has(b.shortName));
-	});
+	// Private access for this chat, published by the mounted ChatAccess.
+	const access = $derived($chatAccessSummary);
+	const accessPending = $derived(access?.pending ?? 0);
 
-	// Search filter for branch dropdown
-	let branchSearch = $state('');
-	let searchInputRef = $state<HTMLInputElement | null>(null);
-	const filteredLocalBranches = $derived(
-		branchSearch
-			? localBranches.filter(b => b.name.toLowerCase().includes(branchSearch.toLowerCase()))
-			: localBranches
-	);
-	const filteredRemoteBranches = $derived(
-		branchSearch
-			? remoteBranches.filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
-			: remoteBranches
-	);
-	const showSearch = $derived(localBranches.length + remoteBranches.length > 5);
+	// ── What the one header button says ─────────────────────────────────────
+	const summary = $derived(computeHeaderSummary({
+		accessPending,
+		mergeBlocked: mergeBlocked && showShipIt,
+		needsPull,
+		commitsBehind: commitsBehindUpstream,
+		isDiverged,
+		hasChanges,
+		additions,
+		deletions,
+		filesChanged,
+		canPush,
+		commitsAheadUpstream,
+		prNumber: shownPr?.number ?? null,
+		defaultBranch
+	}));
+	const pipeline = $derived(computePipeline({
+		hasChanges,
+		canPush,
+		hasOpenPr: !!shownPr,
+		showShipIt,
+		mergeBlocked
+	}));
 
-	// Can the user interact with the branch selector?
-	// In worktree mode, branch is always locked (read-only display). Also locked
-	// while an action is in flight so a checkout can't race a running operation.
-	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut || operationInProgress);
-
-	function toggleDropdown() {
-		if (branchLocked) return;
-		if (showDropdown) {
-			closeDropdown('branch');
-		} else {
-			openDropdown('branch');
-			branchSearch = '';
-			// Refresh branches when opening
-			git.loadBranches();
-			// Focus search input after render
-			requestAnimationFrame(() => searchInputRef?.focus());
-		}
+	function togglePanel() {
+		if (panelOpen) closePanel();
+		else openDropdown('git-panel');
+	}
+	/** Close the panel and any popover inside it. */
+	function closePanel() {
+		openHeaderDropdown.update((cur) => (isPanelId(cur) ? null : cur));
+	}
+	/** Run an action from the panel: the panel gets out of the way first so the
+	 *  progress popover has the header to itself. */
+	function fire<T>(fn: ((opts?: T) => void) | undefined, opts?: T) {
+		closePanel();
+		// A bare row click passes NO argument (the handler falls back to saved
+		// defaults); only the popover passes an explicit bag.
+		if (opts === undefined) fn?.();
+		else fn?.(opts);
 	}
 
-	async function checkoutBranch(branchName: string) {
-		if (branchName === currentBranch) {
-			closeDropdown('branch');
-			return;
-		}
-		checkingOut = true;
-		closeDropdown('branch');
-		try {
-			// Surface failures (incl. uncommitted-changes 409 → "Stash & switch").
-			await checkoutBranchWithToast(branchName, () => git.refreshDiffStats());
-		} finally {
-			checkingOut = false;
-		}
-	}
-
-	function handleNewBranch() {
-		closeDropdown('branch');
-		onClickNewBranch();
-	}
-
-	// Chevron handler for a git-action split button: toggle its option popover.
-	// The shared store guarantees single-open, so this also closes any other
-	// popover (or the branch selector). Never fires when actions are busy.
-	type GitActionDropdownId = 'git-commit' | 'git-push' | 'git-pull' | 'git-pr' | 'git-shipit';
+	// Chevron handler for a git-action row: toggle its option popover.
+	// The shared store guarantees single-open, so this also closes any sibling
+	// popover. Never fires when actions are busy.
 	function toggleActionDropdown(id: GitActionDropdownId) {
 		if (actionsBusy) return;
-		if ($openHeaderDropdown === id) closeDropdown(id);
+		if ($openHeaderDropdown === id) closeActionDropdown(id);
 		else openDropdown(id);
 	}
-	const closeActionDropdown = (id: GitActionDropdownId) => closeDropdown(id);
+	// Closing a popover returns to the panel — unless something else (an
+	// outside click, an action firing) already closed the whole thing.
+	const closeActionDropdown = (id: GitActionDropdownId) =>
+		openHeaderDropdown.update((cur) => (cur === id ? 'git-panel' : cur));
 
-	// Close the branch dropdown on outside click
+	// Close the panel on outside click. This listener registers at mount, so it
+	// runs BEFORE a popover's own outside-click handler: a click outside the
+	// panel closes everything here, and the popover's later "return to panel"
+	// update then finds nothing open and leaves it closed.
 	function handleClickOutside(e: MouseEvent) {
-		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
-			closeDropdown('branch');
-		}
+		if (!panelOpen) return;
+		const target = e.target as Node;
+		if (panelRef?.contains(target) || triggerRef?.contains(target)) return;
+		closePanel();
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			if (showDropdown) closeDropdown('branch');
-		}
+		// A popover closes itself on Escape (back to the panel); the panel only
+		// closes when it is the thing on top.
+		if (e.key === 'Escape' && $openHeaderDropdown === 'git-panel') closePanel();
 	}
 
-	// Clear our shared-store flag on unmount so no dropdown re-opens on remount.
+	// Clear our shared-store flag on unmount so the panel doesn't re-open on remount.
 	onDestroy(() => {
-		openHeaderDropdown.update((cur) => (cur === 'branch' || (cur ?? '').startsWith('git-') ? null : cur));
+		openHeaderDropdown.update((cur) => (isPanelId(cur) ? null : cur));
 	});
+
+	const fileLabel = (n: number) => `${n} file${n === 1 ? '' : 's'}`;
+	const commitLabel = (n: number) => `${n} commit${n === 1 ? '' : 's'}`;
+	const MAX_FILES = 6;
 </script>
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
@@ -363,352 +360,306 @@
 			<TriangleAlert size={13} /> Git unavailable · Retry
 		</button>
 	{:else if isGitRepo}
-	<!-- Branch selector (hidden when hosted in the context pill bar) -->
-	{#if showBranchSelector}
-	<div class="branch-selector" bind:this={dropdownRef}>
-		<button
-			class="git-btn branch-btn"
-			class:locked={branchLocked}
-			onclick={toggleDropdown}
-			disabled={branchLocked}
-			title={isWorktreeMode ? `${projectName ? projectName + ' · ' : ''}Worktree branch: ${currentBranch}` : isStreaming ? 'Branch locked during streaming' : (currentBranch ? `${projectName ? projectName + ' · ' : ''}Branch: ${currentBranch}` : 'Select branch')}
-		>
-			<GitBranch size={13} strokeWidth={1.5} />
-			{#if projectName}
-				<span class="btn-label project-name">{projectName}</span>
-				{#if currentBranch}
-					<span class="branch-separator">/</span>
-				{/if}
-			{/if}
-			{#if currentBranch}
-				<span class="btn-label branch-name">{currentBranch}</span>
-			{/if}
-			{#if checkingOut}
-				<Loader2 size={11} strokeWidth={2} class="spin" />
-			{:else if isWorktreeMode}
-				<!-- No chevron in worktree mode - branch is fixed -->
-			{:else if isStreaming}
-				<Lock size={10} strokeWidth={1.5} />
-			{:else}
-				<ChevronDown size={11} strokeWidth={1.5} />
-			{/if}
-		</button>
+	<button
+		class="git-btn trigger tone-{summary.tone}"
+		class:stale={snapshotPending}
+		class:open={panelOpen}
+		bind:this={triggerRef}
+		onclick={togglePanel}
+		aria-expanded={panelOpen}
+		aria-haspopup="dialog"
+		aria-label="Git actions: {summary.summary}{lastKnownSuffix}"
+		title="{summary.summary}{lastKnownSuffix}"
+	>
+		{#if summary.icon === 'shield'}<ShieldCheck size={14} strokeWidth={1.8} />
+		{:else if summary.icon === 'alert'}<TriangleAlert size={14} strokeWidth={1.6} />
+		{:else if summary.icon === 'pull'}<ArrowDownToLine size={14} strokeWidth={1.6} />
+		{:else if summary.icon === 'push'}<ArrowUpFromLine size={14} strokeWidth={1.6} />
+		{:else if summary.icon === 'pr'}<GitPullRequest size={14} strokeWidth={1.6} />
+		{:else}<GitBranch size={14} strokeWidth={1.6} />{/if}
+		{#if summary.tone === 'changes' && (additions > 0 || deletions > 0)}
+			<span class="stat-line">
+				{#if additions > 0}<span class="stat additions">+{additions}</span>{/if}
+				{#if deletions > 0}<span class="stat deletions">−{deletions}</span>{/if}
+			</span>
+		{/if}
+		{#if summary.label}<span class="btn-label">{summary.label}</span>{/if}
+		{#if summary.detail}<span class="btn-detail">{summary.detail}</span>{/if}
+		{#if prIsLastKnown}
+			<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
+		{/if}
+		<ChevronDown size={12} strokeWidth={1.6} class="trigger-chev" />
+	</button>
 
-		{#if showDropdown}
-			<div class="branch-dropdown">
-				{#if showSearch}
-					<div class="dropdown-search">
-						<input
-							bind:this={searchInputRef}
-							bind:value={branchSearch}
-							type="text"
-							class="branch-search-input"
-							placeholder="Filter branches..."
-							onclick={(e) => e.stopPropagation()}
-							onkeydown={(e) => { if (e.key === 'Escape' && branchSearch) { branchSearch = ''; e.stopPropagation(); }}}
-						/>
+	{#if panelOpen}
+		<!-- Scrim only takes effect in the bottom-sheet layout (see CSS). -->
+		<div class="git-scrim" aria-hidden="true"></div>
+		<div class="git-panel" bind:this={panelRef} role="dialog" aria-label="Git actions">
+			<div class="gp-head">
+				<div class="gp-branch" title={currentBranch ?? ''}>
+					<GitBranch size={13} strokeWidth={1.6} />
+					<span class="gp-branch-name">
+						{#if projectName}<span class="gp-project">{projectName} / </span>{/if}{currentBranch ?? 'no branch'}
+					</span>
+					{#if currentBranch && !isOnDefaultBranch}
+						<span class="gp-base">into <b>{defaultBranch}</b></span>
+					{/if}
+				</div>
+				<div class="gp-sum">
+					<span class="light tone-{summary.tone}" class:pending={snapshotPending}></span>
+					<span class="gp-sum-text">{summary.summary}</span>
+					{#if shownPr}
+						<a class="pr-pill" class:conflict={mergeBlocked} href={shownPr.url} target="_blank" rel="noopener noreferrer" title={shownPr.title}>
+							PR #{shownPr.number} {mergeBlocked ? 'conflicts' : 'open'}{#if prIsLastKnown}?{/if}
+						</a>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Ship It pipeline: one-click commit → push → PR → merge → cleanup -->
+			<div class="gp-pipe" class:blocked={showShipIt && mergeBlocked}>
+				{#if showShipIt && mergeBlocked}<TriangleAlert size={15} strokeWidth={1.6} />{:else}<Rocket size={15} strokeWidth={1.6} />{/if}
+				<ol class="steps" aria-label="Ship It steps">
+					{#each pipeline as step (step.id)}
+						<li class="step {step.state}"><i></i>{step.label}</li>
+					{/each}
+				</ol>
+				{#if showShipIt}
+					<div class="split-btn-group ship-go" class:blocked={mergeBlocked}>
+						<button
+							class="split-main"
+							class:stale={snapshotPending}
+							onclick={() => fire(onClickShipIt)}
+							disabled={primaryDisabled || mergeBlocked}
+							aria-label="Ship It"
+							title={isStreaming ? 'Cannot ship during streaming' : mergeBlocked
+								? `PR #${shownPr?.number} has merge conflicts — resolve them before shipping`
+								: `${shipItSummary}${lastKnownSuffix}`}
+						>
+							{mergeBlocked ? 'Fix conflicts first' : 'Ship It'}
+						</button>
+						<button
+							class="split-chevron"
+							class:active={shipItOptsOpen}
+							onclick={() => toggleActionDropdown('git-shipit')}
+							disabled={actionsBusy}
+							aria-label="Ship It options"
+							aria-haspopup="dialog"
+							aria-expanded={shipItOptsOpen}
+							title="Ship It options"
+						>
+							<ChevronDown size={11} strokeWidth={1.5} />
+						</button>
+						{#if shipItOptsOpen}
+							<GitActionOptionsDropdown
+								action="shipit"
+								{currentBranch}
+								{defaultBranch}
+								baseBranches={baseBranchNames}
+								openPR={shownPr}
+								{hasChanges}
+								{isWorktreeMode}
+								busy={primaryDisabled || mergeBlocked}
+								unpushed={snapshot.status?.unpushed}
+								onClose={() => closeActionDropdown('git-shipit')}
+								onShipIt={(o) => fire(onClickShipIt, o)}
+							/>
+						{/if}
+					</div>
+				{:else}
+					<span class="ship-off">{githubAvailable ? 'Nothing to ship' : 'Needs GitHub'}</span>
+				{/if}
+			</div>
+
+			<div class="gp-rows">
+				<!-- Commit -->
+				{#if primaryAction === 'commit'}
+					<div class="row-group">
+						<button class="row" aria-label="Commit" class:stale={snapshotPending} disabled={primaryDisabled}
+							onclick={() => fire(onClickCommit)}
+							title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}>
+							<GitCommitHorizontal size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub"><span class="count">{fileLabel(filesChanged)}</span></span></span>
+						</button>
+						<button class="row-opts" class:active={commitOptsOpen} onclick={() => toggleActionDropdown('git-commit')} disabled={actionsBusy}
+							aria-label="Commit options" aria-haspopup="dialog" aria-expanded={commitOptsOpen} title="Commit options">
+							<ChevronDown size={12} strokeWidth={1.5} />
+						</button>
+						{#if commitOptsOpen}
+							<GitActionOptionsDropdown action="commit" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
+								{hasChanges} {isWorktreeMode} busy={actionsBusy}
+								onClose={() => closeActionDropdown('git-commit')} onCommit={(o) => fire(onClickCommit, o)} />
+						{/if}
+					</div>
+				{:else}
+					<div class="row-group off">
+						<button class="row" aria-label="Commit" disabled>
+							<GitCommitHorizontal size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub">{hasChanges ? 'pull first' : 'nothing new'}</span></span>
+						</button>
 					</div>
 				{/if}
 
-				{#if filteredLocalBranches.length > 0}
-					<div class="dropdown-section-label">Branches</div>
-					{#each filteredLocalBranches as branch (branch.name)}
-						<button
-							class="dropdown-item"
-							class:active={branch.name === currentBranch}
-							onclick={() => checkoutBranch(branch.name)}
-						>
-							<GitBranch size={13} strokeWidth={1.5} />
-							<span class="dropdown-item-name">{branch.name}</span>
-							{#if branch.name === currentBranch}
-								<Check size={14} strokeWidth={2} />
-							{/if}
+				<!-- Push -->
+				{#if canPush}
+					<div class="row-group">
+						<button class="row" aria-label="Push" class:stale={snapshotPending} disabled={primaryDisabled}
+							onclick={() => fire(onClickPush)}
+							title={isStreaming ? 'Cannot push during streaming' : `${commitLabel(commitsAheadUpstream)} to push`}>
+							<ArrowUpFromLine size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Push</span><span class="row-sub"><span class="count">{commitLabel(commitsAheadUpstream)}</span></span></span>
 						</button>
-					{/each}
-				{:else if !branchSearch}
-					<p class="dropdown-empty">No local branches</p>
-				{/if}
-
-				{#if filteredRemoteBranches.length > 0}
-					<div class="dropdown-section-label">Remote</div>
-					{#each filteredRemoteBranches as branch (branch.name)}
-						<button
-							class="dropdown-item remote-item"
-							onclick={() => checkoutBranch(branch.shortName)}
-							title={branch.name}
-						>
-							<GitBranch size={13} strokeWidth={1.5} />
-							<span class="dropdown-item-name">{branch.shortName}</span>
-							<span class="remote-tag">origin</span>
+						<button class="row-opts" class:active={pushOptsOpen} onclick={() => toggleActionDropdown('git-push')} disabled={actionsBusy}
+							aria-label="Push options" aria-haspopup="dialog" aria-expanded={pushOptsOpen} title="Push options">
+							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
-					{/each}
+						{#if pushOptsOpen}
+							<GitActionOptionsDropdown action="push" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
+								{hasChanges} {isWorktreeMode} busy={actionsBusy}
+								onClose={() => closeActionDropdown('git-push')} onPush={(o) => fire(onClickPush, o)} />
+						{/if}
+					</div>
+				{:else}
+					<div class="row-group off">
+						<button class="row" aria-label="Push" disabled>
+							<ArrowUpFromLine size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Push</span><span class="row-sub">{!hasUpstream ? 'no upstream yet' : needsPull ? 'pull first' : hasChanges ? 'commit first' : 'up to date'}</span></span>
+						</button>
+					</div>
 				{/if}
 
-				{#if branchSearch && filteredLocalBranches.length === 0 && filteredRemoteBranches.length === 0}
-					<p class="dropdown-empty">No matching branches</p>
+				<!-- Pull (when behind upstream, including diverged state) -->
+				{#if needsPull}
+					<div class="row-group">
+						<button class="row" aria-label={isDiverged ? 'Sync' : 'Pull'} class:stale={snapshotPending} class:diverged={isDiverged} disabled={primaryDisabled}
+							onclick={() => fire(onClickPull)}
+							title={isStreaming
+								? 'Cannot pull during streaming'
+								: isDiverged
+									? `Quick sync — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream`
+									: `Quick pull ${commitLabel(commitsBehindUpstream)} with saved settings`}>
+							<ArrowDownToLine size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">{isDiverged ? 'Sync' : 'Pull'}</span><span class="row-sub"><span class="count warn">{commitsBehindUpstream} behind</span></span></span>
+						</button>
+						<button class="row-opts" class:active={pullOptsOpen} onclick={() => toggleActionDropdown('git-pull')} disabled={actionsBusy}
+							aria-label="Pull options" aria-haspopup="dialog" aria-expanded={pullOptsOpen} title="Pull options">
+							<ChevronDown size={12} strokeWidth={1.5} />
+						</button>
+						{#if pullOptsOpen}
+							<GitActionOptionsDropdown action="pull" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
+								{hasChanges} {isWorktreeMode} busy={actionsBusy}
+								onClose={() => closeActionDropdown('git-pull')} onPull={(o) => fire(onClickPull, o)} />
+						{/if}
+					</div>
+				{:else}
+					<div class="row-group off">
+						<button class="row" aria-label="Pull" disabled>
+							<ArrowDownToLine size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Pull</span><span class="row-sub">{hasUpstream ? 'nothing to pull' : 'no upstream yet'}</span></span>
+						</button>
+					</div>
 				{/if}
 
-				<div class="dropdown-divider"></div>
-				<button class="dropdown-item new-branch-item" onclick={handleNewBranch}>
-					<Plus size={13} strokeWidth={1.5} />
-					<span class="dropdown-item-name">New branch...</span>
-				</button>
+				<!-- Create PR / open PR -->
+				{#if primaryAction === 'create-pr'}
+					<div class="row-group">
+						<button class="row" aria-label="Create PR" class:stale={snapshotPending} disabled={primaryDisabled}
+							onclick={() => fire(onClickCreatePR)}
+							title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitLabel(commitsAhead)} ahead)`}>
+							<GitPullRequest size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">into {defaultBranch}</span></span>
+						</button>
+						<button class="row-opts" class:active={prOptsOpen} onclick={() => toggleActionDropdown('git-pr')} disabled={actionsBusy}
+							aria-label="Pull request options" aria-haspopup="dialog" aria-expanded={prOptsOpen} title="Pull request options">
+							<ChevronDown size={12} strokeWidth={1.5} />
+						</button>
+						{#if prOptsOpen}
+							<GitActionOptionsDropdown action="pr" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
+								{hasChanges} {isWorktreeMode} busy={actionsBusy}
+								onClose={() => closeActionDropdown('git-pr')} onCreatePR={(o) => fire(onClickCreatePR, o)} />
+						{/if}
+					</div>
+				{:else if shownPr}
+					<div class="row-group">
+						<a class="row link" href={shownPr.url} target="_blank" rel="noopener noreferrer" aria-label="Open PR #{shownPr.number} on GitHub" title={shownPr.title}>
+							<GitPullRequest size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Open pull request</span><span class="row-sub">#{shownPr.number} on GitHub</span></span>
+							<ExternalLink size={12} strokeWidth={1.5} class="row-trail" />
+						</a>
+					</div>
+				{:else}
+					<div class="row-group off">
+						<button class="row" aria-label="Create PR" disabled>
+							<GitPullRequest size={14} strokeWidth={1.5} />
+							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">{!githubAvailable ? 'needs GitHub' : hasChanges ? 'commit first' : isOnDefaultBranch ? `on ${defaultBranch}` : 'nothing to open'}</span></span>
+						</button>
+					</div>
+				{/if}
 			</div>
-		{/if}
-	</div>
 
-	{/if}
-
-	<!-- Pull split button (when behind upstream, including diverged state) -->
-	{#if needsPull}
-		<div class="split-btn-group">
-			<button
-				class="git-btn split-main pull-btn"
-				class:stale={snapshotPending}
-				class:diverged={isDiverged}
-				onclick={() => onClickPull()}
-				disabled={primaryDisabled}
-				title={isStreaming
-					? 'Cannot pull during streaming'
-					: isDiverged
-						? `Quick sync — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream`
-						: `Quick pull ${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} with saved settings`}
-			>
-				<ArrowDownToLine size={14} strokeWidth={1.5} />
-				<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
-				<span class="count-badge">{commitsBehindUpstream}</span>
-			</button>
-			<button
-				class="git-btn split-chevron pull-btn"
-				class:diverged={isDiverged}
-				class:active={pullOptsOpen}
-				onclick={() => toggleActionDropdown('git-pull')}
-				disabled={actionsBusy}
-				aria-label="Pull options"
-				aria-haspopup="dialog"
-				aria-expanded={pullOptsOpen}
-				title="Pull options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if pullOptsOpen}
-				<GitActionOptionsDropdown
-					action="pull"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={actionsBusy}
-					onClose={() => closeActionDropdown('git-pull')}
-					onPull={onClickPull}
-				/>
-			{/if}
-		</div>
-	{/if}
-
-	<!-- Push split button (when commits ahead of upstream, not behind) -->
-	{#if canPush}
-		<div class="split-btn-group">
-			<button
-				class="git-btn split-main push-btn"
-				class:stale={snapshotPending}
-				onclick={() => onClickPush()}
-				disabled={primaryDisabled}
-				title={isStreaming
-					? 'Cannot push during streaming'
-					: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
-			>
-				<ArrowUpFromLine size={14} strokeWidth={1.5} />
-				<span class="btn-label">Push</span>
-				<span class="count-badge">{commitsAheadUpstream}</span>
-			</button>
-			<button
-				class="git-btn split-chevron push-btn"
-				class:active={pushOptsOpen}
-				onclick={() => toggleActionDropdown('git-push')}
-				disabled={actionsBusy}
-				aria-label="Push options"
-				aria-haspopup="dialog"
-				aria-expanded={pushOptsOpen}
-				title="Push options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if pushOptsOpen}
-				<GitActionOptionsDropdown
-					action="push"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={actionsBusy}
-					onClose={() => closeActionDropdown('git-push')}
-					onPush={onClickPush}
-				/>
-			{/if}
-		</div>
-	{/if}
-
-	<!-- Commit / Create PR split button — primary action decided by
-	     computePrimaryAction (unit-tested pure helper) -->
-	{#if primaryAction === 'commit'}
-		<div class="split-btn-group git-primary">
-			<button
-				class="git-btn split-main"
-				class:stale={snapshotPending}
-				onclick={() => onClickCommit()}
-				disabled={primaryDisabled}
-				title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}
-			>
-				<GitCommitHorizontal size={14} strokeWidth={1.5} />
-				<span class="btn-label">Commit</span>
-			</button>
-			<button
-				class="git-btn split-chevron"
-				class:active={commitOptsOpen}
-				onclick={() => toggleActionDropdown('git-commit')}
-				disabled={actionsBusy}
-				aria-label="Commit options"
-				aria-haspopup="dialog"
-				aria-expanded={commitOptsOpen}
-				title="Commit options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if commitOptsOpen}
-				<GitActionOptionsDropdown
-					action="commit"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={actionsBusy}
-					onClose={() => closeActionDropdown('git-commit')}
-					onCommit={onClickCommit}
-				/>
-			{/if}
-		</div>
-	{:else if primaryAction === 'create-pr'}
-		<div class="split-btn-group git-primary">
-			<button
-				class="git-btn split-main"
-				class:stale={snapshotPending}
-				onclick={() => onClickCreatePR()}
-				disabled={primaryDisabled}
-				title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
-			>
-				<GitPullRequest size={14} strokeWidth={1.5} />
-				<span class="btn-label">Create PR</span>
-			</button>
-			<button
-				class="git-btn split-chevron"
-				class:active={prOptsOpen}
-				onclick={() => toggleActionDropdown('git-pr')}
-				disabled={actionsBusy}
-				aria-label="Pull request options"
-				aria-haspopup="dialog"
-				aria-expanded={prOptsOpen}
-				title="Pull request options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if prOptsOpen}
-				<GitActionOptionsDropdown
-					action="pr"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={actionsBusy}
-					onClose={() => closeActionDropdown('git-pr')}
-					onCreatePR={onClickCreatePR}
-				/>
-			{/if}
-		</div>
-	{:else if !showShipIt}
-		<button
-			class="git-btn git-primary"
-			disabled={true}
-			title="No changes to commit"
-		>
-			<GitCommitHorizontal size={14} strokeWidth={1.5} />
-			<span class="btn-label">Commit</span>
-		</button>
-	{/if}
-
-	<!-- Ship It split button: one-click pipeline (commit → push → PR → merge → cleanup) -->
-	<!-- Shows for uncommitted changes, unmerged branch content, or an open PR. Hidden for branches that are "ahead" by
-	     commit count but carry a 0/0 net diff (already-merged / cleaned-up). -->
-	{#if showShipIt}
-		<div class="split-btn-group">
-			<button
-				class="git-btn split-main"
-				class:stale={snapshotPending}
-				onclick={() => onClickShipIt?.()}
-				disabled={primaryDisabled || mergeBlocked}
-				title={isStreaming ? 'Cannot ship during streaming' : mergeBlocked
-					? `PR #${shownPr?.number} has merge conflicts — resolve them before shipping`
-					: `${shipItSummary}${lastKnownSuffix}`}
-			>
-				{#if mergeBlocked}<TriangleAlert size={13} strokeWidth={1.5} />{:else}<Rocket size={13} strokeWidth={1.5} />{/if}
-				<span class="btn-label">Ship It</span>
-				{#if prIsLastKnown}
-					<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
+			<!-- Changed files (each opens the review panel) -->
+			<div class="gp-files">
+				<div class="gp-files-head">
+					<span>{hasChanges ? `Changed files · ${filesChanged}` : 'Changed files'}</span>
+					{#if hasChanges && onOpenDiffReview}
+						<button class="gp-review" onclick={() => fire(onOpenDiffReview)}>Review all</button>
+					{/if}
+				</div>
+				{#if hasChanges && changedFiles.length > 0}
+					{#each changedFiles.slice(0, MAX_FILES) as f (f.file)}
+						<button class="file" onclick={() => fire(onOpenDiffReview)} disabled={!onOpenDiffReview} title={f.file}>
+							<span class="file-path">{f.file}</span>
+							<span class="file-counts">
+								{#if f.additions > 0}<span class="additions">+{f.additions}</span>{/if}
+								{#if f.deletions > 0}<span class="deletions">−{f.deletions}</span>{/if}
+								{#if f.is_binary}<span class="binary">binary</span>{/if}
+							</span>
+						</button>
+					{/each}
+					{#if changedFiles.length > MAX_FILES}
+						<button class="file more" onclick={() => fire(onOpenDiffReview)} disabled={!onOpenDiffReview}>
+							<span class="file-path">{changedFiles.length - MAX_FILES} more…</span>
+						</button>
+					{/if}
+				{:else if hasChanges}
+					<p class="gp-empty">{fileLabel(filesChanged)} changed.</p>
+				{:else}
+					<p class="gp-empty">Working tree is clean.</p>
 				{/if}
-			</button>
-			<button
-				class="git-btn split-chevron"
-				class:active={shipItOptsOpen}
-				onclick={() => toggleActionDropdown('git-shipit')}
-				disabled={actionsBusy}
-				aria-label="Ship It options"
-				aria-haspopup="dialog"
-				aria-expanded={shipItOptsOpen}
-				title="Ship It options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if shipItOptsOpen}
-				<GitActionOptionsDropdown
-					action="shipit"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={primaryDisabled || mergeBlocked}
-					unpushed={snapshot.status?.unpushed}
-					onClose={() => closeActionDropdown('git-shipit')}
-					onShipIt={onClickShipIt}
-				/>
+			</div>
+
+			{#if access || onDownloadChat}
+				<div class="gp-foot">
+					{#if access}
+						{@const hasAny = access.pending > 0 || access.active > 0 || access.saved > 0 || access.error}
+						<div class="row-group" class:off={!hasAny}>
+							<button class="row" aria-label="Private access" disabled={!hasAny} onclick={() => { closePanel(); access.open(); }}>
+								<ShieldCheck size={14} strokeWidth={1.5} />
+								<span class="row-text">
+									<span class="row-title">Private access</span>
+									<span class="row-sub">
+										{#if access.pending > 0}<span class="count attn">{access.pending} to approve</span>
+										{:else if access.error}<span class="count warn">unavailable</span>
+										{:else if access.active > 0}{access.active} active grant{access.active === 1 ? '' : 's'}
+										{:else if access.saved > 0}{access.saved} saved connection{access.saved === 1 ? '' : 's'}
+										{:else}none in this chat{/if}
+									</span>
+								</span>
+								{#if hasAny}<ChevronRight size={12} strokeWidth={1.5} class="row-trail" />{/if}
+							</button>
+						</div>
+					{/if}
+					{#if onDownloadChat}
+						<div class="row-group narrow-only">
+							<button class="row" aria-label="Download chat history" disabled={downloadingChat} onclick={() => fire(onDownloadChat)}>
+								<Download size={14} strokeWidth={1.5} />
+								<span class="row-text"><span class="row-title">Download chat history</span><span class="row-sub">.jsonl</span></span>
+							</button>
+						</div>
+					{/if}
+				</div>
 			{/if}
 		</div>
-	{/if}
-
-	<!-- Diff stats (clickable to open review panel) -->
-	{#if hasChanges}
-		<button
-			class="diff-stats"
-			onclick={onOpenDiffReview}
-			title="Review {filesChanged} changed file{filesChanged === 1 ? '' : 's'}"
-		>
-			{#if additions > 0}
-				<span class="stat additions">+{additions}</span>
-			{/if}
-			{#if deletions > 0}
-				<span class="stat deletions">-{deletions}</span>
-			{/if}
-			<span class="stat files-count">{filesChanged} file{filesChanged === 1 ? '' : 's'}</span>
-		</button>
 	{/if}
 
 	{:else if !isWorktreeMode}
@@ -732,6 +683,7 @@
 
 <style>
 	.git-actions {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -739,7 +691,7 @@
 
 	/* The action shown belongs to the previous coherent snapshot while the
 	   current checkout revalidates — indicate it rather than flashing empty. */
-	.git-btn.stale {
+	.stale {
 		opacity: 0.55;
 	}
 
@@ -752,50 +704,20 @@
 		opacity: 0.8;
 	}
 
-	.branch-selector {
-		position: relative;
-	}
-
-	/* Split button: main action + chevron, sharing a seam. The group is the
-	   positioning anchor for its GitActionOptionsDropdown popover. */
-	.split-btn-group {
-		position: relative;
-		display: inline-flex;
-		align-items: stretch;
-	}
-
-	.split-btn-group .split-main {
-		border-top-right-radius: 0;
-		border-bottom-right-radius: 0;
-	}
-
-	.split-btn-group .split-chevron {
-		border-top-left-radius: 0;
-		border-bottom-left-radius: 0;
-		border-left: none;
-		padding: 0 5px;
-		gap: 0;
-	}
-
-	.split-chevron.active {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
 	.git-btn {
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		height: 26px;
+		height: 28px;
 		padding: 0 8px;
 		background: transparent;
 		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: calc(var(--radius, 0.75rem) * 0.7);
 		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all 150ms ease;
+		transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
 		white-space: nowrap;
 	}
 
@@ -807,10 +729,6 @@
 	.git-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
-	}
-
-	.git-btn.locked {
-		opacity: 0.6;
 	}
 
 	.git-btn :global(svg) {
@@ -836,236 +754,557 @@
 		text-overflow: ellipsis;
 	}
 
-	.branch-separator {
-		color: var(--muted-foreground);
-		opacity: 0.4;
-		font-size: 0.75rem;
+	/* ── The one header button ─────────────────────────────────────────────── */
+	.trigger {
+		gap: 6px;
+		padding: 0 7px 0 9px;
+		font-size: 0.71875rem;
+	}
+
+	.trigger.open {
+		background: var(--accent);
+		color: var(--foreground);
+		border-color: var(--border-strong, var(--border));
+	}
+
+	.trigger :global(.trigger-chev) {
+		color: var(--subtle-foreground, var(--muted-foreground));
+		transition: transform 200ms ease;
+	}
+
+	.trigger.open :global(.trigger-chev) {
+		transform: rotate(180deg);
+	}
+
+	.btn-detail {
+		color: var(--subtle-foreground, var(--muted-foreground));
 		line-height: 1;
-		flex-shrink: 0;
-		margin: 0 -1px;
 	}
 
-	.branch-name {
-		max-width: 140px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	/* Commit count badge (used in pull/push buttons) */
-	.count-badge {
+	.stat-line {
 		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 16px;
-		height: 16px;
-		padding: 0 4px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		font-size: 0.625rem;
-		font-weight: 700;
+		gap: 5px;
+		font-family: var(--font-mono);
+	}
+
+	.stat {
+		font-weight: 600;
 		font-variant-numeric: tabular-nums;
 		line-height: 1;
 	}
 
-	/* Pull button in diverged state (branch both ahead and behind) */
-	.pull-btn.diverged {
-		border-color: var(--warning, #e8a735);
-		color: var(--warning, #e8a735);
-	}
-
-	.pull-btn.diverged:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--warning, #e8a735) 10%, transparent);
-	}
-
-	.pull-btn.diverged .count-badge {
-		background: color-mix(in oklch, var(--warning, #e8a735) 15%, transparent);
-		color: var(--warning, #e8a735);
-	}
-
-	/* Branch dropdown */
-	.branch-dropdown {
-		position: absolute;
-		top: calc(100% + 4px);
-		right: 0;
-		min-width: 220px;
-		max-width: 320px;
-		max-height: 320px;
-		overflow-y: auto;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
-		padding: 4px;
-		z-index: 100;
-		animation: dropdown-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
-
-	@keyframes dropdown-in {
-		from { opacity: 0; transform: translateY(-4px); }
-		to { opacity: 1; transform: translateY(0); }
-	}
-
-	.dropdown-section-label {
-		padding: 6px 10px 2px;
-		font-size: 0.625rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 7px 10px;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		cursor: pointer;
-		text-align: left;
-		transition: background-color 120ms ease;
-	}
-
-	.dropdown-item:hover {
-		background: var(--hover-overlay);
-	}
-
-	.dropdown-item.active {
-		font-weight: 500;
-	}
-
-	.dropdown-item :global(svg) {
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.dropdown-item.active :global(svg:last-child) {
+	.additions {
 		color: var(--success);
 	}
 
-	.dropdown-item-name {
-		flex: 1;
+	.deletions {
+		color: var(--destructive);
+	}
+
+	/* Tone: the colour says what kind of attention the branch needs. */
+	.trigger.tone-attn {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 55%, transparent);
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+	}
+
+	.trigger.tone-attn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--primary) 16%, transparent);
+		color: var(--primary);
+	}
+
+	.trigger.tone-blocked {
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
+	}
+
+	.trigger.tone-blocked:hover:not(:disabled) {
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+	}
+
+	.trigger.tone-behind :global(svg:first-child) {
+		color: var(--warning);
+	}
+
+	/* ── Panel ─────────────────────────────────────────────────────────────── */
+	.git-panel {
+		position: absolute;
+		top: calc(100% + 8px);
+		right: 0;
+		width: min(440px, calc(100vw - 24px));
+		max-height: calc(100vh - 80px);
+		overflow-y: auto;
+		background: var(--popover, var(--card));
+		border: 1px solid var(--border-strong, var(--border));
+		border-radius: calc(var(--radius, 0.75rem) * 1.2);
+		box-shadow: var(--shadow-l);
+		z-index: 150;
+		text-align: left;
+		animation: panel-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
+		transform-origin: top right;
+	}
+
+	@keyframes panel-in {
+		from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+		to { opacity: 1; transform: none; }
+	}
+
+	.git-scrim {
+		display: none;
+	}
+
+	.gp-head {
+		padding: 12px 14px 10px;
+		border-bottom: 1px solid var(--border);
+		display: grid;
+		gap: 6px;
+	}
+
+	.gp-branch {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--foreground);
+	}
+
+	.gp-branch :global(svg) {
+		color: var(--subtle-foreground, var(--muted-foreground));
+		flex-shrink: 0;
+	}
+
+	.gp-branch-name {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.dropdown-divider {
-		height: 1px;
-		background: var(--border);
-		margin: 4px 0;
-	}
-
-	.dropdown-empty {
-		padding: 12px;
-		text-align: center;
+	.gp-project {
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		margin: 0;
+		font-weight: 400;
 	}
 
-	.new-branch-item {
-		color: var(--primary) !important;
+	.gp-base {
+		flex: none;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		font-weight: 400;
 	}
 
-	.new-branch-item :global(svg) {
-		color: var(--primary) !important;
-	}
-
-	/* Search input */
-	.dropdown-search {
-		padding: 4px;
-	}
-
-	.branch-search-input {
-		width: 100%;
-		height: 28px;
-		padding: 0 8px;
-		background: var(--input);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--foreground);
-		font-size: 0.75rem;
-		outline: none;
-		transition: border-color 150ms ease;
-	}
-
-	.branch-search-input:focus {
-		border-color: var(--primary);
-	}
-
-	.branch-search-input::placeholder {
+	.gp-base b {
+		font-weight: 500;
 		color: var(--muted-foreground);
 	}
 
-	/* Remote branch items */
-	.remote-item :global(svg) {
-		color: var(--muted-foreground);
-		opacity: 0.6;
-	}
-
-	.remote-tag {
-		font-size: 0.5625rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-		color: var(--muted-foreground);
-		background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
-		padding: 1px 5px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		flex-shrink: 0;
-	}
-
-	/* Diff stats */
-	.diff-stats {
+	.gp-sum {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 2px 8px;
-		background: none;
-		border: 1px solid transparent;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		cursor: pointer;
-		transition: all 0.15s ease;
+		gap: 10px;
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		min-width: 0;
 	}
 
-	.diff-stats:hover {
-		background: var(--hover-bg, rgba(255, 255, 255, 0.06));
-		border-color: rgba(255, 255, 255, 0.1);
+	.gp-sum-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
-	.diff-stats:focus-visible {
-		outline: 2px solid var(--primary);
-		outline-offset: 1px;
+	.light {
+		flex: none;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--subtle-foreground, var(--muted-foreground));
 	}
 
-	.stat {
+	.light.tone-attn, .light.tone-changes, .light.tone-push { background: var(--primary); }
+	.light.tone-behind { background: var(--warning); }
+	.light.tone-blocked { background: var(--destructive); }
+	.light.tone-pr { background: var(--success); }
+	.light.pending { opacity: 0.5; }
+
+	.pr-pill {
+		margin-left: auto;
+		flex: none;
 		font-size: 0.6875rem;
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-		line-height: 1;
-	}
-
-	.stat.additions {
+		padding: 1px 8px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in oklch, var(--success) 40%, transparent);
 		color: var(--success);
+		text-decoration: none;
 	}
 
-	.stat.deletions {
+	.pr-pill:hover {
+		background: color-mix(in oklch, var(--success) 10%, transparent);
+	}
+
+	.pr-pill.conflict {
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+	}
+
+	.pr-pill.conflict:hover {
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+	}
+
+	/* Pipeline strip */
+	.gp-pipe {
+		display: grid;
+		grid-template-columns: auto 1fr auto;
+		align-items: center;
+		gap: 10px;
+		padding: 11px 14px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.gp-pipe > :global(svg) {
+		color: var(--primary);
+	}
+
+	.gp-pipe.blocked > :global(svg) {
 		color: var(--destructive);
 	}
 
-	.stat.files-count {
-		color: var(--muted-fg, rgba(255, 255, 255, 0.45));
-		font-size: 0.625rem;
-		margin-left: 2px;
+	.steps {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		align-items: center;
+		min-width: 0;
+		overflow: hidden;
+		font-size: 0.6875rem;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		white-space: nowrap;
 	}
 
-	/* Spin animation */
+	.step {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.step::after {
+		content: '';
+		width: 14px;
+		height: 1px;
+		background: var(--border-strong, var(--border));
+		margin: 0 6px;
+	}
+
+	.step:last-child::after {
+		display: none;
+	}
+
+	.step i {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--border-strong, var(--border));
+	}
+
+	.step.done { color: var(--muted-foreground); }
+	.step.done i { background: var(--success); }
+	.step.next { color: var(--foreground); font-weight: 500; }
+	.step.next i { background: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 25%, transparent); }
+	.step.stop { color: var(--destructive); }
+	.step.stop i { background: var(--destructive); }
+
+	/* Split button: main action + chevron, sharing a seam. The group is the
+	   positioning anchor for its GitActionOptionsDropdown popover. */
+	.split-btn-group {
+		position: relative;
+		display: inline-flex;
+		align-items: stretch;
+	}
+
+	.ship-go {
+		border-radius: calc(var(--radius, 0.75rem) * 0.7);
+		overflow: visible;
+	}
+
+	.ship-go .split-main,
+	.ship-go .split-chevron {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		height: 26px;
+		padding: 0 9px;
+		border: 1px solid color-mix(in oklch, var(--primary) 55%, transparent);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
+		font-size: 0.71875rem;
+		font-weight: 600;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background-color 150ms ease;
+	}
+
+	.ship-go .split-main {
+		border-radius: calc(var(--radius, 0.75rem) * 0.7) 0 0 calc(var(--radius, 0.75rem) * 0.7);
+	}
+
+	.ship-go .split-chevron {
+		border-radius: 0 calc(var(--radius, 0.75rem) * 0.7) calc(var(--radius, 0.75rem) * 0.7) 0;
+		border-left: 0;
+		padding: 0 5px;
+	}
+
+	.ship-go .split-main:hover:not(:disabled),
+	.ship-go .split-chevron:hover:not(:disabled),
+	.ship-go .split-chevron.active {
+		background: color-mix(in oklch, var(--primary) 18%, transparent);
+	}
+
+	.ship-go .split-main:disabled,
+	.ship-go .split-chevron:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.ship-go.blocked .split-main,
+	.ship-go.blocked .split-chevron {
+		border-color: color-mix(in oklch, var(--destructive) 55%, transparent);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		color: var(--destructive);
+	}
+
+	.ship-off {
+		font-size: 0.6875rem;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		padding: 0 4px;
+	}
+
+	/* Action rows */
+	.gp-rows {
+		padding: 6px;
+		display: grid;
+		gap: 1px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.row-group {
+		position: relative;
+		display: grid;
+		grid-template-columns: 1fr auto;
+		align-items: stretch;
+	}
+
+	.row-group.off {
+		opacity: 0.45;
+	}
+
+	.row {
+		display: grid;
+		grid-template-columns: 22px 1fr auto;
+		align-items: center;
+		gap: 10px;
+		height: 36px;
+		padding: 0 8px;
+		border: 0;
+		border-radius: calc(var(--radius, 0.75rem) * 0.8);
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+		text-decoration: none;
+		min-width: 0;
+	}
+
+	.row:hover:not(:disabled) {
+		background: var(--hover-overlay);
+	}
+
+	.row:disabled {
+		cursor: default;
+	}
+
+	.row > :global(svg) {
+		color: var(--muted-foreground);
+		justify-self: center;
+	}
+
+	.row.diverged > :global(svg) {
+		color: var(--warning);
+	}
+
+	.row :global(.row-trail) {
+		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+
+	.row-text {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+		font-size: 0.78125rem;
+	}
+
+	.row-title {
+		flex: none;
+	}
+
+	.row-sub {
+		font-size: 0.6875rem;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.count {
+		font-family: var(--font-mono);
+		font-size: 0.65625rem;
+		font-weight: 600;
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		padding: 1px 5px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+	}
+
+	.count.warn {
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 14%, transparent);
+	}
+
+	.count.attn {
+		color: var(--primary-foreground);
+		background: var(--primary);
+	}
+
+	.row-opts {
+		width: 30px;
+		margin-left: 2px;
+		border: 0;
+		border-radius: calc(var(--radius, 0.75rem) * 0.6);
+		background: transparent;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		display: grid;
+		place-items: center;
+		cursor: pointer;
+	}
+
+	.row-opts:hover:not(:disabled),
+	.row-opts.active {
+		background: var(--active-overlay, var(--hover-overlay));
+		color: var(--foreground);
+	}
+
+	.row-opts:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	/* Files */
+	.gp-files {
+		padding: 8px 6px 6px;
+	}
+
+	.gp-files-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 0 8px 4px;
+		font-size: 0.6875rem;
+		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+
+	.gp-review {
+		border: 0;
+		background: transparent;
+		color: var(--primary);
+		font: inherit;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		cursor: pointer;
+		padding: 2px 4px;
+		border-radius: 4px;
+	}
+
+	.gp-review:hover {
+		text-decoration: underline;
+	}
+
+	.file {
+		display: grid;
+		grid-template-columns: 1fr auto;
+		gap: 10px;
+		align-items: center;
+		width: 100%;
+		height: 26px;
+		padding: 0 8px;
+		border: 0;
+		border-radius: calc(var(--radius, 0.75rem) * 0.6);
+		background: transparent;
+		color: var(--muted-foreground);
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.file:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.file:disabled {
+		cursor: default;
+	}
+
+	.file-path {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		direction: rtl;
+		text-align: left;
+	}
+
+	.file.more .file-path {
+		direction: ltr;
+		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+
+	.file-counts {
+		display: flex;
+		gap: 6px;
+		font-weight: 600;
+		font-size: 0.65625rem;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.binary {
+		color: var(--subtle-foreground, var(--muted-foreground));
+		font-weight: 400;
+	}
+
+	.gp-empty {
+		margin: 0;
+		padding: 2px 8px 4px;
+		font-size: 0.75rem;
+		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+
+	.gp-foot {
+		padding: 6px;
+		border-top: 1px solid var(--border);
+		display: grid;
+		gap: 1px;
+	}
+
+	.narrow-only {
+		display: none;
+	}
+
 	:global(.spin) {
 		animation: spin 1s linear infinite;
 	}
@@ -1075,8 +1314,124 @@
 		to { transform: rotate(360deg); }
 	}
 
+	/* ── Narrow screens: the panel becomes a bottom sheet ──────────────────── */
+	@media (max-width: 700px) {
+		.git-btn.trigger {
+			height: 36px;
+			padding: 0 10px 0 12px;
+			font-size: 0.75rem;
+			border-radius: calc(var(--radius, 0.75rem) * 0.9);
+		}
+
+		.git-scrim {
+			display: block;
+			position: fixed;
+			inset: 0;
+			background: rgb(0 0 0 / 0.5);
+			z-index: 140;
+			animation: scrim-in 180ms ease;
+		}
+
+		@keyframes scrim-in {
+			from { opacity: 0; }
+			to { opacity: 1; }
+		}
+
+		.git-panel {
+			position: fixed;
+			top: auto;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			width: auto;
+			max-height: 88dvh;
+			border-radius: 18px 18px 0 0;
+			border-bottom: 0;
+			padding-bottom: env(safe-area-inset-bottom);
+			transform-origin: bottom center;
+			animation: sheet-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+		}
+
+		@keyframes sheet-in {
+			from { transform: translateY(24px); opacity: 0; }
+			to { transform: none; opacity: 1; }
+		}
+
+		/* Drag handle */
+		.git-panel::before {
+			content: '';
+			display: block;
+			width: 36px;
+			height: 4px;
+			border-radius: 2px;
+			background: var(--border-strong, var(--border));
+			margin: 8px auto 0;
+		}
+
+		.gp-head {
+			padding: 10px 16px 12px;
+		}
+
+		.gp-branch {
+			font-size: 0.78125rem;
+		}
+
+		.gp-pipe {
+			grid-template-columns: auto 1fr;
+			padding: 12px 16px;
+		}
+
+		.ship-go, .ship-off {
+			grid-column: 1 / -1;
+			justify-self: stretch;
+		}
+
+		.ship-go .split-main {
+			flex: 1;
+			justify-content: center;
+			height: 40px;
+			font-size: 0.8125rem;
+		}
+
+		.ship-go .split-chevron {
+			padding: 0 14px;
+		}
+
+		.gp-rows, .gp-files, .gp-foot {
+			padding: 6px 10px;
+		}
+
+		.row {
+			height: 46px;
+		}
+
+		.row-text {
+			font-size: 0.875rem;
+		}
+
+		.row-sub {
+			font-size: 0.75rem;
+		}
+
+		.row-opts {
+			width: 40px;
+		}
+
+		.file {
+			height: 34px;
+			font-size: 0.75rem;
+		}
+
+		.narrow-only {
+			display: grid;
+		}
+	}
+
 	@media (prefers-reduced-motion: reduce) {
-		.branch-dropdown {
+		.git-btn, .trigger :global(.trigger-chev), .row-opts, .ship-go .split-main, .ship-go .split-chevron {
+			transition: none;
+		}
+		.git-panel, .git-scrim {
 			animation: none;
 		}
 	}

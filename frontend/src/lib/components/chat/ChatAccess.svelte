@@ -1,12 +1,15 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
+	import { chatAccessSummary } from '$lib/stores/chat-access';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
-	let { sessionId }: { sessionId: string } = $props();
+	/** `trigger: 'none'` renders only the dialog; the chat header's git panel
+	 *  opens it through the chatAccessSummary store instead of a button here. */
+	let { sessionId, trigger = 'button' }: { sessionId: string; trigger?: 'button' | 'none' } = $props();
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number };
@@ -25,6 +28,20 @@
 	let dialog = $state<HTMLDialogElement>();
 	const pendingCount = $derived(data.requests.length + data.actions.length);
 	let error = $state('');
+	// The header reads the pending count for its button label and the git
+	// panel's "Private access" row opens the dialog from outside this component.
+	const openDialog = () => dialog?.showModal();
+	$effect(() => {
+		chatAccessSummary.set({
+			sessionId,
+			pending: pendingCount,
+			active: data.grants.length,
+			saved: data.saved_connections.length,
+			error: !!error,
+			open: openDialog
+		});
+	});
+	onDestroy(() => chatAccessSummary.update((cur) => (cur?.sessionId === sessionId ? null : cur)));
 	let confirmingRevoke = $state<string | null>(null);
 	let busy = $state(false);
 	// Refreshes are event-driven: the broker sends a session-scoped
@@ -196,6 +213,7 @@
 {/snippet}
 
 {#if data.requests.length || data.actions.length || data.grants.length || data.saved_connections.length || error}
+	{#if trigger === 'button'}
 	<button class="access-trigger" class:needs-attention={pendingCount > 0 || !!error}
 		onclick={() => dialog?.showModal()} aria-label="Private access" aria-haspopup="dialog"
 		title="Private access for this conversation">
@@ -205,6 +223,7 @@
 			{#if pendingCount}{pendingCount} pending{:else if error}!{:else if data.grants.length}{data.grants.length} active{/if}
 		</span>
 	</button>
+	{/if}
 	<dialog bind:this={dialog} class="access-dialog card-system" aria-label="Private access for this conversation">
 		<header class="access-dialog-head">
 			<h2>Private access</h2>

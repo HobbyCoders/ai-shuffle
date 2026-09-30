@@ -1,18 +1,23 @@
 /**
- * Behavior tests for GitHeaderActions — the split-button git controls.
+ * Behavior tests for GitHeaderActions — the chat header's one git button and
+ * the panel it opens.
  *
  * These mount the real header with its git/github stores mocked (but the real
  * header-dropdowns and gitActionPreferences singletons) so we can drive the
- * chevron option popovers end-to-end. Covered:
- *  - the button-visibility matrix (Commit / Create PR / Ship It / Push / Pull /
- *    Ship It appear for the right repo state)
- *  - a chevron opens its popover; Escape and outside-click close it; opening one
- *    popover closes another (shared single-open store)
- *  - persisted options (include-unstaged, next-step, pull strategy) write through
- *    gitActionPreferences; a per-invocation option (force push) does NOT persist
- *  - the main button fires its handler with defaults (no option bag); the popover
- *    primary fires with an explicit bag
+ * panel and its option popovers end-to-end. Covered:
+ *  - the header button's label follows the priority ladder (approvals waiting,
+ *    conflicts, behind, uncommitted changes, to push, open PR, up to date)
+ *  - the row-visibility matrix inside the panel (Commit / Create PR / Ship It /
+ *    Push / Pull enable for the right repo state)
+ *  - the panel opens from the button; Escape and outside-click close it; a
+ *    row's chevron opens its popover; opening one popover closes another
+ *    (shared single-open store) and closing a popover returns to the panel
+ *  - persisted options (include-unstaged, next-step, pull strategy) write
+ *    through gitActionPreferences; a per-invocation option (force push) does NOT persist
+ *  - a row fires its handler with defaults (no option bag) and closes the
+ *    panel; the popover primary fires with an explicit bag
  *  - everything disables under actionsBusy (isStreaming)
+ *  - the private-access row reads chatAccessSummary and opens the dialog
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
@@ -69,9 +74,9 @@ const mocks = vi.hoisted(() => {
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
 		refreshChangedFiles: vi.fn(),
+		retryLoad: vi.fn(),
 		startBackgroundRefresh: vi.fn(),
-		stopBackgroundRefresh: vi.fn(),
-		checkoutBranchWithToast: vi.fn()
+		stopBackgroundRefresh: vi.fn()
 	};
 });
 
@@ -80,6 +85,7 @@ vi.mock('$lib/stores/git.svelte', () => ({
 		loadBranches: mocks.loadBranches,
 		refreshDiffStats: mocks.refreshDiffStats,
 		refreshChangedFiles: mocks.refreshChangedFiles,
+		retryLoad: mocks.retryLoad,
 		startBackgroundRefresh: mocks.startBackgroundRefresh,
 		stopBackgroundRefresh: mocks.stopBackgroundRefresh
 	},
@@ -88,9 +94,6 @@ vi.mock('$lib/stores/git.svelte', () => ({
 }));
 vi.mock('$lib/stores/github.svelte', () => ({
 	githubRepoInfo: mocks.githubRepoInfo
-}));
-vi.mock('$lib/stores/gitCheckoutAction', () => ({
-	checkoutBranchWithToast: mocks.checkoutBranchWithToast
 }));
 
 /**
@@ -122,10 +125,11 @@ function setSnapshot(patch: Record<string, unknown>) {
 import GitHeaderActions from './GitHeaderActions.svelte';
 import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
+import { chatAccessSummary } from '$lib/stores/chat-access';
 
 // ── Scenario setup ──────────────────────────────────────────────────────────
 
-/** Dirty tree on a feature branch → Commit + Ship It show. */
+/** Dirty tree on a feature branch → Commit + Ship It enable. */
 function dirtyFeatureBranch() {
 	setSnapshot({
 		status: {
@@ -136,7 +140,7 @@ function dirtyFeatureBranch() {
 			is_git_repo: true
 		},
 		diffStats: { additions: 5, deletions: 2, files_changed: 1 },
-		changedFiles: [{ file: 'a.ts' }],
+		changedFiles: [{ file: 'a.ts', status: 'M', category: 'modified', additions: 5, deletions: 2, is_binary: false }],
 		branches: [
 			{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 },
 			{ name: 'main', current: false, remote: false }
@@ -163,7 +167,7 @@ function cleanAheadBranch() {
 	});
 }
 
-/** Behind upstream → Pull shows. */
+/** Behind upstream → Pull enables. */
 function behindBranch() {
 	setSnapshot({
 		status: {
@@ -180,30 +184,42 @@ function behindBranch() {
 	});
 }
 
-const noop = () => {};
-
 function baseHandlers() {
 	return {
 		onClickCommit: vi.fn(),
 		onClickCreatePR: vi.fn(),
 		onClickPush: vi.fn(),
 		onClickPull: vi.fn(),
-		onClickNewBranch: vi.fn(),
 		onClickShipIt: vi.fn(),
-		onClickInitRepo: vi.fn()
+		onClickInitRepo: vi.fn(),
+		onOpenDiffReview: vi.fn()
 	};
 }
 
 function renderHeader(props: Record<string, unknown> = {}, handlers = baseHandlers()) {
 	const result = render(GitHeaderActions, {
 		props: {
-			showBranchSelector: false,
 			isGitRepo: true,
 			...handlers,
 			...props
 		}
 	});
 	return { ...result, handlers };
+}
+
+/** The one header button. Its accessible name starts with "Git actions:". */
+const trigger = () => screen.getByRole('button', { name: /^Git actions:/ }) as HTMLButtonElement;
+const panel = () => screen.getByRole('dialog', { name: 'Git actions' });
+const queryPanel = () => screen.queryByRole('dialog', { name: 'Git actions' });
+/** An action's option popover (GitActionOptionsDropdown labels itself "<action> options"). */
+const popover = (action: string) => screen.getByRole('dialog', { name: `${action} options` });
+const queryPopover = (action: string) => screen.queryByRole('dialog', { name: `${action} options` });
+const row = (name: string) => within(panel()).getByRole('button', { name }) as HTMLButtonElement;
+const queryRow = (name: string) => within(panel()).queryByRole('button', { name }) as HTMLButtonElement | null;
+
+async function openPanel() {
+	await fireEvent.click(trigger());
+	return panel();
 }
 
 /** Wait one animation frame — the popover registers its outside-click listener
@@ -214,6 +230,7 @@ beforeEach(() => {
 	localStorage.clear();
 	gitActionPreferences.reset();
 	openHeaderDropdown.set(null);
+	chatAccessSummary.set(null);
 	mocks.gitMode.set('project');
 	vi.clearAllMocks();
 });
@@ -221,17 +238,87 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	openHeaderDropdown.set(null);
+	chatAccessSummary.set(null);
 });
 
-// ── Visibility matrix ───────────────────────────────────────────────────────
+// ── Header button label (priority ladder) ───────────────────────────────────
 
-describe('GitHeaderActions button visibility', () => {
+describe('GitHeaderActions header label', () => {
+	it('shows the diff numbers for uncommitted changes', () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		const btn = trigger();
+		expect(btn.textContent).toContain('+5');
+		expect(btn.textContent).toContain('−2');
+		expect(btn.textContent).toContain('1 file');
+		expect(btn.title).toBe('1 file changed');
+	});
+
+	it('shows commits to push for a clean branch ahead of upstream', () => {
+		cleanAheadBranch();
+		renderHeader();
+		expect(trigger().textContent).toContain('2 to push');
+	});
+
+	it('shows "behind" over uncommitted changes', () => {
+		setSnapshot({
+			status: { current_branch: 'feature/x', default_branch: 'main', ahead: 0, differs_from_base: true, is_git_repo: true },
+			diffStats: { additions: 5, deletions: 2, files_changed: 1 },
+			branches: [{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 3 }]
+		});
+		renderHeader();
+		expect(trigger().textContent).toContain('3 behind');
+		expect(trigger().textContent).not.toContain('+5');
+	});
+
+	it('shows the PR and "conflicts" when the open PR is not mergeable', () => {
+		cleanAheadBranch();
+		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false } });
+		expect(trigger().textContent).toContain('PR #42');
+		expect(trigger().textContent).toContain('conflicts');
+		expect(trigger().title).toContain('merge conflicts');
+	});
+
+	it('shows the open PR when there is nothing else to do', () => {
+		setSnapshot({
+			status: { is_git_repo: true, current_branch: 'feature/x', default_branch: 'main', ahead: 0, unpushed: 0, differs_from_base: false },
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			openPr: { number: 42, title: 'x', url: 'http://x' }
+		});
+		renderHeader();
+		expect(trigger().textContent).toContain('PR #42');
+		expect(trigger().textContent).toContain('open');
+	});
+
+	it('says "Up to date" on a clean default branch', () => {
+		setSnapshot({
+			status: { current_branch: 'main', default_branch: 'main', ahead: 0, differs_from_base: false, is_git_repo: true },
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			branches: [{ name: 'main', current: true, remote: false, upstream: 'origin/main', ahead: 0, behind: 0 }]
+		});
+		renderHeader();
+		expect(trigger().textContent).toContain('Up to date');
+		expect(trigger().title).toBe('Up to date with main');
+	});
+
+	it('puts approvals waiting above every git state', () => {
+		cleanAheadBranch();
+		chatAccessSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 0, error: false, open: vi.fn() });
+		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false } });
+		expect(trigger().textContent).toContain('2 to approve');
+		expect(trigger().textContent).not.toContain('conflicts');
+	});
+});
+
+// ── Row visibility matrix inside the panel ──────────────────────────────────
+
+describe('GitHeaderActions panel rows', () => {
 	it.each(['branch', 'mode'])('does not offer Init Repo for a removed worktree (%s)', (source) => {
 		setSnapshot({ status: { is_git_repo: false } });
 		if (source === 'mode') mocks.gitMode.set('worktree');
 		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
 		expect(screen.queryByText('Init Repo')).toBeNull();
-		expect(screen.queryByText('Ship It')).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Git actions:/ })).toBeNull();
 		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
 	});
 
@@ -239,6 +326,12 @@ describe('GitHeaderActions button visibility', () => {
 		setSnapshot({ status: { is_git_repo: false } });
 		renderHeader({ isGitRepo: false });
 		expect(screen.getByText('Init Repo')).toBeTruthy();
+	});
+
+	it('offers a retry when git is unavailable', async () => {
+		renderHeader({ error: 'boom' });
+		await fireEvent.click(screen.getByText('Git unavailable · Retry'));
+		expect(mocks.retryLoad).toHaveBeenCalledOnce();
 	});
 
 	it('shows only the merge step for an up-to-date open PR, even with no branch diff', async () => {
@@ -250,27 +343,30 @@ describe('GitHeaderActions button visibility', () => {
 		});
 		gitActionPreferences.setCleanupAfterMerge(false);
 		const { handlers } = renderHeader();
-		const button = screen.getByText('Ship It').closest('button')!;
+		await openPanel();
+		const button = row('Ship It');
 		expect(button.title).toBe('Merge PR #42');
-		expect(screen.queryByText('Finish')).toBeNull();
-		expect(screen.queryByText('Commit')).toBeNull();
-		expect(screen.queryByText('Create PR')).toBeNull();
+		expect(row('Commit').disabled).toBe(true);
+		expect(queryRow('Create PR')).toBeNull();
 		await fireEvent.click(button);
 		expect(handlers.onClickShipIt).toHaveBeenCalledOnce();
-		await fireEvent.click(screen.getByRole('button', { name: 'Ship It options' }));
-		expect(screen.getAllByRole('listitem').map(e => e.textContent)).toEqual(['Merge PR #42']);
+		// Firing an action closes the panel.
+		expect(queryPanel()).toBeNull();
+		await openPanel();
+		await fireEvent.click(row('Ship It options'));
+		expect(within(popover('shipit')).getAllByRole('listitem').map((e) => e.textContent)).toEqual(['Merge PR #42']);
 	});
 
 	it('prevents the Ship It popover from bypassing merge conflicts', async () => {
 		cleanAheadBranch();
 		const { handlers } = renderHeader({ openPR: { number: 42, title: 'x', url: 'u', mergeable: false } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Ship It options' }));
-		const submit = screen.getByRole('dialog').querySelector('button.opt-submit') as HTMLButtonElement;
+		await openPanel();
+		await fireEvent.click(row('Ship It options'));
+		const submit = popover('shipit').querySelector('button.opt-submit') as HTMLButtonElement;
 		expect(submit.disabled).toBe(true);
 		await fireEvent.click(submit);
 		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
 	});
-
 
 	it('hides merged work and restores actions as the same branch gets new work', async () => {
 		const sha = 'a'.repeat(40);
@@ -282,122 +378,136 @@ describe('GitHeaderActions button visibility', () => {
 		};
 		setSnapshot(snapshot);
 		renderHeader();
-		expect(screen.queryByText('Create PR')).toBeNull();
-		expect(screen.queryByText('Ship It')).toBeNull();
+		await openPanel();
+		expect(row('Create PR').disabled).toBe(true);
+		expect(queryRow('Ship It')).toBeNull();
 
 		setSnapshot({ ...snapshot, diffStats: { additions: 1, deletions: 0, files_changed: 1 } });
 		await tick();
-		expect(screen.getByText('Commit')).toBeTruthy();
-		expect(screen.getByText('Ship It')).toBeTruthy();
+		expect(row('Commit').disabled).toBe(false);
+		expect(row('Ship It')).toBeTruthy();
 
 		setSnapshot({ ...snapshot, status: { ...snapshot.status, head_commit: 'b'.repeat(12) } });
 		await tick();
-		expect(screen.getByText('Create PR')).toBeTruthy();
-		expect(screen.getByText('Ship It')).toBeTruthy();
+		expect(row('Create PR').disabled).toBe(false);
+		expect(row('Ship It')).toBeTruthy();
 	});
 
-
-	// Note: main buttons carry a count badge (e.g. "Push 2"), so their accessible
-	// name isn't a clean label — query the label text; query chevrons by aria-label.
-	it('shows Commit (with chevron) and Ship It for a dirty feature branch', () => {
+	it('enables Commit (with chevron) and Ship It for a dirty feature branch', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
-		expect(screen.getByText('Commit')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Commit options' })).toBeTruthy();
-		expect(screen.getByText('Ship It')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Ship It options' })).toBeTruthy();
+		await openPanel();
+		expect(row('Commit').disabled).toBe(false);
+		expect(row('Commit options')).toBeTruthy();
+		expect(row('Ship It').disabled).toBe(false);
+		expect(row('Ship It options')).toBeTruthy();
+		expect(row('Push').disabled).toBe(true);
+	});
+
+	it('lists the changed files and opens the review from them', async () => {
+		dirtyFeatureBranch();
+		const { handlers } = renderHeader();
+		await openPanel();
+		await fireEvent.click(within(panel()).getByTitle('a.ts'));
+		expect(handlers.onOpenDiffReview).toHaveBeenCalledOnce();
+		expect(queryPanel()).toBeNull();
 	});
 
 	describe('githubAvailable gate (G10c)', () => {
 		// The header itself no longer requires GitHub auth — local git has to keep
 		// working when `gh` is down. That means the gh-BACKED actions now need
-		// their own gate, or they would render as buttons guaranteed to fail.
-		it('hides Create PR and Ship It when GitHub is unavailable', () => {
+		// their own gate, or they would render as rows guaranteed to fail.
+		it('disables Create PR and hides Ship It when GitHub is unavailable', async () => {
 			cleanAheadBranch();
 			renderHeader({ githubAvailable: false });
-
-			expect(screen.queryByText('Create PR')).toBeNull();
-			expect(screen.queryByText('Ship It')).toBeNull();
+			await openPanel();
+			expect(row('Create PR').disabled).toBe(true);
+			expect(queryRow('Ship It')).toBeNull();
+			expect(within(panel()).getByText('Needs GitHub')).toBeTruthy();
 		});
 
-		it('still offers the LOCAL actions when GitHub is unavailable', () => {
+		it('still offers the LOCAL actions when GitHub is unavailable', async () => {
 			cleanAheadBranch();
 			renderHeader({ githubAvailable: false });
-
+			await openPanel();
 			// Push is plain git — losing gh must not take it away.
-			expect(screen.getByText('Push')).toBeTruthy();
+			expect(row('Push').disabled).toBe(false);
 		});
 
-		it('hides Ship It (PR merge) when GitHub is unavailable', () => {
+		it('hides Ship It (PR merge) when GitHub is unavailable', async () => {
 			cleanAheadBranch();
 			renderHeader({
 				githubAvailable: false,
 				openPR: { number: 12, title: 'A PR', url: 'u', mergeable: true }
 			});
-
-			expect(screen.queryByText('Ship It')).toBeNull();
+			await openPanel();
+			expect(queryRow('Ship It')).toBeNull();
 		});
 
-		it('defaults to available so existing call sites are unchanged', () => {
+		it('defaults to available so existing call sites are unchanged', async () => {
 			cleanAheadBranch();
 			renderHeader();
-
-			expect(screen.getByText('Create PR')).toBeTruthy();
+			await openPanel();
+			expect(row('Create PR').disabled).toBe(false);
 		});
 	});
 
-	it('shows Push and Create PR for a clean branch ahead of upstream', () => {
+	it('enables Push and Create PR for a clean branch ahead of upstream', async () => {
 		cleanAheadBranch();
 		renderHeader();
-		expect(screen.getByText('Push')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Push options' })).toBeTruthy();
-		expect(screen.getByText('Create PR')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Pull request options' })).toBeTruthy();
+		await openPanel();
+		expect(row('Push').disabled).toBe(false);
+		expect(row('Push options')).toBeTruthy();
+		expect(row('Create PR').disabled).toBe(false);
+		expect(row('Pull request options')).toBeTruthy();
 	});
 
-	it('shows Ship It (merge) when an open PR is passed', () => {
+	it('enables Ship It (merge) when an open PR is passed', async () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x' } });
-		expect(screen.getByText('Ship It')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Ship It options' })).toBeTruthy();
+		await openPanel();
+		expect(row('Ship It').disabled).toBe(false);
+		expect(row('Ship It options')).toBeTruthy();
 	});
 
-	it('shows Pull when the branch is behind upstream', () => {
+	it('enables Pull when the branch is behind upstream', async () => {
 		behindBranch();
 		renderHeader();
-		expect(screen.getByText('Pull')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Pull options' })).toBeTruthy();
+		await openPanel();
+		expect(row('Pull').disabled).toBe(false);
+		expect(row('Pull options')).toBeTruthy();
 	});
 
-	it('disables Ship It when the open PR is explicitly not mergeable', () => {
+	it('disables Ship It when the open PR is explicitly not mergeable', async () => {
 		cleanAheadBranch();
 		renderHeader({
 			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false }
 		});
-		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
+		await openPanel();
+		const shipBtn = row('Ship It');
 		expect(shipBtn.disabled).toBe(true);
-		// Warning icon: title explains the mergeability block.
 		expect(shipBtn.title).toContain('merge conflicts');
+		expect(shipBtn.textContent).toContain('Fix conflicts first');
 	});
 
-	it('keeps Ship It enabled when mergeability is unknown (null)', () => {
+	it('keeps Ship It enabled when mergeability is unknown (null)', async () => {
 		cleanAheadBranch();
 		renderHeader({
 			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: null }
 		});
-		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
-		expect(shipBtn.disabled).toBe(false);
+		await openPanel();
+		expect(row('Ship It').disabled).toBe(false);
 	});
 
-	it('does not render the informational PR chip even with an open PR', () => {
+	it('links the open PR from the panel', async () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 42, title: 'My PR', url: 'http://x/pr/42' } });
-		expect(screen.queryByRole('link', { name: /PR #/ })).toBeNull();
-		// Ship It stays as the PR entry point.
-		expect(screen.getByText('Ship It')).toBeTruthy();
+		await openPanel();
+		const link = within(panel()).getByRole('link', { name: 'Open PR #42 on GitHub' }) as HTMLAnchorElement;
+		expect(link.href).toBe('http://x/pr/42');
 	});
 
-	it('shows Create PR when differsFromBase even with zero commits ahead', () => {
+	it('enables Create PR when differsFromBase even with zero commits ahead', async () => {
 		// The matrix gap the helper now closes: content differs from base but
 		// commit count ahead (vs default branch) is 0.
 		setSnapshot({
@@ -415,14 +525,15 @@ describe('GitHeaderActions button visibility', () => {
 			]
 		});
 		renderHeader();
-		expect(screen.getByText('Create PR')).toBeTruthy();
+		await openPanel();
+		expect(row('Create PR').disabled).toBe(false);
 	});
 });
 
 // ── Default branch comes from /git/status (finding G3) ──────────────────────
 
 describe('GitHeaderActions default branch', () => {
-	it('uses status.default_branch, not a hardcoded "main"', () => {
+	it('uses status.default_branch, not a hardcoded "main"', async () => {
 		// A `master`-default repo sitting ON its default branch: nothing to ship
 		// and nothing to PR. The old code fell back to 'main' (the github store
 		// that would have supplied the real value was never populated), so
@@ -441,11 +552,13 @@ describe('GitHeaderActions default branch', () => {
 			]
 		});
 		renderHeader();
-		expect(screen.queryByText('Create PR')).toBeNull();
-		expect(screen.queryByText('Ship It')).toBeNull();
+		expect(trigger().title).toBe('Up to date with master');
+		await openPanel();
+		expect(row('Create PR').disabled).toBe(true);
+		expect(queryRow('Ship It')).toBeNull();
 	});
 
-	it('still offers Create PR on a non-default branch of a master-default repo', () => {
+	it('still offers Create PR on a non-default branch of a master-default repo', async () => {
 		setSnapshot({
 			status: {
 				current_branch: 'feature/x',
@@ -460,7 +573,8 @@ describe('GitHeaderActions default branch', () => {
 			]
 		});
 		renderHeader();
-		expect(screen.getByText('Create PR')).toBeTruthy();
+		await openPanel();
+		expect(row('Create PR').disabled).toBe(false);
 	});
 });
 
@@ -486,7 +600,8 @@ describe('GitHeaderActions snapshot coherence', () => {
 			openPr: { number: 12, title: 'x', url: 'http://x', mergeable: null }
 		});
 		await tick();
-		expect(screen.getByText('Ship It')).toBeTruthy();
+		await openPanel();
+		expect(row('Ship It')).toBeTruthy();
 
 		// Session switch: the store keeps the last-known values as a placeholder
 		// (hydrated: false) while it revalidates. Half of that placeholder — no
@@ -511,15 +626,18 @@ describe('GitHeaderActions snapshot coherence', () => {
 
 		// Still Ship It — held from the last coherent snapshot — and disabled so it
 		// can't be fired against unconfirmed state.
-		expect(screen.getByText('Ship It')).toBeTruthy();
-		expect(screen.queryByText('Create PR')).toBeNull();
-		expect((screen.getByText('Ship It').closest('button') as HTMLButtonElement).disabled).toBe(true);
+		expect(row('Ship It').disabled).toBe(true);
+		expect(queryRow('Create PR')).toBeNull();
+		expect(within(panel()).getByRole('link', { name: 'Open PR #12 on GitHub' })).toBeTruthy();
+		// Commits to push outrank the open PR on the header label.
+		expect(trigger().textContent).toContain('2 to push');
 	});
 
 	it('never renders Ship It against a carried-over placeholder', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
-		expect(screen.getByText('Ship It')).toBeTruthy();
+		await openPanel();
+		expect(row('Ship It')).toBeTruthy();
 
 		// Switch to an unknown checkout: values carry over, hydration does not.
 		setSnapshot({
@@ -531,7 +649,7 @@ describe('GitHeaderActions snapshot coherence', () => {
 				is_git_repo: true
 			},
 			diffStats: { additions: 5, deletions: 2, files_changed: 1 },
-			changedFiles: [{ file: 'a.ts' }],
+			changedFiles: [{ file: 'a.ts', status: 'M', category: 'modified', additions: 5, deletions: 2, is_binary: false }],
 			branches: [
 				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 }
 			],
@@ -541,8 +659,7 @@ describe('GitHeaderActions snapshot coherence', () => {
 		await tick();
 		// The HELD decision still shows Ship It (it was coherent a moment ago),
 		// but the button is disabled until the new context confirms.
-		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
-		expect(shipBtn.disabled).toBe(true);
+		expect(row('Ship It').disabled).toBe(true);
 	});
 });
 
@@ -571,83 +688,152 @@ describe('GitHeaderActions failed PR lookup', () => {
 		});
 		await tick();
 
-		// NEVER "Create PR" because a lookup blipped.
-		expect(screen.queryByText('Create PR')).toBeNull();
-		expect(screen.getByText('Ship It')).toBeTruthy();
-		// …and the user is told the value is unconfirmed.
+		// …and the user is told the value is unconfirmed, on the header button.
 		expect(screen.getByLabelText('Last known PR state — GitHub unreachable')).toBeTruthy();
-		expect(
-			(screen.getByText('Ship It').closest('button') as HTMLButtonElement).title
-		).toContain('last known state');
+		expect(trigger().title).toContain('last known state');
+		await openPanel();
+		// NEVER "Create PR" because a lookup blipped.
+		expect(queryRow('Create PR')).toBeNull();
+		expect(within(panel()).getByRole('link', { name: 'Open PR #12 on GitHub' })).toBeTruthy();
+		expect(row('Ship It')).toBeTruthy();
+		expect(row('Ship It').title).toContain('last known state');
 	});
 
 	it('shows no last-known marker once the lookup succeeds again', async () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 12, title: 'x', url: 'http://x', mergeable: null } });
 		await tick();
-		expect(screen.getByText('Ship It')).toBeTruthy();
 		expect(screen.queryByLabelText('Last known PR state — GitHub unreachable')).toBeNull();
 	});
 });
 
 // ── Open / close coordination ───────────────────────────────────────────────
 
-describe('GitHeaderActions option popover open/close', () => {
-	it('opens the commit popover on chevron click and closes on Escape', async () => {
+describe('GitHeaderActions panel and popover open/close', () => {
+	it('opens the panel from the header button and closes it on Escape', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		expect(screen.getByRole('dialog')).toBeTruthy();
+		expect(queryPanel()).toBeNull();
+		await openPanel();
+		expect(trigger().getAttribute('aria-expanded')).toBe('true');
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(queryPanel()).toBeNull();
 	});
 
-	it('closes the popover on an outside click', async () => {
+	it('closes the panel on an outside click, and the button toggles it', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		expect(screen.getByRole('dialog')).toBeTruthy();
+		await openPanel();
+		await fireEvent.click(document.body);
+		expect(queryPanel()).toBeNull();
+		await openPanel();
+		await fireEvent.click(trigger());
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('opens the commit popover on chevron click; Escape returns to the panel', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		expect(popover('commit')).toBeTruthy();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(queryPopover('commit')).toBeNull();
+		expect(panel()).toBeTruthy();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('closes the popover AND the panel on a click outside both', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		expect(popover('commit')).toBeTruthy();
 		await nextFrame();
 		await fireEvent.click(document.body);
-		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(queryPopover('commit')).toBeNull();
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('closes only the popover on a click inside the panel', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await nextFrame();
+		await fireEvent.click(within(panel()).getByText('1 file changed'));
+		expect(queryPopover('commit')).toBeNull();
+		expect(panel()).toBeTruthy();
 	});
 
 	it('opening the Ship It popover closes the Commit popover (single-open)', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		expect(within(screen.getByRole('dialog')).getByText('Commit options')).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: 'Ship It options' }));
-		// Still exactly one dialog, and it's now the Ship It one (its step preview
-		// row "Push to remote" is unique to the Ship It popover).
-		const dialog = screen.getByRole('dialog');
-		expect(within(dialog).getByText('Push to remote')).toBeTruthy();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		expect(within(popover('commit')).getByText('Commit options')).toBeTruthy();
+		await fireEvent.click(row('Ship It options'));
+		expect(queryPopover('commit')).toBeNull();
+		// The Ship It popover's step preview row "Push to remote" is unique to it.
+		expect(within(popover('shipit')).getByText('Push to remote')).toBeTruthy();
 	});
 });
 
 // ── Handler wiring ──────────────────────────────────────────────────────────
 
 describe('GitHeaderActions handler wiring', () => {
-	it('main Commit click fires the handler with no option bag (defaults)', async () => {
+	it('a Commit row click fires the handler with no option bag (defaults) and closes the panel', async () => {
 		dirtyFeatureBranch();
 		const { handlers } = renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+		await openPanel();
+		await fireEvent.click(row('Commit'));
 		expect(handlers.onClickCommit).toHaveBeenCalledTimes(1);
 		expect(handlers.onClickCommit).toHaveBeenCalledWith();
+		expect(queryPanel()).toBeNull();
 	});
 
 	it('popover Commit primary fires the handler with an explicit bag', async () => {
 		dirtyFeatureBranch();
 		const { handlers } = renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		const dialog = screen.getByRole('dialog');
-		await fireEvent.click(within(dialog).getByRole('button', { name: 'Commit' }));
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: 'Commit' }));
 		expect(handlers.onClickCommit).toHaveBeenCalledTimes(1);
 		const arg = handlers.onClickCommit.mock.calls[0][0];
 		expect(arg).toMatchObject({
 			includeUnstaged: expect.any(Boolean),
 			nextStep: expect.any(String)
 		});
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('the private-access row opens the access dialog', async () => {
+		dirtyFeatureBranch();
+		const open = vi.fn();
+		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 1, saved: 0, error: false, open });
+		renderHeader();
+		await openPanel();
+		const accessRow = row('Private access');
+		expect(accessRow.textContent).toContain('1 active grant');
+		await fireEvent.click(accessRow);
+		expect(open).toHaveBeenCalledOnce();
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('disables the private-access row when the chat has none', async () => {
+		dirtyFeatureBranch();
+		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 0, saved: 0, error: false, open: vi.fn() });
+		renderHeader();
+		await openPanel();
+		expect(row('Private access').disabled).toBe(true);
+	});
+
+	it('omits the private-access row when no chat is mounted', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		expect(queryRow('Private access')).toBeNull();
 	});
 });
 
@@ -657,38 +843,39 @@ describe('GitHeaderActions option persistence', () => {
 	it('toggling include-unstaged persists through gitActionPreferences', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
+		await openPanel();
 		expect(gitActionPreferences.current.includeUnstaged).toBe(true);
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		const dialog = screen.getByRole('dialog');
-		await fireEvent.click(within(dialog).getByText('Include unstaged changes'));
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByText('Include unstaged changes'));
 		expect(gitActionPreferences.current.includeUnstaged).toBe(false);
 	});
 
 	it('changing the next-step radio persists', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
+		await openPanel();
 		expect(gitActionPreferences.current.nextStep).toBe('push');
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		const dialog = screen.getByRole('dialog');
-		await fireEvent.click(within(dialog).getByRole('button', { name: /Commit only/ }));
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: /Commit only/ }));
 		expect(gitActionPreferences.current.nextStep).toBe('commit');
 	});
 
 	it('changing the pull strategy persists', async () => {
 		behindBranch();
 		renderHeader();
+		await openPanel();
 		expect(gitActionPreferences.current.pullStrategy).toBe('rebase');
-		await fireEvent.click(screen.getByRole('button', { name: 'Pull options' }));
-		const dialog = screen.getByRole('dialog');
-		await fireEvent.click(within(dialog).getByRole('button', { name: /Merge/ }));
+		await fireEvent.click(row('Pull options'));
+		await fireEvent.click(within(popover('pull')).getByRole('button', { name: /Merge/ }));
 		expect(gitActionPreferences.current.pullStrategy).toBe('merge');
 	});
 
 	it('force push is per-invocation only and never persisted', async () => {
 		cleanAheadBranch();
 		const { handlers } = renderHeader();
-		await fireEvent.click(screen.getByRole('button', { name: 'Push options' }));
-		const dialog = screen.getByRole('dialog');
+		await openPanel();
+		await fireEvent.click(row('Push options'));
+		const dialog = popover('push');
 		await fireEvent.click(within(dialog).getByText('Force push'));
 		await fireEvent.click(within(dialog).getByRole('button', { name: 'Force push' }));
 		expect(handlers.onClickPush).toHaveBeenCalledWith({ force: true });
@@ -700,20 +887,19 @@ describe('GitHeaderActions option persistence', () => {
 // ── Busy gating ─────────────────────────────────────────────────────────────
 
 describe('GitHeaderActions busy gating', () => {
-	it('disables the main button and chevron while streaming', () => {
+	it('disables the row and its chevron while streaming', async () => {
 		dirtyFeatureBranch();
 		renderHeader({ isStreaming: true });
-		expect((screen.getByRole('button', { name: 'Commit' }) as HTMLButtonElement).disabled).toBe(true);
-		expect((screen.getByRole('button', { name: 'Commit options' }) as HTMLButtonElement).disabled).toBe(true);
+		await openPanel();
+		expect(row('Commit').disabled).toBe(true);
+		expect(row('Commit options').disabled).toBe(true);
 	});
 
-	it('the chevron does not open a popover while streaming', async () => {
+	it('the chevron does not open a popover while an operation runs', async () => {
 		dirtyFeatureBranch();
 		renderHeader({ operationInProgress: true });
-		await fireEvent.click(screen.getByRole('button', { name: 'Commit options' }));
-		expect(screen.queryByRole('dialog')).toBeNull();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		expect(queryPopover('commit')).toBeNull();
 	});
 });
-
-// Keep noop referenced (documents the no-op handler default shape).
-void noop;
