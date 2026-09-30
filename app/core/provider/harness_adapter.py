@@ -1101,9 +1101,8 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
-        opts.extra["automatic_workflows"] = bool(
-            getattr(sdk_options, "aih_automatic_workflows", False)
-        )
+        if getattr(sdk_options, "aih_automatic_workflows", False):
+            opts.extra["automatic_workflows"] = True
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
@@ -3614,7 +3613,8 @@ def _workflow_prompt_blocks(
     Query options only stamps provenance; native compilation supplies the wired
     surface, while delegated compilation supplies its CLI permission surface.
     """
-    if not options.extra.get("automatic_workflows", False):
+    extra = getattr(options, "extra", None) or {}
+    if not extra.get("automatic_workflows", False):
         return []
     from app.core.agent_provider_models import parent_subagent_guidance
     from app.core.task_dispatch import subagent_system_prompt
@@ -3632,7 +3632,7 @@ def _workflow_prompt_blocks(
         )),
     )
     worker = subagent_system_prompt(
-        options.extra.get("app_session_id"), task_available=available("Task")
+        extra.get("app_session_id"), task_available=available("Task")
     )
     return [text for text in (parent, worker) if text]
 

@@ -73,3 +73,10 @@ def test_delegated_preset_keeps_automatic_guidance_and_profile_text(tmp_path):
     text = ha._delegated_append_text("USER", options, registry)
     assert "USER" in text and "belong in Monitor" in text
     assert "# Subagent delegation" not in text
+
+
+@pytest.mark.parametrize("extra", [None, {}, {"automatic_workflows": False}])
+def test_legacy_empty_extras_do_not_add_workflows(extra):
+    options = SessionOptions(model="fake")
+    options.extra = extra
+    assert ha._workflow_prompt_blocks(options, frozenset({"Read"})) == []
