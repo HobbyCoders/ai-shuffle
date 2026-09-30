@@ -4009,6 +4009,22 @@ def _delegated_surface(options: SessionOptions) -> Optional[list]:
     )
 
 
+def _delegated_blocklist(options: SessionOptions) -> list:
+    """The agent's blocklist in the delegated leg's spellings.
+
+    ``tool_access.expand_delegated_blocklist``: blocking Bash also blocks
+    PowerShell, Edit also NotebookEdit, AskUser also AskUserQuestion, and a
+    bare app builtin such as Remember also its bridged
+    ``mcp__builtins__Remember``.
+    """
+    from app.core.tool_access import expand_delegated_blocklist
+
+    return expand_delegated_blocklist(
+        options.disallowed_tools or (),
+        bridged_builtins=_bridged_builtin_names(options),
+    )
+
+
 def _delegated_tool_predicate(options: SessionOptions):
     """``(name) -> bool`` over ``_delegated_surface`` and the blocklist, or None.
 
@@ -4017,7 +4033,7 @@ def _delegated_tool_predicate(options: SessionOptions):
     from app.core.tool_access import tool_permitted
 
     surface = _delegated_surface(options)
-    blocked = list(options.disallowed_tools or ())
+    blocked = _delegated_blocklist(options)
     if not surface and not blocked:
         return None
     return lambda name: tool_permitted(name, surface, blocked)
@@ -4058,11 +4074,12 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     Four sources, unioned:
 
     1. ``DELEGATED_BANNED_TOOLS``, always.
-    2. ``options.disallowed_tools``: the agent's own blocklist. In ``none``
-       mode this is ``["*"]``; the CLI glob-matches deny rules, so one entry
-       denies every tool (verified against the CLI once bundled with
-       claude-agent-sdk 0.2.126; re-check on CLI upgrades, see
-       ``app.core.cli_tool_surface``).
+    2. ``options.disallowed_tools``: the agent's own blocklist, in the leg's
+       spellings (``_delegated_blocklist``: blocking Bash also blocks
+       PowerShell). In ``none`` mode this is ``["*"]``; the CLI glob-matches
+       deny rules, so one entry denies every tool (verified against the CLI
+       once bundled with claude-agent-sdk 0.2.126; re-check on CLI upgrades,
+       see ``app.core.cli_tool_surface``).
     3. The chat lane: the CLI's file, shell and delegation tools, so only the
        bundled attachment reader can read.
     4. For ``allow`` mode only: the CLI's own surface MINUS the allowed set
@@ -4070,7 +4087,9 @@ def _delegated_disallowed(options: SessionOptions) -> list:
        bundled ``mcp__builtins__`` copies of ticked tools survive). The CLI
        shows every tool it is not told to hide, so without this subtraction
        "allow only selected" would leave every other tool on the model's
-       surface, to be refused only when called.
+       surface, to be refused only when called. Only CLI built-ins and this
+       session's external MCP tools are subtracted; the bridge already
+       filters the bundle's tools.
 
     Source 4 needs the CLI's surface, which the CLI announces only in its
     ``init`` frame (republished as ``DelegatedSurface``; ``_translate`` feeds
@@ -4086,7 +4105,7 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     from app.core.cli_tool_surface import cached_cli_tools
     from app.core.tool_access import tool_permitted
 
-    banned = set(DELEGATED_BANNED_TOOLS) | set(options.disallowed_tools or ())
+    banned = set(DELEGATED_BANNED_TOOLS) | set(_delegated_blocklist(options))
     if _session_mode(options) == "chat":
         # Withholding auto-approval is insufficient: the CLI also auto-approves
         # cwd reads. Only our bundled, handle-confined attachment reader is safe.
@@ -4095,17 +4114,24 @@ def _delegated_disallowed(options: SessionOptions) -> list:
 
     surface = _delegated_surface(options)
     if surface:
-        def permitted_cli_name(name: str) -> bool:
-            if tool_permitted(name, surface, None):
-                return True
-            # The CLI cache includes qualified names for our bundle. Compare
-            # the registered spelling too, or the second session would hide
-            # memory tools that the first session could use.
-            return name.startswith(_BUNDLED_CLI_PREFIX) and tool_permitted(
-                name[len(_BUNDLED_CLI_PREFIX):], surface, None
-            )
+        # The cache is a union over every session of this process. Only names
+        # this CLI can show are walled: its built-ins and the tools of this
+        # session's external MCP servers. The bundle's own tools are left out
+        # because the bridge serves only the surface (``_delegated_allowed``),
+        # and other sessions' MCP servers are not connected here; walling
+        # either would only lengthen an argv that also carries the append
+        # (--strict-mcp-config keeps the CLI to the bundle and these servers).
+        external = _external_mcp_servers(options.mcp_servers)
 
-        banned.update(name for name in cached_cli_tools() if not permitted_cli_name(name))
+        def cli_can_show(name: str) -> bool:
+            if not name.startswith("mcp__"):
+                return True
+            return name[len("mcp__"):].partition("__")[0] in external
+
+        banned.update(
+            name for name in cached_cli_tools()
+            if cli_can_show(name) and not tool_permitted(name, surface, None)
+        )
     return sorted(banned)
 
 
@@ -4223,7 +4249,7 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
 
 
 def _web_grants() -> tuple:
-    """The CLI web tools granted on the code lane: those fluid rates ``safe``.
+    """The CLI web tools granted on either lane: those fluid rates ``safe``.
 
     Mirrors the native leg, where fluid's PermissionEngine runs a ``safe``
     tool unprompted: WebSearch is ``safe``; WebFetch is ``write`` (an outbound
@@ -4251,8 +4277,8 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     * code lane: the CLI's Glob and Grep, the bundled fallback copies when
       ``_build_registry`` registers them, and the web tools fluid rates
       ``safe`` (``_web_grants``);
-    * chat lane: WebSearch, WebFetch and the bundled attachment reader,
-      whose confinement is enforced inside the tool.
+    * chat lane: the same web tools (``_web_grants``) and the bundled
+      attachment reader, whose confinement is enforced inside the tool.
 
     In-proc MCP tools: only tools the native leg classifies ``safe`` are granted: the risk comes
     from ``fluid_tool_bridge.SERVER_RISK_MAPS`` / ``SERVER_DEFAULT_RISK``, the
@@ -4281,9 +4307,10 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.core.tool_access import tool_permitted
 
+    # DELEGATED_SHADOWED_BUILTINS (the app's ToolSearch) are rated here like
+    # any other builtin. _build_registry never registers them on this leg, so
+    # their grant names a tool the CLI is never offered and approves nothing.
     def _safe(server: str, tool: str) -> bool:
-        if server == "builtins" and tool in DELEGATED_SHADOWED_BUILTINS:
-            return False  # not bridged on this leg (see _build_registry)
         risk_map = SERVER_RISK_MAPS.get(server) or {}
         return risk_map.get(tool, SERVER_DEFAULT_RISK.get(server, "write")) == "safe"
 
@@ -4296,7 +4323,9 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     if _session_mode(options) == "chat":
         from app.core.attachment_read import DELEGATED_READ
 
-        cli_grants.extend(name for name in ("WebSearch", "WebFetch") if permitted(name))
+        # WebFetch keeps prompting here too: chat is where uploaded documents
+        # are read, and an injected one could send data out through a fetch.
+        cli_grants.extend(name for name in _web_grants() if permitted(name))
         if permitted(DELEGATED_READ):
             cli_grants.append(_BUNDLED_CLI_PREFIX + DELEGATED_READ)
     else:
@@ -5331,7 +5360,7 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
 
     Tool policy is the one exception: ``DELEGATED_TOOL_USE_BLOCK`` restates
     Claude Code's preference for its dedicated file tools on code sessions
-    that have Bash and Read or Edit, because Opus kept doing file work through
+    that have Bash, Read and Edit, because Opus kept doing file work through
     Bash with the CLI's bash-first steer switched off (session 42595afe).
 
     The text depends only on connect-time inputs, so it is identical on
@@ -5347,9 +5376,11 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     memory = all(offered(t) for t in ("Remember", "Recall"))
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
+    # Both Read and Edit: the block forbids file work through Bash, so a
+    # session without either would be left with no permitted way to do it.
     if _session_mode(options) != "chat" and (
         permitted("Bash") or permitted("PowerShell")
-    ) and (permitted("Read") or permitted("Edit")):
+    ) and permitted("Read") and permitted("Edit"):
         blocks.append(DELEGATED_TOOL_USE_BLOCK)
     notes: List[str] = []
     # The bundled Glob/Grep are only registered where the CLI may lack its own

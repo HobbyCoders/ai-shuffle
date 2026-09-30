@@ -90,6 +90,38 @@ DELEGATED_CLI_ALIASES: Dict[str, tuple] = {
 DELEGATED_DEFERRED_CLI_TOOLS = frozenset({"WebSearch", "WebFetch", "LSP", "NotebookEdit"})
 
 
+def expand_delegated_blocklist(
+    names: Iterable[Any],
+    *,
+    bridged_builtins: Iterable[str] = (),
+) -> List[str]:
+    """``names`` plus the delegated leg's spellings of the same features.
+
+    A blocklist needs the same spellings as a surface, or blocking Bash would
+    leave PowerShell callable and blocking Remember would leave the bridged
+    ``mcp__builtins__Remember`` served. ``ToolSearch`` is never added:
+    blocking one deferred tool must not take the loader away from the rest.
+    Order is kept and nothing is duplicated. Patterns pass through unchanged.
+    """
+    bridged = set(bridged_builtins)
+    out: List[str] = []
+
+    def add(name: str) -> None:
+        if name not in out:
+            out.append(name)
+
+    for raw in names or ():
+        name = str(raw).strip()
+        if not name:
+            continue
+        add(name)
+        if name in bridged:
+            add(f"mcp__builtins__{name}")
+        for alias in DELEGATED_CLI_ALIASES.get(name, ()):
+            add(alias)
+    return out
+
+
 def expand_delegated_surface(
     names: Iterable[Any],
     *,
@@ -108,23 +140,13 @@ def expand_delegated_surface(
 
     Order is kept and nothing is duplicated. Patterns pass through unchanged.
     """
-    bridged = set(bridged_builtins)
     external = set(external_servers)
-    out: List[str] = []
+    out = expand_delegated_blocklist(names, bridged_builtins=bridged_builtins)
 
     def add(name: str) -> None:
         if name not in out:
             out.append(name)
 
-    for raw in names or ():
-        name = str(raw).strip()
-        if not name:
-            continue
-        add(name)
-        if name in bridged:
-            add(f"mcp__builtins__{name}")
-        for alias in DELEGATED_CLI_ALIASES.get(name, ()):
-            add(alias)
     needs_search = any(name in DELEGATED_DEFERRED_CLI_TOOLS for name in out) or any(
         name.startswith("mcp__") and name[len("mcp__"):].partition("__")[0] in external
         for name in out

@@ -147,7 +147,8 @@ async def test_guidance_describes_the_picked_app_tools(tmp_path, builtins_server
     assert "Task" in app_tools and "Monitor" in app_tools
     assert "__Remember" in app_tools and "__Recall" in app_tools
     assert ha._MEMORY_BLOCK_CORE in blocks
-    assert ha.DELEGATED_TOOL_USE_BLOCK in blocks
+    # PICKED has no Edit: the block would forbid the only permitted way to edit.
+    assert ha.DELEGATED_TOOL_USE_BLOCK not in blocks
 
 
 def test_unrestricted_sessions_are_unchanged(tmp_path):
@@ -195,8 +196,9 @@ def test_chat_argv_grants_the_attachment_reader_as_the_cli_calls_it(tmp_path):
     options = _options(tmp_path, surface=list(CHAT_MODE_TOOL_SURFACE), lane="chat")
     granted = _flag(_loop(options)._build_argv(), "--allowed-tools")
     assert "mcp__fluid_bundled__mcp__attachments__Read" in granted
-    assert {"WebSearch", "WebFetch"} <= set(granted)
-    assert not {"Read", "Glob", "Grep", "Bash"} & set(granted)
+    assert "WebSearch" in granted
+    # Chat reads uploaded documents; an injected one must not fetch unprompted.
+    assert not {"Read", "Glob", "Grep", "Bash", "WebFetch"} & set(granted)
 
 
 # ─── Duplicate tools ────────────────────────────────────────────────────────
@@ -314,3 +316,57 @@ async def test_allow_mode_bash_call_is_asked_in_default_mode(tmp_path, monkeypat
     [decision] = [r for r in rows if r["kind"] == "decision"]
     assert decision["response"]["behavior"] == "allow"
     assert decision["response"].get("by") != "cli_rules"
+
+
+# ─── Blocklists use the leg's spellings too ─────────────────────────────────
+
+
+def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
+    options = _options(tmp_path)
+    options.disallowed_tools = ["Bash", "Edit", "Remember", "AskUser"]
+    denied = ha._delegated_disallowed(options)
+    assert {"PowerShell", "NotebookEdit", "AskUserQuestion", "mcp__builtins__Remember"} <= set(denied)
+    assert "ToolSearch" not in denied
+
+    policy = ha._delegated_tool_policy(options, None, denied)
+    for name in ("Bash", "PowerShell", "NotebookEdit", "AskUserQuestion"):
+        assert policy(name, {}) is not None, name
+    assert policy("Read", {}) is None
+
+    permit = ha._delegated_tool_predicate(options)
+    assert not permit("mcp__builtins__Remember")
+    assert permit("mcp__builtins__Recall")
+    # No permitted shell is left, so the Bash-vs-dedicated-tools block is moot.
+    assert ha.DELEGATED_TOOL_USE_BLOCK not in ha._delegated_guidance_blocks(options, None)
+
+    loop = _loop(options)
+    assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
+    assert loop._bridge_tool_permitted("mcp__builtins__Recall")
+
+
+def test_allow_mode_walls_only_names_this_cli_can_show(tmp_path):
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.record_cli_tools([
+        *ANNOUNCED,
+        "mcp__fluid_bundled__mcp__builtins__CronCreate",
+        "mcp__browser__navigate",
+        "mcp__someone_elses_server__query",
+    ])
+    browser = {"type": "stdio", "command": "browser-mcp"}
+    options = _options(tmp_path, {"browser": browser}, surface=["Read"])
+    denied = set(ha._delegated_disallowed(options))
+    assert {"Bash", "Write", "DesignSync"} <= denied
+    # This session's external server is connected by the CLI, so it is walled.
+    assert "mcp__browser__navigate" in denied
+    # The bridge filters the bundle; another session's server is not connected.
+    assert "mcp__fluid_bundled__mcp__builtins__CronCreate" not in denied
+    assert "mcp__someone_elses_server__query" not in denied
+
+
+def test_seed_walls_every_built_in_production_announced(tmp_path):
+    from app.core.cli_tool_surface import KNOWN_CLI_TOOLS
+
+    assert set(ANNOUNCED) <= set(KNOWN_CLI_TOOLS)
+    denied = set(ha._delegated_disallowed(_options(tmp_path, surface=["Read"])))
+    assert {"DesignSync", "ReportFindings"} <= denied

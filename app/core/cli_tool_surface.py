@@ -2,12 +2,13 @@
 
 Why this exists
 ---------------
-On the delegated leg the app hands the claude CLI ``--allowed-tools``, which the
-CLI reads as a PERMISSION grant, not a restriction: an unlisted tool is still on
-the model's surface and still callable (it just prompts). To make "Allow only
-selected" mean the same thing on both legs, the adapter must also pass
-``--disallowed-tools`` = every name in the CLI's OWN surface that the agent did
-not select. That requires knowing the CLI's surface at argv-build time.
+The claude CLI reads ``--allowed-tools`` as a PERMISSION grant, not a
+restriction, so the delegated leg puts only the tools that should run
+unprompted there (``harness_adapter._delegated_permission_grants``); every tool
+not walled stays on the model's surface. To make "Allow only selected" mean the
+same thing on both legs, the adapter passes ``--disallowed-tools`` = every name
+in the CLI's OWN surface that the agent did not select. That requires knowing
+the CLI's surface at argv-build time.
 
 Where the surface comes from
 ----------------------------
@@ -68,7 +69,7 @@ KNOWN_CLI_TOOLS: tuple = (
     "Bash", "PowerShell", "Read", "Edit", "Write", "NotebookEdit", "Glob",
     "Grep", "LSP", "WebSearch", "WebFetch", "Skill", "ToolSearch",
     "AskUserQuestion", "RemoteTrigger", "PushNotification", "SendMessage",
-    "ListAgents", "EnterWorktree", "ExitWorktree",
+    "ListAgents", "EnterWorktree", "ExitWorktree", "DesignSync", "ReportFindings",
 )
 
 _LOCK = threading.Lock()
@@ -94,12 +95,6 @@ def record_cli_tools(names: Optional[Iterable[str]]) -> None:
         logger.debug(
             "recorded claude CLI tool surface: %d tool(s) known", len(merged)
         )
-
-
-def observed_cli_tools() -> Optional[List[str]]:
-    """Every name some CLI init frame announced, or None when none arrived yet."""
-    with _LOCK:
-        return list(_TOOLS) if _TOOLS else None
 
 
 def cached_cli_tools() -> List[str]:

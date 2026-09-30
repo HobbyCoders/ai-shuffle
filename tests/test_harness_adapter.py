@@ -2010,6 +2010,11 @@ def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
     assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_file_tools, None)
     no_shell = SessionOptions(model="opus", tool_allowlist=["Read", "Edit"])
     assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_shell, None)
+    # Without Edit the block would forbid the only permitted way to edit.
+    read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(read_only, None)
+    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(shell_and_files, None)
     blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
     assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(blocked, None)
 
@@ -5676,13 +5681,13 @@ def test_cached_cli_surface_ignores_an_empty_frame():
     from app.core import cli_tool_surface
 
     cli_tool_surface.reset_cli_tools()
-    cli_tool_surface.record_cli_tools(["DesignSync"])
+    cli_tool_surface.record_cli_tools(["FutureTool"])
     cli_tool_surface.record_cli_tools([])
     cli_tool_surface.record_cli_tools(None)
-    assert cli_tool_surface.observed_cli_tools() == ["DesignSync"]
-    assert cli_tool_surface.cached_cli_tools()[0] == "DesignSync"
+    assert cli_tool_surface.cached_cli_tools() == [
+        "FutureTool", *cli_tool_surface.KNOWN_CLI_TOOLS,
+    ]
     cli_tool_surface.reset_cli_tools()
-    assert cli_tool_surface.observed_cli_tools() is None
     assert cli_tool_surface.cached_cli_tools() == list(cli_tool_surface.KNOWN_CLI_TOOLS)
 
 
@@ -5694,7 +5699,7 @@ def test_cached_cli_surface_never_shrinks():
     from app.core import cli_tool_surface
     from app.core.provider.harness_adapter import _delegated_disallowed
 
-    code = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "DesignSync"]
+    code = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "FutureTool"]
     chat = ["WebSearch", "WebFetch", "mcp__fluid_bundled__mcp__attachments__Read"]
     cli_tool_surface.reset_cli_tools()
     try:
@@ -5707,7 +5712,7 @@ def test_cached_cli_surface_never_shrinks():
         )
     finally:
         cli_tool_surface.reset_cli_tools()
-    assert {"Bash", "Write", "PowerShell", "DesignSync"} <= set(denied)
+    assert {"Bash", "Write", "PowerShell", "FutureTool"} <= set(denied)
 
 
 def test_cold_cache_chat_bans_every_cli_shell_and_file_tool():
@@ -5739,7 +5744,8 @@ async def test_delegated_surface_event_feeds_the_cache_and_shows_nothing():
     cli_tool_surface.reset_cli_tools()
     try:
         got = await _collect(_adapter_with(FakeEngine(events)))
-        assert cli_tool_surface.observed_cli_tools() == [
+        # Observed names come first, ahead of the static seed.
+        assert cli_tool_surface.cached_cli_tools()[:4] == [
             "Read", "Bash", "Write", "Glob",
         ]
     finally:
@@ -5767,13 +5773,13 @@ async def test_delegated_surface_warms_the_allow_mode_subtraction(recording_adap
         # 0. Cold: a tool outside the static seed is not walled yet.
         adapter, made = recording_adapter
         await adapter.connect(options)
-        assert "DesignSync" not in made["delegated"]["disallowed_tools"]
+        assert "FutureTool" not in made["delegated"]["disallowed_tools"]
 
         # 1. The CLI's init frame arrives on a live delegated leg.
         await _collect(_adapter_with(FakeEngine([
             lm.TurnStarted(session_id=SID, model="m", provider="fake"),
             lm.DelegatedSurface(
-                session_id=SID, tools=("Read", "Bash", "Write", "Glob", "DesignSync"),
+                session_id=SID, tools=("Read", "Bash", "Write", "Glob", "FutureTool"),
             ),
             lm.TurnComplete(
                 session_id=SID, stop_reason="end_turn", num_model_calls=1,
@@ -5786,7 +5792,7 @@ async def test_delegated_surface_warms_the_allow_mode_subtraction(recording_adap
         cli_tool_surface.reset_cli_tools()
 
     denied = made["delegated"]["disallowed_tools"]
-    assert "Bash" in denied and "Write" in denied and "DesignSync" in denied
+    assert "Bash" in denied and "Write" in denied and "FutureTool" in denied
     assert "Read" not in denied and "Glob" not in denied
     assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "Glob", "ToolSearch"]
 

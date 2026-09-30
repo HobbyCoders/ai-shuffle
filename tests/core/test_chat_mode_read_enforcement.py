@@ -294,8 +294,9 @@ def test_read_is_withheld_from_the_cli_grant_for_chat(workspace):
     assert "Read" not in grants
     assert "mcp__fluid_bundled__mcp__attachments__Read" in grants
     assert "mcp__attachments__Read" not in grants  # the CLI never calls this name
-    assert {"WebSearch", "WebFetch"} <= set(grants)
-    assert not {"Glob", "Grep", "Bash", "Edit", "Write"} & set(grants)
+    assert "WebSearch" in grants
+    # WebFetch is 'write' in fluid and keeps prompting, as on the native leg.
+    assert not {"Glob", "Grep", "Bash", "Edit", "Write", "WebFetch"} & set(grants)
     # The bridge filter keeps the registry spelling and drops the CLI's Read.
     assert "Read" not in _delegated_allowed(opts)
     assert set(CHAT_MODE_TOOL_SURFACE) - {"Read"} <= set(_delegated_allowed(opts))

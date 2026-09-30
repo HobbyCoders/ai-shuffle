@@ -159,11 +159,9 @@ def test_write_and_destructive_app_tools_are_never_granted(tmp_path):
         f"mcp__fluid_bundled__mcp__{server}__{tool}"
         for server, tools in SERVER_RISK_MAPS.items()
         for tool, risk in tools.items()
-        # The app's ToolSearch is not bridged on this leg: the CLI's own does
-        # the job (DELEGATED_SHADOWED_BUILTINS).
-        if risk == "safe" and not (
-            server == "builtins" and tool in ha.DELEGATED_SHADOWED_BUILTINS
-        )
+        # The app's ToolSearch is granted too: the grant is inert because
+        # _build_registry never bridges it on this leg (DELEGATED_SHADOWED_BUILTINS).
+        if risk == "safe"
     ]
     assert grants == expected
     for dangerous in (
