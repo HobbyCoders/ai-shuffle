@@ -64,12 +64,12 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 	return items;
 }
 
-/** Query for GET /cluster/git-state. Legacy id wins; v2-only uses project_v2_id. */
+/** Query the session's canonical binding; fall back to a legacy-only project. */
 export function gitStateQuery(session: {
 	project_id?: string | null;
 	project_v2_id?: string | null;
 }): { project_id: string } | { project_v2_id: string } | null {
-	if (session.project_id) return { project_id: session.project_id };
 	if (session.project_v2_id) return { project_v2_id: session.project_v2_id };
+	if (session.project_id) return { project_id: session.project_id };
 	return null;
 }

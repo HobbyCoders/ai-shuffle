@@ -130,8 +130,14 @@ describe('runnerBadgeMenuItems', () => {
 });
 
 describe('gitStateQuery', () => {
-	it('uses project_id when the session has a legacy id', () => {
+	it('uses the canonical session binding even when a legacy id is also present', () => {
 		expect(gitStateQuery({ project_id: 'proj-1', project_v2_id: 'pv2-1' })).toEqual({
+			project_v2_id: 'pv2-1'
+		});
+	});
+
+	it('falls back to project_id for a legacy-only session', () => {
+		expect(gitStateQuery({ project_id: 'proj-1', project_v2_id: null })).toEqual({
 			project_id: 'proj-1'
 		});
 	});
