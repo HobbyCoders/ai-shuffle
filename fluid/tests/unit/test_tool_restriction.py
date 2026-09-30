@@ -325,7 +325,10 @@ def test_config_without_tools_section_is_unrestricted(tmp_path) -> None:
     assert loop.allowed_tools is None and loop._tool_permitted("anything") is True
 
 
-def test_delegated_argv_emits_allowed_tools() -> None:
+def test_delegated_argv_grants_only_permission_grants() -> None:
+    """``allowed_tools`` is the bridge surface, never a CLI grant: the CLI
+    pre-approves a bare name on --allowed-tools. Only ``permission_grants``
+    go there; ``disallowed_tools`` still walls."""
     from fluid.engine.delegated import DelegatedLoop
 
     loop = DelegatedLoop(
@@ -333,8 +336,15 @@ def test_delegated_argv_emits_allowed_tools() -> None:
         allowed_tools=["Read", "Grep"], disallowed_tools=["Bash"],
     )
     argv = loop._build_argv()
-    assert argv[argv.index("--allowed-tools") + 1] == "Read,Grep"
+    assert "--allowed-tools" not in argv
     assert argv[argv.index("--disallowed-tools") + 1] == "Bash,EnterPlanMode,ExitPlanMode"
+
+    granted = DelegatedLoop(
+        store=MemoryStore(), model="m",
+        allowed_tools=["Read", "Grep"], permission_grants=["Grep"],
+    )
+    granted_argv = granted._build_argv()
+    assert granted_argv[granted_argv.index("--allowed-tools") + 1] == "Grep"
 
     unrestricted = DelegatedLoop(store=MemoryStore(), model="m")
     unrestricted_argv = unrestricted._build_argv()

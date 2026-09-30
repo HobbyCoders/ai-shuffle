@@ -375,17 +375,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.cwd = cwd
         self.env = env
         self.add_dirs = add_dirs
-        # Tool restriction (ruling CE12), the CLI's own flags: allowed is the
-        # whole surface when set, disallowed subtracts. The native leg enforces
-        # the same pair itself; here the child CLI does the enforcing.
+        # Tool restriction (ruling CE12). ``allowed_tools`` is the surface the
+        # bundled bridge serves (None serves everything); it never reaches the
+        # CLI's argv, because the CLI reads a bare name on --allowed-tools as a
+        # blanket pre-approval, not a restriction. ``disallowed_tools`` goes out
+        # as --disallowed-tools, which hides a CLI tool, and also subtracts
+        # from the bridge.
         self.allowed_tools = allowed_tools
         # The delegated CLI supplies these tools itself; keep them off its surface.
         self.disallowed_tools = list(dict.fromkeys([
             *(disallowed_tools or ()), "EnterPlanMode", "ExitPlanMode",
         ]))
-        # Extra CLI permission rules (tools that run without a prompt), in the
-        # names the CLI calls them. Joined into --allowed-tools only: unlike
-        # ``allowed_tools`` they never narrow the bridge's surface.
+        # CLI permission rules (tools that run without a prompt), in the names
+        # the CLI calls them. The whole of --allowed-tools; they never narrow
+        # the bridge's surface.
         self.permission_grants = list(permission_grants or ())
         # Gates for the bundled bridge only: the CLI owns its own tools, but a
         # registry tool served over the bridge is harness dispatch and gets the
@@ -867,7 +870,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += ["--system-prompt", self.system]
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
-        granted = list(dict.fromkeys([*(self.allowed_tools or ()), *self.permission_grants]))
+        granted = list(dict.fromkeys(self.permission_grants))
         if granted:
             argv += ["--allowed-tools", ",".join(granted)]
         if self.disallowed_tools:
