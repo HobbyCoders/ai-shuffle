@@ -245,6 +245,183 @@ def test_latest_run_wins_over_old_success_and_new_retry_can_recover(evidence):
     assert check(evidence)[0]
 
 
+@pytest.fixture(params=sorted(gate.LABEL_FILTERED_WORKFLOWS))
+def label_evidence(evidence, request):
+    path = request.param
+    name = gate.LABEL_FILTERED_WORKFLOWS[path]
+    (evidence.directory / "ci.yml").unlink()
+    workflow = evidence.directory / Path(path).name
+    workflow.write_text(
+        f"name: {name}\nrun-name: {json.dumps(gate.UNRELATED_LABEL_RUN_NAME)}\n"
+        "on:\n  pull_request:\n    paths: ['app/**']\n", encoding="utf-8")
+    evidence.run.update(path=path, display_title=name)
+    noop = {**evidence.run, "id": 21, "display_title": name + gate.UNRELATED_LABEL_SUFFIX}
+    evidence.runs.update(workflow_runs=[noop, evidence.run], total_count=2)
+    jobs = {"total_count": 2, "jobs": [
+        {"id": job_id, "run_id": noop["id"], "head_sha": HEAD,
+         "status": "completed", "conclusion": "skipped"} for job_id in [30, 31]]}
+    jobs_endpoint = "actions/runs/21/attempts/1/jobs?per_page=100&page=1"
+    evidence.data[jobs_endpoint] = jobs
+    evidence.workflow, evidence.noop = workflow, noop
+    evidence.jobs, evidence.jobs_endpoint = jobs, jobs_endpoint
+    return evidence
+
+
+@pytest.mark.parametrize("noop_conclusion", ["success", "skipped"])
+@pytest.mark.parametrize("status,conclusion,ready", [
+    ("completed", "success", True), ("completed", "failure", False),
+    ("completed", "cancelled", False), ("queued", None, False),
+    ("in_progress", None, False),
+])
+def test_verified_label_noop_preserves_genuine_ci_result(label_evidence, noop_conclusion, status, conclusion, ready):
+    label_evidence.run.update(status=status, conclusion=conclusion)
+    label_evidence.noop["conclusion"] = noop_conclusion
+    assert check(label_evidence)[0] is ready
+
+
+def test_verified_label_noop_cannot_replace_missing_ci(label_evidence):
+    label_evidence.runs.update(workflow_runs=[label_evidence.noop], total_count=1)
+    assert not check(label_evidence)[0]
+
+
+def test_latest_genuine_failure_still_wins_before_label_noop(label_evidence):
+    older = {**label_evidence.run, "id": 19}
+    label_evidence.run["conclusion"] = "failure"
+    label_evidence.runs.update(workflow_runs=[older, label_evidence.noop, label_evidence.run], total_count=3)
+    assert not check(label_evidence)[0]
+    label_evidence.run.update(run_attempt=2, conclusion="success")
+    assert check(label_evidence)[0]
+
+
+@pytest.mark.parametrize("status,conclusion", [
+    ("queued", None), ("in_progress", None), ("completed", "failure"),
+    ("completed", "cancelled"), ("completed", "timed_out"),
+])
+def test_reserved_title_never_suppresses_pending_or_failed_run(label_evidence, status, conclusion):
+    label_evidence.noop.update(status=status, conclusion=conclusion)
+    # No jobs query is necessary: these runs cannot be ignored in any case.
+    del label_evidence.data[label_evidence.jobs_endpoint]
+    assert not check(label_evidence)[0]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("status", "in_progress"), ("status", None), ("conclusion", "success"),
+    ("conclusion", "failure"), ("conclusion", "cancelled"), ("conclusion", None),
+    ("run_id", 20), ("head_sha", "d" * 40),
+])
+def test_reserved_title_requires_all_jobs_skipped_for_exact_run(label_evidence, field, value):
+    label_evidence.jobs["jobs"][1][field] = value
+    with pytest.raises(ValueError, match="does not prove all jobs skipped"):
+        check(label_evidence)
+
+
+def test_reserved_title_with_no_jobs_cannot_authorize_ci(label_evidence):
+    label_evidence.jobs.update(jobs=[], total_count=0)
+    with pytest.raises(ValueError, match="does not prove all jobs skipped"):
+        check(label_evidence)
+
+
+def test_label_noop_job_history_must_be_complete(label_evidence):
+    label_evidence.jobs["total_count"] = 3
+    with pytest.raises(ValueError, match="incomplete run history"):
+        check(label_evidence)
+
+
+@pytest.mark.parametrize("last_conclusion", ["skipped", "success"])
+def test_label_noop_checks_every_job_page(label_evidence, last_conclusion):
+    job = label_evidence.jobs["jobs"][0]
+    label_evidence.jobs.update(
+        jobs=[{**job, "id": 100 + index} for index in range(100)], total_count=101)
+    label_evidence.data[label_evidence.jobs_endpoint.replace("&page=1", "&page=2")] = {
+        "jobs": [{**job, "id": 200, "conclusion": last_conclusion}], "total_count": 101}
+    if last_conclusion == "skipped":
+        assert check(label_evidence)[0]
+    else:
+        with pytest.raises(ValueError, match="does not prove all jobs skipped"):
+            check(label_evidence)
+
+
+def test_label_noop_jobs_api_failure_fails_closed(label_evidence):
+    def api(endpoint):
+        if endpoint == label_evidence.jobs_endpoint:
+            raise RuntimeError("jobs unavailable")
+        return label_evidence.data[endpoint]
+    with pytest.raises(RuntimeError, match="jobs unavailable"):
+        check(label_evidence, api=api)
+
+
+def test_newer_genuine_ci_does_not_read_obsolete_label_noop_jobs(label_evidence):
+    label_evidence.run["id"] = 22
+    del label_evidence.data[label_evidence.jobs_endpoint]
+    assert check(label_evidence)[0]
+    label_evidence.run["conclusion"] = "failure"
+    assert not check(label_evidence)[0]
+
+
+def test_label_noop_checks_the_reported_run_attempt(label_evidence):
+    label_evidence.noop["run_attempt"] = 2
+    label_evidence.data["actions/runs/21/attempts/2/jobs?per_page=100&page=1"] = label_evidence.data.pop(
+        label_evidence.jobs_endpoint)
+    assert check(label_evidence)[0]
+
+
+@pytest.mark.parametrize("change", ["missing_run_name", "changed_run_name", "missing_name", "changed_name"])
+def test_reserved_title_without_protected_workflow_contract_fails_closed(label_evidence, change):
+    config = yaml.load(label_evidence.workflow.read_text(), Loader=gate.UniqueLoader)
+    if change == "missing_run_name": config.pop("run-name")
+    if change == "changed_run_name": config["run-name"] = "${{ github.event.pull_request.title }}"
+    if change == "missing_name": config.pop("name")
+    if change == "changed_name": config["name"] = "Another workflow"
+    label_evidence.workflow.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="Untrusted unrelated-label run marker"):
+        check(label_evidence)
+
+
+@pytest.mark.parametrize("title", [
+    "Android CI (unrelated label event)", "CI (unrelated label event)",
+])
+def test_unknown_workflow_marker_never_hides_latest_failure(evidence, title):
+    older = {**evidence.run, "id": 19}
+    evidence.run.update(display_title=title, conclusion="failure")
+    evidence.runs.update(workflow_runs=[older, evidence.run], total_count=2)
+    assert not check(evidence)[0]
+
+
+@pytest.mark.parametrize("title", [
+    "User-controlled (unrelated label event)", "Android CI (unrelated label event) extra", "",
+])
+def test_unrecognized_titles_are_not_ignored(label_evidence, title):
+    label_evidence.noop.update(display_title=title, conclusion="failure")
+    assert not check(label_evidence)[0]
+
+
+@pytest.mark.parametrize("change", ["unprotected", "wrong_tree", "fork", "wrong_run_repo", "wrong_run_head"])
+def test_label_noop_does_not_relax_publication_provenance(label_evidence, change):
+    if change == "unprotected": label_evidence.data["branches/main"]["protected"] = False
+    if change == "wrong_tree": label_evidence.data[f"git/commits/{REVISION}"]["tree"]["sha"] = "d" * 40
+    if change == "fork": label_evidence.pr["head"]["repo"]["full_name"] = "other/repo"
+    if change == "wrong_run_repo": label_evidence.run["head_repository"] = {"full_name": "other/repo"}
+    if change == "wrong_run_head": label_evidence.run["head_sha"] = "d" * 40
+    assert not check(label_evidence)[0]
+
+
+def test_manual_main_run_title_never_suppresses_latest_failure(main_evidence):
+    path, name = next(iter(gate.LABEL_FILTERED_WORKFLOWS.items()))
+    (main_evidence.directory / "ci.yml").rename(main_evidence.directory / Path(path).name)
+    main_evidence.main_run.update(path=path, display_title=name)
+    marked = {**main_evidence.main_run, "id": 21, "conclusion": "failure",
+              "display_title": name + gate.UNRELATED_LABEL_SUFFIX}
+    main_evidence.main_runs.update(workflow_runs=[marked, main_evidence.main_run], total_count=2)
+    assert not check(main_evidence)[0]
+
+
+def test_label_workflows_have_the_exact_protected_run_name_contract():
+    for path, name in gate.LABEL_FILTERED_WORKFLOWS.items():
+        config = yaml.load((ROOT / path).read_text(), Loader=gate.UniqueLoader)
+        assert config["name"] == name
+        assert config["run-name"] == gate.UNRELATED_LABEL_RUN_NAME
+
+
 def test_missing_all_runs_is_not_success(evidence):
     evidence.runs.update(workflow_runs=[], total_count=0)
     assert not check(evidence)[0]

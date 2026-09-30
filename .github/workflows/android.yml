@@ -1,4 +1,5 @@
 name: Android CI
+run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
 # Android app (android/) and the Cloudflare account hub (android/hub). Paths-
 # filtered like the other CI workflows: a PR that touches nothing under
@@ -24,6 +25,7 @@ on:
       - 'mobile/**'
       - '.github/workflows/android.yml'
       - 'scripts/ci/require-full-ci.py'
+      - 'scripts/ci/android-inputs.py'
   workflow_dispatch:
     inputs:
       publish_download:
@@ -45,12 +47,42 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.workflow }}-${{ github.ref }}
+  # Unrelated label events must not replace a running OR pending validation.
+  group: android-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Classify Android APK inputs${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      apk: ${{ steps.inputs.outputs.apk }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Classify changed paths (manual and release runs always build)
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo 'apk=true' >> "$GITHUB_OUTPUT"
+          else
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" > "$RUNNER_TEMP/android-changes.json"
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/android-pr.json"
+            python3 scripts/ci/android-inputs.py "$RUNNER_TEMP/android-changes.json" "$RUNNER_TEMP/android-pr.json" "$PR_HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
   account-hub:
-    name: Account hub Worker and D1 tests
+    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    name: Account hub Worker and D1 tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 5
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
@@ -78,7 +110,9 @@ jobs:
         run: node --test app/src/test/js/chat-downloads.test.cjs
 
   build:
-    name: Build and test Android app
+    needs: changes
+    if: needs.changes.outputs.apk == 'true'
+    name: Build and test Android app${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 20
     runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
@@ -200,7 +234,7 @@ jobs:
           if-no-files-found: error
 
   android-ui:
-    name: Android emulator verification (API ${{ matrix.api }})
+    name: Android emulator verification (API ${{ matrix.api }})${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     strategy:
       fail-fast: false
@@ -284,7 +318,7 @@ jobs:
           if-no-files-found: warn
 
   publish:
-    name: Publish verified Android download
+    name: Publish verified Android download${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: [account-hub, build, android-ui]
     if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -308,9 +342,9 @@ jobs:
         run: bash android/ci/publish-apk.sh android-download
 
   readiness:
-    name: Android merge readiness
-    needs: ['account-hub', 'build', 'android-ui']
-    if: ${{ !cancelled() }}
+    name: Android merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    needs: ['changes', 'account-hub', 'build', 'android-ui']
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -320,4 +354,5 @@ jobs:
           CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
           CI_DEFERRABLE_JOBS: '["android-ui"]'
+          CI_ANDROID_APK_REQUIRED: ${{ needs.changes.outputs.apk }}
         run: python3 scripts/ci/require-full-ci.py

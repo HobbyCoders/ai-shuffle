@@ -1,4 +1,5 @@
 name: Desktop CI
+run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
 # Validate native desktop packaging and the preview installer; ordinary application checks have separate
 # coverage.
@@ -28,12 +29,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.ref }}
+  # Unrelated label events must not replace a running OR pending validation.
+  group: desktop-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
   cancel-in-progress: true
 
 jobs:
   check:
-    name: Typecheck and unit tests
+    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    name: Typecheck and unit tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
@@ -51,7 +54,7 @@ jobs:
       - run: npm test
 
   package:
-    name: Package Windows shell
+    name: Package Windows shell${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     needs: check
@@ -75,7 +78,7 @@ jobs:
         run: npm run pack
 
   runtime:
-    name: Assemble worker runtime (linux-x64)
+    name: Assemble worker runtime (linux-x64)${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
@@ -117,7 +120,7 @@ jobs:
 
 
   windows-preview:
-    name: Windows preview installer and fresh database
+    name: Windows preview installer and fresh database${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
@@ -198,9 +201,9 @@ jobs:
           retention-days: 7
 
   readiness:
-    name: Desktop merge readiness
+    name: Desktop merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: ['check', 'package', 'windows-preview']
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

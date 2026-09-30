@@ -103,7 +103,8 @@ def test_no_automatic_production_site_publication_but_ci_still_automatic():
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():
     build = workflow("android.yml")["jobs"]["build"]
-    assert "if" not in build
+    assert build["if"] == "needs.changes.outputs.apk == 'true'"
+    assert build["needs"] == "changes"
     guarded = [step for step in build["steps"] if "secrets." in str(step)]
     assert len(guarded) >= 2
     for step in guarded:

@@ -9,7 +9,8 @@ The slow platform suites run when someone asks for them, and before a release.
 - CI JavaScript: the frontend, mobile, tools and browser-mcp packages that changed
 - CI fluid: the fluid unit suite
 - Cheap jobs inside Android CI, Desktop CI and CI Browser Workspace: the
-  Android build and unit tests, the account hub tests, the desktop typecheck
+  Android build and unit tests when APK inputs change, the account hub and
+  website tests, the desktop typecheck
   and unit tests, and the browser editor smoke test
 - The small policy and service checks (artifact policy, desktop source
   update checks, license server, registry, Android Play)
@@ -27,7 +28,17 @@ check still passes:
 
 Add `ci:full` to a PR that changes that platform in a way the fast checks
 cannot see. While the label stays on, every push reruns these jobs and they
-must pass. Removing the label cancels them.
+must pass. Removing the label cancels them. Other label additions/removals do
+not start runner jobs or interrupt real validation. GitHub still records these
+label events as all-skipped workflow runs with distinct check names. Edge
+publication ignores them only after verifying the workflow marker and all
+skipped job results; genuine failed, canceled or pending checks still block it.
+
+Android PRs confined to `android/hub/`, `android/site/`, `android/docs/` or
+`docs/` skip APK assembly and emulators while retaining hub, website and download
+bridge tests. Native, mobile, shared frontend and unknown paths still build the
+APK. Renames check both old and new paths; missing or stale file evidence fails
+readiness. Manual and release runs always build and verify the APK.
 
 ## Manual only
 

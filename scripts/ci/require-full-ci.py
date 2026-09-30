@@ -10,9 +10,19 @@ import os
 from pathlib import Path
 
 
-def readiness_error(requested, results, deferrable=()):
+def readiness_error(requested, results, deferrable=(), android_apk=None):
     if not isinstance(results, dict) or not results:
         return "Required job results are missing."
+    not_applicable = set()
+    if android_apk is not None:
+        # A failed/missing classifier must never turn a skipped APK into green.
+        if (android_apk not in {"true", "false"}
+                or not isinstance(results.get("changes"), dict)
+                or results["changes"].get("result") != "success"
+                or not {"build", "android-ui"}.issubset(results)):
+            return "Android APK input classification is missing or unsuccessful."
+        if android_apk == "false":
+            not_applicable = {"build", "android-ui"}
     full = requested == "true"
     for name, job in results.items():
         if not isinstance(job, dict):
@@ -20,7 +30,7 @@ def readiness_error(requested, results, deferrable=()):
         result = job.get("result")
         if result == "success":
             continue
-        if not full and result == "skipped" and name in deferrable:
+        if result == "skipped" and (name in not_applicable or (not full and name in deferrable)):
             continue
         return "Required CI did not pass. All prerequisite jobs must succeed on this revision."
     return None
@@ -39,7 +49,8 @@ def main():
     if not isinstance(deferrable, list):
         results = None
     requested = os.environ.get("CI_FULL_REQUESTED")
-    error = readiness_error(requested, results, set(deferrable or []))
+    error = readiness_error(requested, results, set(deferrable or []),
+                            os.environ.get("CI_ANDROID_APK_REQUIRED"))
     if error:
         message = error
     elif requested == "true":

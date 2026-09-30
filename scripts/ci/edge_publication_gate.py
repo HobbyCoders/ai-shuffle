@@ -16,6 +16,20 @@ import yaml
 REPOSITORY = "HobbyCoders/ai-shuffle"
 OWNER_ID = "76577322"
 ROOT = Path(__file__).resolve().parents[2]
+# Only these workflows deliberately create all-skipped runs for unrelated label
+# changes. The protected-main configuration must authenticate the marker; a PR
+# title or another workflow's display title must never hide real CI evidence.
+LABEL_FILTERED_WORKFLOWS = {
+    ".github/workflows/android.yml": "Android CI",
+    ".github/workflows/desktop.yml": "Desktop CI",
+    ".github/workflows/ci-browser-workspace.yml": "CI Browser Workspace",
+}
+UNRELATED_LABEL_SUFFIX = " (unrelated label event)"
+UNRELATED_LABEL_RUN_NAME = (
+    "${{ github.workflow }}${{ github.event_name == 'pull_request' && "
+    "(github.event.action == 'labeled' || github.event.action == 'unlabeled') && "
+    "github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
+)
 
 
 class UniqueLoader(yaml.BaseLoader):
@@ -85,6 +99,30 @@ def applicable_workflows(directory, files=None):
                 continue
         expected.add(f".github/workflows/{path.name}")
     return expected
+
+
+def unrelated_label_run(api, run, directory):
+    name = LABEL_FILTERED_WORKFLOWS.get(run["path"])
+    if (run.get("event") != "pull_request" or name is None
+            or run.get("display_title") != name + UNRELATED_LABEL_SUFFIX):
+        return False
+    # This directory is from the verified protected-main checkout. Do not trust
+    # markers from default PR titles or a changed/missing run-name contract.
+    path = directory / Path(run["path"]).name
+    config = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueLoader)
+    if config.get("name") != name or config.get("run-name") != UNRELATED_LABEL_RUN_NAME:
+        raise ValueError(f"Untrusted unrelated-label run marker: {run['path']}")
+    # A marker alone never suppresses failure, cancellation, or pending CI. A
+    # completed workflow may report success even though every job was skipped.
+    if run.get("status") != "completed" or run.get("conclusion") not in {"success", "skipped"}:
+        return False
+    endpoint = f"actions/runs/{run['id']}/attempts/{run.get('run_attempt', 1)}/jobs"
+    jobs = pages(api, endpoint, "jobs", limit=10)
+    if not jobs or any(job.get("status") != "completed" or job.get("conclusion") != "skipped"
+                       or job.get("run_id") != run["id"] or job.get("head_sha") != run["head_sha"]
+                       for job in jobs):
+        raise ValueError(f"Unrelated-label run does not prove all jobs skipped: {run['path']}")
+    return True
 
 
 class GitHub:
@@ -159,14 +197,16 @@ def publication_readiness(api, revision, directory, trigger_head=None):
     event, tested = ("workflow_dispatch", revision) if main_ci else ("pull_request", head)
     runs = pages(api, f"actions/runs?event={event}&head_sha={tested}", "workflow_runs", limit=10)
     latest = {}
-    for run in runs:
+    # Once the latest genuine run is found, older attempts (including label
+    # no-ops) cannot affect its result or require additional evidence queries.
+    for run in sorted(runs, key=lambda item: (item["id"], item.get("run_attempt", 1)), reverse=True):
         if (run.get("event") != event or run.get("head_sha") != tested
                 or (run.get("head_repository") or {}).get("full_name") != REPOSITORY):
             continue
         path = run["path"]
-        if path not in latest or (run["id"], run.get("run_attempt", 1)) > (
-                latest[path]["id"], latest[path].get("run_attempt", 1)):
-            latest[path] = run
+        if path not in expected or path in latest or unrelated_label_run(api, run, directory):
+            continue
+        latest[path] = run
     blocked = [path for path in sorted(expected) if path not in latest
                or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"
                or (main_ci and not owner_main_ci(latest[path]))]

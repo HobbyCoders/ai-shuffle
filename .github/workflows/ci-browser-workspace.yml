@@ -1,4 +1,5 @@
 name: CI Browser Workspace
+run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
 on:
   pull_request:
@@ -34,7 +35,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-browser-workspace-${{ github.ref }}
+  # Unrelated label events must not replace a running OR pending validation.
+  group: ci-browser-workspace-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
   cancel-in-progress: true
 
 permissions:
@@ -42,7 +44,8 @@ permissions:
 
 jobs:
   smoke:
-    name: Browser editor smoke checks
+    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    name: Browser editor smoke checks${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
@@ -57,7 +60,7 @@ jobs:
       - run: npm test --prefix browser-mcp -- test/editors.test.ts
 
   workspace:
-    name: Real browser workspace
+    name: Real browser workspace${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: smoke
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 10
@@ -116,9 +119,9 @@ jobs:
           retention-days: 3
 
   readiness:
-    name: Browser merge readiness
+    name: Browser merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: ['smoke', 'workspace']
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
