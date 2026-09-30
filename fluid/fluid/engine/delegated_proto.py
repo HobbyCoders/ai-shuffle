@@ -27,6 +27,12 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     splits a multi-block model message into ONE assistant frame PER BLOCK, each
     repeating the same message ``id`` and ``usage`` — hence the message-level
     block cursor (in-frame positions are always 0) and the usage-once guard.
+    That repeated ``usage`` is the ``message_start`` snapshot, whose
+    ``output_tokens`` is a placeholder of a few tokens, so the call's Usage is
+    held until its final count is known: the partial stream's
+    ``message_delta``; without the partial stream, the call's tool result or
+    the next call; for the turn's last call, the result, whose per-turn
+    output count settles what that call produced (``output_reconciled``).
   * ``{"type":"user","message":{"content":[{"type":"tool_result",...}]}}`` —
     ToolResult events (name resolved via the ``tool_use_id`` → name map).
   * ``{"type":"stream_event","event":{<raw Anthropic SSE>}}`` — real streaming
@@ -37,12 +43,20 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     (dedupe); ``message_start`` is what clears that state, one message at a time.
   * ``{"type":"result","subtype":...,"total_cost_usd":...,"num_turns":...}`` —
     TurnComplete (+ a fallback Usage if no assistant frame carried usage).
+    ``usage`` and ``num_turns`` are per turn, but ``total_cost_usd`` is the
+    running total of the CLI process, so the turn's cost is its increase
+    over ``cost_baseline`` (see ``_turn_cost``); the raw total rides along
+    as ``usage["cli_total_cost_usd"]``, next to the turn's tool mix
+    (``bash_file_ops`` / ``dedicated_file_ops``, see ``delegated_toolmix``).
     A result with ``is_error`` set is a failed turn: the mapper reports it
-    as ``Mapped.error`` and emits no TurnComplete, so the loop can decide
+    as ``Mapped.error`` (with ``failed_status`` from its ``api_error_status``)
+    and emits no TurnComplete, so the loop can decide
     between an ErrorEvent and a retry. The one exception is
     ``error_max_turns``: a turn cap is a stop reason, not a failure, and
     completes the turn the way the native loop's call cap does.
-  * ``{"type":"rate_limit_event","rate_limit_info":{...}}`` — RateLimit.
+  * ``{"type":"rate_limit_event","rate_limit_info":{...}}`` — RateLimit. A
+    frame with no utilization in any window (and not rejected) is logged
+    once per key set, so a CLI shape change does not drop readings silently.
   * ``{"type":"control_request","request":{"subtype":"can_use_tool",...}}`` —
     a PermissionRequest event plus a ``PermissionBridge`` the loop uses to answer
     with the matching ``control_response`` frame.
@@ -75,7 +89,10 @@ tool-name map, dedupe tracking, node-id generation) around them.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from fluid.events.model import (
@@ -102,8 +119,15 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from fluid.engine.delegated_toolmix import ToolMix
 from fluid.providers.anthropic.serialize import sse_to_chunk
 from fluid.store.base import new_id
+
+logger = logging.getLogger(__name__)
+
+# rate_limit_info key sets already reported as carrying no utilization, so a
+# CLI that changes its frame shape warns once per process, not per frame.
+_UNREADABLE_RATE_LIMIT_SHAPES: set[frozenset[str]] = set()
 
 # ─── Pure helpers ────────────────────────────────────────────────────────────
 
@@ -125,6 +149,65 @@ def result_error_message(frame: dict[str, Any]) -> str:
         result = frame.get("result")
         detail = result.strip() if isinstance(result, str) else ""
     return f"claude reported {subtype}: {detail}" if detail else f"claude reported {subtype}"
+
+
+# The CLI reports a subscription limit as "<text>|<reset epoch seconds>".
+_LIMIT_RESET_SUFFIX = re.compile(r"^(?P<text>.*?)\|(?P<epoch>\d{9,11})$", re.S)
+_PROVIDER_MESSAGE_LIMIT = 300
+
+
+def result_provider_message(frame: dict[str, Any]) -> str | None:
+    """The short explanation a failed ``result`` frame gives, for a person.
+
+    The result text when there is one, else the joined ``errors``. A
+    usage-limit text's ``|<epoch>`` suffix becomes a readable reset time.
+    None when the frame says nothing.
+    """
+    result = frame.get("result")
+    detail = result.strip() if isinstance(result, str) else ""
+    if not detail:
+        errors = frame.get("errors")
+        if isinstance(errors, list):
+            detail = "; ".join(str(e) for e in errors if e).strip()
+    if not detail:
+        return None
+    match = _LIMIT_RESET_SUFFIX.match(detail)
+    if match is not None:
+        try:
+            resets = datetime.fromtimestamp(int(match["epoch"]), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            pass
+        else:
+            detail = f"{match['text'].strip()} (resets {resets:%Y-%m-%d %H:%M} UTC)"
+    return detail[:_PROVIDER_MESSAGE_LIMIT]
+
+
+def _api_error_status(frame: dict[str, Any]) -> int | None:
+    """The HTTP status a failed ``result`` frame carries, when it is an int."""
+    status = frame.get("api_error_status")
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
+
+
+def _merge_counts(target: dict[str, Any], update: dict[str, Any]) -> None:
+    """Fold a later usage snapshot of the SAME model call into ``target``.
+
+    Token counters are cumulative within a call (``message_start`` carries
+    the input counts, ``message_delta`` the final output count), so each
+    integer takes the larger value, as the native loop merges them. Other
+    fields are only filled in when missing.
+    """
+    for key, value in update.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            current = target.get(key)
+            if isinstance(current, bool) or not isinstance(current, int):
+                current = 0
+            target[key] = max(current, value)
+        elif value is not None and key not in target:
+            target[key] = value
 
 
 def _dict_field(frame: dict[str, Any], key: str) -> dict[str, Any]:
@@ -309,6 +392,24 @@ class ControlReply:
 
 
 @dataclass
+class _PendingCall:
+    """A model call whose Usage waits for its final token counts.
+
+    The first ``assistant`` frame of a message carries the ``message_start``
+    usage, whose ``output_tokens`` is a placeholder of a few tokens. The
+    record is held until the partial stream's ``message_delta`` brings the
+    final count, or until nothing better can arrive (see
+    ``StreamJsonMapper._flush_call``).
+    """
+
+    node_id: str
+    msg_id: str | None
+    model: str | None
+    usage: dict[str, Any]
+    index: int
+
+
+@dataclass
 class Mapped:
     """Everything one frame produces: events to emit, an optional node to
     persist, (for permissions) the bridge the loop must answer, and (for
@@ -326,6 +427,10 @@ class Mapped:
     is_result: bool = False
     # Set with ``is_result`` when the CLI reported the turn as failed.
     error: str | None = None
+    # (node_id, model_call_index) of a model call this frame started: the
+    # loop asks the CLI for that call's context snapshot now, while its Usage
+    # is still held for the final token counts.
+    opened_call: tuple[str, int] | None = None
 
 
 # ─── Stateful mapper ─────────────────────────────────────────────────────────
@@ -340,6 +445,7 @@ class StreamJsonMapper:
         model: str,
         provider: str = "claude",
         user_node_id: str,
+        cost_baseline: float | None = 0.0,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
@@ -365,6 +471,38 @@ class StreamJsonMapper:
         # a failed result arrives.
         self.failed_usage: dict[str, Any] = {}
         self.failed_cost_usd: float | None = None
+        # The HTTP status a failed result carried (its ``api_error_status``,
+        # or 401 when an assistant frame reported ``authentication_failed``)
+        # and its short explanation; None when it gave neither.
+        self.failed_status: int | None = None
+        self.failed_provider_message: str | None = None
+        # The CLI's ``total_cost_usd`` is the running total of its process,
+        # not the turn's cost. ``cost_baseline`` is that total after the last
+        # turn the loop booked on this process (0.0 on a fresh process, None
+        # when the process was spawned with --resume and the total it starts
+        # from is unknown). The turn's cost is the difference; see
+        # ``_turn_cost``. ``cli_total_cost_usd`` is the raw total the result
+        # reported, for the loop's next baseline.
+        self.cost_baseline = cost_baseline
+        self.cli_total_cost_usd: float | None = None
+        # The model the CLI said answered (assistant ``message.model``), used
+        # to price a turn or call from the table.
+        self.reported_model: str | None = None
+        # An assistant frame of this turn reported ``authentication_failed``.
+        self._auth_failed = False
+        # The model call whose Usage is held for its final token counts.
+        self._pending_call: _PendingCall | None = None
+        # The partial stream's final usage (``message_delta``) for the
+        # current message, when it arrived before that message's first
+        # assistant frame.
+        self._stream_final_usage: dict[str, Any] | None = None
+        # A stream_event arrived this turn: the CLI runs with
+        # --include-partial-messages, so each call's message_delta will come.
+        self._partial_seen = False
+        # Output tokens of the per-call Usage events emitted this turn.
+        self._emitted_output = 0
+        # Shell file work against dedicated file tools this turn.
+        self.tool_mix = ToolMix()
         self._last_node_id: str = user_node_id
         # Dedupe: block indices already streamed via stream_event for the CURRENT
         # model message (their whole-block re-emission is suppressed). Cleared on
@@ -381,7 +519,8 @@ class StreamJsonMapper:
         # message-level indices in ``_streamed``; this running cursor supplies
         # the real index. Reset on message_start with ``_streamed``.
         self._block_cursor = 0
-        # Message id whose `usage` was already turned into a Usage event. Every
+        # Message id whose `usage` already opened a model call (held or
+        # emitted, see _open_call). Every
         # per-block frame of a message repeats that message's usage verbatim, so
         # without this a two-block message double-counts its tokens and cost.
         self._usage_msg_id: str | None = None
@@ -438,6 +577,7 @@ class StreamJsonMapper:
         return ThinkingDelta(session_id=self.session_id, turn_id=self.turn_id, index=index, text=text)
 
     def _tool_use(self, tool_use_id: str, name: str, input: dict[str, Any]) -> ToolUse:
+        self.tool_mix.record(tool_use_id, name, input)
         return ToolUse(
             session_id=self.session_id, turn_id=self.turn_id,
             tool_use_id=tool_use_id, name=name, input=input,
@@ -446,16 +586,140 @@ class StreamJsonMapper:
     def _usage_event(
         self, node_id: str, usage: dict[str, Any], *,
         model: str | None = None, cost_usd: float | None = None,
+        index: int | None = None,
     ) -> Usage:
-        self.model_calls += 1
+        if index is None:
+            self.model_calls += 1
+            index = self.model_calls
         return Usage(
             session_id=self.session_id, node_id=node_id, turn_id=self.turn_id,
             raw=per_call_usage(
-                usage, model=model or self.model, index=self.model_calls,
+                usage, model=model or self.model, index=index,
                 cost_usd=cost_usd,
             ),
             **usage_fields(usage),
         )
+
+    # ─── per-call usage (held until its final counts) ────────────────────
+
+    def _open_call(
+        self, node_id: str, msg_id: str | None, usage: dict[str, Any], model: Any,
+    ) -> list[Event]:
+        """Start holding the Usage of a new model call; what that releases.
+
+        A call still held from an earlier message is complete by now and is
+        emitted first. The call number is taken here, so indices follow the
+        order the calls started in.
+        """
+        events = self._flush_call()
+        self.model_calls += 1
+        self._pending_call = _PendingCall(
+            node_id=node_id, msg_id=msg_id,
+            model=model if isinstance(model, str) and model else None,
+            usage=dict(usage), index=self.model_calls,
+        )
+        self._usage_emitted = True
+        self._usage_msg_id = msg_id
+        if self._stream_final_usage is not None:
+            # The message_delta came before this message's first frame.
+            _merge_counts(self._pending_call.usage, self._stream_final_usage)
+            self._stream_final_usage = None
+            events.extend(self._flush_call())
+        return events
+
+    def _flush_call(self, *, turn_output: int | None = None) -> list[Event]:
+        """Emit the held call's Usage (priced from its counts), if any.
+
+        ``turn_output`` is the result's per-turn ``output_tokens``, passed
+        when the call never got a ``message_delta`` (the CLI runs without
+        --include-partial-messages, or the message was cut short). The call
+        then takes whatever output the turn reported beyond the calls
+        already emitted, never less than its own snapshot, and is flagged
+        ``output_reconciled``.
+        """
+        call = self._pending_call
+        if call is None:
+            return []
+        self._pending_call = None
+        usage = call.usage
+        if turn_output is not None:
+            snapshot = _int_or_zero(usage.get("output_tokens"))
+            usage["output_tokens"] = max(snapshot, turn_output - self._emitted_output)
+            usage["output_reconciled"] = True
+        self._emitted_output += _int_or_zero(usage.get("output_tokens"))
+        return [self._usage_event(call.node_id, usage, model=call.model, index=call.index)]
+
+    def call_is_held(self, index: int | None) -> bool:
+        """True while call ``index``'s Usage has not been emitted yet."""
+        return self._pending_call is not None and self._pending_call.index == index
+
+    def flush_usage(self) -> list[Event]:
+        """Emit a call still held when the stream ended without a result.
+
+        Its token counts are the last ones the CLI reported (the output count
+        may be the ``message_start`` placeholder); recording them beats
+        losing the call's input and cache tokens.
+        """
+        return self._flush_call()
+
+    # ─── turn cost ───────────────────────────────────────────────────────
+
+    def _priced_model(self, frame: dict[str, Any]) -> str:
+        """The model a table price should use: the one the CLI reported."""
+        if self.reported_model:
+            return self.reported_model
+        model_usage = frame.get("modelUsage")
+        if isinstance(model_usage, dict):
+            for name in model_usage:
+                if isinstance(name, str) and name:
+                    return name
+        return self.model
+
+    def _turn_cost(
+        self, frame: dict[str, Any], usage: dict[str, Any],
+    ) -> tuple[float | None, bool]:
+        """This turn's cost from the result frame, and whether it is a table
+        estimate.
+
+        ``total_cost_usd`` is cumulative for the CLI process (its schema:
+        read the latest result rather than summing), while the result's
+        ``usage`` and ``num_turns`` are per turn. The turn's cost is the total
+        minus ``cost_baseline``; a total below the baseline means the CLI's
+        counter restarted, and the whole total is this turn's. With no
+        baseline (the first result of a process spawned with --resume, which
+        may or may not restore the saved total) the turn's own usage is
+        priced from the table instead.
+        """
+        total = frame.get("total_cost_usd")
+        if isinstance(total, bool) or not isinstance(total, (int, float)):
+            return None, False
+        total = float(total)
+        self.cli_total_cost_usd = total
+        baseline = self.cost_baseline
+        if baseline is None:
+            from fluid.providers.pricing import estimate_cost
+
+            estimate = estimate_cost(self._priced_model(frame), usage) if usage else None
+            return estimate, estimate is not None
+        if total >= baseline:
+            return round(total - baseline, 10), False
+        return total, False
+
+    def _log_tool_mix(self, frame: dict[str, Any]) -> None:
+        mix = self.tool_mix
+        model = self._priced_model(frame)
+        logger.info(
+            "delegated turn tool mix: bash_file_ops=%d dedicated_file_ops=%d model=%s",
+            mix.bash_file_ops, mix.dedicated_file_ops, model,
+        )
+        if mix.bash_heavy:
+            logger.warning(
+                "delegated turn did most of its file work through the shell: "
+                "bash_file_ops=%d dedicated_file_ops=%d model=%s. Claude Code's "
+                "bash-first steer may be on (the child env should carry "
+                "CLAUDE_CODE_THRIFTY_SONIC=0)",
+                mix.bash_file_ops, mix.dedicated_file_ops, model,
+            )
 
     # ─── per-frame handlers ──────────────────────────────────────────────
 
@@ -565,18 +829,33 @@ class StreamJsonMapper:
         node_id = new_id("node")
         self._last_node_id = node_id
 
+        if frame.get("error") == "authentication_failed":
+            self._auth_failed = True
+        model = msg.get("model")
+        if isinstance(model, str) and model:
+            self.reported_model = model
         usage = msg.get("usage")
         msg_id = msg.get("id")
-        if usage and (msg_id is None or msg_id != self._usage_msg_id):
-            events.append(self._usage_event(node_id, usage, model=msg.get("model")))
-            self._usage_emitted = True
-            self._usage_msg_id = msg_id
+        pending = self._pending_call
+        opened: tuple[str, int] | None = None
+        if usage and isinstance(usage, dict):
+            if msg_id is not None and pending is not None and pending.msg_id == msg_id:
+                # A later per-block frame of the held call.
+                _merge_counts(pending.usage, usage)
+            elif msg_id is None or msg_id != self._usage_msg_id:
+                # A new model call. Its Usage is held: this frame carries the
+                # message_start usage, whose output count is a placeholder.
+                events.extend(self._open_call(node_id, msg_id, usage, model))
+                opened = (node_id, self.model_calls)
 
         # Advance past the blocks this frame reported: the next `assistant`
         # frame of the same message continues where this one stopped.
         self._block_cursor += len(blocks)
 
-        return Mapped(events=events, message=Message(role="assistant", content=content), node_id=node_id)
+        return Mapped(
+            events=events, message=Message(role="assistant", content=content),
+            node_id=node_id, opened_call=opened,
+        )
 
     def _on_user(self, frame: dict[str, Any]) -> Mapped:
         msg = _dict_field(frame, "message")
@@ -614,6 +893,14 @@ class StreamJsonMapper:
         if not content:
             return Mapped()
 
+        if not self._partial_seen:
+            # Without the partial stream no message_delta will come, so the
+            # held call's counts will not improve. Its tool result means the
+            # call is over: emit it now rather than when the next call's
+            # first frame arrives, so a turn killed while that call is still
+            # generating keeps this one on record.
+            events = self._flush_call() + events
+
         node_id = new_id("node")
         self._last_node_id = node_id
         return Mapped(events=events, message=Message(role="user", content=content), node_id=node_id)
@@ -637,6 +924,22 @@ class StreamJsonMapper:
             self._streamed.clear()
             self._se_tool.clear()
             self._block_cursor = 0
+            self._partial_seen = True
+            # A call still held belongs to an earlier message, which is over.
+            events.extend(self._flush_call())
+            self._stream_final_usage = None
+        elif kind == "usage":
+            # message_delta: the call's final usage (output_tokens is the
+            # real count here; message_start and the assistant frames carry
+            # a placeholder). Complete the held call and emit it, or keep the
+            # counts for the message's first assistant frame.
+            final = p.get("usage")
+            if isinstance(final, dict):
+                if self._pending_call is not None:
+                    _merge_counts(self._pending_call.usage, final)
+                    events.extend(self._flush_call())
+                else:
+                    self._stream_final_usage = dict(final)
         elif kind == "block_start":
             index = p["index"]
             self._streamed.add(index)
@@ -676,36 +979,59 @@ class StreamJsonMapper:
                 if block["tool_use_id"]:
                     self.tool_inputs[block["tool_use_id"]] = args
                 events.append(self._tool_use(block["tool_use_id"] or "", block["name"] or "", args))
-        # usage(message_delta) / message_stop from the partial stream are
-        # ignored: Usage is emitted once from the assistant frame.
+        # message_stop from the partial stream is ignored: the call's Usage
+        # went out with its message_delta.
         return Mapped(events=events)
 
     def _on_result(self, frame: dict[str, Any]) -> Mapped:
         subtype = frame.get("subtype", "success")
-        usage = frame.get("usage") or {}
+        usage = _dict_field(frame, "usage")
         events: list[Event] = []
-        cost = frame.get("total_cost_usd")
-        if not self._usage_emitted and usage:
+        cost, cost_from_table = self._turn_cost(frame, usage)
+        if self._pending_call is not None:
+            # The last call never got a message_delta: the result's per-turn
+            # output count settles what it produced.
+            turn_output = usage.get("output_tokens")
+            if isinstance(turn_output, bool) or not isinstance(turn_output, int):
+                turn_output = None
+            events.extend(self._flush_call(turn_output=turn_output))
+        elif not self._usage_emitted and usage:
             # No assistant frame carried usage: the turn's totals stand in for
-            # its one record, priced with the CLI's own figure.
+            # its one record, priced with the turn's own cost (or from the
+            # table when that cost is itself a table estimate).
             events.append(self._usage_event(
-                self._last_node_id, usage,
-                cost_usd=cost if isinstance(cost, (int, float)) else None,
+                self._last_node_id, usage, model=self._priced_model(frame),
+                cost_usd=None if cost_from_table else cost,
             ))
+        self._log_tool_mix(frame)
+        turn_usage = dict(usage)
+        if self.cli_total_cost_usd is not None:
+            # The CLI's own running total, kept for audits.
+            turn_usage["cli_total_cost_usd"] = self.cli_total_cost_usd
+        if cost_from_table:
+            turn_usage["cost_from_table"] = True
         if frame.get("is_error") and subtype != "error_max_turns":
             # A failed turn: no TurnComplete. The loop turns this into an
             # ErrorEvent, or retries when a stale --resume handle caused it.
-            # The CLI still billed the turn, so its totals ride along.
-            self.failed_usage = dict(usage)
-            self.failed_cost_usd = cost if isinstance(cost, (int, float)) else None
+            # The CLI still billed the turn, so its totals ride along, with
+            # the HTTP status the provider refused it with, when it said.
+            self.failed_usage = turn_usage
+            self.failed_cost_usd = cost
+            status = _api_error_status(frame)
+            if status is None and self._auth_failed:
+                status = 401
+            self.failed_status = status
+            self.failed_provider_message = result_provider_message(frame)
             return Mapped(events=events, is_result=True, error=result_error_message(frame))
+        turn_usage["bash_file_ops"] = self.tool_mix.bash_file_ops
+        turn_usage["dedicated_file_ops"] = self.tool_mix.dedicated_file_ops
         num_turns = frame.get("num_turns") or 1
         events.append(TurnComplete(
             session_id=self.session_id, node_id=self._last_node_id, turn_id=self.turn_id,
             stop_reason=stop_reason_from_subtype(subtype),
             num_model_calls=int(num_turns),
-            usage=dict(usage),
-            cost_usd=frame.get("total_cost_usd"),
+            usage=turn_usage,
+            cost_usd=cost,
         ))
         return Mapped(events=events, is_result=True)
 
@@ -741,6 +1067,23 @@ class StreamJsonMapper:
                 utilization=info.get("utilization"),
                 status=status,
             ))
+        if status != "rejected" and not any(
+            isinstance(e.utilization, (int, float)) and not isinstance(e.utilization, bool)
+            for e in events
+        ):
+            # Nothing here moves a usage bar (a host drops a reading with no
+            # utilization unless the window is rejected). When the CLI changes
+            # this frame's shape again, say so once instead of dropping every
+            # reading silently.
+            shape = frozenset(str(key) for key in info)
+            if shape not in _UNREADABLE_RATE_LIMIT_SHAPES:
+                _UNREADABLE_RATE_LIMIT_SHAPES.add(shape)
+                logger.warning(
+                    "claude rate_limit_event carried no utilization in any window "
+                    "(status=%s); rate_limit_info keys: %s. Usage readings from "
+                    "this CLI are being dropped",
+                    status, ", ".join(sorted(shape)) or "(none)",
+                )
         return Mapped(events=events)
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:

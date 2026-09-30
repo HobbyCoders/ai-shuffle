@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import pytest
 
+from fluid.engine import delegated_proto
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper, per_call_usage
-from fluid.events.model import ErrorEvent, RateLimit, Usage
+from fluid.events.model import ErrorEvent, RateLimit, TurnComplete, Usage
 from fluid.events.ops import UserTurn
 from fluid.providers.pricing import estimate_cost
 from fluid.store.base import MemoryStore
@@ -31,8 +33,12 @@ def test_each_call_carries_index_cache_report_and_cost() -> None:
              "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 900}
     second = {"input_tokens": 50, "output_tokens": 40,
               "cache_read_input_tokens": 9900, "cache_creation_input_tokens": 50}
+    result = {"type": "result", "subtype": "success", "num_turns": 2,
+              "total_cost_usd": 0.01, "usage": {"output_tokens": 60}}
+    # Each call's Usage is held until its counts are final: the first goes
+    # out when the second call starts, the second with the result.
     usages = [
-        e for frame in (_assistant("msg_1", first), _assistant("msg_2", second))
+        e for frame in (_assistant("msg_1", first), _assistant("msg_2", second), result)
         for e in mapper.feed(frame).events if isinstance(e, Usage)
     ]
     assert [u.raw["model_call_index"] for u in usages] == [1, 2]
@@ -121,6 +127,126 @@ def test_malformed_unified_windows_preserves_legacy_reading(windows: object) -> 
     assert [(e.kind, e.utilization) for e in got] == [("five_hour", 0.3)]
 
 
+def test_a_rate_limit_frame_with_no_utilization_warns_once_per_shape(
+    caplog, monkeypatch,
+) -> None:
+    """A CLI that moves utilization somewhere the mapper does not read must
+    not drop every usage reading silently (the pre-2.1.285 mapper did)."""
+    monkeypatch.setattr(delegated_proto, "_UNREADABLE_RATE_LIMIT_SHAPES", set())
+    caplog.set_level(logging.WARNING, logger="fluid.engine.delegated_proto")
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    frame = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "resetsAt": 1790754000,
+        "newShapeWindows": [{"pct": 6}],
+    }}
+    got = [e for e in mapper.feed(frame).events if isinstance(e, RateLimit)]
+    # Nothing is invented: the one reading carries no utilization.
+    assert [(e.kind, e.utilization) for e in got] == [("five_hour", None)]
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    for key in ("newShapeWindows", "rateLimitType", "resetsAt", "status"):
+        assert key in message
+    mapper.feed(frame)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_readable_or_rejected_rate_limit_frames_do_not_warn(caplog, monkeypatch) -> None:
+    monkeypatch.setattr(delegated_proto, "_UNREADABLE_RATE_LIMIT_SHAPES", set())
+    caplog.set_level(logging.WARNING, logger="fluid.engine.delegated_proto")
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    for info in (
+        {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.2},
+        {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1900000000},
+        {"status": "allowed", "rateLimitType": "five_hour", "unifiedWindows": {
+            "five_hour": {"utilization": 0.06, "resetsAt": 1790754000}}},
+    ):
+        mapper.feed({"type": "rate_limit_event", "rate_limit_info": info})
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+# ─── Per-call output tokens ─────────────────────────────────────────────────
+
+
+def _stream(event: dict) -> dict:
+    return {"type": "stream_event", "session_id": "cli", "event": event}
+
+
+def test_per_call_output_comes_from_the_message_delta() -> None:
+    """The assistant frame repeats the message_start usage (output 4); the
+    call's real output (812) arrives on the partial stream's message_delta."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    start_usage = {"input_tokens": 30, "output_tokens": 4,
+                   "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 100}
+    frames = [
+        _stream({"type": "message_start", "message": {"id": "msg_1", "usage": start_usage}}),
+        _stream({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+        _stream({"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "done"}}),
+        _stream({"type": "content_block_stop", "index": 0}),
+        _assistant("msg_1", start_usage, text="done"),
+        _stream({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                 "usage": {"output_tokens": 812}}),
+        _stream({"type": "message_stop"}),
+        {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.05,
+         "usage": {**start_usage, "output_tokens": 812}},
+    ]
+    events = [e for frame in frames for e in mapper.feed(frame).events]
+    (usage,) = [e for e in events if isinstance(e, Usage)]
+    assert usage.output_tokens == 812
+    assert usage.input_tokens == 30 and usage.cache_read_tokens == 9000
+    assert usage.raw["model_call_index"] == 1
+    assert "output_reconciled" not in usage.raw
+    assert usage.raw["cost_usd"] == pytest.approx(
+        estimate_cost(MODEL, {**start_usage, "output_tokens": 812})
+    )
+    # The Usage precedes the turn's end.
+    assert isinstance(events[-1], TurnComplete)
+
+
+def test_a_message_delta_before_the_assistant_frame_still_lands() -> None:
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    start_usage = {"input_tokens": 30, "output_tokens": 1}
+    frames = [
+        _stream({"type": "message_start", "message": {"id": "msg_1", "usage": start_usage}}),
+        _stream({"type": "message_delta", "delta": {}, "usage": {"output_tokens": 300}}),
+        _assistant("msg_1", start_usage),
+    ]
+    usages = [e for f in frames for e in mapper.feed(f).events if isinstance(e, Usage)]
+    assert [(u.output_tokens, u.raw["model_call_index"]) for u in usages] == [(300, 1)]
+
+
+def test_without_the_partial_stream_the_result_settles_the_last_call() -> None:
+    """No message_delta: per-call outputs still add up to the turn's own."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    frames = [
+        _assistant("msg_1", {"input_tokens": 100, "output_tokens": 3}),
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}},
+        _assistant("msg_2", {"input_tokens": 120, "output_tokens": 2}),
+        {"type": "result", "subtype": "success", "num_turns": 2, "total_cost_usd": 0.02,
+         "usage": {"input_tokens": 220, "output_tokens": 900}},
+    ]
+    usages = [e for f in frames for e in mapper.feed(f).events if isinstance(e, Usage)]
+    assert [u.raw["model_call_index"] for u in usages] == [1, 2]
+    assert sum(u.output_tokens for u in usages) == 900
+    assert usages[0].output_tokens == 3  # its snapshot is all anyone knows
+    assert usages[1].output_tokens == 897 and usages[1].raw["output_reconciled"] is True
+    assert usages[1].raw["cost_usd"] == pytest.approx(
+        estimate_cost(MODEL, {"input_tokens": 120, "output_tokens": 897})
+    )
+
+
+def test_a_result_never_lowers_a_calls_own_count() -> None:
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    frames = [
+        _assistant("msg_1", {"input_tokens": 10, "output_tokens": 50}),
+        {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0,
+         "usage": {"output_tokens": 20}},
+    ]
+    usages = [e for f in frames for e in mapper.feed(f).events if isinstance(e, Usage)]
+    assert [u.output_tokens for u in usages] == [50]
+
+
 def test_unpriceable_model_leaves_cost_out() -> None:
     raw = per_call_usage({"input_tokens": 5}, model="no-such-model", index=1)
     assert "cost_usd" not in raw and raw["model_call_index"] == 1
@@ -145,6 +271,8 @@ async def test_failed_result_bills_the_turn_on_the_error_event() -> None:
     assert error.usage == {
         "input_tokens": 12, "output_tokens": 5,
         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        # The CLI's own running total, kept next to the turn's share of it.
+        "cli_total_cost_usd": 0.00042,
     }
     assert error.num_model_calls == 1
 

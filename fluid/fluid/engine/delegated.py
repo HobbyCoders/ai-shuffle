@@ -423,6 +423,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # single frame on a resumed process means the handle is dead.
         self._spawn_resume: str | None = None
         self._proc_results = 0
+        # The live CLI's running total_cost_usd after the last result this
+        # loop booked: the baseline its next result's cost is measured from
+        # (the CLI reports the process total, not the turn's). None on a
+        # process spawned with --resume until its first result.
+        self._cli_cost_total: float | None = 0.0
         # Loop time the last turn's result was read (see _discard_stale_stdout).
         self._last_result_at: float | None = None
         # The CLI started a turn of its own (a wake) whose result has not been
@@ -913,6 +918,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             spawn_kwargs["start_new_session"] = True
         self._spawn_resume = self.cli_session_id
         self._proc_results = 0
+        self._cli_cost_total = None if self._spawn_resume else 0.0
         self._proc = await asyncio.create_subprocess_exec(
             *self._build_argv(),
             stdin=asyncio.subprocess.PIPE,
@@ -1084,6 +1090,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             mapper = StreamJsonMapper(
                 session_id=sid, turn_id=turn_id, model=self.model,
                 provider=self.provider, user_node_id=user_node.node_id,
+                cost_baseline=self._cli_cost_total,
             )
             failure: str | None
             try:
@@ -1112,6 +1119,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 usage=dict(mapper.failed_usage),
                 cost_usd=mapper.failed_cost_usd,
                 num_model_calls=mapper.model_calls or None,
+                # The HTTP status the CLI's result carried (429 for a
+                # subscription usage limit, 401 for a lapsed login), so a
+                # host handles it like the same status from any provider.
+                status=mapper.failed_status,
+                provider_message=mapper.failed_provider_message,
             ))
             return mapper
         return mapper
@@ -1136,6 +1148,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _drop_resume_handle(self, sid: str) -> None:
         self.cli_session_id = None
         self._spawn_resume = None
+        # The retry runs on a fresh process, whose cost total starts at zero.
+        self._cli_cost_total = 0.0
         self._persist_cli_session_id(sid, None)
         await self._stop_process(grace=1.0)
 
@@ -1500,9 +1514,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         assert self._proc is not None and self._proc.stdout is not None
         parent = user_node
         last_assistant: Message | None = None
+        # Context snapshots (by model_call_index) whose call's own Usage is
+        # still held by the mapper; each is emitted right after that Usage.
+        held_snapshots: dict[int, Usage] = {}
         while True:
             line = await self._next_stdout_line()
             if not line:
+                # A model call whose Usage was held for its final counts is
+                # still a call the turn paid for: record it before failing.
+                for event in mapper.flush_usage():
+                    await self._emit(event)
+                for snapshot in held_snapshots.values():
+                    await self._emit(snapshot)
                 return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
             if not text:
@@ -1579,10 +1602,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 else:
                     await self._emit(event)
                 self._journal_event(event, mapper)
-                if isinstance(event, Usage) and event.node_id:
-                    await self._ask_usage_snapshot(
-                        event.node_id, event.raw.get("model_call_index"),
-                    )
+                if isinstance(event, Usage) and not event.context_usage:
+                    # The call's own record is out: a snapshot of it that
+                    # arrived first follows it now.
+                    held = held_snapshots.pop(event.raw.get("model_call_index"), None)
+                    if held is not None:
+                        await self._emit(held)
+            if mapped.opened_call is not None:
+                # A model call started. Its context snapshot is asked now,
+                # while its Usage waits for the final token counts; a reply
+                # that beats that Usage is held (see _emit_usage_snapshot).
+                await self._ask_usage_snapshot(*mapped.opened_call)
             if mapped.message is not None and mapped.node_id is not None:
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
@@ -1601,10 +1631,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapped.control_reply is not None:
                 # A control call issued while this turn runs: the turn owns
                 # stdout, so its reader is what delivers the answer.
-                if not await self._emit_usage_snapshot(sid, turn_id, mapped.control_reply):
+                if not await self._emit_usage_snapshot(
+                    sid, turn_id, mapped.control_reply, mapper=mapper, held=held_snapshots,
+                ):
                     self._resolve_control(mapped.control_reply)
             if mapped.is_result:
                 self._last_result_at = asyncio.get_running_loop().time()
+                # The next turn's cost is measured from the total this result
+                # reported, whether it completed, failed or was interrupted.
+                if mapper.cli_total_cost_usd is not None:
+                    self._cli_cost_total = mapper.cli_total_cost_usd
                 # Snapshots the CLI never got round to answering die with the
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
@@ -2573,7 +2609,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _ask_usage_snapshot(
         self, node_id: str, call_index: int | None = None,
     ) -> None:
-        """Ask the CLI what the context looked like for the call just reported.
+        """Ask the CLI what the context looked like for the call just started
+        (its first assistant frame arrived).
 
         Sent, not awaited. The turn's frame reader is the only stdout consumer
         while a turn runs, so awaiting the reply from inside that reader would
@@ -2600,24 +2637,38 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.debug("context-usage snapshot request failed", exc_info=True)
 
     async def _emit_usage_snapshot(
-        self, sid: str, turn_id: str, reply: ControlReply,
+        self, sid: str, turn_id: str, reply: ControlReply, *,
+        mapper: StreamJsonMapper | None = None,
+        held: dict[int, Usage] | None = None,
     ) -> bool:
         """Publish a snapshot reply as a second ``Usage`` for the same node.
 
-        Token fields stay 0 — the call's tokens were already reported by the
-        first event, and double-counting them would inflate every host's spend
-        accounting. Returns False when the reply belongs to somebody else.
+        Token fields stay 0 — the call's tokens are reported by the call's
+        own Usage, and double-counting them would inflate every host's spend
+        accounting. That record must come first: a host counts a zero-token
+        record with an index it has not seen as a call of its own. So while
+        ``mapper`` still holds the call's Usage (waiting for its final token
+        counts), the snapshot goes into ``held`` and the reader emits it right
+        after that Usage. Returns False when the reply belongs to somebody
+        else.
         """
         node_id = self._pending_usage_snapshots.pop(reply.request_id, None)
         call_index = self._snapshot_call_index.pop(reply.request_id, None)
         if node_id is None:
             return False
         if reply.ok and reply.payload is not None:
-            await self._emit(Usage(
+            snapshot = Usage(
                 session_id=sid, node_id=node_id, turn_id=turn_id,
                 context_usage=reply.payload,
                 raw={"model_call_index": call_index} if call_index is not None else {},
-            ))
+            )
+            if (
+                held is not None and mapper is not None and call_index is not None
+                and mapper.call_is_held(call_index)
+            ):
+                held[call_index] = snapshot
+            else:
+                await self._emit(snapshot)
         else:
             logger.debug("context-usage snapshot unavailable: %s", reply.error)
         return True
