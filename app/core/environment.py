@@ -1154,8 +1154,8 @@ def _python_facts(cwd: Path, is_shuffle: bool) -> list:
                     check=False,
                 )
                 if result.returncode == 0:
-                    return [f"Python: worker interpreter {sys.executable} lacks "
-                            f"pytest, but verified pytest executable `{pytest_exe}` "
+                    return [f"Python: pytest was not verified in worker interpreter "
+                            f"{sys.executable}, but verified pytest executable `{pytest_exe}` "
                             "is available. Use it with the checkout's documented "
                             "test environment; no install is needed for pytest."]
             except (OSError, subprocess.SubprocessError):
