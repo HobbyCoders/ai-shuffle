@@ -184,14 +184,18 @@ async def test_fresh_install_refuses_a_turn_from_every_source(mock_db, tmp_path,
 
 
 async def test_fresh_install_refuses_the_rest_query_paths(mock_db, tmp_path):
-    from app.api.query import require_claude_auth
+    from app.api.query import _refuse_unready_leg, require_claude_auth
     from app.core import query_engine
     from fastapi import HTTPException
 
     database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path)})
+    # The route dependency checks only the license; the Claude credential is
+    # checked per leg once the route knows the agent (a Claude one here).
+    assert await require_claude_auth() is None
     with pytest.raises(HTTPException) as exc:
-        await require_claude_auth()
+        await _refuse_unready_leg("gate-profile", None)
     assert exc.value.status_code == 503 and exc.value.detail == credential_gate.NO_CLI_MESSAGE
+    assert exc.value.headers == {"X-Error-Code": credential_gate.SETUP_CODE}
 
     with patch("app.core.provider.factory.make_adapter", side_effect=AssertionError("no spawn")):
         frames = [f async for f in query_engine.stream_query("hello", "gate-profile")]
