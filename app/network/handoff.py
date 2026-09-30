@@ -145,6 +145,23 @@ async def handle(payload, peer_device_id):
     member = engine.require_context().member(peer_device_id)
     if not member or member.kind != "worker" or member.status != "active":
         raise PermissionError("A handoff requires an authenticated receiving worker.")
+    if payload.get("phase") == "receive":
+        from app.api.git_helpers import invalidate_working_dir_cache
+        from app.core import streaming_status
+
+        session = await run_sync(database.get_session, sid)
+        if not session:
+            raise LookupError("Unknown session")
+        if streaming_status.has_active_run(sid):
+            raise ValueError("Stop this session's active run before moving it.")
+        try:
+            cwd = await receive(session)
+        except (control.RunnerUnreachable, control.ControlRefused) as exc:
+            # Preserve the owner's refusal/offline reason across the outer
+            # control hop instead of turning an expected refusal into HTTP 500.
+            raise ValueError(str(exc)) from exc
+        invalidate_working_dir_cache(session_id=sid)
+        return {"moved": cwd is not None}
     if payload.get("phase") == "begin":
         return await run_sync(begin, sid, peer_device_id, payload.get("remote"))
     if payload.get("phase") in ("commit", "cancel"):
@@ -197,9 +214,38 @@ def install_history(sid, data, cwd):
 def _accept_owner(sid, device_id, branch=None):
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE sessions SET owner_device_id=%s, branch=%s WHERE id=%s", (device_id, branch, sid))
+        cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
+                    (device_id, device_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
         if branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
+
+
+async def move(session, target):
+    """Ask an authenticated destination to pull through the canonical protocol.
+
+    No checkout or transcript is supplied by the UI worker. The destination
+    reads its mirrored session and obtains Git identifiers and encrypted context
+    directly from the current owner, under the same lease as Resume here.
+    """
+    from app.network import runners
+
+    ctx = engine.context()
+    if ctx is None:
+        raise ValueError("Both workers must be online on this network to move a session.")
+    device = runners.resolve_runner_id(target)
+    member = ctx.member(device)
+    if not member or member.kind != "worker" or member.status != "active":
+        raise ValueError("The destination must be an active worker on this network.")
+    payload = {"session_id": session["id"], "phase": "receive"}
+    if device == ctx.device_id:
+        result = await handle(payload, ctx.device_id)
+    else:
+        # The destination may spend 600s publishing and 180s confirming with
+        # the owner. Never retry a timed-out mutation or fall back to a DB pin.
+        result = await control.call(device, "handoff", payload, timeout=900)
+    if not isinstance(result.get("moved"), bool):
+        raise ValueError("The destination did not confirm the session transfer.")
+    return result["moved"]
 
 
 async def receive(session):

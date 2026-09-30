@@ -1,22 +1,36 @@
+import contextlib
 import json
+from unittest.mock import patch
 
 import pytest
 from app.core import checkout_transfer
 from app.core.config import settings
 from app.db import database, projects_v2, checkouts, runs
 from app.db.base import get_db
-from app.network import control, engine, handoff
+from app.network import control, engine, handoff, tokens, transport
 from tests.core.network.harness import Worker, join, converge
 from tests.core.test_checkout_transfer import repositories, git
 
 
 @pytest.fixture
-def pair(tmp_path, repositories):
+def pair(tmp_path, repositories, monkeypatch):
+    # Worker.active isolates databases and network identities. Also isolate the
+    # legacy install id: the test process may inherit one explicit INSTANCE_ID.
+    original_active = Worker.active
+
+    @contextlib.contextmanager
+    def active(worker):
+        with original_active(worker), patch.object(settings, "instance_id", "handoff-" + worker.name):
+            yield worker
+
+    monkeypatch.setattr(Worker, "active", active)
     a, b = Worker("a", tmp_path), Worker("b", tmp_path)
     source, target = repositories
     with a.active():
         engine.create_network("Handoff test")
-    join(a, b)
+    with b.active():
+        target_instance = settings.effective_instance_id
+    join(a, b, legacy_instance_id=target_instance)
     for worker, cwd in ((a, source), (b, target)):
         with worker.active():
             project = projects_v2.upsert_project("git:github.com/example/repo", name="Repo")
@@ -39,6 +53,8 @@ def pair(tmp_path, repositories):
     a.close()
     b.close()
     engine.reset_for_tests()
+    tokens.reset_for_tests()
+    transport.reset_for_tests()
 
 
 @pytest.mark.asyncio
@@ -276,3 +292,228 @@ async def test_source_branch_switch_at_same_commit_refuses_ownership(pair, monke
     with a.active():
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dirty", [False, True])
+async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monkeypatch, dirty):
+    from app.api.sessions import move_session_endpoint
+    from app.api.sessions_helpers import MoveSessionRequest
+    from app.db import session_events
+    from app.network import crypto
+    from tests.api.helpers import fake_request
+
+    a, b, source, target = pair
+    with b.active():
+        target_instance = settings.effective_instance_id
+    with a.active():
+        database.register_install(target_instance, "Target", None, "linux", "test")
+        session_events.append_events("handoff-test", [{"type": "message.user", "payload": {"content": "Final unsynced context"}}])
+    if dirty:
+        (source / "file.txt").write_text("dirty staged work")
+        git(source, "add", "file.txt")
+        (source / "new.txt").write_text("untracked source work")
+    (source / ".env").write_text("NEVER_COPY_THIS=private")
+    phases = []
+    exported = []
+
+    # Exercise actual peer challenge/signature tokens and HTTP control routing;
+    # only transport is in-process, so no real user worker or remote is touched.
+    import httpx
+    from app.db import network as network_store
+    from tests.core.network.test_transport import ServedBy
+
+    served = {a.device_id: ServedBy(a, "http://a.local:8000"),
+              b.device_id: ServedBy(b, "http://b.local:8000")}
+    real_async, real_call = httpx.AsyncClient, control.call
+    transport.reset_for_tests()
+    tokens.reset_for_tests()
+    for worker, peer in ((a, b), (b, a)):
+        with worker.active():
+            network_store.touch_member(peer.device_id, endpoints=[served[peer.device_id].base_url])
+
+    def route(request):
+        server = served[a.device_id] if request.url.host == "a.local" else served[b.device_id]
+        return server.handler(request)
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(route)
+        return real_async(*args, **kwargs)
+
+    async def call(device, action, body, **kwargs):
+        assert action in ("handoff", "git-state")
+        if action == "handoff":
+            phases.append(body["phase"])
+            if body["phase"] == "receive":
+                assert body == {"session_id": "handoff-test", "phase": "receive"}
+        reply = await real_call(device, action, body, **kwargs)
+        if action == "git-state":
+            assert reply["eligible"] is True
+            assert all("path" not in row for row in reply["checkouts"])
+        if action == "handoff" and body["phase"] == "begin":
+            ctx = engine.require_context()
+            raw = crypto.decrypt_payload(ctx.network_key, reply["payload"], handoff._aad("handoff-test", b.device_id))
+            exported.append(json.loads(raw))
+        return reply
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr("app.core.placement.capable_runners", lambda *args: [target_instance])
+    with a.active():
+        # The target's real checkout was registered on B, not seeded into A.
+        project_id = database.get_session("handoff-test")["project_v2_id"]
+        assert not checkouts.has_active_base_checkout(project_id, target_instance)
+        result = await move_session_endpoint(fake_request(), "handoff-test", MoveSessionRequest(target_instance_id=target_instance), token="test")
+        assert result.moved is True
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+        head = checkout_transfer.fingerprint(source)
+        assert git(source, "ls-remote", "origin", "refs/heads/feature/only-on-worker").decode().split()[0] == head
+    assert phases == ["receive", "begin", "commit"]
+    for server in served.values():
+        assert ("POST", "/api/v1/network/peer/auth/challenge") in server.requests
+        assert ("POST", "/api/v1/network/peer/auth/token") in server.requests
+        assert ("POST", "/api/v1/network/peer/control/handoff") in server.requests
+    assert set(exported[0]["checkout"]) == {"protocol", "branch", "head", "fingerprint", "remote"}
+    with b.active():
+        from app.core import project_resolver
+        row = database.get_session("handoff-test")
+        cwd = project_resolver.resolve_existing_cwd(row)
+        assert checkout_transfer.fingerprint(cwd) == head
+        assert row["owner_device_id"] == b.device_id
+        placement = row["placement"]
+        assert (json.loads(placement) if isinstance(placement, str) else placement) == {"where": "runner:" + b.device_id}
+        assert row["sdk_session_id"].startswith("ses_") and row["sdk_session_id"] != "ses_source"
+        assert database.get_session_messages("handoff-test")[0]["content"] == "Keep this conversation"
+        assert session_events.get_events("handoff-test", 0)[-1]["payload"]["content"] == "Final unsynced context"
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT message FROM fluid_session_nodes WHERE session_id=%s", (row["sdk_session_id"],))
+            message = cur.fetchone()["message"]
+            assert (json.loads(message) if isinstance(message, str) else message)["content"] == "Native history"
+        from pathlib import Path
+        assert not (Path(cwd) / ".env").exists()
+        if dirty:
+            assert (Path(cwd) / "new.txt").read_text() == "untracked source work"
+    converge([a, b])
+    with b.active():
+        assert database.get_session("handoff-test")["sdk_session_id"] == row["sdk_session_id"]
+        assert project_resolver.resolve_existing_cwd(database.get_session("handoff-test")) == cwd
+
+
+@pytest.mark.asyncio
+async def test_move_preserves_dirty_destination_and_source_ownership(pair, monkeypatch, tmp_path):
+    a, b, source, target = pair
+    state = checkout_transfer.export_checkout(source, "feature/only-on-worker")
+    from pathlib import Path
+    destination = Path(checkout_transfer.import_checkout(target, tmp_path / "existing", state))
+    (destination / "file.txt").write_text("Keep destination edits")
+    phases = []
+
+    async def call(device, action, body, **kwargs):
+        caller = engine.require_context().device_id
+        phases.append(body["phase"])
+        with (a if device == a.device_id else b).active():
+            return await control.handle(action, body, from_device=caller)
+
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        with pytest.raises(ValueError, match="receiving checkout has local changes"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT state FROM runs WHERE session_id=%s", ("handoff-test",))
+            assert cur.fetchone()["state"] == "released"
+    assert phases == ["receive", "begin", "cancel"]
+    assert (destination / "file.txt").read_text() == "Keep destination edits"
+    with b.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,status", [("worker", "revoked"), ("client", "active")])
+async def test_move_rejects_ineligible_network_destination_before_git(pair, monkeypatch, kind, status):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+    a, b, source, target = pair
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        ctx = engine.require_context()
+        ctx.members[b.device_id] = replace(ctx.member(b.device_id), kind=kind, status=status)
+        with pytest.raises(ValueError, match="active worker"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    call.assert_not_called()
+    assert not git(source, "ls-remote", "origin", "refs/heads/feature/only-on-worker").strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["foreign-network-device", "revoked", "client"])
+async def test_receive_request_requires_authenticated_active_worker(pair, monkeypatch, caller):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+    a, b, source, target = pair
+    receive = AsyncMock()
+    monkeypatch.setattr(handoff, "receive", receive)
+    with b.active():
+        ctx = engine.require_context()
+        peer = caller
+        if caller in ("revoked", "client"):
+            peer = a.device_id
+            ctx.members[peer] = replace(ctx.member(peer), status="revoked" if caller == "revoked" else "active", kind="client" if caller == "client" else "worker")
+        with pytest.raises(PermissionError, match="authenticated receiving worker"):
+            await control.handle("handoff", {"session_id": "handoff-test", "phase": "receive"}, from_device=peer)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    receive.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_move_to_this_worker_uses_the_same_leased_protocol(pair, monkeypatch):
+    a, b, source, target = pair
+    phases = []
+
+    async def call(device, action, body, **kwargs):
+        assert device == a.device_id
+        phases.append(body["phase"])
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        assert await handoff.move(database.get_session("handoff-test"), b.device_id) is True
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+    assert phases == ["begin", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_move_cannot_publish_while_source_has_live_run(pair, monkeypatch):
+    a, b, source, target = pair
+
+    async def call(device, action, body, **kwargs):
+        caller = engine.require_context().device_id
+        with (a if device == a.device_id else b).active():
+            return await control.handle(action, body, from_device=caller)
+
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        assert runs.claim_run("handoff-test", settings.effective_instance_id, 300)
+        with pytest.raises(ValueError, match="busy"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    assert not git(source, "ls-remote", "origin", "refs/heads/feature/only-on-worker").strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    control.RunnerUnreachable("Source offline"),
+    control.ControlRefused("Source refused the handoff"),
+])
+async def test_receive_control_hop_preserves_owner_refusal(pair, monkeypatch, error):
+    from unittest.mock import AsyncMock
+    a, b, source, target = pair
+    monkeypatch.setattr(handoff, "receive", AsyncMock(side_effect=error))
+    with b.active():
+        with pytest.raises(ValueError, match=str(error)):
+            await control.handle("handoff", {"session_id": "handoff-test", "phase": "receive"}, from_device=a.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id

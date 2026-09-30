@@ -306,11 +306,10 @@ async def move_session_endpoint(
 
     Adopt is a pull ("resume THIS session HERE"); move is a push ("run this
     session THERE from now on"), so it can be driven from any device without
-    sitting at the destination. Mechanically it is the same single write: the
-    shared-DB ``adopt_session`` dual-write re-points the legacy ``instance_id``
-    owner AND the canonical ``placement = {"where": "runner:<target>"}`` pin, so
-    every reader (board filters, relay routing, the placement resolver) agrees on
-    the new owner immediately.
+    sitting at the destination. The destination performs the authenticated
+    Resume-here protocol: the source commits and pushes through Git, the target
+    syncs its checkout and context, and only then does the leased handoff update
+    ownership. A database-only pin would strand the branch and native history.
 
     Semantics:
       * Target already owns it → no-op, ``moved=False`` / ``already_there``.
@@ -334,7 +333,7 @@ async def move_session_endpoint(
         )
 
     # Already pinned there — nothing to write.
-    if target == (session.get("instance_id") or ""):
+    if target in (session.get("instance_id"), session.get("owner_device_id")):
         return MoveSessionResponse(
             session_id=session_id,
             instance_id=target,
@@ -363,14 +362,14 @@ async def move_session_endpoint(
             ),
         )
 
-    # Project host gate — has_active_base_checkout, not capable_runners.
-    # capable_runners(project_v2_id) also matches branch-only worktrees, but a
-    # new branch needs a base checkout to fork from.
-    # Projectless sessions skip this. Fails OPEN on any non-409 error — a
-    # preflight bug must never make a movable session impossible to move.
+    # Project host gate — ask the destination for its active base checkout.
+    # Checkout paths are worker-local and never replicated. Capability filtering
+    # alone also admits branch-only worktrees, which cannot create a new branch.
+    # Projectless sessions skip this. An unresolved project or failed preflight
+    # must not bypass the checkout gate.
     if session.get("project_v2_id") or session.get("project_id"):
         from app.core import project_resolver
-        from app.db import checkouts as checkouts_db
+        from app.network import git as network_git, control, engine
 
         try:
             project_v2_id = session.get("project_v2_id")
@@ -379,9 +378,7 @@ async def move_session_endpoint(
                     project_resolver.resolve_project_v2, session
                 )
                 project_v2_id = (resolved or {}).get("id")
-            if project_v2_id and not await run_sync(
-                checkouts_db.has_active_base_checkout, project_v2_id, target
-            ):
+            if not project_v2_id or not await network_git.eligible(target, project_v2_id):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -392,11 +389,13 @@ async def move_session_endpoint(
                 )
         except HTTPException:
             raise
-        except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
-            logger.warning(
-                "Move preflight errored for session %s; proceeding fail-open",
-                session_id,
-                exc_info=True,
+        except (control.RunnerUnreachable, control.ControlRefused, engine.NotEnrolled, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception:
+            logger.warning("Move preflight failed for session %s", session_id, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not check the destination's project checkout. Try again.",
             )
 
     from app.core import streaming_status
@@ -414,15 +413,22 @@ async def move_session_endpoint(
             ),
         )
 
-    owner = session.get("instance_id")
-    updated = await run_sync(database.adopt_session, session_id, target)
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}",
-        )
+    from app.network import handoff, control, engine
+    from app.api.git_helpers import invalidate_working_dir_cache
 
-    await run_sync(apply_sdk_session_keep, updated, target)
+    owner = session.get("instance_id")
+    try:
+        moved = await handoff.move(session, target)
+    except (control.RunnerUnreachable, control.ControlRefused, engine.NotEnrolled,
+            PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        logger.warning("Move handoff failed for session %s", session_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not confirm the session handoff. Refresh its owner before retrying.",
+        )
+    invalidate_working_dir_cache(session_id=session_id)
 
     # Wake the target's claim loop now instead of on its next 5s poll. Purely a
     # latency optimization — the poll is the correctness backstop, so a NOTIFY
@@ -447,8 +453,8 @@ async def move_session_endpoint(
     return MoveSessionResponse(
         session_id=session_id,
         instance_id=target,
-        moved=True,
-        status="moved",
+        moved=moved,
+        status="moved" if moved else "already_there",
         pending_live_run=False,
     )
 

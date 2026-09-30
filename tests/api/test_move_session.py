@@ -3,23 +3,25 @@
 
 Move is adopt's mirror image: instead of "resume THIS session HERE" it says
 "run this session on THAT device from now on", so it can be driven from any
-install. Same single write (``database.adopt_session`` — owner column +
-``placement`` pin dual-write), different gates:
+install. The destination performs the canonical authenticated Git/context
+handoff; the API never writes a database-only pin. Preflight gates:
   - target already owns it → 200 no-op (``moved=False``);
   - unknown install → 404; offline/incapable install → 409
     (``capable_runners(None, {})`` — online + capability only);
   - project session whose target has no ACTIVE BASE checkout → 409
-    (``has_active_base_checkout``; a branch-only worktree is not a base);
+    (``network.git.eligible``; a branch-only worktree is not a base);
   - actively streaming → 409 (same gate as /adopt), so turn-end persist
     cannot restore the old disk's ``sdk_session_id``. ``pending_live_run``
-    stays ``false``. CLI resume ids are cleared on move; Fluid ids are kept.
+    stays ``false``. The destination retains its imported native context id.
 
 Fixtures mirror tests/api/test_adopt_preflight_v2.py. Checkout-gate tests seed
 real ``checkouts`` rows (mirror tests/api/test_worktree_remote_target.py) and
 do not patch ``capable_runners`` for the host predicate.
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from app.network import control
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,6 +40,12 @@ def mock_database():
         mock_db.get_installs_map.return_value = {}
         mock_db.get_project.return_value = None
         yield mock_db
+
+
+@pytest.fixture(autouse=True)
+def mock_handoff():
+    with patch("app.network.handoff.move", new=AsyncMock(return_value=True)) as move:
+        yield move
 
 
 @pytest.fixture
@@ -171,17 +179,12 @@ def test_branch_only_checkout_on_target_409s(client, mock_database, tmp_path):
     mock_database.adopt_session.assert_not_called()
 
 
-def test_active_base_checkout_on_target_moves(client, mock_database, tmp_path):
+def test_active_base_checkout_on_target_moves(client, mock_database, mock_handoff, tmp_path):
     """Idle project session + active BASE checkout on the target → 200."""
     pv2 = _seed_pv2()
     session = _session(project_id="proj-1", project_v2_id=pv2["id"])
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac"}
-    mock_database.adopt_session.return_value = {
-        **session,
-        "instance_id": TARGET,
-        "placement": {"where": f"runner:{TARGET}"},
-    }
     _give_target_a_checkout(tmp_path, pv2["id"])
 
     with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
@@ -193,21 +196,16 @@ def test_active_base_checkout_on_target_moves(client, mock_database, tmp_path):
     assert data["moved"] is True
     assert data["status"] == "moved"
     assert data["instance_id"] == TARGET
-    mock_database.adopt_session.assert_called_once_with("test-session-id", TARGET)
+    mock_handoff.assert_awaited_once_with(session, TARGET)
+    mock_database.adopt_session.assert_not_called()
     notify.assert_called_once_with("test-session-id")
 
 
-def test_happy_path_moves_and_repins(client, mock_database):
-    """Idle projectless session → 200, owner + placement pin re-pointed."""
+def test_happy_path_moves_and_repins(client, mock_database, mock_handoff):
+    """Idle projectless session → confirmed destination handoff, no local pin."""
     session = _session()
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac"}
-    moved_row = {
-        **session,
-        "instance_id": TARGET,
-        "placement": {"where": f"runner:{TARGET}"},
-    }
-    mock_database.adopt_session.return_value = moved_row
 
     with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
             patch("app.core.turn_claim.notify_turns_changed") as notify:
@@ -219,13 +217,11 @@ def test_happy_path_moves_and_repins(client, mock_database):
     assert data["status"] == "moved"
     assert data["instance_id"] == TARGET
     assert data["pending_live_run"] is False
-    mock_database.adopt_session.assert_called_once_with("test-session-id", TARGET)
+    mock_handoff.assert_awaited_once_with(session, TARGET)
+    mock_database.adopt_session.assert_not_called()
     notify.assert_called_once_with("test-session-id")
 
-    # The single write is the ownership + placement dual-write.
-    updated = mock_database.adopt_session.return_value
-    assert updated["instance_id"] == TARGET
-    assert updated["placement"] == {"where": f"runner:{TARGET}"}
+    mock_database.update_session.assert_not_called()
 
 
 def test_live_run_409s_and_does_not_move(client, mock_database):
@@ -256,38 +252,21 @@ def test_live_run_409s_and_does_not_move(client, mock_database):
     mock_database.update_session.assert_not_called()
 
 
-def test_cli_move_clears_sdk_session_id(client, mock_database):
-    """A CLI resume id lives on the source disk — /move cannot stat the
-    destination, so the id is cleared. DB transcript remains."""
+def test_move_does_not_clear_imported_native_history(client, mock_database, mock_handoff):
+    """Only the receiver decides the imported SDK identity; the sender cannot stat it."""
     session = _session(sdk_session_id="cli-uuid-1")
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac"}
-    mock_database.adopt_session.return_value = {**session, "instance_id": TARGET}
 
-    with patch("app.core.provider.fluid_transcript.is_fluid_session", return_value=False), \
-            patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.api.sessions.apply_sdk_session_keep") as keep, \
             patch("app.core.turn_claim.notify_turns_changed"):
         response = _move(client)
 
     assert response.status_code == 200
-    mock_database.update_session.assert_called_once_with(
-        "test-session-id", sdk_session_id=""
-    )
-
-
-def test_fluid_move_keeps_sdk_session_id(client, mock_database):
-    """Fluid ids live in shared Postgres — resume works on any install."""
-    session = _session(sdk_session_id="ses_deadbeefcafe")
-    mock_database.get_session.return_value = session
-    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
-    mock_database.adopt_session.return_value = {**session, "instance_id": TARGET}
-
-    with patch("app.core.provider.fluid_transcript.is_fluid_session", return_value=True), \
-            patch("app.core.placement.capable_runners", return_value=[TARGET]), \
-            patch("app.core.turn_claim.notify_turns_changed"):
-        response = _move(client)
-
-    assert response.status_code == 200
+    mock_handoff.assert_awaited_once_with(session, TARGET)
+    keep.assert_not_called()
+    mock_database.adopt_session.assert_not_called()
     mock_database.update_session.assert_not_called()
 
 
@@ -298,4 +277,94 @@ def test_blank_target_is_rejected(client, mock_database):
     response = _move(client, target="")
 
     assert response.status_code in (400, 422)
+    mock_database.adopt_session.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [
+    control.RunnerUnreachable("Destination offline"),
+    control.ControlRefused("Worker removed or permission denied"),
+    ValueError("Git push failed; ownership has not moved"),
+])
+def test_handoff_failure_never_falls_back_to_pin(client, mock_database, mock_handoff, error):
+    mock_database.get_session.return_value = _session()
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    mock_handoff.side_effect = error
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]):
+        response = _move(client)
+    assert response.status_code == 409
+    assert str(error) in response.json()["detail"]
+    mock_database.adopt_session.assert_not_called()
+    mock_database.update_session.assert_not_called()
+
+
+def test_checkout_preflight_failure_is_closed(client, mock_database, mock_handoff):
+    mock_database.get_session.return_value = _session(project_v2_id="project")
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.db.checkouts.has_active_base_checkout", side_effect=RuntimeError("DB unavailable")):
+        response = _move(client)
+    assert response.status_code == 503
+    mock_handoff.assert_not_called()
+    mock_database.adopt_session.assert_not_called()
+
+
+def test_unresolved_legacy_project_cannot_skip_checkout_gate(client, mock_database, mock_handoff):
+    mock_database.get_session.return_value = _session(project_id="legacy-project")
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.core.project_resolver.resolve_project_v2", return_value=None):
+        response = _move(client)
+    assert response.status_code == 409
+    mock_handoff.assert_not_called()
+    mock_database.adopt_session.assert_not_called()
+
+
+@pytest.mark.parametrize("api_user", [
+    {"id": "different-user"},
+    {"id": "owner-user", "profile_ids": ["not-default"]},
+    {"id": "owner-user", "project_id": "not-project"},
+])
+def test_move_preserves_api_user_ownership_and_scope(client, mock_database, mock_api_user, mock_handoff, api_user):
+    mock_database.get_session.return_value = _session(api_user_id="owner-user", project_id="project")
+    mock_api_user.return_value = api_user
+    response = _move(client)
+    assert response.status_code == 403
+    mock_handoff.assert_not_called()
+    mock_database.adopt_session.assert_not_called()
+
+
+def test_canonical_target_owner_is_a_noop(client, mock_database, mock_handoff):
+    mock_database.get_session.return_value = _session(owner_device_id=TARGET)
+    response = _move(client)
+    assert response.status_code == 200
+    assert response.json()["moved"] is False
+    mock_handoff.assert_not_called()
+
+
+def test_destination_already_owns_session_returns_noop(client, mock_database, mock_handoff):
+    mock_database.get_session.return_value = _session()
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    mock_handoff.return_value = False
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.core.turn_claim.notify_turns_changed"):
+        response = _move(client)
+    assert response.status_code == 200
+    assert response.json()["moved"] is False
+    assert response.json()["status"] == "already_there"
+    mock_database.adopt_session.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [
+    control.RunnerUnreachable("Destination offline"),
+    control.ControlRefused("Destination revoked"),
+])
+def test_live_checkout_query_refusal_keeps_its_reason(client, mock_database, mock_handoff, error):
+    mock_database.get_session.return_value = _session(project_v2_id="project")
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.network.git.eligible", new=AsyncMock(side_effect=error)):
+        response = _move(client)
+    assert response.status_code == 409
+    assert str(error) in response.json()["detail"]
+    mock_handoff.assert_not_called()
     mock_database.adopt_session.assert_not_called()
