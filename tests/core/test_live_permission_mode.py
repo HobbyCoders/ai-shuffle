@@ -74,6 +74,30 @@ async def test_idle_session_saves_without_spawning(live, monkeypatch):
     state.adapter.set_permission_mode.assert_not_awaited()
 
 
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions", "auto"])
+async def test_idle_http_update_round_trips_real_session_binding(mock_db, monkeypatch, mode):
+    import httpx
+    from fastapi import FastAPI
+
+    # Produce the row through creation, then exercise the actual setter and DB
+    # readback rather than mocking the persisted field the frontend consumes.
+    created = api.database.create_session(SID, "default")
+    assert created["permission_mode"] is None
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(api.control.engine, "context", lambda: None)
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api/v1/sessions")
+    app.dependency_overrides[api.require_auth] = lambda: "owner"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(f"/api/v1/sessions/{SID}/permission-mode", json={"permission_mode": mode})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"permission_mode": mode}
+    assert api.database.get_session(SID)["permission_mode"] == mode
+    # A session-specific update must not become a server-wide creation default.
+    assert api.database.create_session("another-session", "default")["permission_mode"] is None
+
+
 async def test_chat_ceiling_cannot_be_widened(live, monkeypatch):
     state, save = live
     monkeypatch.setattr(api.control, "_require_owned", lambda sid: {"id": sid, "mode": "chat"})

@@ -657,6 +657,7 @@
 	onToggleFast={() => activeSession.setFastMode(!fastMode)}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
+	{permissionUpdating}
 	onPermissionSelect={selectPermission}
 	showCodeControls={isCodeLane}
 />
