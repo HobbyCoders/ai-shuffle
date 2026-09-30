@@ -475,8 +475,8 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
-            # shutil.which stats the filesystem. A missing CLI raises
-            # ClaudeCliMissingError here, before any engine is built.
+            # Resolving the CLI stats PATH entries on disk. A missing CLI
+            # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
             self._engine = DelegatedLoop(
@@ -3600,12 +3600,14 @@ def _resolve_claude_cmd(*, windows: Optional[bool] = None) -> list:
     :class:`ClaudeCliMissingError`, whose message tells the user how to
     install it.
 
-    PATH entries are searched in order. On Windows each entry is checked for
-    ``claude.exe`` first and only then for a ``claude.cmd`` / ``claude.bat``
-    shim, whatever the PATHEXT order says. A shim still runs (the arguments the
-    loop passes are short and single-line), but the first time one is chosen a
-    WARNING recommends the native installer. Elsewhere only an executable
-    extension-less ``claude`` counts. ``windows`` overrides the platform check
+    PATH entries are searched in order. On Windows every entry is checked for
+    ``claude.exe`` before any entry is checked for a ``claude.cmd`` /
+    ``claude.bat`` shim, whatever the PATHEXT or PATH order says: npm's folder
+    under ``%APPDATA%`` often precedes ``~/.local/bin``, and the native binary
+    must still win. A shim runs only when no ``claude.exe`` is on PATH at all,
+    and the first time one is chosen a WARNING recommends the native installer
+    (cmd.exe cuts a multi-line argument at its first newline). Elsewhere only
+    an executable extension-less ``claude`` counts. ``windows`` overrides the platform check
     so tests can cover both branches on any OS; nothing here runs the binary.
     """
     if windows is None:
@@ -3618,24 +3620,26 @@ def _resolve_claude_cmd(*, windows: Optional[bool] = None) -> list:
             return False
         return windows or os.access(path, os.X_OK)
 
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
+    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if e]
+    # Two passes: a native binary anywhere on PATH beats a shim anywhere.
+    for entry in entries:
         for name in binaries:
             found = os.path.join(entry, name)
             if _usable(found):
                 return [found]
+    for entry in entries:
         for name in shims:
             found = os.path.join(entry, name)
             if _usable(found):
                 if found not in _WARNED_CLAUDE_SHIMS:
                     _WARNED_CLAUDE_SHIMS.add(found)
                     logger.warning(
-                        "Using the Claude Code CLI through the batch shim %s. "
-                        "cmd.exe shims cut arguments at the first newline and "
-                        "reject long command lines; install the native CLI "
-                        "(https://claude.ai/install.ps1) so claude.exe is found "
-                        "first.",
+                        "Using the Claude Code CLI through the batch shim %s "
+                        "because no claude.exe is on PATH. cmd.exe shims cut "
+                        "arguments at the first newline and reject long "
+                        "command lines; install the native CLI "
+                        "(https://claude.ai/install.ps1) and put its folder "
+                        "on PATH.",
                         found,
                     )
                 return [found]

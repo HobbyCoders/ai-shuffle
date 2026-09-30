@@ -48,6 +48,27 @@ def test_the_exe_wins_over_a_cmd_shim_in_the_same_dir(tmp_path, path_of, caplog)
     assert _shim_warnings(caplog) == []
 
 
+def test_an_exe_later_on_path_wins_over_an_earlier_npm_shim(tmp_path, path_of, caplog):
+    # The npm install puts %APPDATA%\npm (claude.cmd) ahead of the native
+    # installer's ~/.local/bin (claude.exe). The shim would cut the multi-line
+    # appended prompt at its first newline, so the exe must still win.
+    _touch(tmp_path / "npm" / "claude.cmd")
+    exe = _touch(tmp_path / "local-bin" / "claude.exe")
+    path_of(tmp_path / "npm", tmp_path / "local-bin")
+
+    with caplog.at_level(logging.WARNING, logger=ha.logger.name):
+        assert ha._resolve_claude_cmd(windows=True) == [str(exe)]
+    assert _shim_warnings(caplog) == []
+
+
+def test_the_first_shim_on_path_is_used_when_there_is_no_exe(tmp_path, path_of):
+    first = _touch(tmp_path / "npm" / "claude.cmd")
+    _touch(tmp_path / "other" / "claude.bat")
+    path_of(tmp_path / "npm", tmp_path / "other")
+
+    assert ha._resolve_claude_cmd(windows=True) == [str(first)]
+
+
 def test_a_lone_cmd_shim_is_used_with_one_warning(tmp_path, path_of, caplog):
     bin_dir = tmp_path / "npm"
     shim = _touch(bin_dir / "claude.cmd")
