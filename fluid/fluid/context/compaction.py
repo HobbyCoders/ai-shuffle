@@ -136,6 +136,13 @@ class CompactionConfig:
     # pin that path. The trim-only contract (``enabled=False``) always keeps
     # the legacy arming so its renders stay byte-identical.
     below_threshold_skips_retry: bool = True
+    # Image rung inside the size batch (plan item 6, B13). On, whether a batch
+    # is due is decided on the prompt before images are consumed, and the size
+    # rungs still run when the images alone pull it under the trigger. Off
+    # restores the legacy early return, which split one due batch into two
+    # rebuilds a few calls apart, or sank it under the 5% floor when the image
+    # reclaim was small. The trim-only contract always keeps the legacy path.
+    image_rung_in_batch: bool = True
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -786,13 +793,18 @@ class Compactor:
         # pressure and for a turn boundary rather than rewriting the prefix
         # mid-turn at low occupancy.
         promotions: list[Promotion] = []
+        due = total > threshold
         if turn_boundary and total > self._image_threshold(threshold):
             promotions = self._consume_images(nodes)
             if promotions:
                 rendered = self._render(nodes)
                 total = overhead_tokens + estimate_tokens_of_messages(rendered)
         self._candidate_threshold = threshold
-        if total <= threshold:
+        # Whether the batch is due is decided before the images leave. Deciding
+        # it after them (the legacy path) let a due batch stop at the images:
+        # the size trim then came a few calls later as a second rebuild, or a
+        # small image reclaim fell under the 5% floor and nothing ran (B13).
+        if not (due if self.config.image_rung_in_batch else total > threshold):
             self._candidate_below = True
             return rendered, promotions
         # The rungs below stay available mid-turn on purpose: past the trigger
@@ -952,6 +964,9 @@ class Compactor:
                 rendered = self._render(nodes)
                 total = overhead_tokens + estimate_tokens_of_messages(rendered)
         self._candidate_threshold = threshold
+        # The legacy early return after the image rung stays here on purpose:
+        # the trim-only contract is byte-identical, so image_rung_in_batch
+        # (B13) applies to the full ladder only.
         if total <= threshold:
             self._candidate_below = True
             return rendered, promotions

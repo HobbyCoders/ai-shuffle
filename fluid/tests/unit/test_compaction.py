@@ -547,6 +547,114 @@ def test_compactor_keeps_unconsumed_image() -> None:
     assert _images(rendered[2]) == _images(nodes[2].message)
 
 
+def _image_then_turns(turns: int) -> list[SessionNode]:
+    """A consumed screenshot, ``turns`` finished turns of tool results, and
+    the next turn's first user message."""
+    nodes = _image_history()
+    for t in range(1, turns + 1):
+        nodes.extend(_turn(t))
+    nodes.append(_node("u_next", "user", [Text("next question")]))
+    return nodes
+
+
+def _due_only_before_images(nodes: list[SessionNode]) -> tuple[int, int, int]:
+    """(prompt estimate, image reclaim, trigger) with the trigger placed so the
+    prompt is over it before the images leave and under it after."""
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    probe = Compactor(config=_cfg())
+    before = estimate_tokens_of_messages(probe.view(nodes))
+    assert probe.trimmer.consume_images(nodes)
+    reclaim = before - estimate_tokens_of_messages(probe.view(nodes))
+    return before, reclaim, before - reclaim // 2
+
+
+def _ladder_for(trigger: int, *, in_batch: bool) -> CompactionConfig:
+    return _cfg(trigger_tokens=trigger, keep_recent_turns=50,
+                image_rung_in_batch=in_batch)
+
+
+def test_image_rung_and_size_trim_share_one_batch() -> None:
+    # Plan item 6 (B13), the 55a36089 seq 26699/26859 shape: a due batch at a
+    # turn start consumed the images, which pulled the prompt under the
+    # trigger, so the size trim waited and came one call later as a second
+    # rebuild. The due decision is now made before the images leave, so both
+    # rungs land in one rewrite.
+    nodes = _image_then_turns(4)
+    before, reclaim, trigger = _due_only_before_images(nodes)
+    assert reclaim >= before * 0.05  # the image batch alone clears the floor
+    # One call later the turn has grown by about what the images freed.
+    grown = nodes + [
+        _node("a_next", "assistant", [
+            ToolUseBlock(id="call_next", name="Read", input={"file_path": "g.py"}),
+        ]),
+        _node("r_next", "user", [ToolResultBlock(
+            tool_use_id="call_next", content=[Text("y" * (reclaim * 4))])]),
+    ]
+
+    def run(in_batch: bool) -> tuple[Compactor, list[list[str]]]:
+        c = Compactor(config=_ladder_for(trigger, in_batch=in_batch))
+        batches = []
+        for prefix, boundary in ((nodes, True), (grown, False)):
+            rendered, promotions = c.apply(prefix, turn_boundary=boundary)
+            assert rendered == c.view(prefix)
+            batches.append([p.reason for p in promotions])
+        return c, batches
+
+    legacy, batches = run(False)
+    assert batches == [["image_consumed"], ["trigger"]]  # two rebuilds
+
+    fixed, batches = run(True)
+    assert batches == [["image_consumed", "trigger"], []]
+    assert fixed.last_decision["reason"] == "below_threshold"
+    assert fixed.trimmer._image_consumed == {("r0", "call0")}
+    # The two newest results stay; the older ones went in the first batch.
+    assert fixed.trimmer._trimmed == {("node_r1", "call1"), ("node_r2", "call2")}
+
+    # The merged batch replays on resume like any other.
+    c = Compactor(config=_ladder_for(trigger, in_batch=True))
+    _, promotions = c.apply(nodes)
+    resumed = Compactor(config=_ladder_for(trigger, in_batch=True))
+    resumed.rehydrate(promotions)
+    assert resumed.view(nodes) == c.view(nodes)
+
+
+def test_small_image_reclaim_no_longer_sinks_a_due_batch() -> None:
+    # Plan item 6 (B13), the 5ee437a3 seq 3238 shape: the images freed under
+    # 5% and pulled the prompt under the trigger, so the whole due batch was
+    # rejected and the watermark armed. Now the size rungs run in the same
+    # candidate and the batch clears the floor.
+    nodes = _image_then_turns(30)
+    before, reclaim, trigger = _due_only_before_images(nodes)
+    assert 0 < reclaim < before * 0.05
+
+    legacy = Compactor(config=_ladder_for(trigger, in_batch=False))
+    rendered, promotions = legacy.apply(nodes)
+    assert not promotions and rendered == legacy.view(nodes)
+    assert legacy.last_decision["reason"] == "insufficient_reclaim"
+    assert not legacy.trimmer._image_consumed  # rolled back with the batch
+
+    fixed = Compactor(config=_ladder_for(trigger, in_batch=True))
+    rendered, promotions = fixed.apply(nodes)
+    assert [p.reason for p in promotions] == ["image_consumed", "trigger"]
+    assert fixed.last_decision["reason"] == "meaningful_reclaim"
+    assert fixed.last_decision["after_tokens"] < before * 0.95
+    assert fixed._optional_retry is None
+    assert _images(rendered[2]) == []
+
+
+def test_image_rung_below_the_trigger_still_builds_no_size_batch() -> None:
+    # The due decision moved, not the trigger: a prompt under it at a turn
+    # start runs no size rung, whatever image_trigger_ratio consumed.
+    nodes = _image_then_turns(4)
+    before, _reclaim, _trigger = _due_only_before_images(nodes)
+    c = Compactor(config=_cfg(trigger_tokens=before + 1_000,
+                              image_trigger_ratio=0.5, keep_recent_turns=50))
+    _, promotions = c.apply(nodes)
+    assert [p.reason for p in promotions] == ["image_consumed"]
+    assert c.trimmer._trimmed == set()
+
+
 # ─── Threshold arithmetic ────────────────────────────────────────────────────
 
 
@@ -1356,8 +1464,11 @@ def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
 # New behaviour flags switched off, so each ladder scenario runs the legacy
 # path. Plan item 4 turned below_threshold_skips_retry on by default; with it
 # on, the ladder, windowed and optional mega-turn scenarios commit earlier.
-# The trim-only scenario needs no flag: that contract keeps the legacy path.
-_LEGACY_FLAGS = {"below_threshold_skips_retry": False}
+# Plan item 6 turned image_rung_in_batch on, which runs the size rungs in the
+# same batch as the images. The trim-only scenario needs no flag: that
+# contract keeps the legacy path.
+_LEGACY_FLAGS = {"below_threshold_skips_retry": False,
+                 "image_rung_in_batch": False}
 
 
 def _parity_ladder() -> CompactionConfig:
