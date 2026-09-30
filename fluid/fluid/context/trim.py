@@ -33,9 +33,15 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.steer_render import (
+    CURRENT_RENDER_VERSION,
+    RENDER_VERSION_LEGACY,
+    SteerRenderConfig,
+    render_steers,
+)
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode
 
@@ -368,6 +374,14 @@ class ToolResultTrimmer:
     # Text verbatim, so the 57-line test summary that shared a ToolResultBlock
     # with a PNG stops leaving context with it.
     _image_consumed: set = field(default_factory=set)
+    # The render version new trim decisions are made under (see
+    # fluid.context.steer_render). The owning Compactor sets it from its own
+    # config, together with the receipt caps in ``steer_render``.
+    render_version: int = CURRENT_RENDER_VERSION
+    steer_render: SteerRenderConfig = field(default_factory=SteerRenderConfig)
+    # Render version of each rehydrated trim decision. A pair missing here
+    # was decided by this process and renders at ``render_version``.
+    _trim_versions: dict = field(default_factory=dict)
 
     @staticmethod
     def _has_image(block: ToolResultBlock) -> bool:
@@ -486,7 +500,10 @@ class ToolResultTrimmer:
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
                             content=[rendered]
-                            + [Text(s.render()) for s in block.delivered_steers],
+                            + [Text(s) for s in render_steers(
+                                block.delivered_steers,
+                                self._steer_config(key), node=node,
+                            )],
                             is_error=block.is_error,
                             delivered_steers=block.delivered_steers,
                             delivery_metadata_version=block.delivery_metadata_version,
@@ -517,6 +534,16 @@ class ToolResultTrimmer:
                 if changed else message
             )
         return out
+
+    def _steer_config(self, key: tuple[str, str]) -> SteerRenderConfig | None:
+        """How the steers on trimmed result ``key`` render: None (verbatim)
+        for a version-1 decision, receipts for a later one."""
+        version = self._trim_versions.get(key, self.render_version)
+        if version <= RENDER_VERSION_LEGACY:
+            return None
+        if self.steer_render.recall_tools != self.config.recall_tools:
+            return replace(self.steer_render, recall_tools=self.config.recall_tools)
+        return self.steer_render
 
     def _eligible(
         self, nodes: list[SessionNode], *, keep_recent: int | None = None
@@ -598,9 +625,22 @@ class ToolResultTrimmer:
         self._image_consumed.update(newly)
         return newly
 
-    def mark_trimmed(self, pairs: Iterable[tuple[str, str]]) -> None:
-        """Re-apply previously persisted trim decisions (resume rehydration)."""
-        self._trimmed.update(tuple(p) for p in pairs)
+    def mark_trimmed(
+        self,
+        pairs: Iterable[tuple[str, str]],
+        *,
+        render_version: int = RENDER_VERSION_LEGACY,
+    ) -> None:
+        """Re-apply previously persisted trim decisions (resume rehydration).
+
+        ``render_version`` is the version the decision was persisted under;
+        events written before the field existed are version 1 and keep
+        rendering exactly as they did.
+        """
+        for pair in pairs:
+            key = tuple(pair)
+            self._trimmed.add(key)
+            self._trim_versions[key] = render_version
 
     def mark_image_consumed(self, pairs: Iterable[tuple[str, str]]) -> None:
         """Re-apply persisted image-consumption decisions (resume)."""

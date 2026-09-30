@@ -48,6 +48,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.steer_render import (
+    CURRENT_RENDER_VERSION,
+    RENDER_VERSION_LEGACY,
+    SteerRenderConfig,
+    render_steers,
+)
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
@@ -128,6 +134,22 @@ class CompactionConfig:
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
+    # Render version new decisions are made under (fluid.context.steer_render).
+    # Persisted decisions keep the version they were made under, so raising
+    # this never re-renders an old session. 1 is the original renderer.
+    render_version: int = CURRENT_RENDER_VERSION
+    # Version 2 steer receipts: a harness notice (origin "system") at least
+    # this long renders, once compacted, as its sender, a preview of this many
+    # chars and a HistoryExpand ref. User and peer steers stay verbatim.
+    steer_receipt_chars: int = 1_000
+    steer_receipt_preview_chars: int = 300
+
+    def steer_render(self) -> SteerRenderConfig:
+        return SteerRenderConfig(
+            receipt_min_chars=self.steer_receipt_chars,
+            receipt_preview_chars=self.steer_receipt_preview_chars,
+            recall_tools=self.recall_tools,
+        )
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -201,6 +223,10 @@ class Promotion:
     token_basis: str = ""
     # The measured next-prompt size the decision used; 0 with an estimate.
     measured_prompt_tokens: int = 0
+    # Renderer version the decision was made under (fluid.context.steer_render).
+    # 1 is the default so a decision rehydrated from an event written before
+    # the field existed renders exactly as it did then.
+    render_version: int = RENDER_VERSION_LEGACY
 
 
 def describe_promotions(
@@ -335,13 +361,23 @@ def _arg_hint(input_: dict[str, Any], cap: int) -> str:
     return rendered[:cap] + ("…" if len(rendered) > cap else "")
 
 
+def _steer_config(config: CompactionConfig) -> SteerRenderConfig | None:
+    """None (every steer verbatim) at render version 1, receipts above it."""
+    if config.render_version <= RENDER_VERSION_LEGACY:
+        return None
+    return config.steer_render()
+
+
 def render_span_digest(
     span: list[SessionNode], config: CompactionConfig
 ) -> Message:
     """Extractive digest of one whole turn, as a single user-role Text message.
 
     Pure and deterministic: same span + same config → byte-identical output.
+    ``config.render_version`` picks how delivered steers render: version 1
+    verbatim, version 2 with large harness notices as receipts.
     """
+    steer_cfg = _steer_config(config)
     start, end = span[0].node_id, span[-1].node_id
     ref = start if start == end else f"{start}..{end}"
     tool_names: list[str] = []
@@ -360,7 +396,9 @@ def render_span_digest(
                 b for b in message.content if isinstance(b, ToolResultBlock)
             ]
             for block in results:
-                lines.extend(s.render() for s in block.delivered_steers)
+                lines.extend(render_steers(
+                    block.delivered_steers, steer_cfg, node=node,
+                ))
                 size = block_chars(block)
                 if block.is_error:
                     error_text = " ".join(
@@ -413,7 +451,9 @@ def render_span_digest(
 def render_epoch_stub(
     spans: list[list[SessionNode]], config: CompactionConfig
 ) -> Message:
-    """One-line stub replacing a run of digested spans. Deterministic."""
+    """One-line stub replacing a run of digested spans. Deterministic;
+    ``config.render_version`` picks how delivered steers render (see
+    ``render_span_digest``)."""
     start = spans[0][0].node_id
     end = spans[-1][-1].node_id
     first_user = ""
@@ -437,9 +477,10 @@ def render_epoch_stub(
             f"[epoch {start}..{end} — {len(spans)} older turns folded; their "
             f"content is not recoverable in this session{hint}]"
         )
-    deliveries = [Text(s.render()) for span in spans for node in span
+    steer_cfg = _steer_config(config)
+    deliveries = [Text(s) for span in spans for node in span
                   for block in node.message.content if isinstance(block, ToolResultBlock)
-                  for s in block.delivered_steers]
+                  for s in render_steers(block.delivered_steers, steer_cfg, node=node)]
     return Message(role="user", content=[Text(text), *deliveries])
 
 
@@ -481,10 +522,25 @@ class Compactor:
     _digest_by_start: dict = field(default_factory=dict)
     _optional_retry: tuple[int, int] | None = None
     last_decision: dict[str, Any] = field(default_factory=dict)
+    # Render version per promoted span key; a key made by this process
+    # renders at config.render_version.
+    _span_versions: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
             self.trimmer = ToolResultTrimmer(config=self.config.trim)
+        self.trimmer.render_version = self.config.render_version
+        self.trimmer.steer_render = self.config.steer_render()
+
+    @property
+    def render_version(self) -> int:
+        """The render version this compactor's new decisions are made under.
+
+        Whoever persists a Promotion as a ContextCompaction event records this
+        value, and whoever rehydrates passes the event's value back on the
+        Promotion.
+        """
+        return self.config.render_version
 
     # ── Mode ─────────────────────────────────────────────────────────────
 
@@ -530,7 +586,8 @@ class Compactor:
                 j = index[end_id]
                 out.append(
                     render_epoch_stub(
-                        split_spans(nodes[i : j + 1]), self.config
+                        split_spans(nodes[i : j + 1]),
+                        self._config_at(node.node_id, end_id),
                     )
                 )
                 i = j + 1
@@ -539,13 +596,23 @@ class Compactor:
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
                 out.append(
-                    render_span_digest(nodes[i : j + 1], self.config)
+                    render_span_digest(
+                        nodes[i : j + 1], self._config_at(node.node_id, end_id)
+                    )
                 )
                 i = j + 1
                 continue
             out.append(self._render_live(node, trimmed, consumed))
             i += 1
         return out
+
+    def _config_at(self, start: str, end: str) -> CompactionConfig:
+        """The config a promoted span renders with: this compactor's own,
+        with ``render_version`` set to the version the span was decided at."""
+        version = self._span_versions.get((start, end), self.config.render_version)
+        if version == self.config.render_version:
+            return self.config
+        return replace(self.config, render_version=version)
 
     def _render_live(
         self,
@@ -589,7 +656,14 @@ class Compactor:
                             and len(b.text) > self.config.tool_result_stub_chars
                             else b
                             for b in block.content
-                        ] + [Text(s.render()) for s in block.delivered_steers],
+                        # A stub is stateless (a pure function of size, from
+                        # the first request on), so it cannot know when the
+                        # result leaves the protected tail. Its steers stay
+                        # verbatim; a receipt needs a trim, digest or fold
+                        # decision, which re-renders them at that version.
+                        ] + [Text(s) for s in render_steers(
+                            block.delivered_steers, None,
+                        )],
                         is_error=block.is_error,
                         delivered_steers=block.delivered_steers,
                         delivery_metadata_version=block.delivery_metadata_version,
@@ -1069,7 +1143,20 @@ class Compactor:
 
     def rehydrate(self, promotions: Iterable[Promotion]) -> None:
         """Re-apply persisted decisions (resume). Rendering is deterministic,
-        so the rehydrated view is byte-identical to the pre-restart one."""
+        so the rehydrated view is byte-identical to the pre-restart one.
+
+        Each promotion renders at its own ``render_version``, so decisions
+        persisted before steer receipts existed keep their version-1 text.
+
+        TODO(lane owning fluid/engine/native.py): the engine must persist and
+        replay the version. ``_emit_compaction`` should set
+        ``render_version=self._compactor.render_version`` on the event, and
+        ``_rehydrate_compaction`` should pass ``render_version=e.render_version``
+        into each Promotion. Until then every resumed decision replays as
+        version 1: nothing is lost (steers render verbatim), but a session
+        whose compacted history holds a large harness notice re-renders it
+        once on resume.
+        """
         for promo in promotions:
             # The two tier-1 reasons rewrite different amounts of the block, so
             # they replay into different sets: an image consumption that came
@@ -1078,11 +1165,15 @@ class Compactor:
             if promo.reason == "image_consumed":
                 self.trimmer.mark_image_consumed(promo.trimmed)
             else:
-                self.trimmer.mark_trimmed(promo.trimmed)
+                self.trimmer.mark_trimmed(
+                    promo.trimmed, render_version=promo.render_version
+                )
             if not self.config.enabled:
                 continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
-                self._mark_span(start, end, kind)
+                self._mark_span(
+                    start, end, kind, render_version=promo.render_version
+                )
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -1097,6 +1188,7 @@ class Compactor:
         digested = dict(self._digested)
         epochs = dict(self._epoch_by_start)
         digests = dict(self._digest_by_start)
+        versions = dict(self._span_versions)
         trimmed = set(self.trimmer._trimmed)
         consumed = set(self.trimmer._image_consumed)
 
@@ -1107,6 +1199,8 @@ class Compactor:
             self._epoch_by_start.update(epochs)
             self._digest_by_start.clear()
             self._digest_by_start.update(digests)
+            self._span_versions.clear()
+            self._span_versions.update(versions)
             self.trimmer._trimmed.clear()
             self.trimmer._trimmed.update(trimmed)
             self.trimmer._image_consumed.clear()
@@ -1114,8 +1208,13 @@ class Compactor:
 
         return restore
 
-    def _mark_span(self, start: str, end: str, kind: str) -> None:
+    def _mark_span(
+        self, start: str, end: str, kind: str, *, render_version: int | None = None
+    ) -> None:
         self._digested[(start, end)] = kind
+        self._span_versions[(start, end)] = (
+            self.config.render_version if render_version is None else render_version
+        )
         if kind == EPOCH_STUB:
             self._epoch_by_start[start] = end
         else:

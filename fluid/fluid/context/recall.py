@@ -106,6 +106,19 @@ def _render_node(node: SessionNode) -> str:
     return "\n".join(lines)
 
 
+def steer_body_offset(node: SessionNode, body: str) -> int | None:
+    """Where ``body`` starts in ``HistoryExpand(node_id)`` output, or None.
+
+    A steer receipt (:mod:`fluid.context.steer_render`) names this offset so
+    the model can page straight to a long notice. None means the stored node
+    does not carry the text, and the steer must then stay verbatim.
+    """
+    if not body:
+        return None
+    pos = _render_node(node).find(body)
+    return pos if pos >= 0 else None
+
+
 def expand_ref(
     nodes: list[SessionNode],
     ref: str,
