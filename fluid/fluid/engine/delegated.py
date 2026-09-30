@@ -1221,12 +1221,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Raises ``RuntimeError`` when there is nothing live to steer into: no
         running turn (send a ``UserTurn`` instead), an interrupt already
         requested for the running turn, or no live CLI process behind it. The
-        caller is expected to fall back to queueing the message. Peer admission
-        closes when the result is read, before terminal bus/store awaits; unlike
-        authorized user steering, a peer may not wake an unadmitted CLI cycle.
+        caller is expected to fall back to queueing the message. AgentMessage
+        is refused on this lane: stdin frames have no same-query binding/ack,
+        unlike native peer delivery at a proven tool boundary. The authorized
+        user result-in-flight window above does not authorize peer follow-ups.
         """
-        if isinstance(op, AgentMessage) and not self._peer_admission_open:
-            raise RuntimeError("peer admission is closed; queue the message instead")
+        if isinstance(op, AgentMessage):
+            # stdin user frames have no original-query binding/ack. Even a
+            # still-running host task can have an unread, completed CLI result.
+            # Never let a peer wake an unadmitted follow-up CLI cycle.
+            raise RuntimeError("peer same-turn admission is unproven; queue the message instead")
         if self._turn_task is None or self._turn_task.done():
             raise RuntimeError("no turn is running; submit a UserTurn instead")
         if self._interrupted.is_set():

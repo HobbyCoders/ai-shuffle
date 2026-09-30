@@ -402,6 +402,79 @@ async def test_list_tool_serializes_postgres_timestamps(peers, monkeypatch):
 
 
 
+
+
+async def test_actual_delegated_unread_result_keeps_peer_durably_queued(peers, monkeypatch):
+    import asyncio, sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.modes import Mode
+    from fluid.events import SteerDelivered, TurnComplete
+    from fluid.events.ops import UserTurn
+    from fluid.store.memory import MemoryStore
+    from fluid.tools.registry import ToolCtx
+    from app.core import session_runtime, turn_scheduler
+    from app.core.provider.harness_adapter import HarnessAdapter
+
+    held, release = asyncio.Event(), asyncio.Event()
+    fake = Path(__file__).resolve().parents[2] / "fluid/tests/fixtures/fake_claude.py"
+    store = MemoryStore()
+    sdk = (await store.create_session()).session_id
+    loop = DelegatedLoop(mode=Mode.CLAUDE_CLI, store=store, session_id=sdk,
+        cli_command=[sys.executable, "-u", str(fake)], extra_env={"FAKE_CLAUDE_SCENARIO": "a"})
+    original_write = loop._write_frame
+    frames, results, readers = [], [], set()
+
+    async def gated_write(frame):
+        frames.append(frame)
+        reader = loop._proc.stdout
+        if reader not in readers:
+            readers.add(reader)
+            readline = reader.readline
+            async def gated_readline():
+                line = await readline()
+                if line and json.loads(line).get("type") == "result":
+                    results.append(json.loads(line))
+                    if len(results) == 1:
+                        held.set()
+                        await release.wait()
+                return line
+            reader.readline = gated_readline
+        await original_write(frame)
+
+    loop._write_frame = gated_write
+    binding = orch._context("peer")["overrides"]
+    live = turns.enqueue_turn("peer", "user", prompt="original", profile_id="agent", overrides=binding)
+    assert turns.start_turn(live["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    monkeypatch.setitem(session_runtime._live_runtimes, "peer", runtime)
+    adapter = HarnessAdapter(); adapter._engine = loop
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda _: SimpleNamespace(adapter=adapter)))
+    monkeypatch.setattr(turn_scheduler, "kick", lambda _: None)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda _: None)
+    args = {"session_id":"peer", "message":"Coordinate edits", "request_id":"actual-cli-fallback"}
+    handler = orch.make_handler(lambda: "caller")
+    try:
+        await loop.submit(UserTurn(content="original admitted turn"))
+        await asyncio.wait_for(held.wait(), 10)
+        assert not loop._turn_task.done() and not any(isinstance(e,TurnComplete) for e in loop.bus.log(sdk))
+        outcome = await handler("message", args, ToolCtx())
+        assert not outcome.is_error, outcome.text
+        row_id = json.loads(outcome.text)["turn_id"]
+        assert json.loads(outcome.text)["delivery_status"] == "queued"
+        assert turns.get_turn(row_id)["state"] == "queued" and turns.get_turn(live["id"])["state"] == "running"
+        assert not runtime._steer_attempted
+        release.set(); await loop.wait_turn(); await loop._discard_stale_stdout()
+        assert len([f for f in frames if f.get("type")=="user"]) == len(results) == 1
+        assert not any(isinstance(e,SteerDelivered) for e in loop.bus.log(sdk))
+        retry = json.loads((await handler("message",args,ToolCtx())).text)
+        assert retry["turn_id"] == row_id and retry["delivery_status"] == "queued"
+        assert turns.get_turn(row_id)["state"] == "queued"
+    finally:
+        release.set(); await loop.aclose()
+
+
 def test_message_can_start_an_existing_empty_top_level_chat(peers):
     sessions.create_session("empty", "agent", title="Empty peer", is_active=True,
                             model="sonnet", permission_mode="default")
