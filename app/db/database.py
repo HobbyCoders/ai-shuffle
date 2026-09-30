@@ -312,7 +312,7 @@ def _savepoint(cursor, name: str):
 #     cleared first, so such a row stays unable to receive push), and the
 #     ``rate_limits`` / ``request_log`` tables the removed rate-limit feature
 #     left behind.
-SCHEMA_VERSION = 90
+SCHEMA_VERSION = 91
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -533,6 +533,8 @@ def _run_column_migrations(cursor):
     """
     migrations_applied = []
     _migrate_preference_revisions(cursor)
+    from app.db.assistant import create_schema as create_assistant_schema
+    create_assistant_schema(cursor)
 
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):
@@ -2793,14 +2795,14 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres, mobile_hub, network
+    from app.db import schema_postgres, mobile_hub, network, assistant
     from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
-    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network):
+    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant):
         path = getattr(module, "__file__", None)
         if not path:
             return ""
