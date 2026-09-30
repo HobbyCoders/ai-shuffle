@@ -1083,9 +1083,8 @@
 						/>
 					</div>
 
-					<!-- While session work is live (including remote/parked work),
-					     show Send for a draft and Stop for an empty composer.
-					     Sending queues a message without stopping the turn.
+					<!-- Stop must remain reachable whenever session work is live,
+					     including with a draft. Send can queue that draft independently.
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
 						{#if $activeSession.isCreatingWorktree}
@@ -1100,12 +1099,11 @@
 								<button type="submit" class="send-btn" disabled={!$anyCredential || isUploading || isRecording || isTranscribing} title="Send — Enter" aria-label="Send">
 									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
 								</button>
-							{:else}
-								<StopButton
-									activeTasks={$activeSession.activeTasks}
-									onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
-								/>
 							{/if}
+							<StopButton
+								activeTasks={$activeSession.activeTasks}
+								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
+							/>
 						{:else}
 							<button
 								type="submit"

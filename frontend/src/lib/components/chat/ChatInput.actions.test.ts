@@ -29,8 +29,8 @@ describe('streaming composer actions', () => {
 		expect(streaming).toContain('disabled={!$anyCredential || isUploading || isRecording || isTranscribing}');
 	});
 
-	it('renders Send and Stop in mutually exclusive draft branches', () => {
-		expect(streaming).toMatch(/\{#if hasMessageContent\}\s*<button[^>]*type="submit"[^>]*aria-label="Send"[\s\S]*?<\/button>\s*\{:else\}\s*<StopButton[\s\S]*?\/>\s*\{\/if\}/);
+	it('keeps Stop outside the draft gate so typing never removes the control', () => {
+		expect(streaming).toMatch(/\{#if hasMessageContent\}\s*<button[^>]*type="submit"[^>]*aria-label="Send"[\s\S]*?<\/button>\s*\{\/if\}\s*<StopButton[\s\S]*?\/>/);
 		expect(streaming.match(/<StopButton/g)).toHaveLength(1);
 	});
 

@@ -8,6 +8,10 @@ const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 describe('session-retained composer suggestions', () => {
 	it('recognizes empty saved documents but blocks text and chips', () => {
 		expect(hasComposerDraft('')).toBe(false);
+		for (const whitespace of [' ', '\n', '\t\n ', '\n\n']) {
+			expect(hasComposerDraft(whitespace)).toBe(false);
+			expect(hasComposerDraft(JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: whitespace }, { type: 'hardBreak' }] }] }))).toBe(false);
+		}
 		expect(hasComposerDraft('{"type":"doc","content":[{"type":"paragraph"}]}')).toBe(false);
 		expect(hasComposerDraft('draft')).toBe(true);
 		expect(hasComposerDraft('{"type":"doc","content":[{"type":"fileChip"}]}')).toBe(true);

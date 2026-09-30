@@ -2,13 +2,14 @@ import { writable } from 'svelte/store';
 
 /** Draft persistence can contain an empty Tiptap document rather than ''. */
 export function hasComposerDraft(draft: string | null | undefined): boolean {
-	if (!draft) return false;
+	if (!draft?.trim()) return false;
 	try {
 		const doc = JSON.parse(draft);
 		if (doc?.type !== 'doc' || !Array.isArray(doc.content)) return true;
 		const occupied = (node: { type?: string; text?: string; content?: unknown[] }): boolean =>
 			node.type === 'text'
-				? !!node.text
+				? !!node.text?.trim()
+				: node.type === 'hardBreak' ? false
 				: !['doc', 'paragraph'].includes(node.type ?? '') ||
 					(node.content ?? []).some(child => occupied(child as Parameters<typeof occupied>[0]));
 		return occupied(doc);

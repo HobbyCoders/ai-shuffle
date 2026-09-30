@@ -28,6 +28,11 @@ describe('session Stop visibility', () => {
 		expect(hasStoppableWork(idle, { ...working, is_remote: false })).toBe(false);
 		expect(hasStoppableWork({ ...idle, sessionId: null }, working)).toBe(false);
 	});
+	it('uses durable task presence for this session even when its local task feed has not hydrated', () => {
+		expect(hasStoppableWork(idle, { id: idle.sessionId, is_remote: false, has_running_tasks: true })).toBe(true);
+		expect(hasStoppableWork(idle, { id: 'other', is_remote: false, has_running_tasks: true })).toBe(false);
+		expect(hasStoppableWork(idle, { id: idle.sessionId, controllable: false, has_running_tasks: true })).toBe(false);
+	});
 	it('preserves foreground Stop including a not-yet-created session', () => {
 		expect(hasStoppableWork({ ...idle, isStreaming: true })).toBe(true);
 		expect(hasStoppableWork({ ...idle, sessionId: null, isStreaming: true })).toBe(true);
