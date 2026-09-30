@@ -7,6 +7,7 @@ import { buildDisplayItems } from '$lib/utils/work-log';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
 import SystemMessage from '../SystemMessage.svelte';
 import ToolUseMessage from './ToolUseMessage.svelte';
+import SwarmDropdown from './SwarmDropdown.svelte';
 
 // Recorded transport shape from the real ten-child acceptance run: a nested
 // code-mode Swarm call, a 3,000-character result preview, eleven worker receipts
@@ -74,7 +75,7 @@ function transcript(sessionId: string, name = 'Swarm') {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Swarm transcript acceptance', () => {
-	it.each(['Swarm', 'mcp__fluid__Swarm'])('keeps %s visible through eleven child receipts and replay with a truncated result', async (name) => {
+	it.each(['Swarm', 'mcp__fluid__Swarm'])('keeps %s as a compact receipt and shows its workflow only in the dropdown', async (name) => {
 		const fixture = transcript(`acceptance-${name}`, name);
 		expect(() => JSON.parse(fixture.preview)).toThrow();
 		const running = reduceAll(fixture.launch);
@@ -89,6 +90,9 @@ describe('Swarm transcript acceptance', () => {
 			name: row!.toolName!, sessionId: fixture.queued.session_id, input: row!.toolInput,
 			result: row!.toolResult, status: row!.toolStatus!,
 		});
+		expect(screen.queryByTestId('swarm-card')).toBeNull();
+		render(SwarmDropdown, { sessionId: fixture.queued.session_id });
+		await fireEvent.click(screen.getByText('Swarm workflows'));
 		expect(screen.getAllByTestId('swarm-card')).toHaveLength(1);
 		await fireEvent.click(screen.getByRole('button', { name: 'Swarm Swarm' }));
 		expect(screen.getByText('Stage 1')).toBeTruthy();

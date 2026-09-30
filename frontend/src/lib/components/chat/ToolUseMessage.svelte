@@ -13,8 +13,8 @@
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
-	import SwarmCard from './SwarmCard.svelte';
-	import { isSwarmTool } from '$lib/utils/swarm';
+	import { swarms } from '$lib/stores/swarms';
+	import { isSwarmTool, parseSwarm } from '$lib/utils/swarm';
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
@@ -36,13 +36,19 @@
 	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	const prefs = $derived(chatPreferences.current);
+	// Keep tool-result snapshots available in the dropdown, not as transcript graphs.
+	$effect(() => {
+		if (!isSwarmTool(name)) return;
+		const snapshot = parseSwarm(result);
+		if (snapshot && (!sessionId || snapshot.session_id === sessionId)) swarms.receive(snapshot, sessionId ?? undefined);
+	});
 
 	// Once the user has toggled this row, their choice outranks the preference.
 	let userToggled = $state(false);
 	let expanded = $state(false);
 
 	$effect(() => {
-		if (!userToggled) expanded = prefs.toolsStartExpanded;
+		if (!userToggled) expanded = !isSwarmTool(name) && prefs.toolsStartExpanded;
 	});
 
 	function toggle() {
@@ -91,9 +97,6 @@
 	}
 </script>
 
-{#if isSwarmTool(name)}
-	<SwarmCard {sessionId} {input} {result} {status} />
-{:else}
 <div class="wl-item">
 	<button
 		type="button"
@@ -189,7 +192,6 @@
 		<ToolScreenshot {screenshot} {name} {sessionId} />
 	{/if}
 </div>
-{/if}
 
 <style>
 	.wl-item {

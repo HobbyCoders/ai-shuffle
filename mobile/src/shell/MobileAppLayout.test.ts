@@ -58,18 +58,24 @@ describe('MobileAppLayout', () => {
 		expect(props.onOpenSpotlight).toHaveBeenCalledTimes(1);
 	});
 
-	it('puts download and git actions in the FIRST and only shell header on a session view', () => {
+	it('puts download left and Git right in a second row, outside the session title bar', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
 		const { container } = renderLayout();
 		const header = screen.getByTestId('app-top-bar');
-		expect(header.contains(screen.getByRole('button', { name: 'Download chat' }))).toBe(true);
-		expect(header.contains(screen.getByRole('button', { name: 'Commit' }))).toBe(true);
-		expect(container.querySelectorAll('header')).toHaveLength(1);
+		const download = screen.getByRole('button', { name: 'Download chat' });
+		const git = screen.getByRole('button', { name: 'Commit' });
+		expect(header.contains(download)).toBe(false);
+		expect(header.contains(git)).toBe(false);
+		const actions = screen.getByRole('banner', { name: 'Chat actions' });
+		expect(actions.querySelector('.hdr-meta')?.contains(download)).toBe(true);
+		expect(actions.querySelector('.hdr-right')?.contains(git)).toBe(true);
+		expect(header.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(container.querySelectorAll('header')).toHaveLength(2);
 		expect(header.getAttribute('data-hide-stt')).toBe('true');
 	});
 
-	it('keeps one app bar and allows global voice input on non-embedded pages', () => {
+	it('keeps one app bar and no chat-action row on non-session pages', () => {
 		const { container } = renderLayout();
 		expect(container.querySelectorAll('header')).toHaveLength(1);
 		expect(screen.getByTestId('app-top-bar').getAttribute('data-hide-stt')).toBe('false');

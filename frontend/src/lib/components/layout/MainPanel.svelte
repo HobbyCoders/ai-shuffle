@@ -51,6 +51,7 @@
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
+	import SwarmDropdown from '$lib/components/chat/SwarmDropdown.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -863,6 +864,15 @@
 			<!-- Dialog only: the git panel's "Private access" row opens it, and the
 			     header button reads its pending count (chatAccessSummary). -->
 			<ChatAccess sessionId={activeTab.sessionId} trigger="none" />
+			<SwarmDropdown
+				sessionId={activeTab.sessionId}
+				standalone
+				hydrateOnly={shouldShowHeaderGitActions({
+					viewType: $activeView?.type, hasProject: !!activeProject,
+					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
+					isRemote: activeIsRemote, sessionMode: activeTab.mode
+				}) && $gitStatus?.is_git_repo !== false && !$git.error}
+			/>
 		{/key}
 	{/if}
 	{#if activeTab && shouldShowHeaderGitActions({
@@ -876,6 +886,7 @@
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
+				sessionId={activeTab.sessionId}
 				isStreaming={$gitControlsStreaming}
 				error={$git.error}
 				operationInProgress={$gitOperationRunning}
@@ -901,7 +912,7 @@
 
 <div class="main-panel">
 	{#if header}
-		<!-- The shell owns the header (mobile app: AppTopBar with these actions). -->
+		<!-- The mobile shell owns the title bar and its separate left/right action row. -->
 		{@render header({
 			title: headerTitle,
 			isSessionView: $activeView?.type === 'session',

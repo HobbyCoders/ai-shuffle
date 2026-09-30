@@ -37,7 +37,6 @@ vi.mock('$lib/services/globalStt', async () => {
 	return { globalSttState: writable({ isRecording: false }), triggerToggle: vi.fn() };
 });
 
-import { createRawSnippet } from 'svelte';
 import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 import { triggerToggle } from '$lib/services/globalStt';
 import AppTopBar from './AppTopBar.svelte';
@@ -77,11 +76,11 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('AppTopBar actions', () => {
-	it('renders the action snippet beside the title, without an overflow rail', () => {
-		const actions = createRawSnippet(() => ({ render: () => '<button>Git actions</button>' }));
-		const { container } = renderBar({ actions });
-		expect(container.querySelector('header .tb-actions')?.contains(screen.getByRole('button', { name: 'Git actions' }))).toBe(true);
-		expect(container.querySelector('.hdr-right')).toBeNull();
+	it('keeps chat action controls out of the title bar', () => {
+		activeView.set({ type: 'session' });
+		const { container } = renderBar();
+		expect(container.querySelector('.tb-actions')?.textContent).toBe('');
+		expect(container.querySelector('.page-header')).toBeNull();
 	});
 
 	it('retains global voice input in the single bar except when the chat owns it', async () => {

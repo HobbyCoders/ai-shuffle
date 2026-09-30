@@ -24,7 +24,6 @@
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery } from '$lib/utils/agent-delivery';
-	import ActiveSwarms from './ActiveSwarms.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
@@ -1888,7 +1887,6 @@
 			<!-- In-flight background tasks: a collapsible line pinned to the history
 			     tail (spinner + "N running tasks"; expands to a |__ tree with per-task
 			     stop). Renders nothing when there are no tasks. -->
-			<ActiveSwarms sessionId={$activeSession.sessionId} />
 			<ActiveTasks tasks={$activeSession.activeTasks ?? []} onStop={handleStopTask} />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->

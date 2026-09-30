@@ -22,6 +22,7 @@
 	 * panel to open for them.
 	 */
 	import { onDestroy, onMount } from 'svelte';
+	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
 	import { buildShell } from '$lib/utils/platform';
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
@@ -43,6 +44,7 @@
 	} from '$lib/stores/derived/git-action-options';
 
 	interface Props {
+		sessionId?: string | null;
 		isStreaming?: boolean;
 		/** True while a git operation (commit/push/PR/ship) is in flight.
 		 *  Disables the mutating action rows so the user can't fire a second
@@ -83,7 +85,7 @@
 		downloadingChat?: boolean;
 	}
 
-	let { isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, onDownloadChat, downloadingChat = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, onDownloadChat, downloadingChat = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -697,6 +699,8 @@
 					<p class="gp-empty">Working tree is clean.</p>
 				{/if}
 			</div>
+
+			<SwarmDropdown {sessionId} />
 
 			{#if access || onDownloadChat}
 				<div class="gp-foot">

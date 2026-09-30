@@ -161,69 +161,27 @@ describe('ActiveTasks', () => {
 	// ── Terminal (failed/killed) tasks ────────────────────────────────────────
 	// A background task whose client died is reaped to killed/error and surfaced
 	// for a retention window so the tree shows the failure instead of silently
-	// vanishing. Terminal rows sort BELOW running ones and carry no stop button.
-	describe('terminal task surfacing', () => {
-		it('shows terminal rows with their status and style hook', () => {
-			const { container } = render(ActiveTasks, {
-				props: { tasks: [makeTask({ id: 'dead', subject: 'Crashed task', status: 'killed' })] }
-			});
-			expect(container.querySelector('.active-tasks')).not.toBeNull();
-			expect(screen.getByText('Crashed task')).toBeTruthy();
-			expect(screen.getByText('killed')).toBeTruthy();
-			expect(container.querySelector('.task-row.is-killed')).not.toBeNull();
+	// vanishing. Terminal receipts remain in history; they do not occupy the live task strip.
+	describe('active-only task surfacing', () => {
+		it.each(['killed', 'error', 'completed'] as const)('hides %s tasks from the live UI', (status) => {
+			const { container } = render(ActiveTasks, { tasks: [makeTask({ status })] });
+			expect(container.querySelector('.active-tasks')).toBeNull();
 		});
-
-		it('marks an errored task with the is-error style and shows its status', () => {
-			const { container } = render(ActiveTasks, {
-				props: { tasks: [makeTask({ id: 'boom', subject: 'Errored task', status: 'error' })] }
-			});
-			expect(screen.getByText('error')).toBeTruthy();
-			expect(container.querySelector('.task-row.is-error')).not.toBeNull();
+		it('keeps only the running task and its stop control in a mixed list', () => {
+			const { container } = render(ActiveTasks, { tasks: [
+				makeTask({ id: 'dead', subject: 'Crashed', status: 'killed' }),
+				makeTask({ id: 'live', subject: 'Still going', status: 'running' })
+			], onStop: vi.fn() });
+			expect(screen.getByText('Still going')).toBeTruthy();
+			expect(screen.queryByText('Crashed')).toBeNull();
+			expect(container.querySelectorAll('.task-row')).toHaveLength(1);
+			expect(screen.getAllByRole('button', { name: /stop task/i })).toHaveLength(1);
 		});
-
-		it('swaps the spinner for a static dot when nothing is running', () => {
-			const { container } = render(ActiveTasks, {
-				props: { tasks: [makeTask({ id: 'dead', status: 'killed' })] }
-			});
-			expect(container.querySelector('.spinner')).toBeNull();
-			expect(container.querySelector('.done-dot')).not.toBeNull();
-		});
-
-		it('omits the stop button for a terminal task even when onStop is provided', () => {
-			const onStop = vi.fn();
-			render(ActiveTasks, {
-				props: { tasks: [makeTask({ id: 'dead', status: 'killed' })], onStop }
-			});
-			expect(screen.queryByRole('button', { name: /stop task/i })).toBeNull();
-		});
-
-		it('still shows the stop button for a running task alongside a terminal one', () => {
-			const onStop = vi.fn();
-			render(ActiveTasks, {
-				props: {
-					tasks: [
-						makeTask({ id: 'live', subject: 'Still going', status: 'running' }),
-						makeTask({ id: 'dead', subject: 'Crashed', status: 'killed' })
-					],
-					onStop
-				}
-			});
-			expect(screen.getAllByRole('button', { name: /stop task/i }).length).toBe(1);
-		});
-
-		it('sorts running tasks above terminal ones', () => {
-			const { container } = render(ActiveTasks, {
-				props: {
-					tasks: [
-						makeTask({ id: 'dead', subject: 'Crashed', status: 'killed' }),
-						makeTask({ id: 'live', subject: 'Still going', status: 'running' })
-					]
-				}
-			});
-			const subjects = Array.from(
-				container.querySelectorAll('.task-row .task-subject')
-			).map((el) => el.textContent);
-			expect(subjects).toEqual(['Still going', 'Crashed']);
+		it('removes a task as soon as a live update makes it terminal', async () => {
+			const view = render(ActiveTasks, { tasks: [makeTask({ id: 'live', subject: 'Live task' })] });
+			expect(screen.getByText('Live task')).toBeTruthy();
+			await view.rerender({ tasks: [makeTask({ id: 'live', subject: 'Live task', status: 'completed' })] });
+			expect(view.container.querySelector('.active-tasks')).toBeNull();
 		});
 	});
 
