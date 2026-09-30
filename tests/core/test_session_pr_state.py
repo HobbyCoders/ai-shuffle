@@ -249,3 +249,56 @@ async def test_reconcile_failed_lookup_does_not_clear(mock_db):
     row = database.get_session(sid)
     assert row['pr_state'] == 'open'
     assert row['pr_number'] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
+async def test_reconcile_canonical_session_without_legacy_project(mock_db, tmp_path, state):
+    """PR discovery must use the owner checkout even without a legacy alias."""
+    from app.core.config import settings
+    from app.db import checkouts, projects_v2
+
+    project = projects_v2.upsert_project("git:canonical-pr", name="Repo")
+    sid = _mk(project_v2_id=project["id"])
+    database.set_session_branch(sid, "feat/canonical")
+    checkouts.upsert_checkout(
+        project["id"], settings.effective_instance_id, str(tmp_path), branch="feat/canonical"
+    )
+    pr = SimpleNamespace(
+        number=1522, url="https://github.com/o/r/pull/1522",
+        state=state, head_branch="feat/canonical",
+    )
+    # Use the real working-directory resolver and the real persistence path.
+    with patch("app.core.github_service.github_service") as gh, patch(
+        "app.core.sync_engine.sync_engine"
+    ) as sync:
+        gh.get_repo_from_remote.return_value = "o/r"
+        gh.list_pulls.return_value = [pr]
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
+        assert await reconcile_session_pr(sid)
+        gh.get_repo_from_remote.assert_called_once_with(str(tmp_path))
+        gh.list_pulls.assert_called_once_with("o/r", state="all", limit=100, head="feat/canonical")
+
+    row = database.get_session(sid)
+    assert row["project_id"] is None
+    assert row["pr_number"] == 1522
+    assert row["pr_url"] == pr.url
+    assert row["pr_state"] == state.lower()
+    payload = sync.broadcast_user_session_updated.await_args.kwargs
+    assert payload["session_id"] == sid
+    assert payload["updates"]["pr_number"] == 1522
+    assert payload["updates"]["pr_state"] == state.lower()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_canonical_session_missing_checkout_does_not_use_base(mock_db):
+    from app.db import projects_v2
+
+    project = projects_v2.upsert_project("git:missing-pr-checkout", name="Repo")
+    sid = _mk(project_v2_id=project["id"])
+    database.set_session_branch(sid, "feat/missing")
+    with patch("app.core.github_service.github_service") as gh:
+        assert not await reconcile_session_pr(sid)
+        gh.get_repo_from_remote.assert_not_called()
+    assert database.get_session(sid)["pr_state"] is None
