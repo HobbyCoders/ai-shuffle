@@ -20,6 +20,7 @@ import pytest
 
 import fluid.engine.delegated as delegated_mod
 from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated_proto import FORCED_CHILD_ENV
 from fluid.events import ErrorEvent, TurnComplete, UserTurn
 from fluid.events.model import Interrupted
 from fluid.events.ops import SetModel, SetPermissionMode
@@ -77,7 +78,11 @@ async def test_acknowledged_run_settings_keep_cli_process_and_update_spawn_flags
         await loop.set_run_settings(effort=None, fast=False)
         assert loop._proc is proc
         assert loop.effort is None
-        assert json.loads(loop.settings) == {"effortLevel": None, "fastMode": False, "env": {"SAFE_TEST": "keep"}}
+        # The host's env block stays, with the forced overrides on top.
+        assert json.loads(loop.settings) == {
+            "effortLevel": None, "fastMode": False,
+            "env": {"SAFE_TEST": "keep", **FORCED_CHILD_ENV},
+        }
         sent = _sent(record, "apply_flag_settings")
         assert sent[0]["request"]["settings"]["effortLevel"] == "low"
         assert sent[1]["request"]["settings"]["fastMode"] is False
@@ -101,7 +106,9 @@ async def test_unacknowledged_run_settings_do_not_record_success(tmp_path, monke
             await loop.set_run_settings(effort="low", fast=True)
         assert loop.effort == "high"
         assert json.loads(loop.settings)["fastMode"] is False
-        assert loop._setting_request("apply_flag_settings")["settings"] == {"effortLevel": "high", "fastMode": False}
+        assert loop._setting_request("apply_flag_settings")["settings"] == {
+            "effortLevel": "high", "fastMode": False, "env": dict(FORCED_CHILD_ENV),
+        }
         assert len(_sent(record, "apply_flag_settings")) == 1
     finally:
         await loop.aclose()

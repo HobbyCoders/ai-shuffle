@@ -136,10 +136,30 @@ def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
 async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_path):
     """The appended prompt is part of the CLI's cached prefix, so it must not
     change between turns. Two turns, with a CLI restart between them so the
-    second one builds its argv again, must send the same bytes."""
-    monkeypatch.setattr(ha, "DelegatedLoop", _ArgvLoop)
+    second one builds its argv again, must send the same bytes. The text
+    rides a file (``--append-system-prompt-file``), so each spawn's file
+    contents are what must match."""
+    import fluid.engine.delegated as delegated_mod
+
+    class _FileLoop(_ArgvLoop):
+        """Keeps the prompt file's bytes as each spawn saw them."""
+
+        prompt_bytes: list = []
+
+        def _build_argv(self):
+            argv = super()._build_argv()
+            path = _flag(argv, "--append-system-prompt-file")
+            type(self).prompt_bytes.append(Path(path).read_bytes() if path else None)
+            return argv
+
+    # The fake CLI reports version 2.0.0; the prompt file flag is sent from
+    # 2.1.0 on, so lower the gate for this test instead of taking the
+    # inline fallback.
+    monkeypatch.setattr(delegated_mod, "_CLI_FLAGS_SINCE", "2.0.0")
+    monkeypatch.setattr(ha, "DelegatedLoop", _FileLoop)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     _ArgvLoop.argvs = []
+    _FileLoop.prompt_bytes = []
 
     adapter = ha.HarnessAdapter()
     await adapter.connect(
@@ -154,10 +174,14 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
 
     assert not first.is_error and not second.is_error
     assert len(_ArgvLoop.argvs) == 2
-    appends = [_flag(argv, "--append-system-prompt") for argv in _ArgvLoop.argvs]
-    assert appends[0] is not None
-    assert appends[0].encode("utf-8") == appends[1].encode("utf-8")
-    assert all(_flag(argv, "--system-prompt") is None for argv in _ArgvLoop.argvs)
+    assert all(_flag(argv, "--append-system-prompt") is None for argv in _ArgvLoop.argvs)
+    appends = _FileLoop.prompt_bytes
+    assert len(appends) == 2 and appends[0]
+    assert appends[0] == appends[1]
+    assert all(
+        _flag(argv, "--system-prompt") is None and _flag(argv, "--system-prompt-file") is None
+        for argv in _ArgvLoop.argvs
+    )
     # The second spawn resumed the same CLI conversation.
     assert _flag(_ArgvLoop.argvs[1], "--resume") is not None
 
@@ -171,7 +195,7 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
         rebuilt = again.engine.append_system_prompt
     finally:
         await again.disconnect()
-    assert rebuilt.encode("utf-8") == appends[0].encode("utf-8")
+    assert rebuilt.encode("utf-8") == appends[0]
 
 
 # ─── Hooks: the delegated leg feeds the same HookBus the native leg does ────

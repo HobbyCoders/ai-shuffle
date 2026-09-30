@@ -105,6 +105,21 @@ from fluid.messages import (
 from fluid.providers.anthropic.serialize import sse_to_chunk
 from fluid.store.base import new_id
 
+# Environment every delegated CLI child is started with, whatever the host
+# environment, the caller's overlay or a settings file say. ``DelegatedLoop``
+# applies it last in its child env and again in the ``--settings`` env block;
+# the mapper copies it onto ``DelegatedSurface`` so a session records which
+# overrides its CLI ran under. Treat it as read-only.
+#
+# * ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS``: the loop reads stdout only during
+#   its own turns, so a background job's between-turn report would go unread.
+# * ``CLAUDE_CODE_THRIFTY_SONIC``: turns off the CLI's "do your work through
+#   Bash" steer (see ``DelegatedLoop._child_env``).
+FORCED_CHILD_ENV: dict[str, str] = {
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "CLAUDE_CODE_THRIFTY_SONIC": "0",
+}
+
 # ─── Pure helpers ────────────────────────────────────────────────────────────
 
 
@@ -351,6 +366,10 @@ class StreamJsonMapper:
         # init frame carries a `tools` list (see _on_system).
         self.cli_tools: tuple[str, ...] | None = None
         self.cli_mcp_servers: tuple[dict[str, Any], ...] | None = None
+        # What the latest init frame said about the CLI itself: its version,
+        # the permission mode and model it runs, and where its credentials
+        # come from (``apiKeySource``). Empty until an init frame arrives.
+        self.cli_init: dict[str, str | None] = {}
 
         self._tool_names: dict[str, str] = {}  # tool_use_id → tool name
         # tool_use_id → input, kept so a tool_result can be journaled with
@@ -466,6 +485,21 @@ class StreamJsonMapper:
         if subtype != "init":
             return Mapped()
         self.cli_session_id = frame.get("session_id") or self.cli_session_id
+
+        def text(key: str) -> str | None:
+            value = frame.get(key)
+            return str(value) if value not in (None, "") else None
+
+        # What the CLI says about itself. This is the only record of which
+        # build actually ran, in which mode and on which credentials: a stale
+        # worker, a CLI on an API key instead of the subscription, or a mode
+        # the CLI downgraded all show here and nowhere else.
+        self.cli_init = {
+            "cli_version": text("claude_code_version"),
+            "permission_mode": text("permissionMode"),
+            "model": text("model"),
+            "api_key_source": text("apiKeySource"),
+        }
         tools = frame.get("tools")
         if not isinstance(tools, list):
             # No tool list announced: leave the surface unknown (None) rather
@@ -479,6 +513,9 @@ class StreamJsonMapper:
         return Mapped(events=[DelegatedSurface(
             session_id=self.session_id, turn_id=self.turn_id,
             tools=self.cli_tools, mcp_servers=self.cli_mcp_servers,
+            cli_session_id=self.cli_session_id,
+            child_env_overrides=dict(FORCED_CHILD_ENV),
+            **self.cli_init,
         )])
 
     def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:

@@ -95,3 +95,19 @@ def test_delegated_child_env_turns_off_the_clis_bash_first_steer(monkeypatch) ->
     loop = DelegatedLoop.__new__(DelegatedLoop)
     loop.env = {"CLAUDE_CODE_THRIFTY_SONIC": "1"}
     assert loop._child_env()["CLAUDE_CODE_THRIFTY_SONIC"] == "0"
+
+
+def test_delegated_child_env_applies_every_forced_override_last(monkeypatch) -> None:
+    """One table drives the child env, the --settings env block and the
+    DelegatedSurface record, so they cannot drift apart."""
+    from fluid.engine.delegated_proto import FORCED_CHILD_ENV
+
+    assert FORCED_CHILD_ENV == {
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "CLAUDE_CODE_THRIFTY_SONIC": "0",
+    }
+    for name in FORCED_CHILD_ENV:
+        monkeypatch.setenv(name, "host")
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {name: "overlay" for name in FORCED_CHILD_ENV}
+    env = loop._child_env()
+    assert {name: env[name] for name in FORCED_CHILD_ENV} == FORCED_CHILD_ENV
