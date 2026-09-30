@@ -1907,7 +1907,7 @@ def make_fluid_dispatcher(
     return _dispatch
 
 
-def subagent_system_prompt(session_id: Optional[str]) -> Optional[str]:
+def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = True) -> Optional[str]:
     """Return the model-facing role block for a Task-created worker."""
     if not session_id or not _is_worker_session(session_id):
         return None
@@ -1915,7 +1915,9 @@ def subagent_system_prompt(session_id: Optional[str]) -> Optional[str]:
 
     _, _, depth = caller_chain(session_id)
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
-    if depth < max_depth:
+    if not task_available:
+        nesting = "Further delegation is unavailable on this worker's tool surface."
+    elif depth < max_depth:
         nesting = (
             f"You are at depth {depth} of {max_depth}. You may delegate only "
             "through your own provider-scoped Task roster."
@@ -1934,16 +1936,19 @@ def subagent_system_prompt(session_id: Optional[str]) -> Optional[str]:
         "side work. Your final response is returned to the parent, so report "
         "concise accomplishments, findings, changed files, verification, and "
         "blockers.\n"
-        "YOU HAVE NO WAKE SEAM YOU CAN RELY ON. Assume ending your turn ends "
-        "you: there may be no later turn in which to report, and nothing "
-        "outside your session can read a Monitor or task you leave running "
-        "(those records are scoped to the session that made them). A worker "
-        "that ends with work still in flight is reported to its parent as a "
-        "failure, not as a result. So finish the work inside this turn — if "
-        "you start a test run or a build, wait for it and report what it "
-        "actually said. Never end with 'X is running; I'll report when it "
-        "completes': that sentence becomes your entire report, and the parent "
-        "redoes your work.\n"
+        "Background completion wakes this worker too. If tests or builds are "
+        "running, end the current turn so the runtime parks you and resumes "
+        "you with their results; do not poll or hold the turn open. Parking "
+        "is not your final assignment report. Collect and inspect completion "
+        "before reporting the assignment as done. An ended worker with "
+        "uncollected work is a failure, not a successful result. Never submit "
+        "'X is running; I will report later' as your final report.\n"
+        "Top-level session orchestration is unavailable to workers. Use your "
+        "parent-report channel when exposed; otherwise put the result or "
+        "blocker in your final response. Do not rediscover or bypass a denied "
+        "top-level scope. Verify your assigned checkout and prerequisites "
+        "before edits; report an unavailable prerequisite instead of "
+        "switching another session's branch.\n"
         "Lead your final response with ONE sentence stating the result — what "
         "is now true, or what you found. That line is what the parent sees in "
         "its task list, so a heading, a title, or 'I'll start by…' there tells "

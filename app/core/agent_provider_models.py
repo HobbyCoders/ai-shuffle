@@ -637,45 +637,47 @@ def file_subagent_targets(
     return tuple(targets)
 
 
-def parent_subagent_guidance() -> str:
-    """Compact system-prompt guidance aligned with the dynamic Task schema."""
-    # The park doctrine is fluid's canonical fragment (spliced verbatim into
-    # Task's and Monitor's own descriptions) so the copies cannot drift.
+def parent_subagent_guidance(
+    *, task_available: bool = True, swarm_available: bool = True,
+    monitor_available: bool = True, browser_available: bool = True,
+) -> str:
+    """Describe only workflows exposed by this session's effective surface."""
     from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SWARM_ROUTING
 
-    return (
-        "# Subagent delegation\n"
-        "Configured agents are exposed to you as subagents through Task. "
-        "Task's schema lists the only DB and file/plugin subagents available "
-        "from the current provider, including each default model (which may "
-        "run on another provider). Use only those IDs; if the list is empty, "
-        "do not call Task. When Task offers a model parameter, choose only "
-        "a listed model on the selected target's provider; omitting it keeps "
-        "the configured default. A model override never switches providers.\n"
-        "A subagent receives an isolated session, not this conversation, so give "
-        "it a self-contained brief with relevant context and expected output. "
-        "Delegate independent or context-heavy work; handle quick direct work "
-        "yourself. Never invent a subagent ID, model, or provider.\n"
-        f"{SWARM_ROUTING}\n"
-        "\n"
-        # Kept outside the Task block above so a session with Task disabled
-        # does not read it as advice about a tool it lacks: it governs ALL
-        # background work, whichever tool produced it.
-        "# Background work\n"
-        "Every completion is push-based, whatever started the work — a Task "
-        "subagent, a Monitor command, or a long Bash call the harness moved to "
-        "the background. Nothing needs watching: you are woken with the result. "
-        f"{END_TURN_ON_BACKGROUND} No sleep loops, no `wait` polling, no "
-        "re-running a check to see whether it has finished yet. Anything "
-        "expected to outlast a Bash call — a test suite, a build, an install, a "
-        "CI wait — belongs in Monitor rather than a foreground command, and any "
-        "waiting the job needs goes inside that one Monitor command.\n"
-        "\n"
-        "# Verifying a UI change\n"
-        "A change to rendered UI (anything under frontend/, a .svelte or .css "
-        "file, a viewport meta) is verified in the browser at the affected "
-        "viewport before you open the PR, not by unit tests alone. The browser "
-        "tools (browser_navigate, browser_resize for viewport emulation, and "
-        "browser_screenshot) may need loading first: use ToolSearch, or "
-        "search_tools in code mode, when they are not in your tool list."
-    )
+    parts = []
+    if task_available:
+        parts.append(
+            "# Subagent delegation\n"
+            "Use only Task's provider-scoped roster IDs and listed models. "
+            "An override never switches providers; omit it to keep the default. "
+            "If the roster is empty, do not delegate. Give an isolated worker "
+            "a self-contained brief, verified checkout/prerequisites, allowed "
+            "scope and expected result. Choose the role that matches the work: "
+            "rendered UI belongs to the frontend role when present, not a "
+            "backend-only worker. Handle quick direct work yourself. "
+            "Delegate only when the user authorizes subagents.\n"
+            + (SWARM_ROUTING if swarm_available else
+               "Use Task for independent or adaptive assignments; do not "
+               "invent an unavailable workflow tool.")
+        )
+    if task_available or monitor_available:
+        parts.append(
+            "# Background work\n"
+            "Background completion is push-based and wakes the owning "
+            "session, including workers. Parking is not a final assignment "
+            "report. Inspect completion before claiming the work is done. "
+            + END_TURN_ON_BACKGROUND
+            + " No sleep loops or status polling. "
+            + ("Long builds, installs, suites and CI waits belong in Monitor."
+               if monitor_available else
+               "If no background runner is exposed, report that limitation; "
+               "do not invent one.")
+        )
+    if browser_available:
+        parts.append(
+            "# Verifying a UI change\n"
+            "Verify rendered UI in the browser at the affected viewport "
+            "before the PR, not with unit tests alone. Discover the browser "
+            "tools from the effective catalog when needed."
+        )
+    return "\n\n".join(parts)

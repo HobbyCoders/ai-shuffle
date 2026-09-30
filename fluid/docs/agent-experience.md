@@ -7,6 +7,37 @@ the inside, what Claude Code and similar harnesses do well, and which gaps
 fluid's code-mode + continual design is aimed at. They are design rationale,
 not marketing.
 
+## Current execution contract (September 2026 audit)
+
+Batch **independent** tool calls, not decisions that depend on unseen results.
+A single-call cell is correct when evidence determines the next safe action.
+Select relevant search paths and narrow Read windows; Grep's header and
+`path:line:content` records are not filenames. The advertised batching example
+is executed against real Grep/Read and Windows-style result records in tests.
+
+Bind results and budget the combined printed output against the cell's stated
+stdout cap. Retained ResultRef handles can be inspected in a later cell;
+reacquiring unchanged data is not necessary. Displayed line numbers and clipped
+long lines are not file bytes and must not be copied into source edits.
+
+Ordinary WebFetch HTTP failures keep error telemetry but return inspectable
+text through code mode, so independent calls can proceed. Tool permission,
+SSRF, timeout and validation barriers still abort; this is not permission to
+catch a denial, retry it through a different tool, or ask a peer to bypass it.
+
+Workflow prose uses the same effective capability surface as the catalog.
+Unavailable browser verification is a reported acceptance gap, not an instruction
+to find another access route and not a reason to call a change verified. Worker
+parking is likewise distinct from a final assignment report (see
+[background-tasks.md](background-tasks.md)).
+
+AI Shuffle's per-turn memory snapshot can omit recognizable branch-prefixed
+setup receipts for other checkouts. Explicit user/profile facts and general
+conventions remain; omitted receipts are not deleted and Recall still finds
+them. The startup workspace card is an initial baseline: fresh checkout/setup
+receipts supersede it. Mobile's lockless package uses its documented same-checkout
+frontend dependency flow, not a blanket npm-ci instruction.
+
 ## 1. Tool results are the context killer, not tool schemas
 
 Schemas get the attention (and progressive disclosure — deferred tools +
