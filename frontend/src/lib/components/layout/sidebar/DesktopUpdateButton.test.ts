@@ -12,6 +12,27 @@ const state = { allow_updates:true, update_all_workers:false, workers:[worker] }
 beforeEach(() => { localStorage.clear(); updateAuth.current.status.preview_access = false; vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
 afterEach(cleanup);
 
+it('produces the ready bell action from the desktop bridge and executes canonical coordination', async () => {
+ Object.defineProperty(window,'matchMedia',{configurable:true,value:()=>({matches:false,addEventListener(){},removeEventListener(){}})});
+ const install=vi.fn();
+ let report!: (state: import('$lib/services/desktop').DesktopUpdateState)=>void;
+ window.shuffleDesktop={version:'preview',platform:'linux',window:{getState:async()=>({maximized:false,fullscreen:false,focused:true}),onStateChange:()=>()=>{},setTitleBarTheme(){}},shell:{onCommand:()=>()=>{}},updates:{getState:async()=>({phase:'idle',version:null,percent:null,error:null,checkedAt:null}),onState:listener=>{report=listener;return()=>{};},install}};
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'}]});
+ render(DesktopUpdateButton);
+ await screen.findByRole('button',{name:'Update and restart'});
+ const {initDesktop}=await import('$lib/services/desktop');
+ const stop=initDesktop();
+ try {
+  report({phase:'ready',version:'notification-produced',percent:100,error:null,checkedAt:null});
+  await waitFor(()=>expect(notice.info).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({category:'desktop-update'})));
+  const options=notice.info.mock.calls.find(call=>call[1]?.category==='desktop-update')![1];
+  options.action.onClick();
+  await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'install'}));
+  expect(install).not.toHaveBeenCalled();
+ } finally {stop();delete window.shuffleDesktop;}
+});
+
+
 it.each([false, true])('routes a desktop ready notification through fresh canonical scope (all=%s)', async all => {
  api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready'}]});
  render(DesktopUpdateButton);
