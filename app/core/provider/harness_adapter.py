@@ -3529,7 +3529,14 @@ class HarnessAdapter(ProviderAdapter):
         # inproc/builtin specs, and permissions ride the CLI's stdio bridge).
         # Connecting here too would run every external server TWICE per session.
         if native:
+            from app.core.native_browser_proxy import register_native_browser_proxy
+
             for name, config in external_mcp.items():
+                # Native browser discovery needs metadata + RPC forwarding, not
+                # one Node/Playwright proxy per agent. Keep the original map for
+                # delegated legs and fall back to STDIO on source-only installs.
+                if name == "browser" and register_native_browser_proxy(registry, config):
+                    continue
                 # The app speaks the SDK's config dialect; fluid's MCP client
                 # speaks ``transport``. Normalize (never mutate — the delegated
                 # leg serializes the ORIGINAL map into its --mcp-config file).
