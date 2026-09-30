@@ -152,6 +152,37 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         pos += 1
     return rows
 
+def _v2_peer_queue_view(session_id: str) -> List[Dict[str, Any]]:
+    """Peer rows are visible but NEVER part of the user's cancellation/steer queue."""
+    from fluid.context.peer import PEER_OPEN_PREFIX, PEER_CLOSE
+    rows = []
+    for turn in turns_db.get_queued_turns(session_id):
+        if turn.get("source") != "agent_message":
+            continue
+        payload = turn.get("payload") or {}
+        sender_id = payload.get("orchestration_sender")
+        content = payload.get("peer_message_content")
+        if not isinstance(content, str):
+            # Durable rows written before metadata was added still carry the
+            # full host-authored envelope. Do not interpret arbitrary fragments.
+            prompt = (turn.get("prompt") or "").strip()
+            opening, separator, body = prompt.partition("\n")
+            content = body[:-len("\n" + PEER_CLOSE)] if (
+                separator and opening.startswith(PEER_OPEN_PREFIX + " from=")
+                and opening.endswith("not a new message when re-read from history]")
+                and body.endswith("\n" + PEER_CLOSE)
+            ) else prompt
+        created = turn.get("created_at")
+        if created is not None and hasattr(created, "isoformat"):
+            created = created.isoformat()
+        rows.append({
+            "id": turn["id"], "content": content,
+            "sender_label": payload.get("peer_sender_label") or sender_id or "Agent",
+            "sender_session_id": sender_id, "created_at": created,
+        })
+    return rows
+
+
 # How long the two-phase ``interrupt_for_query`` waits for the interrupted
 # streaming task to drain naturally before force-cancelling it. The frontend's
 # interrupt-confirm window must exceed this plus the adapter interrupt timeout
@@ -2019,6 +2050,7 @@ class ChatWebSocketHandler:
         queued = await run_sync(_v2_queue_view, session_id)
         if queued:
             history_response["queuedMessages"] = queued
+        history_response["pending_peer_messages"] = await run_sync(_v2_peer_queue_view, session_id)
         await self.send_json(history_response)
 
         # Broadcast to other devices that this session was opened
@@ -2065,22 +2097,21 @@ class ChatWebSocketHandler:
         # ends. Mirror the queue_updated event emitted by the
         # queue_message / remove / clear handlers.
         try:
-            watch_queue = await run_sync(
-                _v2_queue_view, session_id
-            )
+            watch_queue = await run_sync(_v2_queue_view, session_id)
+            peer_queue = await run_sync(_v2_peer_queue_view, session_id)
         except Exception as exc:
             logger.warning(
                 f"[Queue] Failed to load queued messages for "
                 f"{session_id} on watch: {exc}"
             )
             watch_queue = []
-        if watch_queue:
-            await self.send_json({
-                "type": "sync",
-                "event_type": "queue_updated",
-                "session_id": session_id,
-                "data": {"queued_messages": watch_queue},
-            })
+            peer_queue = []
+        await self.send_json({
+            "type": "sync",
+            "event_type": "queue_updated",
+            "session_id": session_id,
+            "data": {"queued_messages": watch_queue, "pending_peer_messages": peer_queue},
+        })
 
     # ------------------------------------------------------------------
     # handle_close_session
@@ -2357,12 +2388,13 @@ class ChatWebSocketHandler:
         shape as the legacy ``queued_messages`` path — the frontend is unchanged.
         """
         queue = await run_sync(_v2_queue_view, session_id)
-        await sync_engine.broadcast_queue_updated(session_id, queue)
+        peer_queue = await run_sync(_v2_peer_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peer_queue)
         await self.send_json({
             "type": "sync",
             "event_type": "queue_updated",
             "session_id": session_id,
-            "data": {"queued_messages": queue},
+            "data": {"queued_messages": queue, "pending_peer_messages": peer_queue},
         })
 
     # ------------------------------------------------------------------

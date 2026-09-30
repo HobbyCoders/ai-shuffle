@@ -111,6 +111,7 @@ function makeDeps(initial?: Partial<ActiveSessionState>) {
 		isStreaming: false,
 		activeTasks: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],
@@ -676,6 +677,27 @@ describe('feedController hidden streaming publication (#1282)', () => {
 });
 
 describe('feedController queue reconciliation (#588)', () => {
+	it('removes exactly the delivered peer id once without matching human queue text', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		deps.update(s => ({ ...s, queuedMessages: [{ id: 'human', content: 'same text', queuedAt: 1 }],
+			pendingPeerMessages: [
+				{ id: 'peer-one', content: 'same text', senderLabel: 'Reviewer', queuedAt: 1 },
+				{ id: 'peer-two', content: 'same text', senderLabel: 'Reviewer', queuedAt: 1 }
+			] }));
+		const delivered = userMessage('peer-event', 'peer-one', 'full attributed envelope');
+		hoisted.onEvent!(delivered);
+		flushRaf();
+		expect(deps.state.pendingPeerMessages?.map(m => m.id)).toEqual(['peer-two']);
+		expect(deps.state.queuedMessages?.map(m => m.id)).toEqual(['human']);
+		hoisted.onEvent!(delivered);
+		flushRaf();
+		expect(deps.state.pendingPeerMessages?.map(m => m.id)).toEqual(['peer-two']);
+		expect(deps.state.messages?.filter(m => m.id === 'peer-event')).toHaveLength(1);
+	});
+
 	it('drops a stale queue chip once its turn is delivered on the transcript', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

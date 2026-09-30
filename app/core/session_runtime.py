@@ -534,10 +534,11 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
     set, so Send-later chips clear the moment the drained turn starts
     (the SSE self-heal remains the fallback). Best-effort."""
     try:
-        from app.api.chat_ws_handler import _v2_queue_view  # lazy: no core→api at module load
+        from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view  # lazy: no core→api at module load
         from app.core.sync_engine import sync_engine
         queue = await asyncio.to_thread(_v2_queue_view, session_id)
-        await sync_engine.broadcast_queue_updated(session_id, queue)
+        peers = await asyncio.to_thread(_v2_peer_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peers)
     except Exception:  # noqa: BLE001
         logger.warning(
             "SessionRuntime: queue_updated broadcast failed for %s",

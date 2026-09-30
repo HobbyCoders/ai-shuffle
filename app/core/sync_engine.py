@@ -668,13 +668,17 @@ class SyncEngine:
         self,
         session_id: str,
         queued_messages: list,
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        pending_peer_messages: Optional[list] = None,
     ):
-        """Broadcast updated queue state to all devices watching this session."""
+        """Broadcast snapshots without yielding before the connection enqueue."""
+        data = {"queued_messages": queued_messages}
+        if pending_peer_messages is not None:
+            data["pending_peer_messages"] = pending_peer_messages
         event = SyncEvent(
             event_type="queue_updated",
             session_id=session_id,
-            data={"queued_messages": queued_messages},
+            data=data,
             source_device_id=source_device_id
         )
         # Send to ALL devices (including source) so everyone is in sync

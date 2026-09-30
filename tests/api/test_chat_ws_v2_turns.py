@@ -150,6 +150,20 @@ async def test_nonblocking_question_ws_forwards_to_owner_without_local_answer(mo
     assert sent_frames(handler, "user_question_response_ack")[0]["success"] is True
 
 
+def test_peer_queue_legacy_rows_keep_attribution_separate_from_user_controls(mock_db):
+    from fluid.context.peer import format_peer_message
+    _make_session("legacy-peer")
+    prompt = format_peer_message("sender", "Pending old message").strip().replace(
+        "another agent in this session", "another top-level session", 1)
+    peer = turns_db.enqueue_turn("legacy-peer", "agent_message", prompt=prompt,
+                                 payload={"orchestration_sender": "sender"})
+    human = turns_db.enqueue_turn("legacy-peer", "queue", prompt="user send later")
+    assert [r["id"] for r in cwh._v2_queue_view("legacy-peer")] == [human["id"]]
+    peers = cwh._v2_peer_queue_view("legacy-peer")
+    assert peers == [{"id": peer["id"], "content": "Pending old message", "sender_label": "sender",
+                      "sender_session_id": "sender", "created_at": peer["created_at"]}]
+
+
 def test_v2_queue_view_filters_sources_and_numbers_sequentially(mock_db):
     """Only user/queue queued turns render as chips, with sequential integer
     positions and id<-turn id / content<-prompt (the float turns.position never

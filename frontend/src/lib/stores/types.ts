@@ -80,6 +80,15 @@ export interface QueuedMessage {
 	queuedAt: number;
 }
 
+/** Attributed peer traffic; has no user unsend/interrupt controls. */
+export interface PendingPeerMessage {
+	id: string;
+	content: string;
+	senderLabel: string;
+	senderSessionId?: string;
+	queuedAt: number;
+}
+
 export interface ChatMessage {
 	id: string;
 	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)

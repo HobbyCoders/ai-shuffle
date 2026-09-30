@@ -27,6 +27,100 @@ def peers(mock_db, monkeypatch):
 
 
 
+@pytest.mark.parametrize("busy", [False, True])
+async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkeypatch, busy):
+    from unittest.mock import AsyncMock, MagicMock
+    from fluid.tools.registry import ToolCtx
+    from fluid.context.peer import format_peer_message
+    from app.core import turn_scheduler, session_runtime
+    from app.core.sync_engine import sync_engine
+    from app.api.chat_ws_handler import ChatWebSocketHandler, _v2_queue_view, _v2_peer_queue_view
+    from app.db import session_events
+    from app.core.turn_recorder import TurnRecorder
+
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda sid: None)
+    fanout = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", fanout)
+    live = turns.enqueue_turn("peer", "user", prompt="ongoing work", profile_id="agent") if busy else None
+    if live:
+        assert turns.start_turn(live["id"])
+    args = {"session_id": "peer", "message": "Coordinate edits", "request_id": "actual-delivery"}
+    send = orch.make_handler(lambda: "caller")
+    outcome = await send("message", args, ToolCtx())
+    assert not outcome.is_error, outcome.text
+    result = json.loads(outcome.text)
+    assert result["delivery_status"] == "queued"
+    row = turns.get_turn(result["turn_id"])
+    expected_prompt = format_peer_message("caller", "Coordinate edits").strip().replace(
+        "another agent in this session", "another top-level session", 1)
+    assert row["prompt"] == expected_prompt
+    assert _v2_queue_view("peer") == []
+    view = _v2_peer_queue_view("peer")
+    assert view == [{"id": row["id"], "content": "Coordinate edits", "sender_label": "caller",
+                     "sender_session_id": "caller", "created_at": row["created_at"]}]
+    assert fanout.await_args.args[0].data["pending_peer_messages"] == view
+
+    handler = ChatWebSocketHandler(websocket=MagicMock(), device_id="watcher", user_id="admin", api_user_id=None)
+    handler.send_json = AsyncMock()
+    await handler.handle_watch_session({"session_id": "peer"})
+    assert handler.send_json.await_args.args[0]["data"]["pending_peer_messages"] == view
+    if busy:
+        assert turns.start_turn(row["id"]) is None
+        assert orch._queue("caller", args, "message")["delivery_status"] == "queued"
+        assert turns.settle_turn(live["id"], "completed")
+    started = turns.start_turn(row["id"])
+    assert started and turns.start_turn(row["id"]) is None
+    assert orch._queue("caller", args, "message")["delivery_status"] == "begun"
+    recorder = TurnRecorder("peer", row["command_id"], None, None, None)
+    recorder.turn_id = row["id"]
+    await recorder.start(row["prompt"], profile_id="agent", source="agent_message")
+    await session_runtime._broadcast_queue_after_start("peer")
+    assert fanout.await_args.args[0].data["pending_peer_messages"] == []
+    assert turns.settle_turn(row["id"], "completed")
+    assert orch._queue("caller", args, "message")["delivery_status"] == "consumed"
+    events = session_events.get_events("peer")
+    delivered = [e for e in events if e["event_type"] == "message.user" and e["turn_id"] == row["id"]]
+    assert len(delivered) == 1 and delivered[0]["payload"]["content"] == expected_prompt
+    assert _v2_peer_queue_view("peer") == []
+    await sync_engine.unregister_device("watcher", "peer", handler.websocket)
+
+
+async def test_existing_message_receipt_after_stop_never_wakes(peers, monkeypatch):
+    from unittest.mock import Mock
+    from fluid.tools.registry import ToolCtx
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    args = {"session_id": "peer", "message": "go", "request_id": "receipt-stop"}
+    first = orch._queue("caller", args, "message")
+    kick = Mock()
+    monkeypatch.setattr(turn_scheduler, "kick", kick)
+    monkeypatch.setattr(task_registry, "is_user_stopped", lambda sid: sid == "peer")
+    result = await orch.make_handler(lambda: "caller")("message", args, ToolCtx())
+    assert not result.is_error, result.text
+    assert json.loads(result.text)["delivery_status"] == "stopped"
+    assert json.loads(result.text)["turn_id"] == first["turn_id"]
+    kick.assert_not_called()
+    with pytest.raises(ValueError, match="stopped"):
+        orch._queue("caller", {**args, "request_id": "fresh"}, "message")
+
+
+def test_queued_message_receipt_rechecks_owner_and_revocation(peers, monkeypatch):
+    args = {"session_id": "peer", "message": "go", "request_id": "scope-receipt"}
+    orch._queue("caller", args, "message")
+    monkeypatch.setattr(orch, "_principal", lambda sid: {"owner": "admin", "kind": sid})
+    def validate(principal):
+        if principal["kind"] == "peer":
+            raise PermissionError("revoked receiver")
+    monkeypatch.setattr("app.core.mobile_tool_identity.validate", validate)
+    with pytest.raises(PermissionError, match="revoked receiver"):
+        orch._queue("caller", args, "message")
+    monkeypatch.setattr("app.core.mobile_tool_identity.validate", lambda principal: None)
+    monkeypatch.setattr(orch, "_principal", lambda sid: {"owner": sid, "kind": "admin"})
+    with pytest.raises(ValueError, match="eligible"):
+        orch._queue("caller", args, "message")
+
+
 async def test_mcp_adapter_uses_same_owner_fence_and_idempotency(peers, monkeypatch):
     from app.mcp.builtin_tools import create_builtin_tools_server
     from app.core import turn_scheduler

@@ -21,7 +21,7 @@ import { startFixChat } from '$lib/services/fix-with-ai';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 
@@ -434,7 +434,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				for (const removeId of pendingQueue.drainRemovalRequests()) {
 					wsSend({ type: 'remove_queued_message', message_id: removeId, session_id: sid });
 				}
-				update(s => ({ ...s, queuedMessages: reconciled }));
+				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
+					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;
+				}>;
+				const peerRows = peers.map(m => ({
+					id: m.id, content: m.content, senderLabel: m.sender_label,
+					senderSessionId: m.sender_session_id || undefined,
+					queuedAt: new Date(m.created_at).getTime()
+				}));
+				update(s => ({
+					...s, queuedMessages: reconciled,
+					pendingPeerMessages: reconcilePendingPeerMessages(peerRows, s.messages)
+				}));
 			}
 
 			// session_updated carries metadata changes (e.g. a backfilled title

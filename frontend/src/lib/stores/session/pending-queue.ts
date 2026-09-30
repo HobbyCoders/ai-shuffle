@@ -54,6 +54,21 @@
  * re-aimed at the real row the moment it appears.
  */
 
+import type { ChatMessage, PendingPeerMessage } from '../types';
+
+/** Peer delivery uses durable turn ids ONLY, never the user's text/unsend arbiter. */
+export function reconcilePendingPeerMessages(
+	rows: PendingPeerMessage[], messages: ChatMessage[]
+): PendingPeerMessage[] {
+	const delivered = new Set(messages.filter(m => m.role === 'user').map(m => m.turnId));
+	const seen = new Set<string>();
+	return rows.filter(row => {
+		if (delivered.has(row.id) || seen.has(row.id)) return false;
+		seen.add(row.id);
+		return true;
+	});
+}
+
 export interface PendingEntry {
 	id: string;
 	content: string;
