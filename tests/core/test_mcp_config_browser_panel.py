@@ -35,6 +35,13 @@ def test_upload_roots_are_enabled_and_operator_override_is_preserved(monkeypatch
     assert env["BROWSER_UPLOAD_DIR"] == str(tmp_path.resolve())
     assert env["AIS_BROWSER_PANEL_UPLOAD_DIR"] == str((tmp_path / ".browser-uploads").resolve())
     assert mcp_config._build_browser_server_env({"BROWSER_UPLOAD_DIR": "/restricted"})["BROWSER_UPLOAD_DIR"] == "/restricted"
+    # An explicit unusable root stays explicit: runtime preflight must diagnose
+    # it rather than replace it with a wider workspace allowlist.
+    disabled_root = str(tmp_path / "does-not-exist")
+    assert mcp_config._build_browser_server_env({"BROWSER_UPLOAD_DIR": disabled_root})["BROWSER_UPLOAD_DIR"] == disabled_root
+    monkeypatch.setenv("BROWSER_UPLOAD_DIR", "/operator-root")
+    assert mcp_config._build_browser_server_env({})["BROWSER_UPLOAD_DIR"] == "/operator-root"
+    assert mcp_config._build_browser_server_env({"BROWSER_UPLOAD_DIR": "/restricted"})["BROWSER_UPLOAD_DIR"] == "/restricted"
 
 
 def test_no_session_omits_panel_wiring():

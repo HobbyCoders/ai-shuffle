@@ -14,7 +14,7 @@
  */
 
 import { statSync, realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import { StaleRefError, type Session } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
 
@@ -99,6 +99,43 @@ export function validatePaths(
     totalBytes += info.size;
   }
   return { paths: resolved, totalBytes };
+}
+
+/** Agent-only diagnostics: never publish server roots/paths to panel workspace state. */
+export function uploadStatus(paths?: unknown, uploadDir = process.env.BROWSER_UPLOAD_DIR) {
+  const status: {
+    source: "browser_runtime"; configured: boolean; enabled: boolean;
+    reason?: "not_configured" | "upload_root_unavailable";
+    check?: { eligible: boolean; reason?: string; total_bytes?: number };
+  } = { source: "browser_runtime", configured: !!uploadDir, enabled: false };
+  if (!uploadDir) {
+    status.reason = "not_configured";
+  } else {
+    try {
+      status.enabled = statSync(realpathSync(uploadDir)).isDirectory();
+    } catch { /* Missing/inaccessible roots cannot accept uploads. */ }
+    if (!status.enabled) status.reason = "upload_root_unavailable";
+  }
+  if (paths === undefined) return status;
+  // Bound both work and output; never enumerate a directory or echo private roots.
+  if (!Array.isArray(paths) || paths.length < 1 || paths.length > 10 ||
+      paths.some(p => typeof p !== "string" || p.length > 4096 || !isAbsolute(p))) {
+    status.check = { eligible: false, reason: "invalid_paths" };
+  } else if (!status.enabled) {
+    status.check = { eligible: false, reason: status.reason };
+  } else {
+    // Use the upload handler's canonical-path, symlink and regular-file checks.
+    const validated = validatePaths(paths, uploadDir);
+    if ("error" in validated) {
+      const reason = validated.error.startsWith("path not allowed") ? "outside_upload_root" :
+        validated.error.startsWith("file not found") ? "file_not_found" :
+        validated.error.startsWith("not a regular file") ? "not_regular_file" : "upload_root_unavailable";
+      status.check = { eligible: false, reason };
+    } else {
+      status.check = { eligible: true, total_bytes: validated.totalBytes };
+    }
+  }
+  return status;
 }
 
 export async function runUpload(session: Session, input: UploadInput): Promise<McpToolResult> {
