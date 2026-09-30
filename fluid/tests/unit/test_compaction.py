@@ -1175,3 +1175,316 @@ def test_segments_refuse_reused_call_ids_and_orphan_results() -> None:
     # A result whose call is absent, with every real call still paired.
     orphan = [*paired[:2], ("result", "ghost"), *paired[2:]]
     assert not completed_segments(turn(orphan))
+
+
+# ─── Guard tests (compaction plan item 0) ────────────────────────────────────
+#
+# The cache-priced redesign (plan items 1-13) adds a cache signal, schedule
+# zones and new ContextCompaction fields. These three tests pin what must not
+# move while it lands: the legacy render, the provider-overflow path, and the
+# replay of events persisted before any of the new fields existed.
+
+
+def _parity_session(turns: int = 30) -> list[SessionNode]:
+    """A long deterministic history that reaches every legacy render path:
+    trims, digests, epoch folds, consumed images, oversize-intake stubs,
+    verbatim errors, and user and system steers riding on results."""
+    from fluid.messages.content import SteerDelivery
+
+    tools = [("Read", "file_path"), ("Bash", "command"), ("Edit", "text")]
+    nodes: list[SessionNode] = []
+    for t in range(turns):
+        ask = f"turn {t}: look at module-{t}. " + "detail " * (40 + 7 * (t % 5))
+        if t % 11 == 4:
+            ask += "A" * 26_000  # over intake_stub_chars: always a stub
+        nodes.append(_node(f"u{t}", "user", [Text(ask)]))
+        calls = 1 + t % 3
+        for k in range(calls):
+            name, arg = tools[(t + k) % 3]
+            nodes.append(_node(f"a{t}_{k}", "assistant", [
+                Text(f"step {k} of turn {t}"),
+                ToolUseBlock(id=f"c{t}_{k}", name=name, input={arg: f"target-{t}-{k}"}),
+            ]))
+            error = t % 7 == 5 and k == calls - 1
+            if error:
+                content: list = [Text(f"Traceback: failure in turn {t}\n" + "e" * 900)]
+            elif t % 8 == 3 and k == 0:
+                content = [Text(f"screenshot {t}"),
+                           Image(media_type="image/png", data="i" * 8_000)]
+            else:
+                content = [Text(f"result {t}.{k} " + "r" * (1_500 + 900 * ((t + k) % 6)))]
+            steers = []
+            if t % 6 == 2 and k == calls - 1:
+                steers.append(SteerDelivery(text=f"user steer {t}: keep the API stable",
+                                            id=f"steer-{t}"))
+            if t % 9 == 6 and k == 0:
+                steers.append(SteerDelivery(text=f"task-notification {t} " + "n" * 1_200,
+                                            origin="system", id=f"note-{t}"))
+            content.extend(Text(s.render()) for s in steers)
+            nodes.append(_node(f"r{t}_{k}", "user", [ToolResultBlock(
+                tool_use_id=f"c{t}_{k}", content=content, is_error=error,
+                delivered_steers=steers, delivery_metadata_version=1,
+            )]))
+        nodes.append(_node(f"f{t}", "assistant", [Text(f"conclusion: module-{t} done")]))
+    return nodes
+
+
+# Today's Promotion fields. Listed explicitly so fields added later (render
+# version, schedule, ...) cannot change the snapshot by existing.
+_LEGACY_PROMOTION_FIELDS = (
+    "tier", "reason", "trimmed", "spans", "reclaimed_chars", "before_tokens",
+    "after_tokens", "decision_reason", "first_changed_message", "token_basis",
+    "measured_prompt_tokens",
+)
+
+
+def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
+                  window: int | None = None, measured: bool = False) -> tuple[str, list]:
+    """Replay the model calls of ``nodes`` through ``apply`` the way the engine
+    does: one call per turn start (a boundary) and one after each tool result
+    (mid-turn). Returns a digest of every rendered view plus every promotion."""
+    import hashlib
+    import json
+
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    digest = hashlib.sha256()
+    promotions = []
+    for end, node in enumerate(nodes, start=1):
+        if node.message.role != "user":
+            continue
+        is_start = not any(isinstance(b, ToolResultBlock) for b in node.message.content)
+        prefix = nodes[:end]
+        kw: dict = {"overhead_tokens": 3_000, "turn_boundary": is_start}
+        if window is not None:
+            kw.update(context_window=window, output_reserve_tokens=4_000)
+        if measured:
+            kw["measured_prompt_tokens"] = 3_000 + int(
+                estimate_tokens_of_messages(compactor.view(prefix)) * 0.85)
+        rendered, promos = compactor.apply(prefix, **kw)
+        assert rendered == compactor.view(prefix)
+        records = [[getattr(p, f) for f in _LEGACY_PROMOTION_FIELDS] for p in promos]
+        promotions.extend(promos)
+        digest.update(json.dumps([[m.to_dict() for m in rendered], records],
+                                 sort_keys=True, default=list).encode())
+    return digest.hexdigest(), promotions
+
+
+def _parity_ladder() -> CompactionConfig:
+    return CompactionConfig(
+        trigger_tokens=12_000, keep_recent_turns=2,
+        max_resident_span_digests=4, epoch_fold_spans=2,
+        trim=TrimConfig(trigger_tokens=12_000, keep_recent_tool_results=3,
+                        min_result_chars=500),
+    )
+
+
+_PARITY_SCENARIOS = {
+    # The full ladder on an absolute trigger: trims, digests, epoch folds,
+    # consumed images, retry watermarks.
+    "ladder": (_parity_session, _parity_ladder, {}),
+    # A known window with the measured basis: window scaling and calibration.
+    "windowed_measured": (
+        _parity_session,
+        lambda: CompactionConfig(trigger_tokens=10_000, trigger_window_ratio=0.3,
+                                 keep_recent_turns=2),
+        {"window": 40_000, "measured": True},
+    ),
+    # One 50-call turn, the shape the redesign targets. On a small window it
+    # runs window protection and the guarded escalation; on a large one the
+    # optional mid-turn batches and their retry watermark.
+    "mega_turn_window_protection": (
+        lambda: _growing_turn(50), CompactionConfig,
+        {"window": 100_000, "measured": True},
+    ),
+    "mega_turn_optional": (
+        lambda: _growing_turn(50), CompactionConfig,
+        {"window": 200_000, "measured": True},
+    ),
+    # The trim-only contract host apps rely on.
+    "trim_only": (
+        _parity_session,
+        lambda: CompactionConfig(enabled=False, trim=TrimConfig(
+            enabled=True, trigger_tokens=12_000, keep_recent_tool_results=3,
+            min_result_chars=500)),
+        {},
+    ),
+}
+
+# Snapshot of origin/main 0163171fe. Any change here is a legacy render change:
+# the cache-priced schedule must be opt-in (no cache signal, new flags off).
+_PARITY_DIGESTS = {
+    "ladder":
+        "831ff63ee4b575bd3940115b830f33502e90e57f7e03b0861759dbc749fdc922",
+    "windowed_measured":
+        "0078398a095a29c2f97e60d6894582086344fc2ba8f7fdd28c60cb3b303ac781",
+    "mega_turn_window_protection":
+        "60d078381534cf10f66fddd54483b8e1837a20b2c9d57c95848cbb4cefd7a3f0",
+    "mega_turn_optional":
+        "cf373e1280f7b83f18ed1e992ae4fd72dc2b868fb9b9a34f846d2f4d7963e214",
+    "trim_only":
+        "26d6e88a8b740e5f112696ddb0bea481b76c8f5fdcb73071106006466ab166e4",
+}
+
+
+def test_legacy_render_parity_snapshot() -> None:
+    """With no cache signal and every new flag off, the rendered view and the
+    persisted decisions of each scenario are byte-identical to origin/main."""
+    for name, (make_nodes, make_config, kw) in _PARITY_SCENARIOS.items():
+        nodes = make_nodes()
+        compactor = Compactor(config=make_config())
+        digest, promotions = _drive_legacy(compactor, nodes, **kw)
+        assert promotions, name
+        assert digest == _PARITY_DIGESTS[name], name
+        # Resume from the persisted decisions renders the same bytes.
+        resumed = Compactor(config=make_config())
+        resumed.rehydrate(promotions)
+        assert resumed.view(nodes) == compactor.view(nodes), name
+
+
+async def test_provider_overflow_runs_the_unguarded_rungs_and_recovers(tmp_path) -> None:
+    """The escalate path has never run in production. The provider rejects a
+    prompt whose only bulk is the in-flight turn, which every guarded rung
+    protects, so recovery has to come from the guard-off rungs: trim(0) on the
+    first retry, digest(0) on the second. The third request goes through."""
+    import json
+
+    from fluid.events import ErrorEvent, TurnComplete
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolRegistry
+
+    @tool("blob", "Blob", {"type": "object", "properties": {}})
+    async def blob(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "fresh-payload " + "B" * 6_000}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("b", [blob]))
+    overflow = [
+        StreamChunk("message_start", {"usage": {}}),
+        StreamChunk("error", {"message": "prompt is too long: 210000 tokens > 200000 maximum",
+                              "retriable": False}),
+    ]
+    tool_call = [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "tool_use",
+                                    "tool_use_id": "t1", "tool_name": "mcp__b__blob"}),
+        StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({})}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+    provider = _ScriptedProvider([tool_call, overflow, overflow, _text_script("recovered")])
+    store = JsonlStore(tmp_path)
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+        # Defaults for every guard (3 turns, 5 results); the normal trigger
+        # never fires, so only the overflow path can compact.
+        compaction=CompactionConfig(
+            trigger_tokens=10_000_000,
+            trim=TrimConfig(trigger_tokens=10_000_000, min_result_chars=500),
+        ),
+    )
+    assert loop.context_window is None  # one rung per retry
+    ask = "Keep the API stable. " + "context " * 400
+    await loop.submit(UserTurn(content=ask))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    assert next(e for e in events if isinstance(e, TurnComplete)).stop_reason == "end_turn"
+    assert provider.calls == 4
+    rungs = [e for e in events if isinstance(e, ContextCompaction)]
+    assert [(e.tier, e.reason, e.decision_reason) for e in rungs] == [
+        (1, "overflow", "provider_overflow"),
+        (2, "overflow", "provider_overflow"),
+    ]
+    nodes = await store.load_path(loop.session_id)
+    result_node = next(n for n in nodes if any(
+        isinstance(b, ToolResultBlock) for b in n.message.content))
+    # trim(0): the newest result, inside every recency guard, was trimmed.
+    assert rungs[0].trimmed == [[result_node.node_id, "t1"]]
+    assert "trimmed" in _request_texts(provider.requests[2])
+    assert "B" * 6_000 not in _request_texts(provider.requests[2])
+    # digest(0): the in-flight turn itself, turn-start node included.
+    assert rungs[1].spans[0][0] == nodes[0].node_id
+    final = provider.requests[3]
+    assert "compacted turn" in _request_texts(final)
+    assert repair_dangling_tool_calls(final.messages) is final.messages
+    assert all(e.before_tokens > e.after_tokens > 0 for e in rungs)
+    # The store keeps full fidelity; eviction stays recoverable.
+    assert "fresh-payload" in result_node.message.content[0].content[0].text
+    assert nodes[0].message.content[0].text == ask
+    # And a fresh engine replays both rungs to the same view.
+    view = loop._compactor.view(nodes)
+    await loop.aclose()
+    fresh = NativeLoop(provider=_ScriptedProvider([_text_script("done")]),
+                       store=JsonlStore(tmp_path), model="m",
+                       session_id=loop.session_id, compaction=loop._compactor.config)
+    await fresh._rehydrate_compaction(loop.session_id)
+    assert fresh._compactor.view(nodes) == view
+    await fresh.aclose()
+
+
+async def test_rehydrate_over_events_persisted_without_the_new_fields(tmp_path) -> None:
+    """Rows written by older builds lack every field added since: the oldest
+    carry only the decision, newer ones the token basis. Each field a row
+    lacks takes its default and the resumed view is byte-identical."""
+    import dataclasses
+    import json
+
+    from fluid.events.model import SCHEMA_VERSION
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+
+    nodes = _parity_session(16)
+    live = Compactor(config=_parity_ladder())
+    _, promotions = _drive_legacy(live, nodes)
+    assert {p.tier for p in promotions} == {1, 2, 3}
+    assert any(p.reason == "image_consumed" for p in promotions)
+
+    oldest = ("tier", "reason", "trimmed", "spans", "reclaimed_chars")
+    sid = "ses_legacy"
+    rows = []
+    for seq, p in enumerate(promotions, start=1):
+        row = {"_cls": "ContextCompaction", "_v": SCHEMA_VERSION,
+               "session_id": sid, "turn_id": "turn_legacy", "seq": seq,
+               "tier": p.tier, "reason": p.reason,
+               "trimmed": [list(t) for t in p.trimmed],
+               "spans": [list(s) for s in p.spans],
+               "reclaimed_chars": p.reclaimed_chars}
+        if seq % 2 == 0:  # a build that already had the token basis
+            row.update(before_tokens=p.before_tokens, after_tokens=p.after_tokens,
+                       decision_reason=p.decision_reason,
+                       first_changed_message=p.first_changed_message,
+                       token_basis=p.token_basis,
+                       measured_prompt_tokens=p.measured_prompt_tokens)
+        rows.append(row)
+    (tmp_path / f"{sid}.events.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    store = JsonlStore(tmp_path)
+    events = await store.events_since(sid, 0)
+    assert len(events) == len(rows)
+    assert all(isinstance(e, ContextCompaction) for e in events)
+    base = {"session_id", "node_id", "turn_id", "seq", "ts"}
+    for event, row in zip(events, rows):
+        for f in dataclasses.fields(ContextCompaction):
+            if f.name in row or f.name in base:
+                continue
+            default = (f.default if f.default is not dataclasses.MISSING
+                       else f.default_factory())  # type: ignore[misc]
+            assert getattr(event, f.name) == default, f.name
+    for event, row in zip(events, rows):
+        assert all(getattr(event, k) == row[k] for k in oldest)
+
+    registry = ToolRegistry()
+    register_builtins(registry)  # HistoryExpand on the surface: recall stays on
+    fresh = NativeLoop(provider=_ScriptedProvider([_text_script("done")]), store=store,
+                       model="m", session_id=sid, compaction=_parity_ladder(),
+                       registry=registry)
+    assert fresh._compactor.config == live.config
+    await fresh._rehydrate_compaction(sid)
+    assert fresh._compactor.view(nodes) == live.view(nodes)
+    await fresh.aclose()
