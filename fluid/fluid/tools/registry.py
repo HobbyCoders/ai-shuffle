@@ -20,13 +20,25 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fluid.tools.mcp.manager import McpManager
 
 log = logging.getLogger(__name__)
+
+# The id of the tool call being dispatched, for handlers that take no ctx.
+# In-process server tools (``register_inproc``) are called with their
+# arguments only, so a host tool that needs its own tool_use_id (to join its
+# UI card, to key a background task) reads it here. ``dispatch`` sets it from
+# ``ctx.extra["tool_use_id"]``, which the native loop stamps per call and the
+# delegated bundled bridge fills from the CLI's request. None outside a call
+# or when the caller did not supply an id.
+current_tool_use_id: ContextVar[str | None] = ContextVar(
+    "fluid_current_tool_use_id", default=None,
+)
 
 # A local (builtin/inproc) handler: takes the parsed input and the tool context,
 # returns anything ``_normalize`` understands (ToolOutcome | str | SDK dict).
@@ -278,6 +290,10 @@ class _Entry:
     handler: Handler | None = None  # None for MCP tools (routed to the manager)
     server: str | None = None  # MCP/inproc server name
     remote_name: str | None = None  # the MCP server's own name for the tool
+    # Per-tool replacement for the registry's ``external_call_timeout``
+    # (only read when ``has_call_timeout``); None means unbounded.
+    has_call_timeout: bool = False
+    call_timeout: float | None = None
 
 
 def _normalize(result: Any) -> ToolOutcome:
@@ -327,6 +343,8 @@ DEFAULT_EXTERNAL_CALL_TIMEOUT_S = 75.0
 # error_code values a code-mode cell must NOT continue past (the tool did
 # not run); every other external error becomes the call's result text.
 FATAL_EXTERNAL_ERROR_CODES = frozenset({"tool_timeout", "unavailable"})
+# ``_bounded_external``'s "use the registry's own bound" default.
+_REGISTRY_BOUND: Any = object()
 
 
 class ToolRegistry:
@@ -376,7 +394,13 @@ class ToolRegistry:
         self._entries[spec.name] = _Entry(spec=spec, handler=handler)
         self._loaded.add(spec.name)
 
-    def register_inproc(self, server: Any, *, defer: bool = False) -> None:
+    def register_inproc(
+        self,
+        server: Any,
+        *,
+        defer: bool = False,
+        call_timeouts: Mapping[str, float | None] | None = None,
+    ) -> None:
         """Register an in-process MCP server (from ``create_inproc_server``).
 
         Each tool surfaces as ``mcp__<server>__<tool>``. By default schemas
@@ -384,14 +408,26 @@ class ToolRegistry:
         to register them in the deferred tier instead (known + searchable via
         ToolSearch, schema out of context until loaded) — the right choice for
         large in-proc servers whose tools are rarely used in a typical turn.
+
+        ``call_timeouts`` maps a tool's own name (``tool.name``, not the
+        ``mcp__`` name) to the seconds one call may take, replacing
+        ``external_call_timeout`` for that tool; ``None`` leaves it unbounded.
+        It is for tools with a legitimate long block that already carry their
+        own deadline (a synchronous subagent dispatch), which the registry's
+        hang guard would otherwise cancel mid-run.
         """
+        timeouts = dict(call_timeouts or {})
         for tool in server.tools:
             name = f"mcp__{server.name}__{tool.name}"
             spec = ToolSpec(
                 name=name, description=tool.description, input_schema=tool.input_schema,
                 risk=tool.risk, source="inproc",
             )
-            self._entries[name] = _Entry(spec=spec, handler=tool.as_handler(), server=server.name)
+            self._entries[name] = _Entry(
+                spec=spec, handler=tool.as_handler(), server=server.name,
+                has_call_timeout=tool.name in timeouts,
+                call_timeout=timeouts.get(tool.name),
+            )
             if not defer:
                 self._loaded.add(name)
 
@@ -514,7 +550,36 @@ class ToolRegistry:
         meaningful for MCP-sourced tools; ignored for in-proc handlers.
         ``raw_shell_output`` is only for code mode, which frames its complete
         model-facing output after Python has parsed/sliced the raw strings.
+
+        A string ``ctx.extra["tool_use_id"]`` is published as
+        ``current_tool_use_id`` for the duration of the call.
         """
+        ctx = ctx or ToolCtx()
+        tool_use_id = (getattr(ctx, "extra", None) or {}).get("tool_use_id")
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            return await self._dispatch(
+                name, input, ctx, input_responses=input_responses,
+                request_state=request_state, raw_shell_output=raw_shell_output,
+            )
+        token = current_tool_use_id.set(tool_use_id)
+        try:
+            return await self._dispatch(
+                name, input, ctx, input_responses=input_responses,
+                request_state=request_state, raw_shell_output=raw_shell_output,
+            )
+        finally:
+            current_tool_use_id.reset(token)
+
+    async def _dispatch(
+        self,
+        name: str,
+        input: dict[str, Any],
+        ctx: ToolCtx,
+        *,
+        input_responses: Any,
+        request_state: str | None,
+        raw_shell_output: bool,
+    ) -> ToolOutcome:
         from fluid.tools.hardening import (
             coerce_args,
             elision_notice,
@@ -523,7 +588,6 @@ class ToolRegistry:
             scrub_error_text,
         )
 
-        ctx = ctx or ToolCtx()
         entry = self._entries.get(name)
         if entry is None:
             return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
@@ -559,7 +623,13 @@ class ToolRegistry:
                     call_input = {**input, "__input_responses__": dict(input_responses)}
                 call = entry.handler(call_input, ctx)
                 if entry.spec.source == "inproc":
-                    outcome = _normalize(await self._bounded_external(name, call))
+                    limit = (
+                        entry.call_timeout if entry.has_call_timeout
+                        else self.external_call_timeout
+                    )
+                    outcome = _normalize(
+                        await self._bounded_external(name, call, limit=limit)
+                    )
                 else:
                     outcome = _normalize(await call)
         except Exception as exc:  # keep tool errors in-context, never crash the loop
@@ -595,15 +665,19 @@ class ToolRegistry:
                 outcome = replace(outcome, text=fence_untrusted(text, name))
         return outcome
 
-    async def _bounded_external(self, name: str, call: Any) -> Any:
+    async def _bounded_external(
+        self, name: str, call: Any, *, limit: Any = _REGISTRY_BOUND,
+    ) -> Any:
         """Await an MCP/inproc call under ``external_call_timeout``.
 
         On expiry the call is cancelled and an ``is_error`` outcome with
         ``error_code="tool_timeout"`` comes back — the transcript gets a
         ToolResult either way, which is what a hung browser_snapshot never
-        produced.
+        produced. ``limit`` replaces the registry bound for one call (a
+        per-tool override from ``register_inproc``); None or <=0 disables it.
         """
-        limit = self.external_call_timeout
+        if limit is _REGISTRY_BOUND:
+            limit = self.external_call_timeout
         if not limit or limit <= 0:
             return await call
         try:
