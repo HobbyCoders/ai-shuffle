@@ -92,44 +92,60 @@ for (let page = 1; ; page++) {
 const archive = path.join(process.env.RUNNER_TEMP, assetName);
 const configFile = path.join(process.env.RUNNER_TEMP, 'desktop-source-d1.json');
 try {
- // git archive is reproducible, so a retry rebuilds identical bytes and the
- // existing asset must match them exactly; bytes behind an asset ID never change.
- const built = JSON.parse(execFileSync('python', ['scripts/source_archive.py', revision, archive], { encoding: 'utf8' }));
- const { sha256, size, tree } = built;
- if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-f0-9]{64}$/.test(tree) || !Number.isSafeInteger(size) || size <= 0 || size > 512 * 1024 ** 2) throw new Error('Invalid runtime source archive');
- const sequence = Date.now();
- const containerSequence = Number(git('rev-list', '--first-parent', '--count', revision));
- if (!Number.isSafeInteger(containerSequence) || containerSequence <= 1 || git('rev-parse', '--is-shallow-repository') !== 'false') throw Error('Container publishing requires complete main history');
- const runtime = execFileSync('python', ['docker/update_contract.py'], { encoding: 'utf8' }).trim();
- if (!/^[a-f0-9]{64}$/.test(runtime)) throw Error('Invalid container runtime contract');
- const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime },
-  channel, version, notes, tree }));
- const signature = sign(null, payload, key);
- if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');
- const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });
- if (signed.length > 32768) throw new Error('Signed manifest exceeds the 32 KiB client limit; shorten the release notes');
- if (!asset) {
-  const uploaded = await fetch(`https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${assetName}`, {
-   method: 'POST', headers: { ...headers, 'Content-Type': 'application/zip', 'Content-Length': String(size) },
-   body: createReadStream(archive), duplex: 'half', signal: AbortSignal.timeout(120000),
-  });
-  if (!uploaded.ok) throw new Error(`Source upload failed (${uploaded.status})`);
-  asset = await uploaded.json();
- }
- if (!Number.isSafeInteger(asset.id) || asset.id <= 0 || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw new Error('GitHub source asset checksum or size did not match');
- if (!(await current())) { console.log('Source stored, but main moved ahead; pointer unchanged.'); }
- else {
-  await writeFile(configFile, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: databaseId }] }));
-  const quote = value => `'${value.replaceAll("'", "''")}'`;
-  const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${quote(channel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision,channel) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence,version=excluded.version WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
-  const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
-  const wrangler = (...args) => execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
-  // Small queries use the query API. --file invokes the bulk import path,
-  // which emits upload progress even with --json and can pause DB queries.
-  wrangler('--command', insert);
-  const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json'));
-  const row = result.flatMap(item => item.results ?? [])[0];
-  if (row?.manifest !== signed || row?.asset_id !== asset.id) throw new Error('Source pointer read-back did not match');
-  console.log(`Published ${channel} ${version} (${revision}): ${size} runtime source bytes in GitHub asset ${asset.id}; signed D1 manifest verified.`);
+ await writeFile(configFile, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: databaseId }] }));
+ const quote = value => `'${value.replaceAll("'", "''")}'`;
+ const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
+ const wrangler = (...args) => execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
+ // Several CI completions can authorize the same revision. Preserve its original
+ // signed sequence rather than turning each completion into another update.
+ const existing = channel === 'edge' ? JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json')) : [];
+ const published = existing.flatMap(item => item.results ?? [])[0];
+ if (published) {
+  const signed = JSON.parse(published.manifest);
+  const payload = Buffer.from(signed.payload, 'base64');
+  const manifest = JSON.parse(payload);
+  if (manifest.revision !== revision || manifest.channel !== channel || published.asset_id !== asset?.id ||
+      asset?.state !== 'uploaded' || manifest.size !== asset.size || asset.digest !== `sha256:${manifest.sha256}` ||
+      !verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), Buffer.from(signed.signature, 'base64'))) {
+   throw new Error('Existing source publication is invalid; refusing to overwrite it');
+  }
+  console.log(`Already published ${channel} ${revision}; leaving the signed update sequence unchanged.`);
+ } else {
+  // git archive is reproducible, so a retry rebuilds identical bytes and the
+  // existing asset must match them exactly; bytes behind an asset ID never change.
+  const built = JSON.parse(execFileSync('python', ['scripts/source_archive.py', revision, archive], { encoding: 'utf8' }));
+  const { sha256, size, tree } = built;
+  if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-f0-9]{64}$/.test(tree) || !Number.isSafeInteger(size) || size <= 0 || size > 512 * 1024 ** 2) throw new Error('Invalid runtime source archive');
+  const sequence = Date.now();
+  const containerSequence = Number(git('rev-list', '--first-parent', '--count', revision));
+  if (!Number.isSafeInteger(containerSequence) || containerSequence <= 1 || git('rev-parse', '--is-shallow-repository') !== 'false') throw Error('Container publishing requires complete main history');
+  const runtime = execFileSync('python', ['docker/update_contract.py'], { encoding: 'utf8' }).trim();
+  if (!/^[a-f0-9]{64}$/.test(runtime)) throw Error('Invalid container runtime contract');
+  const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime },
+   channel, version, notes, tree }));
+  const signature = sign(null, payload, key);
+  if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');
+  const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });
+  if (signed.length > 32768) throw new Error('Signed manifest exceeds the 32 KiB client limit; shorten the release notes');
+  if (!asset) {
+   const uploaded = await fetch(`https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${assetName}`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/zip', 'Content-Length': String(size) },
+    body: createReadStream(archive), duplex: 'half', signal: AbortSignal.timeout(120000),
+   });
+   if (!uploaded.ok) throw new Error(`Source upload failed (${uploaded.status})`);
+   asset = await uploaded.json();
+  }
+  if (!Number.isSafeInteger(asset.id) || asset.id <= 0 || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw new Error('GitHub source asset checksum or size did not match');
+  if (!(await current())) { console.log('Source stored, but main moved ahead; pointer unchanged.'); }
+  else {
+   const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${quote(channel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision,channel) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence,version=excluded.version WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
+   // Small queries use the query API. --file invokes the bulk import path,
+   // which emits upload progress even with --json and can pause DB queries.
+   wrangler('--command', insert);
+   const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json'));
+   const row = result.flatMap(item => item.results ?? [])[0];
+   if (row?.manifest !== signed || row?.asset_id !== asset.id) throw new Error('Source pointer read-back did not match');
+   console.log(`Published ${channel} ${version} (${revision}): ${size} runtime source bytes in GitHub asset ${asset.id}; signed D1 manifest verified.`);
+  }
  }
 } finally { for (const file of [archive, configFile]) await unlink(file).catch(() => {}); }

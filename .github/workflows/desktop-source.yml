@@ -83,14 +83,26 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install PyYAML==6.0.3
+      # Coalesce a burst of merges without interrupting a signing/database write.
+      # Superseded jobs exit before installing the publication dependencies.
+      - name: Allow rapid merges to settle
+        run: sleep 120
+      - name: Skip superseded publication before build setup
+        id: settled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/edge_publication_gate.py
       - uses: actions/setup-node@v4
+        if: steps.settled.outputs.ready == 'true'
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: android/hub/package-lock.json
       - run: npm ci --no-audit --no-fund
+        if: steps.settled.outputs.ready == 'true'
         working-directory: android/hub
       - name: Recheck CI and main immediately before signing
+        if: steps.settled.outputs.ready == 'true'
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}

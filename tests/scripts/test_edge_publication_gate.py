@@ -590,6 +590,21 @@ def test_real_workflow_is_immutable_and_only_edge_publisher_can_use_secrets():
     assert step["if"] == "steps.ci.outputs.ready == 'true'"
     assert step["env"]["SOURCE_CHANNEL"] == "edge"
     assert jobs["publish"]["steps"][-2]["run"] == "python scripts/ci/edge_publication_gate.py"
+    steps = jobs["publish"]["steps"]
+    settle = next(i for i, step in enumerate(steps) if step.get("run") == "sleep 120")
+    assert steps[settle + 1]["id"] == "settled"
+    assert steps[settle + 1]["run"] == "python scripts/ci/edge_publication_gate.py"
+    for step in steps[settle + 2:-1]:
+        assert step["if"] == "steps.settled.outputs.ready == 'true'"
+
+
+@pytest.mark.parametrize("merges", [3, 4])
+def test_merge_burst_only_final_revision_can_publish(evidence, merges):
+    revisions = [f"{i:040x}" for i in range(1, merges)] + [REVISION]
+    for revision in revisions[:-1]:
+        ready, reason = gate.publication_readiness(evidence.data.__getitem__, revision, evidence.directory)
+        assert not ready and "superseded" in reason
+    assert check(evidence)[0]
 
 
 def test_workflow_event_predicate_executes_for_authorized_events():
