@@ -3382,12 +3382,11 @@ class HarnessAdapter(ProviderAdapter):
 
         registry = ToolRegistry(**_registry_bound_kwargs())
         # Constraint: native legs (anthropic / openai_responses / openrouter)
-        # get fluid's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
-        # tools — without them a native session can only reach the app's bridged
-        # MCP servers and has no file/shell access at all. The delegated leg must
-        # NOT get them: the claude CLI supplies its own copies. Conversely the
-        # CLI must never be relied on for tools outside the Claude-subscription
-        # case, which is exactly why the native leg registers its own here.
+        # get fluid's builtin file/shell tools as first-class tools. Delegated
+        # sessions keep the CLI's copies except for search: Claude Code 2.1.285
+        # removes Glob/Grep from its POSIX surface independently of the
+        # bash-first steer. Supply bounded search over the existing MCP bridge
+        # rather than relying on undocumented CLI experiment switches.
         builtins_registered = False
         if native:
             from fluid.tools.builtins import register_builtins
@@ -3435,6 +3434,13 @@ class HarnessAdapter(ProviderAdapter):
                     "Monitor spec; leaving the vendor spec as-is.",
                     exc_info=True,
                 )
+
+        if not native and _session_mode(options) != "chat":
+            from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
+
+            for search_tool in (glob_tool, grep_tool):
+                registry.register_builtin(search_tool.SPEC, search_tool.handler)
+            builtins_registered = True
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
@@ -5016,6 +5022,16 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
     notes: List[str] = []
+    search = [tool for tool in ("Glob", "Grep") if tool in names and (
+        permit is None or permit(tool)
+    )]
+    if search:
+        notes.append(
+            "Use the app's bounded file-search tools instead of find/grep through "
+            "Bash: " + ", ".join(f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search)
+            + ". These remain available even when Claude Code omits its own "
+            "Glob/Grep tools."
+        )
     if recall or memory:
         shown = [
             t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)
