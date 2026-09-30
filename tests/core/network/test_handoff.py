@@ -320,6 +320,7 @@ async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monke
     # Exercise actual peer challenge/signature tokens and HTTP control routing;
     # only transport is in-process, so no real user worker or remote is touched.
     import httpx
+    from app.core import cluster
     from app.db import network as network_store
     from tests.core.network.test_transport import ServedBy
 
@@ -328,8 +329,13 @@ async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monke
     real_async, real_call = httpx.AsyncClient, control.call
     transport.reset_for_tests()
     tokens.reset_for_tests()
+    # Authentication publishes the caller's own address. Use each actual test
+    # server's URL, not a host/CI LAN address that the MockTransport cannot serve.
+    monkeypatch.setattr(settings, "cluster_advertise_url", None)
     for worker, peer in ((a, b), (b, a)):
         with worker.active():
+            cluster.set_advertise_url_override(served[worker.device_id].base_url)
+            assert engine._own_endpoints() == [served[worker.device_id].base_url]
             network_store.touch_member(peer.device_id, endpoints=[served[peer.device_id].base_url])
 
     def route(request):
@@ -376,6 +382,7 @@ async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monke
     assert set(exported[0]["checkout"]) == {"protocol", "branch", "head", "fingerprint", "remote"}
     with b.active():
         from app.core import project_resolver
+        assert network_store.get_member(a.device_id)["endpoints"] == [served[a.device_id].base_url]
         row = database.get_session("handoff-test")
         cwd = project_resolver.resolve_existing_cwd(row)
         assert checkout_transfer.fingerprint(cwd) == head
