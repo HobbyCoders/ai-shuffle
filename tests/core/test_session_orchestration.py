@@ -420,7 +420,7 @@ async def test_actual_delegated_unread_result_keeps_peer_durably_queued(peers, m
     fake = Path(__file__).resolve().parents[2] / "fluid/tests/fixtures/fake_claude.py"
     store = MemoryStore()
     sdk = (await store.create_session()).session_id
-    loop = DelegatedLoop(store=store, session_id=sdk,
+    loop = DelegatedLoop(store=store, session_id=sdk, model="claude-fake",
         claude_cmd=[sys.executable, "-u", str(fake)], env={"FAKE_CLAUDE_SCENARIO": "a"})
     original_write = loop._write_frame
     frames, results, readers = [], [], set()
