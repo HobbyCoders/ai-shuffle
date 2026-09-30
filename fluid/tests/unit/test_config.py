@@ -170,6 +170,7 @@ def _non_default_config_dict() -> dict:
             "tool_result_stub_chars": 8,
             "keep_recent_tool_results": 9,
             "min_result_chars": 10,
+            "elide_old_args": True,
         },
         "hooks": [{"event": "PreToolUse", "command": "echo", "matcher": "Bash", "timeout": 5.0}],
         "cwd": "/w",

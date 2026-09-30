@@ -48,6 +48,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.arg_elision import elidable_call_ids, elide_tool_args
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
@@ -128,6 +129,10 @@ class CompactionConfig:
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
+    # Arg elision (fluid.context.arg_elision): the input of an assistant tool
+    # call whose result is already trimmed renders as a small JSON summary.
+    # Off by default; off, every view is byte-identical to before the flag.
+    elide_old_args: bool = False
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -513,6 +518,9 @@ class Compactor:
         # render never rewrites a message inside an already-cached prefix.
         trimmed = self.trimmer._trimmed
         consumed = self.trimmer._image_consumed
+        elide = (
+            elidable_call_ids(trimmed, index) if self.config.elide_old_args else None
+        )
         out: list[Message] = []
         i = 0
         while i < len(nodes):
@@ -522,7 +530,7 @@ class Compactor:
                 # persisted one rehydrated from a session that *did* run the
                 # ladder stays inert rather than digesting history behind the
                 # host app's back.
-                out.append(self._render_live(node, trimmed, consumed))
+                out.append(self._render_live(node, trimmed, consumed, elide))
                 i += 1
                 continue
             end_id = self._epoch_by_start.get(node.node_id)
@@ -543,7 +551,7 @@ class Compactor:
                 )
                 i = j + 1
                 continue
-            out.append(self._render_live(node, trimmed, consumed))
+            out.append(self._render_live(node, trimmed, consumed, elide))
             i += 1
         return out
 
@@ -552,6 +560,7 @@ class Compactor:
         node: SessionNode,
         trimmed: set[tuple[str, str]],
         consumed: set[tuple[str, str]],
+        elide: frozenset[str] | None = None,
     ) -> Message:
         message = (
             self.trimmer._render([node], trimmed, consumed)[0]
@@ -559,6 +568,8 @@ class Compactor:
             else node.message
         )
         if message.role != "user":
+            if elide is not None:
+                return elide_tool_args(node.node_id, message, elide)
             return message
         blocks: list[Any] = []
         changed = False
