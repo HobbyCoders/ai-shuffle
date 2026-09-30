@@ -43,7 +43,6 @@
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
-	import ChatAccess from './ChatAccess.svelte';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -1855,12 +1854,6 @@
 				{/if}
 			</div>
 			{/each}
-
-			{#if $activeSession.sessionId}
-				{#key $activeSession.sessionId}
-					<ChatAccess sessionId={$activeSession.sessionId} />
-				{/key}
-			{/if}
 
 			<!-- Prompts already sent but not yet delivered to the model. They sit
 			     below the transcript, above the activity indicator, until the

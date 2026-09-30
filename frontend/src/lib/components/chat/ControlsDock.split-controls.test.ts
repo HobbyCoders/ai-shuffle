@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { createRawSnippet, tick } from 'svelte';
 import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
+import { auth } from '$lib/stores/auth.svelte';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
 import { loadVoiceSettings, type VoiceSessionConfig } from '$lib/api/voice';
@@ -50,6 +51,30 @@ afterEach(() => {
 	setLane('code');
 });
 afterAll(() => vi.unstubAllGlobals());
+
+it.each(['code', 'voice'] as const)('enables attach for an existing %s worker session without a local checkout', async mode => {
+	const status = vi.spyOn(api, 'get').mockResolvedValue({ authenticated: true, has_any_credential: true });
+	try {
+		await auth.checkAuth();
+		setLane(mode);
+		activeSession.setProject('', 'pv2-worker');
+		const onAttachClick = vi.fn();
+		renderDock({ onAttachClick });
+		expect((screen.getByRole('button', { name: 'Attach file' }) as HTMLButtonElement).disabled).toBe(true);
+		await activeSession.switchSession('attach-worker');
+		activeSession.setProject('', 'pv2-worker');
+		activeSession.reconcileSessionMode([{ id: 'attach-worker', mode }]);
+		await tick();
+		const attach = screen.getByRole('button', { name: 'Attach file' }) as HTMLButtonElement;
+		expect(attach.disabled).toBe(false);
+		await fireEvent.click(attach);
+		expect(onAttachClick).toHaveBeenCalledOnce();
+	} finally {
+		status.mockResolvedValue({ authenticated: false, has_any_credential: false });
+		await auth.checkAuth();
+		status.mockRestore();
+	}
+});
 
 function renderDock(props: Record<string, unknown> = {}) {
 	return render(ControlsDock, {

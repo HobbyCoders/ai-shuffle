@@ -634,6 +634,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         else:  # Fork / Rewind: unsupported under delegation (see EngineCaps)
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 
+    async def set_run_settings(self, *, effort: str | None, fast: bool) -> None:
+        """Session-only flag settings; never write account/project configuration."""
+        settings = {**json.loads(self.settings or "{}"), "effortLevel": effort, "fastMode": fast}
+        await self._apply_setting({"subtype": "apply_flag_settings", "settings": settings})
+        self.effort = effort
+        self.settings = json.dumps(settings)
+
     async def aclose(self) -> None:
         await self._close_background_lifecycle()
         self._interrupted.set()
@@ -1381,6 +1388,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """The control_request that puts the CLI on the recorded value."""
         if subtype == "set_model":
             return {"subtype": "set_model", "model": self.model}
+        if subtype == "apply_flag_settings":
+            return {"subtype": subtype, "settings": {
+                **json.loads(self.settings or "{}"), "effortLevel": self.effort,
+                "fastMode": bool(json.loads(self.settings or "{}").get("fastMode", False)),
+            }}
         return {
             "subtype": "set_permission_mode",
             "mode": _cli_permission_mode(self.permission_mode, self.cli_version),

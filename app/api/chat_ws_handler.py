@@ -1050,10 +1050,10 @@ class ChatWebSocketHandler:
         from app.core import upload_transfer
 
         if not project_id:
-            raise upload_transfer.UploadLiftError(
-                "Attachments can only be sent to another device from a project "
-                "session."
-            )
+            session = await run_sync(database.get_session, session_id)
+            if not session or not session.get("project_v2_id"):
+                raise upload_transfer.UploadLiftError("Attachments need a project session.")
+            return await run_sync(upload_transfer.lift_session_paths_to_blobs, upload_paths, session)
         project = await run_sync(database.get_project, project_id)
         if not project:
             raise upload_transfer.UploadLiftError(
@@ -1613,14 +1613,6 @@ class ChatWebSocketHandler:
         # files the executing install cannot see is exactly the silent loss this
         # mechanism exists to prevent.
         if placed_remote and upload_paths:
-            if not project_id:
-                from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
-
-                await self.send_json({
-                    "type": "error",
-                    "message": ATTACHMENTS_NEED_LOCAL_CHECKOUT,
-                })
-                return
             try:
                 blob_ids = await self._lift_uploads(
                     upload_paths, project_id, session_id
@@ -1645,13 +1637,8 @@ class ChatWebSocketHandler:
         owner_device = await self._network_owner(session_id) if placed_remote else None
         if owner_device:
             from app.network import control
-            if upload_paths or (payload or {}).get("upload_blob_ids"):
-                await self.send_json({
-                    "type": "error", "session_id": session_id,
-                    "message": "Attachments cannot be sent to a session that runs on another device yet. "
-                               "Send the message without attachments, or fork the session here.",
-                })
-                return
+            # submit_turn exports this send's lifted blobs; the owner imports
+            # them before enqueuing so the prompt never names unavailable bytes.
             try:
                 await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,

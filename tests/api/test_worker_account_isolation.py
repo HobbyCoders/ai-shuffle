@@ -56,8 +56,6 @@ def enroll(client):
     result = client.post('/api/v1/mobile/hub/enroll', json={'ticket': 'one-use-ticket',
         'device_info': DeviceInfo(device_id=PHONE, device_name='Phone', platform='android', capabilities={}).model_dump()})
     assert result.status_code == 200, result.text
-    device = database.get_mobile_device_by_api_key_hash(hash_api_key(result.json()['api_key']))
-    store.confirm_device(store.ownership(device['device_id']), True)
     return result.json()['api_key']
 
 

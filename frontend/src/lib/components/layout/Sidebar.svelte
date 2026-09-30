@@ -624,7 +624,7 @@
 		</button>
 	</div>
 
-	<div class="sb-scroll" bind:this={scrollRef} onscroll={handleScroll}>
+	<div class="sb-scroll" class:edge-guard={fullscreen} bind:this={scrollRef} onscroll={handleScroll}>
 		<div class="workspace" bind:this={workspaceRef}>
 			<WorkspaceNav
 				items={railItems}
@@ -1101,6 +1101,12 @@
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
+	/* The mobile drawer is the full screen wide, and Android reserves the
+	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
+	   that edge got taken for a back swipe, and taps on its outer half went
+	   to the system. Hold the rows off the edge so the whole rail, and the
+	   place a thumb starts a settle swipe, sit inside the app's own touch area. */
+	.sb-scroll.edge-guard { padding-right: 24px; }
 	.sb-scroll::-webkit-scrollbar { width: 8px; }
 	.sb-scroll::-webkit-scrollbar-thumb {
 		background: var(--border);

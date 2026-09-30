@@ -1,8 +1,8 @@
 name: CI JavaScript
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
-# One runner checks only the JavaScript packages changed by a PR. Scheduled
-# canaries check all three packages. The mobile UI (mobile/) compiles
+# One runner checks only the JavaScript packages changed by a PR. Manual runs
+# check all three packages. The mobile UI (mobile/) compiles
 # frontend/src/lib, so its own job runs for either package. A PR that changes only docs/content gets
 # the two cheap docs checks (the two docs copies match, and the website's
 # rendered docs.json is current) and nothing else.
@@ -21,12 +21,7 @@ on:
       - 'android/site/scripts/render-docs.mjs'
       - 'android/site/src/content/docs.json'
       - '.github/workflows/ci-frontend.yml'
-  # Daily main-branch canary catches interactions between merged PRs within
-  # roughly a day. Skip the paid runner when main has not moved since a green
-  # canary; PRs already check each revision before merge.
-  schedule:
-    - cron: '7 6 * * *'
-  # Manual canary (`gh workflow run ci-frontend.yml`).
+  # Manual run on any ref (`gh workflow run ci-frontend.yml`).
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -42,37 +37,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  canary-gate:
-    name: Canary gate
-    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
-    # canary job.
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      actions: read
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-frontend.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
-          if [ "$last" = "$GITHUB_SHA" ]; then
-            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
   frontend:
     name: JavaScript package checks
-    needs: canary-gate
-    # PRs and manual runs always run; the schedule runs only when main moved.
-    # !cancelled() keeps this job alive when the gate is skipped on a PR.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     timeout-minutes: 20
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
@@ -180,8 +146,6 @@ jobs:
   # type check, tests or build; android.yml does not start for frontend/**.
   mobile:
     name: Mobile UI checks
-    needs: canary-gate
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     timeout-minutes: 20
     runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     defaults:

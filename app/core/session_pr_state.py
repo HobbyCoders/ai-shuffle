@@ -222,6 +222,8 @@ async def reconcile_session_pr(session_id: str) -> bool:
     merged number). No branch: refresh the stored ``pr_number``. Unchanged
     number+state is a no-op.
 
+    Canonical project-only sessions resolve through this runner's checkout;
+    a legacy project alias is not required. No remote checkout is materialized.
     A failed lookup or write returns False so the scheduler can retry.
     An authoritative no-op returns True. Never clears state on failure.
     """
@@ -234,10 +236,14 @@ async def reconcile_session_pr(session_id: str) -> bool:
             return True
 
         project_id = session.get("project_id")
+        # Canonical sessions (including those synced from another worker) may
+        # have no legacy project alias. The working-dir helper resolves their
+        # runner-local checkout by session_id, not by that legacy alias.
+        checkout_project_id = session.get("project_v2_id") or project_id
         branch = session.get("branch") or session.get("worktree_branch")
         pr_number = session.get("pr_number")
         current_state = (session.get("pr_state") or "").lower()
-        if not project_id:
+        if not checkout_project_id:
             return True
         if not branch and not pr_number:
             return True
@@ -246,7 +252,7 @@ async def reconcile_session_pr(session_id: str) -> bool:
             from app.api.git_helpers import get_working_dir_async
 
             working_dir = await get_working_dir_async(
-                project_id, session.get("worktree_id"), session_id
+                checkout_project_id, session.get("worktree_id"), session_id
             )
         except Exception:
             logger.debug("PR reconcile: working dir for %s failed", session_id, exc_info=True)

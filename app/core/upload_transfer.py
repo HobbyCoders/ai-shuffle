@@ -26,6 +26,7 @@ Two halves:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -68,6 +69,22 @@ def _is_under(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def session_upload_dir(session_id: str) -> Path:
+    """Stable, path-safe staging root, isolated from every other session."""
+    from app.core.config import settings
+    key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return settings.effective_workspace_dir / "session-uploads" / key
+
+
+def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:
+    """Lift only this session's staged files, never arbitrary workspace paths."""
+    session_id = session["id"]
+    return lift_paths_to_blobs(
+        paths, {"path": str(session_upload_dir(session_id))}, session_id,
+        session.get("project_v2_id"),
+    )
 
 
 def lift_paths_to_blobs(

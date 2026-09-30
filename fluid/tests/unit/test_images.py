@@ -2,8 +2,8 @@
 
 Covers the oversized-image paths: a bloated PNG re-encodes to JPEG once it is
 past the megapixel gate but stays PNG below it, an animated GIF/WebP flattens,
-and anything over the 1568px vision cap downscales. Pillow is optional —
-without it conditioning is a pass-through no-op.
+and anything over the 1568px vision cap downscales. Provider serialization
+also bounds older persisted images without rewriting their stored blocks.
 """
 
 import base64
@@ -12,7 +12,7 @@ import pytest
 
 from fluid.tools.images import MAX_IMAGE_EDGE, condition_image
 
-PILImage = pytest.importorskip("PIL.Image")
+from PIL import Image as PILImage
 
 
 def _png(width: int, height: int, color=(120, 40, 200)) -> str:
@@ -22,6 +22,15 @@ def _png(width: int, height: int, color=(120, 40, 200)) -> str:
     buf = io.BytesIO()
     PILImage.new("RGB", (width, height), color).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_pillow_is_a_runtime_dependency():
+    import tomllib
+    from pathlib import Path
+
+    manifest = Path(__file__).parents[2] / "pyproject.toml"
+    dependencies = tomllib.loads(manifest.read_text())["project"]["dependencies"]
+    assert any(dep.lower().startswith("pillow>=") for dep in dependencies)
 
 
 def test_oversized_image_downscaled_to_cap() -> None:
@@ -94,29 +103,47 @@ def test_garbage_base64_passes_through() -> None:
     assert condition_image("image/png", "!!!not-an-image") == ("image/png", "!!!not-an-image")
 
 
-def test_dispatch_tool_conditions_images(monkeypatch) -> None:
-    """The engine seam: ToolOutcome images are conditioned before becoming blocks."""
-    from fluid.messages import Image, Text, ToolResultBlock
-    from fluid.tools.registry import ToolImage, ToolOutcome
-
-    big_png = _png(2400, 1400)
-    outcome = ToolOutcome(
-        text="shot",
-        images=(ToolImage(media_type="image/png", data=big_png),),
-    )
-
-    class FakeLoop:
-        pass
-
-    # Exercise the same expression _dispatch_tool uses.
+@pytest.mark.parametrize("dialect", ["anthropic", "responses", "chat"])
+@pytest.mark.parametrize("nested", [False, True], ids=["user-image", "tool-image"])
+@pytest.mark.parametrize("size", [(400, 300), (3000, 1600)])
+def test_serializers_bound_persisted_images_without_mutation(dialect, nested, size):
     import io
+    import json
 
-    from fluid.tools.images import condition_image as cond
-    content = [Text(outcome.text)]
-    content.extend(
-        Image(media_type=mt, data=d)
-        for mt, d in (cond(img.media_type, img.data) for img in outcome.images)
-    )
-    block = ToolResultBlock(tool_use_id="t1", content=content)
-    img_block = next(b for b in block.content if isinstance(b, Image))
-    assert max(PILImage.open(io.BytesIO(base64.b64decode(img_block.data))).size) == MAX_IMAGE_EDGE
+    from fluid.messages import Image, Message, Text, ToolResultBlock
+    from fluid.providers.anthropic.serialize import build_request_body as anthropic_body
+    from fluid.providers.openai_responses.serialize import build_request_body as responses_body
+    from fluid.providers._chat_completions import translate_message
+    from fluid.providers.base import ProviderRequest
+
+    original = _png(*size)
+    image = Image(media_type="image/png", data=original)
+    content = [Text("keep this text"), image]
+    if nested:
+        content = [ToolResultBlock(tool_use_id="read-image", content=content)]
+    # Use the stored representation too; legacy history is not re-ingested.
+    stored = json.dumps(Message(role="user", content=content).to_dict())
+    message = Message.from_dict(json.loads(stored))
+    request = ProviderRequest(model="test-model", messages=[message])
+    if dialect == "anthropic":
+        parts = anthropic_body(request)["messages"][0]["content"]
+        if nested:
+            parts = parts[0]["content"]
+        source = parts[1]["source"]
+        media_type, data = source["media_type"], source["data"]
+    else:
+        if dialect == "responses":
+            items = responses_body(request)["input"]
+            parts = items[0]["output" if nested else "content"]
+            url = parts[1]["image_url"]
+        else:
+            items = translate_message(message)
+            parts = items[-1]["content"]
+            url = parts[1]["image_url"]["url"]
+        media_type, data = url.removeprefix("data:").split(";base64,", 1)
+    assert media_type == "image/png"
+    with PILImage.open(io.BytesIO(base64.b64decode(data))) as decoded:
+        assert max(decoded.size) <= MAX_IMAGE_EDGE
+    if max(size) <= MAX_IMAGE_EDGE:
+        assert data == original  # No needless churn of an already safe prefix.
+    assert json.dumps(message.to_dict()) == stored

@@ -61,6 +61,7 @@ from fluid.providers.base import (
     StreamChunk,
     flatten_system,
 )
+from fluid.tools.images import condition_image
 
 # Fields echoed on output items that MUST be removed before a stateless
 # (``store: false``) resend — the backend rejects resent items carrying them.
@@ -79,9 +80,10 @@ def _strip_for_resend(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _image_part(block: Image) -> dict[str, Any]:
+    media_type, data = condition_image(block.media_type, block.data)
     return {
         "type": "input_image",
-        "image_url": f"data:{block.media_type};base64,{block.data}",
+        "image_url": f"data:{media_type};base64,{data}",
         "detail": "auto",
     }
 

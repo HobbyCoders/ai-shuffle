@@ -78,6 +78,7 @@ from app.api.sessions_worktree import (
     worktree_router,
 )
 from app.api.sessions_permissions import router as permissions_router
+from app.api.sessions_uploads import router as uploads_router
 
 # ---------------------------------------------------------------------------
 # Router setup — include sub-routers so all endpoints are served
@@ -87,6 +88,7 @@ router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
 router.include_router(permissions_router)
+router.include_router(uploads_router)
 
 
 # ============================================================================

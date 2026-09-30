@@ -1,11 +1,11 @@
-"""Owner-routed permission changes; never interrupt or reconnect a live turn."""
+"""Owner-routed live run settings; never interrupt or reconnect a turn."""
 import asyncio
 import logging
-from typing import Literal
+from typing import Literal, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from app.api.auth import require_auth
 from app.api.sessions_helpers import require_session
@@ -16,6 +16,97 @@ from app.network import control
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _locks = WeakValueDictionary()
+
+
+class RunSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]] = None
+    fast: Optional[StrictBool] = None
+
+
+async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
+    from app.core.session_pool import get_session_pool
+    from app.core.session_runtime import get_live_runtime
+    from app.core.model_effort import normalize_effort
+    from app.core.provider.harness_adapter import _decide_provider_kind
+    from app.core.provider.types import SessionOptions
+    from app.db.model_providers import get_model_provider
+
+    changes = body.model_dump(exclude_unset=True)
+    if not changes or ("fast" in changes and changes["fast"] is None):
+        raise ValueError("Provide effort and/or a boolean fast setting")
+    lock = _locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session = await run_sync(control._require_owned, session_id)
+        state = get_session_pool().peek(session_id)
+        runtime = get_live_runtime(session_id)
+        connected = state is not None and state.is_connected
+        if runtime is not None and not connected:
+            raise ValueError("The session is still connecting. Try again in a moment.")
+        options = getattr(state.adapter, "_options", None) if connected else None
+        old = {"effort": options.effort if options else session.get("effort"),
+               "fast": bool(options.fast if options else session.get("fast"))}
+        selected = {**old, **changes}
+        if connected:
+            selected = await state.adapter.set_run_settings(**selected)
+            if get_session_pool().peek(session_id) is not state or not state.is_connected:
+                raise RuntimeError("Session connection changed before the setting was confirmed")
+        else:
+            model = session.get("model")
+            provider_id = session.get("provider_id")
+            if model and model.startswith("prov:"):
+                _, provider_id, model = model.split(":", 2)
+            provider = await run_sync(get_model_provider, provider_id) if provider_id else None
+            route = await run_sync(_decide_provider_kind, SessionOptions(
+                model=model, extra={"provider_id": provider_id} if provider_id else {}))
+            effort = normalize_effort(selected["effort"], model, provider, route=route)
+            if selected["effort"] is not None and effort is None:
+                raise ValueError("This model does not support the selected effort level")
+            if selected["fast"] and route not in ("delegated", "openai_responses"):
+                raise ValueError("Fast mode is not supported by this provider")
+            selected["effort"] = effort
+        try:
+            await run_sync(database.set_session_run_binding, session_id, **selected,
+                           clear_effort=selected["effort"] is None)
+        except Exception:
+            if connected:
+                await state.adapter.set_run_settings(**old)
+            raise
+        runtime = get_live_runtime(session_id)
+        if runtime is not None:
+            runtime.turn["overrides"] = {**(runtime.turn.get("overrides") or {}), **selected}
+        if connected and state.connect_options is not None:
+            state.connect_options.effort = selected["effort"]
+            state.connect_options.aih_fast = selected["fast"]
+        return selected
+
+
+async def handle_run_settings(body: dict, from_device: str) -> dict:
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    return await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
+        {key: value for key, value in body.items() if key != "session_id"}))
+
+
+@router.put("/{session_id}/run-settings")
+async def update_run_settings(
+    request: Request, session_id: str, body: RunSettingsUpdate,
+    token: str = Depends(require_auth),
+):
+    session = await require_session(request, session_id)
+    owner = await run_sync(control.owner_of, session)
+    try:
+        if owner is not None:
+            return await control.call(owner, "run-settings", {
+                "session_id": session_id, **body.model_dump(exclude_unset=True),
+            })
+        return await apply_run_settings(session_id, body)
+    except (control.ControlRefused, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Could not change run settings for %s", session_id)
+        raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
 
 
 class PermissionModeUpdate(BaseModel):
@@ -60,6 +151,12 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
                 # UI claim otherwise; remaining prompts can still be answered.
                 logger.warning("Mode applied but pending prompts could not be released for %s",
                                session_id, exc_info=True)
+        try:
+            from app.core.chat_access import broker
+            await broker.resolve_mode_actions(session_id)
+        except Exception:
+            logger.warning("Mode applied but private-access confirmations could not be released for %s",
+                           session_id, exc_info=True)
         return {"permission_mode": mode}
 
 

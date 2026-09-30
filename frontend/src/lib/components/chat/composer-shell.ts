@@ -112,6 +112,8 @@ export interface ComposerSheetProps {
 	showCodeControls?: boolean;
 	permissionOptions: ComposerControlOption[];
 	permissionValue: string | null;
+	/** The session write is pending; keep the saved choice visible until it succeeds. */
+	permissionUpdating?: boolean;
 	onPermissionSelect: (value: string) => void;
 }
 

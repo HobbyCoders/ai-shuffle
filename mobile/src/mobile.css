@@ -332,62 +332,23 @@ html:root[data-platform='mobile'] .options-dropdown {
 
 /* ── frontend/src/lib/components/git/GitHeaderActions.svelte ───────────────── */
 
-/* Mobile shell (Android WebView) — single horizontal rail (no wrapping)
-   with touch-sized targets. */
+/* Mobile shell (Android WebView): the git cluster is one button that opens a
+   bottom sheet (the component's own narrow-screen layout). Only the direct
+   header buttons (Init Repo, retry) need touch sizing here. */
 html:root[data-platform='mobile'] .git-actions {
-	/* Stay on one line so the header reads as a single touch-scrollable rail.
-	   Items keep their intrinsic size and overflow-scroll with the header. */
 	flex-wrap: nowrap;
 	flex-shrink: 0;
 }
 
-/* Don't let rail items shrink — they should keep their size and scroll. */
-html:root[data-platform='mobile'] .git-btn, html:root[data-platform='mobile'] .split-btn-group, html:root[data-platform='mobile'] .diff-stats {
-	flex-shrink: 0;
-}
-
-/* Pin Commit/Finish/Create PR at the start of the rail so Finish is
-   visible when a PR is open — Pull/Push used to sit first and push
-   the primary action off-screen on a phone-width header. */
-html:root[data-platform='mobile'] .git-primary {
-	order: -1;
-}
-
 html:root[data-platform='mobile'] .git-btn {
+	flex-shrink: 0;
 	height: 36px;
 	padding: 0 12px;
 	font-size: 0.75rem;
 }
 
-/* Keep the chevron compact even at the larger mobile touch size. */
-html:root[data-platform='mobile'] .split-btn-group .split-chevron {
-	padding: 0 8px;
-}
-
-html:root[data-platform='mobile'] .branch-name {
-	max-width: 80px;
-}
-
 html:root[data-platform='mobile'] .project-name {
 	max-width: 80px;
-}
-
-/* The header is a horizontal scroll container on mobile, which would clip an
-   absolutely-positioned dropdown. Pin it as a fixed panel just below the
-   header so it escapes the rail's overflow while staying in the DOM tree
-   (so outside-click detection keeps working). Scope this to the Git header:
-   runner and branch menus reuse .branch-dropdown in the composer sheet, where
-   they must stay in normal flow beneath their triggers. */
-html:root[data-platform='mobile'] .git-actions .branch-dropdown {
-	position: fixed;
-	top: 100px;
-	left: 8px;
-	right: 8px;
-	bottom: auto;
-	min-width: 0;
-	max-width: none;
-	max-height: 60vh;
-	z-index: 200;
 }
 
 /* ── frontend/src/lib/components/git/GitProgressPopover.svelte ─────────────── */

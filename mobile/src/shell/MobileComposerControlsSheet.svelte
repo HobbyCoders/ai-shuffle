@@ -21,7 +21,7 @@
 		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
 		effortExplanation = NO_ADJUSTABLE_EFFORT, effortKnown = true,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
-		permissionOptions, permissionValue, onPermissionSelect
+		permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect
 	}: Props = $props();
 
 	let page = $state<'overview' | 'models'>('overview');
@@ -164,16 +164,16 @@
 					{/if}
 				</div>
 				{#if showCodeControls}
-					<div class="quick-setting" role="group" aria-label="Tool access">
+					<div class="quick-setting" role="group" aria-label="Tool access" aria-busy={permissionUpdating}>
 						<div class="setting-label"><span>Tool access</span></div>
 						<div class="access-choices">
 							{#each permissionOptions as option (option.value)}
-								<button type="button" class="quick-choice" aria-pressed={option.value === permissionValue}
+								<button type="button" class="quick-choice" disabled={permissionUpdating} aria-pressed={option.value === permissionValue}
 									aria-label={`${option.label}: ${option.description}`} title={option.description}
 									onclick={() => onPermissionSelect(option.value)}>{option.label}</button>
 							{/each}
 						</div>
-						<p class="setting-description" aria-live="polite">{permissionLabel} · {permissionDescription}</p>
+						<p class="setting-description" aria-live="polite">{permissionUpdating ? 'Saving tool access…' : `${permissionLabel} · ${permissionDescription}`}</p>
 					</div>
 				{/if}
 				{#if fastSupported && !modelLocked}
@@ -242,6 +242,7 @@
 	.controls-panel.models > .mobile-model-picker { flex: 1 0 210px; min-height: 210px; --mpp-width: 100%; --mpp-height: 100%; }
 	.mobile-model-picker :global(.mpp-list), .mobile-model-picker :global(.mpp-rail) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 	.model-notice { margin: 0; color: var(--warning); font-size: 0.72rem; }
+	.access-choices button:disabled { opacity: 0.55; cursor: wait; }
 	button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 	button:active { filter: brightness(1.1); }
 	@media (prefers-reduced-motion: reduce) {

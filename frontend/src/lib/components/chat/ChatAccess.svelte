@@ -1,12 +1,15 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
+	import { chatAccessSummary } from '$lib/stores/chat-access';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
-	let { sessionId }: { sessionId: string } = $props();
+	/** `trigger: 'none'` renders only the dialog; the chat header's git panel
+	 *  opens it through the chatAccessSummary store instead of a button here. */
+	let { sessionId, trigger = 'button' }: { sessionId: string; trigger?: 'button' | 'none' } = $props();
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number };
@@ -19,7 +22,26 @@
 		catch (e) { error = getErrorMessage(e, 'Could not remove the saved connection.'); }
 		finally { busy = false; }
 	}
+	// Disclosure belongs to the user, not to a freshly fetched grants array.
+	// Streaming/resource invalidations must never reopen either surface.
+	let accessExpanded = $state(false);
+	let dialog = $state<HTMLDialogElement>();
+	const pendingCount = $derived(data.requests.length + data.actions.length);
 	let error = $state('');
+	// The header reads the pending count for its button label and the git
+	// panel's "Private access" row opens the dialog from outside this component.
+	const openDialog = () => dialog?.showModal();
+	$effect(() => {
+		chatAccessSummary.set({
+			sessionId,
+			pending: pendingCount,
+			active: data.grants.length,
+			saved: data.saved_connections.length,
+			error: !!error,
+			open: openDialog
+		});
+	});
+	onDestroy(() => chatAccessSummary.update((cur) => (cur?.sessionId === sessionId ? null : cur)));
 	let confirmingRevoke = $state<string | null>(null);
 	let busy = $state(false);
 	// Refreshes are event-driven: the broker sends a session-scoped
@@ -172,6 +194,14 @@
 	}
 </script>
 
+<svelte:window onkeydowncapture={(event) => {
+	if (event.key === 'Escape' && dialog?.open) {
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		dialog.close();
+	}
+}} />
+
 {#snippet chevron()}
 	<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
 {/snippet}
@@ -183,7 +213,23 @@
 {/snippet}
 
 {#if data.requests.length || data.actions.length || data.grants.length || data.saved_connections.length || error}
-	<div class="private-access card-system" aria-label="Temporary access in this conversation">
+	{#if trigger === 'button'}
+	<button class="access-trigger" class:needs-attention={pendingCount > 0 || !!error}
+		onclick={() => dialog?.showModal()} aria-label="Private access" aria-haspopup="dialog"
+		title="Private access for this conversation">
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.6-4.6A12 12 0 0112 3a12 12 0 01-8.6 3.4A12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.2-2.4-.4-3.6z" /></svg>
+		<span class="access-label">Access</span>
+		<span class="access-status" aria-live="polite">
+			{#if pendingCount}{pendingCount} pending{:else if error}!{:else if data.grants.length}{data.grants.length} active{/if}
+		</span>
+	</button>
+	{/if}
+	<dialog bind:this={dialog} class="access-dialog card-system" aria-label="Private access for this conversation">
+		<header class="access-dialog-head">
+			<h2>Private access</h2>
+			<button class="access-close" aria-label="Close private access" onclick={() => dialog?.close()}>×</button>
+		</header>
+		<div class="private-access" aria-label="Temporary access in this conversation">
 		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#each data.requests as request (request.id)}
 			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} onComplete={() => void refresh()} />
@@ -221,7 +267,7 @@
 			</section>
 		{/each}
 		{#if data.grants.length || data.saved_connections.length}
-			<details class="pa-card access-panel" open={data.grants.length > 0}>
+			<details class="pa-card access-panel" bind:open={accessExpanded}>
 				<summary class="pa-summary">
 					<span class="pa-icon">
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.6-4.6A12 12 0 0112 3a12 12 0 01-8.6 3.4A12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.2-2.4-.4-3.6z" /></svg>
@@ -239,7 +285,7 @@
 						<div class="pa-row-main">
 							<strong>{grant.label}</strong>
 							<code>{grant.target}</code>
-							<small>{grant.kind === 'machine' ? 'Commands need approval' : grant.writable ? 'Read and approved writes' : 'Read only'} · until {new Date(grant.expires_at * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}{#if grant.kind === 'machine' && grant.fingerprint} · host key {grant.fingerprint.slice(0, 19)}…{/if}</small>
+							<small>{grant.kind === 'machine' ? 'Remote commands · session permission mode applies' : grant.writable ? 'Read/write · session permission mode applies' : 'Read only'} · until {new Date(grant.expires_at * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}{#if grant.kind === 'machine' && grant.fingerprint} · host key {grant.fingerprint.slice(0, 19)}…{/if}</small>
 						</div>
 						<div class="pa-row-actions">
 							{#if confirmingRevoke === grant.id}
@@ -275,11 +321,25 @@
 				<p class="pa-hint panel-foot">Worker restart or expiry ends access. Revoking closes open connections but can’t undo changes already made. Deleting a saved connection also revokes access that uses it.</p>
 			</details>
 		{/if}
-	</div>
+		</div>
+	</dialog>
 {/if}
 
 <style>
-	.private-access { min-width: 0; display: grid; gap: .75rem; margin-block: .5rem; }
+	.access-trigger { display: inline-flex; align-items: center; justify-content: center; gap: .375rem; min-height: 44px; padding: .375rem .625rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); color: var(--muted-foreground); font-size: .75rem; cursor: pointer; white-space: nowrap; }
+	.access-trigger svg { width: 1rem; height: 1rem; flex-shrink: 0; }
+	.access-trigger:hover, .access-trigger.needs-attention { color: var(--foreground); border-color: var(--primary); }
+	.access-status { font-size: .6875rem; font-variant-numeric: tabular-nums; }
+	.access-status:empty { display: none; }
+	.needs-attention .access-status { font-weight: 600; }
+	.access-dialog { width: min(38rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 2rem); margin: auto; padding: 0; border: 1px solid var(--border); border-radius: 1rem; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); overflow: auto; }
+	.access-dialog::backdrop { background: rgb(0 0 0 / .45); }
+	.access-dialog-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: .5rem 1rem; background: var(--background); border-bottom: 1px solid var(--border); }
+	.access-dialog-head h2 { margin: 0; font-size: .9375rem; font-weight: 600; }
+	.access-close { min-width: 44px; min-height: 44px; border: 0; border-radius: .5rem; background: transparent; color: var(--muted-foreground); font-size: 1.5rem; cursor: pointer; }
+	.access-trigger:focus-visible, .access-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.private-access { min-width: 0; display: grid; gap: .75rem; padding: .75rem; }
+	@media (max-width: 480px) { .access-label { display: none; } }
 	.access-panel { box-shadow: none; animation: none; }
 	.row-icon { width: 2rem; height: 2rem; border-radius: .5rem; }
 	.row-icon :global(svg) { width: .9rem; height: .9rem; }

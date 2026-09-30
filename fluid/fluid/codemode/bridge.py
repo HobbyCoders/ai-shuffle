@@ -204,6 +204,17 @@ class HostBridge:
             verdict = decided.decision
         if verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
+                # Match the native gate: Bypass must not park on an approval
+                # when the repeat guard trips. Refuse this call with feedback.
+                if self._permissions.approval_policy == "never_ask":
+                    return HostReply(
+                        denied=True,
+                        message=(
+                            "doom-loop guard: this exact tool call has now been "
+                            "repeated several times in a row — not running it "
+                            "again. Change the input or the approach."
+                        ),
+                    )
                 verdict = "ask"
         if verdict == "allow" and hook_permission == "ask":
             verdict = "ask"

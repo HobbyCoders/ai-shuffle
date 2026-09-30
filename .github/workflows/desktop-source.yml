@@ -1,36 +1,116 @@
 name: Publish desktop source update
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+  # PR CI may finish before or after its merge. Both events re-evaluate the
+  # current main revision; no PR checkout, artifacts or caches enter this job.
+  workflow_run:
+    types: [completed]
+    workflows:
+      - "Android Play signing enrollment"
+      - "Android Play internal release"
+      - "Android CI"
+      - "CI artifact storage policy"
+      - "CI Backend"
+      - "CI Browser Workspace"
+      - "CI fluid"
+      - "CI JavaScript"
+      - "License server CI"
+      - "Registry CI"
+      - "Desktop source update checks"
+      - "Desktop CI"
 
 permissions:
-  contents: write
-
-concurrency:
-  group: desktop-source-publish
-  cancel-in-progress: false
+  contents: read
+  actions: read
+  pull-requests: read
 
 jobs:
-  publish:
+  gate:
     if: >-
-      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    # Store and sign GitHub's source ZIP in a private release. No application builds.
+      github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
+       (github.event_name == 'workflow_run' &&
+        (github.event.workflow_run.event == 'pull_request' ||
+         (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.actor.id == 76577322 && github.event.workflow_run.triggering_actor.id == 76577322)) &&
+        github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'HobbyCoders/ai-shuffle'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.ci.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Require CI for the exact merged tree
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/edge_publication_gate.py
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    # Unrelated PR completion events must not evict a ready main publication
+    # from GitHub's single pending slot. Serialize only authorized publishers.
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    # Signing secrets are available only after the read-only gate succeeds.
     runs-on: ubuntu-latest
     environment: account-hub-production
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      # Coalesce a burst of merges without interrupting a signing/database write.
+      # Superseded jobs exit before installing the publication dependencies.
+      - name: Allow rapid merges to settle
+        run: sleep 120
+      - name: Skip superseded publication before build setup
+        id: settled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/edge_publication_gate.py
       - uses: actions/setup-node@v4
+        if: steps.settled.outputs.ready == 'true'
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: android/hub/package-lock.json
       - run: npm ci --no-audit --no-fund
+        if: steps.settled.outputs.ready == 'true'
         working-directory: android/hub
-      - name: Publish signed source revision
+      - name: Recheck CI and main immediately before signing
+        if: steps.settled.outputs.ready == 'true'
+        id: ci
         env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/edge_publication_gate.py
+      - name: Publish signed source revision
+        if: steps.ci.outputs.ready == 'true'
+        env:
+          SOURCE_CHANNEL: edge
           GH_TOKEN: ${{ github.token }}
           DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

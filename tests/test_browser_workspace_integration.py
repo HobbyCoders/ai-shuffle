@@ -198,8 +198,16 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         "BROWSER_PANEL_REGISTER_URL", origin + "/api/v1/browser/panel/register"
     )
 
+    from app.core import owner_auth, desktop_listener
+    from app.middleware.csrf import CSRFProtectionMiddleware
+
+    # Reproduce the passwordless local worker boundary, not just the routes:
+    # every Node proxy and workspace bridge POST must supply its own Origin.
+    monkeypatch.setattr(owner_auth, "local_access", lambda request: True)
+    monkeypatch.setattr(desktop_listener, "configured", lambda: False)
     app = FastAPI()
     app.include_router(panel.router)
+    app.add_middleware(CSRFProtectionMiddleware)
     app.dependency_overrides[panel.require_auth] = lambda: auth
 
     async def require_fixture_session(request, sid):
@@ -407,7 +415,7 @@ auth.addEventListener('input', () => {
             assert len(browser_runtime._runtimes) == 1
             print("Real UI cold start: one POST, one runtime, one initial tab; no prior agent")
         else:
-            async with httpx.AsyncClient() as http:
+            async with httpx.AsyncClient(headers={"origin": origin}) as http:
                 started = await http.post(origin + f"/api/v1/sessions/{session_id}/browser/panel/start", timeout=60)
             assert started.status_code == 200, started.text
             cold_state = started.json()
@@ -704,7 +712,7 @@ auth.addEventListener('input', () => {
         assert await browser_running(), "Actor retirement must not close shared Chrome"
         targets = await cdp_get("/json/list")
         assert recovered["state"]["target_id"] not in {target["id"] for target in targets}
-        async with httpx.AsyncClient() as http:
+        async with httpx.AsyncClient(headers={"origin": origin}) as http:
             reopened = await http.post(origin + f"/api/v1/sessions/{session_id}/browser/panel/start", timeout=60)
         assert reopened.status_code == 200, reopened.text
         assert reopened.json()["runtime_id"] != current_runtime

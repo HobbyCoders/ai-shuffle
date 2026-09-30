@@ -49,8 +49,18 @@ credential or an upstream signed URL. The publisher uses the `ACCOUNT_HUB_DATABA
 variable and existing D1 deployment permissions. The signing key is the
 `DESKTOP_APPLICATION_SIGNING_KEY` GitHub secret; its public half ships with the launcher.
 
-The app checks for updates in the background without downloading them. When one
-is available, a small update button appears next to Search in the sidebar header.
+The app checks for updates in the background without downloading them. **Check for
+updates** in the native menu or tray reports its result in a dialog, including
+errors and checks that find no newer version. Downloading or restarting from that
+dialog requires a separate choice and affects this desktop. Use the sidebar update
+button when updating all online workers.
+
+The desktop revalidates its entry page when opening the worker, and the worker
+marks HTML responses as non-cacheable so a new revision does not reuse an old UI.
+**View → Force Reload** (`Ctrl+Shift+R` on Windows/Linux, `Cmd+Shift+R` on macOS)
+reloads the current desktop window without restarting the worker.
+
+When an update is available, a small update button appears next to Search in the sidebar header.
 Click it to download and build the new revision alongside the running one; the
 button shows progress while dependencies are prepared. Dependencies are cached by
 their manifests. Once ready, click the same button again: **Update and restart**

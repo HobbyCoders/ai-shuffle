@@ -78,9 +78,10 @@ def capture(recipient: str) -> dict:
         try:
             with store.get_db() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                store.lock_state(cursor)
-                ctx = copy.deepcopy(engine.load_context(conn))
+                # MVCC binds rows and watermarks to one view without holding the
+                # network's writer lock while serializing a large transcript.
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                ctx = engine.load_context(conn, publish=False)
                 member = ctx.member(recipient)
                 if member is None or member.status != "active":
                     raise ValueError("Peer is no longer a member")
@@ -92,9 +93,10 @@ def capture(recipient: str) -> dict:
                 # on an older build requires every collection it knows.
                 names = [c.name for c in policy.ordered_collections()] + sorted(policy.RETIRED_COLLECTIONS)
                 for name in names:
-                    offset, limit = 0, 100
+                    offset, limit, after_record_id = 0, 100, None
                     while True:
-                        chunk = engine.snapshot_chunk(name, offset, ctx=ctx, limit=limit, _conn=conn)
+                        chunk, next_record_id = engine.snapshot_page(
+                            name, offset, after_record_id=after_record_id, ctx=ctx, limit=limit, _conn=conn)
                         raw = crypto.canonical_json(chunk)
                         if len(raw) > MAX_PAGE:
                             if limit == 1:
@@ -107,8 +109,11 @@ def capture(recipient: str) -> dict:
                                                   "collection": name, "offset": offset,
                                                   "count": chunk["count"], "more": chunk["more"]})
                         offset += chunk["count"]
+                        after_record_id = next_record_id
                         if not chunk["more"]:
                             break
+                # Give the recipient the full download window after capture.
+                manifest["expires_at"] = int(time.time()) + TTL
                 manifest["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private,
                                                                        crypto.canonical_json(manifest)))
                 (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

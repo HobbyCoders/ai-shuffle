@@ -24,7 +24,7 @@ function load() {
 		}
 		isDestroyed() { return this.destroyed; }
 		async loadFile(file, options) { this.loads.push(['file', file, options]); }
-		async loadURL(url) { this.loads.push(['url', url]); }
+		async loadURL(url, options) { this.loads.push(['url', url, options]); }
 		setAppDetails() {}
 	}
 	const electron = { app: { getAppPath: () => desktopDir }, BrowserWindow, nativeTheme: { shouldUseDarkColors: false }, shell: {} };
@@ -61,6 +61,7 @@ test('two opens while the saved window state loads share one window', async () =
 	assert.equal(main.browserWindow, created[0]);
 	assert.equal(main.isOwnSender(created[0].webContents.id), true);
 	assert.deepEqual(created[0].loads.map(([kind]) => kind), ['file', 'url']);
+	assert.equal(created[0].loads[1][2].extraHeaders, 'Cache-Control: no-cache\r\nPragma: no-cache\r\n', 'reopening the same worker URL must revalidate old HTML');
 	// A window closed later is replaced by a fresh one, not the finished promise's.
 	created[0].destroyed = true;
 	await main.showPage('status');

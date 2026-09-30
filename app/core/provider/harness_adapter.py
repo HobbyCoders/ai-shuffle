@@ -2208,6 +2208,38 @@ class HarnessAdapter(ProviderAdapter):
         # is what its next turn compares against.
         self._record_applied("model", requested)
 
+    async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
+        """Apply at the next model-call boundary without restarting a live turn."""
+        if self._engine is None or self._options is None:
+            raise RuntimeError("Adapter not connected")
+        normalized = _effective_effort(self._options, effort, self._provider_kind)
+        if effort is not None and normalized is None:
+            raise ValueError("This model does not support the selected effort level")
+        if fast and not (self._is_delegated or self._provider_kind == "openai_responses"):
+            raise ValueError("Fast mode is not supported by this provider")
+        if self._is_delegated:
+            engine, options = self._engine, self._options
+            await engine.set_run_settings(effort=normalized, fast=fast)
+            if self._engine is not engine or self._options is not options:
+                raise RuntimeError("Session connection changed before the setting was confirmed")
+        else:
+            # A request already in flight retains its parameters. The next
+            # request builder reads these attributes, including within a turn.
+            self._engine.effort = normalized
+            extra = dict(self._engine.request_extra)
+            extra.pop("service_tier", None)
+            if fast:
+                extra["service_tier"] = "priority"
+            self._engine.request_extra = extra
+        self._options.effort = normalized
+        self._options.fast = fast
+        self._record_applied("effort", normalized)
+        self._record_applied("aih_fast", fast)
+        ctx = getattr(self._engine, "ctx", None)
+        if ctx is not None:
+            ctx.extra["app_caller_effort"] = normalized
+        return {"effort": normalized, "fast": fast}
+
     async def set_permission_mode(self, mode: str) -> None:
         requested = mode
         mode = effective_permission_mode(mode, delegated=self._is_delegated)
@@ -2388,8 +2420,8 @@ class HarnessAdapter(ProviderAdapter):
             new_options.disallowed_tools or []
         ):
             return True
-        # Effort is baked into the engine at construction (NativeLoop request
-        # builder / DelegatedLoop argv), so a change needs a rebuild.
+        # Composer runtime updates record both options in place. Callers that
+        # bypass that acknowledged setter still rebuild when their picks differ.
         if old.effort is not None or new_options.effort is not None:
             provider_id = (new_options.extra or {}).get("provider_id")
             if provider_id and _lookup_provider_row(provider_id) is None:
@@ -2399,8 +2431,8 @@ class HarnessAdapter(ProviderAdapter):
                 new_options.effort if new_options.effort is not None else old.effort,
             ):
                 return True
-        # Fast mode is baked in the same way (DelegatedLoop --settings argv /
-        # NativeLoop request_extra), so a flip is a rebuild, not a hot-swap.
+        # A pick not yet applied through set_run_settings must not silently
+        # reuse an engine on the previous Fast mode.
         if bool(getattr(old, "fast", None)) != bool(
             getattr(new_options, "fast", None)
         ):
@@ -3382,12 +3414,11 @@ class HarnessAdapter(ProviderAdapter):
 
         registry = ToolRegistry(**_registry_bound_kwargs())
         # Constraint: native legs (anthropic / openai_responses / openrouter)
-        # get fluid's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
-        # tools — without them a native session can only reach the app's bridged
-        # MCP servers and has no file/shell access at all. The delegated leg must
-        # NOT get them: the claude CLI supplies its own copies. Conversely the
-        # CLI must never be relied on for tools outside the Claude-subscription
-        # case, which is exactly why the native leg registers its own here.
+        # get fluid's builtin file/shell tools as first-class tools. Delegated
+        # sessions keep the CLI's copies except for search: Claude Code 2.1.285
+        # removes Glob/Grep from its POSIX surface independently of the
+        # bash-first steer. Supply bounded search over the existing MCP bridge
+        # rather than relying on undocumented CLI experiment switches.
         builtins_registered = False
         if native:
             from fluid.tools.builtins import register_builtins
@@ -3435,6 +3466,13 @@ class HarnessAdapter(ProviderAdapter):
                     "Monitor spec; leaving the vendor spec as-is.",
                     exc_info=True,
                 )
+
+        if not native and _session_mode(options) != "chat":
+            from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
+
+            for search_tool in (glob_tool, grep_tool):
+                registry.register_builtin(search_tool.SPEC, search_tool.handler)
+            builtins_registered = True
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
@@ -3798,7 +3836,10 @@ def _valid_effort(value: Any) -> Optional[str]:
 # client never reads them and they vanish from app history and cost
 # accounting. The bridged mcp__builtins__ copies (Monitor, TaskOutput,
 # TaskStop, ScheduleWakeup) stay; the app owns their wakes.
+# Worktree lifecycle belongs to the app, not agents; block CLI native copies too.
 DELEGATED_BANNED_TOOLS = frozenset({
+    "EnterWorktree",
+    "ExitWorktree",
     "Task",
     "Agent",
     "Workflow",
@@ -5013,6 +5054,16 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
     notes: List[str] = []
+    search = [tool for tool in ("Glob", "Grep") if tool in names and (
+        permit is None or permit(tool)
+    )]
+    if search:
+        notes.append(
+            "Use the app's bounded file-search tools instead of find/grep through "
+            "Bash: " + ", ".join(f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search)
+            + ". These remain available even when Claude Code omits its own "
+            "Glob/Grep tools."
+        )
     if recall or memory:
         shown = [
             t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)

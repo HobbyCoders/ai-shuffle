@@ -1274,7 +1274,7 @@ def build_options_from_profile(
         logger.debug("App-config MCP tools added to allowed_tools")
 
     # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
-    # EnterWorktree, CronCreate, NotifyDevices, ToolSearch, etc). These are
+    # CronCreate, NotifyDevices, ToolSearch, etc). These are
     # harness-level tools that the CLI ships natively; the app provides its own
     # implementations bridged to AI Shuffle infrastructure.
     from app.mcp.builtin_tools import get_builtin_tool_names
@@ -1617,9 +1617,12 @@ def build_options_from_profile(
         # For Sonnet/Haiku: use token budget-based thinking
         **_build_thinking_config(
             config, model_to_use, overrides, session_effort=_session_effort,
-            # Workers carry an explicit spawn or inherited caller binding.
-            # With neither, use the model default, not a saved role default.
-            allow_profile_effort=not bool((_binding_row or {}).get("is_worker")),
+            # A model-bound session owns its effort choice, including an
+            # explicit model default (NULL). Do not resurrect a legacy agent's
+            # effort after a live reset. Unbound pre-migration sessions retain
+            # their old fallback; workers never inherit a saved role default.
+            allow_profile_effort=not bool((_binding_row or {}).get("is_worker"))
+            and not bool((_binding_row or {}).get("model")),
         ),
     )
 

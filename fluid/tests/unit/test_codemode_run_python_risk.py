@@ -22,7 +22,7 @@ from fluid.engine.native import NativeLoop
 from fluid.events import PermissionRequest, RespondPermission, ToolResult, UserTurn
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import MemoryStore
-from fluid.tools.registry import ToolRegistry
+from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
 
 from .test_codemode import ScriptedProvider, _run_python, _text
 
@@ -193,6 +193,46 @@ async def test_ask_mode_prompts_for_run_python_only_without_the_sandbox(
             assert [(r.name, r.risk) for r in asked] == [("run_python", "write")]
     finally:
         watcher.cancel()
+        await loop.aclose()
+
+
+async def test_unsandboxed_bypass_runs_cell_and_projected_write_without_approval() -> None:
+    registry = ToolRegistry()
+    executed = []
+
+    async def write_marker(input, ctx):
+        executed.append(input["value"])
+        return ToolOutcome(text="marker written")
+
+    registry.register_builtin(
+        ToolSpec(
+            name="write_marker", description="Write a test marker", risk="write",
+            input_schema={"type": "object", "properties": {"value": {"type": "string"}}},
+        ),
+        write_marker,
+    )
+    session = CodeModeSession(registry, config=KernelConfig(os_sandbox="off"))
+    provider = ScriptedProvider([
+        _run_python("from tools import write_marker\nwrite_marker(value='bypass')"),
+        _text("done"),
+    ])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
+        registry=registry, codemode=session, permissions=PermissionEngine("never_ask"),
+    )
+    try:
+        await loop.submit(UserTurn(content="write marker"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=60)
+        assert executed == ["bypass"]
+        assert not session.os_sandbox_active()
+        assert not any(isinstance(e, PermissionRequest) for e in loop.bus.log(sid))
+        assert any(
+            isinstance(e, ToolResult) and e.name == "run_python" and "marker written" in e.output
+            for e in loop.bus.log(sid)
+        )
+    finally:
         await loop.aclose()
 
 

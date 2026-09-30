@@ -82,7 +82,7 @@ def confirm_device(device_id: str, body: DeviceConfirmation, _owner: Annotated[s
             or owner['server_id'] != binding['server_id']
             or owner['paired_client_id'] != body.paired_client_id):
         raise HTTPException(409, 'Device authorization changed')
-    # The hub is a veto, never the source of this approval.
+    # A manual approval also requires an active account/device binding.
     if body.approved:
         account_hub.require_active(owner)
     try:

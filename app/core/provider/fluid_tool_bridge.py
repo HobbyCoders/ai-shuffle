@@ -123,8 +123,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "CronList": "safe",
     "CronCreate": "write",
     "CronDelete": "destructive",
-    "EnterWorktree": "write",
-    "ExitWorktree": "write",
     "GetAppErrors": "safe",
     "GetAppLogs": "safe",
     "GetUsage": "safe",
@@ -199,8 +197,8 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "ai-tools": AI_TOOLS_RISK_MAP,
     "computer-use": COMPUTER_USE_RISK_MAP,
     "provider-agent": PROVIDER_AGENT_RISK_MAP,
-    # Writes and commands wait for the broker's one-shot approval card, which
-    # applies even in bypass mode. Gating them here too asked the user twice.
+    # The broker enforces grants and per-action confirmation outside Bypass.
+    # Gating writes/commands here too would ask the user twice.
     "chat-access": {
         "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
         "ChatWriteFile": "safe", "ChatRunCommand": "safe",

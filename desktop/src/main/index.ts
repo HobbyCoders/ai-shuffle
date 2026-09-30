@@ -24,6 +24,7 @@ import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
+import { ManualUpdateCheck } from './manual-update-check';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
@@ -245,6 +246,7 @@ async function main(): Promise<void> {
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
 	// macOS and Linux: new releases come as signed installers (D22: checked on
 	// launch and daily without asking). Windows keeps its source-update path.
+	const manualUpdateCheck = new ManualUpdateCheck(updater, options => dialog.showMessageBox(options));
 	const platform = installerPlatform();
 	if (!applications && platform && app.isPackaged && !isolation) {
 		try {
@@ -254,7 +256,7 @@ async function main(): Promise<void> {
 			let offered: string | null = null;
 			updater.subscribe((state) => {
 				// Offer each new release once per launch; the sidebar button keeps offering it.
-				if (state.phase !== 'available' || !state.version || state.version === offered) return;
+				if (manualUpdateCheck.active || state.phase !== 'available' || !state.version || state.version === offered) return;
 				offered = state.version;
 				void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: `AI Shuffle ${state.version} is available`,
 					detail: 'Download the installer now? It is checked against the signed release before it is saved to your Downloads folder.',
@@ -344,7 +346,10 @@ async function main(): Promise<void> {
 				(error) => dialog.showErrorBox('Open in Browser', error instanceof Error ? error.message : String(error))
 			);
 		},
-		checkForUpdates: () => void updater.check(true),
+		checkForUpdates: () => {
+			window.focus();
+			void manualUpdateCheck.run().catch(error => console.error('Could not show update check result', error));
+		},
 		reload: () => window.browserWindow?.webContents.reload(),
 		showAgentAccess: () => void showAgentAccess(false),
 		openDocs: () => {

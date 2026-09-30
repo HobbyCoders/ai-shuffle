@@ -75,11 +75,14 @@ def observe(operation, rows):
     for target in operation["workers"]:
         current = live.get(target["device_id"], {})
         worker = dict(target)
-        if target["accepted"] is False:
-            worker.update(status="skipped", message=target.get("reason") or "Not queued")
-        elif (current.get("online") and current.get("supported")
-              and same_version(current.get("running_version"), target.get("target_version"))):
+        # A duplicate request can be refused while an earlier install succeeds.
+        # Verify the running commit before considering that request's receipt;
+        # accepting a command is not required to observe its target running.
+        if (current.get("online") and current.get("supported")
+                and same_version(current.get("running_version"), target.get("target_version"))):
             worker.update(status="verified", message="Updated and verified")
+        elif target["accepted"] is False:
+            worker.update(status="skipped", message=target.get("reason") or "Not queued")
         elif current.get("error"):
             worker.update(status="error", message=current["error"])
         else:

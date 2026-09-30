@@ -447,6 +447,44 @@ def renewal(pg, monkeypatch):
     return SimpleNamespace(device=device, owner=owner, old_hash=old_hash)
 
 
+@pytest.mark.parametrize('legacy', [False, True])
+def test_account_authorization_accepts_original_credential_not_repair(pg, legacy):
+    pg.hub.bind('https://hub.example.com', 'server-one', 'test-encrypted-secret',
+                'managed:' + pg.config.settings.effective_instance_id)
+    pg.hub.activate()
+    local_id = enroll(pg)
+    owner = pg.hub.ownership(local_id)
+    binding = pg.hub.get_binding()
+    if legacy:
+        with pg.transaction() as conn:
+            conn.cursor().execute('DELETE FROM mobile_worker_confirmations')
+    assert pg.hub.confirm_device(owner, True, account_binding=binding) == 'approved'
+    with pg.transaction() as conn:
+        conn.cursor().execute("UPDATE mobile_devices SET id='replacement-record'")
+    with pytest.raises(ValueError, match='Confirm this device'):
+        pg.hub.confirm_device(owner, True, account_binding=binding)
+    assert pg.hub.confirmation(owner) == 'pending'
+
+
+def test_account_authorization_cannot_race_away_worker_denial(pg):
+    pg.hub.bind('https://hub.example.com', 'server-one', 'test-encrypted-secret',
+                'managed:' + pg.config.settings.effective_instance_id)
+    pg.hub.activate()
+    owner = pg.hub.ownership(enroll(pg))
+    binding = pg.hub.get_binding()
+    def automatic():
+        try:
+            return pg.hub.confirm_device(owner, True, account_binding=binding)
+        except ValueError:
+            return 'refused'
+    results = pg.race(automatic, lambda: pg.hub.confirm_device(owner, False))
+    assert results[0] in ('approved', 'refused')
+    assert results[1] == 'denied'
+    assert pg.hub.confirmation(owner) == 'denied'
+    with pytest.raises(ValueError):
+        pg.hub.confirm_device(owner, True, account_binding=binding)
+
+
 def test_concurrent_renewals_recover_exactly_one_replacement(pg, renewal):
     import hashlib
 

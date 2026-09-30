@@ -377,6 +377,101 @@ describe('SessionCard actions', () => {
 		expect(frame.classList.contains('actions-open')).toBe(false);
 		expect(onOpen).not.toHaveBeenCalled();
 	});
+
+	it('settles on release after a long swipe, without a second tap', async () => {
+		platform.set('mobile');
+		const { container, onOpen } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		// jsdom has no layout, so the row is unmeasured and the commit distance
+		// falls back to its floor (2.5 rail widths).
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 300, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 200, clientY: 22 });
+		expect(frame.classList.contains('swipe-commit')).toBe(false);
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 60, clientY: 22 });
+		expect(frame.classList.contains('swipe-commit')).toBe(true);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 60, clientY: 22 });
+		await fireEvent.click(card);
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(frame.classList.contains('actions-open')).toBe(false);
+		expect(frame.classList.contains('swipe-commit')).toBe(false);
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('keeps a long swipe that is let go inside the rail as a reveal', async () => {
+		platform.set('mobile');
+		// A slow, deliberate drag: no flick reading can decide the release.
+		let clock = 1000;
+		const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
+		const { container } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 300, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 60, clientY: 22 });
+		expect(frame.classList.contains('swipe-commit')).toBe(true);
+		// Dragging back inside the rail disarms the commit before release.
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 240, clientY: 22 });
+		expect(frame.classList.contains('swipe-commit')).toBe(false);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 240, clientY: 22 });
+		now.mockRestore();
+
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(frame.classList.contains('actions-open')).toBe(true);
+	});
+
+	it('does not open the session from the click a touch tap on Settle leaves behind', async () => {
+		platform.set('mobile');
+		const { container, onOpen } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
+		expect(frame.classList.contains('actions-open')).toBe(true);
+
+		const settle = screen.getByTitle('Settle session');
+		await fireEvent.pointerDown(settle, { pointerId: 2, isPrimary: true, button: 0, pointerType: 'touch', clientX: 300, clientY: 20 });
+		await fireEvent.pointerUp(settle, { pointerId: 2, isPrimary: true, button: 0, pointerType: 'touch', clientX: 300, clientY: 20 });
+		// Committing closes the rail at once, so the browser's trailing click
+		// hit-tests the card that slid back underneath the (now inert) button.
+		await fireEvent.click(card);
+
+		expect(mocks.setSessionActive).toHaveBeenCalledTimes(1);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('latches the rail open on a quick short flick', async () => {
+		platform.set('mobile');
+		// 12px in 16ms: under the latch distance, but fast.
+		const ticks = [1000, 1016, 1020];
+		const now = vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1020);
+		const { container } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 248, clientY: 20 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 248, clientY: 20 });
+		now.mockRestore();
+
+		expect(frame.classList.contains('actions-open')).toBe(true);
+	});
+
+	it('keeps a slow short drag shut, so a wobble is not a reveal', async () => {
+		platform.set('mobile');
+		let clock = 1000;
+		const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
+		const { container } = renderCard();
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 248, clientY: 20 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 248, clientY: 20 });
+		now.mockRestore();
+
+		expect(frame.classList.contains('actions-open')).toBe(false);
+	});
 });
 
 describe('SessionCard git state', () => {

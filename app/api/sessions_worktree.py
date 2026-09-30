@@ -331,18 +331,30 @@ async def _create_remote_branch_session(
         database.set_session_branch(session_id, branch_name, pv2["id"])
 
     await run_sync(_create)
+    # Keep the submitted text even if the owner takes longer than the request
+    # timeout. A timeout does not mean the remote session was never created.
+    _broadcast_session_created(session_id)
+    if prompt:
+        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
     from app.network import control, engine, git as network_git
     ctx = engine.context()
     remote_device = network_git.device_id(target_instance_id) if ctx else None
     if ctx and remote_device != ctx.device_id:
         row = await run_sync(database.get_session, session_id)
-        await control.call(remote_device, "sessions", {
-            "session": {**row, "branch": branch_name},
-            "uploads": await network_git.export_uploads(upload_blob_ids),
-        })
+        try:
+            await control.call(remote_device, "sessions", {
+                "session": {**row, "branch": branch_name},
+                "uploads": await network_git.export_uploads(upload_blob_ids),
+            })
+        except (control.RunnerUnreachable, control.ControlRefused) as exc:
+            raise HTTPException(
+                status_code=503 if isinstance(exc, control.RunnerUnreachable) else 409,
+                detail=(f"The other worker did not confirm session creation. Session {session_id} "
+                        + ("keeps your submitted message. " if prompt else "is still listed here. ")
+                        + "No turn was sent. Check that session before retrying; the remote request may still finish."),
+            ) from exc
     else:
         remote_device = None
-    _broadcast_session_created(session_id)
 
     # 4. Queue the checkout work for the target. This row carries
     #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
@@ -360,7 +372,6 @@ async def _create_remote_branch_session(
 
     query_started = False
     if prompt:
-        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
         try:
             payload: dict = {}
             if api_user_id:

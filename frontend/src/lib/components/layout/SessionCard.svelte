@@ -19,7 +19,9 @@
 	 *   L2  device icon · git-state word · branch
 	 *
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
-	 * (settled). Rename, Fork, and Delete live on the header session-title menu.
+	 * (settled). On the swipe layout a long swipe across the row commits that
+	 * action on release. Rename, Fork, and Delete live on the header
+	 * session-title menu.
 	 */
 	import { onMount } from 'svelte';
 	import {
@@ -230,22 +232,40 @@
 
 	let swipeLayout = $state(false);
 	let dragOffset = $state<number | null>(null);
+	// True once the drag has travelled far enough that letting go commits the
+	// action itself: one long swipe settles a row, no second tap needed.
+	let swipeCommit = $state(false);
 
-	const ACTION_REVEAL_WIDTH = 44;
-	// Commit at half the reveal width so a normal swipe latches the actions open;
-	// the old full-width threshold meant most swipes snapped shut again.
-	const SWIPE_COMMIT_DISTANCE = 22;
+	// Width of the swipe rail; the styles read it back through `--reveal`.
+	const ACTION_REVEAL_WIDTH = 60;
+	// A short swipe latches the rail open once it has come this far.
+	const SWIPE_COMMIT_DISTANCE = 24;
+	// Past the rail the card keeps following the finger, with a little drag.
+	const OVERSCROLL_RATIO = 0.85;
+	// A flick faster than this (px per ms) latches the rail open or shut
+	// whatever distance it covered, so a quick swipe is never "too short".
+	const FLICK_VELOCITY = 0.45;
+	// Ignore a flick reading older than this at release: the finger stopped.
+	const FLICK_MAX_AGE = 80;
+	// The click a touch commit leaves behind is swallowed for this long.
+	const COMMIT_CLICK_GUARD = 500;
 	let pointerId: number | null = null;
 	let pointerStartX = 0;
 	let pointerStartY = 0;
 	let pointerStartOffset = 0;
+	let fullSwipeDistance = Infinity;
 	let horizontalDrag = false;
+	let lastMoveX = 0;
+	let lastMoveTime = 0;
+	let velocity = 0;
 	let suppressNextClick = false;
 	let actionJustCommitted = false;
+	let lastCommitAt = -Infinity;
 
 	function closeActions() {
 		setActionsOpen(false);
 		dragOffset = null;
+		swipeCommit = false;
 	}
 
 	async function commitToggle() {
@@ -265,10 +285,17 @@
 	// the frame can reroute or drop it, which is why the first tap on a freshly
 	// revealed action was being lost. Commit straight from pointerup and mark the
 	// trailing click handled so it can't double-fire.
+	//
+	// Committing closes the rail at once, which makes the button inert before
+	// the browser dispatches that trailing click. The click then hit-tests the
+	// card sliding back underneath and used to OPEN the session. Arm the card's
+	// click guard as well so the click dies wherever it lands.
 	function handleActionPointerUp(event: PointerEvent) {
 		if (event.pointerType === 'mouse') return;
 		event.stopPropagation();
 		actionJustCommitted = true;
+		suppressNextClick = true;
+		lastCommitAt = event.timeStamp;
 		void commitToggle();
 	}
 
@@ -282,11 +309,14 @@
 		void commitToggle();
 	}
 
-	function openCard() {
+	function openCard(event?: Event) {
 		if (suppressNextClick) {
 			suppressNextClick = false;
 			return;
 		}
+		// Belt and braces for the post-commit click: some engines deliver it
+		// after a fresh pointerdown has already cleared the one-shot guard.
+		if (event && event.timeStamp - lastCommitAt < COMMIT_CLICK_GUARD) return;
 		if (swipeLayout && actionsOpen) {
 			closeActions();
 			return;
@@ -315,7 +345,13 @@
 		pointerStartX = event.clientX;
 		pointerStartY = event.clientY;
 		pointerStartOffset = actionsOpen ? -ACTION_REVEAL_WIDTH : 0;
+		// A swipe across half the row commits outright. The floor keeps a
+		// narrow (or unmeasured) row from committing on what is really a reveal.
+		fullSwipeDistance = Math.max(ACTION_REVEAL_WIDTH * 2.5, (cardRef?.clientWidth ?? 0) * 0.5);
 		horizontalDrag = false;
+		lastMoveX = event.clientX;
+		lastMoveTime = performance.now();
+		velocity = 0;
 		cardRef?.setPointerCapture?.(event.pointerId);
 	}
 
@@ -335,7 +371,23 @@
 		}
 
 		event.preventDefault();
-		dragOffset = Math.max(-ACTION_REVEAL_WIDTH, Math.min(0, pointerStartOffset + dx));
+		// Timed off the wall clock rather than event.timeStamp: the two agree in
+		// browsers and the clock is the one a test can steer.
+		const moveTime = performance.now();
+		const elapsed = moveTime - lastMoveTime;
+		if (elapsed > 0) velocity = (event.clientX - lastMoveX) / elapsed;
+		lastMoveX = event.clientX;
+		lastMoveTime = moveTime;
+
+		const raw = Math.min(0, pointerStartOffset + dx);
+		// Inside the rail the card tracks the finger 1:1; past it the card
+		// keeps going with a touch of drag so the long swipe reads as a
+		// deliberate stretch rather than a wall.
+		dragOffset =
+			raw >= -ACTION_REVEAL_WIDTH
+				? raw
+				: -ACTION_REVEAL_WIDTH - (-raw - ACTION_REVEAL_WIDTH) * OVERSCROLL_RATIO;
+		swipeCommit = -dragOffset >= fullSwipeDistance;
 	}
 
 	function finishPointer(event: PointerEvent) {
@@ -343,17 +395,27 @@
 		const dx = event.clientX - pointerStartX;
 		if (horizontalDrag) {
 			const nextOffset = dragOffset ?? pointerStartOffset;
-			setActionsOpen(
-				actionsOpen
-					? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
-					: nextOffset <= -SWIPE_COMMIT_DISTANCE
-			);
+			const flick = performance.now() - lastMoveTime <= FLICK_MAX_AGE && Math.abs(velocity) >= FLICK_VELOCITY;
+			if (swipeCommit) {
+				// The long swipe IS the tap on the action.
+				lastCommitAt = event.timeStamp;
+				void commitToggle();
+			} else if (flick) {
+				setActionsOpen(velocity < 0);
+			} else {
+				setActionsOpen(
+					actionsOpen
+						? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
+						: nextOffset <= -SWIPE_COMMIT_DISTANCE
+				);
+			}
 			// Swallow the trailing click from this gesture; cleared on the next press.
 			suppressNextClick = true;
 		} else if (Math.abs(dx) > 6) {
 			suppressNextClick = true;
 		}
 		dragOffset = null;
+		swipeCommit = false;
 		pointerId = null;
 		horizontalDrag = false;
 	}
@@ -361,6 +423,7 @@
 	function cancelPointer(event: PointerEvent) {
 		if (pointerId !== event.pointerId) return;
 		dragOffset = null;
+		swipeCommit = false;
 		pointerId = null;
 		horizontalDrag = false;
 	}
@@ -401,6 +464,9 @@
 	class:compact
 	class:actions-open={actionsOpen}
 	class:dragging={dragOffset !== null}
+	class:swipe-commit={swipeCommit}
+	style:--reveal={`${ACTION_REVEAL_WIDTH}px`}
+	style:--rail-shift={dragOffset === null ? undefined : `${Math.min(0, dragOffset + ACTION_REVEAL_WIDTH)}px`}
 	role="group"
 	aria-label={`${title} session`}
 	onpointerdown={handlePointerDown}
@@ -506,6 +572,7 @@
 				onclick={handleActionClick}
 			>
 				<Check size={16} strokeWidth={1.8} />
+				{#if swipeLayout && !compact}<span class="row-action-label" aria-hidden="true">Settle</span>{/if}
 			</button>
 		{:else}
 			<button
@@ -516,6 +583,7 @@
 				onclick={handleActionClick}
 			>
 				<Undo2 size={16} strokeWidth={1.8} />
+				{#if swipeLayout && !compact}<span class="row-action-label" aria-hidden="true">Restore</span>{/if}
 			</button>
 		{/if}
 	</span>
@@ -850,7 +918,7 @@
 				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
 				var(--sidebar);
 		}
-		.scard-frame.actions-open .scard { transform: translateX(-44px); }
+		.scard-frame.actions-open .scard { transform: translateX(calc(-1 * var(--reveal))); }
 		.scard-frame.dragging .scard { transition: none; }
 		.scard-frame:hover .scard { background: var(--sidebar); }
 		.scard-frame:hover .scard.active {
@@ -858,12 +926,18 @@
 				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
 				var(--sidebar);
 		}
+		/* A long swipe arms the commit: the whole track goes solid so the
+		   release reads as "this will settle now", not "this reveals a button". */
+		.scard-frame.swipe-commit { background: var(--primary); }
 
+		/* The rail hugs the card's trailing edge. Inside the reveal width it is
+		   pinned to the frame; once the finger drags past, `--rail-shift`
+		   carries it along with the card so the button never detaches. */
 		.card-actions {
 			top: 0;
 			right: 0;
 			bottom: 0;
-			width: 44px;
+			width: var(--reveal);
 			justify-content: flex-end;
 			gap: 0;
 			padding-left: 0;
@@ -871,23 +945,51 @@
 			opacity: 1;
 			z-index: 1;
 			pointer-events: none;
+			transform: translateX(var(--rail-shift, 0px));
+			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 		}
+		.scard-frame.dragging .card-actions { transition: none; }
 		.scard-frame.actions-open .card-actions { pointer-events: auto; }
 		.card-actions > * {
-			width: 44px;
+			width: var(--reveal);
 			height: 100%;
 			min-height: 44px;
 			border-radius: 0;
+			display: grid;
+			grid-auto-flow: row;
+			place-items: center;
+			align-content: center;
+			gap: 3px;
+			color: var(--foreground);
+			background: color-mix(in oklch, var(--foreground) 9%, var(--sidebar));
+			transition: color 120ms ease, background-color 120ms ease, transform 120ms ease;
 		}
 		.card-actions > *:hover {
-			background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
+			background: color-mix(in oklch, var(--foreground) 14%, var(--sidebar));
 		}
+		.card-actions > *:active {
+			background: color-mix(in oklch, var(--foreground) 18%, var(--sidebar));
+		}
+		.row-action-label {
+			font-size: 10px;
+			font-weight: 600;
+			line-height: 1;
+			letter-spacing: 0.02em;
+		}
+		.scard-frame.swipe-commit .card-actions > * {
+			color: var(--primary-foreground);
+			background: var(--primary);
+		}
+		.card-actions > * :global(svg) { transition: transform 120ms ease; }
+		.scard-frame.swipe-commit .card-actions > * :global(svg) { transform: scale(1.18); }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
 		.working-dots > span,
 		.title :global(.warn) { animation: none; }
-		.scard { transition: none; }
+		.scard,
+		.card-actions,
+		.card-actions > * { transition: none; }
 	}
 </style>

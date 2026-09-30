@@ -37,5 +37,21 @@ for(const scenario of ['new','reuse','moved','corrupt','stable','offmain','older
  }
  assert(!events.some(url=>String(url).includes('/zipball/')),'the full-repository zipball is never published');
  if(scenario==='reuse'){assert(events.includes('reuse'));assert(!events.some(url=>String(url).startsWith('https://uploads.github.com/')));}
+ if(scenario==='reuse'){
+  const before=await fs.readFile(path.join(root,'record.json'),'utf8');
+  // Drive the actual publisher four more times, with the record produced by the
+  // first publication, like separate serialized CI-completion jobs.
+  for(let i=0;i<4;i++){
+   const duplicate=spawnSync(process.execPath,['--import',preload,script],{encoding:'utf8',env});
+   assert.equal(duplicate.status,0,duplicate.stderr);assert.match(duplicate.stdout,/Already published/);
+   assert.equal(await fs.readFile(path.join(root,'record.json'),'utf8'),before);
+   const repeated=JSON.parse(await fs.readFile(path.join(root,'events.json'),'utf8'));
+   assert(repeated.includes('read-publication'));assert(!repeated.includes('archive'));assert(!repeated.includes('publish'));
+  }
+  const row=JSON.parse(before);row.manifest=JSON.stringify({payload:Buffer.from('{}').toString('base64'),signature:''});
+  await fs.writeFile(path.join(root,'record.json'),JSON.stringify(row));
+  const invalid=spawnSync(process.execPath,['--import',preload,script],{encoding:'utf8',env});
+  assert.equal(invalid.status,1);assert.match(invalid.stderr,/Existing source publication is invalid/);
+ }
  for(const name of ['desktop-source-d1.json','a'.repeat(40)+'-runtime.zip'])await assert.rejects(fs.stat(path.join(root,name)),{code:'ENOENT'});
 });

@@ -26,6 +26,7 @@ from fluid.providers._transport import billing_summary, provider_error_summary
 from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
 from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
+from fluid.tools.images import condition_image
 
 
 def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
@@ -64,9 +65,10 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
             out["content"] = content
         return out
     if isinstance(block, Image):
+        media_type, data = condition_image(block.media_type, block.data)
         return {
             "type": "image",
-            "source": {"type": "base64", "media_type": block.media_type, "data": block.data},
+            "source": {"type": "base64", "media_type": media_type, "data": data},
         }
     return None
 

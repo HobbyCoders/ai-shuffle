@@ -277,6 +277,6 @@ def test_stable_update_is_signed_only_after_verification_in_a_protected_environm
     assert publish["env"]["SOURCE_CHANNEL"] == "stable"
     assert publish["env"]["RELEASE_TAG"] == "${{ needs.create-release.outputs.release_tag }}"
     assert job["concurrency"]["group"] == "desktop-source-publish"
-    # The owner-dispatched source publisher stays on the edge channel.
+    # Automatic main publication cannot overwrite the stable release feed.
     edge = yaml.safe_load((ROOT / ".github/workflows/desktop-source.yml").read_text())
-    assert "SOURCE_CHANNEL" not in str(edge)
+    assert edge["jobs"]["publish"]["steps"][-1]["env"]["SOURCE_CHANNEL"] == "edge"

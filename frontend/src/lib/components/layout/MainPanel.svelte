@@ -50,6 +50,7 @@
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
+	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -81,7 +82,6 @@
 		IDLE_PRELOAD_ORDER,
 		BrowserSidePanel,
 		ChangedFilesPanelLazy,
-		CreateBranchModalLazy,
 		InitRepoModalLazy,
 		type FeaturePanelKey
 	} from '$lib/components/deck/lazy/panels';
@@ -208,7 +208,6 @@
 	});
 
 	// Git dialogs mount on first use.
-	let createBranchEverOpened = $state(false);
 	let initRepoEverOpened = $state(false);
 
 	// Get the active session state (if the conversation panel is open)
@@ -268,7 +267,6 @@
 	// Git modal state (retained: branch creation, init repo, diff review)
 	// =========================================================================
 
-	let showCreateBranchModal = $state(false);
 
 	// Init repo modal state
 	let showInitRepoModal = $state(false);
@@ -860,6 +858,13 @@
 {/snippet}
 
 {#snippet headerActions()}
+	{#if $activeView?.type === 'session' && activeTab?.sessionId}
+		{#key activeTab.sessionId}
+			<!-- Dialog only: the git panel's "Private access" row opens it, and the
+			     header button reads its pending count (chatAccessSummary). -->
+			<ChatAccess sessionId={activeTab.sessionId} trigger="none" />
+		{/key}
+	{/if}
 	{#if activeTab && shouldShowHeaderGitActions({
 		viewType: $activeView?.type,
 		hasProject: !!activeProject,
@@ -875,19 +880,19 @@
 				error={$git.error}
 				operationInProgress={$gitOperationRunning}
 				isGitRepo={$gitStatus?.is_git_repo !== false}
-				showBranchSelector={false}
 				projectName={headerProjectName}
 				worktreeBranch={activeWorktreeBranch}
 				openPR={openPrForBranch}
 				githubAvailable={activeGithubAvailable}
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
-				onClickNewBranch={() => { createBranchEverOpened = true; showCreateBranchModal = true; }}
 				onClickPush={handlePush}
 				onClickPull={handlePull}
 				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
+				onDownloadChat={header ? undefined : handleDownloadJsonl}
+				downloadingChat={downloadingJsonl}
 			/>
 			<GitProgressPopover />
 		</div>
@@ -1017,20 +1022,6 @@
 	`gh auth status` failure must not unmount an open diff review (G10c).
 -->
 {#if activeProject}
-	{#if createBranchEverOpened}
-		<LazyPanel
-			handle={CreateBranchModalLazy}
-			label="the branch dialog"
-			bare
-			props={{
-				open: showCreateBranchModal,
-				defaultName: activeTab?.title || '',
-				onClose: () => (showCreateBranchModal = false),
-				onCreated: () => git.refreshStatus()
-			}}
-		/>
-	{/if}
-
 	{#if initRepoEverOpened}
 		<LazyPanel
 			handle={InitRepoModalLazy}

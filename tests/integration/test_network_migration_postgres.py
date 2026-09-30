@@ -349,7 +349,8 @@ def test_peer_apply_rolls_back_records_and_frontier_together(pg, monkeypatch, tm
         assert store.local_watermarks(conn) == {}
 
 
-def test_peer_capture_keeps_concurrent_changes_out_of_its_signed_frontier(pg, monkeypatch, tmp_path):
+@pytest.mark.parametrize("page_limit", [8 * 1024 * 1024, 4096])
+def test_peer_capture_keeps_concurrent_changes_out_of_its_signed_frontier(pg, monkeypatch, tmp_path, page_limit):
     import json
     from types import SimpleNamespace
 
@@ -386,25 +387,36 @@ def test_peer_capture_keeps_concurrent_changes_out_of_its_signed_frontier(pg, mo
     monkeypatch.setattr(settings, 'data_dir', tmp_path)
     monkeypatch.setattr(store, 'get_db', get_db)
     monkeypatch.setattr(engine, 'require_context', lambda: ctx)
-    monkeypatch.setattr(engine, 'load_context', lambda conn: ctx)
+    monkeypatch.setattr(engine, 'load_context', lambda conn, **kwargs: ctx)
     monkeypatch.setattr(engine, 'scan_all', lambda: None)
-    original = engine.snapshot_chunk
+    monkeypatch.setattr(peer_snapshot, 'MAX_PAGE', page_limit)
+    original = engine.snapshot_page
     changed = False
 
     def snapshot_chunk(collection, offset, **kwargs):
         nonlocal changed
         result = original(collection, offset, **kwargs)
-        if collection == 'tags' and offset == 0:
+        if collection == 'tags' and offset == 0 and not changed:
             with connect(schema) as writer:
+                # The old capture held this lock until every page was written,
+                # timing out real session creation and catalog publishers.
+                store.lock_state(writer.cursor())
+                writer.cursor().execute("UPDATE network_state SET clock=clock+1 WHERE id=1")
                 writer.cursor().execute("UPDATE tags SET name='After' WHERE id='tag-100'")
             changed = True
         return result
 
-    monkeypatch.setattr(engine, 'snapshot_chunk', snapshot_chunk)
+    monkeypatch.setattr(engine, 'snapshot_page', snapshot_chunk)
     manifest = peer_snapshot.capture('recipient')
     assert changed
-    index = next(i for i, page in enumerate(manifest['pages']) if page['collection'] == 'tags' and page['offset'] == 100)
-    chunk = json.loads(peer_snapshot.page('recipient', manifest['transfer'], index))
-    aad = crypto.canonical_json({'collection': 'tags', 'offset': 100, 'network_id': ctx.network_id})
-    body = json.loads(crypto.decrypt_payload(key, chunk['ciphertext'], aad))
-    assert body['items'][0]['record']['name'] == 'Before'
+    items = []
+    for index, page in enumerate(manifest['pages']):
+        if page['collection'] != 'tags':
+            continue
+        assert page['bytes'] <= page_limit
+        chunk = json.loads(peer_snapshot.page('recipient', manifest['transfer'], index))
+        aad = crypto.canonical_json({'collection': 'tags', 'offset': page['offset'], 'network_id': ctx.network_id})
+        body = json.loads(crypto.decrypt_payload(key, chunk['ciphertext'], aad))
+        items.extend(body['items'])
+    assert [item['record_id'] for item in items] == [f'tag-{i:03}' for i in range(101)]
+    assert all(item['record']['name'] == 'Before' for item in items)

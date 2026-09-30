@@ -36,7 +36,7 @@ def create_schema(cursor):
         account_id TEXT NOT NULL, hub_device_id TEXT NOT NULL,
         server_id TEXT NOT NULL, UNIQUE(server_id, hub_device_id)
     )""")
-    # Never inferred from a hub verdict or grandfathered during an upgrade.
+    # Decisions and enrollment record IDs survive revocation and credential repair.
     cursor.execute("""CREATE TABLE IF NOT EXISTS mobile_worker_confirmations (
         server_id TEXT NOT NULL, device_id TEXT NOT NULL,
         paired_client_id TEXT NOT NULL, decision TEXT NOT NULL,
@@ -189,6 +189,12 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
             (device_id, paired_client_id, account_id, hub_device_id, server_id)
             VALUES (%s, %s, %s, %s, %s)""",
             (device_id, client_id, identity['account_id'], hub_device_id, identity['server_id']))
+        # Record which credential the hub actually enrolled. A local repair must
+        # not inherit account authorization for a replacement mobile record.
+        c.execute("""INSERT INTO mobile_worker_confirmations
+            (server_id, device_id, paired_client_id, decision, mobile_record_id, decided_at)
+            SELECT %s, %s, %s, 'pending', id, %s FROM mobile_devices WHERE device_id=%s""",
+            (identity['server_id'], device_id, client_id, now, device_id))
         if session_token_hash:
             c.execute('''UPDATE paired_clients SET session_token_hash=%s,
                 session_expires_at=%s WHERE id=%s''',
@@ -209,7 +215,7 @@ def confirmation(owner):
         return 'pending'
 
 
-def confirm_device(owner, approved, *, mobile_record_id=None):
+def confirm_device(owner, approved, *, mobile_record_id=None, account_binding=None):
     """Serialize with revocation/repair; denial is a durable tombstone.
 
     A retry cannot resurrect a denied device. A new identity must be enrolled
@@ -217,6 +223,19 @@ def confirm_device(owner, approved, *, mobile_record_id=None):
     """
     with get_db() as conn:
         c = conn.cursor()
+        if account_binding is not None:
+            # Fence account logout/rebinding while the approval is persisted.
+            if 'instance_id' in account_binding:
+                c.execute('SELECT * FROM mobile_worker_bindings WHERE instance_id=%s FOR SHARE',
+                          (settings.effective_instance_id,))
+            else:
+                c.execute('SELECT * FROM mobile_hub_binding WHERE id=1 FOR SHARE')
+            binding = c.fetchone()
+            if (not binding or not binding['active']
+                    or binding['linked_by'] != 'managed:' + settings.effective_instance_id
+                    or binding['server_id'] != owner['server_id']
+                    or any(binding[k] != account_binding[k] for k in ('server_id', 'hub_url', 'linked_by'))):
+                raise ValueError('Account authorization revoked')
         c.execute('SELECT * FROM paired_clients WHERE id=%s FOR UPDATE', (owner['paired_client_id'],))
         client = c.fetchone()
         c.execute('SELECT * FROM mobile_devices WHERE device_id=%s FOR UPDATE', (owner['device_id'],))
@@ -226,6 +245,20 @@ def confirm_device(owner, approved, *, mobile_record_id=None):
                 or client['device_id'] != owner['device_id']
                 or (mobile_record_id is not None and device['id'] != mobile_record_id)):
             raise ValueError('Device authorization changed')
+        if account_binding is not None:
+            c.execute("""SELECT decision, mobile_record_id FROM mobile_worker_confirmations
+                WHERE server_id=%s AND device_id=%s AND paired_client_id=%s""",
+                (owner['server_id'], owner['device_id'], owner['paired_client_id']))
+            previous = c.fetchone()
+            if previous and previous['decision'] == 'denied':
+                raise ValueError('This device was denied by the worker owner')
+            # Old enrollments predate the pending record. Their mobile and paired
+            # client were created together; repair retains the old client but
+            # creates a new mobile record. Do not bless that replacement.
+            original = (previous['mobile_record_id'] == device['id'] if previous else
+                        bool(device['created_at']) and device['created_at'] == client['created_at'])
+            if not original:
+                raise ValueError('Confirm this device on the worker before connecting')
         if approved:
             from app.core.device_keys import key_expiry
             if key_expiry(dict(device)) <= datetime.now(timezone.utc):

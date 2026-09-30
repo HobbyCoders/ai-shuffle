@@ -17,6 +17,7 @@ import type { ExecutionMode, Task } from '../types';
 import { api } from '$lib/api/client';
 import { composerPreferences, resolveComposerProject } from '../composer-preferences';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
+import { hasComposerDraft } from './composer-suggestion';
 import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
@@ -242,14 +243,9 @@ export function normalizePermissionMode(mode: string | null | undefined): string
 	return mode === 'plan' ? 'default' : mode ?? null;
 }
 
-/**
- * The permission mode a NEW session may inherit from the last pick. Bypass is
- * never carried over: choosing it once must not leave later sessions unguarded
- * without anyone noticing, so it falls back to `default`.
- */
+/** Only NEW sessions inherit this explicit choice; existing sessions keep their binding. */
 export function rememberablePermissionMode(mode: string | null | undefined): string | null {
-	const normalized = normalizePermissionMode(mode);
-	return normalized === 'bypassPermissions' ? 'default' : normalized;
+	return normalizePermissionMode(mode);
 }
 
 export function getPersistedPermissionMode(): string | null {
@@ -840,7 +836,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
-		const savedDraft = newChatEphemeral && (newChatEphemeral.draft || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
+		// The editor serializes a blank composer as a nonempty Tiptap JSON string.
+		// Only real content or a staged checkout pins the old execution binding.
+		const savedDraft = newChatEphemeral && (hasComposerDraft(newChatEphemeral.draft) || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
 			? newChatEphemeral : null;
 
 		// A new session is created into whichever lane the sidepanel is showing.

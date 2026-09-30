@@ -26,7 +26,8 @@
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
-	import { profiles } from '$lib/stores/app-data.svelte';
+	import { profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
@@ -77,6 +78,12 @@
 	// once one is open, and only falls back to the sidepanel's pick on a fresh
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
+	// Remote runtime summaries are display/control truth, not transcript streaming
+	// state. A parked turn can also retain background work that Stop must reach.
+	const stoppableWork = $derived(hasStoppableWork(
+		$activeSession,
+		$sessions.find(session => session.id === $activeSession.sessionId)
+	));
 	const commandSettingsKey = $derived.by(() => {
 		const config = $profiles.find(profile => profile.id === $activeSession.profile)?.config;
 		return JSON.stringify([config?.setting_sources ?? null, config?.cwd ?? null, config?.provider ?? null, config?.model ?? null]);
@@ -119,7 +126,7 @@
 	let inputValue = $state(initialComposerDraft);
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
-	const hasMessageContent = $derived(!!inputValue.trim() || uploadedFiles.length > 0);
+	const hasMessageContent = $derived(hasComposerDraft(inputValue) || uploadedFiles.length > 0);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
@@ -777,6 +784,9 @@
 	 * two can never drift onto different targets.
 	 */
 	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
+		if (composerMode !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
+			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
+		}
 		if (composerMode === 'chat') {
 			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
 		}
@@ -792,7 +802,8 @@
 		const block = attachmentBlockReason(
 			$activeSession.project,
 			$activeSession.projectV2Id,
-			composerMode
+			composerMode,
+			$activeSession.sessionId
 		);
 		if (block) {
 			errorMessage = block;
@@ -807,7 +818,7 @@
 		if (!files || files.length === 0) return;
 		// A code-lane upload needs the project in the URL; a chat-lane one has no
 		// project by construction and must not be turned away for missing it.
-		if (composerMode !== 'chat' && !$activeSession.project) return;
+		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)) return;
 
 		isUploading = true;
 		try {
@@ -910,7 +921,8 @@
 		const dropBlock = attachmentBlockReason(
 			$activeSession.project,
 			$activeSession.projectV2Id,
-			composerMode
+			composerMode,
+			$activeSession.sessionId
 		);
 		if (dropBlock) {
 			errorMessage = dropBlock;
@@ -1071,8 +1083,8 @@
 						/>
 					</div>
 
-					<!-- During a turn, show Send for a draft and Stop for an empty
-					     composer. Sending queues a message without stopping the turn.
+					<!-- Stop must remain reachable whenever session work is live,
+					     including with a draft. Send can queue that draft independently.
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
 						{#if $activeSession.isCreatingWorktree}
@@ -1082,17 +1094,16 @@
 									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 								</svg>
 							</button>
-						{:else if $activeSession.isStreaming}
+						{:else if stoppableWork}
 							{#if hasMessageContent}
 								<button type="submit" class="send-btn" disabled={!$anyCredential || isUploading || isRecording || isTranscribing} title="Send — Enter" aria-label="Send">
 									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
 								</button>
-							{:else}
-								<StopButton
-									activeTasks={$activeSession.activeTasks}
-									onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
-								/>
 							{/if}
+							<StopButton
+								activeTasks={$activeSession.activeTasks}
+								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
+							/>
 						{:else}
 							<button
 								type="submit"

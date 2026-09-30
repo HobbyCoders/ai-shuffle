@@ -121,10 +121,18 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return await call(device_id, "turns", {
+    body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,
-    })
+    }
+    blob_ids = (payload or {}).get("upload_blob_ids")
+    if blob_ids:
+        from app.network import git
+        try:
+            body["uploads"] = await git.export_uploads(blob_ids)
+        except ValueError as exc:
+            raise ControlRefused(str(exc)) from exc
+    return await call(device_id, "turns", body)
 
 
 async def create_session(device_id: str, session: Dict[str, Any], turn: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -212,7 +220,13 @@ def _permission_mode_handler():
     return handle
 
 
+def _run_settings_handler():
+    from app.api.sessions_permissions import handle_run_settings
+    return handle_run_settings
+
+
 _LAZY_HANDLERS = {
+    "run-settings": _run_settings_handler,
     "permission-mode": _permission_mode_handler,
     "session-active": _session_active_handler,
     "handoff": _handoff_handler,
@@ -288,6 +302,18 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     session_id = str(body.get("session_id") or "")
     row = _require_owned(session_id)
     payload = dict(body.get("payload") or {})
+    blob_ids = payload.get("upload_blob_ids") or []
+    uploads = body.get("uploads") or []
+    if blob_ids or uploads:
+        if (not isinstance(blob_ids, list) or not isinstance(uploads, list)
+                or len(blob_ids) > 50 or len(blob_ids) != len(uploads)
+                or any(not isinstance(blob_id, str) for blob_id in blob_ids)
+                or any(not isinstance(record, dict) or not isinstance(record.get("id"), str) for record in uploads)
+                or len(set(blob_ids)) != len(blob_ids)
+                or {record.get("id") for record in uploads} != set(blob_ids)):
+            raise ValueError("Invalid upload transfer")
+        from app.network import git
+        await run_sync(git.import_uploads, session_id, uploads)
     payload.setdefault("forwarded_by_device", from_device)
     # Forwarded turns bypass the chat WebSocket's first-message title backfill.
     # Only the owner can persist a title that survives catalog replication.

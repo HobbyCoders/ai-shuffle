@@ -474,15 +474,23 @@ def require_worker_confirmation(owner):
         if decision == 'denied':
             raise HTTPException(status_code=403, detail='This device was denied by the worker owner')
         if decision != 'approved':
+            binding = store.get_binding()
+            if binding and binding.get('linked_by') == 'managed:' + settings.effective_instance_id:
+                binding = require_active(owner)
+                try:
+                    store.confirm_device(owner, True, account_binding=binding)
+                    return
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from None
             raise HTTPException(status_code=403, detail='Confirm this device on the worker before connecting')
 
 
 def check_paired_client(client):
     """Validate the device live and derive this installation owner's authority.
 
-    The hub may veto a device, but cannot approve one. Both a worker-local
-    confirmation and a live managed binding are required. Direct/controller-linked
-    connections do not delegate administration.
+    A verified account device on this installation's managed binding needs no
+    separate owner approval. Local denials and credential revocation still win.
+    Direct/controller-linked connections do not delegate administration.
     """
     from datetime import datetime, timezone
 

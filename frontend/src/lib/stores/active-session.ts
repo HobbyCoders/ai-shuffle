@@ -42,9 +42,12 @@ import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
+import { hasComposerDraft } from './session/composer-suggestion';
 
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
+import { sessionOwnerEpoch } from './session-owner';
+import { notify } from './notifications';
 import { getOrCreateDeviceId } from './device-id';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from './worker-selection';
 import { appData } from './app-data.svelte';
@@ -721,6 +724,53 @@ function rememberBranchIntent() {
 	} : null);
 }
 
+let permissionSelectionGeneration = 0;
+const runSettingGenerations = { effort: 0, fast: 0 };
+const runSettingQueues = new Map<string, Promise<unknown>>();
+
+async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null | boolean) {
+	const generation = ++runSettingGenerations[field];
+	const ownerEpoch = sessionOwnerEpoch();
+	const sessionId = _state.sessionId;
+	const stateKey = field === 'effort' ? 'effortLevelOverride' : 'fastMode';
+	let selected = value;
+	if (sessionId) {
+		// Serialize picks for the same owner/session so a slow earlier request
+		// cannot overwrite a newer pick at the running worker.
+		const queueKey = `${ownerEpoch}:${sessionId}`;
+		const previous = runSettingQueues.get(queueKey);
+		const apply = () => {
+			if (sessionOwnerEpoch() !== ownerEpoch) return null;
+			return api.put<{ effort: string | null; fast: boolean }>(
+				`/sessions/${sessionId}/run-settings`, { [field]: value }
+			);
+		};
+		const pending = previous ? previous.catch(() => {}).then(apply) : Promise.resolve(apply());
+		runSettingQueues.set(queueKey, pending);
+		try {
+			const saved = await pending;
+			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
+			selected = saved[field];
+			const cached = sessionEphemeralCache.restore(sessionId);
+			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, [stateKey]: selected });
+		} catch (error) {
+			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
+				notify.error(`Could not change ${field === 'effort' ? 'effort' : 'Fast mode'}: ${error instanceof Error ? error.message : String(error)}`,
+					{ session_id: sessionId, persist: false });
+			}
+			return;
+		} finally {
+			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
+		}
+	}
+	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
+	setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
+		field === 'effort' ? selected as string | null : selected ? '1' : '');
+	if (_state.sessionId !== sessionId) return;
+	_update(s => ({ ...s, [stateKey]: selected }));
+	persistSession();
+}
+
 export const activeSession = {
 	get current() { return _state; },
 
@@ -912,30 +962,35 @@ export const activeSession = {
 	//
 	// The model / effort / permission mode this session runs on. Picked when
 	// the session is created and changeable mid-session; the backend stores it
-	// on the session row from send overrides; permission changes additionally
-	// update the running engine immediately. Picks outlive this tab and become
-	// defaults for the NEXT new chat, except Bypass (which defaults back to Ask).
+	// on the session row from send overrides; effort, Fast mode and permissions
+	// also update the running engine without interrupting its turn. Picks outlive
+	// this tab and become defaults for the NEXT new chat, including Bypass.
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
 	async setPermissionModeOverride(mode: string | null) {
 		mode = normalizePermissionMode(mode);
+		const generation = ++permissionSelectionGeneration;
+		const ownerEpoch = sessionOwnerEpoch();
 		const sessionId = _state.sessionId;
 		if (sessionId) {
 			const saved = await api.put<{ permission_mode: string }>(
 				`/sessions/${sessionId}/permission-mode`, { permission_mode: mode ?? 'default' }
 			);
+			if (sessionOwnerEpoch() !== ownerEpoch) return;
 			mode = saved.permission_mode;
 			const cached = sessionEphemeralCache.restore(sessionId);
 			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: mode });
 		}
-		// A slow owner reply must not change the newly opened session.
+		// Remember acknowledged choices even after navigation, but never overwrite
+		// a newer explicit pick or apply the reply to a different open session.
+		if (generation !== permissionSelectionGeneration) return;
+		setPersistedRunBinding('permissionMode', mode);
 		if (_state.sessionId !== sessionId) return;
 		_update(s => ({ ...s, permissionModeOverride: mode }));
-		setPersistedRunBinding('permissionMode', mode);
 		persistSession();
 	},
-	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
-	setFastMode(on: boolean) { _update(s => ({ ...s, fastMode: on })); setPersistedRunBinding('fastMode', on ? '1' : ''); persistSession(); },
+	setEffortLevelOverride(level: string | null) { return setLiveRunSetting('effort', level); },
+	setFastMode(on: boolean) { return setLiveRunSetting('fast', on); },
 	async setWorkspaceProjectIds(ids: string[]) {
 		const owner = { sessionId: _state.sessionId, project: _state.project, projectV2Id: _state.projectV2Id };
 		let next = [...new Set(ids)].filter(id => id !== owner.project);
@@ -1025,7 +1080,7 @@ export const activeSession = {
 
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
 	applyComposerDefaults() {
-		if (_state.sessionId || _state.draft || _state.worktreeBranch || _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession) return;
+		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession) return;
 		const picks = composerPreferences.current;
 		const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
 		const code = _state.mode !== 'chat';

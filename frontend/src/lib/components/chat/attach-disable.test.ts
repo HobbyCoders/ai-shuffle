@@ -7,6 +7,11 @@ import {
 } from './attach-disable';
 
 describe('attachmentBlockReason', () => {
+	it('allows an existing canonical worker session without a local checkout', () => {
+		expect(attachmentBlockReason(null, 'pv2-remote', 'code', 'session-1')).toBeNull();
+		expect(attachmentBlockReason('', 'pv2-remote', 'voice', 'session-1')).toBeNull();
+		expect(attachmentBlockReason(null, null, 'code', 'session-1')).toBe(SELECT_PROJECT_TO_UPLOAD);
+	});
 	it('allows attach when a local project is selected', () => {
 		expect(attachmentBlockReason('proj-1', 'pv2-1')).toBeNull();
 		expect(attachmentBlockReason('proj-1', null)).toBeNull();
@@ -35,8 +40,8 @@ describe('attachmentBlockReason', () => {
 	});
 
 	it('still refuses a code-lane remote-only compose once lanes are passed', () => {
-		// The lane argument must not become a blanket bypass: a projectV2Id with
-		// no local checkout has nowhere to put the file in ANY code-lane compose.
+		// An uncreated remote draft still has no session-scoped upload destination;
+		// passing its lane must not turn that into a blanket bypass.
 		expect(attachmentBlockReason(null, 'pv2-remote', 'code')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
 		expect(attachmentBlockReason('', 'pv2-remote', 'voice')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
 	});

@@ -84,9 +84,10 @@ async function run(page: Page | null, tabId: string | undefined, gen: number): P
       try {
         resp = await fetch(registerUrl, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", origin: new URL(registerUrl).origin },
           body: JSON.stringify(payload),
           signal: controller.signal,
+          redirect: "error",
         });
       } catch (err) {
         if (controller.signal.aborted) throw new Error(`timed out after ${REGISTER_TIMEOUT_MS} ms`);

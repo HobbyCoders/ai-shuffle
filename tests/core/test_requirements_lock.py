@@ -53,6 +53,18 @@ def test_lock_covers_every_direct_requirement_within_its_range():
             f"requirements.lock pins {name} outside {requirement.specifier}; run scripts/lock_requirements.sh")
 
 
+def test_headless_image_conditioning_dependency_is_in_main_lock():
+    # Docker and the container updater install Fluid with --no-deps after ONLY
+    # the main lock. A desktop/dev-only Pillow silently disables conditioning.
+    fluid = tomllib.loads((ROOT / "fluid/pyproject.toml").read_text())
+    required = [Requirement(dep) for dep in fluid["project"]["dependencies"]]
+    [pillow] = [dep for dep in required if canonicalize_name(dep.name) == "pillow"]
+    main = locked()
+    assert "pillow" in main, "Headless workers must install Pillow from requirements.lock"
+    assert all(pillow.specifier.contains(version) and hashes for version, hashes in main["pillow"])
+    assert main["pillow"] == locked("requirements-native.lock")["pillow"]
+
+
 def test_image_and_updater_install_only_from_the_lock():
     image = (ROOT / "Dockerfile").read_text()
     assert "pip install --no-cache-dir --require-hashes -r requirements.lock" in image

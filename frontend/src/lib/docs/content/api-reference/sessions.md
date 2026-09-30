@@ -18,7 +18,7 @@ An API key sees and acts only on the sessions it started (see [Own Sessions](/do
 
 Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `null` when no current eligible suggestion is available. This read never calls a model.
 
-With **Suggest next reply** enabled (**Settings → Chat & Input**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. A newer turn, a cleared/rewound answer, or disabling the feature prevents the stale hint from being shown. An existing draft is never replaced. Clicking the gray hint or pressing Tab/Enter accepts it into the draft; it does not send the message. Escape dismisses it for that browser's current visit.
+With **Suggest next reply** enabled (**Settings → Chat & Input**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. A newer turn, a cleared/rewound answer, or disabling the feature prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
 
 ## List Sessions
 

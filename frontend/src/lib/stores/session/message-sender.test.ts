@@ -7,6 +7,7 @@ import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
+import { composerPreferences } from '../composer-preferences';
 const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
 vi.mock('$lib/services/voiceCall', () => voice);
 const context = vi.hoisted(() => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -114,6 +115,24 @@ function makeDeps(initial: ActiveSessionState) {
 
 	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
+
+describe('remembered permission on first send', () => {
+	it.each([
+		{}, { deviceIntent: { id: 'runner-1', name: 'Runner' } },
+		{ worktreeIntent: 'worktree' as const, worktreeMode: 'existing' as const, worktreeId: 'wt-1' },
+	])('carries the explicit preference through session creation (%j)', async (selection) => {
+		composerPreferences.set('permissionMode', 'bypassPermissions');
+		const { deps, wsConn } = makeDeps(baseState({ ...selection, permissionModeOverride: composerPreferences.current.permissionMode }));
+		const originalActive = deps.getActiveSession();
+		let sender: ReturnType<typeof createMessageSender>;
+		deps.getActiveSession = () => ({ ...originalActive, sendMessage: (...args) => sender.sendMessage(...args) });
+		sender = createMessageSender(deps);
+		expect(await sender.sendMessage('hello')).toBe(true);
+		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({
+			type: 'query', overrides: expect.objectContaining({ permission_mode: 'bypassPermissions' }),
+		}));
+	});
+});
 
 describe('remembered worker on send', () => {
 	it('sends to the remembered worker, consumes the active intent but keeps the default', async () => {

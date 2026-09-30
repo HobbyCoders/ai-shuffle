@@ -3,6 +3,7 @@
 	import { Download, RefreshCw, LoaderCircle, CircleAlert } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
+	import { notify } from '$lib/stores/notifications';
 
 	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; workers: { device_id: string; device_name: string; status: string; message: string }[] };
@@ -96,14 +97,43 @@
 		try { acknowledged = localStorage.getItem(completionKey) || ''; } catch { /* Storage may be unavailable. */ }
 		void refresh();
 		window.addEventListener('application-update-policy', refresh);
+		window.addEventListener('application-update-request', activateFromNotification);
 		document.addEventListener('visibilitychange', visibilityChanged);
 		return () => {
 			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer);
 			window.removeEventListener('application-update-policy', refresh);
+			window.removeEventListener('application-update-request', activateFromNotification);
 			document.removeEventListener('visibilitychange', visibilityChanged);
 		};
 	});
-	async function activate() {
+	async function activateFromNotification() {
+		// Never fall back to the shell's local-only install when policy cannot
+		// be read. A ready desktop may still have peers that need preparation.
+		if (auth.current.status?.preview_access) {
+			notify.error('Application updates cannot be requested from an agent preview.');
+			return;
+		}
+		if (pending) return;
+		pending = true;
+		try {
+			const next = await api.get<Snapshot>('/settings/application-updates/workers');
+			if (!active) return;
+			applySnapshot(next);
+		} catch (cause) {
+			notify.error(getErrorMessage(cause, 'Could not check application update scope. Try again.'));
+			return;
+		} finally { pending = false; }
+		if (!snapshot?.allow_updates) {
+			notify.error('Application updates are disabled in Settings.');
+			return;
+		}
+		if (busy) {
+			notify.info(status, { title: 'Update in progress', persist: false });
+			return;
+		}
+		await activate(true);
+	}
+	async function activate(announce = false) {
 		if (busy || !snapshot?.allow_updates) return;
 		const requestedAction = ready ? 'install' : available ? 'download' : 'check';
 		watchUntil = Date.now() + REQUEST_WATCH_MS;
@@ -113,7 +143,17 @@
 			if (!active) return;
 			receipt = result.results.map(w => `${w.device_name}: ${w.reason}`).join('; ');
 			if (!result.results.some(w => w.accepted)) installRequested = false;
-		} catch (cause) { if (active) requestError = getErrorMessage(cause, 'Could not request application update'); }
+			if (announce) {
+				const message = `${scope}. ${receipt}${requestedAction === 'download' ? ' When preparation finishes, choose Update and restart to install.' : ''}`;
+				if (result.results.some(w => !w.accepted)) notify.warning(message, { title: 'Update needs attention', persist: false });
+				else notify.info(message, { title: 'Update requested', persist: false });
+			}
+		} catch (cause) {
+			if (active) {
+				requestError = getErrorMessage(cause, 'Could not request application update');
+				if (announce) notify.error(requestError);
+			}
+		}
 		finally { if (active) { pending = false; void refresh(); } }
 	}
 </script>
@@ -121,7 +161,7 @@
 {#if visible}
 	<div class="update-slot" class:complete={celebrating} class:leaving={celebration === 'leaving'}>
 		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating}
-			type="button" onclick={activate} aria-disabled={busy} aria-busy={busy && !celebrating}
+			type="button" onclick={() => activate()} aria-disabled={busy} aria-busy={busy && !celebrating}
 			aria-label={waiting || celebrating ? headline : busy ? 'Downloading update' : action}
 			title={status} aria-describedby={tipOpen ? tooltipId : undefined}
 			onmouseenter={showTip} onmouseleave={() => tipOpen = false} onfocus={showTip} onblur={() => tipOpen = false}

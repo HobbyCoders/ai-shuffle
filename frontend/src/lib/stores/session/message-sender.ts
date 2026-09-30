@@ -442,9 +442,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// Sidepanel mode for a NEW session. Creation-time only — the backend
 				// ignores it once the session row exists.
 				mode: _state.sessionId ? undefined : _state.mode,
-				// Staged upload paths this prompt references (D8). Remote-only
-				// compose has no local checkout — never send the list.
-				upload_paths: !remoteOnly && options?.pendingUploadPaths?.length
+				// Existing remote-only sessions stage attachments per session;
+				// only an uncreated remote draft has no upload destination.
+				upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
 					? options.pendingUploadPaths
 					: undefined,
 				// Adoption token — present only for a new-session query (see requestId).

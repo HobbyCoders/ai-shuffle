@@ -24,9 +24,12 @@ type HeaderDropdownId =
 	| 'notifications'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'
-	// Git-action option popovers (split-button chevrons). Listing them here means
-	// opening any one closes every other header dropdown — including the branch
-	// selector and any sibling git-action popover — so only one is ever open.
+	// The chat header's git panel (one button opens it) and the option popovers
+	// for the actions inside it. A popover id implies the panel is open too:
+	// GitHeaderActions treats every `git-*` id as "panel open" and returns to
+	// 'git-panel' when a popover closes. Listing them here means opening any
+	// one closes every other header dropdown, so only one is ever open.
+	| 'git-panel'
 	| 'git-commit'
 	| 'git-push'
 	| 'git-pull'

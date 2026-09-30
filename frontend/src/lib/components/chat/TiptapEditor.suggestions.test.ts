@@ -5,37 +5,63 @@ import TiptapEditor from './TiptapEditor.svelte';
 
 afterEach(cleanup);
 
+// jsdom lacks PointerEvent; supply its touch-specific fields explicitly.
+function tap(field: HTMLElement, time: number, x = 10) {
+	const event = new Event('pointerup', { bubbles: true, cancelable: true });
+	Object.defineProperties(event, {
+		pointerType: { value: 'touch' }, isPrimary: { value: true },
+		timeStamp: { value: time }, clientX: { value: x }, clientY: { value: 10 }
+	});
+	return fireEvent(field, event);
+}
+
 describe('inline reply suggestion', () => {
-	it('accepts the placeholder by tap without submitting or changing the draft itself', async () => {
+	it('single click only focuses; double click accepts without sending', async () => {
 		const accept = vi.fn();
-		const { component, getByRole, queryByText, rerender } = render(TiptapEditor, {
+		const { component, getByRole, getByText } = render(TiptapEditor, {
 			props: { suggestion: 'Check the logs', onAcceptSuggestion: accept }
 		});
 		await tick();
+		const field = getByRole('textbox', { name: 'Message' });
+		expect(getByText('Check the logs').tagName).toBe('SPAN');
+		await fireEvent.click(field);
+		expect(accept).not.toHaveBeenCalled();
 		expect(component.getMessage()).toBe('');
-		expect(queryByText('Dismiss')).toBeNull();
-		const placeholder = getByRole('button', { name: 'Use suggested reply: Check the logs' });
-		expect(placeholder.textContent?.trim()).toBe('Check the logs');
-		expect(placeholder.getAttribute('type')).toBe('button');
-		await fireEvent.click(placeholder);
+		await fireEvent.doubleClick(field);
 		expect(accept).toHaveBeenCalledOnce();
 		expect(component.getMessage()).toBe('');
-		await rerender({ suggestion: '', onAcceptSuggestion: accept });
-		expect(queryByText('Check the logs')).toBeNull();
 	});
 
-	it('does not accept over an existing draft or while disabled', async () => {
+	it('accepts two nearby touch taps, not a single tap or slow/distant taps', async () => {
 		const accept = vi.fn();
-		const { component, queryByRole, rerender } = render(TiptapEditor, {
-			props: { suggestion: 'Old suggestion', onAcceptSuggestion: accept, initialContent: 'My draft' }
+		const { getByRole } = render(TiptapEditor, {
+			props: { suggestion: 'Check the logs', onAcceptSuggestion: accept }
 		});
 		await tick();
-		expect(queryByRole('button')).toBeNull();
+		const field = getByRole('textbox', { name: 'Message' });
+		await tap(field, 100);
 		expect(accept).not.toHaveBeenCalled();
-		expect(component.getMessage()).toBe('My draft');
-		await rerender({ suggestion: 'Old suggestion', onAcceptSuggestion: accept, disabled: true });
-		expect(queryByRole('button')).toBeNull();
+		await tap(field, 600);
+		await tap(field, 700, 100);
+		expect(accept).not.toHaveBeenCalled();
+		await tap(field, 800, 102);
+		expect(accept).toHaveBeenCalledOnce();
 	});
+
+	it.each([{ initialContent: 'My draft' }, { disabled: true }, { suggestion: '' }])(
+		'does not accept when unavailable: %j', async extra => {
+			const accept = vi.fn();
+			const { getByRole } = render(TiptapEditor, {
+				props: { suggestion: 'Old suggestion', onAcceptSuggestion: accept, ...extra }
+			});
+			await tick();
+			const field = getByRole('textbox', { name: 'Message' });
+			await fireEvent.doubleClick(field);
+			await tap(field, 100);
+			await tap(field, 200);
+			expect(accept).not.toHaveBeenCalled();
+		}
+	);
 });
 
 describe('composer accessibility', () => {

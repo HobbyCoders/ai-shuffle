@@ -109,10 +109,19 @@ def test_large_png_past_megapixel_gate_becomes_jpeg(fake_pil) -> None:
     assert mt == "image/jpeg"
 
 
-def test_reencode_that_grows_keeps_the_original(fake_pil) -> None:
-    fake_pil["image"] = _FakeImage((3000, 3000), payload=b"y" * 50_000)
-    data = _b64(100)
+def test_reencode_that_grows_keeps_within_budget_original(fake_pil) -> None:
+    fake_pil["image"] = _FakeImage((1200, 1000), payload=b"y" * 600_000)
+    data = _b64(images._REENCODE_RAW_BYTES + 10)
     assert condition_image("image/webp", data) == ("image/webp", data)
+
+
+def test_resize_that_grows_still_obeys_pixel_budget(fake_pil) -> None:
+    fake_pil["image"] = img = _FakeImage((3000, 3000), payload=b"y" * 50_000)
+    data = _b64(100)
+    media_type, conditioned = condition_image("image/webp", data)
+    assert img.resized_to == (MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)
+    assert media_type == "image/jpeg"
+    assert base64.b64decode(conditioned) == img.payload
 
 
 def test_decode_failure_passes_through(fake_pil) -> None:

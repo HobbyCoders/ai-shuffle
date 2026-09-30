@@ -82,6 +82,8 @@
 			liveDictation = createLiveDictation(editor);
 
 			// Add keydown handler to the editor element
+			boundElement.addEventListener('dblclick', handleSuggestionDoubleClick);
+			boundElement.addEventListener('pointerup', handleSuggestionTap);
 			boundElement.addEventListener('keydown', handleEditorKeyDown, true);
 			boundElement.addEventListener('beforeinput', handleUserInput);
 			boundElement.addEventListener('input', handleUserInput);
@@ -95,6 +97,8 @@
 		// Parent refs may already be cleared. Hand off capture before destruction.
 		if (editor && !editor.isDestroyed) onBeforeDestroy?.(editor);
 		if (boundElement) {
+			boundElement.removeEventListener('dblclick', handleSuggestionDoubleClick);
+			boundElement.removeEventListener('pointerup', handleSuggestionTap);
 			boundElement.removeEventListener('keydown', handleEditorKeyDown, true);
 			boundElement.removeEventListener('beforeinput', handleUserInput);
 			boundElement.removeEventListener('input', handleUserInput);
@@ -122,6 +126,33 @@
 		if (onKeyDown) {
 			const handled = onKeyDown(event);
 			if (handled) return;
+		}
+	}
+
+	// A single pointer interaction only focuses the real editor. Touch devices
+	// do not consistently emit dblclick, so recognize two nearby touch releases.
+	let lastSuggestionTap: { time: number; x: number; y: number; suggestion: string } | null = null;
+	function canAcceptSuggestion() {
+		return !!suggestion && !!onAcceptSuggestion && !disabled && !!editor?.isEmpty;
+	}
+	function handleSuggestionDoubleClick(event: MouseEvent) {
+		if (!canAcceptSuggestion()) return;
+		event.preventDefault();
+		lastSuggestionTap = null;
+		onAcceptSuggestion?.();
+	}
+	function handleSuggestionTap(event: PointerEvent) {
+		if (event.pointerType !== 'touch' || !event.isPrimary || !canAcceptSuggestion()) {
+			lastSuggestionTap = null;
+			return;
+		}
+		const previous = lastSuggestionTap;
+		lastSuggestionTap = { time: event.timeStamp, x: event.clientX, y: event.clientY, suggestion };
+		if (previous && previous.suggestion === suggestion && event.timeStamp - previous.time <= 350 &&
+			Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 24) {
+			event.preventDefault();
+			lastSuggestionTap = null;
+			onAcceptSuggestion?.();
 		}
 	}
 
@@ -331,12 +362,9 @@
 		class:disabled
 	></div>
 	{#if suggestion && onAcceptSuggestion && !disabled && editorEmpty}
-		<button type="button" class="inline-suggestion" aria-label={`Use suggested reply: ${suggestion}`}
-			title="Use suggested reply (Tab)"
-			onkeydown={(event) => { if (event.key === 'Escape') handleEditorKeyDown(event); }}
-			onclick={() => { if (editor?.isEmpty) onAcceptSuggestion?.(); }}>
+		<span class="inline-suggestion" aria-hidden="true">
 			{suggestion}
-		</button>
+		</span>
 	{/if}
 </div>
 
@@ -359,9 +387,8 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		text-align: start;
-		cursor: pointer;
+		pointer-events: none;
 	}
-	.inline-suggestion:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.tiptap-editor {
 		width: 100%;
 		min-height: 24px;

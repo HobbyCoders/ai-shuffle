@@ -12,6 +12,8 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+RELEVANT = "github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'"
+NOOP = "github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full'"
 FULL = "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
 EXPENSIVE = {
     "ci-browser-workspace.yml": ["workspace"],
@@ -20,7 +22,7 @@ EXPENSIVE = {
 }
 REQUIRED = {
     "ci-browser-workspace.yml": ["smoke", "workspace"],
-    "android.yml": ["account-hub", "build", "android-ui"],
+    "android.yml": ["changes", "account-hub", "build", "android-ui"],
     "desktop.yml": ["check", "package", "windows-preview"],
 }
 SCRIPT = ROOT / "scripts/ci/require-full-ci.py"
@@ -42,13 +44,17 @@ class CostPolicyTests(unittest.TestCase):
                     self.assertEqual(jobs[key]["if"], FULL)
                 gate = jobs["readiness"]
                 self.assertEqual(gate["needs"], REQUIRED[name])
-                self.assertEqual(gate["if"], "${{ !cancelled() }}")
+                self.assertEqual(gate["if"], "${{ !cancelled() && (" + RELEVANT + ") }}")
                 self.assertEqual(gate["runs-on"], "ubuntu-latest")
                 step = gate["steps"][-1]
-                self.assertEqual(step["env"], {
+                expected_env = {
                     "CI_FULL_REQUESTED": "${{ " + FULL + " }}",
                     "CI_REQUIRED_RESULTS": "${{ toJSON(needs) }}",
-                })
+                    "CI_DEFERRABLE_JOBS": json.dumps(expensive),
+                }
+                if name == "android.yml":
+                    expected_env["CI_ANDROID_APK_REQUIRED"] = "${{ needs.changes.outputs.apk }}"
+                self.assertEqual(step["env"], expected_env)
                 self.assertEqual(step["run"], "python3 scripts/ci/require-full-ci.py")
                 self.assertNotIn("continue-on-error", gate)
 
@@ -73,18 +79,19 @@ class CostPolicyTests(unittest.TestCase):
             self.assertEqual(set(config["on"]["pull_request"]["types"]), {"opened", "synchronize", "reopened", "labeled", "unlabeled"})
             self.assertIn("scripts/ci/require-full-ci.py", config["on"]["pull_request"]["paths"])
             self.assertIn("github.ref", config["concurrency"]["group"])
-            self.assertNotIn("github.event.action", config["concurrency"]["group"])
+            self.assertIn(NOOP + " && github.run_id", config["concurrency"]["group"])
+            self.assertEqual(config["run-name"], "${{ github.workflow }}${{ " + NOOP + " && ' (unrelated label event)' || '' }}")
             self.assertIn(config["concurrency"]["cancel-in-progress"], ["true", "${{ github.event_name == 'pull_request' }}"])
 
     def test_cheap_checks_do_not_require_the_label(self):
         for name, keys in {
             "ci-browser-workspace.yml": ["smoke"],
-            "android.yml": ["account-hub", "build"],
+            "android.yml": ["account-hub", "changes"],
             "desktop.yml": ["check"],
         }.items():
             jobs = workflow(name)["jobs"]
             for key in keys:
-                self.assertNotIn("if", jobs[key])
+                self.assertEqual(jobs[key]["if"], RELEVANT)
                 self.assertLessEqual(int(jobs[key]["timeout-minutes"]), 20)
 
     def test_android_consumers_and_staging_are_gated_together(self):
@@ -98,11 +105,89 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn("inputs.publish_download", jobs["publish"]["if"])
         self.assertIn("github.event_name != 'pull_request'", jobs["publish"]["if"])
 
-    def test_daily_canaries_still_skip_unchanged_main(self):
-        for name in ["ci-backend.yml", "ci-frontend.yml"]:
+
+    def test_irrelevant_labels_do_not_cancel_or_start_validation(self):
+        cases = []
+        for event, action, label in itertools.product(
+            ["pull_request", "workflow_dispatch", "workflow_call"],
+            ["opened", "synchronize", "reopened", "labeled", "unlabeled"],
+            ["ci:full", "bug", "ci:full-other"],
+        ):
+            irrelevant = event == "pull_request" and action in {"labeled", "unlabeled"} and label != "ci:full"
+            github = {"event_name": event, "event": {"action": action, "label": {"name": label}}}
+            cases.append({"github": github, "expected": not irrelevant})
+        runner = "const {expr,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); const fn=new Function('github','return '+expr); for(const c of cases) require('assert').strictEqual(fn(c.github),c.expected);"
+        subprocess.run(["node", "-e", runner], input=json.dumps({"expr": RELEVANT, "cases": cases}), text=True, check=True)
+        for name in EXPENSIVE:
             config = workflow(name)
-            self.assertEqual(config["on"]["schedule"], [{"cron": "7 6 * * *"}])
-            self.assertIn('if [ "$last" = "$GITHUB_SHA" ]', config["jobs"]["canary-gate"]["steps"][0]["run"])
+            group = config["concurrency"]["group"]
+            for job in config["jobs"].values():
+                self.assertIn(NOOP + " && ' (unrelated label event)'", job["name"])
+            # The same real group handles ci:full additions AND removals; each
+            # irrelevant event has its own group, so cannot evict pending work.
+            self.assertIn(NOOP + " && github.run_id || 'validation'", group)
+
+    def test_android_apk_classification_and_readiness(self):
+        spec = importlib.util.spec_from_file_location("android_inputs", ROOT / "scripts/ci/android-inputs.py")
+        inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inputs)
+        def check(*names):
+            return inputs.apk_required([[{"filename": name} for name in names]])
+        for path in ["android/hub/src/index.ts", "android/site/package-lock.json", "android/docs/testing.md", "docs/content/setup.md"]:
+            self.assertFalse(check(path))
+        for path in ["android/app/src/Main.kt", "android/build.gradle.kts", "android/gradle.properties", "android/ci/test-mobile-apk.py", "android/scripts/sync-mobile-ui.sh", "mobile/src/App.svelte", "frontend/src/lib/api.ts", ".github/workflows/android.yml", "scripts/ci/android-inputs.py", "android/new-build-input/data"]:
+            self.assertTrue(check(path))
+            self.assertTrue(check("android/site/src/index.ts", path))
+        self.assertTrue(inputs.apk_required([[{"filename": "android/site/old.kt", "previous_filename": "android/app/src/old.kt", "status": "renamed"}]]))
+        self.assertTrue(inputs.apk_required([[{"filename": "android/app/src/old.kt", "status": "removed"}]]))
+        self.assertTrue(inputs.apk_required([[]]))
+        for pages in [None, [], [None], [[{}]], [[{"filename": "android/site/x", "status": "renamed"}]]]:
+            with self.assertRaises(ValueError):
+                inputs.apk_required(pages)
+        for pr in [None, {}, {"head": None}, {"head": {"sha": "new"}, "changed_files": 1}, {"head": {"sha": "head"}, "changed_files": 2}]:
+            with self.assertRaises(ValueError):
+                inputs.apk_required([[{"filename": "android/site/x"}]], pr, "head")
+        results = {"changes": {"result": "success"}, "account-hub": {"result": "success"}, "build": {"result": "skipped"}, "android-ui": {"result": "skipped"}}
+        for requested in ["true", "false"]:
+            self.assertIsNone(readiness.readiness_error(requested, results, ("android-ui",), "false"))
+            for apk in ["true", "", "invalid", None]:
+                self.assertIsNotNone(readiness.readiness_error(requested, results, ("android-ui",), apk))
+            for job in results:
+                for state in ["failure", "cancelled", "pending"]:
+                    bad = dict(results, **{job: {"result": state}})
+                    self.assertIsNotNone(readiness.readiness_error(requested, bad, ("android-ui",), "false"))
+        jobs = workflow("android.yml")["jobs"]
+        self.assertEqual(jobs["build"]["needs"], "changes")
+        self.assertEqual(jobs["build"]["if"], "needs.changes.outputs.apk == 'true'")
+        self.assertEqual(jobs["changes"]["outputs"]["apk"], "${{ steps.inputs.outputs.apk }}")
+        command = jobs["changes"]["steps"][-1]["run"]
+        self.assertIn('if [ "$EVENT_NAME" != pull_request ]', command)
+        self.assertIn("echo 'apk=true'", command)
+        self.assertIn("--paginate --slurp", command)
+        callers = []
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            config = workflow(path.name)
+            for job in config.get("jobs", {}).values():
+                if job.get("uses") == "./.github/workflows/android.yml":
+                    callers.append(path.name)
+                    self.assertEqual(job["permissions"]["pull-requests"], "read")
+                    self.assertEqual(job["permissions"]["contents"], "write")
+                    self.assertEqual(job["permissions"]["actions"], "read")
+        self.assertEqual(callers, ["platform-installer.yml"])
+
+    def test_no_workflow_runs_on_a_schedule(self):
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                config = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+                self.assertNotIn("schedule", config["on"])
+                self.assertNotIn("canary-gate", config.get("jobs", {}))
+
+    def test_costly_single_purpose_suites_are_manual_only(self):
+        # Releases re-run the container check in docker-publish.yml; Linux
+        # identity coverage stays in CI Backend.
+        for name in ["container-postgres.yml", "ci-instance-identity.yml"]:
+            with self.subTest(workflow=name):
+                self.assertEqual(set(workflow(name)["on"]), {"workflow_dispatch"})
 
     def test_benchmark_defaults_and_worker_count_match(self):
         backend = workflow("ci-backend.yml")
@@ -129,25 +214,39 @@ class CostPolicyTests(unittest.TestCase):
     def test_readiness_rejects_every_non_success_state(self):
         for state in ["skipped", "failure", "cancelled", "pending", None]:
             for requested in ["true", "false", None]:
-                with self.subTest(state=state, requested=requested):
-                    self.assertIsNotNone(readiness.readiness_error(requested, {"smoke": {"result": "success"}, "full": {"result": state}}))
+                for deferrable in [(), ("full",)]:
+                    if state == "skipped" and requested != "true" and deferrable:
+                        continue
+                    with self.subTest(state=state, requested=requested, deferrable=deferrable):
+                        results = {"smoke": {"result": "success"}, "full": {"result": state}}
+                        self.assertIsNotNone(readiness.readiness_error(requested, results, deferrable))
         for results in [None, {}, [], {"full": None}, {"full": {}}, {"full": "success"}]:
             self.assertIsNotNone(readiness.readiness_error("true", results))
+            self.assertIsNotNone(readiness.readiness_error("false", results, ("full",)))
 
-    def test_success_does_not_override_removed_label(self):
-        results = {key: {"result": "success"} for key in ["smoke", "full"]}
-        self.assertIsNone(readiness.readiness_error("true", results))
-        self.assertIsNotNone(readiness.readiness_error("false", results))
+    def test_unlabelled_prs_pass_with_deferred_platform_jobs_only(self):
+        deferred = {"smoke": {"result": "success"}, "full": {"result": "skipped"}}
+        self.assertIsNone(readiness.readiness_error("false", deferred, ("full",)))
+        # A skipped fast job is never acceptable, even without the label.
+        self.assertIsNotNone(readiness.readiness_error("false", {"smoke": {"result": "skipped"}, "full": {"result": "skipped"}}, ("full",)))
+        # With the label, a deferred job must have run and passed.
+        self.assertIsNotNone(readiness.readiness_error("true", deferred, ("full",)))
+        passed = {key: {"result": "success"} for key in ["smoke", "full"]}
+        for requested in ["true", "false"]:
+            self.assertIsNone(readiness.readiness_error(requested, passed, ("full",)))
 
     def test_actual_readiness_entrypoint_and_summary(self):
-        cases = [("false", '{"full":{"result":"skipped"}}', 1, "ci:full"),
+        cases = [("false", '{"full":{"result":"skipped"}}', 0, "ci:full"),
+                 ("false", '{"fast":{"result":"skipped"}}', 1, "did not pass"),
+                 ("true", '{"full":{"result":"skipped"}}', 1, "did not pass"),
                  ("true", '{"full":{"result":"failure"}}', 1, "did not pass"),
                  ("true", '{"full":{"result":"success"}}', 0, "passed"),
                  ("true", "malformed", 1, "missing")]
         with tempfile.TemporaryDirectory() as temporary:
             for index, (requested, results, expected, message) in enumerate(cases):
                 summary = Path(temporary) / str(index)
-                env = dict(os.environ, CI_FULL_REQUESTED=requested, CI_REQUIRED_RESULTS=results, GITHUB_STEP_SUMMARY=str(summary))
+                env = dict(os.environ, CI_FULL_REQUESTED=requested, CI_REQUIRED_RESULTS=results,
+                           CI_DEFERRABLE_JOBS='["full"]', GITHUB_STEP_SUMMARY=str(summary))
                 result = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(message, result.stdout)

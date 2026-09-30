@@ -15,7 +15,9 @@ export async function forwardTool(name: string, args: Record<string, unknown>, e
     url.search = ""; url.hash = "";
     const body = JSON.stringify({ session_id: env.AIS_SESSION_ID, token: env.AIS_PANEL_TOKEN, tool: name, arguments: args });
     if (Buffer.byteLength(body) > 262144) return errorResult("Browser payload too large");
-    const response = await transport(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(90000), redirect: "error" });
+    // Node fetch has no browser Origin; satisfy the worker's same-origin guard.
+    // The per-session body token still authenticates this internal request.
+    const response = await transport(url, { method: "POST", headers: { "content-type": "application/json", origin: url.origin }, body, signal: AbortSignal.timeout(90000), redirect: "error" });
     if (!response.ok || !response.body) throw new Error();
     const chunks: Uint8Array[] = []; let length = 0;
     const reader = response.body.getReader();

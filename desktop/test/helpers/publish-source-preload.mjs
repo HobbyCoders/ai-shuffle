@@ -2,17 +2,20 @@
 import fs from 'node:fs';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import path from 'node:path';
 const root=process.env.RUNNER_TEMP, scenario=process.env.PUBLISH_TEST_CASE;
 const bytes=Buffer.from('immutable runtime source ZIP fixture'), revision='a'.repeat(40);
-const pair=generateKeyPairSync('ed25519');
+const keyFile=path.join(root,'private.pem');
+const pair=fs.existsSync(keyFile)?{privateKey:createPrivateKey(fs.readFileSync(keyFile))}:generateKeyPairSync('ed25519');
+pair.publicKey=createPublicKey(pair.privateKey);
+fs.writeFileSync(keyFile,pair.privateKey.export({type:'pkcs8',format:'pem'}));
 const publicKey=pair.publicKey.export({type:'spki',format:'pem'});
 process.env.DESKTOP_APPLICATION_SIGNING_KEY=pair.privateKey.export({type:'pkcs8',format:'pem'});
 fs.writeFileSync(path.join(root,'public.pem'),publicKey);
 const readFile=fs.promises.readFile;
 fs.promises.readFile=async(file,...args)=>String(file).endsWith('application-update-key.pem')?publicKey:readFile(file,...args);
-let saved,mainCalls=0;
+let saved=fs.existsSync(path.join(root,'record.json'))?JSON.parse(fs.readFileSync(path.join(root,'record.json'),'utf8')):undefined,mainCalls=0;
 const events=[];
 const sha256=createHash('sha256').update(bytes).digest('hex');
 const asset={id:123,name:revision+'-runtime.zip',size:bytes.length,state:'uploaded',digest:'sha256:'+sha256};
@@ -45,7 +48,7 @@ cp.execFileSync=(exe,args)=>{
   if(!match)throw Error('Invalid publisher SQL');
   saved={channel:match[2],version:match[3],manifest:match[6],asset_id:Number(match[4])};fs.writeFileSync(path.join(root,'record.json'),JSON.stringify(saved));return '';
  }
- if(sql.startsWith('SELECT'))return JSON.stringify([{results:[saved]}]);
+ if(sql.startsWith('SELECT')){events.push('read-publication');return JSON.stringify([{results:saved?[saved]:[]}]);}
  throw Error('Unexpected SQL');
 };
 syncBuiltinESMExports();

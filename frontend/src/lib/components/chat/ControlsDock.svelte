@@ -62,7 +62,7 @@
 		BUCKET_STALE_MS
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
-	import { attachmentBlockReason, isRemoteOnlyCompose } from './attach-disable';
+	import { attachmentBlockReason } from './attach-disable';
 
 	interface Props {
 		isUploading: boolean;
@@ -183,7 +183,9 @@
 		if (!isCodeLane && openPopover === 'permission') openPopover = null;
 	});
 	const attachDisabled = $derived(
-		!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)
+		!$anyCredential || isUploading || !!attachmentBlockReason(
+			$activeSession.project, $activeSession.projectV2Id, $activeSession.mode, $activeSession.sessionId
+		)
 	);
 
 	// ── Model override ──────────────────────────────────────────────
@@ -528,7 +530,8 @@
 				: (attachmentBlockReason(
 						$activeSession.project,
 						$activeSession.projectV2Id,
-						$activeSession.mode
+						$activeSession.mode,
+						$activeSession.sessionId
 					) ?? 'Attach file')}
 		>
 			{#if isUploading}
@@ -654,6 +657,7 @@
 	onToggleFast={() => activeSession.setFastMode(!fastMode)}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
+	{permissionUpdating}
 	onPermissionSelect={selectPermission}
 	showCodeControls={isCodeLane}
 />

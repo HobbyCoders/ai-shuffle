@@ -310,6 +310,44 @@ async def test_remote_create_sends_title_in_owner_payload(project):
     assert payload["session"]["title"] == "Fix remote session titles"
 
 
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_remote_create_failure_keeps_prompt_without_sending_turn(project, refused):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from app.network import control, engine, git as network_git
+
+    _give_peer_a_base_checkout(project)
+    persist = swt._persist_and_broadcast_first_message
+    error = control.ControlRefused("Denied") if refused else control.RunnerUnreachable("ReadTimeout")
+    with _Patches(), patch.object(
+        swt, "_persist_and_broadcast_first_message", persist
+    ), patch.object(
+        network_git, "eligible", new=AsyncMock(return_value=True)
+    ), patch.object(
+        engine, "context", return_value=SimpleNamespace(device_id="local-device")
+    ), patch.object(
+        network_git, "device_id", return_value="remote-device"
+    ), patch.object(
+        network_git, "enqueue", new=AsyncMock()
+    ) as enqueue, patch.object(
+        control, "call", new=AsyncMock(side_effect=error)
+    ) as create_owner, patch.object(
+        control, "submit_turn", new=AsyncMock()
+    ) as submit:
+        with pytest.raises(HTTPException) as failure:
+            await _create(project, _body(prompt="Keep the complete submitted prompt"))
+    session_id = create_owner.call_args.args[2]["session"]["id"]
+    assert failure.value.status_code == (409 if refused else 503)
+    assert session_id in failure.value.detail
+    messages = database.get_session_messages(session_id)
+    assert [message["content"] for message in messages] == ["Keep the complete submitted prompt"]
+    create_owner.assert_awaited_once()
+    enqueue.assert_not_awaited()
+    submit.assert_not_awaited()
+
+
 async def test_the_no_profile_sentinel_never_rides_a_remote_turn(project):
     """'claude-code' is the install-LOCAL no-profile sentinel; sending it to
     another install would bind the turn to a profile row that may not exist

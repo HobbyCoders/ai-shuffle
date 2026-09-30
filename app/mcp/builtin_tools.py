@@ -2,15 +2,14 @@
 Claude Code builtin tools MCP server — adapts harness-level tools for AI Shuffle.
 
 Claude Code CLI ships several "builtin" tools that normally require harness
-cooperation (ScheduleWakeup, Monitor, CronCreate, EnterWorktree, etc). The app
+cooperation (ScheduleWakeup, Monitor, CronCreate, etc). The app
 exposes its own implementations as MCP tools that bridge to AI Shuffle's
 existing infrastructure (session pool, worktree manager, automation manager,
 push notification service); on the delegated leg the CLI's own copies of the
 overlapping tools are disallowed (``harness_adapter.DELEGATED_BANNED_TOOLS``).
 
 Tools are registered per-session so that session-scoped actions
-(ScheduleWakeup firing a new prompt, EnterWorktree tying a worktree to the
-calling session) have the context they need.
+(such as ScheduleWakeup firing a new prompt) have the context they need.
 
 Tool naming convention: ``mcp__builtins__<toolName>``
 """
@@ -1581,124 +1580,6 @@ def create_builtin_tools_server(
     all_tools.append(push_notification)
 
     # ------------------------------------------------------------------
-    # EnterWorktree / ExitWorktree
-    # ------------------------------------------------------------------
-    @tool(
-        "EnterWorktree",
-        "Materialize (or resolve) the current project's persistent branch checkout and return its path. "
-        "The checkout path can be used as cwd for subsequent tool calls. Requires an active project. "
-        "Also records the branch on this session, so the sidebar and PR tracking follow the work you do there.",
-        {
-            "type": "object",
-            "properties": {
-                "branch_name": {"type": "string", "description": "Branch to check out."},
-                "create_new_branch": {"type": "boolean", "description": "If true, create a new branch from base_branch."},
-                "base_branch": {"type": "string", "description": "Base branch when creating a new one."},
-            },
-            "required": ["branch_name"],
-        },
-    )
-    async def enter_worktree(args: dict) -> dict:
-        if not project_id:
-            return _err("EnterWorktree requires an active project context.")
-        branch = (args.get("branch_name") or "").strip()
-        if not branch:
-            return _err("branch_name is required.")
-        try:
-            from app.core.project_resolver import resolve_project_v2
-            from app.core import checkout_manager
-            pv2 = await asyncio.to_thread(
-                resolve_project_v2, {"project_id": project_id}
-            )
-            if not pv2:
-                return _err(
-                    "This project is not resolvable to a v2 checkout on this device."
-                )
-            checkout_path = await asyncio.to_thread(
-                checkout_manager.ensure_checkout,
-                pv2,
-                branch,
-                base_branch=args.get("base_branch"),
-                create_new_branch=bool(args.get("create_new_branch")),
-            )
-            if not checkout_path:
-                return _err(
-                    f"Branch '{branch}' is not materializable on this device "
-                    "(no base checkout here, or the branch exists nowhere and "
-                    "create_new_branch was not set)."
-                )
-            # BIND THE SESSION TO THE BRANCH, exactly as the HTTP intake paths
-            # do (sessions_worktree._create_remote_branch_session and
-            # _create_v2_branch_session). Without this the tool would
-            # materialize a checkout and tell nobody: `sessions.branch` would
-            # stay NULL, the sidebar would show the session on no branch, the
-            # turn-finalize resync could not repair it (with no branch it
-            # resolves the BASE checkout, whose branch it deliberately refuses
-            # to adopt), and PR reconciliation — which matches on session_id,
-            # pr_number, or project_id+branch — could match nothing.
-            bound = False
-            if session_id:
-                try:
-                    from app.db import database
-
-                    bound = bool(await asyncio.to_thread(
-                        database.set_session_branch,
-                        session_id, branch, pv2.get("id"),
-                    ))
-                except Exception:  # noqa: BLE001 — bookkeeping must never fail
-                    logger.warning(  # a checkout that was really materialized
-                        "EnterWorktree: binding session %s to %r failed",
-                        session_id, branch, exc_info=True,
-                    )
-            return _ok({
-                "branch_name": branch,
-                "worktree_path": checkout_path,
-                "status": "active",
-                "session_branch_recorded": bound,
-                # Audited sessions edited a file at its old path's worktree
-                # twin and hit the read-before-edit gate as if it were a new
-                # file — which, to the gate, it is.
-                "note": (
-                    "Paths under the worktree root are new paths: the "
-                    "read-before-edit gate re-fires there, so Read a file at "
-                    "its worktree path before the first Edit to it."
-                ),
-            })
-        except Exception as e:
-            logger.exception("EnterWorktree failed")
-            return _err(f"enter checkout failed: {e}")
-
-    all_tools.append(enter_worktree)
-
-    @tool(
-        "ExitWorktree",
-        "Clean up a LEGACY git worktree by ID. Optionally keep the underlying branch. "
-        "Applies only to legacy worktrees — v2 project checkouts are persistent and need no cleanup.",
-        {
-            "type": "object",
-            "properties": {
-                "worktree_id": {"type": "string"},
-                "keep_branch": {"type": "boolean", "description": "Keep the branch after removing the worktree (default true)."},
-            },
-            "required": ["worktree_id"],
-        },
-    )
-    async def exit_worktree(args: dict) -> dict:
-        wt_id = (args.get("worktree_id") or "").strip()
-        if not wt_id:
-            return _err("worktree_id is required.")
-        try:
-            from app.core.worktree_manager import worktree_manager
-            keep = args.get("keep_branch", True)
-            ok = await worktree_manager.cleanup_worktree(wt_id, keep_branch=bool(keep))
-            return _ok({"removed": ok, "worktree_id": wt_id})
-        except Exception as e:
-            logger.exception("ExitWorktree failed")
-            return _err(f"cleanup worktree failed: {e}")
-
-    all_tools.append(exit_worktree)
-
-    # ------------------------------------------------------------------
     # CronCreate / CronList / CronDelete (bridge to automations)
     # ------------------------------------------------------------------
     @tool(
@@ -2632,8 +2513,6 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
         "mcp__builtins__NotifyDevices",
-        "mcp__builtins__EnterWorktree",
-        "mcp__builtins__ExitWorktree",
         "mcp__builtins__CronCreate",
         "mcp__builtins__CronList",
         "mcp__builtins__CronDelete",

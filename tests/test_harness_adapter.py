@@ -1836,9 +1836,8 @@ async def test_native_leg_registry_has_fluid_builtins():
 
 
 @pytest.mark.asyncio
-async def test_delegated_leg_registry_has_no_fluid_builtins():
-    """The claude CLI ships its own Read/Bash/... — registering fluid's here
-    would double up on the delegated leg."""
+async def test_delegated_leg_registry_has_search_without_duplicate_file_tools():
+    """Search must not depend on the CLI's changing built-in tool surface."""
     adapter = HarnessAdapter()
     options = SessionOptions(
         model="fable", extra={"fluid_inproc_servers": [_FakeInprocServer()]}
@@ -1847,10 +1846,88 @@ async def test_delegated_leg_registry_has_no_fluid_builtins():
     assert registry is not None
     names = _names(registry)
     assert "mcp__fake__Ping" in names
-    assert not (_FLUID_BUILTINS & names)
+    assert {"Glob", "Grep"} <= names
+    assert not ((_FLUID_BUILTINS - {"Grep"}) & names)
 
-    # With nothing to bridge at all the delegated leg still gets no registry.
-    assert await adapter._build_registry(SessionOptions(model="fable"), native=False) is None
+    # A session without configured MCP servers still needs working search.
+    bare = await adapter._build_registry(SessionOptions(model="fable"), native=False)
+    assert _names(bare) == {"Glob", "Grep"}
+
+
+@pytest.mark.asyncio
+async def test_delegated_search_bridge_executes_and_preserves_restrictions(tmp_path):
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.store.base import MemoryStore
+    from fluid.tools.mcp.bundled_server import _answer
+    from fluid.tools.registry import ToolCtx
+
+    (tmp_path / "sample.txt").write_text("delegated search works\n")
+    adapter = HarnessAdapter()
+    registry = await adapter._build_registry(SessionOptions(model="fable"), native=False)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="fake", registry=registry,
+        allowed_tools=["Glob", "Grep"],
+    )
+    ctx = ToolCtx(cwd=str(tmp_path))
+    try:
+        listed = await _answer(registry, ctx, {"op": "list"}, tool_filter=loop._bridge_tool_permitted)
+        assert {tool["name"] for tool in listed["tools"]} == {"Glob", "Grep"}
+        for name, arguments in (
+            ("Glob", {"pattern": "*.txt"}),
+            ("Grep", {"pattern": "delegated", "glob": "*.txt"}),
+        ):
+            result = await _answer(registry, ctx, {"op": "call", "name": name,
+                "arguments": arguments}, tool_filter=loop._bridge_tool_permitted)
+            assert not result["is_error"]
+            assert "sample.txt" in result["text"]
+
+        from fluid.permissions.engine import PermissionEngine
+        from fluid.permissions.rules import Rule
+
+        policy_denied = await _answer(
+            registry, ctx,
+            {"op": "call", "name": "Grep", "arguments": {"pattern": "delegated"}},
+            tool_filter=loop._bridge_tool_permitted,
+            permissions=PermissionEngine("never_ask", rules=[Rule(tool="Grep", decision="deny")]),
+        )
+        assert policy_denied["is_error"]
+        assert "configured rule" in policy_denied["text"]
+
+        loop.disallowed_tools.append("Grep")
+        listed = await _answer(registry, ctx, {"op": "list"}, tool_filter=loop._bridge_tool_permitted)
+        assert {tool["name"] for tool in listed["tools"]} == {"Glob"}
+        denied = await _answer(registry, ctx, {"op": "call", "name": "Grep",
+            "arguments": {"pattern": "delegated"}}, tool_filter=loop._bridge_tool_permitted)
+        assert denied["is_error"]
+
+        loop.allowed_tools = ["Read"]
+        listed = await _answer(registry, ctx, {"op": "list"}, tool_filter=loop._bridge_tool_permitted)
+        assert listed["tools"] == []
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delegated_chat_does_not_gain_filesystem_search():
+    adapter = HarnessAdapter()
+    registry = await adapter._build_registry(
+        SessionOptions(model="fable", extra={"session_mode": "chat"}), native=False,
+    )
+    assert not ({"Glob", "Grep"} & _names(registry))
+
+
+@pytest.mark.asyncio
+async def test_delegated_search_guidance_names_only_permitted_bridge_tools():
+    from app.core.provider.harness_adapter import _delegated_guidance_blocks
+
+    adapter = HarnessAdapter()
+    options = SessionOptions(model="fable")
+    registry = await adapter._build_registry(options, native=False)
+    text = "\n".join(_delegated_guidance_blocks(options, registry))
+    assert "mcp__fluid_bundled__Glob" in text
+    assert "mcp__fluid_bundled__Grep" in text
+    options.tool_allowlist = ["Read"]
+    assert not _delegated_guidance_blocks(options, registry)
 
 
 @pytest.mark.asyncio

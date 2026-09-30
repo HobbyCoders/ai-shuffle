@@ -349,6 +349,35 @@ class TestJSONLRewindServiceExtractMessageText:
         assert result == ""
 
 
+
+    def test_user_enrichment_is_removed_only_from_complete_trailing_reminders(self):
+        service = JSONLRewindService()
+        for tag in ("system•reminder", "system-reminder"):
+            note = f"<{tag}>\nInjected facts\n</{tag}>"
+            for content in (
+                "Inspect @/uploads/map.webp\n\n" + note + "\n\n" + note,
+                [{"type": "text", "text": "Inspect @/uploads/map.webp\n\n" + note},
+                 {"type": "image", "source": {}}, {"type": "text", "text": note}],
+            ):
+                entry = {"message": {"role": "user", "content": content}}
+                assert service._extract_message_text(entry) == "Inspect @/uploads/map.webp"
+
+            # Do not eat genuine text between or after reminder blocks, or
+            # treat malformed/incomplete wrappers as host enrichment.
+            for text in (f"prompt {note} literal text", f"prompt <{tag}>unfinished"):
+                assert service._extract_message_text(
+                    {"message": {"role": "user", "content": text}}
+                ) == text
+            text = f"prompt {note} literal text"
+            assert service._extract_message_text(
+                {"message": {"role": "user", "content": text + " " + note}}
+            ) == text
+            text = "assistant quotes " + note
+            assert service._extract_message_text(
+                {"message": {"role": "assistant", "content": text}}
+            ) == text
+
+
 class TestJSONLRewindServiceGetCheckpoints:
     """Test checkpoint extraction from JSONL."""
 

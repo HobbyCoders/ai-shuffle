@@ -148,22 +148,18 @@ def mobile_session(client, key):
     return client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + key})
 
 
-def test_hub_ticket_is_pending_until_worker_confirms(owner_app, monkeypatch):
+def test_same_account_ticket_connects_without_worker_confirmation(owner_app, monkeypatch):
     monkeypatch.setattr(settings, 'shuffle_local_access', True)
     body, local_id = enroll_from_hub(owner_app, monkeypatch)
     remote = worker_client(owner_app, remote=True)
-    pending = mobile_session(remote, body['api_key'])
-    assert pending.status_code == 403
-    assert pending.json()['detail'] == 'Confirm this device on the worker before connecting'
-    assert remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']}).status_code == 403
-    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'
+    # Android renews before opening a session; neither call needs a local owner.
+    assert remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer ' + body['api_key']}).status_code == 200
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'approved'
     local = worker_client(owner_app)
     inventory = local.get('/api/v1/mobile/hub/devices/confirmations')
     assert inventory.status_code == 200
-    assert inventory.json()[0]['confirmation'] == 'pending'
+    assert inventory.json()[0]['confirmation'] == 'approved'
     assert body['api_key'] not in inventory.text
-    assert decide(local, local_id).json() == {'confirmation': 'approved'}
-    assert decide(local, local_id).status_code == 200  # lost-response retry
     session = mobile_session(remote, body['api_key'])
     assert session.status_code == 200, session.text
     remote.headers['Authorization'] = 'Bearer ' + session.json()['session_token']
@@ -183,6 +179,9 @@ def test_pending_device_lan_trust_and_hub_cannot_confirm(owner_app, monkeypatch,
     from app.core import owner_auth
     monkeypatch.setattr(settings, 'shuffle_local_access', True)
     owner_auth.set_trusted_lan(True)
+    # Controller-linked hubs do not delegate the installation owner's authority.
+    hub_store.bind(HUB, SERVER, encryption.encrypt_value('a' * 64), 'controller')
+    hub_store.activate()
     body, local_id = enroll_from_hub(owner_app, monkeypatch)
     headers = {}
     if credential == 'pending-key':
@@ -289,7 +288,7 @@ def test_ninety_day_rotation_retry_expiry_and_revocation(owner_app, monkeypatch)
 
 
 @pytest.mark.parametrize('stored_expiry', [True, False])
-def test_upgrade_preserves_existing_key_deadline_but_never_approval(owner_app, monkeypatch, test_db, stored_expiry):
+def test_upgrade_allows_existing_account_credential_without_extending_deadline(owner_app, monkeypatch, test_db, stored_expiry):
     from freezegun import freeze_time
     monkeypatch.setattr(settings, 'shuffle_local_access', True)
     with freeze_time('2030-01-01T00:00:00Z') as clock:
@@ -304,9 +303,8 @@ def test_upgrade_preserves_existing_key_deadline_but_never_approval(owner_app, m
             hub_store.create_schema(conn.cursor())
             hub_store.create_schema(conn.cursor())  # restart/upgrade is idempotent
         remote = worker_client(owner_app, remote=True)
-        assert mobile_session(remote, 'aim_owner-test').status_code == 403
+        assert mobile_session(remote, 'aim_owner-test').status_code == 200
         clock.tick(timedelta(days=200))
-        assert decide(worker_client(owner_app), DEVICE).status_code == 200
         assert mobile_session(remote, 'aim_owner-test').status_code == 200
         remote.cookies.clear()
         early = remote.post('/api/v1/mobile/key/renew', headers={'Authorization': 'Bearer aim_owner-test'})
@@ -722,3 +720,65 @@ def test_owner_admin_cookie_retains_same_origin_csrf_protection(owner_app, monke
     client.cookies.set('session', token)
     assert change_voice(client, headers={'Origin': 'https://attacker.example.com'}).status_code == 403
     assert change_voice(client, headers={'Origin': 'https://worker.example.com'}).status_code == 200
+
+@pytest.mark.parametrize('purpose', ['web', 'native'])
+async def test_same_account_first_session_and_websocket_need_no_manual_approval(owner_app, monkeypatch, purpose):
+    from app.api.ws_auth import authenticate_websocket
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    remote = worker_client(owner_app, remote=True)
+    response = remote.post('/api/v1/mobile/web-session',
+        headers={'Authorization': 'Bearer ' + body['api_key']}, json={'purpose': purpose})
+    assert response.status_code == 200, response.text
+    token = response.json()['session_token']
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'approved'
+    client = auth.get_paired_client_from_token(token)
+    assert client and client['account_owner_admin'] is True
+    socket = Mock(cookies={})
+    assert await authenticate_websocket(socket, token) == (True, None)
+    principal = socket.state.mobile_tool_principal
+    assert principal['kind'] == 'paired'
+    assert principal['account_id'] == ACCOUNT
+    assert principal['owner'] == 'account:' + ACCOUNT
+
+
+@pytest.mark.parametrize('blocked', [
+    'denied', 'revoked', 'expired', 'hub-revoked', 'other-account',
+    'other-device', 'hub-unavailable', 'disconnected',
+])
+def test_account_login_never_overrides_blocked_device(owner_app, monkeypatch, test_db, blocked):
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    owner = hub_store.ownership(local_id)
+    account_hub.reset_display_cache()
+    if blocked == 'denied':
+        hub_store.confirm_device(owner, False)
+    elif blocked == 'revoked':
+        database.revoke_paired_client(owner['paired_client_id'])
+    elif blocked == 'expired':
+        test_db.execute("UPDATE mobile_devices SET api_key_expires_at='2020-01-01T00:00:00+00:00'")
+        test_db.commit()
+    elif blocked == 'disconnected':
+        hub_store.disconnect()
+    elif blocked == 'hub-unavailable':
+        monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(503, 'unavailable')))
+    else:
+        verdict = {'active': blocked != 'hub-revoked', 'account_id': ACCOUNT, 'device_id': DEVICE}
+        if blocked == 'other-account':
+            verdict['account_id'] = OTHER
+        if blocked == 'other-device':
+            verdict['device_id'] = OTHER
+        monkeypatch.setattr(account_hub, 'call', lambda *a, **k: verdict)
+    remote = worker_client(owner_app, remote=True)
+    assert mobile_session(remote, body['api_key']).status_code in (401, 403, 503)
+    assert hub_store.confirmation(owner) != 'approved'
+
+
+def test_account_authorization_fences_binding_change(owner_app, monkeypatch):
+    body, local_id = enroll_from_hub(owner_app, monkeypatch)
+    confirm = hub_store.confirm_device
+    def disconnect_before_commit(owner, approved, **kwargs):
+        hub_store.disconnect()
+        return confirm(owner, approved, **kwargs)
+    monkeypatch.setattr(hub_store, 'confirm_device', disconnect_before_commit)
+    remote = worker_client(owner_app, remote=True)
+    assert mobile_session(remote, body['api_key']).status_code == 403
+    assert hub_store.confirmation(hub_store.ownership(local_id)) == 'pending'

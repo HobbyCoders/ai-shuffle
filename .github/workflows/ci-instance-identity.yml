@@ -1,13 +1,8 @@
 name: Instance identity contracts
 
+# Keep platform-specific checks available without duplicating ordinary backend validation on an additional paid
+# runner.
 on:
-  pull_request:
-    paths:
-      - 'app/core/config.py'
-      - 'tests/core/test_instance_identity.py'
-      - 'requirements.txt'
-      - 'requirements-dev.txt'
-      - '.github/workflows/ci-instance-identity.yml'
   workflow_dispatch:
 
 permissions:
