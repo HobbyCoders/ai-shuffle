@@ -913,6 +913,148 @@ def build_cli_transcript_entries(
     return out
 
 
+#: Longest project dir name the CLI keeps whole. A longer encoded cwd is cut
+#: to this many characters and gets ``-<hash>`` appended (Claude Code 2.1.285).
+CLI_PROJECT_DIR_MAX = 200
+
+#: How much of a CLI transcript's end :func:`cli_transcript_prompts` reads.
+CLI_TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+
+_CLI_HANDLE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+
+
+def cli_project_dir_name(path: str) -> str:
+    """The project dir name Claude Code gives ``path``: every character other
+    than an ASCII letter or digit becomes ``-``.
+
+    ``jsonl_parser.get_project_dir_name`` keeps ``.``, ``_`` and other symbols,
+    so for a cwd such as ``...\\.claude\\worktrees\\a_b`` it names a directory
+    the CLI never looks in. Names longer than :data:`CLI_PROJECT_DIR_MAX` are
+    returned whole; the CLI shortens those with a hash this module does not
+    reproduce (see :func:`_cli_project_dir`).
+    """
+    return "".join(
+        ch if ch.isascii() and ch.isalnum() else "-" for ch in str(path)
+    )
+
+
+def _cli_project_dir(root: Path, working_dir: str) -> Path:
+    """Where the CLI keeps transcripts for ``working_dir`` under ``root``."""
+    name = cli_project_dir_name(working_dir)
+    if len(name) <= CLI_PROJECT_DIR_MAX:
+        return root / name
+    prefix = name[:CLI_PROJECT_DIR_MAX]
+    try:
+        matches = [
+            child for child in root.iterdir()
+            if child.is_dir() and child.name.startswith(prefix)
+        ]
+    except OSError:
+        matches = []
+    if len(matches) == 1:
+        return matches[0]
+    from app.core.jsonl_parser import get_project_dir_name
+
+    fallback = get_project_dir_name(working_dir)
+    logger.info(
+        "CLI project dir for a %d-character cwd is hashed and %d existing dirs "
+        "match its first %d characters; writing under %s",
+        len(name), len(matches), CLI_PROJECT_DIR_MAX, fallback,
+    )
+    return root / fallback
+
+
+def cli_projects_root(env: Optional[Dict[str, str]] = None) -> Path:
+    """The CLI's transcript root: ``$CLAUDE_CONFIG_DIR/projects`` when the
+    CLI's env (``env``, else this process's) sets it, else the app setting."""
+    config_dir = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get(
+        "CLAUDE_CONFIG_DIR"
+    )
+    if config_dir:
+        return Path(config_dir) / "projects"
+    from app.core.config import settings
+
+    return Path(settings.get_claude_projects_dir)
+
+
+def find_cli_transcript(cli_session_id: str, projects_dir: Path) -> Optional[Path]:
+    """The ``<handle>.jsonl`` file under any project dir of ``projects_dir``.
+
+    The CLI resolves ``--resume <handle>`` by the file name across every
+    project dir, so the cwd it lives under does not matter here. Returns None
+    when no such file exists (or the handle is not a plain id).
+    """
+    if not cli_session_id or not set(cli_session_id) <= _CLI_HANDLE_CHARS:
+        return None
+    root = Path(projects_dir)
+    if not root.is_dir():
+        return None
+    for candidate in root.glob(f"*/{cli_session_id}.jsonl"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def prompt_text(content: Any) -> Optional[str]:
+    """A user message's prompt text, or None when it is not a typed prompt.
+
+    Text blocks are joined with newlines and stripped, the same way
+    :func:`build_cli_transcript_entries` collapses a text-only user turn. A
+    message carrying a ``tool_result`` is a tool echo, not a prompt.
+    """
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    texts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "tool_result":
+            return None
+        if kind == "text":
+            texts.append(block.get("text") or "")
+    joined = "\n".join(texts).strip()
+    return joined or None
+
+
+def cli_transcript_prompts(
+    path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
+) -> List[str]:
+    """The typed user prompts in the last ``tail_bytes`` of a CLI transcript,
+    oldest first. A partial first line and lines that are not JSON are
+    skipped, and so are the CLI's meta and compaction-summary entries."""
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        start = max(0, size - tail_bytes)
+        handle.seek(start)
+        data = handle.read()
+    lines = data.split(b"\n")
+    if start > 0 and lines:
+        lines = lines[1:]
+    prompts: List[str] = []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "user":
+            continue
+        if entry.get("isMeta") or entry.get("isCompactSummary"):
+            continue
+        text = prompt_text((entry.get("message") or {}).get("content"))
+        if text:
+            prompts.append(text)
+    return prompts
+
+
 def _write_cli_transcript(
     lines: Sequence[Dict[str, Any]],
     cli_session_id: str,
@@ -921,15 +1063,16 @@ def _write_cli_transcript(
 ) -> Path:
     """Write the materialized transcript to ``<projects>/<cwd>/<uuid>.jsonl``.
 
+    The cwd is encoded the way the CLI encodes it (:func:`cli_project_dir_name`).
+
     Atomic (temp file + rename in the same directory), matching how
     ``JSONLRewindService.truncate_to_checkpoint`` rewrites a transcript: a
     half-written session file is one the CLI would refuse to resume.
     """
     from app.core.config import settings
-    from app.core.jsonl_parser import get_project_dir_name
 
-    root = projects_dir or settings.get_claude_projects_dir
-    project_dir = Path(root) / get_project_dir_name(working_dir)
+    root = Path(projects_dir or settings.get_claude_projects_dir)
+    project_dir = _cli_project_dir(root, working_dir)
     project_dir.mkdir(parents=True, exist_ok=True)
     target = project_dir / f"{cli_session_id}.jsonl"
 
@@ -963,7 +1106,10 @@ def reseed_delegated_cli_session(
     ``force=True`` writes even when this session has no stored CLI handle.
     Fork uses that: the new fluid session is empty of a handle, but the parent
     was delegated, so the fork must mint its own CLI conversation from the
-    copied path or the next turn starts with empty model context.
+    copied path or the next turn starts with empty model context. A delegated
+    connect uses it too (``HarnessAdapter._resolve_cli_session_id``), when the
+    session ran on another provider, its transcript is not on this worker, or
+    turns ran elsewhere since the CLI last saw it.
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that

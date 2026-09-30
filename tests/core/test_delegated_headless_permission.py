@@ -141,3 +141,106 @@ def test_an_interactive_turn_does_not_reuse_a_client_without_an_approver():
     assert not pooled_client_lacks_approver(SimpleNamespace(adapter=wired), broadcast)
     # A headless caller reusing it has no approver to lose.
     assert not pooled_client_lacks_approver(headless, None)
+
+
+# ─── saved rules on a prompt with no approver ────────────────────────────────
+#
+# The watched approver applies saved rules before the mode (a remembered Deny
+# beats Auto and Accept Edits, a remembered Allow skips the Ask prompt). A
+# headless delegated prompt must decide the same way.
+
+APP_SID = "app-headless-saved-rules"
+
+
+@pytest.fixture
+def saved_rules():
+    """Install session rules for APP_SID in the real permission handler."""
+    from app.core.permission_handler import (
+        PermissionDecision,
+        PermissionRule,
+        permission_handler,
+    )
+
+    def install(tool_name: str, decision: str) -> None:
+        permission_handler._session_rules.setdefault(APP_SID, []).append(PermissionRule(
+            id=f"rule-{tool_name}-{decision}", session_id=APP_SID, profile_id=None,
+            tool_name=tool_name, tool_pattern=None,
+            decision=PermissionDecision(decision),
+        ))
+
+    yield install
+    permission_handler.clear_session_rules(APP_SID)
+
+
+def _headless_adapter(mode: str):
+    from app.core.provider.types import PermissionRequestEvent
+
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(
+        model="opus", permission_mode=mode,
+        extra={"app_session_id": APP_SID, "profile_id": "p-none"},
+    )
+    adapter._is_delegated = True
+    answers: list = []
+
+    async def respond(tool_use_id, allow, *, message=None, **_kw):
+        answers.append((tool_use_id, allow, message))
+
+    adapter.respond_to_permission = respond
+    event = PermissionRequestEvent(
+        tool_use_id="tu-1", name="Bash", input={"command": "rm -rf build"},
+    )
+    return adapter, event, answers
+
+
+@pytest.mark.asyncio
+async def test_auto_with_a_saved_deny_denies_by_saved_rule(mock_db, saved_rules):
+    saved_rules("Bash", "deny")
+    adapter, event, answers = _headless_adapter("auto")
+    await adapter._answer_without_approver(event)
+    assert answers == [("tu-1", False, "Denied by saved rule")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["default", "acceptEdits"])
+async def test_a_saved_allow_allows_where_the_mode_would_ask(mock_db, saved_rules, mode):
+    saved_rules("Bash", "allow")
+    adapter, event, answers = _headless_adapter(mode)
+    await adapter._answer_without_approver(event)
+    assert answers == [("tu-1", True, None)]
+
+
+@pytest.mark.asyncio
+async def test_without_a_saved_rule_the_mode_still_decides(mock_db, saved_rules):
+    adapter, event, answers = _headless_adapter("default")
+    await adapter._answer_without_approver(event)
+    assert answers == [("tu-1", False, ha._NO_APPROVER_DENIAL)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rule_lookup_denies(monkeypatch):
+    from app.core.permission_handler import permission_handler
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(permission_handler, "saved_rule", boom)
+    adapter, event, answers = _headless_adapter("auto")
+    await adapter._answer_without_approver(event)
+    assert len(answers) == 1
+    tool_use_id, allow, message = answers[0]
+    assert (tool_use_id, allow) == ("tu-1", False)
+    assert "saved permission rules could not be read" in message
+
+
+@pytest.mark.asyncio
+async def test_bypass_skips_the_rule_lookup(monkeypatch):
+    from app.core.permission_handler import permission_handler
+
+    def boom(*args, **kwargs):
+        raise AssertionError("bypass must not look up saved rules")
+
+    monkeypatch.setattr(permission_handler, "saved_rule", boom)
+    adapter, event, answers = _headless_adapter("bypassPermissions")
+    await adapter._answer_without_approver(event)
+    assert answers == [("tu-1", True, None)]
