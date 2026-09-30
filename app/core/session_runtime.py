@@ -123,10 +123,9 @@ def live_turn_ids() -> Set[str]:
     return {runtime.turn_id for runtime in _live_runtimes.values()}
 
 
-# Queue sources a steer may pull from — the two that render as the user's own
-# pending messages. Mirrors ``chat_ws_handler._V2_QUEUE_SOURCES``; an internal
-# turn (unpark, failover, automation) is never someone talking mid-turn.
-_STEERABLE_SOURCES = ("user", "queue")
+# Peer traffic shares the safe-boundary queue, never the user's authority or
+# editable queue view. Internal wake/automation turns are not interjections.
+_STEERABLE_SOURCES = ("user", "queue", "agent_message")
 
 # Override keys that BIND a turn's run and cannot change once it started. A
 # queued message asking for a different one of these is a request the live turn
@@ -1604,7 +1603,17 @@ class SessionRuntime:
                 break
             self._steer_attempted.add(row_id)
             try:
-                await adapter.steer(prompt, id=row_id)
+                if row.get("source") == "agent_message":
+                    payload = row.get("payload") or {}
+                    from app.core import session_orchestration
+                    sender = await asyncio.to_thread(session_orchestration._caller, payload["orchestration_sender"])
+                    await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    await adapter.steer_peer(
+                        payload["peer_message_content"],
+                        sender=payload["orchestration_sender"], id=row_id,
+                    )
+                else:
+                    await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
@@ -1838,6 +1847,13 @@ class SessionRuntime:
         * a different profile — a message addressed to another agent.
         """
         payload = row.get("payload") or {}
+        if row.get("source") == "agent_message":
+            # Only an attributed, scope-checked producer may use the peer channel.
+            # Recheck revocation/ownership/Stop before handing it to the engine.
+            if not payload.get("orchestration_sender") or not payload.get("peer_message_content"):
+                return False
+            # The asynchronous sweep revalidates scope immediately before
+            # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids"):
             return False
         if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
@@ -1936,6 +1952,8 @@ class SessionRuntime:
                 content,
                 profile_id=profile_id,
                 command_id=row.get("command_id"),
+                **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                   if row.get("source") == "agent_message" else {}),
             )
             if not recorded:
                 return
@@ -1947,7 +1965,10 @@ class SessionRuntime:
                 # asked for BEFORE this moment, ``_finalize`` puts the
                 # message back on the queue rather than leaving it in the
                 # transcript with no answer under it.
-                self._steer_absorbed[row_id] = (time.perf_counter(), row)
+                if row.get("source") != "agent_message":
+                    # Peer consumption is delivery, not an obligation to answer.
+                    # Do not replay it after a later Stop/provider failure.
+                    self._steer_absorbed[row_id] = (time.perf_counter(), row)
         if absorbed:
             # The rows left the queue — clear their pending bubbles everywhere.
             await _broadcast_queue_after_start(self.session_id)

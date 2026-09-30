@@ -60,7 +60,7 @@ import type { ChatMessage, PendingPeerMessage } from '../types';
 export function reconcilePendingPeerMessages(
 	rows: PendingPeerMessage[], messages: ChatMessage[]
 ): PendingPeerMessage[] {
-	const delivered = new Set(messages.filter(m => m.role === 'user').map(m => m.turnId));
+	const delivered = new Set(messages.filter(m => m.role === 'user').map(m => m.queuedTurnId ?? m.turnId));
 	const seen = new Set<string>();
 	return rows.filter(row => {
 		if (delivered.has(row.id) || seen.has(row.id)) return false;

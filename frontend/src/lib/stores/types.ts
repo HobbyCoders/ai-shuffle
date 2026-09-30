@@ -106,6 +106,8 @@ export interface ChatMessage {
 	metadata?: Record<string, unknown>;
 	timestamp?: string; // ISO-8601 creation time — from server metadata.timestamp on load, stamped client-side on send; without it the UI falls back to "now"
 	turnId?: string; // Turn this message belongs to (user messages, from the wire event). Two user messages sharing one turn id means the later one was steered into a turn already running — see work-log's splitTurns.
+	queuedTurnId?: string; // Queued row absorbed into an already-running turn.
+	checkpointBacked?: boolean; // False for peer traffic, not a human checkpoint.
 	streaming?: boolean;
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)

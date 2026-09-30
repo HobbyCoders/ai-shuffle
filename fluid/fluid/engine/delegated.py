@@ -100,6 +100,7 @@ from fluid.events.model import (
     Usage,
 )
 from fluid.events.ops import (
+    AgentMessage,
     BackgroundTaskFinished,
     Interrupt,
     Op,
@@ -607,7 +608,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The CLI owns its own transcript; fluid cannot hand it a head node
             # to continue from. Say so plainly rather than dropping the op.
             raise NotImplementedError("Resume is not supported by the delegated engine")
-        elif isinstance(op, Steer):
+        elif isinstance(op, (Steer, AgentMessage)):
             await self._deliver_steer(op)
         elif isinstance(op, Interrupt):
             self._interrupted.set()
@@ -1177,7 +1178,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     # ─── mid-turn steering ───────────────────────────────────────────────
 
-    async def _deliver_steer(self, op: Steer) -> None:
+    async def _deliver_steer(self, op: Steer | AgentMessage) -> None:
         """Hand mid-turn user text to the running CLI as a second ``user`` frame.
 
         Where NativeLoop queues a steer and folds it into the next tool result
@@ -1229,7 +1230,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             raise RuntimeError("no live CLI turn to steer; queue the message instead")
         text = op.text
         record: dict[str, Any] = {"id": op.id, "text": op.text}
-        if op.origin != "user":
+        if isinstance(op, AgentMessage):
+            from fluid.context.peer import format_peer_message
+            from fluid.tools.hardening import defang_harness_markers
+
+            text = format_peer_message(op.sender, defang_harness_markers(op.text)).strip()
+            record["from"] = op.sender
+        elif op.origin != "user":
             # A harness notice rides the same user frame — the CLI has no other
             # mid-turn channel — so the marker is the only thing separating it
             # from the user's own words. Wrap it, and defang the body first:

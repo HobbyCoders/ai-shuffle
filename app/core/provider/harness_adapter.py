@@ -130,6 +130,7 @@ from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.hooks.bus import HookBus
 from fluid.events.ops import (
+    AgentMessage,
     BackgroundTaskFinished,
     Interrupt,
     RespondPermission,
@@ -1661,6 +1662,15 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         await self._engine.submit(Steer(text=text, id=id, origin=origin))
+
+    async def steer_peer(self, text: str, *, sender: str, id: Optional[str] = None) -> None:
+        """Use Fluid's peer marker and receipt, without starting another turn."""
+        if self._engine is None:
+            raise RuntimeError("Adapter not connected")
+        from fluid.tools.hardening import defang_harness_markers
+        await self._engine.submit(AgentMessage(
+            text=defang_harness_markers(text), sender=sender, id=id, wake=False,
+        ))
 
     async def cancel_steer(self, id: str) -> bool:
         """Ask fluid to drop the pending ``Steer`` submitted under ``id``.

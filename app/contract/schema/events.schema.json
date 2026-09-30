@@ -719,6 +719,18 @@
           "title": "Attachments",
           "type": "array"
         },
+        "checkpoint_backed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Backed"
+        },
         "command_args": {
           "anyOf": [
             {
@@ -791,6 +803,18 @@
           ],
           "default": null,
           "title": "Profile Id"
+        },
+        "queued_turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Queued Turn Id"
         },
         "run_id": {
           "anyOf": [

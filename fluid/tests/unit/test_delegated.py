@@ -464,6 +464,35 @@ def _user_frames(frames: list[dict]) -> list[dict]:
     return [f for f in frames if f.get("type") == "user"]
 
 
+async def test_peer_message_uses_standard_cli_steering_with_peer_provenance() -> None:
+    from fluid.events.ops import AgentMessage
+    from fluid.context.steering import STEER_OPEN
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+
+    async def respond():
+        async for event in loop.bus.subscribe(sid):
+            if isinstance(event, PermissionRequest):
+                await loop.submit(AgentMessage(sender="reviewer", text="Coordinate edits", id="peer-1", wake=False))
+                await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+                return
+
+    watcher = asyncio.create_task(respond())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, 10)
+        assert len(_user_frames(frames)) == 2
+        text = _user_frames(frames)[1]["message"]["content"][0]["text"]
+        assert "[agent message from='reviewer'" in text and STEER_OPEN not in text
+        receipt = next(e for e in loop.bus.log(sid) if isinstance(e, SteerDelivered))
+        assert receipt.steers == [{"id": "peer-1", "text": "Coordinate edits", "from": "reviewer"}]
+    finally:
+        await loop.aclose()
+
+
 async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:
     """A live turn is steered by writing a second ``user`` frame to the CLI's
     stdin; the write is the delivery, so it is receipted immediately."""

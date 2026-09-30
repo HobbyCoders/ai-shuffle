@@ -272,6 +272,8 @@ def make_handler(supplier):
                         await asyncio.to_thread(turns.remove_queued_turn, result["turn_id"])
                         raise ValueError("The user stopped a participating session; queued work was cancelled.")
                     if result.get("delivery_status") == "queued":
+                        from app.core.session_runtime import try_steer_pending
+                        await try_steer_pending(result["session_id"])
                         turn_scheduler.note_wake_pending(result["session_id"])
                         turn_scheduler.kick(result["session_id"])
                         try:

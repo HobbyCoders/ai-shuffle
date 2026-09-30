@@ -100,6 +100,7 @@ export type SessionId6 = string;
 export type TurnId6 = string | null;
 export type Type6 = 'turn.usage';
 export type Attachments = string[];
+export type CheckpointBacked = boolean | null;
 export type CommandArgs = string | null;
 export type CommandId7 = string | null;
 export type CommandName = string | null;
@@ -108,6 +109,7 @@ export type CreatedAt7 = string;
 export type Id7 = string;
 export type Kind = string | null;
 export type ProfileId1 = string | null;
+export type QueuedTurnId = string | null;
 export type RunId7 = string | null;
 export type Seq7 = number;
 export type SessionId7 = string;
@@ -491,6 +493,7 @@ export interface Usage1 {
 }
 export interface MessageUser {
   attachments?: Attachments;
+  checkpoint_backed?: CheckpointBacked;
   command_args?: CommandArgs;
   command_id?: CommandId7;
   command_name?: CommandName;
@@ -499,6 +502,7 @@ export interface MessageUser {
   id: Id7;
   kind?: Kind;
   profile_id?: ProfileId1;
+  queued_turn_id?: QueuedTurnId;
   run_id?: RunId7;
   seq: Seq7;
   session_id: SessionId7;

@@ -103,6 +103,8 @@ class TurnAborted(EventBase):
 class MessageUser(EventBase):
     type: Literal["message.user"] = "message.user"
     content: str
+    queued_turn_id: str | None = None
+    checkpoint_backed: bool | None = None
     attachments: list[str] = Field(default_factory=list)  # artifact hashes
     kind: str | None = None  # e.g. 'text' | 'command'
     command_name: str | None = None
