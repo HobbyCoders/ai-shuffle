@@ -38,7 +38,7 @@
 		</summary>
 		<div class="swarm-list" aria-label="Swarm workflow history">
 			{#each workflows as workflow (workflow.id)}
-				<SwarmCard {sessionId} result={JSON.stringify({ swarm: workflow })} status={isSwarmActive(workflow) ? 'running' : workflow.status === 'completed' ? 'complete' : 'error'} />
+				<SwarmCard {sessionId} input={{ action: 'status', swarm_id: workflow.id }} status={isSwarmActive(workflow) ? 'running' : workflow.status === 'completed' ? 'complete' : 'error'} />
 			{:else}
 				<p>No swarm workflows in this chat yet.</p>
 			{/each}

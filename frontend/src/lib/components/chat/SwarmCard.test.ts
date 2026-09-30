@@ -3,6 +3,7 @@ import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/sv
 import { swarms } from '$lib/stores/swarms';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
 import ToolUseMessage from './ToolUseMessage.svelte';
+import SwarmDropdown from './SwarmDropdown.svelte';
 const snapshot: SwarmSnapshot = {
  id: 'sw-1', session_id: 'session-swarm', title: 'Review the release', status: 'running',
  created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:01:00Z',
@@ -16,9 +17,12 @@ const snapshot: SwarmSnapshot = {
 beforeEach(() => vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ swarms: [] }), { status: 200 })))));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Swarm card integration', () => {
- it('renders compact dependency stages and worker transcript navigation through a prefixed tool', async () => {
+ it('keeps the receipt compact and exposes stages/navigation through the dropdown', async () => {
   render(ToolUseMessage, { name: 'mcp__fluid__Swarm', status: 'complete', result: JSON.stringify({ swarm: snapshot }) });
-  expect(screen.getByTestId('swarm-card')).toBeTruthy();
+  expect(screen.queryByTestId('swarm-card')).toBeNull();
+  render(SwarmDropdown, { sessionId: snapshot.session_id });
+  await fireEvent.click(screen.getByText('Swarm workflows'));
+  expect(screen.getByTestId('swarm-card').closest('.swarm-dropdown')).not.toBeNull();
   expect(screen.queryByText('Stage 1')).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: /Swarm Review the release/ }));
   expect(screen.getByText('Stage 1')).toBeTruthy(); expect(screen.getByText('Stage 2')).toBeTruthy();
@@ -35,6 +39,9 @@ describe('Swarm card integration', () => {
   const early = { ...snapshot, id: 'early', session_id: 'early-session' };
   swarms.receive(early);
   render(ToolUseMessage, { name: 'Swarm', status: 'running', sessionId: early.session_id, input: { title: early.title, tasks: early.tasks } });
+  expect(screen.queryByTestId('swarm-card')).toBeNull();
+  render(SwarmDropdown, { sessionId: early.session_id });
+  await fireEvent.click(screen.getByText('Swarm workflows'));
   expect(screen.getByRole('status').textContent).toBe('running');
   await fireEvent.click(screen.getByRole('button', { name: /Swarm Review the release/ }));
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel workflow' }));
@@ -51,6 +58,9 @@ describe('Swarm card integration', () => {
    { ...snapshot.tasks[2], status: 'blocked' }
   ] };
   render(ToolUseMessage, { name: 'Swarm', status: 'complete', result: JSON.stringify({ swarm: failed }) });
+  expect(screen.queryByTestId('swarm-card')).toBeNull();
+  render(SwarmDropdown, { sessionId: failed.session_id });
+  await fireEvent.click(screen.getByText('Swarm workflows'));
   await fireEvent.click(screen.getByRole('button', { name: /Swarm Review the release/ }));
   await fireEvent.click(screen.getByText('Review code'));
   expect(screen.getByText('Worker stopped unexpectedly.')).toBeTruthy();

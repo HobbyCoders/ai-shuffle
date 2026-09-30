@@ -11,6 +11,7 @@
 	 * Screenshots stay OUTSIDE the collapsible body: a screenshot the user can't
 	 * see is useless.
 	 */
+	import { untrack } from 'svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
 	import { swarms } from '$lib/stores/swarms';
@@ -36,11 +37,18 @@
 	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	const prefs = $derived(chatPreferences.current);
-	// Keep tool-result snapshots available in the dropdown, not as transcript graphs.
+	// Scalar boundaries stop replay's store-backed prop getters from making
+	// this effect depend on the store it publishes into. Writes stay untracked.
+	const swarmTool = $derived(isSwarmTool(name));
+	const swarmResult = $derived(result);
+	const swarmOwner = $derived(sessionId);
 	$effect(() => {
-		if (!isSwarmTool(name)) return;
-		const snapshot = parseSwarm(result);
-		if (snapshot && (!sessionId || snapshot.session_id === sessionId)) swarms.receive(snapshot, sessionId ?? undefined);
+		if (!swarmTool) return;
+		const snapshot = parseSwarm(swarmResult);
+		const owner = swarmOwner;
+		if (snapshot && (!owner || snapshot.session_id === owner)) {
+			untrack(() => swarms.receive(snapshot, owner ?? undefined));
+		}
 	});
 
 	// Once the user has toggled this row, their choice outranks the preference.
