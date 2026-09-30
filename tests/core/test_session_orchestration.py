@@ -409,10 +409,9 @@ async def test_actual_delegated_unread_result_keeps_peer_durably_queued(peers, m
     from pathlib import Path
     from types import SimpleNamespace
     from fluid.engine.delegated import DelegatedLoop
-    from fluid.engine.modes import Mode
     from fluid.events import SteerDelivered, TurnComplete
     from fluid.events.ops import UserTurn
-    from fluid.store.memory import MemoryStore
+    from fluid.store.base import MemoryStore
     from fluid.tools.registry import ToolCtx
     from app.core import session_runtime, turn_scheduler
     from app.core.provider.harness_adapter import HarnessAdapter
@@ -421,8 +420,8 @@ async def test_actual_delegated_unread_result_keeps_peer_durably_queued(peers, m
     fake = Path(__file__).resolve().parents[2] / "fluid/tests/fixtures/fake_claude.py"
     store = MemoryStore()
     sdk = (await store.create_session()).session_id
-    loop = DelegatedLoop(mode=Mode.CLAUDE_CLI, store=store, session_id=sdk,
-        cli_command=[sys.executable, "-u", str(fake)], extra_env={"FAKE_CLAUDE_SCENARIO": "a"})
+    loop = DelegatedLoop(store=store, session_id=sdk,
+        claude_cmd=[sys.executable, "-u", str(fake)], env={"FAKE_CLAUDE_SCENARIO": "a"})
     original_write = loop._write_frame
     frames, results, readers = [], [], set()
 
