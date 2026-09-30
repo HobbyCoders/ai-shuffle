@@ -333,11 +333,27 @@ def setup_file_logging() -> Optional[Path]:
     return Path(handler.baseFilename)
 
 
+def source_revision() -> str:
+    """The source revision this process runs, for startup log lines.
+
+    The desktop app sets ``SHUFFLE_SOURCE_REVISION`` for the worker it starts,
+    and container images carry ``GIT_SHA``. The app version alone spans many
+    commits, so without this the logs cannot say which build ran. Returns
+    ``"unknown"`` when neither variable is set.
+    """
+    for name in ("SHUFFLE_SOURCE_REVISION", "GIT_SHA"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
 def log_startup_banner() -> None:
     """Log a clear startup banner so restart boundaries are obvious in the file.
 
-    Includes pid / version / instance_id. The LAST banner before a gap or a
-    fatal.log trace pinpoints the run that crashed.
+    Includes pid / version / source revision / instance_id. The LAST banner
+    before a gap or a fatal.log trace pinpoints the run that crashed, and the
+    revision names the build (see :func:`source_revision`).
     """
     from app.core.config import settings
 
@@ -347,9 +363,10 @@ def log_startup_banner() -> None:
         instance = settings.service_name
 
     logger.info(
-        "=== AI Shuffle starting (pid=%s, version=%s, instance_id=%s) ===",
+        "=== AI Shuffle starting (pid=%s, version=%s, revision=%s, instance_id=%s) ===",
         os.getpid(),
         settings.version,
+        source_revision(),
         instance,
     )
 
