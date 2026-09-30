@@ -149,15 +149,19 @@ class SessionSyncService:
             # Generate new AI Shuffle session ID
             new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
 
-            # Convert SDK created_at (unix timestamp) to ISO format if available
+            # Discovery follows the SDK's millisecond contract. Retain support
+            # for older seconds-valued metadata, and fall back on invalid dates.
             created_at_iso = None
             if session_info.created_at:
                 try:
                     from datetime import datetime, timezone
+                    timestamp = session_info.created_at
+                    if abs(timestamp) >= 100_000_000_000:
+                        timestamp /= 1000
                     created_at_iso = datetime.fromtimestamp(
-                        session_info.created_at, tz=timezone.utc
+                        timestamp, tz=timezone.utc
                     ).isoformat()
-                except (ValueError, OSError):
+                except (ValueError, OSError, OverflowError, TypeError):
                     pass
 
             # Create session with all stats in a single atomic transaction

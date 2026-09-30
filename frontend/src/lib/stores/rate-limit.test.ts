@@ -783,11 +783,11 @@ describe('remaining quota helpers', () => {
 		expect(remainingFromUsedPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(100);
 	});
 
-	it('returns 100% remaining after either kind of window rolls over', () => {
+	it('retains last reported percentages after a reset until observed again', () => {
 		const now = Date.now();
 		const expired = win(12, new Date(now - 60_000).toISOString());
-		expect(reportedRemainingPct(expired, now)).toBe(100);
-		expect(remainingFromUsedPct(expired, now)).toBe(100);
+		expect(reportedRemainingPct(expired, now)).toBe(12);
+		expect(remainingFromUsedPct(expired, now)).toBe(88);
 	});
 });
 

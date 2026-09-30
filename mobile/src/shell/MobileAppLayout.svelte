@@ -4,8 +4,8 @@
 	 *
 	 * AppTopBar's compact bar plus its slide-in drawer (which hosts the same
 	 * Sidebar the desktop shell docks), over the shared MainPanel. MainPanel's
-	 * top bar is replaced by PageHeader through its `header` snippet, so the
-	 * download / git actions MainPanel owns render in the mobile header row.
+	 * header snippet renders AppTopBar with MainPanel's download / git actions:
+	 * one header at every width, including an unfolded phone.
 	 */
 	import { onMount } from 'svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -13,7 +13,6 @@
 	import MainPanel from '$lib/components/layout/MainPanel.svelte';
 	import CredentialStorageBanner from '$lib/components/CredentialStorageBanner.svelte';
 	import AppTopBar from './AppTopBar.svelte';
-	import PageHeader from './PageHeader.svelte';
 
 	let {
 		isAdmin,
@@ -32,30 +31,23 @@
 
 <div class="app-shell mobile">
 	<CredentialStorageBanner />
-	<AppTopBar
-		{isAdmin}
-		{onNewSession}
-		{onSettledOpenSession}
-		{onOpenSession}
-		{onOpenFeature}
-		{onOpenSpotlight}
-	/>
-
 	<div class="app-body">
 		<MainPanel {onOpenSession}>
 			{#snippet header(ctx)}
-				<!-- Session views and non-embedded pages keep the PageHeader; feature
-				     panels draw their own StudioPageHeader. -->
-				{#if ctx.isSessionView || !ctx.embedded}
-					<PageHeader hideGlobalStt={ctx.isSessionView}>
-						{#snippet leftActions()}
-							{@render ctx.downloadAction()}
-						{/snippet}
-						{#snippet actions()}
-							{@render ctx.headerActions()}
-						{/snippet}
-					</PageHeader>
-				{/if}
+				<AppTopBar
+					{isAdmin}
+					{onNewSession}
+					{onSettledOpenSession}
+					{onOpenSession}
+					{onOpenFeature}
+					{onOpenSpotlight}
+					hideGlobalStt={ctx.isSessionView || ctx.embedded}
+				>
+					{#snippet actions()}
+						{@render ctx.downloadAction()}
+						{@render ctx.headerActions()}
+					{/snippet}
+				</AppTopBar>
 			{/snippet}
 		</MainPanel>
 	</div>

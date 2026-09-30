@@ -524,3 +524,26 @@ class TestPollOnceDispatch:
 
         poll_grok.assert_not_called()
         poll_codex.assert_called_once_with(rows[1])
+
+@pytest.mark.parametrize("balance, expected", [(12.5, {"balance": 12.5}), (0, None), (-1, None), ("Infinity", None), (True, None)])
+async def test_codex_polled_extra_credits_reach_usage_api(mock_db, monkeypatch, balance, expected):
+    from app.api.usage import _load_provider_usage
+    from app.core import provider_usage as producer
+    from app.db import database as db
+    import httpx
+
+    row = db.create_model_provider("chat-extra", "ChatGPT", "chatgpt", "https://chatgpt.com")
+    monkeypatch.setattr(producer.ProviderUsageMonitor, "_codex_credentials", staticmethod(lambda _: _credentials()))
+
+    async def fetch(*_, **__):
+        return httpx.Response(200, json={"plan_type": "pro", "rate_limit": {"secondary_window": {"used_percent": 29, "limit_window_seconds": 604800, "reset_at": 1791247630}}, "credits": {"balance": balance}})
+
+    async def _credentials():
+        return "test-token-only", "test-account-only"
+
+    monkeypatch.setattr(producer, "_registered_get", fetch)
+    await producer.ProviderUsageMonitor()._poll_codex_provider(row)
+    entries = {s.provider_id: s for s in await _load_provider_usage()}
+    assert entries["chat-extra"].credits == expected
+    assert entries["chat-extra"].windows[0].type == "seven_day"
+    assert entries["chat-extra"].windows[0].utilization == 29

@@ -36,7 +36,6 @@ AI Shuffle is an independent product. Anthropic makes Claude Code, but it does n
 | [License](/docs/getting-started/license) | You activate a license, move it to another machine, cancel or ask for a refund. |
 | [Troubleshooting](/docs/getting-started/troubleshooting) | Something does not work. |
 | [FAQ](/docs/getting-started/faq) | You have a question about accounts, privacy, pricing or support. |
-| [Changelog](/docs/getting-started/changelog) | You want to know what changed in a release. |
 
 ## Everything else
 

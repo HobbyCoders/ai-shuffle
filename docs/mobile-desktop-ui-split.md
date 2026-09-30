@@ -29,7 +29,7 @@ an API contract instead.
 | | `frontend/` (web UI) | `mobile/` (mobile UI) |
 |---|---|---|
 | Kind | SvelteKit static app served by the worker | SvelteKit static app bundled in the APK |
-| Shell | `src/lib/components/layout/AppLayout.svelte` (desktop) | `src/shell/MobileAppLayout.svelte` (AppTopBar + drawer + PageHeader) |
+| Shell | `src/lib/components/layout/AppLayout.svelte` (desktop) | `src/shell/MobileAppLayout.svelte` (one AppTopBar + drawer) |
 | Shared code | `src/lib` | the same `src/lib`, via `kit.files.lib = '../frontend/src/lib'` (`$lib` resolves there) |
 | Page | `src/routes/+page.svelte` → shared `AppPage` with the desktop shell | `src/routes/+page.svelte` → the same `AppPage` with the mobile shell |
 | Root layout | `src/routes/+layout.svelte` → shared `RootLayout` | `src/routes/+layout.svelte` → `RootLayout` with `mobileApp` |
@@ -59,8 +59,23 @@ mobile behaviour (collapse, swipe-to-open gesture, controls sheet) is reached
 through `frontend/src/lib/components/chat/composer-shell.ts`: the web build
 gets desktop no-op defaults, and `mobile/src/shell/register.ts` registers the
 real implementations at startup. `MainPanel` takes an optional `header`
-snippet so the mobile app can put its `PageHeader` where the web UI renders
-`StudioTopBar`.
+snippet so the mobile app can put its `AppTopBar` where the web UI renders
+`StudioTopBar`. The mobile bar hosts the session breadcrumbs, transcript download,
+and single Git trigger on the same row; there is no second chat action header.
+At phone widths the Git trigger is icon-only to leave room for the chat title;
+its accessible name and the opened panel still expose the full status.
+Mobile header and Git-sheet actions use matching 44px touch targets; both halves
+of a split action share the same height. Private-access dialogs use one scrolling
+body below a fixed close/header row. Connection details wrap within the card and
+saved host-key fingerprints remain available through a disclosure. Mobile fields
+retain their touch size on unfolded screens; desktop cards do not inherit mobile
+spacing or platform rules. Authentication and approval behavior are unchanged.
+
+Git uses a draggable bottom sheet in the mobile build at every width (including
+unfolded phones). Narrow or coarse-pointer web screens also use that sheet;
+wide fine-pointer web screens retain the anchored popover. Drag the handle down
+to dismiss, or tap/activate it; a short/cancelled drag snaps back. The panel
+content scrolls normally, independently of the handle.
 
 ### Mobile CSS
 

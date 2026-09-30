@@ -113,7 +113,7 @@ async def test_usage_response_separates_scopes_and_hides_legacy_combined_balance
     account = entries[usage.SNAPSHOT_PREFIX + "router"]
     assert account.credits["balance_remaining"] == 7
     assert account.provider_name == "Router account"
-    assert account.source == "OpenRouter management API"
+    assert account.source == "OpenRouter credits API"
     assert account.scope == "Account credit ledger (USD)"
 
 
@@ -121,13 +121,67 @@ def test_overdrawn_account_balance_is_not_clamped():
     assert usage.normalize({"data": {"total_credits": 1, "total_usage": 2.5}})["balance_remaining"] == -1.5
 
 
-async def test_no_management_key_never_falls_back_to_model_key(provider, monkeypatch):
-    from unittest.mock import AsyncMock
-
+async def test_existing_model_key_reads_account_credits_without_setup(provider, monkeypatch):
     db.delete_system_setting(usage.SETTING_PREFIX + provider["id"])
-    provider["auth_token"] = "model-key-must-not-be-used"
-    fetch = AsyncMock()
+    db.update_model_provider("router", auth_token="existing-model-test-key")
+    calls = []
+
+    async def fetch(url, *, headers, **_):
+        calls.append((url, headers))
+        return httpx.Response(200, json={"data": {"total_credits": 50, "total_usage": 30.5}})
+
     monkeypatch.setattr(usage, "usage_get", fetch)
     await usage.poll(provider)
-    fetch.assert_not_called()
+    assert calls == [(usage.CREDITS_URL, {"Authorization": "Bearer existing-model-test-key"})]
+    assert snapshot()["credits"]["balance_remaining"] == 19.5
+    assert snapshot()["raw"]["source"] == "openrouter_model_key"
+    assert "existing-model-test-key" not in str(snapshot())
+    from app.api.usage import _load_provider_usage
+    entries = {s.provider_id: s for s in await _load_provider_usage()}
+    assert entries[usage.SNAPSHOT_PREFIX + "router"].credits["balance_remaining"] == 19.5
+    db.update_model_provider("router", auth_token="replacement-key")
     assert snapshot() is None
+
+
+@pytest.mark.parametrize("mutation", ["replace", "remove", "disable", "delete", "custom", "management"])
+@pytest.mark.parametrize("outcome", [200, 403])
+async def test_model_key_late_observation_is_discarded(provider, monkeypatch, mutation, outcome):
+    db.delete_system_setting(usage.SETTING_PREFIX + "router")
+    db.update_model_provider("router", auth_token="initial-test-key")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def fetch(*_, **__):
+        entered.set()
+        await release.wait()
+        return httpx.Response(outcome, json={"data": {"total_credits": 25, "total_usage": 1}})
+
+    monkeypatch.setattr(usage, "usage_get", fetch)
+    task = asyncio.create_task(usage.poll(provider))
+    await asyncio.wait_for(entered.wait(), 2)
+    if mutation == "replace": db.update_model_provider("router", auth_token="new-test-key")
+    elif mutation == "remove": db.update_model_provider("router", auth_token=None)
+    elif mutation == "disable": db.set_model_provider_enabled("router", False)
+    elif mutation == "delete": db.delete_model_provider("router")
+    elif mutation == "custom": db.update_model_provider("router", base_url="https://proxy.example")
+    else: db.set_system_setting(usage.SETTING_PREFIX + "router", "legacy-key")
+    release.set()
+    await task
+    assert snapshot() is None
+
+
+async def test_model_key_denial_is_cached_until_credential_changes(provider, monkeypatch):
+    db.delete_system_setting(usage.SETTING_PREFIX + "router")
+    db.update_model_provider("router", auth_token="denied-test-key")
+    calls = []
+
+    async def fetch(*_, **__):
+        calls.append(1)
+        return httpx.Response(403)
+
+    monkeypatch.setattr(usage, "usage_get", fetch)
+    await usage.poll(provider)
+    await usage.poll(provider)
+    assert len(calls) == 1
+    db.update_model_provider("router", auth_token="new-test-key")
+    await usage.poll(provider)
+    assert len(calls) == 2

@@ -200,7 +200,10 @@ async def test_unbuildable_options_refuse_instead_of_running_elsewhere(tmp_path,
             "app.core.sdk_options.build_options_from_profile", side_effect=err,
         ))
         events = await _turn(stack)
-    assert events == [{"type": "error", "message": str(err)}]
+    expected = {"type": "error", "message": str(err)}
+    if isinstance(err, WorktreeUnavailableError):
+        expected["code"] = "checkout_unavailable"
+    assert events == [expected]
     b.make_adapter.assert_not_called()
 
 

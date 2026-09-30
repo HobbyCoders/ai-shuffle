@@ -1083,3 +1083,245 @@ def test_adoption_failure_never_fails_the_checkout(
     assert checkout_manager.ensure_checkout(project, runner_id=RUNNER) == str(
         base_checkout
     )
+
+@pytest.mark.parametrize("source", ["recorded", "deterministic", "legacy"])
+def test_refuses_checkout_whose_head_no_longer_matches_binding(
+    project, base_checkout, workspace_root, tmp_path, monkeypatch, source
+):
+    from app.core import project_resolver
+    from app.core.config import settings
+
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: RUNNER))
+    branch = "fix/first-task"
+    if source == "recorded":
+        path = Path(checkout_manager.ensure_checkout(
+            project, branch=branch, runner_id=RUNNER, create_new_branch=True
+        ))
+    elif source == "deterministic":
+        path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+        _add_legacy_worktree(base_checkout, path, branch)
+    else:
+        path = _add_legacy_worktree(base_checkout, tmp_path / "legacy", branch)
+        _seed_legacy_project("lp1", "Repo", str(base_checkout), link_group_id="git:repo")
+        _seed_git_repository("gr1", "lp1")
+        _seed_worktree("wt1", "gr1", branch, str(path))
+
+    # Reproduce the producing path found in the historical session, not merely
+    # a fixture with a stale branch field: the agent changes HEAD in its cwd.
+    _git(path, "checkout", "-b", "fix/second-task")
+    sentinel = path / "uncommitted.txt"
+    sentinel.write_text("keep user work", encoding="utf-8")
+    before = checkouts_db.list_checkouts(project["id"])
+
+    assert checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER, create_new_branch=True
+    ) is None
+    assert project_resolver.resolve_existing_cwd({
+        "project_v2_id": project["id"], "branch": branch
+    }) is None
+    assert checkouts_db.list_checkouts(project["id"]) == before
+    assert checkout_manager.git_service.get_current_branch(str(path)) == "fix/second-task"
+    assert sentinel.read_text(encoding="utf-8") == "keep user work"
+    if source == "legacy":
+        assert not checkout_manager._branch_checkout_path(str(base_checkout), branch).exists()
+
+
+def test_sanitized_branch_collision_cannot_relabel_another_checkout(
+    project, base_checkout, workspace_root
+):
+    first = checkout_manager.ensure_checkout(
+        project, branch="feat/topic", runner_id=RUNNER, create_new_branch=True
+    )
+    before = checkouts_db.list_checkouts(project["id"])
+
+    assert checkout_manager.ensure_checkout(
+        project, branch="feat-topic", runner_id=RUNNER, create_new_branch=True
+    ) is None
+    assert checkouts_db.list_checkouts(project["id"]) == before
+    assert checkout_manager.git_service.get_current_branch(first) == "feat/topic"
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="feat-topic") is None
+
+
+@pytest.mark.parametrize("invalid", ["detached", "broken-git"])
+def test_branch_adoption_requires_a_live_matching_git_head(
+    project, base_checkout, workspace_root, invalid
+):
+    branch = "fix/adoption"
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if invalid == "detached":
+        _add_legacy_worktree(base_checkout, path, branch)
+        _git(path, "checkout", "--detach")
+    else:
+        path.mkdir(parents=True)
+        (path / ".git").write_text("gitdir: nonexistent\n", encoding="utf-8")
+    before = checkouts_db.list_checkouts(project["id"])
+
+    assert checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER) is None
+    assert checkouts_db.list_checkouts(project["id"]) == before
+
+
+def test_concurrent_distinct_branch_materialization_keeps_each_head(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    branches = ["fix/task-a", "feat/task-b"]
+    added = Barrier(2)
+
+    def after_add(*args):
+        # Both real git worktree adds must finish before either checkout binds.
+        added.wait(timeout=10)
+        return {}
+
+    monkeypatch.setattr(checkout_manager, "provision_worktree_runtime", after_add)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        paths = list(executor.map(lambda branch: checkout_manager.ensure_checkout(
+            project, branch=branch, runner_id=RUNNER, create_new_branch=True
+        ), branches))
+
+    assert all(paths)
+    assert paths[0] != paths[1]
+    for branch, path in zip(branches, paths):
+        assert checkout_manager.git_service.get_current_branch(path) == branch
+        assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["path"] == path
+        assert checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER) == path
+
+
+
+
+def test_head_changed_during_provisioning_is_not_bound(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    def provision(main, path):
+        _git(path, "checkout", "-b", "fix/other-task")
+        return {}
+
+    monkeypatch.setattr(checkout_manager, "provision_worktree_runtime", provision)
+    branch = "fix/late-change"
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+
+    assert checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER, create_new_branch=True
+    ) is None
+    assert checkout_manager.git_service.get_current_branch(str(path)) == "fix/other-task"
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch) is None
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_context(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.api import sessions_worktree as intake
+    from app.api.sessions_helpers import CreateWorktreeSessionRequest
+    from app.core import query_options, turn_manager
+    from app.core.config import settings
+    from app.db import database
+    from tests.core.helpers import query_profile
+
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: RUNNER))
+    monkeypatch.setattr(intake, "_broadcast_session_created", lambda sid: None)
+    # Broadcast only is stubbed: the session and first-message producer writes
+    # run against the real DB layer, as do checkout creation and cwd resolution.
+    from app.core.sync_engine import sync_engine
+    monkeypatch.setattr(sync_engine, "broadcast_message_added", AsyncMock())
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", AsyncMock())
+    monkeypatch.setattr(query_options, "get_security_instructions", lambda: "")
+    submitted = []
+
+    async def submit(session_id, source, **kwargs):
+        submitted.append((session_id, source, kwargs["prompt"]))
+        return "turn-" + session_id
+
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    run_sync = intake.run_sync
+    first_waiting = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def delayed(fn, *args, **kwargs):
+        if fn is checkout_manager.ensure_checkout and args[1] == "fix/task-a":
+            first_waiting.set()
+            await release_first.wait()
+        return await run_sync(fn, *args, **kwargs)
+
+    monkeypatch.setattr(intake, "run_sync", delayed)
+
+    def body(branch, prompt):
+        return CreateWorktreeSessionRequest(
+            project_v2_id=project["id"], branch_name=branch, base_branch="HEAD",
+            profile_id="default", create_new_branch=True, prompt=prompt,
+        )
+
+    first = asyncio.create_task(intake._create_v2_branch_session(
+        body("fix/task-a", "First independent task"), None, None, project
+    ))
+    try:
+        await asyncio.wait_for(first_waiting.wait(), timeout=10)
+        second = await intake._create_v2_branch_session(
+            body("feat/task-b", "Second independent task"), None, None, project
+        )
+    finally:
+        release_first.set()
+    first = await asyncio.wait_for(first, timeout=10)
+
+    assert first.session_id != second.session_id
+    assert first.worktree_path != second.worktree_path
+    assert [item[0] for item in submitted] == [second.session_id, first.session_id]
+    for response, prompt in [(first, "First independent task"), (second, "Second independent task")]:
+        session = database.get_session(response.session_id)
+        assert session["branch"] == response.branch_name
+        assert session["title"] == prompt
+        assert [m["content"] for m in database.get_session_messages(response.session_id)
+                if m["role"] == "user"] == [prompt]
+        assert (response.session_id, "worktree", prompt) in submitted
+        options, _ = query_options.build_options_from_profile(
+            query_profile({"system_prompt": {
+                "type": "custom", "content": "test", "inject_env_details": True
+            }}), session_id=response.session_id,
+        )
+        assert str(options.cwd) == response.worktree_path
+        assert options.aih_turn_env["worktree_info"]["branch"] == response.branch_name
+        assert checkout_manager.git_service.get_current_branch(str(options.cwd)) == response.branch_name
+
+    # A changes its own HEAD mid-turn; a subsequent spawn is refused instead of
+    # running the next task under A's stale metadata. B remains untouched.
+    _git(first.worktree_path, "checkout", "-b", "fix/unrecorded-switch")
+    with pytest.raises(query_options.WorktreeUnavailableError):
+        query_options.build_options_from_profile(query_profile(), session_id=first.session_id)
+    assert database.get_session(first.session_id)["branch"] == first.branch_name
+    assert checkout_manager.git_service.get_current_branch(second.worktree_path) == second.branch_name
+
+    # Drive the real preflight error producer through SessionRuntime and its
+    # real finalizer. Only provider/recorder and unrelated background work are
+    # substituted; a refused turn must not silently resync A to the other HEAD.
+    from unittest.mock import patch
+
+    from app.core import query_engine, session_runtime, turn_finalize
+    from app.db import turns as turns_db
+    from tests.core.test_session_runtime import _runtime_env
+
+    turn = turns_db.enqueue_turn(
+        first.session_id, "user", prompt="Follow-up for first task", profile_id="default"
+    )
+    actual_pump = query_engine._stream_to_websocket_impl
+    actual_finalize = turn_finalize.persist_turn_end_state
+    with _runtime_env(pump=actual_pump) as env, patch(
+        "app.core.turn_finalize.persist_turn_end_state", new=AsyncMock(wraps=actual_finalize)
+    ) as finalize, patch(
+        "app.core.session_pr_state.schedule_session_pr_reconcile"
+    ), patch(
+        "app.core.provider.harness_adapter.HarnessAdapter.connect", new=AsyncMock()
+    ) as connect:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "aborted"
+    connect.assert_not_awaited()
+    assert any(call.args[0].get("code") == "checkout_unavailable"
+               for call in env["recorder"].on_event.await_args_list)
+    finalize.assert_awaited_once_with(first.session_id, resync_branch=False)
+    assert turns_db.get_turn(turn["id"])["state"] == "aborted"
+    assert database.get_session(first.session_id)["branch"] == first.branch_name
+    assert checkout_manager.git_service.get_current_branch(second.worktree_path) == second.branch_name

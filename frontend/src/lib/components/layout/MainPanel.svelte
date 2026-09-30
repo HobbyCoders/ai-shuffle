@@ -840,7 +840,7 @@
 <!--
 	Header actions are declared once and rendered by whichever bar is on screen:
 	the desktop StudioTopBar, or the shell's own `header` snippet (the mobile
-	app's PageHeader). The git cluster is the existing GitHeaderActions
+	app's AppTopBar). The git cluster is the existing GitHeaderActions
 	instance with its existing handlers.
 -->
 {#snippet downloadAction()}
@@ -901,7 +901,7 @@
 
 <div class="main-panel">
 	{#if header}
-		<!-- The shell owns the header (mobile app: PageHeader with these actions). -->
+		<!-- The shell owns the header (mobile app: AppTopBar with these actions). -->
 		{@render header({
 			title: headerTitle,
 			isSessionView: $activeView?.type === 'session',

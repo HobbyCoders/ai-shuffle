@@ -54,6 +54,7 @@ from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
+from fluid.tools.fragments import CODE_MODE_ERROR_RULE, DEPENDENCY_AWARE_BATCHING
 from fluid.tools.hardening import fence_shell_output
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -72,15 +73,10 @@ _RUN_PYTHON_DESC = (
     "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
-    "permission-gated on the host. A Read of a path that does not exist "
-    "returns a falsy MissingFile instead of raising (check `if not text:`; "
-    "using it as text raises MissingPathError); other errors now return as "
-    "results and do not abort the cell: Grep/Glob on a missing path return "
-    "'(path missing …)', an Edit whose old_string does not match returns "
-    "'Edit NOT applied …', and an MCP tool error (a stale browser ref) "
-    "returns its error text — read each result before depending on it. "
-    "Permission denials, cancellation and tool timeouts still abort the "
-    "cell; do not wrap calls in try/except to get past those. "
+    "permission-gated on the host. A missing Read returns a falsy MissingFile "
+    "instead of raising; check if not text before using it. "
+    + CODE_MODE_ERROR_RULE
+    + "Read missing-path and Edit mismatch text before depending on them. "
     "Saved skills (reusable helpers that persist "
     "across sessions) import via `from skills import <name>`; persist a new one "
     "with the save_skill tool when you notice a reusable pattern. The kernel "
@@ -95,11 +91,8 @@ _RUN_PYTHON_DESC = (
     "id its repr shows, so a handle you forgot to assign is recovered with "
     "`_refs[7]` — never re-run a tool to get a result back.\n"
     "\n"
-    "One cell per step, not per call: compose the several tool calls a step "
-    "needs into a single cell — loop Read over a file list, search then read "
-    "then decide, apply an Edit and rerun the check in the same cell. A cell "
-    "that makes a single tool call is usually a wasted round-trip.\n"
-    "\n"
+    + DEPENDENCY_AWARE_BATCHING
+    + "\n\n"
     "The cell must be valid Python, so:\n"
     "- Quote every argument. `Grep(pattern=r\"def foo|bar\", glob=\"*.py\")`, "
     "never `pattern=def foo|bar`. Raw strings for regexes and Windows paths.\n"

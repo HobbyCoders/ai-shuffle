@@ -70,6 +70,7 @@ const mocks = vi.hoisted(() => {
 			githubAvailable: true
 		}),
 		gitMode: store<string>('project'),
+		mobileShell: false,
 		githubRepoInfo: store<Record<string, unknown> | null>({ default_branch: 'main' }),
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
@@ -79,6 +80,8 @@ const mocks = vi.hoisted(() => {
 		stopBackgroundRefresh: vi.fn()
 	};
 });
+
+vi.mock('$lib/utils/platform', () => ({ buildShell: () => mocks.mobileShell ? 'mobile' : 'desktop' }));
 
 vi.mock('$lib/stores/git.svelte', () => ({
 	git: {
@@ -232,6 +235,7 @@ beforeEach(() => {
 	openHeaderDropdown.set(null);
 	chatAccessSummary.set(null);
 	mocks.gitMode.set('project');
+	mocks.mobileShell = false;
 	vi.clearAllMocks();
 });
 
@@ -777,6 +781,89 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(queryPopover('commit')).toBeNull();
 		// The Ship It popover's step preview row "Push to remote" is unique to it.
 		expect(within(popover('shipit')).getByText('Push to remote')).toBeTruthy();
+	});
+});
+
+describe('GitHeaderActions mobile sheet', () => {
+	beforeEach(() => {
+		vi.stubGlobal('PointerEvent', class extends MouseEvent {
+			pointerId: number;
+			isPrimary: boolean;
+			constructor(type: string, init: PointerEventInit = {}) {
+				super(type, init);
+				this.pointerId = init.pointerId ?? 1;
+				this.isPrimary = init.isPrimary ?? true;
+			}
+		});
+	});
+	afterEach(() => vi.unstubAllGlobals());
+
+	async function sheet() {
+		dirtyFeatureBranch();
+		mocks.mobileShell = true;
+		renderHeader();
+		await openPanel();
+		Object.defineProperty(panel(), 'offsetHeight', { value: 600 });
+		const handle = screen.getByRole('button', { name: 'Close Git panel (drag down or tap)' });
+		handle.setPointerCapture = vi.fn();
+		return handle;
+	}
+
+	it('always uses a bottom sheet in the mobile build, even at unfolded widths', () => {
+		mocks.mobileShell = true;
+		const { container } = renderHeader();
+		expect(container.querySelector('.git-actions.sheet-layout')).toBeTruthy();
+	});
+
+	it('uses a sheet for coarse-pointer web/tablet screens and responds to folding', async () => {
+		let change: () => void = () => {};
+		const media = { matches: true, addEventListener: vi.fn((_, fn) => { change = fn; }), removeEventListener: vi.fn() };
+		vi.stubGlobal('matchMedia', vi.fn(() => media));
+		const { container } = renderHeader();
+		expect(container.querySelector('.sheet-layout')).toBeTruthy();
+		media.matches = false;
+		change();
+		await tick();
+		expect(container.querySelector('.sheet-layout')).toBeNull();
+	});
+
+	it('tracks a touch drag and dismisses on a downward swipe, returning focus', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(handle, { pointerId: 7, clientY: 100, button: 0 });
+		expect(handle.setPointerCapture).toHaveBeenCalledWith(7);
+		await fireEvent.pointerMove(handle, { pointerId: 7, clientY: 240 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('140px');
+		await fireEvent.pointerUp(handle, { pointerId: 7, clientY: 240 });
+		expect(queryPanel()).toBeNull();
+		expect(document.activeElement).toBe(trigger());
+	});
+
+	it('snaps back after a short drag and suppresses the resulting click', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(handle, { clientY: 100 });
+		await fireEvent.pointerMove(handle, { clientY: 130 });
+		await fireEvent.pointerUp(handle, { clientY: 130 });
+		await fireEvent.click(handle, { detail: 1 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+		await fireEvent.click(handle, { detail: 0 });
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('cancels a drag without dismissing and never drags from the panel content', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(panel(), { clientY: 100 });
+		await fireEvent.pointerMove(panel(), { clientY: 300 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+		await fireEvent.pointerDown(handle, { clientY: 100 });
+		await fireEvent.pointerMove(handle, { clientY: 300 });
+		await fireEvent.pointerCancel(handle);
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+	});
+
+	it('allows tapping/keyboard activation of the handle to close', async () => {
+		await sheet();
+		await fireEvent.click(screen.getByRole('button', { name: 'Close Git panel (drag down or tap)' }));
+		expect(queryPanel()).toBeNull();
 	});
 });
 

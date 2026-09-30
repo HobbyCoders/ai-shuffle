@@ -23,6 +23,9 @@ idempotent and safe to call repeatedly. Design commitments:
   honestly "not on this device" — rather than fabricating a checkout.
 - **Never destructive.** If a directory exists but is not a valid worktree, we log
   and return ``None`` rather than tearing anything down.
+- **Verified branch binding.** Reused and newly materialized branch checkouts
+  must have their own Git root and the requested HEAD. A stale row or colliding
+  sanitized path is refused, never repaired by switching HEAD or relabeling it.
 
 Reuses ``git_service`` and ``worktree_manager._sanitize_branch_name`` by import.
 """
@@ -167,6 +170,25 @@ def _dir_is_worktree(path: str) -> bool:
     two-rule liveness test as ``worktree_manager.is_worktree_valid``."""
     p = Path(path)
     return p.is_dir() and (p / ".git").exists()
+
+
+def _require_branch_binding(path: str, branch: str) -> None:
+    """Refuse stale/adopted branch paths without switching HEAD or rewriting rows."""
+    root = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=10)
+    if (
+        not _dir_is_worktree(path)
+        or root.returncode != 0
+        or not (root.stdout or "").strip()
+        or os.path.normcase(os.path.realpath(root.stdout.strip()))
+        != os.path.normcase(os.path.realpath(path))
+    ):
+        raise WorktreeError(f"Checkout {path!r} is not its own Git working tree")
+    actual = git_service.get_current_branch(path)
+    if actual != branch:
+        raise WorktreeError(
+            f"Checkout {path!r} is on {actual!r}, not the bound branch {branch!r}; "
+            "refusing to use or reassign it"
+        )
 
 
 def _branch_plan(
@@ -499,6 +521,7 @@ def _adopt_legacy_worktree(
             continue
         path = cand["worktree_path"]
         if path and os.path.isdir(path) and _dir_is_worktree(path):
+            _require_branch_binding(path, branch)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, path, branch=branch, status="active"
             )
@@ -533,6 +556,7 @@ def _ensure_branch_checkout(
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
             if _dir_is_worktree(resolved):
+                _require_branch_binding(resolved, branch)
                 # Status-refresh reuses the ORIGINAL path (its uniqueness key) so it
                 # updates in place — only when absolute, so a legacy relative row
                 # never trips upsert_checkout's relative-path guard.
@@ -564,6 +588,7 @@ def _ensure_branch_checkout(
     # Adopt an already-materialized dir at the deterministic path (idempotent).
     if dest.exists():
         if _dir_is_worktree(dest_str):
+            _require_branch_binding(dest_str, branch)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, dest_str, branch=branch, status="active"
             )
@@ -614,6 +639,10 @@ def _ensure_branch_checkout(
         )
         return None
 
+    # Verify the materialization too: a successful add must not bind a checkout
+    # that changed HEAD before it reached the session/checkout registry.
+    _require_branch_binding(dest_str, branch)
+
     # Everything a run needs is gitignored, so the new worktree has none of it.
     # Link it from the checkout it branched off before anyone tries to build or
     # run in it. Best-effort by contract: a failure here degrades the worktree,
@@ -637,6 +666,8 @@ def _ensure_branch_checkout(
             "checkout_manager: runtime provisioning raised for %s: %s", dest_str, e
         )
 
+    # Provisioning may take long enough for another process to change HEAD.
+    _require_branch_binding(dest_str, branch)
     checkouts_db.upsert_checkout(
         project_id, runner_id, dest_str, branch=branch, status="active"
     )
@@ -1330,14 +1361,18 @@ def ensure_checkout(
         if base:
             register_unregistered_worktrees(project_id, runner_id, base)
         return base
-    path = _ensure_branch_checkout(
-        project_v2_row,
-        project_id,
-        runner_id,
-        branch,
-        base_branch=base_branch,
-        create_new_branch=create_new_branch,
-    )
+    try:
+        path = _ensure_branch_checkout(
+            project_v2_row,
+            project_id,
+            runner_id,
+            branch,
+            base_branch=base_branch,
+            create_new_branch=create_new_branch,
+        )
+    except WorktreeError as e:
+        logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
+        return None
     if path:
         register_unregistered_worktrees(project_id, runner_id, path)
     return path

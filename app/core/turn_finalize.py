@@ -214,8 +214,8 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     return cleared
 
 
-async def persist_turn_end_state(session_id: str) -> None:
-    """Persist the durable end-of-turn state for ``session_id``. Never raises."""
+async def persist_turn_end_state(session_id: str, *, resync_branch: bool = True) -> None:
+    """Persist turn-end state; a refused checkout must not adopt another HEAD."""
     # 1. Durable parked marker (set or clear).
     try:
         from app.core.task_registry import task_registry
@@ -231,7 +231,10 @@ async def persist_turn_end_state(session_id: str) -> None:
     # below looks the PR up BY that branch and would otherwise race it; it is
     # one git head read, and it writes nothing when nothing moved.
     try:
-        changed = await asyncio.to_thread(resync_session_branch_from_head, session_id)
+        changed = (
+            await asyncio.to_thread(resync_session_branch_from_head, session_id)
+            if resync_branch else None
+        )
         if changed:
             logger.info(
                 "turn_finalize: session %s moved from branch %r to %r",

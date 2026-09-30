@@ -279,7 +279,10 @@ def test_code_mode_addendum_carries_the_cell_authoring_rules() -> None:
 
     assert 'Grep(pattern=r"def foo|bar", glob="*.py")' in CODE_MODE_ADDENDUM
     assert "heredoc" in CODE_MODE_ADDENDUM
-    assert "Read then Edit the same file in a single cell" in CODE_MODE_ADDENDUM
+    assert "A known Read/Edit recipe may share one cell" in CODE_MODE_ADDENDUM
+    assert "first select that evidence and stop at the decision boundary" in CODE_MODE_ADDENDUM
+    assert "single-call cell is appropriate" in CODE_MODE_ADDENDUM
+    assert "stated stdout cap" in CODE_MODE_ADDENDUM
 
 
 def test_code_mode_addendum_explains_deferred_tools() -> None:

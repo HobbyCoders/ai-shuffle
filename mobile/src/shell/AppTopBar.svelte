@@ -17,8 +17,10 @@
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
-	import { tick } from 'svelte';
-	import { Menu, X } from 'lucide-svelte';
+	import { tick, type Snippet } from 'svelte';
+	import { Menu, Mic, X } from 'lucide-svelte';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
+	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -35,6 +37,8 @@
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
+		actions?: Snippet;
+		hideGlobalStt?: boolean;
 	}
 
 	let {
@@ -43,7 +47,9 @@
 		onSettledOpenSession,
 		onOpenSession,
 		onOpenFeature,
-		onOpenSpotlight
+		onOpenSpotlight,
+		actions,
+		hideGlobalStt = false
 	}: Props = $props();
 
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
@@ -149,9 +155,16 @@
 		<span class="tb-context-title">{mobileTitle}</span>
 	{/if}
 
-	<!-- Balances the ☰ so the title stays optically centered now that the bell
-	     it used to sit beside lives in the sidebar. -->
-	<span class="tb-spacer" aria-hidden="true"></span>
+	<div class="tb-actions">
+		{#if $hotkeyPreferences.globalSttEnabled && !hideGlobalStt}
+			<button class="tb-hamburger" class:recording={$globalSttState.isRecording}
+				onclick={triggerToggle}
+				aria-label={$globalSttState.isRecording ? 'Stop recording' : 'Start voice input'}>
+				<Mic size={18} />
+			</button>
+		{/if}
+		{#if actions}{@render actions()}{/if}
+	</div>
 </header>
 
 <!-- Slide-in navigation drawer: hosts the full sidebar -->
@@ -201,8 +214,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 40px;
-		height: 40px;
+		width: 44px;
+		height: 44px;
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
@@ -228,10 +241,27 @@
 		pointer-events: none;
 	}
 
-	.tb-spacer { width: 40px; flex-shrink: 0; }
+	/* Never put popovers in an overflow rail: unfolded phones are wider than
+	   the phone breakpoint and their anchored dialogs would be clipped. */
+	.tb-actions {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex: none;
+		margin-left: auto;
+	}
+	/* Header controls share the same hit area on both Fold screens. */
+	.tb-actions :global(.git-btn),
+	.tb-actions :global(.download-jsonl-btn) {
+		box-sizing: border-box;
+		min-width: 44px;
+		min-height: 44px;
+		height: 44px;
+	}
+	.tb-actions :global(.download-jsonl-btn) { width: 44px; }
+	.recording { color: var(--destructive); }
 
-	/* Title fills the space between the ☰ (left) and the balancing spacer
-	   (right), so it sits visually centered, and ellipsizes for long chat names. */
+	/* The title yields space to the single compact action cluster. */
 	.tb-context-title {
 		flex: 1 1 auto;
 		min-width: 0;

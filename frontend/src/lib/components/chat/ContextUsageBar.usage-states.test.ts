@@ -142,7 +142,7 @@ describe('provider rows', () => {
 	it('fresh: figures without an "Updated" line', async () => {
 		snapshot([row({ provider_id: 'Router', windows: [{ type: 'credit_limit', utilization: 20, resets_at: null }] })]);
 		const text = sectionText(await open(), 'Router');
-		expect(text).toContain('20%');
+		expect(text).toContain('80% left');
 		expect(text).not.toContain('Updated');
 	});
 
@@ -168,26 +168,26 @@ describe('provider rows', () => {
 	it('error: one provider’s failure is labelled and the others still render', async () => {
 		snapshot([
 			row({ provider_id: 'Broken', provider_type: 'grok', status: 'unavailable', fetched_at: null, last_error_kind: 'billing_access_denied' }),
-			row({ provider_id: 'Router', credits: { usage: 2 } }),
+			row({ provider_id: 'Router', credits: { limit_remaining: 2 } }),
 		]);
 		const container = await open();
 		// Grok rows carry the brand name.
 		expect(sectionText(container, 'Grok')).toContain('Billing access required');
-		expect(sectionText(container, 'Router')).toContain('$2.00 used');
+		expect(sectionText(container, 'Router')).toContain('$2.00 left on this key');
 	});
 
 	it('providers: null keeps the rows already shown', async () => {
-		snapshot([row({ provider_id: 'Router', credits: { usage: 2 } })]);
+		snapshot([row({ provider_id: 'Router', credits: { limit_remaining: 2 } })]);
 		snapshot(null);
-		expect(sectionText(await open(), 'Router')).toContain('$2.00 used');
+		expect(sectionText(await open(), 'Router')).toContain('$2.00 left on this key');
 	});
 
 	it('refreshing: progressive rows render while the pass is still running', async () => {
-		snapshot([row({ provider_id: 'Router', credits: { usage: 2 } })], { provider_refreshing: true });
+		snapshot([row({ provider_id: 'Router', credits: { limit_remaining: 2 } })], { provider_refreshing: true });
 		const container = await open();
-		snapshot([row({ provider_id: 'Router', credits: { usage: 3 } })], { provider_refreshing: true });
+		snapshot([row({ provider_id: 'Router', credits: { limit_remaining: 3 } })], { provider_refreshing: true });
 		await vi.advanceTimersByTimeAsync(0);
-		expect(sectionText(container, 'Router')).toContain('$3.00 used');
+		expect(sectionText(container, 'Router')).toContain('$3.00 left on this key');
 	});
 
 	it('subscription quota at the edges: full use is 0% left, a sliver used is 99% left', async () => {
@@ -222,7 +222,7 @@ describe('Claude rows', () => {
 		// Zone-less reset is UTC: one hour from T0 in every browser zone.
 		expect(text).toContain('resets in 1h 0m');
 		expect(text).toContain('reset · awaiting next report');
-		expect(text).toContain('100% left');
+		expect(text).toContain('30% left');
 		expect(text).not.toContain('resets in -');
 	});
 

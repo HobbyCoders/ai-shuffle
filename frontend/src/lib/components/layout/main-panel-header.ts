@@ -1,7 +1,7 @@
 /**
  * What `MainPanel` hands a custom `header` snippet. The worker web UI has no
  * custom header (MainPanel renders StudioTopBar); the mobile app passes a
- * snippet that renders its PageHeader with these same actions.
+ * snippet that renders its AppTopBar with these same actions.
  */
 import type { Snippet } from 'svelte';
 

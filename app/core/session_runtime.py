@@ -659,6 +659,8 @@ class SessionRuntime:
         # (otherwise turns.error stays NULL — stop_reason='error' with nothing
         # behind it, and the provider's own error body only in the event log).
         self._terminal_error: Optional[str] = None
+        # A pre-spawn checkout refusal cannot authorize adopting its other HEAD.
+        self._resync_branch = True
         # In-flight pump task — interrupt() escalation cancels it: the pump
         # holds the reader token, so nothing else can read until it is gone.
         self._pump_task: Optional[asyncio.Task] = None
@@ -1379,6 +1381,8 @@ class SessionRuntime:
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
                     if etype == "error":
+                        if event.get("code") == "checkout_unavailable":
+                            self._resync_branch = False
                         message = event.get("message")
                         self._terminal_error = (
                             str(message) if message else None
@@ -2198,7 +2202,10 @@ class SessionRuntime:
         try:
             from app.core.turn_finalize import persist_turn_end_state
 
-            await persist_turn_end_state(sid)
+            if self._resync_branch:
+                await persist_turn_end_state(sid)
+            else:
+                await persist_turn_end_state(sid, resync_branch=False)
         except Exception:
             logger.debug("SessionRuntime: persist_turn_end_state failed for %s", sid, exc_info=True)
 

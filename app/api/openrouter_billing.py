@@ -55,7 +55,7 @@ async def _status(provider_id):
     configured = bool(await run_sync(db.get_system_setting_revision, SETTING_PREFIX + provider_id))
     snapshots = await run_sync(db.get_all_provider_usage_snapshots)
     snapshot = next((s for s in snapshots if s["provider_id"] == SNAPSHOT_PREFIX + provider_id), {})
-    return {"configured": configured, "source": "OpenRouter management API",
+    return {"configured": configured, "source": "OpenRouter credits API",
             "scope": "Account credit ledger (USD)", "credits": snapshot.get("credits"),
             "fetched_at": snapshot.get("fetched_at"),
             "last_error_kind": (snapshot.get("raw") or {}).get("usage_error")}

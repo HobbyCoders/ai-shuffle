@@ -22,6 +22,7 @@
 	 * panel to open for them.
 	 */
 	import { onDestroy, onMount } from 'svelte';
+	import { buildShell } from '$lib/utils/platform';
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -132,6 +133,64 @@
 	const shipItOptsOpen = $derived($openHeaderDropdown === 'git-shipit');
 	let triggerRef = $state<HTMLButtonElement | null>(null);
 	let panelRef = $state<HTMLDivElement | null>(null);
+	// The native mobile build stays a sheet on foldables at ANY width. Web
+	// windows use a sheet on phones and coarse-pointer tablets.
+	let sheetLayout = $state(buildShell() === 'mobile');
+	onMount(() => {
+		if (typeof window.matchMedia !== 'function') return;
+		const media = window.matchMedia('(max-width: 700px), (pointer: coarse)');
+		const update = () => { sheetLayout = buildShell() === 'mobile' || media.matches; };
+		update();
+		media.addEventListener('change', update);
+		return () => media.removeEventListener('change', update);
+	});
+	let sheetOffset = $state(0);
+	let draggingSheet = $state(false);
+	let dragPointer: number | null = null;
+	let dragStartY = 0;
+	let suppressHandleClick = false;
+	$effect(() => {
+		if (!panelOpen || !sheetLayout) cancelSheetDrag();
+	});
+
+	function startSheetDrag(e: PointerEvent) {
+		if (!e.isPrimary || e.button !== 0) return;
+		dragPointer = e.pointerId;
+		dragStartY = e.clientY;
+		suppressHandleClick = false;
+		draggingSheet = true;
+		(e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+	}
+
+	function moveSheetDrag(e: PointerEvent) {
+		if (e.pointerId !== dragPointer) return;
+		const distance = e.clientY - dragStartY;
+		if (Math.abs(distance) > 8) suppressHandleClick = true;
+		sheetOffset = Math.max(0, distance);
+	}
+
+	function endSheetDrag(e: PointerEvent) {
+		if (e.pointerId !== dragPointer) return;
+		const dismiss = sheetOffset >= Math.min(120, (panelRef?.offsetHeight ?? 600) * 0.2);
+		cancelSheetDrag();
+		if (dismiss) {
+			closePanel();
+			triggerRef?.focus({ preventScroll: true });
+		}
+	}
+
+	function cancelSheetDrag() {
+		dragPointer = null;
+		draggingSheet = false;
+		sheetOffset = 0;
+	}
+
+	function activateSheetHandle(e: MouseEvent) {
+		// Suppress the click synthesized after dragging, not keyboard activation.
+		if (suppressHandleClick && e.detail > 0) return;
+		closePanel();
+		triggerRef?.focus({ preventScroll: true });
+	}
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
 	const currentBranch = $derived(snapshot.currentBranch ?? worktreeBranch ?? null);
@@ -300,6 +359,7 @@
 	}
 	/** Close the panel and any popover inside it. */
 	function closePanel() {
+		cancelSheetDrag();
 		openHeaderDropdown.update((cur) => (isPanelId(cur) ? null : cur));
 	}
 	/** Run an action from the panel: the panel gets out of the way first so the
@@ -354,7 +414,7 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
-<div class="git-actions">
+<div class="git-actions" class:sheet-layout={sheetLayout}>
 	{#if error}
 		<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
 			<TriangleAlert size={13} /> Git unavailable · Retry
@@ -394,7 +454,17 @@
 	{#if panelOpen}
 		<!-- Scrim only takes effect in the bottom-sheet layout (see CSS). -->
 		<div class="git-scrim" aria-hidden="true"></div>
-		<div class="git-panel" bind:this={panelRef} role="dialog" aria-label="Git actions">
+		<div class="git-panel" class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
+			<button
+				class="sheet-handle"
+				aria-label="Close Git panel (drag down or tap)"
+				onpointerdown={startSheetDrag}
+				onpointermove={moveSheetDrag}
+				onpointerup={endSheetDrag}
+				onpointercancel={cancelSheetDrag}
+				onlostpointercapture={cancelSheetDrag}
+				onclick={activateSheetHandle}
+			><span></span></button>
 			<div class="gp-head">
 				<div class="gp-branch" title={currentBranch ?? ''}>
 					<GitBranch size={13} strokeWidth={1.6} />
@@ -850,7 +920,7 @@
 		to { opacity: 1; transform: none; }
 	}
 
-	.git-scrim {
+	.git-scrim, .sheet-handle {
 		display: none;
 	}
 
@@ -1026,6 +1096,7 @@
 	}
 
 	.ship-go {
+		height: 26px;
 		border-radius: calc(var(--radius, 0.75rem) * 0.7);
 		overflow: visible;
 	}
@@ -1035,7 +1106,8 @@
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		height: 26px;
+		box-sizing: border-box;
+		height: 100%;
 		padding: 0 9px;
 		border: 1px solid color-mix(in oklch, var(--primary) 55%, transparent);
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
@@ -1315,116 +1387,145 @@
 	}
 
 	/* ── Narrow screens: the panel becomes a bottom sheet ──────────────────── */
-	@media (max-width: 700px) {
-		.git-btn.trigger {
-			height: 36px;
-			padding: 0 10px 0 12px;
-			font-size: 0.75rem;
-			border-radius: calc(var(--radius, 0.75rem) * 0.9);
-		}
+	/* Native mobile builds and touch/narrow web windows use a bottom sheet. */
+	.sheet-layout .git-btn.trigger {
+		height: 36px;
+		padding: 0 10px 0 12px;
+		font-size: 0.75rem;
+		border-radius: calc(var(--radius, 0.75rem) * 0.9);
+	}
 
-		.git-scrim {
-			display: block;
-			position: fixed;
-			inset: 0;
-			background: rgb(0 0 0 / 0.5);
-			z-index: 140;
-			animation: scrim-in 180ms ease;
-		}
+	.sheet-layout .git-scrim {
+		display: block;
+		position: fixed;
+		inset: 0;
+		background: rgb(0 0 0 / 0.5);
+		z-index: 140;
+		animation: scrim-in 180ms ease;
+	}
 
-		@keyframes scrim-in {
-			from { opacity: 0; }
-			to { opacity: 1; }
-		}
+	@keyframes scrim-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
 
-		.git-panel {
-			position: fixed;
-			top: auto;
-			left: 0;
-			right: 0;
-			bottom: 0;
-			width: auto;
-			max-height: 88dvh;
-			border-radius: 18px 18px 0 0;
-			border-bottom: 0;
-			padding-bottom: env(safe-area-inset-bottom);
-			transform-origin: bottom center;
-			animation: sheet-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
-		}
+	.sheet-layout .git-panel {
+		position: fixed;
+		top: auto;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		width: auto;
+		max-height: 88dvh;
+		border-radius: 18px 18px 0 0;
+		border-bottom: 0;
+		padding-bottom: env(safe-area-inset-bottom);
+		transform-origin: bottom center;
+		transform: translateY(var(--sheet-offset, 0px));
+		transition: transform 180ms ease;
+		animation: sheet-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+		overscroll-behavior: contain;
+	}
 
-		@keyframes sheet-in {
-			from { transform: translateY(24px); opacity: 0; }
-			to { transform: none; opacity: 1; }
-		}
+	.sheet-layout .git-panel.dragging-sheet {
+		animation: none;
+		transition: none;
+	}
 
-		/* Drag handle */
-		.git-panel::before {
-			content: '';
-			display: block;
-			width: 36px;
-			height: 4px;
-			border-radius: 2px;
-			background: var(--border-strong, var(--border));
-			margin: 8px auto 0;
-		}
+	@keyframes sheet-in {
+		from { transform: translateY(24px); opacity: 0; }
+		to { transform: none; opacity: 1; }
+	}
 
-		.gp-head {
-			padding: 10px 16px 12px;
-		}
+	/* A real pointer target, separate from the normally scrollable content. */
+	.sheet-layout .sheet-handle {
+		display: grid;
+		place-items: center;
+		width: 100%;
+		height: 32px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		cursor: grab;
+		touch-action: none;
+		user-select: none;
+	}
+	.sheet-layout .dragging-sheet .sheet-handle { cursor: grabbing; }
+	.sheet-layout .sheet-handle span {
+		width: 36px;
+		height: 4px;
+		border-radius: 2px;
+		background: var(--border-strong, var(--border));
+	}
 
-		.gp-branch {
-			font-size: 0.78125rem;
-		}
+	.sheet-layout .gp-head {
+		padding: 10px 16px 12px;
+	}
 
-		.gp-pipe {
-			grid-template-columns: auto 1fr;
-			padding: 12px 16px;
-		}
+	.sheet-layout .gp-branch {
+		font-size: 0.78125rem;
+	}
 
-		.ship-go, .ship-off {
-			grid-column: 1 / -1;
-			justify-self: stretch;
-		}
+	.sheet-layout .gp-pipe {
+		grid-template-columns: auto 1fr;
+		padding: 12px 16px;
+	}
 
-		.ship-go .split-main {
-			flex: 1;
-			justify-content: center;
-			height: 40px;
-			font-size: 0.8125rem;
-		}
+	.sheet-layout .ship-go, .sheet-layout .ship-off {
+		grid-column: 1 / -1;
+		justify-self: stretch;
+	}
 
-		.ship-go .split-chevron {
-			padding: 0 14px;
-		}
+	.sheet-layout .ship-go { height: 44px; }
 
-		.gp-rows, .gp-files, .gp-foot {
-			padding: 6px 10px;
-		}
+	.sheet-layout .ship-go .split-main {
+		flex: 1;
+		justify-content: center;
+		font-size: 0.8125rem;
+	}
 
-		.row {
-			height: 46px;
-		}
+	.sheet-layout .ship-go .split-chevron {
+		width: 44px;
+		justify-content: center;
+		padding: 0;
+	}
 
-		.row-text {
-			font-size: 0.875rem;
-		}
+	.sheet-layout .gp-rows, .sheet-layout .gp-files, .sheet-layout .gp-foot {
+		padding: 6px 10px;
+	}
 
-		.row-sub {
-			font-size: 0.75rem;
-		}
+	.sheet-layout .row {
+		height: 44px;
+	}
 
-		.row-opts {
-			width: 40px;
-		}
+	.sheet-layout .row-text {
+		font-size: 0.875rem;
+	}
 
-		.file {
-			height: 34px;
-			font-size: 0.75rem;
-		}
+	.sheet-layout .row-sub {
+		font-size: 0.75rem;
+	}
 
-		.narrow-only {
-			display: grid;
-		}
+	.sheet-layout .row-opts {
+		width: 44px;
+	}
+
+	.sheet-layout .gp-review { min-height: 44px; }
+
+	.sheet-layout .file {
+		height: 44px;
+		font-size: 0.75rem;
+	}
+
+	.sheet-layout .narrow-only {
+		display: grid;
+	}
+	/* Keep room for the session title and download on a phone's single bar.
+	   The icon/tone and accessible name retain the full Git status. */
+	@media (max-width: 500px) {
+		.sheet-layout .trigger .stat-line,
+		.sheet-layout .trigger .btn-label,
+		.sheet-layout .trigger .btn-detail { display: none; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
@@ -1433,6 +1534,7 @@
 		}
 		.git-panel, .git-scrim {
 			animation: none;
+			transition: none;
 		}
 	}
 </style>

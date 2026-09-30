@@ -332,14 +332,19 @@
 	.access-status { font-size: .6875rem; font-variant-numeric: tabular-nums; }
 	.access-status:empty { display: none; }
 	.needs-attention .access-status { font-weight: 600; }
-	.access-dialog { width: min(38rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 2rem); margin: auto; padding: 0; border: 1px solid var(--border); border-radius: 1rem; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); overflow: auto; }
+	.access-dialog { box-sizing: border-box; width: min(38rem, calc(100vw - 1.5rem)); max-width: calc(100vw - 1.5rem); max-height: calc(100dvh - 1.5rem); margin: auto; padding: 0; border: 1px solid var(--border); border-radius: 1rem; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); overflow: hidden; }
+	.access-dialog[open] { display: flex; flex-direction: column; }
 	.access-dialog::backdrop { background: rgb(0 0 0 / .45); }
-	.access-dialog-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: .5rem 1rem; background: var(--background); border-bottom: 1px solid var(--border); }
+	.access-dialog-head { flex: none; display: flex; align-items: center; justify-content: space-between; padding: .5rem 1rem; background: var(--background); border-bottom: 1px solid var(--border); }
 	.access-dialog-head h2 { margin: 0; font-size: .9375rem; font-weight: 600; }
 	.access-close { min-width: 44px; min-height: 44px; border: 0; border-radius: .5rem; background: transparent; color: var(--muted-foreground); font-size: 1.5rem; cursor: pointer; }
 	.access-trigger:focus-visible, .access-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.private-access { min-width: 0; display: grid; gap: .75rem; padding: .75rem; }
-	@media (max-width: 480px) { .access-label { display: none; } }
+	.private-access { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; align-content: start; gap: .75rem; padding: .75rem; overflow: auto; overscroll-behavior: contain; }
+	@media (max-width: 480px) {
+		.access-label { display: none; }
+		.access-dialog-head { padding: .375rem .75rem; }
+		.private-access { gap: .625rem; padding: .625rem; }
+	}
 	.access-panel { box-shadow: none; animation: none; }
 	.row-icon { width: 2rem; height: 2rem; border-radius: .5rem; }
 	.row-icon :global(svg) { width: .9rem; height: .9rem; }
