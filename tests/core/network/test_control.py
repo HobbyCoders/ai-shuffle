@@ -614,3 +614,70 @@ def test_fork_context_uses_the_latest_events(workers):
         assert lines[0] == "User: msg 100" and lines[-1] == "User: msg 499"
         assert "msg 099" not in text
         assert lines == sorted(lines)
+
+async def test_existing_remote_session_attachments_reach_owner(workers, monkeypatch, tmp_path):
+    """Independent DBs: stage/lift on viewer, authenticated transfer, owner materialization."""
+    from app.core import turn_manager, upload_transfer
+    from app.core.confined_files import upload
+    import app.core.config as config
+    from app.db import projects_v2, upload_blobs
+
+    a, b = workers("upload-owner"), workers("upload-viewer")
+    served = ServedBy(a, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
+    with a.active():
+        engine.create_network("Uploads")
+    join(a, b)
+    with a.active():
+        project = projects_v2.upsert_project("https://github.com/example/uploads.git")
+        database.create_session(session_id="upload-session", profile_id="default", title="Uploads",
+                                project_id=None, project_v2_id=project["id"])
+        catalog.publish_owned()
+    converge([a, b])
+    landed = []
+
+    async def receive(session_id, source, **kwargs):
+        blob_ids = kwargs["payload"]["upload_blob_ids"]
+        assert upload_blobs.get_blob_data(blob_ids[0]) == b"worker bytes"
+        owner_dir = tmp_path / "owner-checkout"
+        owner_dir.mkdir()
+        mapping = upload_transfer.materialize_blobs_for_turn(blob_ids, str(owner_dir))
+        landed.append(upload_transfer.rewrite_prompt(kwargs["prompt"], mapping))
+        return "turn-with-file"
+
+    monkeypatch.setattr(turn_manager, "submit_async", receive)
+    with b.active():
+        row = dict(database.get_session("upload-session"))
+        assert row["project_id"] is None  # no local checkout on viewer
+        stage = upload_transfer.session_upload_dir(row["id"]).relative_to(tmp_path).as_posix()
+        path = upload(tmp_path, stage, "notes.txt", b"worker bytes")
+        ids = upload_transfer.lift_session_paths_to_blobs([path.as_posix()], row)
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        result = await control.submit_turn(a.device_id, row["id"], prompt=f"Read @{path.as_posix()}",
+                                           payload={"upload_blob_ids": ids})
+        assert result["turn_id"] == "turn-with-file"
+        assert upload_blobs.get_blob_data(ids[0]) == b"worker bytes"  # independent sender DB
+    assert (tmp_path / "owner-checkout" / "uploads" / "notes.txt").read_bytes() == b"worker bytes"
+    assert landed == [f"Read @{tmp_path / 'owner-checkout' / 'uploads' / 'notes.txt'}"]
+
+
+async def test_remote_turn_refuses_missing_upload_bytes_before_enqueue(workers, monkeypatch):
+    from app.core import turn_manager
+    from unittest.mock import AsyncMock
+    a = workers("upload-validation")
+    with a.active():
+        engine.create_network("Uploads")
+        database.create_session(session_id="upload-session", profile_id="default", title="Uploads")
+        submit = AsyncMock()
+        monkeypatch.setattr(turn_manager, "submit_async", submit)
+        with pytest.raises(ValueError, match="Invalid upload transfer"):
+            await control.handle("turns", {"session_id": "upload-session", "prompt": "file",
+                                           "payload": {"upload_blob_ids": ["missing"]}}, from_device="peer")
+        submit.assert_not_awaited()

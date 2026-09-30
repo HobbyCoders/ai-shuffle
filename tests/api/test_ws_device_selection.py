@@ -703,19 +703,16 @@ async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch, tmp_path):
     p.submit.assert_not_called()
 
 
-async def test_remote_turn_without_local_project_refuses_attachments(
+async def test_remote_turn_without_local_project_carries_staged_attachments(
     mock_db, monkeypatch
 ):
-    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
 
     _stub_installs(monkeypatch, [ME, PEER])
     _peer_owned_session("sess-1", placement={"where": f"runner:{PEER}"})
 
     with _Patches() as p:
         handler = _make_handler()
-        handler._lift_uploads = AsyncMock(
-            side_effect=AssertionError("must not lift without a local project")
-        )
+        handler._lift_uploads = AsyncMock(return_value=["staged-blob"])
         await handler.handle_query({
             "prompt": "look at this",
             "session_id": "sess-1",
@@ -724,8 +721,9 @@ async def test_remote_turn_without_local_project_refuses_attachments(
             "upload_paths": ["/tmp/a.txt"],
         })
 
-    assert sent_frames(handler, "error")[0]["message"] == ATTACHMENTS_NEED_LOCAL_CHECKOUT
-    p.submit.assert_not_called()
+    handler._lift_uploads.assert_awaited_once_with(["/tmp/a.txt"], None, "sess-1")
+    assert p.submit.call_args.kwargs["payload"]["upload_blob_ids"] == ["staged-blob"]
+    assert p.submit.call_args.kwargs["no_kick"] is True
 
 
 async def test_auto_adopt_clears_cli_sdk_without_jsonl(mock_db, monkeypatch):
