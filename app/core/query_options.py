@@ -1176,21 +1176,6 @@ def build_options_from_profile(
     if context_window not in context_window_choices(model_to_use, main_provider_row):
         context_window = None
 
-    # Model-facing orchestration contract. The same provider-scoped resolver
-    # builds Task's schema and enforces dispatch, so prompt prose cannot promise
-    # a subagent that the tool will later reject.
-    from app.core.agent_provider_models import parent_subagent_guidance
-    from app.core.task_dispatch import subagent_system_prompt
-
-    final_system_prompt = _append_system_block(
-        final_system_prompt,
-        parent_subagent_guidance(),
-    )
-    final_system_prompt = _append_system_block(
-        final_system_prompt,
-        subagent_system_prompt(session_id),
-    )
-
     # SDK-shaped tool fields. ``tools`` / ``tools_preset`` feed
     # ``AgentOptions.tools``, which the harness adapter ignores.
     tools_config = config.get("tools")  # Explicit list of tools
@@ -1217,6 +1202,26 @@ def build_options_from_profile(
     access = narrow_tool_access_for_mode(access, session_mode)
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
+
+    # Resolve the actual sidepanel/profile surface before advertising workflows.
+    from app.core.agent_provider_models import parent_subagent_guidance
+    from app.core.task_dispatch import subagent_system_prompt
+
+    def exposed(name):
+        return tool_permitted(name, access.allowed, access.disallowed)
+
+    final_system_prompt = _append_system_block(
+        final_system_prompt,
+        parent_subagent_guidance(
+            task_available=exposed("Task"), swarm_available=exposed("Swarm"),
+            monitor_available=exposed("Monitor"),
+            browser_available=(exposed("browser_navigate") or
+                               exposed("mcp__browser__browser_navigate")),
+        ),
+    )
+    final_system_prompt = _append_system_block(
+        final_system_prompt, subagent_system_prompt(session_id, task_available=exposed("Task")),
+    )
 
     # Block the CLI's ``claude-api`` skill on every non-Claude provider session
     # (see NON_CLAUDE_DISALLOWED_SKILL). This sits here — on the shared

@@ -2296,8 +2296,8 @@ async def test_code_mode_rewrites_the_compiled_prompt(monkeypatch, agent_workspa
 
     # LAST — the operating rule for every instruction above it, immediately
     # followed by the "# Tools" catalog it points at.
-    assert ha.CODE_MODE_SECTION in system
-    assert system.index(ha.CODE_MODE_SECTION) < system.index(_TOOLS_HEADING)
+    assert "# Code mode\n" in system
+    assert system.index("# Code mode\n") < system.index(_TOOLS_HEADING)
     # Skills: header rewritten, index body untouched.
     assert "from tools.Skill import Skill" in system
     assert "- demo: Demo skill" in system
@@ -2319,7 +2319,7 @@ async def test_code_mode_section_is_priced_as_a_section(monkeypatch, agent_works
 
     captured = await _connect_code_mode(monkeypatch, agent_workspace)
     compiled = captured["system_sections"]
-    assert [s for s in compiled.sections if s.text == ha.CODE_MODE_SECTION]
+    assert len([s for s in compiled.sections if s.text.startswith("# Code mode\n")]) == 1
     assert sum(s.text.startswith("# Code mode") for s in compiled.sections) == 1
     # The two views never drift: joined sections ARE the prompt.
     assert compiled.text == captured["system"]
@@ -6910,29 +6910,19 @@ def test_guidance_degrades_to_nothing_without_the_fluid_symbol(monkeypatch):
 
 
 def test_code_mode_section_carries_the_four_contracts():
-    """The four model-side contracts the audit sized as highest leverage."""
+    """Budget output and batch independent work, not unseen decisions."""
     import app.core.provider.harness_adapter as ha
 
     text = ha._code_mode_section()
-
-    # (a) bind-then-slice, with the recovery seams named.
-    assert "forfeits its ResultRef" in text
-    assert "_refs" in text
-    # (b) park after delegating.
-    assert 'Task(mode="background")' in text and "never poll" in text
-    # (c) one cell carries the whole step.
-    assert "Never spend a cell on a single Read" in text
-    assert "sleep-poll" in text
-    # ... and the two batching rules the round-3 audit added beside it: a known
-    # recipe is one step, and a bound result is located in-cell, not paged out
-    # across cells.
-    assert "is ONE step" in text and "same file or working tree" in text
-    assert "do not print it in slices across cells" in text
-    assert "txt.find('needle')" in text
-    # (d) recall budget.
+    assert "_refs" in text and "stated stdout cap" in text and "16,384 characters" in text
+    assert "Further windows in a later cell are allowed" in text
+    assert 'Task(mode="background")' in text and "Never poll" in text
+    assert "single-call cell is appropriate" in text
+    assert "independent calls, not decisions" in text
+    assert "safety/validation barriers abort" in text
+    assert "Never spend a cell on a single Read" not in text
+    assert "read every search hit" in text and "do not read every" in text
     assert "limit<=5" in text and "two unproductive queries" in text
-    # The code-mode rule still ends the block (it is last for a reason).
-    assert text.rstrip().endswith("those go to Remember.")
 
 
 # ── native recoverable context policy ─────────────────────────────────────
@@ -7283,9 +7273,10 @@ def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
     assert "delete_skill(name=...)" in text
     # 8b: the try/except sentence that contradicted run_python is gone.
     assert "Wrap calls that may fail in try/except" not in text
-    assert "returns a falsy MissingFile instead of raising" in text
+    assert "a falsy MissingFile instead of raising" in text
     assert "Grep of a path you guessed" not in text
-    assert "other tool errors come back as results and do not abort" in text
+    assert "Recoverable failures return inspectable error text" in text
+    assert "safety/validation barriers abort" in text
 
 
 def test_save_skill_and_delete_skill_are_documented_in_the_catalog():

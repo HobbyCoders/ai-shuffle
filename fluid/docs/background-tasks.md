@@ -4,6 +4,22 @@ Fluid treats background workers as host-owned processes with a durable session
 lifecycle. A parent model turn may finish or be interrupted without cancelling a
 worker that crossed the spawn acknowledgement boundary.
 
+## Worker reporting contract
+
+Push-based completion wakes the owning session, including a Task-created worker.
+When background work is all that remains, ending the current turn **parks** the
+session; it is not a final assignment report. Inspect completion and report the
+actual result after resumption. Do not poll, hold the turn open, or submit an
+interim "still running" sentence as completed work. An ended worker with
+uncollected work is reported as failed rather than successful; the host's bounded
+completion/drain safeguards remain in effect.
+
+The worker uses only its exposed role/capability surface. Top-level session
+orchestration is not available to children; use the parent-report channel when
+exposed, otherwise include blockers in the final result. A missing tool or
+checkout prerequisite is not permission to bypass a guard or switch another
+session's branch.
+
 ## Host contract
 
 The host dispatcher injected as `ToolCtx.extra["task_dispatch"]` must return one
