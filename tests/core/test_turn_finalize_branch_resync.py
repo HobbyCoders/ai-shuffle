@@ -266,3 +266,17 @@ async def test_a_failing_resync_never_breaks_turn_teardown(monkeypatch):
     await turn_finalize.persist_turn_end_state("s-2")
 
     assert flushed == ["s-2"]
+
+@pytest.mark.asyncio
+async def test_checkout_refusal_does_not_adopt_a_different_head(scene, monkeypatch):
+    from app.core import pg_session_store, session_pr_state
+
+    _git(scene["worktree"], "checkout", "-b", "fix/unrelated-task")
+    before = checkouts_db.list_checkouts(scene["project"]["id"])
+    monkeypatch.setattr(session_pr_state, "schedule_session_pr_reconcile", lambda *a, **kw: None)
+    monkeypatch.setattr(pg_session_store, "flush_summary_folds", lambda sid: None)
+
+    await turn_finalize.persist_turn_end_state(scene["session_id"], resync_branch=False)
+
+    assert database.get_session(scene["session_id"])["branch"] == "fix/update-session-git-state"
+    assert checkouts_db.list_checkouts(scene["project"]["id"]) == before
