@@ -4,11 +4,57 @@ const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (error: Error) => error.message }));
 const updateAuth = vi.hoisted(() => ({current: {status: {preview_access: false}}}));
 vi.mock('$lib/stores/auth.svelte', () => ({auth: updateAuth}));
+const notice = vi.hoisted(() => ({ info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
+vi.mock('$lib/stores/notifications', () => ({ notify: notice }));
 import DesktopUpdateButton from './DesktopUpdateButton.svelte';
 const worker = { device_id:'local', device_name:'Current worker', online:true, supported:true, allow_updates:true, phase:'available', version:'abc123' };
 const state = { allow_updates:true, update_all_workers:false, workers:[worker] };
 beforeEach(() => { localStorage.clear(); updateAuth.current.status.preview_access = false; vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
 afterEach(cleanup);
+
+it.each([false, true])('routes a desktop ready notification through fresh canonical scope (all=%s)', async all => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready'}]});
+ render(DesktopUpdateButton);
+ await screen.findByRole('button',{name:'Update and restart'});
+ // Policy changes after mount: a ready local shell must prepare a newly selected peer.
+ api.get.mockResolvedValue({...state, update_all_workers:all, workers:all
+  ? [{...worker,phase:'ready'}, {...worker,device_id:'peer',device_name:'Peer',phase:'available'}]
+  : [{...worker,phase:'ready'}]});
+ window.dispatchEvent(new Event('application-update-request'));
+ await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:all?'download':'install'}));
+ expect(notice.info).toHaveBeenCalledWith(expect.stringContaining(all?'All online workers':'Current worker'),expect.anything());
+});
+it('shows per-worker refusals from a notification request', async () => {
+ api.get.mockResolvedValue({...state, update_all_workers:true, workers:[{...worker,phase:'ready'}]});
+ api.post.mockResolvedValue({results:[{device_name:'Peer',accepted:false,reason:'Worker is offline; not replayed'}]});
+ render(DesktopUpdateButton);
+ await screen.findByRole('button',{name:'Update and restart'});
+ window.dispatchEvent(new Event('application-update-request'));
+ await waitFor(()=>expect(notice.warning).toHaveBeenCalledWith(expect.stringContaining('Peer: Worker is offline; not replayed'),expect.anything()));
+});
+it.each(['policy-read','disabled','preview','post'])('never bypasses %s failure with a local install', async reason => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready'}]});
+ render(DesktopUpdateButton);
+ await screen.findByRole('button',{name:'Update and restart'});
+ if(reason==='policy-read') api.get.mockRejectedValue(new Error('Scope unavailable'));
+ if(reason==='disabled') api.get.mockResolvedValue({...state,allow_updates:false});
+ if(reason==='preview') updateAuth.current.status.preview_access=true;
+ if(reason==='post') api.post.mockRejectedValue(new Error('Worker refused the update'));
+ window.dispatchEvent(new Event('application-update-request'));
+ await waitFor(()=>expect(notice.error).toHaveBeenCalled());
+ if(reason!=='post') expect(api.post).not.toHaveBeenCalled();
+});
+it('does not replay a second notification click while its scope read is pending', async () => {
+ render(DesktopUpdateButton);
+ await screen.findByRole('button',{name:'Download update'});
+ let complete!: (value: typeof state) => void;
+ api.get.mockReturnValueOnce(new Promise(resolve=>complete=resolve));
+ window.dispatchEvent(new Event('application-update-request'));
+ window.dispatchEvent(new Event('application-update-request'));
+ complete({...state,workers:[{...worker,phase:'ready'}]});
+ await waitFor(()=>expect(api.post).toHaveBeenCalledTimes(1));
+});
+
 it('does not poll or show update controls in an agent preview', async () => {
  vi.useFakeTimers();
  try {

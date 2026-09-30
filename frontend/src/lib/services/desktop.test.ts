@@ -94,8 +94,12 @@ describe('desktop update announcement', () => {
 		expect(items[0].persist).toBe(false);
 		expect(items[0].read).toBe(false);
 
+		const request = vi.fn();
+		window.addEventListener('application-update-request', request);
 		items[0].action?.onClick();
-		expect(install).toHaveBeenCalledTimes(1);
+		expect(request).toHaveBeenCalledOnce();
+		expect(install).not.toHaveBeenCalled();
+		window.removeEventListener('application-update-request', request);
 
 		teardown();
 	});

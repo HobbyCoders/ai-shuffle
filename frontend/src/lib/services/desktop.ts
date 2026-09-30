@@ -173,13 +173,13 @@ async function announceUpdate(state: DesktopUpdateState): Promise<void> {
 	if (announcedUpdateVersion === version) return;
 	announcedUpdateVersion = version;
 	const { notify } = await import('$lib/stores/notifications');
-	const shell = desktop;
 	const summary = notesSummary(state.notes);
 	notify.info(`AI Shuffle Desktop ${state.release || version} has downloaded. Restart to finish installing it.${summary ? ` What's new: ${summary}` : ''}`, {
 		title: 'Update ready',
 		category: 'desktop-update',
 		persist: false,
-		action: { label: 'Restart and update', onClick: () => shell.updates.install() }
+		// The shared control owns scope, preparation, receipts and restart consent.
+		action: { label: 'Restart and update', onClick: () => window.dispatchEvent(new Event('application-update-request')) }
 	});
 }
 
