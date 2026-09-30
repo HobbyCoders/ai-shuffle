@@ -306,9 +306,9 @@ class ContextConfig:
     min_result_chars: int = 2_000
     # Render the input of an old call whose result is trimmed as a small JSON
     # summary (CompactionConfig.elide_old_args). Off by default.
-    # TODO(loader owner, outside lane E): pass this into the CompactionConfig
-    # that fluid/config/loader.py builds. Until then the key parses here but
-    # the engine keeps the flag at its default.
+    # TODO: fluid/config/loader.py does not pass this into the CompactionConfig
+    # it builds yet, so the key parses and round-trips here while the engine
+    # keeps the flag at its default.
     elide_old_args: bool = False
 
     @classmethod

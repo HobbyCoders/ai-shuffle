@@ -117,6 +117,4 @@ def elide_tool_args(
         blocks.append(block)
     if not changed:
         return message
-    return Message(
-        role=message.role, content=blocks, provider_meta=message.provider_meta
-    )
+    return replace(message, content=blocks)
