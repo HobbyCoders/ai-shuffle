@@ -124,7 +124,7 @@ def test_disabled_provider_has_no_roster(mock_db, monkeypatch):
     assert available_subagents("caller", "disabled-row") == ()
 
 
-def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
+def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db):
     from app.db import database
 
     database.create_profile("caller", "Caller", None, {"model": "opus"})
@@ -138,7 +138,11 @@ def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
     contract = build_task_contract("caller", None)
 
     assert "reviewer" in contract.input_schema["properties"]["agent"]["enum"]
-    assert "model" not in contract.input_schema["properties"]
+    # A native Claude caller picks among the Claude aliases per Task, the way
+    # a provider-row caller picks from its row's curated list.
+    assert contract.input_schema["properties"]["model"]["enum"] == [
+        "fable", "haiku", "opus", "sonnet",
+    ]
     assert "subagent" in contract.description.lower()
     assert "reviewer" in contract.description
     assert "sonnet" in contract.description
