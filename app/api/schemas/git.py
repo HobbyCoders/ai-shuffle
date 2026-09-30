@@ -75,6 +75,8 @@ class GitStatusResponse(BaseModel):
     """Response for git status endpoint"""
     is_git_repo: bool
     current_branch: Optional[str] = None
+    # None on inline/legacy payloads; GET status always supplies a fresh check.
+    mutations_blocked: Optional[bool] = None
     is_detached: bool = False
     head_commit: Optional[str] = None
     remote_url: Optional[str] = None

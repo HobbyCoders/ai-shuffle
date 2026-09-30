@@ -17,6 +17,43 @@ from app.db.async_database import run_sync
 from app.network import control
 
 _actions = {}
+_MUTATING_ACTIONS = {
+    'init_repository', 'clone_repository', 'create_branch', 'delete_branch',
+    'checkout_branch', 'fetch_from_remote', 'stage_files', 'unstage_files',
+    'discard_changes', 'create_commit', 'push_commits', 'pull_from_remote',
+    'create_pull_request', 'finish', 'ship',
+}
+
+async def _guard_mutation(action_name, values, endpoint=None):
+    if action_name not in _MUTATING_ACTIONS:
+        return
+    from app.api.common import check_project_access
+    from app.api.git_helpers import get_working_dir_async
+    from app.core.git_activity import require_idle_git_target
+    project_id = values['project_id']
+    # Use the endpoint's existing ACL/cwd implementation (the registered
+    # server function, never a peer-selected module or caller-supplied path).
+    namespace = getattr(endpoint, '__globals__', {})
+    access = namespace.get('check_project_access', check_project_access)
+    resolve = namespace.get('get_working_dir_async', get_working_dir_async)
+    access(values['request'], project_id)
+    body = values.get('body')
+    sid = values.get('session_id') or getattr(body, 'session_id', None)
+    wid = values.get('worktree_id') or getattr(body, 'worktree_id', None)
+    if action_name == 'checkout_branch' and wid:
+        raise HTTPException(400, 'Cannot checkout branches in a worktree. Worktrees are bound to their branch.')
+    try:
+        cwd = await resolve(project_id, wid, sid)
+    except HTTPException as exc:
+        # GitHub-only projects need not have a local clone. Branch activity is
+        # still checked against the authenticated project's canonical aliases.
+        if action_name != 'create_pull_request' or exc.status_code not in {404, 409}:
+            raise
+        cwd = None
+    branches = [values.get('branch_name')]
+    branches.extend(getattr(body, key, None) for key in ('branch_name', 'branch', 'ref', 'head', 'name', 'base_branch'))
+    await run_sync(require_idle_git_target, project_id, cwd, branches)
+
 
 
 def _check_project(session, project_id):
@@ -48,6 +85,7 @@ def session_git_action(endpoint):
                 raise HTTPException(400, "Worker Git scope cannot include a session or legacy worktree")
             return await _route_project_git(endpoint, values, worker_id, request.query_params.get("checkout_branch"))
         if not session_id:
+            await _guard_mutation(endpoint.__name__, values, endpoint)
             return await endpoint(*args, **kwargs)
         session = await run_sync(database.get_session, session_id)
         if not session:
@@ -60,6 +98,7 @@ def session_git_action(endpoint):
         owner = control.owner_of(session)
         if owner is None:
             bound.arguments["project_id"] = await run_sync(_owner_project_id, session, values["project_id"])
+            await _guard_mutation(endpoint.__name__, bound.arguments, endpoint)
             return await endpoint(*bound.args, **bound.kwargs)
         params = jsonable_encoder({k: v for k, v in values.items() if k not in {"request", "token"}})
         try:
@@ -116,6 +155,7 @@ async def handle_session_git(body, from_device):
         request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "state": {}})
         request.state.api_user = None  # Peer membership + owned-session check authorize this call.
         values.update(request=request, token="worker-control")
+        await _guard_mutation(body["action"], values, endpoint)
         result = await endpoint(**values)
         return {"status": 200, "result": jsonable_encoder(result)}
     except ValidationError as exc:
@@ -250,6 +290,7 @@ async def handle_project_git(body, from_device):
         values.update(request=request, token="worker-control")
         scope = _worker_checkout_scope.set((project_id, path))
         try:
+            await _guard_mutation(body["action"], values, endpoint)
             result = await endpoint(**values)
         finally:
             _worker_checkout_scope.reset(scope)

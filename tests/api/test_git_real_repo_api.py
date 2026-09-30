@@ -37,7 +37,7 @@ STATUS_FIELDS = {
     "is_git_repo", "current_branch", "is_detached", "head_commit", "remote_url",
     "is_clean", "staged", "modified", "untracked", "ahead", "behind",
     "differs_from_base", "matches_base_tree", "unpushed", "conflicts",
-    "repository_id", "default_branch", "github_repo_name", "last_synced_at",
+    "repository_id", "default_branch", "github_repo_name", "last_synced_at", "mutations_blocked",
 }
 
 
@@ -95,6 +95,7 @@ def test_status_shape_and_index_codes(api):
 
     assert set(data) == STATUS_FIELDS
     assert data["is_git_repo"] is True and data["current_branch"] == "main"
+    assert data["mutations_blocked"] is False
     assert {(s["file"], s["status"]) for s in data["staged"]} == {
         ("a.txt", "M"), ("new.txt", "A"), ("b.txt", "D"),
     }

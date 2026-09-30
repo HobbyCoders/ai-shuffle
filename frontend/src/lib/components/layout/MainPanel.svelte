@@ -7,6 +7,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack, type Snippet } from 'svelte';
+	import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { MediaQuery } from 'svelte/reactivity';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -446,13 +447,15 @@
 		}
 	}
 
+	const gitMenuOpen = $derived($openHeaderDropdown?.startsWith('git-') ?? false);
+
 	function scheduleGitPoll() {
 		if (_gitPollTimer) clearTimeout(_gitPollTimer);
 		if (!_gitPollRunning || document.hidden) return;
 		_gitPollTimer = setTimeout(() => {
 			gitPollNow();
 			scheduleGitPoll();
-		}, gitPollIntervalMs(Date.now(), _gitLastActivity));
+		}, gitPollIntervalMs(Date.now(), _gitLastActivity, gitMenuOpen));
 	}
 
 	function startGitPoll() {
@@ -512,6 +515,17 @@
 			stopGitPoll();
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		};
+	});
+
+	// Inspecting the dropdown needs fresh owner activity, even if THIS chat
+	// is idle. Reschedule on open/close without tracking the whole git store.
+	$effect(() => {
+		const opened = gitMenuOpen;
+		untrack(() => {
+			if (!_gitPollRunning) return;
+			if (opened) gitPollNow();
+			scheduleGitPoll();
+		});
 	});
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.

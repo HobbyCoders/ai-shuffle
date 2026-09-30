@@ -69,7 +69,7 @@ def _ship_op(project_id="p1", session_id=None):
 
 
 def _pr(number=7, url="https://github.com/o/r/pull/7", head="feat/x"):
-    return SimpleNamespace(number=number, url=url, head_branch=head, state="open")
+    return SimpleNamespace(number=number, url=url, head_branch=head, base_branch="main", state="open")
 
 
 def _step_status(op, step_id):
@@ -104,6 +104,7 @@ def mock_github_service():
     m = MagicMock()
     m.get_repo_from_remote.return_value = "o/r"
     m.list_pulls.return_value = [_pr()]
+    m.get_pull.return_value = _pr()
     m.merge_pull.return_value = (True, None)
     m.create_pull.return_value = (_pr(), None)
     return m
@@ -545,18 +546,20 @@ class TestExecuteFinish:
 
         mock_git_service.remove_worktree.return_value = True
         op = _finish_op(project_id="p1", session_id="me")
-        # The requesting session is mid-turn; the sibling does ``activity``.
-        busy = {"me"} | ({"other"} if activity != "idle" else set())
+        # The caller is idle. Shared head/base activity must block BEFORE merge,
+        # not interrupt the sibling later during destructive cleanup.
+        busy = {"other"} if activity != "idle" else set()
         stopped = []
 
         async def stop(sid):
             stopped.append(sid)
             busy.discard(sid)
 
+        mock_git_service.get_current_branch.side_effect = lambda path: "main" if path == str(main) else "feat/other" if path == str(other) else "feat/x"
         with patch.multiple(
             gitops, git_service=mock_git_service,
             github_service=mock_github_service, worktree_manager=mock_worktree_manager,
-        ), patch(
+        ), patch("app.core.git_activity.git_service", mock_git_service), patch("app.core.git_activity._live_session_ids", side_effect=lambda: set(busy) if activity == "turn" else set()), patch(
             "app.core.streaming_status.has_active_run",
             side_effect=lambda sid: sid in busy and (sid == "me" or activity == "turn"),
         ), patch(
@@ -570,17 +573,20 @@ class TestExecuteFinish:
                 merge_method="squash", cleanup=True, session_id="me", status={"ahead": 0},
             )
 
-        # Only sessions in THIS checkout are stopped; a busy sibling on another
-        # branch or the main checkout keeps running and does not block.
-        sibling_here = sibling_branch == "feat/x" and activity != "idle"
-        assert sorted(stopped) == (["me", "other"] if sibling_here else ["me"])
+        # Both the head and the merge base must be idle. Unrelated branches
+        # remain usable and their sessions are never stopped by this operation.
+        related_busy = sibling_branch in ("feat/x", None) and activity != "idle"
+        if related_busy:
+            assert op.status == "error"
+            assert stopped == []
+            mock_github_service.merge_pull.assert_not_called()
+            mock_git_service.remove_worktree.assert_not_called()
+            return
+        assert stopped == []  # idle caller needs cwd release, never an interrupt
         assert op.status == "done"
         cleanup = next(s for s in op.steps if s["id"] == "cleanup")
         assert cleanup["status"] == "done"
-        assert cleanup["detail"] == (
-            "Stopped 2 sessions, removed worktree" if sibling_here
-            else "Stopped 1 session, removed worktree"
-        )
+        assert cleanup["detail"] == "Removed worktree"
         mock_git_service.remove_worktree.assert_called_once()
         mock_git_service.checkout.assert_not_called()
 

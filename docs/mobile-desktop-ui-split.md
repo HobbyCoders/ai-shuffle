@@ -76,6 +76,13 @@ saved host-key fingerprints remain available through a disclosure. Mobile fields
 retain their touch size on unfolded screens; desktop cards do not inherit mobile
 spacing or platform rules. Authentication and approval behavior are unchanged.
 
+Git writes lock by checkout/branch, not just the viewed chat. Sessions sharing a
+worktree or logical branch disable mutations while status/swarm views stay
+readable; independent identified branches remain usable. Fresh owner-side leases,
+draining turns, and active background jobs also guard local/peer API writes.
+Unknown activity fails closed. PR merges check their head/base before writing,
+including a fresh check at the queued merge stage.
+
 Git uses a draggable bottom sheet in the mobile build at every width (including
 unfolded phones). Narrow or coarse-pointer web screens also use that sheet;
 wide fine-pointer web screens retain the anchored popover. Drag the handle down
