@@ -347,6 +347,14 @@ html:root[data-platform='mobile'] .git-btn {
 	font-size: 0.75rem;
 }
 
+/* Private access keeps touch-sized fields on the unfolded screen too. */
+html:root[data-platform='mobile'] .pa-field .card-form-input {
+	min-height: 44px;
+	font-size: 1rem;
+}
+html:root[data-platform='mobile'] .pa-toggle,
+html:root[data-platform='mobile'] .pa-small-btn { min-height: 44px; }
+
 html:root[data-platform='mobile'] .project-name {
 	max-width: 80px;
 }

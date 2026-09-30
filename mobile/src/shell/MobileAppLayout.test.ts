@@ -58,24 +58,27 @@ describe('MobileAppLayout', () => {
 		expect(props.onOpenSpotlight).toHaveBeenCalledTimes(1);
 	});
 
-	it('puts the download and git actions in the PageHeader on a session view', () => {
+	it('puts download and git actions in the FIRST and only shell header on a session view', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
 		const { container } = renderLayout();
-		const header = container.querySelector('header.page-header')!;
-		expect(header.querySelector('.hdr-meta')!.textContent).toContain('Download chat');
-		expect(header.querySelector('.hdr-right')!.textContent).toContain('Commit');
+		const header = screen.getByTestId('app-top-bar');
+		expect(header.contains(screen.getByRole('button', { name: 'Download chat' }))).toBe(true);
+		expect(header.contains(screen.getByRole('button', { name: 'Commit' }))).toBe(true);
+		expect(container.querySelectorAll('header')).toHaveLength(1);
+		expect(header.getAttribute('data-hide-stt')).toBe('true');
 	});
 
-	it('keeps the PageHeader on a non-embedded page', () => {
+	it('keeps one app bar and allows global voice input on non-embedded pages', () => {
 		const { container } = renderLayout();
-		expect(container.querySelector('header.page-header')).toBeTruthy();
+		expect(container.querySelectorAll('header')).toHaveLength(1);
+		expect(screen.getByTestId('app-top-bar').getAttribute('data-hide-stt')).toBe('false');
 	});
 
-	it('drops the PageHeader for an embedded feature panel that draws its own header', () => {
+	it('keeps navigation but hides global voice input for embedded feature panels', () => {
 		mainPanelView.embedded = true;
 		const { container } = renderLayout();
-		expect(container.querySelector('header.page-header')).toBeNull();
-		expect(screen.queryByRole('button', { name: 'Download chat' })).toBeNull();
+		expect(container.querySelectorAll('header')).toHaveLength(1);
+		expect(screen.getByTestId('app-top-bar').getAttribute('data-hide-stt')).toBe('true');
 	});
 });
