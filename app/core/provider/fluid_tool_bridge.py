@@ -257,25 +257,31 @@ def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]
     """Per-tool call bounds for the ``builtins`` server, over the registry's.
 
     A synchronous Task blocks until its worker reports, and task_dispatch
-    caps that at ``task_worker_sync_max_seconds``. The registry's general
-    bound (330 s by default) would cancel a longer worker mid-run, so Task
-    gets the sync cap plus a margin for the report to come back, or no
-    bound when the cap is off. The general bound still applies if it is the
-    larger one. Monitor's inline wait (at most 120 s) and TaskOutput (never
-    blocks) fit under the general bound and keep it.
+    caps the run at ``task_worker_sync_max_seconds``. That cap starts only
+    after the dispatch clears pool admission, which can queue for up to
+    ``_ADMISSION_WAIT_SECONDS`` (or the longer provider-row queue budget),
+    and a retry attempt queues for admission again inside the cap. The
+    registry's general bound (330 s by default) would cancel such a call
+    with ``tool_timeout`` before task_dispatch could return its own
+    worker-failed result, so Task gets the sync cap plus two admission
+    waits plus a margin for the report, or no bound when the cap is off.
+    The general bound still applies if it is the larger one. Monitor's
+    inline wait (at most 120 s) and TaskOutput (never blocks) fit under the
+    general bound and keep it.
     """
-    from app.core.config import settings
+    from app.core import task_dispatch
 
-    try:
-        cap = float(getattr(settings, "task_worker_sync_max_seconds", 0) or 0)
-    except (TypeError, ValueError):
-        cap = 0.0
+    cap = task_dispatch._sync_cap_seconds()
     if cap <= 0:
         return {"Task": None}
     general = getattr(registry, "external_call_timeout", None)
     if not general or general <= 0:
         return {"Task": None}
-    return {"Task": max(cap + 60.0, float(general))}
+    queue = max(
+        float(task_dispatch._ADMISSION_WAIT_SECONDS),
+        task_dispatch._provider_queue_seconds(),
+    )
+    return {"Task": max(cap + 2 * queue + 60.0, float(general))}
 
 
 def register_recorded_sdk_servers(

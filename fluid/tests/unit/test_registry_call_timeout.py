@@ -85,3 +85,26 @@ async def test_dispatch_publishes_the_ctx_tool_use_id() -> None:
 
     assert seen == ["toolu_1", None]
     assert current_tool_use_id.get() is None
+
+
+async def test_an_id_less_call_does_not_inherit_the_enclosing_calls_id() -> None:
+    """A call made from inside another call's context (a worker started by a
+    bridged Task copies it) must not read the outer call's tool_use_id."""
+    seen: list[str | None] = []
+
+    @tool("probe", "reads the id", {"type": "object", "properties": {}})
+    async def probe(args: dict) -> dict:
+        seen.append(current_tool_use_id.get())
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    reg = ToolRegistry()
+    reg.register_inproc(create_inproc_server("p", [probe]))
+
+    token = current_tool_use_id.set("toolu_outer")
+    try:
+        await reg.dispatch("mcp__p__probe", {}, ToolCtx())
+        assert current_tool_use_id.get() == "toolu_outer"
+    finally:
+        current_tool_use_id.reset(token)
+
+    assert seen == [None]

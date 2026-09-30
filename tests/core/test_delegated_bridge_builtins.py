@@ -110,14 +110,38 @@ def test_only_task_gets_a_longer_bound():
     from app.core.config import settings
     from app.core.provider.fluid_tool_bridge import _builtins_call_timeouts
 
+    from app.core import task_dispatch
+
     cap = float(settings.task_worker_sync_max_seconds)
+    queue = max(
+        task_dispatch._ADMISSION_WAIT_SECONDS,
+        float(settings.task_worker_provider_queue_seconds),
+    )
+    expected = cap + 2 * queue + 60.0
     assert _builtins_call_timeouts(ToolRegistry(external_call_timeout=330)) == {
-        "Task": max(cap + 60.0, 330.0),
+        "Task": max(expected, 330.0),
     }
-    # A general bound already above the sync cap is never lowered.
-    assert _builtins_call_timeouts(ToolRegistry(external_call_timeout=cap + 600)) == {
-        "Task": cap + 600,
+    # A general bound already above that is never lowered.
+    assert _builtins_call_timeouts(ToolRegistry(external_call_timeout=expected + 600)) == {
+        "Task": expected + 600,
     }
+
+
+def test_task_bound_covers_the_admission_queue_before_the_sync_cap(monkeypatch):
+    """The sync cap starts after admission; a queued worker that then runs
+    to its cap must still finish inside the registry bound."""
+    from app.core import task_dispatch
+    from app.core.config import settings
+    from app.core.provider.fluid_tool_bridge import _builtins_call_timeouts
+
+    monkeypatch.setattr(settings, "task_worker_sync_max_seconds", 900.0)
+    monkeypatch.setattr(settings, "task_worker_provider_queue_seconds", 300.0)
+    bound = _builtins_call_timeouts(ToolRegistry(external_call_timeout=330))["Task"]
+    # First admission (provider-row budget) + full cap + a retry's admission.
+    assert bound >= 900.0 + 300.0 + 300.0
+    monkeypatch.setattr(settings, "task_worker_provider_queue_seconds", 0.0)
+    bound = _builtins_call_timeouts(ToolRegistry(external_call_timeout=330))["Task"]
+    assert bound >= 900.0 + 2 * task_dispatch._ADMISSION_WAIT_SECONDS
 
 
 def test_task_is_unbounded_when_the_sync_cap_is_off(monkeypatch):

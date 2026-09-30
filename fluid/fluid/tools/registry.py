@@ -552,15 +552,14 @@ class ToolRegistry:
         model-facing output after Python has parsed/sliced the raw strings.
 
         A string ``ctx.extra["tool_use_id"]`` is published as
-        ``current_tool_use_id`` for the duration of the call.
+        ``current_tool_use_id`` for the duration of the call. A call without
+        one publishes ``None``, so it never inherits an enclosing call's id
+        (a worker started inside a bridged Task copies that call's context).
         """
         ctx = ctx or ToolCtx()
         tool_use_id = (getattr(ctx, "extra", None) or {}).get("tool_use_id")
         if not isinstance(tool_use_id, str) or not tool_use_id:
-            return await self._dispatch(
-                name, input, ctx, input_responses=input_responses,
-                request_state=request_state, raw_shell_output=raw_shell_output,
-            )
+            tool_use_id = None
         token = current_tool_use_id.set(tool_use_id)
         try:
             return await self._dispatch(
