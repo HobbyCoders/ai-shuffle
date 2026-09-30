@@ -49,6 +49,27 @@ def monitor():
     return UsageLimitsMonitor()
 
 
+@pytest.mark.asyncio
+async def test_live_cli_unified_windows_reach_usage_snapshot(monitor):
+    from fluid.engine.delegated_proto import StreamJsonMapper
+
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="sonnet", user_node_id="n")
+    events = mapper.feed({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "resetsAt": 1790754000,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.06, "resetsAt": 1790754000},
+            "seven_day": {"utilization": 0.4, "resetsAt": 1790978400},
+        },
+    }}).events
+    for event in events:
+        monitor.apply_live_event(event.kind, event.utilization, event.resets_at, status=event.status)
+    snapshot = await monitor.get_snapshot()
+    assert snapshot["available"] is True
+    assert {w["type"]: w["utilization"] for w in snapshot["windows"]} == {
+        "five_hour": 94.0, "seven_day": 60.0,
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # generation guard (stale in-flight poll ordering)

@@ -79,6 +79,48 @@ def test_rate_limit_carries_the_cli_verdict() -> None:
     ]
 
 
+def test_rate_limit_unified_windows_from_claude_2_1_285() -> None:
+    """Shape captured from a live signed-in CLI; no top-level utilization."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    frame = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "resetsAt": 1790754000, "rateLimitType": "five_hour",
+        "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": False,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.06, "resetsAt": 1790754000},
+            "seven_day": {"utilization": 0.4, "resetsAt": 1790978400},
+        },
+    }}
+    got = [e for e in mapper.feed(frame).events if isinstance(e, RateLimit)]
+    assert [(e.kind, e.utilization, e.resets_at, e.status) for e in got] == [
+        ("five_hour", 0.06, 1790754000, "allowed"),
+        ("seven_day", 0.4, 1790978400, None),
+    ]
+
+
+@pytest.mark.parametrize("include_primary", [True, False])
+def test_unified_windows_rejection_only_applies_to_primary(include_primary: bool) -> None:
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    windows = {"seven_day": {"utilization": 0.4, "resetsAt": 1900000000}}
+    if include_primary:
+        windows["five_hour"] = {"resetsAt": 1800000000}
+    got = mapper.feed({"type": "rate_limit_event", "rate_limit_info": {
+        "rateLimitType": "five_hour", "status": "rejected",
+        "resetsAt": 1800000000, "unifiedWindows": windows,
+    }}).events
+    assert {e.kind: e.status for e in got} == {"five_hour": "rejected", "seven_day": None}
+    assert len(got) == 2
+
+
+@pytest.mark.parametrize("windows", [None, [], "bad", {"five_hour": None}])
+def test_malformed_unified_windows_preserves_legacy_reading(windows: object) -> None:
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    got = mapper.feed({"type": "rate_limit_event", "rate_limit_info": {
+        "rateLimitType": "five_hour", "utilization": 0.3, "unifiedWindows": windows,
+    }}).events
+    assert [(e.kind, e.utilization) for e in got] == [("five_hour", 0.3)]
+
+
 def test_unpriceable_model_leaves_cost_out() -> None:
     raw = per_call_usage({"input_tokens": 5}, model="no-such-model", index=1)
     assert "cost_usd" not in raw and raw["model_call_index"] == 1

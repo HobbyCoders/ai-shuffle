@@ -711,19 +711,37 @@ class StreamJsonMapper:
 
     def _on_rate_limit(self, frame: dict[str, Any]) -> Mapped:
         info = frame.get("rate_limit_info", {}) or {}
-        # Without a window type there is nothing to key the reading on.
-        if not info.get("rateLimitType"):
+        if not isinstance(info, dict):
             return Mapped()
+        kind = info.get("rateLimitType")
         status = info.get("status")
-        return Mapped(events=[RateLimit(
-            session_id=self.session_id, turn_id=self.turn_id,
-            kind=info["rateLimitType"],
-            resets_at=info.get("resetsAt"),
-            utilization=info.get("utilization"),
-            # ``rejected`` marks the window exhausted even when the CLI sends
-            # no utilization with it, so the verdict has to reach the host.
-            status=status if isinstance(status, str) and status else None,
-        )])
+        status = status if isinstance(status, str) and status else None
+        events = []
+        # Claude Code 2.1.285 reports all observed windows here, without a
+        # top-level utilization. The verdict applies only to rateLimitType:
+        # a rejected five-hour window must not exhaust the weekly allowance.
+        windows = info.get("unifiedWindows")
+        for window_kind, window in (windows.items() if isinstance(windows, dict) else ()):
+            if not isinstance(window_kind, str) or not window_kind or not isinstance(window, dict):
+                continue
+            events.append(RateLimit(
+                session_id=self.session_id, turn_id=self.turn_id,
+                kind=window_kind,
+                resets_at=window.get("resetsAt"),
+                utilization=window.get("utilization"),
+                status=status if window_kind == kind else None,
+            ))
+        # Older CLIs report just one window. Also preserve a primary verdict
+        # omitted from unifiedWindows (rejected may have no utilization).
+        if isinstance(kind, str) and kind and not any(e.kind == kind for e in events):
+            events.append(RateLimit(
+                session_id=self.session_id, turn_id=self.turn_id,
+                kind=kind,
+                resets_at=info.get("resetsAt"),
+                utilization=info.get("utilization"),
+                status=status,
+            ))
+        return Mapped(events=events)
 
     def _on_control_request(self, frame: dict[str, Any]) -> Mapped:
         req = _dict_field(frame, "request")
