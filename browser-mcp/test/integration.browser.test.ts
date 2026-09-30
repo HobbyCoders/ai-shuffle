@@ -85,6 +85,32 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       res.write("data: first\n\n");
       return;
     }
+    if (req.url === "/menu-next") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<!doctype html><title>Next page</title>");
+      return;
+    }
+    if (req.url === "/menu") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<!doctype html><title>More menu fixture</title>
+        <button aria-haspopup="menu" aria-expanded="false" id="more">More</button>
+        <div id="popup"></div><main id="docs" hidden><h1>Docs</h1>
+          <a href="/menu-next">Next page</a></main>
+        <script>
+          document.getElementById("more").onclick = () => {
+            document.getElementById("more").setAttribute("aria-expanded", "true");
+            document.getElementById("popup").innerHTML =
+              '<div role="menu" aria-label="More workspace destinations">' +
+              '<button role="menuitem" id="docs-item"><span>Docs</span></button></div>';
+            document.getElementById("docs-item").onclick = () => {
+              document.getElementById("popup").replaceChildren();
+              document.getElementById("more").setAttribute("aria-expanded", "false");
+              document.getElementById("docs").hidden = false;
+            };
+          };
+        </script>`);
+      return;
+    }
     if (req.url === "/api/data") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ marker: NET_BODY_MARKER }));
@@ -1073,6 +1099,63 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       session.agentAdmission = undefined; session.onWorkspaceChange = undefined; session.workspaceStatus = undefined;
     }
   }, 30000);
+
+  it("STDIO MCP acts on fresh More menuitem refs and rejects detached and navigated refs", async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))],
+      env: {
+        PATH: process.env.PATH ?? "",
+        CHROME_CDP_PORT: new URL(cdpEndpoint).port,
+        BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128",
+      },
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "menuitem-fixture", version: "1" });
+    const call = async (name: string, args: Record<string, unknown>) =>
+      await client.callTool({ name, arguments: args }) as McpToolResult;
+    const emittedRef = (result: McpToolResult, role: string, name: string): string => {
+      expect(result.isError, firstText(result)).not.toBe(true);
+      const tree = result.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const ref = new RegExp(`${role} "${name}"[^\n]*\\[ref=(e\\d+)\\]`).exec(tree)?.[1];
+      expect(ref, tree).toBeTruthy();
+      return ref!;
+    };
+    try {
+      await client.connect(transport);
+      const nav = await call("browser_navigate", { url: `${httpUrl}menu` });
+      expect(nav.isError, firstText(nav)).not.toBe(true);
+      for (const filter of ["interactive", "all"] as const) {
+        const more = emittedRef(await call("browser_snapshot", { filter }), "button", "More");
+        expect((await call("browser_act", { kind: "click", ref: more })).isError).not.toBe(true);
+        // The real producer emits this ref; no registry seeding or guessed token.
+        const snapshot = await call("browser_snapshot", { filter, max_chars: 8000 });
+        const docs = emittedRef(snapshot, "menuitem", "Docs");
+        const action = await call("browser_act", { kind: "click", ref: docs });
+        expect(action.isError, `${firstText(action)}\n${snapshot.content.map(c => c.type === "text" ? c.text : "").join("\n")}`).not.toBe(true);
+        const state = await call("browser_eval", {
+          code: 'return !document.querySelector("#docs").hidden && !document.querySelector("#docs-item");',
+        });
+        expect(state.isError, firstText(state)).not.toBe(true);
+        expect(JSON.parse(firstText(state)).value).toBe("true");
+        // The click actually removed the old menuitem, not just its ref record.
+        const detached = await call("browser_act", { kind: "click", ref: docs });
+        expect(detached.isError).toBe(true);
+        expect(firstText(detached)).toContain("stale_ref");
+      }
+      const snapshot = await call("browser_snapshot", { filter: "interactive" });
+      const more = emittedRef(snapshot, "button", "More");
+      const next = emittedRef(snapshot, "link", "Next page");
+      const navigation = await call("browser_act", { kind: "click", ref: next });
+      expect(navigation.isError, firstText(navigation)).not.toBe(true);
+      expect(JSON.parse(firstText(navigation)).url_changed).toBe(true);
+      const stale = await call("browser_act", { kind: "click", ref: more });
+      expect(stale.isError).toBe(true);
+      expect(firstText(stale)).toContain("stale_ref");
+    } finally {
+      await client.close();
+    }
+  });
 
   it("STDIO MCP runtime authenticates bridge, reports target, and exposes status during human takeover", async () => {
     const reports: any[] = []; const paths: string[] = []; const queue: any[] = [];
