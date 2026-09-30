@@ -26,7 +26,8 @@ class SubagentRow(TypedDict):
     description: str
     prompt: str
     tools: Optional[List[str]]
-    model: Optional[str]
+    model: Optional[str]  # Legacy fallback; provider_models holds Task assignments.
+    provider_models: dict[str, str]
     skills: Optional[List[str]]
     memory: Optional[str]
     mcp_servers: Optional[List[Any]]
@@ -62,6 +63,7 @@ def _agent_to_subagent(agent: Optional[dict]) -> Optional[SubagentRow]:
         "prompt": prompt or "",
         "tools": config.get("allowed_tools"),
         "model": config.get("model"),
+        "provider_models": config.get("provider_models") or {},
         "skills": config.get("skills"),
         "memory": config.get("memory"),
         "mcp_servers": config.get("mcp_servers"),

@@ -27,7 +27,10 @@ def _create_subagent_tools(is_admin: bool) -> list:
 
     @tool(
         "listSubagents",
-        "List all available subagents with their model, memory scope, and status.",
+        "List all available subagents with their provider-scoped Task assignments, "
+        "legacy model, memory scope, and status. provider_models is keyed by the "
+        "caller's provider (__native__ for Claude, __voice__ for voice); model is "
+        "the legacy fallback.",
         {"type": "object", "properties": {}},
     )
     async def list_subagents(args: dict) -> dict:
@@ -40,6 +43,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     "description": s.get("description"),
                     "is_builtin": s.get("is_builtin", False),
                     "model": s.get("model"),
+                    "provider_models": s.get("provider_models") or {},
                     "memory": s.get("memory"),
                 }
                 for s in subagents
@@ -53,7 +57,9 @@ def _create_subagent_tools(is_admin: bool) -> list:
 
     @tool(
         "getSubagent",
-        "Get full configuration of a specific subagent.",
+        "Get full configuration of a specific subagent. provider_models holds "
+        "Task assignments keyed by the caller's provider (__native__ for Claude, "
+        "__voice__ for voice); model is the legacy fallback.",
         {
             "type": "object",
             "properties": {

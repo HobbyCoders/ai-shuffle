@@ -9,8 +9,9 @@ Tests cover all 5 tools exposed by _create_subagent_tools:
   - deleteSubagent
 
 Tool handlers are invoked directly via tool.handler(args) to avoid
-requiring a running MCP server. The database layer is mocked at the
-function level (app.db.database.*) so no real DB connection is needed.
+requiring a running MCP server. Most tests mock app.db.database functions;
+provider-assignment regressions use the isolated DB shim to exercise agent
+persistence, the compatibility projection, and Task roster resolution.
 """
 
 import json
@@ -39,6 +40,7 @@ def _make_subagent(**kwargs) -> dict:
         "prompt": "You are a test agent.",
         "tools": None,
         "model": None,
+        "provider_models": {},
         "skills": None,
         "memory": None,
         "mcp_servers": None,
@@ -110,6 +112,7 @@ class TestListSubagents:
         assert row["description"] == "Does things"
         assert row["is_builtin"] is True
         assert row["model"] == "claude-opus-4-5"
+        assert row["provider_models"] == {}
         assert row["memory"] == "project"
 
 
@@ -150,6 +153,86 @@ class TestGetSubagent:
         assert data["skills"] == ["python"]
         assert data["mcp_servers"] == [{"name": "foo"}]
         assert data["memory"] == "user"
+        assert data["model"] == "claude-sonnet-4-5"
+        assert data["provider_models"] == {}
+
+
+# =============================================================================
+# Provider-scoped Task assignments (real agent persistence + compatibility view)
+# =============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["listSubagents", "getSubagent"])
+@pytest.mark.parametrize("is_admin", [True, False])
+@pytest.mark.parametrize("legacy_model", [None, "haiku"])
+@pytest.mark.parametrize("caller_provider", [None, "provider-1", "provider-2"])
+async def test_subagent_readouts_preserve_task_assignments(
+    mock_db, tool_name, is_admin, legacy_model, caller_provider
+):
+    from app.core.agent_provider_models import (
+        NATIVE_PROVIDER_KEY,
+        VOICE_PROVIDER_KEY,
+        available_subagents,
+        available_voice_subagents,
+        decode_subagent_binding,
+        provider_key,
+    )
+    from app.db import database
+
+    assignments = {
+        NATIVE_PROVIDER_KEY: "sonnet",
+        "provider-1": "gpt-worker",
+        "provider-2": "prov:provider-1:gpt-worker",
+        VOICE_PROVIDER_KEY: "prov:provider-2:gpt-voice",
+    }
+    for provider_id, model in [
+        ("provider-1", "gpt-worker"), ("provider-2", "gpt-voice")
+    ]:
+        database.create_model_provider(
+            provider_id, provider_id, "openai", "https://example.invalid",
+            auth_token="enc:test-provider-secret",
+            models=[{"id": model}],
+        )
+    database.create_profile(
+        "caller", "Caller", None,
+        {"agent_invoke_mode": "custom", "enabled_agents": ["assigned-worker"]},
+    )
+    config = {"provider_models": assignments}
+    if legacy_model is not None:
+        config["model"] = legacy_model
+    database.create_profile("assigned-worker", "Assigned Worker", None, config)
+
+    tool = get_tool(_create_subagent_tools(is_admin=is_admin), tool_name)
+    result = await tool.handler(
+        {} if tool_name == "listSubagents" else {"subagent_id": "assigned-worker"}
+    )
+    data = _parse_result(result)
+    row = (
+        next(s for s in data["subagents"] if s["id"] == "assigned-worker")
+        if tool_name == "listSubagents" else data
+    )
+    assert row["model"] == legacy_model
+    assert row["provider_models"] == assignments
+    assert "test-provider-secret" not in json.dumps(data)
+    assert "auth_token" not in json.dumps(data)
+
+    roster = available_subagents("caller", caller_provider)
+    assert [target.id for target in roster] == ["assigned-worker"]
+    target = roster[0]
+    binding = decode_subagent_binding(
+        provider_key(caller_provider),
+        row["provider_models"][provider_key(caller_provider)],
+    )
+    assert binding == (
+        target.provider_id if target.provider_pinned else caller_provider,
+        target.model,
+    )
+    voice_target = next(
+        t for t in available_voice_subagents() if t.id == "assigned-worker"
+    )
+    assert decode_subagent_binding(
+        VOICE_PROVIDER_KEY, row["provider_models"][VOICE_PROVIDER_KEY]
+    ) == (voice_target.provider_id, voice_target.model)
 
 
 # =============================================================================
