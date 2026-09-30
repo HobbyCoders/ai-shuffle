@@ -660,7 +660,6 @@ class TurnRecorder:
                     contract.MessageUser,
                     content=user_message or "",
                     profile_id=profile_id,
-                    **({"checkpoint_backed": False} if source == "agent_message" else {}),
                 ))
             await self._append(events)
         except Exception:
