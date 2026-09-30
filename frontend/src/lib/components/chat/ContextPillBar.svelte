@@ -13,9 +13,8 @@
 	 *
 	 * Active chat: the same row, now describing the session's context. The
 	 * agent chip stays a selector and the branch chip stays the checkout
-	 * selector where it was available before; the runner chip is read-only
-	 * unless the session runs on another install, in which case it keeps the
-	 * "Move this session" menu (re-pin / continue-here / unpin). A degraded
+	 * selector where it was available before; the runner chip opens the
+	 * "Move this session" menu for both local and remote owners. A degraded
 	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
 	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
@@ -145,6 +144,7 @@
 	let runnerInstalls = $state<Install[]>([]);
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
+	let runnerMenuError = $state('');
 	let runnerActionPending = $state(false);
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
 
@@ -152,6 +152,7 @@
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
 			ownerId: sessionRow?.instance_id ?? null,
+			isRemote: sessionRow?.is_remote ?? false,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: sessionHasProject,
@@ -161,6 +162,7 @@
 
 	async function loadRunnerMenu() {
 		runnerMenuLoading = true;
+		runnerMenuError = '';
 		const q = gitStateQuery({
 			project_id: sessionRow?.project_id,
 			project_v2_id: sessionRow?.project_v2_id
@@ -179,6 +181,7 @@
 		} catch (e) {
 			console.warn('[ContextPillBar] Failed to list runners:', e);
 			runnerInstalls = [];
+			runnerMenuError = 'Could not load workers. Try again.';
 		}
 		const gitState = await gitStateReq;
 		runnerEligibility = checkoutEligibility(gitState);
@@ -199,7 +202,7 @@
 		const sessionId = $activeSession.sessionId;
 		if (!sessionId) return;
 		// Only Git projects commit and push on the way; plain chats move history alone.
-		if (item.action.kind === 'adopt' && sessionHasProject && !confirmed) {
+		if (sessionHasProject && !confirmed) {
 			pendingResume = { item, sessionId };
 			closeDropdown('runner');
 			return;
@@ -253,9 +256,9 @@
 
 <ConfirmDialog
 	open={!!pendingResume}
-	title="Commit, push and continue here?"
-	message="The owning worker will commit all non-ignored changes and push this branch to origin. This worker will fetch the branch and sync the conversation and context. Ignored files stay on the original worker. If a later step fails, the commit and push are not undone."
-	confirmLabel="Commit, push and continue"
+	title={pendingResume?.item.action?.kind === 'move' ? `Commit, push and move to ${pendingResume.item.label}?` : 'Commit, push and continue here?'}
+	message="The owning worker will commit all non-ignored changes and push this branch to origin. The destination worker will fetch the branch and sync the conversation and context. Ignored files stay on the original worker. If a later step fails, the commit and push are not undone."
+	confirmLabel={pendingResume?.item.action?.kind === 'move' ? 'Commit, push and move' : 'Commit, push and continue'}
 	onConfirm={confirmResume}
 	onCancel={() => (pendingResume = null)}
 />
@@ -289,31 +292,31 @@
 			{@render repoChip()}
 		{/if}
 	{:else}
-		<!-- Runner: read-only "Local", the remote runner with its move menu, or
-		     the degraded warning. -->
+		<!-- Both local and remote persisted sessions expose the move menu. -->
 		{#if badge?.degraded}
 			<span class="ctx-chip readonly degraded" title={badge.title}>
 				<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 				<span class="ctx-chip-label">Read-only — no runner online</span>
 			</span>
-		{:else if badge?.runner}
+		{:else if sessionRow}
 			<div class="runner-badge-wrap" bind:this={runnerMenuRef}>
 				<button
 					type="button"
 					class="ctx-chip runner"
 					class:open={showRunnerMenu}
-					title={badge.title}
-					aria-label="Runner: {badge.runner.deviceName}{badge.runner.online ? '' : ' (offline)'}"
+					title={badge?.title || 'Runs on this device — move this session to another worker'}
+					aria-label="Runner: {badge?.runner?.deviceName ?? 'Local'}{badge?.runner && !badge.runner.online ? ' (offline)' : ''}"
+					disabled={runnerActionPending}
 					aria-haspopup="menu"
 					aria-expanded={showRunnerMenu}
 					onclick={toggleRunnerMenu}
 				>
-					{#if badge.runner.online}
+					{#if !badge?.runner || badge.runner.online}
 						<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
 					{:else}
 						<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 					{/if}
-					<span class="ctx-chip-label">{badge.runner.deviceName}</span>
+					<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
 				</button>
 				{#if showRunnerMenu}
 					<div class="runner-dropdown" role="menu" aria-label="Move this session">
@@ -322,6 +325,11 @@
 								<Loader2 size={14} strokeWidth={1.5} class="spin" />
 								<span>Loading…</span>
 							</div>
+						{:else if runnerMenuError}
+							<div class="runner-loading" role="alert">{runnerMenuError}</div>
+							<button type="button" class="runner-item" role="menuitem" onclick={loadRunnerMenu}>Retry</button>
+						{:else if runnerMenu.length === 0}
+							<div class="runner-loading" role="status">No other workers available.</div>
 						{:else}
 							{#each runnerMenu as item (item.id)}
 								<button

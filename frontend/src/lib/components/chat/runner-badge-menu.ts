@@ -16,6 +16,8 @@ import {
 
 export interface RunnerBadgeMenuInput {
 	ownerId: string | null | undefined;
+	/** Only remote sessions can be continued on this worker. */
+	isRemote: boolean;
 	installs: Install[];
 	eligibility: EligibilityMap;
 	/** Session has a project — ineligible runners 409 on /move. */
@@ -37,7 +39,7 @@ export interface RunnerBadgeMenuItem {
 }
 
 export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMenuItem[] {
-	const items: RunnerBadgeMenuItem[] = [
+	const items: RunnerBadgeMenuItem[] = input.isRemote ? [
 		{
 			id: 'continue-here',
 			label: 'Continue here',
@@ -47,7 +49,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 				? 'Commit and push on the owning worker, then fetch the branch and sync context here'
 				: 'Move this chat and its history to this runner'
 		}
-	];
+	] : [];
 	const peers = peerRunners(input.installs).filter((i) => i.id !== input.ownerId);
 	for (const install of peers) {
 		const blocked = isBlocked(install, input.hasProject, input.eligibility);

@@ -38,6 +38,7 @@ const offlinePeer = install({ id: 'inst-offline', device_name: 'Garage', online:
 function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuInput {
 	return {
 		ownerId: owner.id,
+			isRemote: true,
 		installs: [self, owner, onlinePeer, offlinePeer],
 		eligibility: { 'inst-owner': true, 'inst-online': true, 'inst-offline': true },
 		hasProject: true,
@@ -47,6 +48,13 @@ function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuIn
 }
 
 describe('runnerBadgeMenuItems', () => {
+	it('offers only peer destinations for the local owner, never Continue here', () => {
+		const items = runnerBadgeMenuItems(input({ ownerId: self.id, isRemote: false }));
+		expect(items.map(i => i.id)).toEqual(['move-inst-owner', 'move-inst-online', 'move-inst-offline']);
+		expect(items.find(i => i.id === 'move-inst-offline')?.disabled).toBe(true);
+		expect(runnerBadgeMenuItems(input({ isRemote: false, installs: [self] }))).toEqual([]);
+	});
+
 	it('offers Continue here without an Unpin action', () => {
 		const items = runnerBadgeMenuItems(input());
 		expect(items.map((i) => i.id)).toContain('continue-here');

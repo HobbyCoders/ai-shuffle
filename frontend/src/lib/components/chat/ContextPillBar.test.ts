@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
-import { adoptSession } from '$lib/api/sessions';
+import { adoptSession, moveSession } from '$lib/api/sessions';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -48,6 +48,7 @@ vi.mock('$lib/api/sessions', () => ({ adoptSession: vi.fn(), moveSession: vi.fn(
 afterEach(() => {
 	cleanup();
 	vi.mocked(adoptSession).mockClear();
+	vi.mocked(moveSession).mockReset();
 	execution.mockClear();
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
@@ -123,6 +124,48 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		if (action === 'confirm') expect(adoptSession).toHaveBeenCalledExactlyOnceWith('remote');
 		else expect(adoptSession).not.toHaveBeenCalled();
 		expect(view.queryByRole('dialog')).toBeNull();
+	});
+
+	it.each(['cancel', 'confirm', 'navigate'])('offers a confirmed move for a persisted local Git session: %s', async action => {
+		session.store.set({ ...base, messages: [], projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
+			instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' },
+			{ id: 'offline', is_self: false, online: false, device_name: 'Offline worker' },
+			{ id: 'missing', is_self: false, online: true, device_name: 'Missing checkout' }
+		] });
+		getClusterGitStateMock.mockResolvedValue({ project_v2_id: 'pv2-project', installs: [
+			{ id: 'peer', online: true, eligible: true }, { id: 'missing', online: true, eligible: false }
+		] });
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		const destination = await view.findByRole('menuitem', { name: 'Other worker' });
+		expect(view.queryByRole('menuitem', { name: 'Continue here' })).toBeNull();
+		expect((view.getByRole('menuitem', { name: 'Offline worker' }) as HTMLButtonElement).disabled).toBe(true);
+		expect((view.getByRole('menuitem', { name: 'Missing checkout' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(destination);
+		expect(view.getByRole('dialog')).toBeTruthy();
+		expect(moveSession).not.toHaveBeenCalled();
+		if (action === 'cancel') await fireEvent.click(view.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+		else {
+			if (action === 'navigate') { session.store.set({ ...base, sessionId: 'different' }); await tick(); }
+			await fireEvent.click(view.getByRole('button', { name: 'Commit, push and move' }));
+		}
+		if (action === 'confirm') expect(moveSession).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer');
+		else expect(moveSession).not.toHaveBeenCalled();
+	});
+
+	it('explains empty and failed local worker discovery and supports retry', async () => {
+		session.store.set(base);
+		appSessions.store.set([{ id: base.sessionId, is_remote: false }]);
+		listInstallsMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ installs: [] });
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		expect(await view.findByRole('alert')).toBeTruthy();
+		await fireEvent.click(view.getByRole('menuitem', { name: 'Retry' }));
+		expect(await view.findByRole('status')).toBeTruthy();
 	});
 
 	it('moves a plain chat without the Git publication dialog', async () => {
