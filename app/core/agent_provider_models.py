@@ -648,8 +648,11 @@ def parent_subagent_guidance(
     if task_available:
         parts.append(
             "# Subagent delegation\n"
-            "Use only Task's provider-scoped roster IDs and listed models. "
-            "An override never switches providers; omit it to keep the default. "
+            "Use only the roster IDs exposed by the current provider. "
+            "Defaults may run on another provider. When Task offers a model "
+            "parameter, choose only listed models on the target's provider; "
+            "otherwise omit it. An override never switches providers. "
+            "Never invent a subagent ID, model, or provider. "
             "If the roster is empty, do not delegate. Give an isolated worker "
             "a self-contained brief, verified checkout/prerequisites, allowed "
             "scope and expected result. Choose the role that matches the work: "
@@ -664,7 +667,7 @@ def parent_subagent_guidance(
         parts.append(
             "# Background work\n"
             "Background completion is push-based and wakes the owning "
-            "session, including workers. Parking is not a final assignment "
+            "session, including subagents. Parking is not a final assignment "
             "report. Inspect completion before claiming the work is done. "
             + END_TURN_ON_BACKGROUND
             + " No sleep loops or status polling. "
@@ -676,8 +679,9 @@ def parent_subagent_guidance(
     if browser_available:
         parts.append(
             "# Verifying a UI change\n"
-            "Verify rendered UI in the browser at the affected viewport "
-            "before the PR, not with unit tests alone. Discover the browser "
+            "Verify rendered UI (frontend/, .svelte, .css or viewport meta) "
+            "in the browser at the affected viewport before the PR, not "
+            "with unit tests alone. Discover the browser "
             "tools from the effective catalog when needed."
         )
     return "\n\n".join(parts)

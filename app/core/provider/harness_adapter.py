@@ -4827,7 +4827,10 @@ them before you hand the work back."""
 
 def _verification_section(tools: Optional[frozenset[str]] = None) -> str:
     """Unavailable browser access is a verification gap, never an escape hatch."""
-    browser_tools = {"browser_navigate", "browser_snapshot", "browser_eval"}
+    browser_tools = {
+        "browser_navigate", "browser_snapshot", "browser_eval", "browser_act",
+        "browser_screenshot", "browser_resize",
+    }
     leaves = {name.rsplit("__", 1)[-1] for name in tools} if tools is not None else None
     if leaves is None or browser_tools <= leaves:
         return VERIFICATION_BLOCK

@@ -60,8 +60,17 @@ def test_write_without_browser_is_a_gap_not_a_bypass(tmp_path):
 
 @pytest.mark.parametrize("prefix", ["", "mcp__browser__"])
 def test_browser_contract_accepts_leaf_or_wire_names(prefix):
-    tools = frozenset(prefix + name for name in ("browser_navigate", "browser_snapshot", "browser_eval"))
+    tools = frozenset(prefix + name for name in (
+        "browser_navigate", "browser_snapshot", "browser_eval", "browser_act",
+        "browser_screenshot", "browser_resize",
+    ))
     assert ha._verification_section(tools) == ha.VERIFICATION_BLOCK
+
+
+def test_partial_browser_surface_does_not_prescribe_missing_interactions():
+    text = ha._verification_section(frozenset({"browser_navigate", "browser_snapshot", "browser_eval"}))
+    assert "browser_act" not in text and "browser_screenshot" not in text
+    assert "unavailable" in text and "do not claim it verified" in text
 
 
 @pytest.mark.parametrize("paths", [
