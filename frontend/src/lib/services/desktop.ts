@@ -161,9 +161,9 @@ function resolveHex(cssColor: string, fallback: string): string {
 }
 
 /**
- * A downloaded update is announced once, in the bell, with a button that
- * restarts into it. The item is local to this window (not persisted to the
- * worker), because it is about this computer's app, not the worker.
+ * A downloaded desktop update is announced once in this window's bell.
+ * Its action enters the shared worker-update control, which prepares and
+ * installs according to the current account scope, not the shell alone.
  */
 let announcedUpdateVersion: string | null = null;
 
