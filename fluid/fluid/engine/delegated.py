@@ -430,6 +430,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # read yet. Kept across drains: a Stop ends the drain, not the wake,
         # and the next drain must still wait for that result.
         self._wake_in_flight = False
+        # Peer input may not start a CLI cycle after the admitted host turn ends.
+        self._peer_admission_open = False
         # A hook on a bridge-served call answered ``continue: false``: the
         # reason, reported as the turn's ErrorEvent once the CLI's result
         # lands (the native loop ends its turn the same way).
@@ -552,6 +554,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         raises into the turn, which ends on an ErrorEvent. The rejected
         deltas stay batched, so that terminal write retries them first.
         """
+        if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
+            self._peer_admission_open = False
         sequenced = await self.bus.publish(event)
         await persist_event(self.store, sequenced)
         return sequenced
@@ -611,6 +615,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         elif isinstance(op, (Steer, AgentMessage)):
             await self._deliver_steer(op)
         elif isinstance(op, Interrupt):
+            self._peer_admission_open = False
             self._interrupted.set()
             pulse, self._stop_pulse = self._stop_pulse, asyncio.Event()
             pulse.set()
@@ -643,6 +648,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.settings = json.dumps(settings)
 
     async def aclose(self) -> None:
+        self._peer_admission_open = False
         await self._close_background_lifecycle()
         self._interrupted.set()
         # Settle anyone parked on a control reply: the CLI is going away, so
@@ -1033,6 +1039,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc))
             )
         finally:
+            self._peer_admission_open = False
             self._active_turn_id = None
             self._pending_usage_snapshots.clear()
             self._snapshot_call_index.clear()
@@ -1096,10 +1103,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # handle in play that is the rejected-handle exit.
                 failure = f"claude stdin closed before the turn was sent: {exc!r}"
             else:
+                self._peer_admission_open = not self._interrupted.is_set()
                 async with self._stdout_lock:
                     failure = await self._read_until_result(sid, turn_id, mapper, user_node)
             if failure is None:
                 return mapper
+            self._peer_admission_open = False
             if attempt == 1 and self._resume_handle_rejected(mapper):
                 logger.warning(
                     "claude did not accept --resume %s (%s); starting a fresh "
@@ -1212,8 +1221,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Raises ``RuntimeError`` when there is nothing live to steer into: no
         running turn (send a ``UserTurn`` instead), an interrupt already
         requested for the running turn, or no live CLI process behind it. The
-        caller is expected to fall back to queueing the message.
+        caller is expected to fall back to queueing the message. Peer admission
+        closes when the result is read, before terminal bus/store awaits; unlike
+        authorized user steering, a peer may not wake an unadmitted CLI cycle.
         """
+        if isinstance(op, AgentMessage) and not self._peer_admission_open:
+            raise RuntimeError("peer admission is closed; queue the message instead")
         if self._turn_task is None or self._turn_task.done():
             raise RuntimeError("no turn is running; submit a UserTurn instead")
         if self._interrupted.is_set():
@@ -1521,6 +1534,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if not isinstance(frame, dict):
                 continue  # valid JSON but not a frame (a stray number, a list)
 
+            if frame.get("type") == "result":
+                # A completed CLI result cannot admit an unrequested peer cycle,
+                # even while terminal publication or storage is still pending.
+                self._peer_admission_open = False
             mapped = mapper.feed(frame)
             if mapped.hook_request is not None:
                 # The CLI waits on this answer before it goes on, so it is
