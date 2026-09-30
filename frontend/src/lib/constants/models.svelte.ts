@@ -439,13 +439,13 @@ export function getClaudeContextWindow(value: string | null | undefined): number
 
 /**
  * `provider_type` values that identify an OpenAI/Codex row — the only gateway
- * kinds whose GPT-5 and Astra models expose the fast-output service tier.
+ * kinds whose GPT-5 and GPT-6 models expose the fast-output service tier.
  * `chatgpt` is the Codex subscription row, `openai` the API-key one.
  */
 const OPENAI_PROVIDER_TYPES: readonly string[] = ['chatgpt', 'openai'];
 
-/** Provider model ids that carry the fast tier (GPT-5 models and GPT-6 Astra). */
-const FAST_PROVIDER_MODEL_RE = /^(?:gpt-5|gpt-6-astra$)/i;
+/** GPT-5 and versioned GPT-6 models, including the named ChatGPT variants. */
+const FAST_PROVIDER_MODEL_RE = /^(?:gpt-5|gpt-6(?:\.\d+)*(?:-(?:astra|sol|luna|terra))?$)/i;
 
 /**
  * True when `value` names a model that supports "fast mode" — the higher-priced
@@ -454,7 +454,7 @@ const FAST_PROVIDER_MODEL_RE = /^(?:gpt-5|gpt-6-astra$)/i;
  * Two shapes qualify:
  *  - a native Claude preset in the `opus` family;
  *  - a `prov:<providerId>:<modelId>` composite whose model id starts with
- *    `gpt-5` or is `gpt-6-astra`, AND whose provider row is an OpenAI/Codex kind.
+ *    `gpt-5` or matches the GPT-6 family, AND whose provider row is an OpenAI/Codex kind.
  *    When the row isn't in the hydrated registry (pre-hydration, or a row that was
  *    disabled after the pick was stored) the id match alone decides, so the
  *    toggle doesn't blink out while `/models` is still in flight.

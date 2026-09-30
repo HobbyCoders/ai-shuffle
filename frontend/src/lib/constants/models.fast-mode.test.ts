@@ -46,7 +46,7 @@ describe('isFastModeCapable — native Claude models', () => {
 });
 
 describe('isFastModeCapable — provider composites', () => {
-	it('accepts GPT-5 and Astra on OpenAI/Codex rows and rejects other providers', async () => {
+	it('accepts GPT-5 and GPT-6 on OpenAI/Codex rows and rejects other providers', async () => {
 		mocks.get.mockResolvedValueOnce({
 			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
@@ -87,12 +87,18 @@ describe('isFastModeCapable — provider composites', () => {
 		expect(isFastModeCapable(encodeProviderModel('oai', 'gpt-5.6'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('codex', 'gpt-5.6-sol'))).toBe(true);
 		for (const provider of ['oai', 'codex']) {
-			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-6-astra'))).toBe(true);
+			for (const model of ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1']) {
+				expect(isFastModeCapable(encodeProviderModel(provider, model))).toBe(true);
+			}
+			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-6.1-sol-custom'))).toBe(false);
+			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-60-sol'))).toBe(false);
 			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-6-astra-custom'))).toBe(false);
 		}
 		// Right model id, wrong provider kind.
 		expect(isFastModeCapable(encodeProviderModel('or', 'gpt-5.6'))).toBe(false);
 		expect(isFastModeCapable(encodeProviderModel('or', 'gpt-6-astra'))).toBe(false);
+		expect(isFastModeCapable(encodeProviderModel('or', 'gpt-6.1-sol'))).toBe(false);
+		expect(isFastModeCapable('gpt-6.1-sol')).toBe(false);
 		expect(isFastModeCapable(encodeProviderModel('or', 'openai/gpt-6-astra'))).toBe(false);
 		expect(isFastModeCapable('gpt-6-astra')).toBe(false);
 		// The provider kind alone does not give other model families a fast tier.
@@ -105,6 +111,7 @@ describe('isFastModeCapable — provider composites', () => {
 		// must not blink out while `/models` is still in flight.
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-5.6'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-6-astra'))).toBe(true);
+		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-6.1-sol'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'claude-3'))).toBe(false);
 	});
 });
