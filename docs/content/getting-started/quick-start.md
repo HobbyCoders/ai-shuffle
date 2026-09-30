@@ -29,6 +29,8 @@ Agents control how the AI behaves. To create one:
 
 The model, reasoning effort and permission mode are picked per session in the composer, not stored on the agent. You can also choose **Generate** to create an agent from a description.
 
+You can change **reasoning effort** and toggle **Fast mode** (where supported) while a session is running. The owning worker acknowledges the change without stopping the turn or requiring another message. It applies to subsequent model calls; a request already in flight keeps its original settings. If the worker is unreachable or the provider refuses the change, the composer does not claim it was applied. These changes are session-specific, not account-wide provider settings.
+
 ## Set Up a Project
 
 Projects link to directories on your system:

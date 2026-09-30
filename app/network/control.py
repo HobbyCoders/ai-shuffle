@@ -220,7 +220,13 @@ def _permission_mode_handler():
     return handle
 
 
+def _run_settings_handler():
+    from app.api.sessions_permissions import handle_run_settings
+    return handle_run_settings
+
+
 _LAZY_HANDLERS = {
+    "run-settings": _run_settings_handler,
     "permission-mode": _permission_mode_handler,
     "session-active": _session_active_handler,
     "handoff": _handoff_handler,

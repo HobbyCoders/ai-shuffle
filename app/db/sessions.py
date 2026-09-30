@@ -914,6 +914,7 @@ def set_session_run_binding(
     fast: Optional[bool] = None,
     workspace_project_ids: Optional[List[str]] = None,
     preserve_provider: bool = False,
+    clear_effort: bool = False,
 ) -> None:
     """Persist the run binding a turn actually used onto its session.
 
@@ -936,7 +937,8 @@ def set_session_run_binding(
     that sent no override must not erase the binding). ``fast`` is the one
     exception to "non-empty": it is a BOOLEAN, so ``False`` is a real value the
     user picked and is written through — only ``None`` (the field was absent)
-    leaves the row alone.
+    leaves the row alone. ``clear_effort`` explicitly removes the session's
+    effort binding (the live settings endpoint's model-default choice).
     """
     _ph = ph()
     updates: List[str] = []
@@ -952,9 +954,9 @@ def set_session_run_binding(
                 updates.append(f"provider_id = {_ph}")
                 values.append(rebound_provider)
     clean_effort = (effort or "").strip()
-    if clean_effort:
+    if clean_effort or clear_effort:
         updates.append(f"effort = {_ph}")
-        values.append(clean_effort)
+        values.append(clean_effort or None)
     clean_permission = (permission_mode or "").strip()
     if clean_permission:
         updates.append(f"permission_mode = {_ph}")

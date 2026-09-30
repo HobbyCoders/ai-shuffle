@@ -192,6 +192,10 @@ class ProviderAdapter(ABC):
     async def set_permission_mode(self, mode: str) -> None:
         """Change the permission mode for subsequent queries."""
 
+    async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
+        """Acknowledge session-only effort/Fast changes, or refuse if unsupported."""
+        raise NotImplementedError("Live effort/Fast changes are not supported by this adapter")
+
     # ─── Session Identity ─────────────────────────────────────────────
 
     @property

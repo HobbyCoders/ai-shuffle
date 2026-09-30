@@ -66,6 +66,47 @@ def _sent(record: Path, subtype: str) -> list[dict]:
             and (r["frame"].get("request") or {}).get("subtype") == subtype]
 
 
+async def test_acknowledged_run_settings_keep_cli_process_and_update_spawn_flags(tmp_path):
+    loop, record = _loop(tmp_path)
+    loop.effort = "high"
+    loop.settings = json.dumps({"fastMode": False, "env": {"SAFE_TEST": "keep"}})
+    try:
+        await _turn(loop)
+        proc = loop._proc
+        await loop.set_run_settings(effort="low", fast=True)
+        await loop.set_run_settings(effort=None, fast=False)
+        assert loop._proc is proc
+        assert loop.effort is None
+        assert json.loads(loop.settings) == {"effortLevel": None, "fastMode": False, "env": {"SAFE_TEST": "keep"}}
+        sent = _sent(record, "apply_flag_settings")
+        assert sent[0]["request"]["settings"]["effortLevel"] == "low"
+        assert sent[1]["request"]["settings"]["fastMode"] is False
+        assert loop._setting_request("apply_flag_settings")["settings"] == json.loads(loop.settings)
+        argv = loop._build_argv()
+        assert "--effort" not in argv
+        assert json.loads(argv[argv.index("--settings") + 1])["fastMode"] is False
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("how", ["error", "mute"])
+async def test_unacknowledged_run_settings_do_not_record_success(tmp_path, monkeypatch, how):
+    monkeypatch.setattr(delegated_mod, "CONTROL_TIMEOUT", 0.2)
+    loop, record = _loop(tmp_path, {"apply_flag_settings": how})
+    loop.effort = "high"
+    loop.settings = '{"fastMode":false}'
+    try:
+        await _turn(loop)
+        with pytest.raises(RuntimeError, match="apply_flag_settings"):
+            await loop.set_run_settings(effort="low", fast=True)
+        assert loop.effort == "high"
+        assert json.loads(loop.settings)["fastMode"] is False
+        assert loop._setting_request("apply_flag_settings")["settings"] == {"effortLevel": "high", "fastMode": False}
+        assert len(_sent(record, "apply_flag_settings")) == 1
+    finally:
+        await loop.aclose()
+
+
 async def test_acknowledged_switches_are_recorded(tmp_path) -> None:
     loop, record = _loop(tmp_path)
     try:

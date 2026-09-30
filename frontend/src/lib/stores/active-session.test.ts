@@ -212,6 +212,85 @@ describe('live permission selection', () => {
 });
 
 
+describe('live effort and Fast mode selection', () => {
+	beforeEach(() => {
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
+		sessionEphemeralCache.clear();
+		Object.assign(activeSession.current, { sessionId: 'live-knobs', effortLevelOverride: 'high', fastMode: false, isStreaming: true });
+	});
+	afterEach(() => { vi.restoreAllMocks(); activeSession.current.sessionId = null; });
+
+	it('waits for acknowledgement and changes both knobs without stopping', async () => {
+		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
+		const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setEffortLevelOverride('low');
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low' });
+		expect(activeSession.current.effortLevelOverride).toBe('high');
+		acknowledge({ effort: 'low', fast: false });
+		await pending;
+		put.mockResolvedValueOnce({ effort: 'low', fast: true });
+		await activeSession.setFastMode(true);
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.fastMode).toBe(true);
+		expect(activeSession.current.isStreaming).toBe(true);
+		expect(hoisted.reconnect).not.toHaveBeenCalled();
+	});
+
+	it('retains picks after rejection and does not submit a message', async () => {
+		vi.spyOn(api, 'put').mockRejectedValue(new Error('unreachable'));
+		await activeSession.setFastMode(true);
+		expect(activeSession.current.fastMode).toBe(false);
+		expect(activeSession.current.isStreaming).toBe(true);
+	});
+
+	it('does not apply replies to another open session', async () => {
+		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
+		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setEffortLevelOverride('low');
+		activeSession.current.sessionId = 'different-session';
+		acknowledge({ effort: 'low', fast: false });
+		await pending;
+		expect(activeSession.current.effortLevelOverride).toBe('high');
+	});
+
+	it('retires pending picks and queued requests at an account boundary', async () => {
+		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
+		const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setEffortLevelOverride('low');
+		const queued = activeSession.setFastMode(true);
+		bindSessionOwner('account-before', 'account-after');
+		acknowledge({ effort: 'low', fast: false });
+		await Promise.all([pending, queued]);
+		expect(put).toHaveBeenCalledTimes(1);
+		expect(activeSession.current.effortLevelOverride).toBe('high');
+		expect(activeSession.current.fastMode).toBe(false);
+	});
+
+	it('serializes rapid picks and lets the latest acknowledged pick win', async () => {
+		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
+		const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }))
+			.mockResolvedValueOnce({ effort: 'medium', fast: false });
+		const first = activeSession.setEffortLevelOverride('low');
+		const second = activeSession.setEffortLevelOverride('medium');
+		expect(put).toHaveBeenCalledTimes(1);
+		acknowledge({ effort: 'low', fast: false });
+		await Promise.all([first, second]);
+		expect(put).toHaveBeenLastCalledWith('/sessions/live-knobs/run-settings', { effort: 'medium' });
+		expect(activeSession.current.effortLevelOverride).toBe('medium');
+	});
+
+	it('supports explicit default effort and turning Fast mode off', async () => {
+		const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: null, fast: false });
+		activeSession.current.fastMode = true;
+		await activeSession.setEffortLevelOverride(null);
+		await activeSession.setFastMode(false);
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null });
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { fast: false });
+		expect(activeSession.current.effortLevelOverride).toBeNull();
+		expect(activeSession.current.fastMode).toBe(false);
+	});
+});
+
 describe('activeSession.resolveInteractionByRequestId (#606 item 4)', () => {
 	beforeEach(() => {
 		// Reset the singleton's queues to a known-empty baseline before each test
