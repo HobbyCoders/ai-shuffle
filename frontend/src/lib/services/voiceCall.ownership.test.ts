@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
-const api = vi.hoisted(() => ({ mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
+const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
 import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic } from './voiceCall';
 
@@ -33,6 +33,22 @@ afterEach(async () => { await hangup(); vi.restoreAllMocks(); vi.unstubAllGlobal
 const start = () => startCall('owner', { client_secret: 'test', model: 'test-model' });
 
 describe('voice owner lifecycle', () => {
+ it('attaches ordinary audio to the same conversation using the returned credential, without a second mint', async () => {
+  api.prepareConversationCall.mockResolvedValue({ session_id: 'owner', client_secret: 'attached', model: 'test-model' });
+  await startCallForSession('owner', { attach: true });
+  expect(api.prepareConversationCall).toHaveBeenCalledWith('owner');
+  expect(api.mintVoiceSecret).not.toHaveBeenCalled();
+  expect(get(voiceCallState).sessionId).toBe('owner');
+  expect(capture).toHaveBeenCalledTimes(1);
+ });
+ it('does not capture microphone audio after attachment is refused', async () => {
+  api.prepareConversationCall.mockRejectedValue({ detail: 'Conversation is not eligible', status: 404 });
+  await startCallForSession('owner', { attach: true });
+  expect(get(voiceCallState)).toMatchObject({ status: 'error', error: 'Conversation is not eligible' });
+  expect(api.mintVoiceSecret).not.toHaveBeenCalled();
+  expect(capture).not.toHaveBeenCalled();
+ });
+
 	it('serializes rapid typed sends before response.created arrives', async () => {
 		await start();
 		expect(sendVoiceText('owner', 'first')).toBe(true);

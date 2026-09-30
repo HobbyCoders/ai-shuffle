@@ -29,6 +29,7 @@ Deliberately small surface:
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -646,18 +647,23 @@ def _reject_when_capped(session_id: str) -> None:
 
 
 async def _load_voice_session(session_id: str) -> Dict[str, Any]:
-    """The session row, or a 404 when it is missing or is not a voice session.
+    """A legacy voice row or an explicitly attached normal conversation.
 
-    A chat session is 404 rather than 400 on purpose: the voice call surface
-    simply does not exist for it (ruling VM7 — modes never mix in V1).
+    Ordinary sessions remain 404 until /attach pins their separate call binding.
+    Attachment never changes their mode, agent, model or permission ceiling.
 
     Existence only. Every HTTP route goes through :func:`_require_voice_session`
     so the caller's access is checked as well; the audio WebSocket, which has
     no ``Request``, applies :func:`_check_voice_session_access` itself.
     """
     row = await run_sync(database.get_session, session_id)
-    if not row or row.get("mode") != "voice":
+    config = (row or {}).get("voice_config") or {}
+    if isinstance(config, str):
+        config = json.loads(config)
+    if not row or (row.get("mode") != "voice" and not config.get("conversation_surface")):
         raise HTTPException(status_code=404, detail="Voice session not found.")
+    if row.get("mode") != "voice":
+        await run_sync(_check_attachable_conversation, row)
     return row
 
 
@@ -925,6 +931,72 @@ async def create_voice_session(
 # Call surface — re-mint, attach, hangup, state
 # ============================================================================
 
+def _check_attachable_conversation(row):
+    from app.core.config import settings
+    if (row.get("instance_id") != settings.effective_instance_id
+            or row.get("is_worker") or row.get("parent_session_id")
+            or row.get("hidden") or row.get("status") == "archived"):
+        raise HTTPException(404, "Conversation is not eligible for call attachment.")
+    from app.db import turns
+    turn = turns.get_live_turn(row["id"]) or turns.get_latest_turn(row["id"]) or {}
+    if ((turn.get("payload") or {}).get("_assistant_proactive") is not None
+            or (turn.get("overrides") or {}).get("_assistant_proactive") is not None):
+        raise HTTPException(403, "Background observation cannot acquire a voice surface.")
+
+
+class VoiceAttachRequest(BaseModel):
+    # Call funding only; never rebinds the conversation agent/text provider.
+    provider_id: Optional[str] = None
+
+
+@router.post("/sessions/{session_id}/attach", response_model=VoiceSessionResponse)
+async def prepare_voice_attachment(
+    http_request: Request, session_id: str, request: VoiceAttachRequest,
+    token: str = Depends(require_auth),
+):
+    """Attach audio to an existing conversation without creating another history.
+
+    Same response/handshake as POST /sessions. Saved voice bindings are reused;
+    first attachment pins current voice settings independently of text bindings.
+    """
+    voice_settings = await _require_voice_enabled()
+    row = await run_sync(database.get_session, session_id)
+    if not row:
+        raise HTTPException(404, "Session not found.")
+    _check_voice_session_access(get_api_user_from_request(http_request), row)
+    if row.get("mode") != "voice":
+        await run_sync(_check_attachable_conversation, row)
+    _reject_when_capped(session_id)
+    config = row.get("voice_config")
+    if isinstance(config, str):
+        config = json.loads(config)
+    if not config:
+        config = {
+            "model": voice_settings["voice_model"], "voice": voice_settings["voice_voice"],
+            "provider_id": request.provider_id or voice_settings.get("voice_provider_id"),
+            "options": voice_settings.get("voice_options", {}), "greet": False,
+        }
+    elif request.provider_id and request.provider_id != config.get("provider_id"):
+        raise HTTPException(400, "This conversation already has a saved voice provider binding.")
+    api_user = get_api_user_from_request(http_request)
+    provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if (config["model"] == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
+        raise HTTPException(400, "The voice model does not belong to the selected provider.")
+    config = {**config, "provider_id": provider_row["id"],
+              "conversation_surface": row.get("mode") != "voice"}
+    secret, expires_at = "", None
+    if transport_for(config["model"]) == "webrtc":
+        body = await _mint_client_secret(api_key, config["model"], config["voice"], config.get("options"))
+        secret, expires_at = _extract_client_secret(body)
+    from app.db.sessions import set_session_voice_binding
+    await run_sync(set_session_voice_binding, session_id, config)
+    _remember_client_secret(session_id, secret, expires_at)
+    return VoiceSessionResponse(session_id=session_id, client_secret=secret,
+                                expires_at=expires_at, model=config["model"],
+                                options=config.get("options", {}))
+
+
 @router.post("/sessions/{session_id}/secret", response_model=VoiceSecretResponse)
 async def mint_voice_session_secret(
     http_request: Request,
@@ -1053,7 +1125,8 @@ async def attach_voice_call(
     client_tools = _sanitize_client_tools(
         request.client_tools,
         reserved_names={t["name"] for t in voice_bridge.VOICE_TOOLS}
-        | {t["name"] for t in voice_bridge.VOICE_WEB_TOOLS},
+        | {t["name"] for t in voice_bridge.VOICE_WEB_TOOLS}
+        | {"submit_to_chat"},
     )
     client_instructions = (request.client_instructions or "").strip() or None
     if client_instructions and len(client_instructions) > MAX_CLIENT_INSTRUCTIONS_CHARS:
@@ -1078,6 +1151,14 @@ async def attach_voice_call(
     from app.core.voice_options import effective_options
     options = effective_options(config)
     instructions_override = options["instructions"] or voice_bridge.VOICE_INSTRUCTIONS
+    if session_row.get("mode") != "voice":
+        # Audio is an overlay, not a new agent. Substantive work runs through
+        # the same conversation queue, profile, model and permission ceiling.
+        instructions_override = await run_sync(voice_bridge.conversation_instructions, session_row)
+        if client_tools:
+            raise HTTPException(400, "Conversation calls do not expose client-side action tools.")
+        if client_instructions:
+            raise HTTPException(400, "Conversation call instructions come from the session agent.")
     if session_mode is not None:
         appendix = voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
         instructions_override = f"{instructions_override}\n\n{appendix}"
@@ -1090,7 +1171,7 @@ async def attach_voice_call(
     # Both the caller and the row must be the owner's: a worker row carries no
     # ``api_user_id`` yet belongs to its parent's key, which may attach to it.
     app_tools: List[Any] = []
-    if api_user is None and not session_row.get("api_user_id"):
+    if api_user is None and not session_row.get("api_user_id") and session_row.get("mode") == "voice":
         app_tools = await run_sync(
             _voice_app_tools, session_row.get("project_id"),
         )
@@ -1123,6 +1204,7 @@ async def attach_voice_call(
             instructions_override=instructions_override,
             voice_options=options,
             app_tools=app_tools,
+            conversation_surface=session_row.get("mode") != "voice",
             greet=greet,
         )
     except HTTPException:

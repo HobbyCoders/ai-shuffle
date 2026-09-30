@@ -136,14 +136,50 @@ def set_source(assistant_id, connector_id, enabled):
         return row
 
 
+def owner_connector(conn, connector):
+    """Normal owner connectors use auto-created integration API credentials.
+
+    A connector API user is not its owner: the owner-only connector API creates
+    a dedicated, non-login user with this exact durable provenance. Existing
+    regular API-user connections stay outside the owner assistant scope.
+    """
+    user_id = connector.get("api_user_id")
+    if user_id is None:
+        return True
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM api_users WHERE id=%s", (user_id,))
+    user = cursor.fetchone()
+    return bool(user and not user["web_login_allowed"] and
+                user["description"] == "Auto-created API user for connector " + connector["id"])
+
+
+def connector_grant_available(conn, connector, agent_id):
+    if not owner_connector(conn, connector):
+        return False
+    user_id = connector.get("api_user_id")
+    if user_id is None:
+        return True
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_active,profile_id FROM api_users WHERE id=%s", (user_id,))
+    user = cursor.fetchone()
+    if not user or not user["is_active"]:
+        return False
+    cursor.execute("SELECT profile_id FROM api_user_profiles WHERE api_user_id=%s", (user_id,))
+    allowed = {row["profile_id"] for row in cursor.fetchall()}
+    if user["profile_id"]:
+        allowed.add(user["profile_id"])
+    return not allowed or agent_id in allowed
+
+
 def trusted_source(conn, state, connector_id):
     """Recheck the live connector grant, owner and runner inside admission/write."""
     cursor = conn.cursor()
     cursor.execute("""SELECT c.* FROM connectors c JOIN assistant_sources s ON s.connector_id=c.id
         WHERE s.assistant_id=%s AND c.id=%s AND s.enabled=TRUE AND c.is_active=TRUE
-        AND c.api_user_id IS NULL AND c.runner_id=%s AND c.status='connected'""",
+        AND c.runner_id=%s AND c.status='connected'""",
         (state["id"], connector_id, state["runner_id"]))
-    return row_to_dict(cursor.fetchone())
+    connector = row_to_dict(cursor.fetchone())
+    return connector if connector and connector_grant_available(conn, connector, state["agent_id"]) else None
 
 
 def record_observations(assistant_id, connector_id, observations, watermark=None):
@@ -160,6 +196,7 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_events WHERE assistant_id=%s AND status='pending'", (assistant_id,))
         remaining = max(0, 100 - cursor.fetchone()["n"])
         inserted = []
+        overflow = len(observations) > 50
         for event_type, external_id, payload in observations[:50]:
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
             if len(encoded) > 16000:
@@ -167,6 +204,7 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
             identity = str(external_id) if external_id else encoded
             fingerprint = hashlib.sha256((event_type + ":" + identity).encode()).hexdigest()
             if remaining == 0:
+                overflow = True
                 break
             cursor.execute("""INSERT INTO assistant_events (id,assistant_id,source_id,event_type,fingerprint,payload)
                 VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING *""",
@@ -176,8 +214,11 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
                 inserted.append(event)
                 remaining -= 1
         cursor.execute("UPDATE assistant_sources SET last_observed_at=NOW(),last_error=%s WHERE assistant_id=%s AND connector_id=%s",
-                       ("Observation inbox full; overflow not queued" if remaining == 0 else None, assistant_id, connector_id))
-        if watermark is not None:
+                       ("Observation inbox full; overflow not queued" if overflow else None, assistant_id, connector_id))
+        # A poll watermark acknowledges the whole observed batch. If capacity
+        # excluded any event, leave it unseen so a later bounded scan can retry
+        # after admission drains the inbox; fingerprints suppress redelivery.
+        if watermark is not None and not overflow:
             cursor.execute("UPDATE assistant_sources SET watermark=%s WHERE assistant_id=%s AND connector_id=%s", (json.dumps(watermark), assistant_id, connector_id))
         return inserted
 
@@ -203,8 +244,12 @@ def get_activity(assistant_id, limit=50, active_only=False):
     with get_db() as conn:
         cursor = conn.cursor()
         sql = ("SELECT r.*,s.title AS session_title,s.status AS session_status,s.profile_id AS session_agent_id,"
-               "a.name AS agent_name,a.config AS agent_config FROM assistant_runs r "
-               "LEFT JOIN sessions s ON s.id=r.session_id LEFT JOIN agents a ON a.id=s.profile_id WHERE r.assistant_id=%s")
+               "a.name AS agent_name,a.config AS agent_config,s.total_cost_usd AS session_reported_cost,"
+               "t.state AS linked_turn_state,t.error AS linked_turn_error,t.ended_at AS linked_turn_ended_at "
+               "FROM assistant_runs r LEFT JOIN sessions s ON s.id=r.session_id "
+               "LEFT JOIN agents a ON a.id=s.profile_id LEFT JOIN turns t ON t.id=("
+               "SELECT id FROM turns WHERE session_id=s.id ORDER BY position DESC,created_at DESC LIMIT 1) "
+               "WHERE r.assistant_id=%s")
         if active_only:
             sql += " AND r.kind='proactive' AND r.status IN ('admitted','submitting','running','cancelling')"
         cursor.execute(sql + " ORDER BY r.created_at DESC LIMIT %s", (assistant_id, limit))
@@ -216,6 +261,18 @@ def get_activity(assistant_id, limit=50, active_only=False):
                 config = json.loads(config)
             avatar = config.get("avatar_id", "robot")
             row["avatar_id"] = avatar if avatar in AVATAR_PRESETS else "robot"
+            reported_cost = row.pop("session_reported_cost", None)
+            linked_state = row.pop("linked_turn_state", None)
+            linked_error = row.pop("linked_turn_error", None)
+            linked_ended_at = row.pop("linked_turn_ended_at", None)
+            if row["kind"] != "proactive":
+                # A relationship is stored once, not settled as a research run.
+                # Reflect the linked normal session's real latest outcome and
+                # cumulative reported usage rather than perpetual "linked"/$0.
+                row["status"] = linked_state or row["session_status"] or row["status"]
+                row["cost_usd"] = max(0.0, float(reported_cost or 0))
+                row["error"] = linked_error
+                row["ended_at"] = linked_ended_at
             result.append(row)
         return result
 

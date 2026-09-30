@@ -12,6 +12,8 @@
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
+	import AssistantConversationHeader from '$lib/components/assistant/AssistantConversationHeader.svelte';
+	import { assistantState } from '$lib/stores/assistant';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -49,6 +51,7 @@
 	// hero with the session's own title + a "cleared" hint instead of the
 	// brand-new "Let's build your project" workspace picker.
 	const isClearedSession = $derived(chatSurface === 'cleared');
+	const primaryAssistant = $derived($activeSession.sessionId && $assistantState?.home_session_id === $activeSession.sessionId ? $assistantState : null);
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
 	// The lane this surface belongs to. The store carries it for BOTH an opened
@@ -219,6 +222,7 @@
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
+	<AssistantConversationHeader sessionId={$activeSession.sessionId} thinking={$activeSession.isStreaming} />
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
@@ -234,7 +238,12 @@
 			{/if}
 
 			<div class="empty-hero-content">
-				{#if isClearedSession}
+				{#if primaryAssistant}
+					<div class="cleared-hero">
+						<h1 class="cleared-title">{primaryAssistant.introduction.preferred_name ? `Hello, ${primaryAssistant.introduction.preferred_name}.` : 'Where shall we begin?'}</h1>
+						<p class="cleared-hint">Message {primaryAssistant.assistant_name} here. Plan together, pick up a task, or start a call — this conversation stays with you.</p>
+					</div>
+				{:else if isClearedSession}
 					<!-- Bound existing session with an empty transcript (cleared via the
 					     sessions-board broom, #558). Show its OWN title + a cleared
 					     hint so it never reads as a brand-new chat. The project is

@@ -102,6 +102,18 @@ def configure(changes):
     return get_state()
 
 
+def agent_identities():
+    # ProfileConfig's normal typed serializer deliberately does not contain
+    # assistant presentation metadata. This owner-only projection uses the
+    # SAME unified agent records/IDs, never a parallel agent registry.
+    result = []
+    for agent in database.get_all_profiles():
+        avatar = (agent.get("config") or {}).get("avatar_id", "robot")
+        result.append({"id": agent["id"], "name": agent["name"],
+                       "avatar_id": avatar if avatar in AVATAR_PRESETS else "robot"})
+    return result
+
+
 def update_agent_identity(agent_id, name=None, avatar_id=None, _conn=None):
     if avatar_id is not None and avatar_id not in AVATAR_PRESETS:
         raise ValueError("Unknown avatar preset")
@@ -168,7 +180,10 @@ def get_primary_session_id():
 
 
 def is_primary_session(session_id):
-    return bool(session_id and session_id == get_primary_session_id())
+    if not session_id or session_id != get_primary_session_id():
+        return False
+    session = database.get_session(session_id)
+    return bool(session and session.get("api_user_id") is None and session.get("instance_id") == assistant_id())
 
 
 def session_stopped(session_id):
@@ -194,17 +209,19 @@ def session_stopped(session_id):
 def source_catalog():
     from app.core.connectors.registry import get_connector_class
     selections = {s["connector_id"]: s for s in store.get_sources(assistant_id())}
+    state = store.get_state(assistant_id()) or {}
     result = []
     for connector in database.get_all_connectors():
-        # Never reveal API-user connections, their labels, config or secrets.
-        if connector.get("api_user_id") is not None:
-            continue
+        with get_db() as conn:
+            if not store.owner_connector(conn, connector):
+                continue
+            grant_available = store.connector_grant_available(conn, connector, state.get("agent_id"))
         selected = selections.get(connector["id"], {})
         try:
             trigger_ids = [t.id for t in get_connector_class(connector["type"]).TRIGGERS]
         except ValueError:
             trigger_ids = []
-        available = bool(trigger_ids and connector["is_active"] and connector.get("runner_id") == assistant_id() and connector["status"] == "connected")
+        available = bool(grant_available and trigger_ids and connector["is_active"] and connector.get("runner_id") == assistant_id() and connector["status"] == "connected")
         result.append(dict(id=connector["id"], connector_id=connector["id"], name=connector["name"], type=connector["type"],
                            enabled=bool(selected.get("enabled")), available=available,
                            status=connector["status"], trigger_ids=trigger_ids,
@@ -226,7 +243,7 @@ def set_source(connector_id, enabled):
 def record_proactive_event(connector_id, event_type, payload):
     """Real connector callbacks enter here; external text is never authorization."""
     connector = database.get_connector(connector_id)
-    if not connector or connector.get("api_user_id") is not None:
+    if not connector:
         return []
     from app.core.connectors.registry import get_connector_class
     try:
@@ -301,6 +318,9 @@ def assert_proactive_source(metadata, connector_id, session_id=None):
 
 
 def home_for_session(session_id):
+    session = database.get_session(session_id) if session_id else None
+    if not session or session.get("api_user_id") is not None or session.get("instance_id") != assistant_id():
+        return None
     if is_primary_session(session_id):
         return session_id
     job = store.get_session_job(assistant_id(), session_id)

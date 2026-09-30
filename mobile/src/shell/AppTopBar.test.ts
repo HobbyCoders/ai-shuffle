@@ -77,6 +77,12 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('AppTopBar actions', () => {
+	it('names the integrated Assistant home without becoming a new session mode', () => {
+		activeView.set({ type: 'assistant' });
+		renderBar();
+		expect(screen.getByText('Assistant')).toBeTruthy();
+		expect(screen.queryByTestId('breadcrumbs')).toBeNull();
+	});
 	it('renders the action snippet beside the title, without an overflow rail', () => {
 		const actions = createRawSnippet(() => ({ render: () => '<button>Git actions</button>' }));
 		const { container } = renderBar({ actions });

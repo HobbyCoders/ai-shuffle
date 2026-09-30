@@ -134,6 +134,9 @@ def _queue(sender_id, data, action):
 
     sender = _caller(sender_id)
     context = _context(sender_id)
+    if ((context.get("payload") or {}).get("_assistant_proactive") is not None
+            or (context.get("overrides") or {}).get("_assistant_proactive") is not None):
+        raise PermissionError("Background observation cannot start or message sessions.")
     request_id = _text(data, "request_id", 120)
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.
@@ -229,6 +232,10 @@ def _queue(sender_id, data, action):
             overrides=overrides, payload=payload, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
         )
+    from app.core.assistant_service import home_for_session, link_job
+    home = home_for_session(sender_id)
+    if home and target["id"] != home:
+        link_job(home, target["id"])
     return {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
             "created": action == "start", "url": "/?session=" + target["id"],
             "note": "Queued is not delivered. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}
@@ -253,6 +260,12 @@ def make_handler(supplier):
                             or task_registry.stop_invalidated(target_id, target_generation)):
                         await asyncio.to_thread(turns.remove_queued_turn, result["turn_id"])
                         raise ValueError("The user stopped a participating session; queued work was cancelled.")
+                    # Join the existing runtime at its next safe boundary. The
+                    # durable row stays queued until the runtime receipts it;
+                    # normal scheduler admission prevents a parallel turn.
+                    from app.core.session_runtime import try_steer_pending
+                    if action == "message":
+                        await try_steer_pending(result["session_id"])
                     turn_scheduler.note_wake_pending(result["session_id"])
                     turn_scheduler.kick(result["session_id"])
                 if result.get("created"):

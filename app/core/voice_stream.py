@@ -32,7 +32,7 @@ def live_session_config(config: dict, history: list[dict]) -> dict:
     from app.core.query_options import decode_provider_model
     o = validate_options(LIVE_MODEL, config.get("options") or {})
     delegation = {"type": "client"}
-    if o["delegation_type"] == "responses":
+    if o["delegation_type"] == "responses" and not config.get("conversation_surface"):
         decoded = decode_provider_model(o["delegation_model"])
         if not decoded:
             raise ValueError("Responses delegation needs a provider-bound model")
@@ -106,6 +106,16 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
 
     row = await run_sync(database.get_session, session_id)
     selected = (row or {}).get("model")
+    normal_conversation = row is not None and "mode" in row and row.get("mode") != "voice"
+    if not selected and normal_conversation:
+        profile = await run_sync(database.get_profile, row.get("profile_id")) or {}
+        profile_config = profile.get("config") or {}
+        if isinstance(profile_config, str):
+            profile_config = json.loads(profile_config)
+        selected = row.get("launched_model") or profile_config.get("model")
+        if not selected and not row.get("provider_id"):
+            from app.core.model_registry import DEFAULT_MODEL
+            selected = DEFAULT_MODEL
     if not selected:
         return "No chat model is selected. Ask the user to choose one in the composer."
     decoded = decode_provider_model(selected)
@@ -121,6 +131,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # Submit to the SAME session: reuse its history/client and normal queue,
     # approval, stop, placement and model-switch semantics. No worker creation.
     overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
+    if provider_id is None and normal_conversation:
+        provider_id = row.get("provider_id")
     overrides.update(model=selected, provider=provider_id,
                      system_prompt_append=options["delegation_instructions"] or DELEGATION_INSTRUCTIONS)
     # VoiceStream flushes the spoken exchange before handing off. Keep the
@@ -317,7 +329,7 @@ class VoiceStream:
                     await self.send({"type": "session.commentary.append", "delegation_id": None,
                                      "content": "Begin the conversation now, following the instructions provided."})
                 elif kind == "session.delegation.created":
-                    if self.options["delegation_type"] == "responses":
+                    if self.options["delegation_type"] == "responses" and not self.config.get("conversation_surface"):
                         continue  # Provider-owned: never also dispatch an app worker.
                     delegation = event.get("delegation") or {}
                     did = delegation.get("id")
@@ -387,7 +399,13 @@ class VoiceStream:
                 await self.flush()
 
     async def start_live(self, history: list[dict]) -> None:
-        await self.send({"type": "session.start", "session": live_session_config(self.config, history)})
+        live_config = live_session_config(self.config, history)
+        if self.config.get("conversation_surface"):
+            from app.core.voice_bridge import conversation_instructions
+            row = await run_sync(database.get_session, self.session_id)
+            overlay = await run_sync(conversation_instructions, row)
+            live_config["instructions"] += "\n\n" + overlay
+        await self.send({"type": "session.start", "session": live_config})
         event = json.loads(await asyncio.wait_for(self.upstream.recv(), 20))
         if event.get("type") != "session.started":
             raise ValueError(str((event.get("error") or {}).get("message") or "GPT Live did not start."))
@@ -416,7 +434,7 @@ class VoiceStream:
                         history = ([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": seed}]}] if seed else [])
                         if seed:
                             self.transcript.append({"role": "history", "text": seed, "offset_ms": 0})
-                        if self.options["delegation_type"] != "responses":
+                        if self.options["delegation_type"] != "responses" or self.config.get("conversation_surface"):
                             from app.core.voice_progress import VoiceProgress
                             self.progress = VoiceProgress(self.session_id, self.send)
                             await self.progress.open()
@@ -424,7 +442,8 @@ class VoiceStream:
                     else:
                         await self.prime_fal()
                     self.connected = True
-                    await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
+                    if not self.config.get("conversation_surface"):
+                        await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
                     await run_sync(database.set_session_active, self.session_id, True)
                     await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
                     tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.receive_upstream()), asyncio.create_task(self.checkpoint())]
@@ -459,7 +478,8 @@ class VoiceStream:
             await self.flush()
             if calls.get(self.session_id) is self:
                 calls.pop(self.session_id, None)
-                await run_sync(database.set_session_active, self.session_id, False)
+                if not self.config.get("conversation_surface"):
+                    await run_sync(database.set_session_active, self.session_id, False)
 
 
 async def stop(session_id: str) -> bool:

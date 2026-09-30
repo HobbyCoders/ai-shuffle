@@ -2708,3 +2708,34 @@ async def test_respond_approval_still_names_a_different_pending_request(
     assert [r["request_id"] for r in result["pending_requests"]] == ["req-real"]
     assert "different request IS pending" in result["note"]
     await bridge.stop()
+
+@pytest.mark.asyncio
+async def test_attached_conversation_uses_only_same_session_queue_and_keeps_work_on_hangup(mock_db, fake_sockets, monkeypatch):
+    from app.db import turns, database
+    SESSION_ID = SID
+    voice_bridge = vb
+    database.create_profile("voice-pm", "Assistant", None, {})
+    database.create_session(SESSION_ID, "voice-pm", model="text-model", mode="chat")
+    database.set_session_active(SESSION_ID, True)
+    database.patch_voice_session_context(SESSION_ID, {"model": "text-model"})
+    from app.core import voice_stream
+    # Admission runs the real turn manager without starting a provider.
+    from app.core import turn_manager
+    turn_manager.register_kick(None)
+    bridge = voice_bridge.VoiceBridge(SESSION_ID, "attached", api_key="key", model="gpt-realtime", max_call_minutes=60, conversation_surface=True)
+    await bridge.start()
+    packets = [json.loads(x) for x in fake_sockets[0].sent]
+    packet = next(x for x in packets if x.get("type") == "session.update")
+    assert [t["name"] for t in packet["session"]["tools"]] == ["submit_to_chat"]
+    await bridge._service_call("call-submit", "submit_to_chat", '{"request":"Research this"}')
+    queued = turns.get_queued_turns(SESSION_ID)
+    assert len(queued) == 1 and queued[0]["profile_id"] == "voice-pm"
+    assert queued[0]["overrides"]["model"] == "text-model"
+    await bridge._service_call("bad", "dispatch_agent", '{"prompt":"write"}')
+    packets = [json.loads(x) for x in fake_sockets[0].sent]
+    results = [x["item"] for x in packets if x.get("type") == "conversation.item.create" and x["item"].get("type") == "function_call_output"]
+    assert "normal chat ceiling" in results[-1]["output"]
+    await bridge.stop()
+    assert bool(database.get_session(SESSION_ID)["is_active"])
+    assert database.get_session(SESSION_ID).get("launched_model") != "gpt-realtime"
+    assert turns.get_turn(queued[0]["id"])["state"] == "queued"

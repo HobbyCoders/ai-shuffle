@@ -63,7 +63,7 @@ def test_proactive_provenance_pause_revoke_and_forgery(assistant_fixture):
     with pytest.raises(ValueError, match="paused"):
         service.assert_proactive_allowed(marker)
     service.configure({"paused": False})
-    database.update_connector("mail", is_active=False)
+    database.update_connector("conn-mail", is_active=False)
     with pytest.raises(ValueError, match="grant"):
         service.assert_proactive_allowed(marker)
 
@@ -77,11 +77,11 @@ def test_owner_runner_and_explicit_source_optin(assistant_fixture):
     assert events(connector_id="peer") == []
     assert events(connector_id="user-mail") == []
     catalog = service.source_catalog()
-    assert {s["id"] for s in catalog} == {"mail", "peer"}
+    assert {s["id"] for s in catalog} == {"conn-mail", "peer"}
     assert not next(s for s in catalog if s["id"] == "peer")["available"]
     with pytest.raises(ValueError, match="unavailable"):
         service.set_source("peer", True)
-    service.set_source("mail", False)
+    service.set_source("conn-mail", False)
     assert events() == []
 
 
@@ -108,3 +108,24 @@ def test_linked_sessions_are_normal_and_scope_checked(assistant_fixture):
     database.create_session("other-owner", "assistant-agent", api_user_id="another-user")
     with pytest.raises(ValueError, match="owner"):
         service.link_job(assistant_fixture["id"], "other-owner")
+
+
+
+def test_dedicated_connector_credential_revocation_and_agent_scope(assistant_fixture):
+    events()
+    run = store.admit_run(service.assistant_id())
+    marker = service.proactive_metadata(run)
+    database.update_api_user("mail-user", is_active=False)
+    assert not next(s for s in service.source_catalog() if s["id"] == "conn-mail")["available"]
+    assert events(message_id="revoked-credential") == []
+    with pytest.raises(ValueError, match="grant"):
+        service.assert_proactive_allowed(marker)
+    database.update_api_user("mail-user", is_active=True)
+    database.create_profile("other-allowed-agent", "Scoped specialist", None, {})
+    database.update_api_user("mail-user", profile_ids=["other-allowed-agent"])
+    assert events(message_id="wrong-agent") == []
+    with pytest.raises(ValueError, match="grant"):
+        service.assert_proactive_allowed(marker)
+    database.update_api_user("mail-user", profile_ids=["assistant-agent"])
+    assert service.assert_proactive_allowed(marker)["id"] == run["id"]
+    assert events(message_id="allowed-agent")

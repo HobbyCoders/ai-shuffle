@@ -1,28 +1,7 @@
 <script lang="ts">
-	/**
-	 * SessionModeSwitcher — the sidebar's lane picker (Code / Chat / Voice).
-	 *
-	 * Sits directly under the brand row and decides which lane the whole panel
-	 * is looking at: the session list, the filters and the composer all follow
-	 * it. Because it changes what the list contains rather than what a single
-	 * control does, it is a radiogroup — three mutually exclusive views of the
-	 * same panel — with roving-tabindex arrow keys, so a keyboard user tabs
-	 * into the group once and cycles lanes with the arrows.
-	 *
-	 * It rides in the sidebar's bottom dock, so it is styled as a segmented
-	 * control: an inset trough with ONE raised thumb that slides between the
-	 * three equal columns. The thumb is a sibling element rather than a
-	 * background on the selected button, which is the only way the change of
-	 * lane reads as a movement instead of two independent fades — and it is a
-	 * transform, so the slide never touches layout. Sized so all three labels
-	 * survive the panel's 220px minimum; below ~250px of switcher width
-	 * the labels drop and the icons carry the meaning — which is why each radio
-	 * carries an explicit `aria-label`: `display: none` takes the visible label
-	 * out of the accessibility tree too, so without it the narrow sidebar would
-	 * present three unnamed radios.
-	 */
-	import { AudioLines, Code2, MessagesSquare } from 'lucide-svelte';
-	import { SESSION_MODES, type SessionMode } from '$lib/stores/sessionMode.svelte';
+	/** Select the capabilities for a new conversation. History is never partitioned. */
+	import { Code2, MessagesSquare } from 'lucide-svelte';
+	import { type SessionMode } from '$lib/stores/sessionMode.svelte';
 
 	interface Props {
 		value: SessionMode;
@@ -32,16 +11,15 @@
 	let { value, onSelect }: Props = $props();
 
 	const OPTIONS: { mode: SessionMode; label: string; icon: typeof Code2 }[] = [
-		{ mode: 'code', label: 'Code', icon: Code2 },
-		{ mode: 'chat', label: 'Chat', icon: MessagesSquare },
-		{ mode: 'voice', label: 'Voice', icon: AudioLines }
+		{ mode: 'code', label: 'Workspace', icon: Code2 },
+		{ mode: 'chat', label: 'Chat', icon: MessagesSquare }
 	];
 
 	let buttons = $state<(HTMLButtonElement | null)[]>([]);
 
 	/** Which column the thumb sits over. Clamped so an unknown value parks it
 	 *  on the first lane instead of sliding the thumb out of the trough. */
-	const index = $derived(Math.max(0, OPTIONS.findIndex((o) => o.mode === value)));
+	const index = $derived(Math.max(0, OPTIONS.findIndex((o) => o.mode === (value === 'voice' ? 'chat' : value))));
 
 	/** Arrow keys move the selection AND the focus, which is what a radiogroup
 	 *  promises — Home/End jump to the ends. */
@@ -50,17 +28,17 @@
 		switch (e.key) {
 			case 'ArrowRight':
 			case 'ArrowDown':
-				next = (index + 1) % SESSION_MODES.length;
+				next = (index + 1) % OPTIONS.length;
 				break;
 			case 'ArrowLeft':
 			case 'ArrowUp':
-				next = (index - 1 + SESSION_MODES.length) % SESSION_MODES.length;
+				next = (index - 1 + OPTIONS.length) % OPTIONS.length;
 				break;
 			case 'Home':
 				next = 0;
 				break;
 			case 'End':
-				next = SESSION_MODES.length - 1;
+				next = OPTIONS.length - 1;
 				break;
 			default:
 				return;
@@ -71,18 +49,18 @@
 	}
 </script>
 
-<div class="modes" role="radiogroup" aria-label="Session mode" style="--mode-index:{index}">
+<div class="modes" role="radiogroup" aria-label="New conversation capabilities" style="--mode-index:{index}">
 	<span class="thumb" aria-hidden="true"></span>
 	{#each OPTIONS as opt, i (opt.mode)}
 		<button
 			bind:this={buttons[i]}
 			class="mode"
-			class:on={value === opt.mode}
+			class:on={index === i}
 			type="button"
 			role="radio"
-			aria-checked={value === opt.mode}
+			aria-checked={index === i}
 			aria-label={opt.label}
-			tabindex={value === opt.mode ? 0 : -1}
+			tabindex={index === i ? 0 : -1}
 			onclick={() => onSelect(opt.mode)}
 			onkeydown={(e) => handleKeydown(e, i)}
 		>
@@ -96,7 +74,7 @@
 	.modes {
 		position: relative;
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(2, 1fr);
 		margin: 0;
 		padding: 3px;
 		border: 1px solid var(--sidebar-border);
@@ -110,7 +88,7 @@
 		top: 3px;
 		bottom: 3px;
 		left: 3px;
-		width: calc((100% - 6px) / 3);
+		width: calc((100% - 6px) / 2);
 		border-radius: 7px;
 		background: linear-gradient(
 			180deg,
@@ -130,7 +108,7 @@
 		align-items: center;
 		justify-content: center;
 		gap: 6px;
-		height: 28px;
+		height: 36px;
 		padding: 0 6px;
 		border: none;
 		background: transparent;
@@ -165,7 +143,7 @@
 
 	/* Touch sizing: the mobile shell, plus any touch-only pointer. */
 	@media (hover: none) {
-		.mode { height: 40px; }
+		.mode { height: 44px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

@@ -165,6 +165,11 @@ async def read_activity(limit: int = Query(50, ge=1, le=100)):
     return await run_sync(store.get_activity, service.assistant_id(), limit)
 
 
+@router.get("/agents")
+async def read_agent_identities():
+    return await run_sync(service.agent_identities)
+
+
 @router.patch("/agents/{agent_id}/identity")
 async def update_agent_identity(agent_id: str, body: AgentIdentity):
     return await _value_error_call(service.update_agent_identity, agent_id, body.name, body.avatar_id)

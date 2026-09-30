@@ -430,11 +430,20 @@
 	}
 
 	function buildProfilePayload() {
-		// `PUT /agents/{id}` replaces the whole config column, so a key left out
-		// here is genuinely cleared — that is how 'all'/'none' drop a stale list.
+		// Preserve configuration this editor does not own (including legacy model
+		// bindings and future fields). Clear only editable optional keys, then
+		// reapply this form; switching tool modes must still remove stale lists.
 		const config: any = {
+			...editingProfile?.config,
 			include_partial_messages: profileForm.include_partial_messages
 		};
+		// Identity has its own narrow PATCH. Normal GET projects the avatar,
+		// but this editor snapshot may predate a later identity edit; omitting it
+		// lets the backend preserve the latest avatar during ordinary autosave.
+		delete config.avatar_id;
+		for (const key of ['max_turns', 'setting_sources', 'allowed_tools', 'disallowed_tools', 'cwd', 'add_dirs', 'env']) {
+			delete config[key];
+		}
 		// An agent carries no model, provider, permission mode or effort: a chat
 		// picks those when it starts, and internal one-shot generation reads the
 		// text-generation setting under Settings → Providers.

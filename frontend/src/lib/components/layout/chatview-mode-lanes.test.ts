@@ -2,8 +2,9 @@
  * ChatView's per-lane empty state.
  *
  * Three things have to stay true and are all easy to break by accident:
- *  1. The cleared-session hero wins over the lane heroes. A cleared session
- *     shows its own title in EVERY lane — reordering those branches would make
+ *  1. For ordinary sessions, the cleared-session hero wins over the lane heroes.
+ *     The designated Assistant home has a personalized role-level welcome;
+ *     other cleared sessions show their own title in EVERY lane. Reordering would make
  *     a cleared chat-lane session read as a brand-new one, the exact regression
  *     #558 fixed for the code lane.
  *  2. All three lanes keep the same mounted composer and its draft.
@@ -45,8 +46,16 @@ describe('ChatView — lane heroes', () => {
 		expect(codeOnly).toMatch(/<WorkspaceSelector/);
 	});
 
+	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
+		expect(codeOnly).toContain('$assistantState?.home_session_id === $activeSession.sessionId');
+		const primary = codeOnly.indexOf('{#if primaryAssistant}');
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		expect(primary).toBeGreaterThan(-1);
+		expect(cleared).toBeGreaterThan(primary);
+	});
+
 	it('keeps the cleared-session hero ahead of the lane branches', () => {
-		const cleared = codeOnly.indexOf('{#if isClearedSession}');
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
 		const chatLane = codeOnly.indexOf("{:else if surfaceMode === 'chat'}");
 		const voiceLane = codeOnly.indexOf("{:else if surfaceMode === 'voice'}");
 		expect(cleared).toBeGreaterThan(-1);

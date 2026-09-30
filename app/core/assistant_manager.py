@@ -90,10 +90,19 @@ class AssistantManager:
         self._stopping = False
         self._source_offset = 0
         self._pass_lock = asyncio.Lock()
+        # Last durable active/admitted identities, for local shutdown/deadlines
+        # when the database cannot be read. Never use this cache to admit work.
+        self._active_runs = {}
 
     async def start(self):
         if self._task and not self._task.done():
             return
+        # Lifespan can restart this singleton on a new event loop (for example
+        # a new TestClient). Events/locks bind lazily to the loop that waits on
+        # them; a stopped generation must not carry those bindings forward.
+        self._wake = asyncio.Event()
+        self._observer_wake = asyncio.Event()
+        self._pass_lock = asyncio.Lock()
         self._stopping = False
         self._task = asyncio.create_task(self._loop(), name="assistant-manager")
         self._observer_task = asyncio.create_task(self._observer_loop(), name="assistant-observer")
@@ -111,23 +120,70 @@ class AssistantManager:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.exception("Assistant loop failed before shutdown")
         self._task = self._observer_task = None
-        # Never leave queued proactive work to be woken after shutdown. A
-        # crash instead is recovered by command_id/deadline on the next boot.
-        for run in await run_sync(store.get_activity, service.assistant_id(), 100, True):
-            await self._cancel(run, "cancelled", "Assistant manager stopped")
+        # A failed/closed database must not prevent local inference teardown.
+        # Settlement stays best-effort: do not invent a cancelled/$0 outcome
+        # when the provider may already have completed and reported billing.
+        active = dict(self._active_runs)
+        try:
+            for run in await run_sync(store.get_activity, service.assistant_id(), 100, True):
+                active[run["id"]] = run
+        except Exception:
+            logger.exception("Assistant shutdown could not read durable activity")
+        for run in active.values():
+            try:
+                await self._cancel(run, "cancelled", "Assistant manager stopped")
+            except Exception:
+                logger.exception("Assistant shutdown could not settle run %s", run["id"])
+                await self._cancel_locally(run)
+
+    async def _cancel_locally(self, run):
+        """Stop only this process's known research, without any DB dependency."""
+        from app.core import query_session_lifecycle, session_runtime
+        sid = run.get("session_id")
+        if not sid:
+            return
+        runtime = session_runtime.get_live_runtime(sid)
+        if runtime is not None and run.get("turn_id") and runtime.turn_id != run["turn_id"]:
+            return  # Never interrupt a different turn that now owns the session.
+        executions = [task for task, session_id in session_runtime.active_executions().items() if session_id == sid]
+        try:
+            await query_session_lifecycle.interrupt_session(sid)
+        except Exception:
+            logger.exception("Assistant local provider interrupt failed for %s", sid)
+        finally:
+            for task in executions:
+                task.cancel()
+            await asyncio.gather(*executions, return_exceptions=True)
 
     async def _loop(self):
+        retry_delay = 1
         while not self._stopping:
             self._wake.clear()
+            failed = False
             try:
                 await self.run_once(observe=False)
+                active = await run_sync(store.get_activity, service.assistant_id(), 100, True)
+                self._active_runs = {run["id"]: run for run in active}
+                timeout = 60
+                retry_delay = 1
             except Exception:
                 logger.exception("Assistant reconciliation failed")
-            active = await run_sync(store.get_activity, service.assistant_id(), 100, True)
-            # Deadlines wake the command loop independently of slow connector
-            # I/O; observation never holds up a pause or inference timeout.
-            timeout = min([60] + [max(1, (_deadline(r["deadline_at"]) - store.now()).total_seconds()) for r in active if r["deadline_at"]])
+                active = list(self._active_runs.values())
+                timeout = retry_delay
+                retry_delay = min(60, retry_delay * 2)
+                failed = True
+            # DB outages deny new admission/tools, but must not kill this loop
+            # or extend known inference deadlines. Retry with bounded backoff.
+            for run in active:
+                if run.get("deadline_at"):
+                    remaining = (_deadline(run["deadline_at"]) - datetime.now(timezone.utc)).total_seconds()
+                    if failed and remaining <= 0:
+                        await self._cancel_locally(run)
+                    else:
+                        timeout = min(timeout, max(1, remaining))
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=timeout)
             except asyncio.TimeoutError:
@@ -150,6 +206,15 @@ class AssistantManager:
 
     async def _cancel(self, run, status, error):
         turn = await run_sync(_find_submitted_turn, run)
+        if turn and turn["state"] in turns.TERMINAL_STATES:
+            # Pause/revoke/shutdown can beat reconciliation after the provider
+            # finished. Preserve its outcome and reported billing here too,
+            # rather than settling an already completed run as cancelled/$0.
+            session = await run_sync(database.get_session, run["session_id"])
+            outcome = "cancelled" if run["status"] == "cancelling" else ("completed" if turn["state"] == "completed" else "failed")
+            await run_sync(store.settle_run, run["id"], outcome, turn.get("error"), float((session or {}).get("total_cost_usd") or 0))
+            self._active_runs.pop(run["id"], None)
+            return
         if turn and turn["state"] not in turns.TERMINAL_STATES:
             removed = await run_sync(turn_manager.remove_queued, turn["id"]) if turn["state"] == "queued" else None
             if not removed:
@@ -158,6 +223,7 @@ class AssistantManager:
                 # Do not free concurrency/budget while its provider still runs.
                 return
         await run_sync(store.settle_run, run["id"], status, error)
+        self._active_runs.pop(run["id"], None)
 
     async def cancel_invalid_runs(self):
         """API pause/revoke uses the same cancellation as background reconciliation."""
@@ -168,7 +234,9 @@ class AssistantManager:
                 await self._cancel(run, "cancelled", str(exc))
 
     async def _reconcile_runs(self):
-        for run in await run_sync(store.get_activity, service.assistant_id(), 100, True):
+        active = await run_sync(store.get_activity, service.assistant_id(), 100, True)
+        self._active_runs = {run["id"]: run for run in active}
+        for run in active:
             turn = await run_sync(_find_submitted_turn, run)
             # Terminal state wins over timeout/revocation: do not fabricate a
             # cancelled outcome or $0 accounting for an already completed run.
@@ -176,6 +244,7 @@ class AssistantManager:
                 session = await run_sync(database.get_session, run["session_id"])
                 status = "cancelled" if run["status"] == "cancelling" else ("completed" if turn["state"] == "completed" else "failed")
                 await run_sync(store.settle_run, run["id"], status, turn.get("error"), float((session or {}).get("total_cost_usd") or 0))
+                self._active_runs.pop(run["id"], None)
                 continue
             try:
                 await run_sync(service.assert_proactive_allowed, service.proactive_metadata(run), run["session_id"])
@@ -184,11 +253,12 @@ class AssistantManager:
                 continue
             if turn and not run["turn_id"]:
                 await run_sync(store.update_run, run["id"], status="running", turn_id=turn["id"])
+                run["turn_id"] = turn["id"]
             elif not turn and run["status"] == "submitting":
                 # The submit/record gap may have crashed. Never replay it.
                 # Leave a finite grace window for an in-flight thread submit.
                 created = _deadline(run["created_at"])
-                if (store.now() - created).total_seconds() >= 60:
+                if (datetime.now(timezone.utc) - created).total_seconds() >= 60:
                     await self._cancel(run, "failed", "Dispatch interrupted before a durable turn was found")
             elif not turn and run["status"] == "admitted":
                 # A restart may resume an admitted (never submitted) batch.
@@ -230,6 +300,7 @@ class AssistantManager:
             return bool(store.trusted_source(conn, state, connector_id))
 
     async def _dispatch(self, run):
+        self._active_runs[run["id"]] = run
         if self._stopping or not service.proactive_guard_available():
             return
         await run_sync(service.assert_proactive_allowed, service.proactive_metadata(run), run["session_id"])
@@ -246,6 +317,7 @@ class AssistantManager:
                 await run_sync(database.delete_session, session["id"])
                 return
             run = dict(run, session_id=session["id"])
+            self._active_runs[run["id"]] = run
         if "events" not in run:
             with_events = await run_sync(self._events, run["id"])
         else:
@@ -263,6 +335,7 @@ class AssistantManager:
                     profile_id=state["agent_id"], instance_id=state["runner_id"], command_id=run["id"],
                     overrides={"max_turns": (run.get("limits") or {}).get("max_turns", state["max_turns"]), "_assistant_proactive": metadata},
                     payload={"_assistant_proactive": metadata})
+        run["turn_id"] = turn_id
         await run_sync(store.update_run, run["id"], status="running", turn_id=turn_id)
 
     @staticmethod

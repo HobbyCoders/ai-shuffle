@@ -43,7 +43,7 @@ class Reply:
 
 @pytest.fixture
 def producer(assistant_fixture, monkeypatch):
-    instance = GmailConnector("mail", "gmail", {}, AsyncMock(), AsyncMock(), on_trigger=connector_manager._handle_trigger)
+    instance = GmailConnector("conn-mail", "gmail", {}, AsyncMock(), AsyncMock(), on_trigger=connector_manager._handle_trigger)
     sdk = MailSDK()
     instance._service = sdk
     monkeypatch.setattr(connector_manager, "get_running_connector", AsyncMock(return_value=instance))
@@ -62,7 +62,7 @@ async def test_actual_gmail_trigger_produces_external_deduplicated_event(produce
     run = store.admit_run(service.assistant_id())
     assert len(run["events"]) == 1
     event = run["events"][0]
-    assert event["event_type"] == "email_received" and event["source_id"] == "mail"
+    assert event["event_type"] == "email_received" and event["source_id"] == "conn-mail"
     assert event["trust"] == "external"
     assert "Actual normalized source event" in event["payload"]["data"]
     assert automation_manager.handle_connector_trigger.await_count == 2
@@ -94,6 +94,33 @@ async def test_polling_baseline_restart_watermark_and_real_turn_manager(producer
     assert store.get_activity(service.assistant_id())[0]["status"] == "completed"
     assert len(store.get_activity(service.assistant_id())) == 1
     assert [r["id"] for r in sdk.reads] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_polling_overflow_does_not_acknowledge_unqueued_mail(producer):
+    _, sdk = producer
+    manager = module.AssistantManager()
+    await manager._observe()  # First opt-in scan establishes the baseline.
+    for i in range(99):
+        events(message_id=f"queued-{i}")
+    sdk.ids = ["three", "two", "one", "old"]
+    await manager._observe()
+    source = store.get_sources(service.assistant_id())[0]
+    assert source["watermark"] == {"seen_ids": ["old"]}
+    assert source["last_error"] == "Observation inbox full; overflow not queued"
+
+    run = store.admit_run(service.assistant_id())
+    store.settle_run(run["id"], "completed")
+    await manager._observe()
+    source = store.get_sources(service.assistant_id())[0]
+    assert source["watermark"] == {"seen_ids": sdk.ids}
+    assert source["last_error"] is None
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM assistant_events WHERE assistant_id=%s", (service.assistant_id(),))
+        # All three real SDK observations survived overflow, without duplicates.
+        assert cursor.fetchone()["n"] == 102
 
 
 @pytest.mark.asyncio
@@ -179,6 +206,183 @@ async def test_manager_start_shutdown_uses_real_lifecycle_and_cancels_queue(prod
 
 
 @pytest.mark.asyncio
+async def test_shutdown_stops_local_research_when_database_and_loop_failed(producer, monkeypatch):
+    from app.core import query_session_lifecycle, session_runtime
+    service.register_proactive_guard(1)
+    manager = module.AssistantManager()
+    events()
+    await manager.run_once()
+    run = store.get_activity(service.assistant_id())[0]
+    waiting = asyncio.Event()
+    execution = asyncio.create_task(waiting.wait())
+    unrelated = asyncio.create_task(waiting.wait())
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {execution: run["session_id"], unrelated: "unrelated-session"})
+    interrupt = AsyncMock()
+    monkeypatch.setattr(query_session_lifecycle, "interrupt_session", interrupt)
+
+    def unavailable(*args):
+        raise RuntimeError("database is closed")
+    async def failed_loop():
+        raise RuntimeError("activity read failed")
+    manager._task = asyncio.create_task(failed_loop())
+    manager._observer_task = asyncio.create_task(waiting.wait())
+    await asyncio.gather(manager._task, return_exceptions=True)
+    observer = manager._observer_task
+    monkeypatch.setattr(store, "get_activity", unavailable)
+    monkeypatch.setattr(module, "_find_submitted_turn", unavailable)
+    try:
+        await manager.shutdown()
+        assert manager._task is None and manager._observer_task is None
+        assert observer.cancelled() and execution.cancelled()
+        assert not unrelated.done()
+        interrupt.assert_awaited_once_with(run["session_id"])
+    finally:
+        execution.cancel()
+        unrelated.cancel()
+        observer.cancel()
+        await asyncio.gather(execution, unrelated, observer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_loop_recovers_after_activity_read_outage(monkeypatch):
+    manager = module.AssistantManager()
+    monkeypatch.setattr(manager, "run_once", AsyncMock())
+    recovered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    calls = []
+
+    def activity(*args):
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("transient activity database failure")
+        loop.call_soon_threadsafe(recovered.set)
+        return []
+    monkeypatch.setattr(store, "get_activity", activity)
+    task = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=3)
+        assert not task.done()
+        assert manager.run_once.await_count == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_activity_outage_blocks_admission_then_recovers_real_connector_turn(producer, monkeypatch):
+    instance, _ = producer
+    service.register_proactive_guard(1)
+    await instance._process_message("outage-mail")
+    manager = module.AssistantManager()
+    original_activity = store.get_activity
+    original_admit = store.admit_run
+    original_dispatch = manager._dispatch
+    outage_seen = asyncio.Event()
+    submitted = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    reads = []
+    admissions = []
+
+    def activity(*args):
+        reads.append(True)
+        if len(reads) == 1:
+            loop.call_soon_threadsafe(outage_seen.set)
+            raise RuntimeError("transient database outage")
+        return original_activity(*args)
+    def admit(*args):
+        admissions.append(True)
+        return original_admit(*args)
+    async def dispatch(run):
+        await original_dispatch(run)
+        submitted.set()
+    monkeypatch.setattr(store, "get_activity", activity)
+    monkeypatch.setattr(store, "admit_run", admit)
+    monkeypatch.setattr(manager, "_dispatch", dispatch)
+    task = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(outage_seen.wait(), timeout=2)
+        assert admissions == []
+        await asyncio.wait_for(submitted.wait(), timeout=3)
+        assert len(admissions) == 1 and not task.done()
+        run = original_activity(service.assistant_id())[0]
+        assert turns.get_turn(run["turn_id"])["source"] == "assistant"
+        assert len(run["event_ids"]) == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_database_outage_preserves_cached_research_deadlines(producer, monkeypatch):
+    service.register_proactive_guard(1)
+    manager = module.AssistantManager()
+    events()
+    await manager.run_once()
+    run = store.get_activity(service.assistant_id())[0]
+    # Expire the real run through a reconciliation snapshot before the outage.
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_runs SET deadline_at=%s WHERE id=%s", ("2000-01-01T00:00:00+00:00", run["id"]))
+    # Cache its durable deadline without allowing this test pass to cancel it.
+    monkeypatch.setattr(manager, "_cancel", AsyncMock())
+    await manager._reconcile_runs()
+    cancelled = asyncio.Event()
+    async def cancel_local(cached):
+        assert cached["id"] == run["id"]
+        cancelled.set()
+    monkeypatch.setattr(manager, "_cancel_locally", cancel_local)
+    monkeypatch.setattr(manager, "run_once", AsyncMock(side_effect=RuntimeError("database unavailable")))
+    monkeypatch.setattr(store, "get_activity", lambda *args: (_ for _ in ()).throw(RuntimeError("database unavailable")))
+    task = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(cancelled.wait(), timeout=2)
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_outage_does_not_replace_completed_cost_with_zero(producer, monkeypatch):
+    service.register_proactive_guard(1)
+    manager = module.AssistantManager()
+    events()
+    await manager.run_once()
+    run = store.get_activity(service.assistant_id())[0]
+    database.update_session(run["session_id"], cost_increment=0.75)
+    turns.settle_turn(run["turn_id"], "completed")
+    with monkeypatch.context() as outage:
+        outage.setattr(store, "settle_run", lambda *args: (_ for _ in ()).throw(RuntimeError("settlement unavailable")))
+        await manager.shutdown()
+    assert turns.get_turn(run["turn_id"])["state"] == "completed"
+    assert database.get_session(run["session_id"])["total_cost_usd"] == 0.75
+    await module.AssistantManager().run_once()
+    settled = store.get_run(run["id"])
+    assert settled["status"] == "completed" and settled["cost_usd"] == 0.75
+
+
+def test_manager_restarts_on_a_new_event_loop(monkeypatch):
+    manager = module.AssistantManager()
+    monkeypatch.setattr(manager, "run_once", AsyncMock())
+    monkeypatch.setattr(manager, "_observe", AsyncMock())
+    monkeypatch.setattr(store, "get_activity", lambda *args: [])
+
+    async def lifecycle():
+        await manager.start()
+        # Bind both wait primitives just as the idle loops do in production.
+        for wake in (manager._wake, manager._observer_wake):
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=0.02)
+        assert not manager._task.done()
+        assert not manager._observer_task.done()
+        await manager.shutdown()
+
+    asyncio.run(lifecycle())
+    asyncio.run(lifecycle())
+
+
+@pytest.mark.asyncio
 async def test_deadline_and_revocation_cancel_queued_research(producer):
     from app.db.base import get_db
     service.register_proactive_guard(1)
@@ -194,10 +398,36 @@ async def test_deadline_and_revocation_cancel_queued_research(producer):
     events(message_id="next")
     await manager.run_once()
     second = store.get_activity(service.assistant_id())[0]
-    service.set_source("mail", False)
+    service.set_source("conn-mail", False)
     await manager.cancel_invalid_runs()
     assert turns.get_turn(second["turn_id"])["state"] == "aborted"
     assert store.get_run(second["id"])["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["pause", "source", "shutdown"])
+async def test_cancel_after_completion_preserves_outcome_and_reported_cost(producer, revocation):
+    service.register_proactive_guard(1)
+    manager = module.AssistantManager()
+    events()
+    await manager.run_once()
+    run = store.get_activity(service.assistant_id())[0]
+    database.update_session(run["session_id"], cost_increment=0.75)
+    turns.settle_turn(run["turn_id"], "completed")
+    if revocation == "shutdown":
+        await manager.shutdown()
+    else:
+        if revocation == "pause":
+            service.configure({"paused": True})
+        else:
+            service.set_source("conn-mail", False)
+        await manager.cancel_invalid_runs()
+    # The model finished before cancellation; neither its outcome nor billing
+    # can be erased by the API/manager settling first on this boundary.
+    settled = store.get_run(run["id"])
+    assert settled["status"] == "completed"
+    assert settled["cost_usd"] == 0.75
+    assert store.get_usage(service.assistant_id())["reported_cost_today"] == 0.75
 
 
 @pytest.mark.asyncio

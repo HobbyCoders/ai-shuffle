@@ -123,10 +123,10 @@ def live_turn_ids() -> Set[str]:
     return {runtime.turn_id for runtime in _live_runtimes.values()}
 
 
-# Queue sources a steer may pull from — the two that render as the user's own
-# pending messages. Mirrors ``chat_ws_handler._V2_QUEUE_SOURCES``; an internal
-# turn (unpark, failover, automation) is never someone talking mid-turn.
-_STEERABLE_SOURCES = ("user", "queue")
+# User pending messages and explicitly attributed peer messages may join a
+# running turn. Peer receipts remain system events, not user interjections;
+# other internal turns (unpark, failover, automation) never steer this way.
+_STEERABLE_SOURCES = ("user", "queue", "agent_message")
 
 # Override keys that BIND a turn's run and cannot change once it started. A
 # queued message asking for a different one of these is a request the live turn
@@ -1208,6 +1208,14 @@ class SessionRuntime:
 
         prompt = self.turn.get("prompt") or ""
         turn_overrides = dict(self.turn.get("overrides") or {})
+        proactive = (self.turn.get("payload") or {}).get("_assistant_proactive")
+        override_proactive = turn_overrides.get("_assistant_proactive")
+        if proactive is not None or override_proactive is not None:
+            if proactive != override_proactive:
+                raise ValueError("Proactive turn provenance differs between payload and overrides")
+            from app.core.assistant_service import assert_proactive_allowed
+            await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
+            turn_overrides["_assistant_proactive"] = proactive
         completion_frames = list(
             ((self.turn.get("payload") or {}).get("pending_frames") or [])
         )
@@ -1607,7 +1615,10 @@ class SessionRuntime:
                 break
             self._steer_attempted.add(row_id)
             try:
-                await adapter.steer(prompt, id=row_id)
+                if row.get("source") == "agent_message":
+                    await adapter.steer(prompt, id=row_id, origin="system")
+                else:
+                    await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
@@ -1843,6 +1854,10 @@ class SessionRuntime:
         payload = row.get("payload") or {}
         if payload.get("upload_blob_ids"):
             return False
+        # Never steer external observation into a foreground/broad-permission
+        # turn (or vice versa). Admission is part of the execution identity.
+        if payload.get("_assistant_proactive") != (self.turn.get("payload") or {}).get("_assistant_proactive"):
+            return False
         if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
             return False
         live_overrides = self.turn.get("overrides") or {}
@@ -1935,14 +1950,21 @@ class SessionRuntime:
                 continue
             content = row.get("prompt") or steer.get("text") or ""
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
-            recorded = await recorder.record_steered_user_message(
-                content,
-                profile_id=profile_id,
-                command_id=row.get("command_id"),
-            )
-            if not recorded:
-                return
-            await self._persist_user_message(content, profile_id=profile_id)
+            if row.get("source") == "agent_message":
+                await recorder.on_event({
+                    "type": "system", "subtype": "agent_message",
+                    "data": {"sender": (row.get("payload") or {}).get("orchestration_sender"),
+                             "content": content, "delivery": "delivered"},
+                })
+            else:
+                recorded = await recorder.record_steered_user_message(
+                    content,
+                    profile_id=profile_id,
+                    command_id=row.get("command_id"),
+                )
+                if not recorded:
+                    return
+                await self._persist_user_message(content, profile_id=profile_id)
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row

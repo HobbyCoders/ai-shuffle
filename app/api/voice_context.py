@@ -110,8 +110,16 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
     if "permission_mode" in kwargs and kwargs["permission_mode"] is not None:
         kwargs["permission_mode"] = kwargs["permission_mode"].strip()
 
+    row = database.get_session(session_id) or {}
     if kwargs:
-        database.patch_voice_session_context(session_id, kwargs)
+        if row.get("mode") == "voice":
+            database.patch_voice_session_context(session_id, kwargs)
+        else:
+            # Normal conversation binding semantics; voice funding lives only
+            # in voice_config and cannot replace its text provider.
+            database.patch_voice_session_context(session_id, kwargs)
+            if kwargs.get("model") is not None:
+                database.set_session_run_binding(session_id, model=kwargs["model"])
     return database.get_session(session_id) or {}
 
 
@@ -130,15 +138,13 @@ async def update_voice_session_context(
     # never leaks as a 403; then the same rule as the call surface in
     # app.api.voice: an API key may only edit the worker context (model,
     # permission mode, ...) of a voice session it owns and has in scope.
-    session = await run_sync(database.get_session, session_id)
-    if not session or session.get("mode") != "voice":
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Voice session not found.",
-        )
+    from app.api.voice import _load_voice_session
+    session = await _load_voice_session(session_id)
     check_session_access(request, session)
 
     _validate_patch(body)
+    if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):
+        raise HTTPException(400, "Chat conversations use the default permission ceiling.")
     updated = await run_sync(_persist_patch, session_id, body)
     return VoiceContextResponse(
         session_id=session_id,

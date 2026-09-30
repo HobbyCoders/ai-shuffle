@@ -1711,6 +1711,9 @@ async def _stream_to_websocket_impl(
     # divergence, not a redundancy.
     session_mode = session_mode_of(session)
     _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode)
+    from app.core.session_modes import narrow_tool_access_for_proactive
+    assistant_proactive = (overrides or {}).get("_assistant_proactive")
+    _tool_access = narrow_tool_access_for_proactive(_tool_access, assistant_proactive)
     allowed_tools = list(_tool_access.allowed or [])
     disallowed_tools = list(_tool_access.disallowed or [])
 

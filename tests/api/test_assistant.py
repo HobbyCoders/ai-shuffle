@@ -3,7 +3,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api import assistant, auth
+from app.api import assistant, auth, connectors
 from app.core import assistant_service as service, owner_auth
 from app.core.config import settings
 from app.db import database
@@ -26,6 +26,7 @@ def client(monkeypatch):
     monkeypatch.setattr(service, "_guard_version", 0)
     app = FastAPI()
     app.include_router(assistant.router)
+    app.include_router(connectors.router)
     with TestClient(LocalListener(app), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 43210), headers={"Origin": "http://127.0.0.1:8000"}) as value:
         yield value
 
@@ -52,11 +53,11 @@ def test_safe_unconfigured_http_and_stable_open(client):
 
 def test_http_source_explicit_optin_and_activity(client, assistant_fixture):
     sources = client.get("/api/v1/assistant/sources")
-    assert sources.status_code == 200 and sources.json()[0]["connector_id"] == "mail"
+    assert sources.status_code == 200 and sources.json()[0]["connector_id"] == "conn-mail"
     assert "config" not in sources.json()[0]
-    source = client.patch("/api/v1/assistant/sources/mail", json={"enabled": False})
+    source = client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False})
     assert source.status_code == 200 and not source.json()["enabled"]
-    assert client.patch("/api/v1/assistant/sources/mail", json={"enabled": True}).json()["enabled"]
+    assert client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": True}).json()["enabled"]
     assert client.get("/api/v1/assistant/activity?limit=101").status_code == 422
 
 
@@ -78,6 +79,7 @@ def test_identity_specialist_endpoint_preserves_all_other_config(client, assista
     before = database.get_profile("assistant-agent")
     response = client.patch("/api/v1/assistant/agents/assistant-agent/identity", json={"name": "New name", "avatar_id": "spark"})
     assert response.status_code == 200 and response.json()["avatar_id"] == "spark"
+    assert next(a for a in client.get("/api/v1/assistant/agents").json() if a["id"] == "assistant-agent")["avatar_id"] == "spark"
     after = database.get_profile("assistant-agent")
     assert after["mcp_tools"] == before["mcp_tools"]
     assert {k: v for k, v in after["config"].items() if k != "avatar_id"} == before["config"]
@@ -99,3 +101,22 @@ def test_invalid_config_does_not_partially_change_identity(client, assistant_fix
     response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "introduction": {"project_ids": ["unknown-project"]}})
     assert response.status_code == 409
     assert database.get_profile("assistant-agent")["name"] == "Helper"
+
+
+
+def test_normal_connector_api_dedicated_credential_is_discoverable(client, monkeypatch):
+    from app.core import connector_packages
+    monkeypatch.setattr(connector_packages, "require_installed", lambda _: "test-runtime")
+    created = client.post("/api/v1/connectors", json={"name": "New owner mailbox", "type": "gmail", "config": {}, "events": []})
+    assert created.status_code == 201
+    connector = created.json()
+    assert connector["api_user_id"] is not None
+    credential = database.get_api_user(connector["api_user_id"])
+    assert not credential["web_login_allowed"]
+    assert credential["description"] == "Auto-created API user for connector " + connector["id"]
+    sources = client.get("/api/v1/assistant/sources").json()
+    source = next(s for s in sources if s["id"] == connector["id"])
+    assert not source["enabled"] and not source["available"]
+    assert "api_user_id" not in source and "config" not in source
+    # Creation alone is NOT authorization or a successful OAuth connection.
+    assert client.patch("/api/v1/assistant/sources/" + connector["id"], json={"enabled": True}).status_code == 409

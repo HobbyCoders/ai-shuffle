@@ -502,7 +502,10 @@ class HarnessAdapter(ProviderAdapter):
                 # delegated leg JSON-serializes this map into its --mcp-config
                 # file -> TypeError("Object of type Server is not JSON
                 # serializable") and a failed spawn.
-                mcp_servers=_external_mcp_servers(options.mcp_servers),
+                mcp_servers=(
+                    {} if options.extra.get("assistant_proactive") is not None
+                    else _external_mcp_servers(options.mcp_servers)
+                ),
                 cwd=options.cwd,
                 env=options.env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
@@ -672,7 +675,7 @@ class HarnessAdapter(ProviderAdapter):
 
                 app_session_id = self._resolve_app_session_id()
                 # Auxiliary requests have no memory owner or learning journal.
-                if app_session_id and (
+                if app_session_id and options.extra.get("assistant_proactive") is None and (
                     settings.fluid_code_mode or settings.fluid_continual or settings.fluid_memory_enabled
                 ):
                     from app.core.fluid_memory import session_memory
@@ -755,7 +758,8 @@ class HarnessAdapter(ProviderAdapter):
                     # the same names as a second line; deny does survive the
                     # exemption.)
                     chat_lane = _session_mode(options) == "chat"
-                    if settings.fluid_code_mode and not chat_lane and self._registry is not None:
+                    proactive_lane = options.extra.get("assistant_proactive") is not None
+                    if settings.fluid_code_mode and not chat_lane and not proactive_lane and self._registry is not None:
                         try:
                             codemode = CodeModeSession(
                                 self._registry, config=_codemode_kernel_config(),
@@ -1111,6 +1115,9 @@ class HarnessAdapter(ProviderAdapter):
         session_mode = getattr(sdk_options, "aih_session_mode", None)
         if session_mode:
             opts.extra["session_mode"] = str(session_mode)
+        proactive = getattr(sdk_options, "aih_assistant_proactive", None)
+        if proactive is not None:
+            opts.extra["assistant_proactive"] = proactive
         # Whether the install's gh CLI is present and signed in (stamped by
         # query_options as ``aih_github_connected``, behind a TTL cache). Only
         # forwarded when true — the prompt's "# GitHub" section exists solely to
@@ -1391,6 +1398,14 @@ class HarnessAdapter(ProviderAdapter):
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        if self._options is not None:
+            proactive = self._options.extra.get("assistant_proactive")
+            if proactive is not None:
+                from app.core.assistant_service import assert_proactive_allowed
+                await asyncio.to_thread(
+                    assert_proactive_allowed, proactive,
+                    self._options.extra.get("app_session_id"),
+                )
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
@@ -1588,7 +1603,7 @@ class HarnessAdapter(ProviderAdapter):
         Explicit saves are available independently of background learning and
         independently of any provider SDK's own memory files.
         """
-        if self._options is None:
+        if self._options is None or self._options.extra.get("assistant_proactive") is not None:
             return None
         try:
             from app.core.fluid_memory import session_memory
@@ -1607,6 +1622,11 @@ class HarnessAdapter(ProviderAdapter):
     async def send_resume(self) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
+            from app.core.assistant_service import assert_proactive_allowed
+            await asyncio.to_thread(assert_proactive_allowed,
+                                    self._options.extra["assistant_proactive"],
+                                    self._options.extra.get("app_session_id"))
         self._mark_turn_floor()
         await self._engine.submit(Resume(source=self._take_turn_source()))
 
@@ -2414,6 +2434,8 @@ class HarnessAdapter(ProviderAdapter):
         # Tool restriction is session-STATIC by design (CE12): fluid
         # freezes allowed/disallowed at construction and never renegotiates them
         # mid-session, so a changed surface can only be honored by a rebuild.
+        if old.extra.get("assistant_proactive") != new_options.extra.get("assistant_proactive"):
+            return True
         if _tool_allowlist(old) != _tool_allowlist(new_options):
             return True
         if sorted(old.disallowed_tools or []) != sorted(
@@ -3406,6 +3428,19 @@ class HarnessAdapter(ProviderAdapter):
         # Escape hatch: a caller may hand a fully-built registry — its contents
         # are then entirely the caller's responsibility (builtins included).
         prebuilt = _extra_opt(options, "registry")
+        proactive = options.extra.get("assistant_proactive")
+        if proactive is not None:
+            # Registry escape hatches and arbitrary MCPs must not defeat the
+            # background ceiling. Both native and delegated bundled calls use
+            # the same final dispatch fence, independent of permission mode.
+            from app.core.session_modes import install_proactive_registry_guard
+            from fluid.tools.builtins import web
+            registry = ToolRegistry(**_registry_bound_kwargs())
+            for spec, handler in web.SPECS:
+                registry.register_builtin(spec, handler)
+            return install_proactive_registry_guard(
+                registry, proactive, options.extra.get("app_session_id"),
+            )
         if isinstance(prebuilt, ToolRegistry):
             return prebuilt
 
@@ -3900,6 +3935,11 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     from app.core.tool_access import tool_permitted
 
     banned = set(DELEGATED_BANNED_TOOLS) | set(options.disallowed_tools or ())
+    if options.extra.get("assistant_proactive") is not None:
+        from app.core.session_modes import PROACTIVE_DENIED_TOOLS
+        banned.update(PROACTIVE_DENIED_TOOLS)
+        # Use our bounded/SSRF-guarded web readers, not arbitrary CLI copies.
+        banned.update({"WebFetch", "WebSearch"})
     if _session_mode(options) == "chat":
         # Withholding auto-approval is insufficient: the CLI also auto-approves
         # cwd reads. Only our bundled, handle-confined attachment reader is safe.
@@ -3955,6 +3995,13 @@ def _delegated_tool_policy(
     cwd = options.cwd
 
     def policy(name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+        from app.core.session_modes import proactive_tool_denial
+        denial = proactive_tool_denial(
+            options.extra.get("assistant_proactive"),
+            options.extra.get("app_session_id"), name,
+        )
+        if denial:
+            return denial
         if blocked and matches_any(name, blocked):
             return f"Tool '{name}' is disabled in this profile"
         if surface and not tool_permitted(name, surface, None):
