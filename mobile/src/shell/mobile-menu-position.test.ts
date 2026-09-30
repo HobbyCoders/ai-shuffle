@@ -5,9 +5,10 @@ import { resolve } from 'node:path';
 const css = readFileSync(resolve(process.cwd(), 'src/mobile.css'), 'utf8');
 // Exercise the actual global selectors: Svelte's scoped component tests do not
 // load mobile.css, which previously fixed every .branch-dropdown to the header.
-const fixedMenuSelectors = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-	.filter(([, selector, body]) => selector.includes('.branch-dropdown') && /position:\s*fixed\s*;/.test(body))
-	.map(([, selector]) => selector.replace(/\/\*[\s\S]*?\*\//g, '').trim());
+// Strip comments before reading selectors so documentation cannot count as a rule.
+const fixedMenuSelectors = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+	.filter(([, , body]) => /position:\s*fixed\s*;/.test(body))
+	.map(([, selector]) => selector.trim());
 
 afterEach(() => {
 	document.body.innerHTML = '';
@@ -15,10 +16,10 @@ afterEach(() => {
 });
 
 describe('mobile menu positioning', () => {
-	it('pins only the Git header branch menu, not the composer runner or branch menus', () => {
+	it('pins Git action options, not the composer runner or branch menus', () => {
 		document.documentElement.dataset.platform = 'mobile';
 		document.body.innerHTML = `
-			<div class="git-actions"><div class="branch-dropdown" id="header"></div></div>
+			<div class="git-actions"><div class="options-dropdown" id="header"></div></div>
 			<div class="execution-mode-bar sheet-mode">
 				<div class="mode-selector"><div class="mode-dropdown branch-dropdown" id="runner"></div></div>
 				<div class="branch-selector"><div class="branch-dropdown" id="worktree"></div></div>
@@ -33,8 +34,8 @@ describe('mobile menu positioning', () => {
 
 	it('does not apply the mobile header positioning to the desktop shell', () => {
 		document.documentElement.dataset.platform = 'desktop';
-		document.body.innerHTML = '<div class="git-actions"><div class="branch-dropdown"></div></div>';
-		const menu = document.querySelector('.branch-dropdown')!;
+		document.body.innerHTML = '<div class="git-actions"><div class="options-dropdown"></div></div>';
+		const menu = document.querySelector('.options-dropdown')!;
 		expect(fixedMenuSelectors.some(selector => menu.matches(selector))).toBe(false);
 	});
 });

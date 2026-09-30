@@ -124,9 +124,11 @@ try {
         assert.equal(route.request().method(), 'POST');
         assert.ok(!route.request().postData());
         starts++;
+        // This Node fixture proxy calls the isolated backend on a different port.
+        // Supply its Origin just as the real internal browser transports do.
         const response = await route.fetch({ url: config.api + path,
-          headers: { Authorization: `Bearer ${config.token}` }, timeout: 60_000 });
-        assert.equal(response.status(), 200);
+          headers: { Authorization: `Bearer ${config.token}`, origin: new URL(config.api).origin }, timeout: 60_000 });
+        assert.equal(response.status(), 200, await response.text());
         const actual = await response.json();
         assert.equal(actual.tabs.length, 1);
         assert.ok(actual.runtime_id && actual.target_id);
@@ -136,7 +138,8 @@ try {
       if (path.endsWith('/browser/panel/upload')) {
         const incoming = new URL(route.request().url());
         const response = await route.fetch({ url: config.api + path + incoming.search,
-          headers: { ...route.request().headers(), Authorization: `Bearer ${config.token}` }, timeout: 45_000 });
+          headers: { ...route.request().headers(), Authorization: `Bearer ${config.token}`,
+            origin: new URL(config.api).origin }, timeout: 45_000 });
         await route.fulfill({ response });
         return;
       }
