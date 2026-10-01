@@ -342,6 +342,9 @@ def test_delegated_usage_stream_rolls_up_with_its_cache_hit_ratio():
     ]
     mapper = StreamJsonMapper(session_id="ses", turn_id="turn", model="fable", user_node_id="n0")
     events = [e for f in frames for e in mapper.feed(f).events]
+    # No result frame: release the last call, which the mapper holds for its
+    # final counts until the stream ends.
+    events.extend(mapper.flush_usage())
     usages = [e for e in events if isinstance(e, Usage)]
     # The context breakdown the loop asks for after each call arrives as its
     # own record, tokens zero, carrying the index of the call it describes.

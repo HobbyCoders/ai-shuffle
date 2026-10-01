@@ -572,6 +572,93 @@ async def test_usage_is_reported_once_per_model_call_with_the_clis_totals(tmp_pa
         await run.aclose()
 
 
+def _se(event: dict) -> dict:
+    return {"op": "frame", "frame": {"type": "stream_event", "uuid": "u", "event": event}}
+
+
+def _block_frame(msg_id: str, block: dict, usage: dict, stop: str | None) -> dict:
+    return {"op": "frame", "frame": {"type": "assistant", "message": {
+        "id": msg_id, "model": "claude-fake", "role": "assistant", "content": [block],
+        "usage": usage, "stop_reason": stop,
+    }}}
+
+
+async def test_usage_takes_each_calls_output_from_its_message_delta(tmp_path) -> None:
+    """What CLI 2.1.285 really sends: every per-block assistant frame repeats
+    the message_start usage (output a few tokens); the final output count
+    arrives only on the partial stream's message_delta."""
+    start_1 = {"input_tokens": 100, "output_tokens": 2,
+               "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 300}
+    start_2 = {"input_tokens": 30, "output_tokens": 1,
+               "cache_read_input_tokens": 5300, "cache_creation_input_tokens": 0}
+    text = {"type": "text", "text": "reading"}
+    tool = {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a"}}
+    turn = [
+        _se({"type": "message_start", "message": {"id": "m1", "usage": start_1}}),
+        _se({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+        _se({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "reading"}}),
+        _se({"type": "content_block_stop", "index": 0}),
+        _block_frame("m1", text, start_1, None),
+        _se({"type": "content_block_start", "index": 1, "content_block": {
+            "type": "tool_use", "id": "t1", "name": "Read"}}),
+        _se({"type": "content_block_delta", "index": 1, "delta": {
+            "type": "input_json_delta", "partial_json": '{"file_path": "a"}'}}),
+        _se({"type": "content_block_stop", "index": 1}),
+        _block_frame("m1", tool, start_1, None),
+        _se({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+             "usage": {"output_tokens": 20}}),
+        _se({"type": "message_stop"}),
+        {"op": "serve", "subtype": "get_context_usage", "count": 1, "timeout": 5},
+        {"op": "tool_result", "tool_use_id": "t1", "content": "contents"},
+        _se({"type": "message_start", "message": {"id": "m2", "usage": start_2}}),
+        _se({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+        _se({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "done"}}),
+        _se({"type": "content_block_stop", "index": 0}),
+        _block_frame("m2", {"type": "text", "text": "done"}, start_2, None),
+        _se({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 12}}),
+        _se({"type": "message_stop"}),
+        {"op": "serve", "subtype": "get_context_usage", "count": 2, "timeout": 5},
+        {"op": "result", "num_turns": 2, "cost": 0.0456,
+         "usage": {"input_tokens": 130, "output_tokens": 32,
+                   "cache_read_input_tokens": 10300, "cache_creation_input_tokens": 300}},
+    ]
+    run = Scripted(tmp_path, {"turns": [turn]}, partial=True)
+    try:
+        events = await run.turn("hi")
+        usages = _of(events, Usage)
+        calls = [u for u in usages if not u.context_usage]
+        assert [(u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens)
+                for u in calls] == [(100, 20, 5000, 300), (30, 12, 5300, 0)]
+        assert [u.raw["model_call_index"] for u in calls] == [1, 2]
+        # Each call's context snapshot follows that call's own record, so a
+        # host never counts a snapshot as a call of its own.
+        order = [(u.raw.get("model_call_index"), bool(u.context_usage)) for u in usages]
+        assert order == [(1, False), (1, True), (2, False), (2, True)]
+        [use] = _of(events, ToolUse)
+        assert use.input == {"file_path": "a"}
+        done = events[-1]
+        assert isinstance(done, TurnComplete) and done.num_model_calls == 2
+    finally:
+        await run.aclose()
+
+
+async def test_multi_turn_cost_is_the_increase_of_the_clis_total(tmp_path) -> None:
+    """The fake's default result reports the same total (0.001) every turn,
+    as a real CLI process would if later turns cost nothing."""
+    run = Scripted(tmp_path, {})
+    try:
+        first = (await run.turn("one"))[-1]
+        second = (await run.turn("two"))[-1]
+        assert first.cost_usd == pytest.approx(0.001)
+        assert second.cost_usd == pytest.approx(0.0)
+        assert second.usage["cli_total_cost_usd"] == pytest.approx(0.001)
+    finally:
+        await run.aclose()
+
+
 # ─── The CLI's environment ──────────────────────────────────────────────────
 
 
