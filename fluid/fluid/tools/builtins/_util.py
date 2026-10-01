@@ -147,9 +147,10 @@ def list_rel_files(
     With ``rg``, a directory is listed by ``rg --files``: ``-uu`` (no ignore
     files, hidden files included) plus the :data:`PRUNE_DIRS` excludes covers
     the same tree as the walk, an order of magnitude faster. Ripgrep without
-    ``--follow`` differs in one place: it lists no symlinked files and enters
-    no symlinked directories or junctions, where the walk lists the former and
-    enters junctions. Following links is not an option, because a link out of
+    ``--follow`` lists no symlinks at all, so :class:`_LinkProbe` adds the
+    symlinked files the walk lists. Neither enters a symlinked directory; the
+    one remaining difference is that the walk enters Windows junctions and
+    ripgrep does not. Following links is not an option, because a link out of
     the tree (to a home or data directory) would turn every listing into a
     walk of that tree. When ripgrep cannot be started, or exits with an error
     having listed nothing, the walk runs instead; a listing that also met an
