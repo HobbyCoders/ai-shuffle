@@ -25,8 +25,9 @@
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
+	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download, X } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
@@ -82,13 +83,11 @@
 		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
-		/** Download the chat transcript. Rendered as a panel row on narrow
-		 *  screens only, where the header has no room for its own icon. */
-		onDownloadChat?: () => void;
-		downloadingChat?: boolean;
+		/** Private backup and sharing exports live in the existing narrow-screen panel. */
+		showChatExports?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, onDownloadChat, downloadingChat = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -773,7 +772,7 @@
 
 			<SwarmDropdown {sessionId} />
 
-			{#if access || onDownloadChat}
+			{#if access || (showChatExports && sessionId)}
 				<div class="gp-foot">
 					{#if access}
 						{@const hasAny = access.pending > 0 || access.active > 0 || access.saved > 0 || access.error}
@@ -794,12 +793,9 @@
 							</button>
 						</div>
 					{/if}
-					{#if onDownloadChat}
+					{#if showChatExports && sessionId}
 						<div class="row-group narrow-only">
-							<button class="row" aria-label="Download chat history" disabled={downloadingChat} onclick={() => leaveForReview(onDownloadChat)}>
-								<Download size={14} strokeWidth={1.5} />
-								<span class="row-text"><span class="row-title">Download chat history</span><span class="row-sub">.jsonl</span></span>
-							</button>
+							<ChatExportActions {sessionId} menu onStart={closePanel} />
 						</div>
 					{/if}
 				</div>

@@ -26,6 +26,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { flushSync, tick } from 'svelte';
+import { exportSession } from '$lib/api/sessions';
+vi.mock('$lib/api/sessions', () => ({ exportSession: vi.fn() }));
 
 // jsdom lacks ResizeObserver; some lucide/layout paths probe for it.
 if (!('ResizeObserver' in globalThis)) {
@@ -253,6 +255,39 @@ afterEach(() => {
 	cleanup();
 	openHeaderDropdown.set(null);
 	chatAccessSummary.set(null);
+});
+
+describe('GitHeaderActions chat exports', () => {
+	it('renders both clearly labeled choices in the existing narrow-screen group', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		expect(row('Download private backup (.jsonl)').closest('.narrow-only')).toBeTruthy();
+		expect(row('Export for sharing (.md)').closest('.narrow-only')).toBeTruthy();
+		expect(panel().textContent).toContain('Recognized secrets removed; review before sharing');
+	});
+	it('closes the existing menu and downloads only sharing Markdown', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		await fireEvent.click(row('Export for sharing (.md)'));
+		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'markdown', { shareSafe: true });
+		expect(queryPanel()).toBeNull();
+	});
+	it('closes the existing menu and preserves the raw JSONL action', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		await fireEvent.click(row('Download private backup (.jsonl)'));
+		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'jsonl');
+		expect(queryPanel()).toBeNull();
+	});
+	it('does not render exports without a session', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ showChatExports: true });
+		await openPanel();
+		expect(queryRow('Export for sharing (.md)')).toBeNull();
+	});
 });
 
 // ── Header button label (priority ladder) ───────────────────────────────────

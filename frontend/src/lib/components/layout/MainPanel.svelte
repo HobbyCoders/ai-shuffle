@@ -42,9 +42,8 @@
 	} from '$lib/stores/derived/git-action-options';
 	import { computeOperationSideEffects } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
-	import { exportSession } from '$lib/api/sessions';
+	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { Download } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 	import SessionSidePanel from './SessionSidePanel.svelte';
@@ -838,22 +837,6 @@
 			notify('Operation complete', { severity: 'success' });
 		}
 	}
-
-	// Download the raw Claude session history (.jsonl) for the active chat.
-	let downloadingJsonl = $state(false);
-	async function handleDownloadJsonl() {
-		const sessionId = activeTab?.sessionId;
-		if (!sessionId || downloadingJsonl) return;
-		downloadingJsonl = true;
-		try {
-			await exportSession(sessionId, 'jsonl');
-		} catch (err) {
-			const detail = (err as { detail?: string })?.detail;
-			notify(detail || 'Failed to download chat history', { severity: 'error' });
-		} finally {
-			downloadingJsonl = false;
-		}
-	}
 </script>
 
 <!--
@@ -864,15 +847,7 @@
 -->
 {#snippet downloadAction()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
-		<button
-			class="download-jsonl-btn"
-			onclick={handleDownloadJsonl}
-			disabled={downloadingJsonl}
-			title="Download chat history (.jsonl)"
-			aria-label="Download chat history as JSONL"
-		>
-			<Download size={16} strokeWidth={1.5} />
-		</button>
+		<ChatExportActions sessionId={activeTab.sessionId} />
 	{/if}
 {/snippet}
 
@@ -926,8 +901,7 @@
 				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
-				onDownloadChat={header ? undefined : handleDownloadJsonl}
-				downloadingChat={downloadingJsonl}
+				showChatExports={!header}
 			/>
 		</div>
 	{/if}
@@ -1105,51 +1079,6 @@
 		position: relative;
 		display: flex;
 		align-items: center;
-	}
-
-	/* Download chat history button — matches the mobile PageHeader's .header-btn styling */
-	.download-jsonl-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		flex-shrink: 0;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background-color 150ms ease, color 150ms ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-
-	.download-jsonl-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.download-jsonl-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: -2px;
-	}
-
-	.download-jsonl-btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
-
-	@media (max-width: 639px) {
-		.download-jsonl-btn {
-			width: 36px;
-			height: 36px;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.download-jsonl-btn {
-			transition: none;
-		}
 	}
 
 	/* Anchor the live browser overlay below the page header. */
