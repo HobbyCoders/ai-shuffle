@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.api import assistant, auth, connectors
 from app.core import assistant_service as service, owner_auth
 from app.core.config import settings
-from app.db import database
+from app.db import assistant as store, database
 from tests.db.test_assistant_store import assistant_fixture
 
 
@@ -124,9 +124,53 @@ def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
 
 
 def test_invalid_config_does_not_partially_change_identity(client, assistant_fixture):
-    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "introduction": {"project_ids": ["unknown-project"]}})
-    assert response.status_code == 409
+    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "agent_id": "no-such-agent"})
+    assert response.status_code == 404
     assert database.get_profile("assistant-agent")["name"] == "Helper"
+    assert service.get_state()["agent_id"] == "assistant-agent"
+
+
+def test_minimal_setup_creates_a_dedicated_agent_on_the_text_generation_model(client):
+    database.set_system_setting("text_generation_model", "prov:gen-provider:gen-model")
+    database.set_system_setting("text_generation_effort", "low")
+    created = client.patch("/api/v1/assistant", json={"create_agent": True})
+    assert created.status_code == 200
+    state = created.json()
+    assert state["configured"] and state["assistant_name"] == "Assistant"
+    assert state["avatar_id"] in service.AVATAR_PRESETS and state["agent"]["dedicated"]
+    agent = database.get_profile(state["agent_id"])
+    assert not agent["is_builtin"]
+    assert {k: agent["config"][k] for k in ("model", "provider", "effort", "tool_selection_mode")} == {
+        "model": "gen-model", "provider": "gen-provider", "effort": "low", "tool_selection_mode": "all"}
+    # A built-in guard does not apply: identity edits work on the new agent.
+    renamed = client.patch("/api/v1/assistant", json={"assistant_name": "Juniper", "avatar_id": "owl"})
+    assert renamed.status_code == 200 and renamed.json()["assistant_name"] == "Juniper"
+    assert renamed.json()["avatar_id"] == "owl"
+    # Asking again reuses the same agent rather than making a second one.
+    again = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Juniper"})
+    assert again.json()["agent_id"] == state["agent_id"]
+    assert sum(1 for a in client.get("/api/v1/assistant/agents").json() if a["dedicated"]) == 1
+    assert client.post("/api/v1/assistant/open").status_code == 200
+    assert client.patch("/api/v1/assistant", json={"create_agent": True, "agent_id": state["agent_id"]}).status_code == 409
+
+
+def test_new_agent_takes_the_chosen_name_and_avatar(client):
+    created = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Pip", "avatar_id": "fox"})
+    assert created.status_code == 200
+    agent = database.get_profile(created.json()["agent_id"])
+    assert agent["name"] == "Pip" and agent["config"]["avatar_id"] == "fox"
+    assert agent["id"] == "pip"
+
+
+def test_limits_and_introduction_are_accepted_but_ignored(client, assistant_fixture):
+    service.configure({"introduction": {"preferred_name": "Ada"}})
+    response = client.patch("/api/v1/assistant", json={
+        "max_runs_per_day": 100, "max_concurrent_runs": 3, "max_turns": 20, "timeout_seconds": 900,
+        "max_cost_per_run": 50, "max_cost_per_day": 900, "introduction": {"preferred_name": "Mallory"}})
+    assert response.status_code == 200
+    state = response.json()
+    assert {k: state[k] for k in store.LIMIT_KEYS} == store.RESEARCH_LIMITS
+    assert state["introduction"]["preferred_name"] == "Ada"
 
 
 

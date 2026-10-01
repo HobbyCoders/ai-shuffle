@@ -367,7 +367,7 @@ class AssistantManager:
         await run_sync(service.assert_proactive_allowed, metadata, run["session_id"])
         turn_id = await turn_manager.submit_async(run["session_id"], "assistant", prompt=prompt,
                     profile_id=state["agent_id"], instance_id=state["runner_id"], command_id=run["id"],
-                    overrides={"max_turns": (run.get("limits") or {}).get("max_turns", state["max_turns"]), "_assistant_proactive": metadata},
+                    overrides={"max_turns": (run.get("limits") or {}).get("max_turns", store.research_limits(state)["max_turns"]), "_assistant_proactive": metadata},
                     payload={"_assistant_proactive": metadata})
         run["turn_id"] = turn_id
         await run_sync(store.update_run, run["id"], status="running", turn_id=turn_id)

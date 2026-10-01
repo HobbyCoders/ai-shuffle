@@ -14,10 +14,28 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
+# The frontend mirror is AVATARS in frontend/src/lib/api/assistant.ts, drawn in
+# AgentAvatar.svelte; tests/api/test_assistant_avatars.py keeps the three in step.
+AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
+                  "owl", "fox", "cat", "bear", "ghost", "cloud",
+                  "moon", "sun", "bolt", "gem", "drop")
+# Background research limits. Setup no longer asks the owner for these; this
+# is the one place they are set. They are the values setup used to suggest:
+#   max_runs_per_day     12    research runs in any rolling 24 hours
+#   max_concurrent_runs   1    runs in progress at once
+#   max_turns             3    agent turns inside one run
+#   timeout_seconds     180    deadline for one run
+#   max_cost_per_run    1.0    USD reserved before a run is admitted
+#   max_cost_per_day    5.0    USD reserved/reported over the 24-hour window
+# The dollar figures are admission checks against costs reported after each
+# run, not provider billing caps. A row saved before this change keeps any
+# stricter value its owner chose (see research_limits); a looser stored value
+# is capped here. The columns stay so older rows and workers keep working.
+RESEARCH_LIMITS = dict(max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
+                       timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0)
+LIMIT_KEYS = tuple(RESEARCH_LIMITS)
 DEFAULTS = dict(agent_id=None, home_session_id=None, enabled=False, paused=False,
-                max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
-                timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0, introduction={})
-AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel")
+                **RESEARCH_LIMITS, introduction={})
 ACTIVE = ("admitted", "submitting", "running")
 IN_FLIGHT = ACTIVE + ("cancelling",)
 # Per-"day" admission limits use a rolling window anchored on each run's
@@ -85,6 +103,13 @@ def create_schema(cursor):
     )""")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
+
+
+def research_limits(state):
+    """The limits a run is admitted under: the stricter of stored and fixed."""
+    state = state or {}
+    return {key: min(value, state[key]) if state.get(key) is not None else value
+            for key, value in RESEARCH_LIMITS.items()}
 
 
 def _parse(row):
@@ -341,16 +366,17 @@ def admit_run(assistant_id):
         state = lock_state(conn, assistant_id)
         if not state or not state["enabled"] or state["paused"] or not state["agent_id"] or not state["home_session_id"]:
             return None
+        limits = research_limits(state)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        if cursor.fetchone()["n"] >= state["max_concurrent_runs"]:
+        if cursor.fetchone()["n"] >= limits["max_concurrent_runs"]:
             return None
         usage = _window_usage(cursor, assistant_id)
         # Reserve the configured per-run amount for *every* live run. Provider
         # billing is reported after a run, so this is not an exact dollar cap.
         cursor.execute("SELECT limits FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", state["max_cost_per_run"]) for row in cursor.fetchall())
-        if usage["n"] >= state["max_runs_per_day"] or usage["cost"] + reserved + state["max_cost_per_run"] > state["max_cost_per_day"]:
+        reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", limits["max_cost_per_run"]) for row in cursor.fetchall())
+        if usage["n"] >= limits["max_runs_per_day"] or usage["cost"] + reserved + limits["max_cost_per_run"] > limits["max_cost_per_day"]:
             return None
         # The inbox is capped at 100, so scanning it all lets events from a
         # reconnecting source wait without starving other sources' events.
@@ -379,11 +405,11 @@ def admit_run(assistant_id):
         run_id = str(uuid.uuid4())
         event_ids = [e["id"] for e in eligible]
         source_ids = sorted({e["source_id"] for e in eligible})
-        deadline = (now() + timedelta(seconds=state["timeout_seconds"])).isoformat()
+        deadline = (now() + timedelta(seconds=limits["timeout_seconds"])).isoformat()
         cursor.execute("""INSERT INTO assistant_runs (id,assistant_id,home_session_id,status,event_ids,source_ids,deadline_at,created_at,agent_id,limits)
             VALUES (%s,%s,%s,'admitted',%s,%s,%s,%s,%s,%s) RETURNING *""",
             (run_id, assistant_id, state["home_session_id"], json.dumps(event_ids), json.dumps(source_ids), deadline, now().isoformat(), state["agent_id"],
-             json.dumps({k: state[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
+             json.dumps({k: limits[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
         run = _parse(cursor.fetchone())
         for event in eligible:
             cursor.execute("UPDATE assistant_events SET status='admitted',run_id=%s WHERE id=%s AND status='pending'", (run_id, event["id"]))

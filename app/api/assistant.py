@@ -57,6 +57,8 @@ class Introduction(BaseModel):
 class Configuration(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_id: Optional[str] = Field(None, min_length=1, max_length=128)
+    # Create (or reuse) the dedicated assistant agent instead of naming one.
+    create_agent: Optional[bool] = None
     enabled: Optional[bool] = None
     paused: Optional[bool] = None
     max_runs_per_day: Optional[int] = Field(None, ge=1, le=100)
@@ -65,6 +67,10 @@ class Configuration(BaseModel):
     timeout_seconds: Optional[int] = Field(None, ge=30, le=900)
     max_cost_per_run: Optional[float] = Field(None, gt=0, le=100, allow_inf_nan=False)
     max_cost_per_day: Optional[float] = Field(None, gt=0, le=1000, allow_inf_nan=False)
+    # The limits and the introduction are still validated so an older client
+    # gets the same errors, then ignored: research runs under the fixed
+    # store.RESEARCH_LIMITS, and setup no longer collects an introduction.
+    # A stored introduction is kept and still read by build_role_context.
     introduction: Optional[Introduction] = None
     assistant_name: Optional[str] = Field(None, min_length=1, max_length=80)
     avatar_id: Optional[str] = None
@@ -123,6 +129,10 @@ async def configure_assistant(body: Configuration):
         for key, value in changes["introduction"].items():
             if value is None:
                 raise HTTPException(422, f"introduction.{key} cannot be null")
+    for key in (*store.LIMIT_KEYS, "introduction"):
+        changes.pop(key, None)
+    if changes.get("create_agent") is False:
+        changes.pop("create_agent")
     state = await _value_error_call(service.configure, changes)
     await assistant_manager.cancel_invalid_runs()
     assistant_manager.notify()

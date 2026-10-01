@@ -9,6 +9,8 @@ source content. Configured bypass permissions do not waive this ceiling.
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -18,6 +20,10 @@ from app.db import assistant as store, database, projects_v2
 from app.db.base import get_db, row_to_dict
 
 AVATAR_PRESETS = store.AVATAR_PRESETS
+DEFAULT_ASSISTANT_NAME = "Assistant"
+# Marks the agent setup creates for the assistant. It is an ordinary agent row
+# (agents sync between workers), so a second worker reuses it, not a copy.
+DEDICATED_KEY = "assistant_dedicated"
 _guard_version = 0
 
 
@@ -36,12 +42,15 @@ def proactive_guard_available():
 
 def get_state():
     state = store.get_state(assistant_id()) or dict(store.DEFAULTS, id=assistant_id(), runner_id=assistant_id())
+    # Report the limits runs are actually admitted under, not stored columns.
+    state.update(store.research_limits(state))
     state["configured"] = bool(state["agent_id"])
     agent = database.get_profile(state["agent_id"]) if state["agent_id"] else None
     avatar = (agent.get("config") or {}).get("avatar_id", "robot") if agent else "robot"
     if avatar not in AVATAR_PRESETS:
         avatar = "robot"
-    state["agent"] = {"id": agent["id"], "name": agent["name"], "avatar_id": avatar} if agent else None
+    state["agent"] = {"id": agent["id"], "name": agent["name"], "avatar_id": avatar,
+                      "dedicated": _is_dedicated(agent)} if agent else None
     state["assistant_name"] = agent["name"] if agent else None
     state["avatar_id"] = state["agent"]["avatar_id"] if agent else "robot"
     state["avatar_presets"] = list(AVATAR_PRESETS)
@@ -63,10 +72,67 @@ def get_state():
     return state
 
 
+def _config(agent):
+    config = (agent or {}).get("config") or {}
+    return json.loads(config) if isinstance(config, str) else config
+
+
+def _is_dedicated(agent):
+    return bool(agent and not agent.get("is_builtin") and _config(agent).get(DEDICATED_KEY) is True)
+
+
+def random_avatar():
+    return secrets.choice(AVATAR_PRESETS)
+
+
+def dedicated_agent_config(avatar_id=None):
+    """A new assistant agent runs on the default text-generation model.
+
+    That is the model/provider/effort set in Settings -> Providers -> Generated
+    text, and it falls back to the registry default when nothing is set.
+    """
+    from app.core.generation_options import text_generation_config
+    binding = text_generation_config()
+    config = {"model": binding["model"], "tool_selection_mode": "all",
+              "avatar_id": avatar_id or random_avatar(), DEDICATED_KEY: True}
+    if binding.get("provider"):
+        config["provider"] = binding["provider"]
+    if binding.get("effort"):
+        config["effort"] = binding["effort"]
+    return config
+
+
+def _provision_agent(cursor, name, avatar_id):
+    """Reuse the dedicated assistant agent, or create it in this transaction."""
+    cursor.execute("SELECT * FROM agents WHERE is_builtin=FALSE ORDER BY created_at, id")
+    for row in cursor.fetchall():
+        agent = row_to_dict(row)
+        if _is_dedicated(agent):
+            return agent["id"]
+    base = re.sub(r"[^a-z0-9-]+", "-", (name or DEFAULT_ASSISTANT_NAME).lower()).strip("-") or "assistant"
+    agent_id = base
+    for counter in range(1, 1000):
+        cursor.execute("SELECT id FROM agents WHERE id=%s", (agent_id,))
+        if not cursor.fetchone():
+            break
+        agent_id = f"{base}-{counter}"
+    else:
+        raise ValueError("Could not choose an id for the assistant agent")
+    stamp = datetime.now(timezone.utc).isoformat()
+    cursor.execute("""INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,FALSE,'[]',%s,%s)""",
+        (agent_id, name or DEFAULT_ASSISTANT_NAME, "Your personal assistant. Created by Assistant setup.",
+         json.dumps(dedicated_agent_config(avatar_id)), stamp, stamp))
+    return agent_id
+
+
 def configure(changes):
     changes = dict(changes)
     name = changes.pop("assistant_name", None)
     avatar = changes.pop("avatar_id", None)
+    create_agent = changes.pop("create_agent", False)
+    if create_agent and changes.get("agent_id"):
+        raise ValueError("Choose an existing agent or a new assistant agent, not both")
     introduction = changes.get("introduction")
     if introduction is not None:
         for project_id in introduction.get("project_ids", []):
@@ -74,8 +140,10 @@ def configure(changes):
                 raise ValueError("Introduction references an unknown project")
     with get_db() as conn:
         current = store.configure(assistant_id(), {}, _conn=conn)
-        agent_id = changes.get("agent_id", current["agent_id"])
         cursor = conn.cursor()
+        if create_agent:
+            changes["agent_id"] = _provision_agent(cursor, name, avatar)
+        agent_id = changes.get("agent_id", current["agent_id"])
         cursor.execute("SELECT * FROM agents WHERE id=%s", (agent_id,))
         profile = row_to_dict(cursor.fetchone())
         if agent_id and not profile:
@@ -119,7 +187,8 @@ def agent_identities():
     for agent in database.get_all_profiles():
         avatar = (agent.get("config") or {}).get("avatar_id", "robot")
         result.append({"id": agent["id"], "name": agent["name"],
-                       "avatar_id": avatar if avatar in AVATAR_PRESETS else "robot"})
+                       "avatar_id": avatar if avatar in AVATAR_PRESETS else "robot",
+                       "dedicated": _is_dedicated(agent)})
     return result
 
 

@@ -223,3 +223,14 @@ def test_retention_scrubs_then_deletes_only_settled_history(assistant_fixture):
     # Scrubbed rows are not rewritten forever; activity still renders.
     assert store.retention_sweep(aid) == {"events_scrubbed": 0, "events_deleted": 0, "runs_deleted": 0}
     assert {row["id"] for row in store.get_activity(aid)} == {old["id"], in_flight["id"]}
+
+
+def test_research_runs_use_fixed_limits_but_keep_a_stricter_stored_value(assistant_fixture):
+    assert store.research_limits(None) == store.RESEARCH_LIMITS
+    stricter = store.research_limits(dict(store.RESEARCH_LIMITS, max_runs_per_day=2, max_turns=1))
+    assert stricter == dict(store.RESEARCH_LIMITS, max_runs_per_day=2, max_turns=1)
+    # A looser value saved by the old setup form is capped at the fixed one.
+    store.configure(service.assistant_id(), {"max_turns": 20, "timeout_seconds": 900, "max_cost_per_run": 50.0})
+    events()
+    run = store.admit_run(service.assistant_id())
+    assert run["limits"] == {k: store.RESEARCH_LIMITS[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")}
