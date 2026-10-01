@@ -15,8 +15,11 @@
  *    with focus back on its chevron (or the first overview control, then Close)
  *  - persisted options (include-unstaged, next-step, pull strategy) write
  *    through gitActionPreferences; a per-invocation option (force push) does NOT persist
- *  - a row fires its handler with defaults (no option bag) and closes the
- *    panel; the popover primary fires with an explicit bag
+ *  - a row fires its handler with defaults (no option bag) and keeps the
+ *    panel on the overview; the editor submit fires with an explicit bag and
+ *    returns focus to its chevron
+ *  - the panel opens when an operation starts after mount, never on mount
+ *    for one already active (a pinned failure, a resumed Ship It)
  *  - everything disables under actionsBusy (isStreaming)
  *  - the private-access row reads chatAccessSummary and opens the dialog
  */
@@ -377,6 +380,32 @@ describe('GitHeaderActions panel rows', () => {
 		expect(submit.disabled).toBe(true);
 		await fireEvent.click(submit);
 		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
+		// Only the submit is blocked: the merge settings stay editable, and the
+		// message names the conflict rather than a running operation.
+		expect(within(popover('shipit')).getByRole('status').textContent).toContain('PR #42 has merge conflicts');
+		const rebase = within(popover('shipit')).getByRole('button', { name: 'Rebase' }) as HTMLButtonElement;
+		expect(rebase.matches(':disabled')).toBe(false);
+		await fireEvent.click(rebase);
+		expect(rebase.getAttribute('aria-pressed')).toBe('true');
+	});
+
+	it('blocks editor submits while the snapshot is still loading', async () => {
+		dirtyFeatureBranch();
+		const { handlers } = renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Ship It options'));
+		mocks.gitSnapshot.set({ ...mocks.gitSnapshot.value, hydrated: false });
+		await tick();
+		const submit = popover('shipit').querySelector('button.opt-submit') as HTMLButtonElement;
+		expect(submit.disabled).toBe(true);
+		expect(within(popover('shipit')).getByRole('status').textContent).toContain('Checking the latest Git state');
+		await fireEvent.click(submit);
+		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
+		mocks.gitSnapshot.set({ ...mocks.gitSnapshot.value, hydrated: true });
+		await tick();
+		expect(submit.disabled).toBe(false);
+		await fireEvent.click(submit);
+		expect(handlers.onClickShipIt).toHaveBeenCalledTimes(1);
 	});
 
 	it('hides merged work and restores actions as the same branch gets new work', async () => {
@@ -894,8 +923,11 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		});
 		it('keeps operation progress/errors in-panel and permits closing while work continues', async () => {
 			dirtyFeatureBranch();
-			mocks.gitOperationState.set({ active: true, status: 'running', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'running' }] });
 			renderHeader({ operationInProgress: true });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// An operation starting while the header is mounted opens the panel.
+			mocks.gitOperationState.set({ active: true, status: 'running', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'running' }] });
 			await tick();
 			expect(screen.getAllByRole('dialog')).toHaveLength(1);
 			expect(panel().querySelector('.git-progress')).toBeTruthy();
@@ -908,6 +940,68 @@ describe('GitHeaderActions panel and popover open/close', () => {
 			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
 			await fireEvent.click(within(panel()).getByRole('button', { name: 'Dismiss' }));
 			expect(panel().querySelector('.git-progress')).toBeNull();
+		});
+	});
+
+	describe('opening for an operation', () => {
+		const failed = { active: true, status: 'error', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'error', error: 'Fixture failure' }] };
+		const running = { active: true, status: 'running', title: 'Pull', steps: [{ id: 'pull', label: 'Pull changes', status: 'running' }] };
+
+		it('does not open on mount for an operation that is already active (pinned failure, resumed run)', async () => {
+			dirtyFeatureBranch();
+			mocks.gitOperationState.set(failed);
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// Remounting (leaving and returning to the session) still leaves it closed.
+			cleanup();
+			mocks.mobileShell = true;
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// The failure is still there when the user opens the panel.
+			await openPanel();
+			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
+		});
+
+		it('opens when an operation starts after mount, including after a dismissed failure', async () => {
+			dirtyFeatureBranch();
+			mocks.gitOperationState.set(failed);
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set(running);
+			await tick();
+			expect(panel().querySelector('.git-progress')).toBeTruthy();
+		});
+
+		it('stays open when the operation is started by a click outside the panel', async () => {
+			// A toast's "Pull first" starts the operation from outside the panel. A
+			// real click flushes Svelte between listeners, so the panel opens before
+			// the window click listener sees a click outside it.
+			const flush = () => flushSync();
+			document.addEventListener('click', flush);
+			const toastButton = document.createElement('button');
+			toastButton.textContent = 'Pull first';
+			toastButton.addEventListener('click', () => mocks.gitOperationState.set(running));
+			document.body.appendChild(toastButton);
+			try {
+				behindBranch();
+				renderHeader();
+				await tick();
+				await fireEvent.click(toastButton);
+				expect(panel().querySelector('.git-progress')).toBeTruthy();
+				// The exemption lasts only for that click; a later outside click closes.
+				await new Promise((r) => setTimeout(r, 0));
+				await fireEvent.click(document.body);
+				expect(queryPanel()).toBeNull();
+			} finally {
+				document.removeEventListener('click', flush);
+				toastButton.remove();
+			}
 		});
 	});
 
@@ -1024,6 +1118,26 @@ describe('GitHeaderActions handler wiring', () => {
 		// Submitting leaves the editor and returns to the panel overview.
 		expect(queryPopover('commit')).toBeNull();
 		expect(panel().querySelector('.gp-rows')).toBeTruthy();
+	});
+
+	it('returns focus to the Commit chevron after submitting from the editor', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: 'Commit' }));
+		await vi.waitFor(() => expect(document.activeElement).toBe(row('Commit options')));
+	});
+
+	it('falls back to the first enabled overview control when the submit makes the chevron busy', async () => {
+		dirtyFeatureBranch();
+		const handlers = baseHandlers();
+		const { rerender } = renderHeader({}, handlers);
+		handlers.onClickCommit.mockImplementation(() => { void rerender({ operationInProgress: true }); });
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: 'Commit' }));
+		await vi.waitFor(() => expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Review all' })));
 	});
 
 	it('the private-access row opens the access dialog', async () => {

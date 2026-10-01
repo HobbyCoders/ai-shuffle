@@ -122,6 +122,23 @@ describe('ship it options', () => {
 		await fireEvent.click(submit('Ship It'));
 		expect(onShipIt).not.toHaveBeenCalled();
 	});
+
+	it('blocks only the submit when submitting is blocked, keeping the settings editable', async () => {
+		const onShipIt = vi.fn();
+		mount('shipit', { onShipIt, openPR: { number: 12 }, submitBlocked: 'PR #12 has merge conflicts.' });
+		expect(screen.getByRole('status').textContent).toBe('PR #12 has merge conflicts.');
+		expect(screen.queryByText(/Return to Git to check its status/)).toBeNull();
+		expect(submit('Ship It').disabled).toBe(true);
+		await fireEvent.click(submit('Ship It'));
+		expect(onShipIt).not.toHaveBeenCalled();
+		const rebase = screen.getByRole('button', { name: 'Rebase' }) as HTMLButtonElement;
+		expect(rebase.matches(':disabled')).toBe(false);
+		await fireEvent.click(rebase);
+		const cleanupSwitch = screen.getByRole('switch', { name: 'Delete branch after merge' }) as HTMLButtonElement;
+		expect(cleanupSwitch.matches(':disabled')).toBe(false);
+		await fireEvent.click(cleanupSwitch);
+		expect(gitActionPreferences.current).toMatchObject({ mergeMethod: 'rebase', cleanupAfterMerge: false });
+	});
 });
 
 describe('inline workspace navigation', () => {

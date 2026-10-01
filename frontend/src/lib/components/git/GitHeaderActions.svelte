@@ -133,7 +133,29 @@
 	const editorId = $props.id();
 	const activeEditor = $derived($openHeaderDropdown === 'git-commit' ? 'commit' : $openHeaderDropdown === 'git-push' ? 'push' : $openHeaderDropdown === 'git-pull' ? 'pull' : $openHeaderDropdown === 'git-pr' ? 'pr' : $openHeaderDropdown === 'git-shipit' ? 'shipit' : null);
 	const progressActive = $derived($gitOperationState.active);
-	$effect(() => { if (progressActive) untrack(() => openDropdown('git-panel')); });
+	// Open the panel when an operation STARTS while this header is mounted, so
+	// its progress is visible. Never on mount: a failed operation stays active
+	// until Dismiss, and a resumed Ship It is active before mount, so opening on
+	// mount would pop the panel (a sheet over the chat on mobile) every time the
+	// header remounts or the page reloads.
+	let lastProgressActive: boolean | null = null;
+	// An operation started from outside the panel (a toast's "Pull first") opens
+	// it during that click, before the window click listener runs. This marks
+	// that event turn so handleClickOutside doesn't close what was just opened.
+	let openedByOperation = false;
+	$effect(() => {
+		const active = progressActive;
+		untrack(() => {
+			const started = lastProgressActive === false && active;
+			lastProgressActive = active;
+			if (!started) return;
+			if (!panelOpen) {
+				openedByOperation = true;
+				setTimeout(() => { openedByOperation = false; }, 0);
+			}
+			openDropdown('git-panel');
+		});
+	});
 	const commitOptsOpen = $derived($openHeaderDropdown === 'git-commit');
 	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
 	const pullOptsOpen = $derived($openHeaderDropdown === 'git-pull');
@@ -396,12 +418,27 @@
 		openHeaderDropdown.update((cur) => (cur === id ? 'git-panel' : cur));
 
 	// Back or Escape: return to the overview and put focus back on the chevron
-	// that opened the editor. If the repo state changed meanwhile and that
-	// chevron is gone or disabled, use the first overview control, then Close.
-	// A submit has already switched to the overview via fire(), so it skips this.
+	// that opened the editor. A submit has already switched to the overview via
+	// fire(), so the editor's own close call is a no-op here; submitEditor
+	// restores focus for that path.
 	async function leaveEditor(id: GitActionDropdownId) {
 		if ($openHeaderDropdown !== id) return;
 		closeActionDropdown(id);
+		await focusOverview(id);
+	}
+
+	/** Submit from an editor: run the action, then focus the overview the way
+	 *  Back does. A busy submit falls through to the editor's close (leaveEditor). */
+	function submitEditor<T>(id: GitActionDropdownId, fn: ((opts?: T) => void) | undefined, opts: T) {
+		if (actionsBusy) return;
+		fire(fn, opts);
+		void focusOverview(id);
+	}
+
+	// Once the overview renders, focus the chevron that opened the editor. If
+	// the repo state changed meanwhile and that chevron is gone or disabled,
+	// use the first overview control, then Close.
+	async function focusOverview(id: GitActionDropdownId) {
 		await tick();
 		// Something else (an outside click, the panel closing) may have won meanwhile.
 		const view: string | null = $openHeaderDropdown;
@@ -420,12 +457,10 @@
 		}
 	}
 
-	// Close the panel on outside click. This listener registers at mount, so it
-	// runs BEFORE a popover's own outside-click handler: a click outside the
-	// panel closes everything here, and the popover's later "return to panel"
-	// update then finds nothing open and leaves it closed.
+	// Close the panel (and any inline editor in it) on an outside click. The
+	// editors have no outside-click handling of their own.
 	function handleClickOutside(e: MouseEvent) {
-		if (!panelOpen) return;
+		if (!panelOpen || openedByOperation) return;
 		// Use the path captured at dispatch. A real click lets Svelte flush between
 		// listeners, so a chevron, Back or Dismiss button can already be detached
 		// from the panel by the time this window listener runs.
@@ -529,11 +564,14 @@
 				{#key activeEditor}
 					<GitActionOptionsDropdown id={editorId} action={activeEditor} {currentBranch} {defaultBranch}
 						baseBranches={baseBranchNames} openPR={shownPr} {hasChanges} {isWorktreeMode}
-						unpushed={snapshot.status?.unpushed} busy={actionsBusy || (activeEditor === 'shipit' && mergeBlocked)}
+						unpushed={snapshot.status?.unpushed} busy={actionsBusy}
+						submitBlocked={activeEditor === 'shipit' && mergeBlocked
+							? `PR #${shownPr?.number} has merge conflicts. Resolve them before shipping; you can still change these settings.`
+							: snapshotPending ? 'Checking the latest Git state…' : null}
 						onClose={() => leaveEditor(`git-${activeEditor}` as GitActionDropdownId)}
-						onCommit={(o) => fire(onClickCommit, o)} onPush={(o) => fire(onClickPush, o)}
-						onPull={(o) => fire(onClickPull, o)} onCreatePR={(o) => fire(onClickCreatePR, o)}
-						onShipIt={(o) => fire(onClickShipIt, o)} />
+						onCommit={(o) => submitEditor('git-commit', onClickCommit, o)} onPush={(o) => submitEditor('git-push', onClickPush, o)}
+						onPull={(o) => submitEditor('git-pull', onClickPull, o)} onCreatePR={(o) => submitEditor('git-pr', onClickCreatePR, o)}
+						onShipIt={(o) => submitEditor('git-shipit', onClickShipIt, o)} />
 				{/key}
 			{:else}
 				<GitProgressPopover />
@@ -1115,8 +1153,9 @@
 	.step.stop { color: var(--destructive); }
 	.step.stop i { background: var(--destructive); }
 
-	/* Split button: main action + chevron, sharing a seam. The group is the
-	   positioning anchor for its GitActionOptionsDropdown popover. */
+	/* Split button: main action + chevron, sharing a seam. The chevron swaps
+	   the panel to the inline GitActionOptionsDropdown editor; nothing is
+	   positioned against the group. */
 	.split-btn-group {
 		position: relative;
 		display: inline-flex;

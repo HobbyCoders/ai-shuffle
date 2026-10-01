@@ -26,7 +26,11 @@
 		unpushed?: number | null;
 		/** Worktree sessions delete a worktree on cleanup; plain repos delete a branch. */
 		isWorktreeMode?: boolean;
+		/** Disables the whole editor (an operation or stream is running). */
 		busy?: boolean;
+		/** Why submitting is blocked right now (merge conflicts, state still
+		 *  loading). Only the submit button disables; options stay editable. */
+		submitBlocked?: string | null;
 		onClose: () => void;
 		onCommit?: (o: CommitOptions) => void;
 		onPush?: (o: PushOptions) => void;
@@ -46,6 +50,7 @@
 		unpushed = null,
 		isWorktreeMode = false,
 		busy = false,
+		submitBlocked = null,
 		onClose,
 		onCommit,
 		onPush,
@@ -91,9 +96,11 @@
 		if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
 	}
 
+	const cannotSubmit = $derived(busy || !!submitBlocked);
+
 	// ── Submit handlers (build the option bag, fire, close) ─────────────────────
 	function submitCommit() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onCommit?.({
 			message: commitMessage.trim() || undefined,
 			includeUnstaged: prefs.includeUnstaged,
@@ -102,17 +109,17 @@
 		onClose();
 	}
 	function submitPush() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onPush?.({ force: forcePush });
 		onClose();
 	}
 	function submitPull() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onPull?.({ strategy: prefs.pullStrategy, autoStash: prefs.autoStash });
 		onClose();
 	}
 	function submitCreatePR() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onCreatePR?.({
 			title: prTitle.trim() || undefined,
 			body: prBody.trim() || undefined,
@@ -122,7 +129,7 @@
 		onClose();
 	}
 	function submitShipIt() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onShipIt?.({
 			mergeMethod: prefs.mergeMethod,
 			cleanup: prefs.cleanupAfterMerge,
@@ -184,7 +191,8 @@
 		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ArrowLeft size={16} /> Back</button>
 		<div><h3>{titles[action]}</h3><p>{descriptions[action]}</p></div>
 	</div>
-	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>{/if}
+	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>
+	{:else if submitBlocked}<p class="opt-blocked" role="status">{submitBlocked}</p>{/if}
 	<fieldset class="opt-fields" disabled={busy}>
 	{#if action === 'commit'}
 		<label class="opt-field">
@@ -223,7 +231,7 @@
 			{/each}
 		</fieldset>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitCommit}>Commit</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitCommit}>Commit</button>
 
 	{:else if action === 'push'}
 		<p class="opt-readonly">Pushing <strong>{currentBranch ?? 'current branch'}</strong> to remote.</p>
@@ -242,7 +250,7 @@
 			<span class="opt-switch danger" class:on={forcePush}></span>
 		</button>
 
-		<button type="button" class="opt-submit" class:danger={forcePush} disabled={busy} onclick={submitPush}>
+		<button type="button" class="opt-submit" class:danger={forcePush} disabled={cannotSubmit} onclick={submitPush}>
 			{forcePush ? 'Force push' : 'Push'}
 		</button>
 
@@ -273,7 +281,7 @@
 			<span class="opt-switch" class:on={prefs.autoStash}></span>
 		</button>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitPull}>Pull</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitPull}>Pull</button>
 
 	{:else if action === 'pr'}
 		<label class="opt-field">
@@ -304,7 +312,7 @@
 			<span class="opt-switch" class:on={prDraft}></span>
 		</button>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitCreatePR}>Create PR</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitCreatePR}>Create PR</button>
 
 	{:else if action === 'shipit'}
 		<ol class="opt-steps">
@@ -316,7 +324,7 @@
 		{@render mergeMethodFieldset()}
 		{@render cleanupToggle()}
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitShipIt}>Ship It</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitShipIt}>Ship It</button>
 	{/if}
 	</fieldset>
 </section>
