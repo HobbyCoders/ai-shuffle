@@ -144,7 +144,9 @@ _listing_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="chat-access-list",
 )
 LISTING_TIMEOUT_SECONDS = 15.0
-# A listing slower than this logs its stage timings at WARNING.
+# Every listing logs its stage timings at INFO (the default production level),
+# so a stall outside this function still shows when the call itself finished;
+# a listing slower than this logs them at WARNING.
 LISTING_SLOW_SECONDS = 2.0
 
 
@@ -528,7 +530,7 @@ class Broker:
         folder_available = chat_files.available()
         finished = time.monotonic()
         total = finished - started
-        log = logger.warning if total >= LISTING_SLOW_SECONDS else logger.debug
+        log = logger.warning if total >= LISTING_SLOW_SECONDS else logger.info
         log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
             "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
             finished - looked_up, total, _default_executor_load())

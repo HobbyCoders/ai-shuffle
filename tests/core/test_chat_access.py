@@ -953,3 +953,24 @@ async def test_chat_resources_lists_only_live_grant_metadata(broker, monkeypatch
         {"id": live.id, "kind": "folder", "expires_at": live.expires_at, "writable": True}]
     assert expired.id not in broker.grants and other.id in broker.grants
     assert "Private label" not in text and str(tmp_path) not in text
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_logs_stage_timings_at_info_without_details(broker, monkeypatch, tmp_path, caplog):
+    """A prompt listing still leaves a timing line at the default INFO level, so
+    a stall outside the listing can be told apart from one inside it (#1605)."""
+    import logging
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    grant = chat_access.Grant("d" * 32, "chat", (None, "worker", None), "Private label", "folder",
+                              str(tmp_path), time.time() + 60)
+    broker.grants[grant.id] = grant
+    with caplog.at_level(logging.INFO, logger="app.core.chat_access"):
+        await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    lines = [r for r in caplog.records if r.getMessage().startswith("ChatResources listing:")]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    text = lines[0].getMessage()
+    assert "grants=1" in text and "owner_lookup=" in text and "total=" in text
+    assert "Private label" not in text and str(tmp_path) not in text
+    broker.revoke("chat", grant.id)
