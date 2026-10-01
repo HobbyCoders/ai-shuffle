@@ -43,7 +43,9 @@ beforeEach(async () => {
 		providers: [{
 			id: 'openai', name: 'OpenAI', provider_type: 'openai', default_model: 'gpt-6-astra',
 			models: [{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000,
-				context_window_choices: [256_000, 1_000_000] }]
+				context_window_choices: [256_000, 1_000_000] },
+				{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', context_window: 272_000,
+					context_window_choices: [272_000, 1_000_000] }]
 		}]
 	});
 	await hydrateModelRegistry();
@@ -51,6 +53,16 @@ beforeEach(async () => {
 afterEach(() => cleanup());
 
 describe('ModelPickerPanel', () => {
+	it('shows selectable 272K and 1M controls for Sol 6.1', async () => {
+		const onContextChoiceSelect = vi.fn();
+		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(),
+			value: 'prov:openai:gpt-6.1-sol', onSelect: vi.fn(),
+			contextChoice: '1m', onContextChoiceSelect } });
+		await fireEvent.click(screen.getByRole('radio', { name: '272K · Standard' }));
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('standard');
+		await fireEvent.click(screen.getByRole('radio', { name: '1M · Extended' }));
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
+	});
 	it('shows Astra context choices and supports keyboard selection without selecting a model', async () => {
 		const onContextChoiceSelect = vi.fn();
 		const onSelect = vi.fn();

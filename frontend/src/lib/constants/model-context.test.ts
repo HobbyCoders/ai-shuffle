@@ -25,6 +25,7 @@ beforeAll(async () => {
 				provider_type: 'openai',
 				models: [
 					{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000, context_window_choices: [256_000, 1_000_000] },
+					{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', context_window: 272_000, context_window_choices: [272_000, 1_000_000] },
 					{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', context_window: 1_000_000 },
 					{ id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', context_window: 256_000 }
 				],
@@ -47,6 +48,13 @@ beforeAll(async () => {
 });
 
 describe('model context choices', () => {
+	it('offers and serializes registry-provided 272K and 1M choices for Sol 6.1', () => {
+		const sol = encodeProviderModel('openai-row', 'gpt-6.1-sol');
+		expect(getModelContextControl(sol)?.standardLabel).toBe('272K');
+		expect(contextWindowForChoice(sol, 'standard')).toBe(272_000);
+		expect(contextWindowForChoice(sol, '1m')).toBe(1_000_000);
+		expect(contextChoiceFromWindow(272_000)).toBe('standard');
+	});
 	it('offers Astra 1M independently of its smaller default, scoped to its provider', () => {
 		const astra = encodeProviderModel('openai-row', 'gpt-6-astra');
 		expect(getModelContextControl(astra)?.standardLabel).toBe('256K');

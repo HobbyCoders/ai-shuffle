@@ -249,8 +249,8 @@ def context_window_choices(
 ) -> List[int]:
     """Selectable session windows, shared by the picker and request validation.
 
-    OpenAI's Astra and Sol support an opt-in 1M window even when their catalog
-    advertises the smaller default. Keep that capability separate from the
+    OpenAI's GPT-6 variants and legacy Sol support an opt-in 1M window even
+    when their catalog advertises the smaller default. Keep that separate from the
     resolved default so existing sessions without an override are unchanged.
     Other gateways must advertise their own 1M window.
     """
@@ -263,11 +263,13 @@ def context_window_choices(
     else:
         return []
 
-    if (
-        preset_kind_for(provider_row) in {"chatgpt", "openai"}
-        and model_id in {"gpt-6-astra", "gpt-5.6-sol"}
-    ):
-        return [standard, 1_000_000]
+    if preset_kind_for(provider_row) in {"chatgpt", "openai"}:
+        # Preserve the numeric standard pick accepted by existing Astra/Sol
+        # sessions. New GPT-6 variants expose the 272K standard window.
+        if model_id in {"gpt-6-astra", "gpt-5.6-sol"}:
+            return [standard, 1_000_000]
+        if re.fullmatch(r"gpt-6(?:\.\d+)*(?:-(?:astra|sol|luna|terra))?", identity):
+            return [272_000, 1_000_000]
 
     window = (
         resolve_provider_context_window(provider_row, model_id, model_entry)
