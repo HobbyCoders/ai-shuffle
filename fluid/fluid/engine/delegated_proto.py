@@ -391,6 +391,11 @@ class ControlReply:
     error: str | None = None
 
 
+def _same_message(a: str | None, b: str | None) -> bool:
+    """Whether two message ids name one message; an unknown id matches any."""
+    return a is None or b is None or a == b
+
+
 @dataclass
 class _PendingCall:
     """A model call whose Usage waits for its final token counts.
@@ -485,8 +490,10 @@ class StreamJsonMapper:
         # reported, for the loop's next baseline.
         self.cost_baseline = cost_baseline
         self.cli_total_cost_usd: float | None = None
-        # The model the CLI said answered (assistant ``message.model``), used
-        # to price a turn or call from the table.
+        # The model the CLI said answered the turn (the first main-thread
+        # assistant ``message.model``), used to price a turn from the table.
+        # A subagent's frames (``parent_tool_use_id`` set) may name a cheaper
+        # model and never replace it.
         self.reported_model: str | None = None
         # An assistant frame of this turn reported ``authentication_failed``.
         self._auth_failed = False
@@ -496,6 +503,12 @@ class StreamJsonMapper:
         # current message, when it arrived before that message's first
         # assistant frame.
         self._stream_final_usage: dict[str, Any] | None = None
+        # The id of the message now streaming (its message_start), and of the
+        # message whose final counts are kept above: a message_delta carries
+        # no id of its own, so it belongs to the latest message_start. Its
+        # counts complete only a call of that message.
+        self._stream_msg_id: str | None = None
+        self._stream_final_msg_id: str | None = None
         # A stream_event arrived this turn: the CLI runs with
         # --include-partial-messages, so each call's message_delta will come.
         self._partial_seen = False
@@ -620,10 +633,13 @@ class StreamJsonMapper:
         )
         self._usage_emitted = True
         self._usage_msg_id = msg_id
-        if self._stream_final_usage is not None:
+        if self._stream_final_usage is not None and _same_message(
+            self._stream_final_msg_id, msg_id,
+        ):
             # The message_delta came before this message's first frame.
             _merge_counts(self._pending_call.usage, self._stream_final_usage)
             self._stream_final_usage = None
+            self._stream_final_msg_id = None
             events.extend(self._flush_call())
         return events
 
@@ -832,7 +848,10 @@ class StreamJsonMapper:
         if frame.get("error") == "authentication_failed":
             self._auth_failed = True
         model = msg.get("model")
-        if isinstance(model, str) and model:
+        if (
+            isinstance(model, str) and model and self.reported_model is None
+            and not frame.get("parent_tool_use_id")
+        ):
             self.reported_model = model
         usage = msg.get("usage")
         msg_id = msg.get("id")
@@ -928,6 +947,10 @@ class StreamJsonMapper:
             # A call still held belongs to an earlier message, which is over.
             events.extend(self._flush_call())
             self._stream_final_usage = None
+            self._stream_final_msg_id = None
+            message = p.get("message")
+            msg_id = message.get("id") if isinstance(message, dict) else None
+            self._stream_msg_id = msg_id if isinstance(msg_id, str) and msg_id else None
         elif kind == "usage":
             # message_delta: the call's final usage (output_tokens is the
             # real count here; message_start and the assistant frames carry
@@ -935,11 +958,15 @@ class StreamJsonMapper:
             # counts for the message's first assistant frame.
             final = p.get("usage")
             if isinstance(final, dict):
-                if self._pending_call is not None:
-                    _merge_counts(self._pending_call.usage, final)
+                pending = self._pending_call
+                if pending is not None and _same_message(self._stream_msg_id, pending.msg_id):
+                    _merge_counts(pending.usage, final)
                     events.extend(self._flush_call())
                 else:
+                    # Its message has no assistant frame yet (or the held
+                    # call is another message's, when streams interleave).
                     self._stream_final_usage = dict(final)
+                    self._stream_final_msg_id = self._stream_msg_id
         elif kind == "block_start":
             index = p["index"]
             self._streamed.add(index)

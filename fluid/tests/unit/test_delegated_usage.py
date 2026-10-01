@@ -215,6 +215,46 @@ def test_a_message_delta_before_the_assistant_frame_still_lands() -> None:
     assert [(u.output_tokens, u.raw["model_call_index"]) for u in usages] == [(300, 1)]
 
 
+def test_a_message_delta_completes_only_its_own_messages_call() -> None:
+    """A delta belongs to the latest message_start. When a second stream
+    starts before the first message's frame lands (parallel subagents), the
+    second message's final count must not complete the first one's call."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    a_usage = {"input_tokens": 30, "output_tokens": 1}
+    b_usage = {"input_tokens": 50, "output_tokens": 2}
+    frames = [
+        _stream({"type": "message_start", "message": {"id": "msg_a", "usage": a_usage}}),
+        _stream({"type": "message_start", "message": {"id": "msg_b", "usage": b_usage}}),
+        _assistant("msg_a", a_usage),
+        _stream({"type": "message_delta", "delta": {}, "usage": {"output_tokens": 300}}),
+        _assistant("msg_b", b_usage),
+    ]
+    usages = [e for f in frames for e in mapper.feed(f).events if isinstance(e, Usage)]
+    assert [(u.input_tokens, u.output_tokens) for u in usages] == [(30, 1), (50, 300)]
+
+
+def test_a_subagents_model_does_not_price_the_turn() -> None:
+    """With no cost baseline (first turn after --resume) the turn is priced
+    from the table, at the main thread's model, even when the last frame
+    came from a cheaper subagent."""
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n",
+                              cost_baseline=None)
+    usage = {"input_tokens": 1000, "output_tokens": 500}
+    sub = _assistant("msg_2", {"input_tokens": 10, "output_tokens": 5})
+    sub["parent_tool_use_id"] = "toolu_task"
+    sub["message"]["model"] = "claude-haiku-4-5"
+    frames = [
+        _assistant("msg_1", {"input_tokens": 990, "output_tokens": 495}),
+        sub,
+        {"type": "result", "subtype": "success", "num_turns": 2, "total_cost_usd": 9.0,
+         "usage": usage},
+    ]
+    events = [e for f in frames for e in mapper.feed(f).events]
+    assert mapper.reported_model == MODEL
+    (done,) = [e for e in events if isinstance(e, TurnComplete)]
+    assert done.cost_usd == pytest.approx(estimate_cost(MODEL, usage))
+
+
 def test_without_the_partial_stream_the_result_settles_the_last_call() -> None:
     """No message_delta: per-call outputs still add up to the turn's own."""
     mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
