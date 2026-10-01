@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -1006,21 +1007,23 @@ OPENAI_API_USAGE_PROVIDER_ID = "openai-api"
 # fal.ai account billing poller
 # ---------------------------------------------------------------------------
 
-# The documented Platform API requires a separate *admin* key. There is no
-# fallback to ordinary-key or alpha billing endpoints.
-FAL_BILLING_HOST = "api.fal.ai"
-FAL_BILLING_URL = usage_sources.FAL_BILLING_URL
+# The balance is read with the ordinary fal.ai API key (``fal_api_key``), the
+# one the media tools use. fal's documented billing API refuses that key (it
+# needs an Admin key), so the registry lists the endpoint that accepts it. The
+# host is pinned; the Key credential never leaves it.
+FAL_BALANCE_HOST = "rest.alpha.fal.ai"
+FAL_BALANCE_URL = usage_sources.FAL_BALANCE_URL
 FAL_USAGE_PROVIDER_ID = "fal-ai"
 FAL_USAGE_PROVIDER_TYPE = "fal"
 FAL_USAGE_PROVIDER_NAME = "fal.ai"
+FAL_KEY_SETTING = "fal_api_key"
 
 _FAL_CREDITS_FIELDS: Tuple[str, ...] = ("balance_remaining", "currency")
-_FAL_RAW_FIELDS: Tuple[str, ...] = ("username", "current_balance", "currency", "source")
 
 
-def _fal_billing_url_is_pinned(url: str) -> bool:
-    """HTTPS + host pin — the Key credential must never leave api.fal.ai."""
-    return _https_host_is(url, FAL_BILLING_HOST)
+def _fal_balance_url_is_pinned(url: str) -> bool:
+    """HTTPS + host pin — the Key credential must never leave rest.alpha.fal.ai."""
+    return _https_host_is(url, FAL_BALANCE_HOST)
 
 
 def _fal_auth_header(api_key: str) -> str:
@@ -1031,44 +1034,40 @@ def _fal_auth_header(api_key: str) -> str:
     return f"Key {text}"
 
 
-def normalize_fal_billing(payload: Any) -> Optional[Dict[str, Any]]:
-    """Map fal ``/v1/account/billing?expand=credits`` JSON to a credits blob.
+def _fal_balance_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip().strip('"').strip("'")
+    number = _as_float(value)
+    return number if number is not None and math.isfinite(number) else None
 
-    ``credits.current_balance`` becomes ``balance_remaining`` so the popover
-    headlines ``$X.XX left``. Pure and defensive: a missing/non-numeric
-    balance returns ``None``.
+
+def normalize_fal_user_balance(payload: Any) -> Optional[Dict[str, Any]]:
+    """Map fal's ``/billing/user_balance`` answer to a credits blob.
+
+    The endpoint answers with a bare number (sometimes quoted). Dict wrappers
+    carrying ``balance`` / ``user_balance`` / ``current_balance`` (directly or
+    under ``credits``) are accepted too. The figure becomes
+    ``balance_remaining`` so the popover headlines ``$X.XX left``. Pure and
+    defensive: anything without a finite number returns ``None``.
     """
     if not isinstance(payload, dict):
-        return None
-    if isinstance(payload.get("data"), dict) and "credits" not in payload:
-        payload = payload["data"]
-    credits_obj = payload.get("credits")
-    if not isinstance(credits_obj, dict):
-        credits_obj = payload if "current_balance" in payload else None
-    if not isinstance(credits_obj, dict):
-        return None
-    balance = _as_float(credits_obj.get("current_balance"))
-    if balance is None:
-        return None
-    credits: Dict[str, Any] = {"balance_remaining": balance}
-    currency = credits_obj.get("currency")
-    if isinstance(currency, str) and currency.strip():
-        credits["currency"] = currency.strip()
-    return {k: v for k, v in credits.items() if k in _FAL_CREDITS_FIELDS}
-
-
-def _allowlisted_fal_raw(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Copy only billing fields we actually read. Never credentials."""
-    raw: Dict[str, Any] = {}
-    username = payload.get("username")
-    if isinstance(username, str) and username:
-        raw["username"] = username
-    credits_obj = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
-    if "current_balance" in credits_obj:
-        raw["current_balance"] = credits_obj.get("current_balance")
-    if "currency" in credits_obj:
-        raw["currency"] = credits_obj.get("currency")
-    return {k: v for k, v in raw.items() if k in _FAL_RAW_FIELDS}
+        balance = _fal_balance_number(payload) if isinstance(payload, (int, float, str)) else None
+        return {"balance_remaining": balance} if balance is not None else None
+    for obj in (payload, payload.get("credits")):
+        if not isinstance(obj, dict):
+            continue
+        for key in ("balance", "user_balance", "current_balance"):
+            balance = _fal_balance_number(obj.get(key))
+            if balance is None:
+                continue
+            credits: Dict[str, Any] = {"balance_remaining": balance}
+            currency = obj.get("currency")
+            if isinstance(currency, str) and currency.strip():
+                credits["currency"] = currency.strip()
+            return {k: v for k, v in credits.items() if k in _FAL_CREDITS_FIELDS}
+    return None
 
 
 # A user-forced refresh (popover open, ``refresh=true``) starts at most one poll
@@ -1569,10 +1568,10 @@ class ProviderUsageMonitor:
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.
 
-        Only the optional, separate local ``fal_billing_api_key`` is used.
-        Credential mutations invalidate ``fal-ai`` inside their transaction;
-        every result is conditionally committed against the captured revision.
-        No ordinary-key probes or undocumented fallback endpoints are allowed.
+        Uses the ordinary fal.ai API key (``fal_api_key``) the media tools use;
+        no extra billing key is needed. Credential mutations invalidate
+        ``fal-ai`` inside their transaction; every result is conditionally
+        committed against the captured revision.
         """
         from app.db import database as db
 
@@ -1580,9 +1579,9 @@ class ProviderUsageMonitor:
         try:
             from app.api.settings_crypto import get_decrypted_api_key
 
-            generation = await run_sync(db.get_system_setting_revision, "fal_billing_api_key")
-            key = await run_sync(get_decrypted_api_key, "fal_billing_api_key")
-            if generation != await run_sync(db.get_system_setting_revision, "fal_billing_api_key"):
+            generation = await run_sync(db.get_system_setting_revision, FAL_KEY_SETTING)
+            key = await run_sync(get_decrypted_api_key, FAL_KEY_SETTING)
+            if generation != await run_sync(db.get_system_setting_revision, FAL_KEY_SETTING):
                 return
             if not key:
                 return
@@ -1597,23 +1596,23 @@ class ProviderUsageMonitor:
                 "Authorization": _fal_auth_header(key),
                 "Accept": "application/json",
             }
-            credits: Optional[Dict[str, Any]] = None
-            raw: Dict[str, Any] = {}
-
-            if not _fal_billing_url_is_pinned(FAL_BILLING_URL):
+            if not _fal_balance_url_is_pinned(FAL_BALANCE_URL):
                 return
-            # Re-saving the Admin key bumps its revision and probes again.
+            # Re-saving the key bumps its revision and probes again.
             fingerprint = capability_fingerprint("fal_billing", headers, generation)
             if await _capability_denied(FAL_USAGE_PROVIDER_ID, fingerprint):
                 return
-            resp = await _registered_get("fal_billing", FAL_BILLING_URL, headers=headers)
+            resp = await _registered_get("fal_billing", FAL_BALANCE_URL, headers=headers)
             if resp.status_code != 200:
                 refused = _is_capability_refusal(resp.status_code)
                 await failed(_failure_kind(resp.status_code), fingerprint if refused else None)
                 return
-            body = resp.json()
-            credits = normalize_fal_billing(body)
-            raw = {**_allowlisted_fal_raw(body), "source": "fal_admin"}
+            try:
+                body: Any = resp.json()
+            except ValueError:
+                body = resp.text
+            credits = normalize_fal_user_balance(body)
+            raw = {"source": "fal_user_balance"}
 
             if not credits:
                 await failed()

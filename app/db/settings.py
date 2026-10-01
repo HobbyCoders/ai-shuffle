@@ -265,7 +265,7 @@ def set_system_setting(key: str, value: str) -> None:
                    revision = excluded.revision""",
             (key, value, now, str(uuid4()))
         )
-        if key == "fal_billing_api_key":
+        if key == "fal_api_key":
             # Same transaction and lock order as conditional billing writes.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
         if key.startswith("openrouter_billing_key:"):
@@ -281,7 +281,7 @@ def delete_system_setting(key: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
         deleted = cursor.rowcount > 0
-        if key == "fal_billing_api_key":
+        if key == "fal_api_key":
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
         if key.startswith("openrouter_billing_key:"):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",

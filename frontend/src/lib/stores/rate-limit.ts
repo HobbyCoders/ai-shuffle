@@ -83,7 +83,7 @@ export type ProviderUsageErrorKind =
 
 /** What a reading means; never present one kind as another. */
 export type UsageMeasure = 'rate_limit' | 'subscription_allowance' | 'reported_spend' | 'monetary_credit';
-export type UsageSupport = 'documented' | 'response_metadata' | 'unofficial_subscription';
+export type UsageSupport = 'documented' | 'response_metadata' | 'unofficial_subscription' | 'undocumented';
 
 /** Backend registry entry describing where a usage reading comes from. */
 export interface UsageSourceInfo {

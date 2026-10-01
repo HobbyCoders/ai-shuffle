@@ -2351,6 +2351,7 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_claude_accounts(cursor))
     migrations_applied.extend(_retire_message_hooks(cursor))
     migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
+    migrations_applied.extend(_retire_fal_billing_key(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -2656,6 +2657,26 @@ def _retire_webhooks_and_legacy_push(cursor) -> List[str]:
             cursor.execute(f"DROP TABLE IF EXISTS {table}")
             applied.append(f"drop {table}")
     return applied
+
+
+def _retire_fal_billing_key(cursor) -> List[str]:
+    """Drop the separate fal.ai Admin billing key. Idempotent.
+
+    The fal.ai balance is read with the ordinary fal.ai API key again, so the
+    ``fal_billing_api_key`` setting (stored on this worker only, never synced)
+    has no reader or route. The cached ``fal-ai`` balance it produced goes with
+    it; the next usage refresh reads the balance with the ordinary key.
+    No ``SCHEMA_VERSION`` bump: editing this file changes
+    ``migrations_fingerprint()``, which runs the column pass once.
+    """
+    if not table_exists(cursor, "system_settings"):
+        return []
+    cursor.execute("DELETE FROM system_settings WHERE key = %s", ("fal_billing_api_key",))
+    if not cursor.rowcount:
+        return []
+    if table_exists(cursor, "provider_usage_snapshots"):
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
+    return ["system_settings.fal_billing_api_key"]
 
 
 def _backfill_sessions_is_worker(cursor) -> Optional[int]:

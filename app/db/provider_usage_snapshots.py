@@ -193,7 +193,7 @@ def record_provider_usage_failure(
 
 
 def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optional[str]) -> bool:
-    setting = "fal_billing_api_key"
+    setting = "fal_api_key"
     if provider_type == "openrouter_account":
         from app.core.openrouter_usage import SETTING_PREFIX, SNAPSHOT_PREFIX, supported
 
@@ -269,7 +269,7 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
             "SELECT p.provider_id, p.provider_type, p.plan_type, p.windows, p.credits, "
             "p.raw, p.fetched_at, s.revision AS credential_generation "
             "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = CASE "
-            "WHEN p.provider_type = 'fal' THEN 'fal_billing_api_key' "
+            "WHEN p.provider_type = 'fal' THEN 'fal_api_key' "
             "WHEN p.provider_type = 'openrouter_account' THEN 'openrouter_billing_key:' || SUBSTR(p.provider_id, 20) END"
         )
         rows = rows_to_list(cursor.fetchall())

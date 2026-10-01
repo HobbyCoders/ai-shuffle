@@ -396,7 +396,9 @@
 	}
 
 	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
-		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'API credit balance unavailable';
+		// No source can read an OpenAI API prepaid balance: the Admin API reports
+		// spend only, and the billing endpoints refuse API and Admin keys.
+		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'Credit balance not available for this key';
 		const status = providerStatusAt(pb, nowMs);
 		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') ? 'Balance unavailable for this key' : 'Billing access required';
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
@@ -742,7 +744,7 @@
 							<span class="sec-head-labels">
 								<span class="section-device">{claudeDisplay.name}</span>
 								{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
-									<span class="section-account provider-status">Last reported · not live</span>
+									<span class="section-account provider-status usage-as-of">Last reported {formatAsOf(bucketObservedAt(resolvedBucket), now)}</span>
 								{/if}
 								{#if claudeSubtext}
 									<span class="section-account">{claudeSubtext}</span>
@@ -792,9 +794,6 @@
 								</div>
 							</div>
 						{/each}
-						{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
-							<div class="row-reset usage-as-of">Updated {formatAsOf(bucketObservedAt(resolvedBucket), now)}</div>
-						{/if}
 					{:else}
 						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
 					{/if}
@@ -850,13 +849,11 @@
 									<span class="row-pct {pbSummary.severity} sec-summary"
 										use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
 									>
-								{:else if pbCreditsShort}
+								{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
+									<!-- ChatGPT extra credits live in the expanded rows only. -->
 									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{:else if pb.providerType === 'openrouter'}
 									<span class="sec-summary sec-credits">Balance unavailable</span>
-								{/if}
-								{#if pb.providerType === 'chatgpt' && pbSummary && pbCreditsShort}
-									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{/if}
 							{/if}
 							<svg
@@ -871,14 +868,6 @@
 						</button>
 						{@render hideProvider(sectionId, pbDisplay.name)}
 					</div>
-					{#if pb.providerType?.toLowerCase() === 'openai'}
-						<a
-							class="provider-billing-link"
-							href="https://platform.openai.com/settings/organization/billing/overview"
-							target="_blank"
-							rel="noopener noreferrer"
-						>View balance in OpenAI Platform billing</a>
-					{/if}
 				</div>
 				{#if pbOpen}
 					{@render sourceDetails(pb.sourceInfo)}
@@ -1339,8 +1328,7 @@
 	}
 	/* Guidance is prose, not a single-line account label. Allow it to shrink
 	   beside collapsed balances and wrap inside the viewport-clamped panel. */
-	.provider-status,
-	.provider-billing-link {
+	.provider-status {
 		min-width: 0;
 		max-width: 100%;
 		white-space: normal;
@@ -1368,14 +1356,6 @@
 		outline: 2px solid var(--ring, var(--primary));
 		outline-offset: 2px;
 	}
-	.provider-billing-link {
-		align-self: flex-start;
-		font-size: 10.5px;
-		color: var(--muted-foreground);
-		text-decoration: underline;
-		text-underline-offset: 2px;
-	}
-	.provider-billing-link:focus-visible,
 	.sec-header:focus-visible {
 		outline: 2px solid var(--ring, var(--primary));
 		outline-offset: 2px;

@@ -243,6 +243,6 @@ describe('Claude rows', () => {
 			{ type: 'seven_day', utilization: 50, resets_at: null, observed_at: T0 - 20 * 60_000 },
 		] });
 		const container = await open();
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 20m ago');
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 20m ago');
 	});
 });

@@ -96,13 +96,6 @@ def test_integrations_with_locked_storage_reports_unset_without_leaking(c, monke
     assert "enc:" not in r.text and FAL_KEY not in r.text
 
 
-def test_integrations_reports_the_billing_key_by_presence_only(c):
-    set_encrypted_api_key("fal_billing_api_key", "billing-admin-key-0123456789abcdef")
-    r = c.get(f"{BASE}/integrations")
-    assert r.json()["fal_billing_api_key_set"] is True
-    assert "billing-admin-key" not in r.text
-
-
 def test_integrations_is_readable_by_api_users_without_key_material(client, api_user):
     set_encrypted_api_key("fal_api_key", FAL_KEY)
     r = client.get(f"{BASE}/integrations", headers=api_user)
@@ -184,7 +177,6 @@ def test_locked_storage_never_saves_a_plaintext_key(authenticated_client, monkey
 
 @pytest.mark.parametrize("path,setting,body", [
     ("/integrations/fal-ai", "fal_api_key", {"api_key": FAL_KEY}),
-    ("/integrations/fal-billing", "fal_billing_api_key", {"api_key": "billing-key-0123456789"}),
     ("/integrations/anthropic", "anthropic_api_key", {"api_key": ANTHROPIC_KEY}),
 ])
 def test_saving_a_key_while_storage_is_locked_is_409(authenticated_client, monkeypatch, path, setting, body):
@@ -244,8 +236,6 @@ def test_documented_masked_key_examples_match_the_real_mask():
 @pytest.mark.parametrize("method,path,body", [
     ("post", "/integrations/fal-ai", {"api_key": FAL_KEY}),
     ("delete", "/integrations/fal-ai", None),
-    ("post", "/integrations/fal-billing", {"api_key": "billing-key-0123456789"}),
-    ("delete", "/integrations/fal-billing", None),
     ("post", "/integrations/anthropic", {"api_key": ANTHROPIC_KEY}),
     ("delete", "/integrations/anthropic", None),
 ])
@@ -258,49 +248,41 @@ def test_key_routes_are_owner_only(client, api_user, method, path, body):
     assert r.status_code == 403
     assert get_decrypted_api_key("fal_api_key") == "fal-existing-key-0123456789abcdef"
     assert database.get_system_setting("anthropic_api_key") is None
-    assert database.get_system_setting("fal_billing_api_key") is None
 
 
 # ---------------------------------------------------------------------------
-# fal billing and Anthropic keys
+# fal balance polling and Anthropic keys
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("key", ["", "   ", "has space-0123456789", "x" * 4097])
-def test_fal_billing_key_rejects_blank_whitespace_and_oversized(c, key):
-    r = c.post(f"{BASE}/integrations/fal-billing", json={"api_key": key})
-    assert r.status_code == 400
-    assert r.json()["detail"] == "Enter an Admin API key without whitespace"
-    assert database.get_system_setting("fal_billing_api_key") is None
-
-
-def test_fal_billing_key_saves_then_resumes_usage_polling(c, monkeypatch):
+def test_saving_the_fal_key_resumes_balance_polling_for_that_key(c, monkeypatch):
+    from app.core.provider_usage import FAL_BALANCE_URL
     from app.network import usage_budget
     resumed = []
 
     async def resume(url, headers):
         resumed.append((url, headers))
 
+    _fal_validation(monkeypatch, 200)
     monkeypatch.setattr(usage_budget, "resume_authentication", resume)
-    r = c.post(f"{BASE}/integrations/fal-billing", json={"api_key": " billing-key-0123456789 "})
-    assert r.status_code == 200 and r.json() == {"success": True}
-    assert get_decrypted_api_key("fal_billing_api_key") == "billing-key-0123456789"
-    assert resumed[0][1] == {"Authorization": "Key billing-key-0123456789"}
-    assert c.delete(f"{BASE}/integrations/fal-billing").json() == {"success": True}
-    assert database.get_system_setting("fal_billing_api_key") is None
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 200
+    assert get_decrypted_api_key("fal_api_key") == FAL_KEY
+    assert resumed == [(FAL_BALANCE_URL, {"Authorization": f"Key {FAL_KEY}"})]
 
 
-def test_fal_billing_key_deferred_resume_is_503_but_key_is_kept(c, monkeypatch):
+@pytest.mark.parametrize("error", ["deferred", "boom"])
+def test_fal_balance_resume_failure_never_fails_the_key_save(c, monkeypatch, error):
     from app.core.usage_polling import UsageDeferred
     from app.network import usage_budget
 
     async def resume(url, headers):
-        raise UsageDeferred("cooldown")
+        raise UsageDeferred("cooldown") if error == "deferred" else RuntimeError("offline")
 
+    _fal_validation(monkeypatch, 200)
     monkeypatch.setattr(usage_budget, "resume_authentication", resume)
-    r = c.post(f"{BASE}/integrations/fal-billing", json={"api_key": "billing-key-0123456789"})
-    assert r.status_code == 503
-    assert r.json()["detail"].startswith("Key saved.")
-    assert get_decrypted_api_key("fal_billing_api_key") == "billing-key-0123456789"
+    r = c.post(f"{BASE}/integrations/fal-ai", json={"api_key": FAL_KEY})
+    assert r.status_code == 200
+    assert get_decrypted_api_key("fal_api_key") == FAL_KEY
 
 
 @pytest.mark.parametrize("error,status,saved", [

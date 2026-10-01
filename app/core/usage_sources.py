@@ -42,11 +42,13 @@ MEASURE_LABELS = {
 DOCUMENTED = "documented"
 RESPONSE_METADATA = "response_metadata"
 UNOFFICIAL_SUBSCRIPTION = "unofficial_subscription"
+UNDOCUMENTED = "undocumented"
 
 SUPPORT_LABELS = {
     DOCUMENTED: "Documented API",
     RESPONSE_METADATA: "Metadata on inference responses",
     UNOFFICIAL_SUBSCRIPTION: "Unofficial, subscription-specific endpoint",
+    UNDOCUMENTED: "Undocumented endpoint",
 }
 
 PASSIVE = "passive"
@@ -184,7 +186,9 @@ def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
 
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 OPENAI_ADMIN_BASE = "https://api.openai.com/v1/organization"
-FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
+# fal's documented billing API needs an Admin key; this endpoint answers the
+# ordinary API key the media tools already use.
+FAL_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -323,15 +327,15 @@ _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
         id="fal_billing",
         snapshot_type="fal",
-        label="fal account billing API",
-        credential="Separate fal Admin key (local only)",
+        label="fal account balance",
+        credential="fal.ai API key (the media tools key)",
         scope="account",
         scope_label="Account credit balance",
         measure=MONETARY_CREDIT,
         collection=POLLED,
-        support=DOCUMENTED,
+        support=UNDOCUMENTED,
         dashboard_url="https://fal.ai/dashboard/billing",
-        endpoints=(Endpoint(FAL_BILLING_URL, 300),),
+        endpoints=(Endpoint(FAL_BALANCE_URL, 300),),
         poller="_poll_fal",
         global_source=True,
     ),

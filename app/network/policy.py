@@ -91,7 +91,6 @@ _LOCAL_SETTING_PATTERNS = [
         r"^port$|^host$|^advertise_url",
         r"^tunnel_",
         r"^openai_billing_",
-        r"^fal_billing_api_key$",
         r"^openrouter_billing_key:",
         r"^oauth_state",
     )

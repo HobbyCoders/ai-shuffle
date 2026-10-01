@@ -104,7 +104,7 @@ Which providers get a row:
 - **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
 - **SuperGrok sign-in:** the subscription allowance.
 - **OpenAI API:** the month's spend, only with an [OpenAI usage key](/docs/api-reference/model-providers#openai-usage-key). Without one, the row reports `last_error_kind` `missing_credentials`.
-- **fal.ai:** the account credit balance, only with a [fal.ai billing key](#post-apiv1settingsintegrationsfal-billing). Your media key is never used for it.
+- **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
 
 xAI API keys, other OpenAI-compatible hosts and the Anthropic API key get no row: they report only per-minute rate limits. Rows of a deleted provider are dropped.
 
@@ -460,13 +460,13 @@ Run a workflow again. Returns `{"status": "ok", "message": "Workflow #123 re-run
 
 ### GET /api/v1/settings/integrations
 
-Get integration settings (API key status for various services). Keys are never returned: `fal_api_key_set`, `fal_billing_api_key_set` and `anthropic_api_key_set` say whether each is stored, and `fal_api_key_masked` and `anthropic_api_key_masked` show the key's first 7 and last 4 characters (`""` for a key under 22 characters). The response also carries `claude_auth_mode`, the media tool models and the media tool defaults.
+Get integration settings (API key status for various services). Keys are never returned: `fal_api_key_set` and `anthropic_api_key_set` say whether each is stored, and `fal_api_key_masked` and `anthropic_api_key_masked` show the key's first 7 and last 4 characters (`""` for a key under 22 characters). The response also carries `claude_auth_mode`, the media tool models and the media tool defaults.
 
 **Auth:** Required
 
 ### POST /api/v1/settings/integrations/fal-ai
 
-Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT).
+Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT, and to read the fal.ai credit balance in [usage limits](#usage-limits)). Saving the key (or deleting it) also clears the saved fal.ai balance; the next usage refresh reads it again with the new key.
 
 **Auth:** Owner only
 
@@ -508,20 +508,6 @@ Errors from both routes: `400` for invalid input (empty text or text over 4096 c
 ### DELETE /api/v1/settings/integrations/fal-ai
 
 Remove the fal.ai API key.
-
-**Auth:** Owner only
-
-### POST /api/v1/settings/integrations/fal-billing
-
-Save a separate fal.ai Admin API key used only to read the account credit balance for [usage limits](#usage-limits). The media key is never used for billing. Body: `api_key` (no whitespace, at most 4096 characters, `400` otherwise). Returns `{"success": true}`. Saving the key (or deleting it) also clears the saved fal.ai balance; the next usage refresh reads it again.
-
-**Auth:** Owner only
-
-**Errors:** `409` when credential storage is locked. `503` when the key was saved but usage polling could not resume yet; the detail says what to do, then save again.
-
-### DELETE /api/v1/settings/integrations/fal-billing
-
-Remove the fal.ai Admin API key and its saved balance. The media key is not changed.
 
 **Auth:** Owner only
 
