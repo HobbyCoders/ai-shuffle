@@ -7,12 +7,17 @@
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { isVoiceEnabled } from '$lib/api/voice';
 	import { startCallForSession, voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
+	import { hasStoppableWork } from './stoppable-work';
 
 	interface Props {
 		disabled?: boolean;
+		/** Why `disabled` is set (upload, recording, transcription), shown as the tooltip. */
+		disabledReason?: string | null;
 	}
 
-	let { disabled = false }: Props = $props();
+	let { disabled = false, disabledReason = null }: Props = $props();
+
+	const START_LABEL = 'Start a call in this conversation';
 
 	let voiceEnabled = $state(false);
 	let startingVoice = $state(false);
@@ -21,8 +26,25 @@
 		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
 	);
 	const legacyVoice = $derived($activeSession.mode === 'voice');
-	const permittedSurface = $derived(!!$activeSession.sessionId && !sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote);
+	// A fresh composer has no conversation to attach a call to yet. The button
+	// stays visible there (disabled) so the entry point is discoverable.
+	const freshComposer = $derived(!$activeSession.sessionId);
+	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote));
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
+	// Calls start only on a ready or finished conversation. Busy is the Stop
+	// button's signal (streaming, running tasks, has_running_tasks, remote
+	// runtime) plus the sidebar's Parked marker and an unanswered prompt.
+	const working = $derived(hasStoppableWork($activeSession, sessionRow ?? undefined)
+		|| $activeSession.pendingPermissions.length > 0
+		|| $activeSession.pendingQuestions.length > 0);
+	const parked = $derived(!!sessionRow?.parked_task_kind);
+	const blockedReason = $derived(
+		freshComposer ? 'Send a message to start this conversation, then you can call it'
+		: working ? 'Calls can start once this session finishes working'
+		: parked ? 'Calls can start once this session’s background tasks finish'
+		: disabled ? (disabledReason || 'Unavailable right now')
+		: null
+	);
 
 	onMount(async () => {
 		voiceEnabled = await isVoiceEnabled();
@@ -31,7 +53,7 @@
 	/** Re-open a call on the voice session already being viewed. */
 	async function resumeVoiceCall() {
 		const sessionId = $activeSession.sessionId;
-		if (startingVoice || !sessionId) return;
+		if (startingVoice || !sessionId || blockedReason) return;
 		startingVoice = true;
 		try {
 			await startCallForSession(sessionId, { attach: !legacyVoice });
@@ -47,9 +69,9 @@
 		class="voice-call-btn"
 		class:starting={startingVoice}
 		onclick={resumeVoiceCall}
-		disabled={disabled || startingVoice}
-		aria-label="Start a call in this conversation"
-		title="Start a call in this conversation"
+		disabled={!!blockedReason || startingVoice}
+		aria-label={START_LABEL}
+		title={blockedReason ?? START_LABEL}
 	>
 		<AudioLines size={15} strokeWidth={1.7} />
 	</button>

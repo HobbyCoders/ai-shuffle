@@ -1154,10 +1154,13 @@
 							bind:isTranscribing
 						/>
 
-						<!-- Voice call (VM19): re-opens the call on a voice session.
-						     Renders nothing anywhere else — a NEW voice session is
-						     started from the voice lane's own hero, not from here. -->
-						<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
+						<!-- Voice call (VM19): starts a call on this conversation. It
+						     never creates a session: on a fresh composer and while the
+						     session is working or parked it shows disabled with the reason. -->
+						<VoiceCallButton
+							disabled={isUploading || isRecording || isTranscribing}
+							disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
+						/>
 					{/snippet}
 				</ControlsDock>
 			</div>
