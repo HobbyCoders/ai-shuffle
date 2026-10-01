@@ -44,15 +44,16 @@ CWD_PARAM = (
 
 # Task/Swarm/base prompt — route planned batches through the coordinator.
 SWARM_ROUTING_SUMMARY = (
-    "Use Swarm, when available, for three or more planned subagent tasks or "
-    "known dependency chains. Do not split batches into Task calls; keep Task "
-    "for isolated or adaptive work. When the user asks for a swarm, scope the "
-    "entire requested job before launch: include all known implementation, "
-    "integration, verification, and review tasks in one dependency graph, not "
-    "just a small initial slice."
+    "Use Swarm for whole workflows (3+ tasks or dependencies); Task for "
+    "isolated/adaptive work."
 )
 SWARM_ROUTING = SWARM_ROUTING_SUMMARY + (
-    " Submit the planned workflow in one start call, not smaller waves. "
+    " Use Swarm, when available, for three or more planned subagent tasks. "
+    "Do not split batches into Task calls. "
+    "When the user asks for a swarm, scope the entire requested job: include "
+    "all known implementation, integration, verification, and review tasks, "
+    "not just a small initial slice. Submit the planned workflow in one start "
+    "call, not smaller waves. "
     "Choose task boundaries by independent scope and real dependencies, not "
     "an arbitrary target such as five agents. The workflow accepts up to 64 "
     "tasks; max_parallel limits concurrent tasks, not total workflow scope. "
@@ -66,29 +67,24 @@ SWARM_ROUTING = SWARM_ROUTING_SUMMARY + (
 )
 
 # Task/Swarm/base prompt — session isolation is not Git checkout isolation.
-SUBAGENT_WORKTREE_GUIDANCE = (
-    "An isolated subagent session is not an isolated Git checkout. Never "
-    "switch or rebind the parent session's registered checkout to another "
-    "branch for independent work, including before worker launch: "
-    "branch-binding guards must remain intact. "
-    "Before delegating repository edits, prepare a separate worktree and "
-    "unique branch for each coding worker from a recorded committed base "
-    "on the parent's current branch; preserve uncommitted user work. Give "
-    "each worker its absolute checkout path, branch, base commit, owned files, "
-    "prerequisites, verification, and integration target in its brief. "
-    "Workers must use that absolute working directory for shell/build/test "
-    "commands and absolute paths for edits, not their inherited default "
-    "checkout. For read-only work, workers may share it without mutations. "
-    "Have coding workers commit only their assigned changes and return "
-    "commit SHAs, checkout/branch, tests, and blockers. Integrate reviewed "
-    "commits by merge or cherry-pick into the parent's current bound branch "
-    "(not automatically main), then verify the combined result. Dependent "
-    "workers must explicitly integrate predecessor commits into their own "
-    "worktrees: dependency reports do not transfer code. Serialize integration "
-    "and overlapping edits; do not let workers concurrently modify the parent "
-    "checkout. Do not copy credential files or dependencies from another "
-    "checkout, remove provisioned worktrees by hand, or bypass a refused "
-    "checkout; report the blocker instead."
+SUBAGENT_WORKTREE_SUMMARY = (
+    "Isolate coding-worker checkouts; preserve the parent's branch; return commits."
+)
+SUBAGENT_WORKTREE_GUIDANCE = SUBAGENT_WORKTREE_SUMMARY + (
+    " An isolated session is not an isolated Git checkout. Use the host's "
+    "assigned worktree and unique branch for each coding worker; do not "
+    "provision a duplicate. Only on hosts without automatic isolation must "
+    "the parent prepare a dedicated worktree before delegating edits. Preserve "
+    "uncommitted user work and fork the parent's committed HEAD. Include "
+    "scope, prerequisites, verification, and integration target in the brief. "
+    "Workers use their assigned absolute cwd and edit paths, commit scoped "
+    "changes, and return SHAs, checkout/branch, tests, and blockers. Integrate "
+    "reviewed commits into the parent's current bound branch (not automatically "
+    "main), then verify the combined result. Dependent workers integrate "
+    "predecessor commits in their own checkout; dependency reports do not "
+    "transfer code. Serialize integration and overlapping edits. Do not switch "
+    "the parent's branch, copy credentials or dependencies from another "
+    "checkout, remove provisioned worktrees by hand, or bypass a refusal."
 )
 
 # Task/Monitor/base prompt — park instead of holding the turn open.

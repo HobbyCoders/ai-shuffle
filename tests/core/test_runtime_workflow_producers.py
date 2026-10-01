@@ -66,8 +66,8 @@ def test_worker_context_survives_without_nested_task(tmp_path, monkeypatch):
     assert "Further delegation is unavailable" in compiled.text
     assert "Task roster" not in compiled.text
     assert "Top-level session orchestration is unavailable" in compiled.text
-    assert "default checkout may be inherited from the parent" in compiled.text
-    assert "require a dedicated worktree and branch" in compiled.text
+    assert "host-provisioned dedicated worktree and branch" in compiled.text
+    assert "do not provision another worktree" in compiled.text
     assert "absolute edit paths" in compiled.text
     assert "Dependency reports do not transfer code" in compiled.text
     assert "return commit SHAs" in compiled.text

@@ -1635,9 +1635,11 @@ async def dispatch_worker(
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
-    Binding: the worker inherits the PARENT's profile, project, worktree and
-    cwd — but NOT its transcript, exactly like the CLI's own Task tool — and
-    carries ``parent_session_id`` plus an explicit ``provider_id``. The turn is
+    Binding: workers inherit the direct caller's project, not its transcript.
+    Coding workers receive a host-provisioned worktree from the caller's exact
+    committed HEAD; research/non-Git workers retain normal cwd inheritance.
+    Each coding session is bound to its own branch/path before its first turn.
+    All workers carry ``parent_session_id`` plus an explicit ``provider_id``. The turn is
     submitted with ``overrides={"provider": ..., "model": ...}`` so both the row
     binding and the per-turn override agree.
 
@@ -1725,20 +1727,22 @@ async def dispatch_worker(
         _worker_deadlines, background, first_frame_seconds, max_wall_seconds, provider_id
     )
 
+    from app.core.worker_checkout import prepare_worker_checkout
+    worker_checkout = None
+
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
         Optional[str], str, Optional[BaseException], Optional[str],
         Optional[str],
     ]:
-        """The dispatch prologue's DB work, in ONE thread hop.
+        """Prepare checkout and durable session binding in one thread hop.
 
-        Three contiguous synchronous round trips with no awaits between them —
-        the inheritance read, the provider-name lookup (``_provider_display_name``
-        is itself a DB read) and the worker-session INSERT, each best-effort.
-        The INSERT's failure is RETURNED rather than raised so the caller can
-        build the ``WorkerOutcome`` on its own loop. Nothing here needs a
-        running loop.
+        Read the direct caller, provision Git isolation when required, then
+        insert the worker session. Checkout/INSERT failures are returned so the
+        caller can refuse launch before registration or provider submission.
+        Nothing here needs a running loop.
         """
+        nonlocal worker_checkout
         # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
         # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
         # dispatch it is the ROOT session, whose UI renders the card and answers
@@ -1783,6 +1787,15 @@ async def dispatch_worker(
                 selected_effort, api_user_id,
             )
         try:
+            worker_checkout = prepare_worker_checkout(
+                parent_row, worker_session_id, profile_id, tool_allowlist,
+            )
+            if worker_checkout:
+                project_v2_id = worker_checkout.project_v2_id
+                branch = worker_checkout.branch
+                worktree_id = None  # v2 checkout, not the caller's legacy row
+                worktree_branch = branch
+                worktree_path = worker_checkout.path
             database.create_session(
                 session_id=worker_session_id,
                 profile_id=profile_id,
@@ -1871,7 +1884,7 @@ async def dispatch_worker(
         overrides["model"] = model_id
     if selected_effort is not None:
         overrides["effort"] = selected_effort
-    cwd = _parent_cwd(parent_row)
+    cwd = worker_checkout.path if worker_checkout else _parent_cwd(parent_row)
     if cwd:
         overrides["cwd"] = cwd
     # Permission inheritance: the worker runs at the CALLER's effective
@@ -1890,8 +1903,11 @@ async def dispatch_worker(
     # the caller's profile because it has no ``agents`` row of its own (ruling
     # CE6, see app/core/task_dispatch). Rides the same append seam the
     # connectors use, so it lands after the profile's own instructions.
-    if system_prompt_append:
-        overrides["system_prompt_append"] = system_prompt_append
+    append_parts = [system_prompt_append] if system_prompt_append else []
+    if worker_checkout:
+        append_parts.append(worker_checkout.instructions())
+    if append_parts:
+        overrides["system_prompt_append"] = "\n\n".join(append_parts)
     # Tool-surface restriction for this worker (ruling CE12). Today's only
     # source is a file/plugin agent definition's ``tools:`` frontmatter, which
     # the caller's profile knows nothing about — so it rides the turn rather

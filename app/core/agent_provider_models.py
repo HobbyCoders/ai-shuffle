@@ -516,7 +516,10 @@ def build_task_contract(
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        f"tool call. {SWARM_ROUTING}\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
+        "tool call. Coding workers in Git projects get an automatically "
+        "provisioned, session-bound checkout before launch; do not create "
+        "worktrees in the model's brief. "
+        f"{SWARM_ROUTING}\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
         f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
@@ -667,7 +670,11 @@ def parent_subagent_guidance(
             "scope and expected result. Choose the role that matches the work: "
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
-            "Delegate only when the user authorizes subagents.\n"
+            "Delegate only when the user authorizes subagents. Coding workers "
+            "in Git projects get an automatically provisioned, session-bound "
+            "checkout before launch; do not create worktrees in the model's "
+            "brief. The app forks the direct caller's committed HEAD and leaves "
+            "its bound checkout untouched.\n"
             + SUBAGENT_WORKTREE_GUIDANCE + "\n"
             + (SWARM_ROUTING if swarm_available else
                "Use Task for independent or adaptive assignments; do not "
