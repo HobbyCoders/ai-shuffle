@@ -105,39 +105,6 @@
 			It never stops a turn you started yourself.
 		</p>
 
-		<!-- Mirrors app/core/loop_guard.py; keep the two in step. -->
-		<details class="explain pad" data-testid="loop-guard-explainer">
-			<summary>What the loop guard counts and why</summary>
-			<p>
-				On a Claude subscription, every agent run uses your plan's limits. A runaway automation, an
-				agent that keeps scheduling wake-ups, a flood of connector messages or a crowd of background
-				workers could use them up while nobody is watching.
-			</p>
-			<ul>
-				<li>
-					<strong>Counted:</strong> turns that start without you (automations, scheduled wake-ups,
-					background workers and connector messages) when they run on the Claude Code CLI in subscription
-					mode. Each one counts against its session and against this worker over the last hour. Defaults:
-					{status.defaults.session_turns_per_hour} per session, {status.defaults.install_turns_per_hour} per worker.
-				</li>
-				<li>
-					<strong>When a budget is used up:</strong> the next unattended turn does not start. The session
-					shows why, and the turn waits under "Waiting for confirmation" here. Confirm starts it now (it
-					still counts toward the hour); Dismiss drops it. A held turn never runs by itself; new unattended
-					turns start again once the last hour's count is back under the budget.
-				</li>
-				<li>
-					<strong>Worker time limit:</strong> a background worker on the Claude Code CLI stops after
-					{status.defaults.worker_max_minutes} minutes by default when nothing else set a limit.
-				</li>
-				<li>
-					<strong>Not covered:</strong> turns you start yourself (chat, queued messages, resumes, API
-					requests), API key mode (your Anthropic Console spend limit is the control there), and turns that
-					run on another provider. Counts are kept in memory and start from zero when the worker restarts.
-				</li>
-			</ul>
-		</details>
-
 		<div class="set-row">
 			<div class="lab"><h4>Loop guard</h4><p class="hint">Hold unattended turns past the budget until you confirm them.</p></div>
 			<div class="ctl">
@@ -178,7 +145,6 @@
 		{#if status.held.length}
 			<div class="held" data-testid="loop-guard-held">
 				<h4 class="pad">Waiting for confirmation</h4>
-				{#if isAdmin}<p class="hint pad">Confirm starts the turn now; it still counts toward the hour. Dismiss drops it.</p>{/if}
 				{#each status.held as item (item.id)}
 					<div class="held-item">
 						<div class="held-text">
@@ -204,12 +170,6 @@
 	.hint { margin: 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
 	.pad { padding: 0 14px; }
 	.num { width: 90px; }
-	.explain { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); }
-	.explain summary { cursor: pointer; color: var(--foreground); }
-	.explain summary:focus-visible { outline: 2px solid var(--ring, var(--primary)); outline-offset: 2px; border-radius: 3px; }
-	.explain p, .explain ul { margin: 6px 0 0; }
-	.explain ul { padding-left: 18px; display: grid; gap: 4px; }
-	.explain strong { color: var(--foreground); font-weight: 600; }
 	.held { display: grid; gap: 6px; }
 	.held h4 { margin: 4px 0 0; font-size: 13px; }
 	.held-item { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin: 0 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }

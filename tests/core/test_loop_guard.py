@@ -31,20 +31,6 @@ def test_defaults_are_documented_values(mock_db):
         True, 12, 60, 60)
 
 
-def test_facts_the_settings_explainer_states(mock_db):
-    """LoopGuardPanel's explainer repeats these; change both together."""
-    _subscription()
-    assert loop_guard.UNATTENDED_SOURCES == ("automation", "wakeup", "provider_agent", "connector")
-    loop_guard.update_config(session_turns_per_hour=1)
-    # A confirmed turn starts past the budget and still counts toward the hour.
-    assert loop_guard.check("s", "automation", "delegated", confirmed=True, now=1.0) is None
-    assert loop_guard.usage("s", now=1.0) == {"install_last_hour": 1, "session_last_hour": 1}
-    # Turns a person started and turns on another provider's leg are never counted.
-    assert loop_guard.check("s", "chat", "delegated", now=2.0) is None
-    assert loop_guard.check("s", "automation", "openai_responses", now=2.0) is None
-    assert loop_guard.usage("s", now=2.0) == {"install_last_hour": 1, "session_last_hour": 1}
-
-
 def test_session_budget_holds_the_next_unattended_turn(mock_db):
     _subscription()
     loop_guard.update_config(session_turns_per_hour=3)

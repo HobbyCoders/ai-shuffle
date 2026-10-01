@@ -1,5 +1,5 @@
-// Real-browser check of the usage popover rows (#1607) and the loop guard
-// explainer (#1613) at desktop and phone widths.
+// Real-browser check of the usage popover rows and fal.ai settings (#1607) at
+// desktop and phone widths.
 //
 // Run from frontend/ while the fixture is serving:
 //   npx vite dev --config tests/vite.usage-rows.config.js --host 127.0.0.1 --port 5291 --strictPort
@@ -88,15 +88,7 @@ async function run(viewport, touch) {
 
 	// ── Settings panels ──
 	await page.goto(`${base}?view=settings`);
-	const explainer = page.getByTestId('loop-guard-explainer');
-	await explainer.waitFor();
-	check(!(await explainer.evaluate((d) => d.open)), 'explainer starts collapsed');
-	await press(explainer.locator('summary'));
-	check(await explainer.evaluate((d) => d.open), 'explainer opens');
-	const text = (await explainer.textContent()).replace(/\s+/g, ' ');
-	check(text.includes('Defaults: 12 per session, 60 per worker.'), 'explainer states the defaults');
-	check(text.includes('Not covered:'), 'explainer states what is not covered');
-	check((await page.getByTestId('loop-guard-held').textContent()).includes('Confirm starts the turn now'), 'held list says what Confirm does');
+	await page.getByText('fal-abc...wxyz').waitFor();
 	check((await page.getByText('fal-abc...wxyz').count()) === 1, 'fal.ai key card shows the saved key');
 	check((await page.getByText(/Admin API key|billing access/i).count()) === 0, 'no fal.ai Admin billing UI');
 	check((await noHorizontalOverflow()).length === 0, 'settings panel fits the viewport', await noHorizontalOverflow());
