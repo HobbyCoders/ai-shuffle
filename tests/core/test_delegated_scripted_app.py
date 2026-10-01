@@ -323,6 +323,37 @@ async def test_stop_mid_turn_ends_with_an_aborted_result_that_keeps_the_cost(tmp
     assert not again[-1].is_error
 
 
+# ─── A refused call's HTTP status ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_failed_results_http_status_reaches_the_apps_result(tmp_path):
+    """A lapsed Claude Code login ends the turn with ``api_error_status`` 401.
+
+    The status travels from the CLI's result frame through fluid's ErrorEvent
+    to the ResultMessage the query loops read, which is what raises the
+    "sign in to Claude Code again" notice.
+    """
+    turn = [
+        {"op": "frame", "frame": {
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "api_error_status": 401, "num_turns": 1, "total_cost_usd": 0.0,
+            "duration_ms": 5, "duration_api_ms": 3,
+            "errors": ["Invalid API key · Please run /login"],
+            "usage": {"input_tokens": 0, "output_tokens": 0,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        }},
+    ]
+    run = Run(tmp_path, {"turns": [turn]})
+    async with run:
+        messages = await run.turn("hello")
+
+    final = messages[-1]
+    assert isinstance(final, ResultMessage)
+    assert final.is_error
+    assert final.api_error_status == 401
+
+
 # ─── Usage the app books for the turn ───────────────────────────────────────
 
 
