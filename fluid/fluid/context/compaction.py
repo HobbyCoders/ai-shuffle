@@ -143,6 +143,29 @@ class CompactionConfig:
     # rebuilds a few calls apart, or sank it under the 5% floor when the image
     # reclaim was small. The trim-only contract always keeps the legacy path.
     image_rung_in_batch: bool = True
+    # Deep target (plan item 5, B2). With a known window every full-ladder
+    # batch reclaims down to T = deep_target_window_ratio * window measured
+    # tokens, or the legacy target_ratio * threshold when that is lower. The
+    # legacy target sat only 30% under the trigger, so a long turn regrew to
+    # the trigger within a few calls and paid for another rebuild. 0 restores
+    # the legacy target. With no known window the legacy target always holds.
+    deep_target_window_ratio: float = 0.35
+    # Hard ceiling H = min(hard_window_ratio * window, L - hard_margin_tokens),
+    # where L is the window-protection limit. Between H and L a batch skips
+    # the shortfall watermark below (not the legacy floor watermark), and it
+    # must land at or below the trigger S or run the guarded escalation. The
+    # margin reserves space for an unexpectedly large single-call jump. With no known window, a 0 ratio, or an H at or below S, there
+    # is no hard zone.
+    hard_window_ratio: float = 0.75
+    hard_margin_tokens: int = 32_000
+    # Shortfall watermark (plan item 5, B2). On, a commit with a known window
+    # that still leaves the prompt above its batch target sets a watermark
+    # at the shortfall instead of clearing it: later mid-turn calls over the
+    # trigger wait until the reclaimable chars have grown by that much, so
+    # one shallow batch is not followed by another a few calls later. The
+    # hard zone and window protection skip the watermark, so it never delays
+    # a needed batch. Off restores the legacy clear on every commit.
+    shortfall_watermark: bool = True
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -501,6 +524,12 @@ class Compactor:
     # stayed at or below it. ``apply`` reads them to label the decision.
     _candidate_threshold: int | None = None
     _candidate_below: bool = False
+    # The batch target of the last candidate that ran its size rungs, in the
+    # same chars/4 units; None when no size batch ran.
+    _candidate_target: int | None = None
+    # Shortfall watermark (plan item 5): reclaimable chars at the commit and
+    # the growth the next mid-turn batch over the trigger waits for.
+    _shortfall_retry: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -670,15 +699,24 @@ class Compactor:
         else:
             basis, measured, scale = "estimate", 0, 1.0
         mandatory = limit is not None and before * scale >= limit
+        # The hard zone (plan item 5): past H the batch skips the shortfall
+        # watermark and must reach the trigger. It still keeps the legacy
+        # floor watermark, which only waits for a batch worth 4x the 5%
+        # floor; skipping that too made hard-zone batches smaller and more
+        # frequent. Full ladder only; the trim-only contract keeps its
+        # legacy path.
+        hard_at = (
+            self._hard_ceiling(context_window, output_reserve_tokens)
+            if self.config.enabled else None
+        )
+        hard = not mandatory and hard_at is not None and before * scale >= hard_at
         minimum = max(1, int(before * 0.05))
-        eligible_chars = _chars_of(nodes, self.trimmer._eligible(nodes))
-        if self.config.enabled:
-            eligible_chars += sum(
-                block_chars(b) for span in self._eligible_spans(nodes)
-                for node in span for b in node.message.content
-            )
+        eligible_chars = self._eligible_chars(nodes)
         basis_fields = {"token_basis": basis, "measured_prompt_tokens": measured}
         decision_fields = {"window_protection": mandatory, **basis_fields}
+        if hard_at is not None:
+            decision_fields["hard_ceiling_tokens"] = hard_at
+            decision_fields["hard_ceiling"] = hard
         retry = self._optional_retry
         if not mandatory and retry is not None and not turn_boundary:
             last_chars, growth = retry
@@ -687,17 +725,48 @@ class Compactor:
                                       "before_tokens": before, "after_tokens": before,
                                       **decision_fields}
                 return before_view, []
+        shortfall_retry = self._shortfall_retry
+        if shortfall_retry is not None and before * scale > self._threshold(
+            self.config.trigger_tokens, context_window, output_reserve_tokens
+        ):
+            # Under the trigger the candidate is a cheap below_threshold, so
+            # the watermark only gates calls over it, and it is spent the
+            # first time a candidate over the trigger is built.
+            last_chars, growth = shortfall_retry
+            if (
+                not mandatory and not hard and not turn_boundary
+                and self._reclaimable_chars(nodes) < last_chars + growth
+            ):
+                self.last_decision = {"reason": "awaiting_reclaimable_growth",
+                                      "before_tokens": before, "after_tokens": before,
+                                      "shortfall_tokens": growth // 4,
+                                      **decision_fields}
+                return before_view, []
+            self._shortfall_retry = None
         restore = self._tier_snapshot()
         self._candidate_threshold, self._candidate_below = None, False
+        self._candidate_target = None
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
             scale=scale,
         )
-        if mandatory and self._estimate(nodes, overhead_tokens) * scale >= limit:
+        # Reachability: a hard-zone batch still over the trigger would be
+        # followed by another one within a few calls, so it runs the guarded
+        # escalation, whose stop target is the trigger.
+        unreached = (
+            hard and self._candidate_threshold is not None
+            and self._estimate(nodes, overhead_tokens) > self._candidate_threshold
+        )
+        if unreached or (
+            mandatory and self._estimate(nodes, overhead_tokens) * scale >= limit
+        ):
             # Recency-guarded rungs only. The unguarded ones trim and digest
             # the in-flight turn, including its newest result and any steer
             # delivered with it; they are for a prompt the provider rejected.
+            # TODO(lane A, plan item 2): the guarded in-flight rung
+            # (turn_budget) joins escalate(guarded_only=True), and the hard
+            # zone reaches the in-flight turn through it.
             promotions.extend(self.escalate(
                 nodes, overhead_tokens=overhead_tokens, context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens, guarded_only=True,
@@ -705,11 +774,17 @@ class Compactor:
             ))
             rendered = self.view(nodes)
         after = overhead_tokens + estimate_tokens_of_messages(rendered)
-        reason = "window_protection" if mandatory else "meaningful_reclaim"
+        reason = (
+            "window_protection" if mandatory
+            else "hard_ceiling" if hard
+            else "meaningful_reclaim"
+        )
         threshold_fields = (
             {"threshold_tokens": self._candidate_threshold}
             if self._candidate_threshold is not None else {}
         )
+        if self._candidate_target is not None:
+            threshold_fields["target_tokens"] = self._candidate_target
         if before - after < minimum:
             restore()
             below = self._candidate_below
@@ -737,13 +812,35 @@ class Compactor:
                                   "candidate_after_tokens": after,
                                   **threshold_fields, **decision_fields}
             return before_view, []
+        # Shortfall watermark (plan item 5, B2). The legacy commit cleared the
+        # watermark, so a batch that could not reach its target was followed
+        # by another shallow one as soon as the prompt crossed the trigger
+        # again, every few calls in a long turn. When the commit leaves the
+        # prompt above its target, the next mid-turn batch waits until the
+        # reclaimable growth covers the shortfall. The hard zone and window
+        # protection skip the watermark, so it never holds a needed batch.
         self._optional_retry = None
+        target = self._candidate_target
+        shortfall = 0
+        if (
+            self.config.enabled and self.config.shortfall_watermark
+            and context_window is not None
+            and target is not None and after > target
+        ):
+            shortfall = after - target
+            self._shortfall_retry = (
+                self._reclaimable_chars(nodes), max(minimum, shortfall) * 4,
+            )
+        else:
+            self._shortfall_retry = None
         first_changed = next((i for i, (a, b) in enumerate(zip(before_view, rendered))
                               if a != b), min(len(before_view), len(rendered)))
         self.last_decision = {"reason": reason, "before_tokens": before,
                               "after_tokens": after,
                               "first_changed_message": first_changed,
                               **threshold_fields, **decision_fields}
+        if shortfall:
+            self.last_decision["shortfall_tokens"] = shortfall
         return rendered, [replace(p, before_tokens=before, after_tokens=after,
                                   decision_reason=reason,
                                   first_changed_message=first_changed,
@@ -812,6 +909,10 @@ class Compactor:
         # one cache break beats a turn that overflows. Only the image rung is
         # held for a turn boundary.
         target = int(threshold * self.config.target_ratio)
+        deep = self._deep_target(context_window, scale)
+        if deep is not None:
+            target = min(target, deep)
+        self._candidate_target = target
 
         # Rung 1: batch-trim tool results.
         pairs = self.trimmer.trim_batch(nodes)
@@ -898,6 +999,70 @@ class Compactor:
             headroom_tokens=self.config.headroom_tokens,
             output_reserve_tokens=output_reserve_tokens,
         )
+
+    def _deep_target(self, context_window: int | None, scale: float) -> int | None:
+        """The deep batch target T in chars/4 units, or None for the legacy
+        target (no known window, or ``deep_target_window_ratio`` of 0)."""
+        ratio = self.config.deep_target_window_ratio
+        if context_window is None or ratio <= 0:
+            return None
+        return _in_estimate_units(int(context_window * ratio), scale)
+
+    def _hard_ceiling(
+        self, context_window: int | None, output_reserve_tokens: int
+    ) -> int | None:
+        """The hard ceiling H in measured tokens, or None when there is no
+        hard zone: no known window, a ratio of 0, or an H at or below the
+        trigger. On a small window the trigger already sits at the limit,
+        and window protection covers that band."""
+        ratio = self.config.hard_window_ratio
+        if context_window is None or ratio <= 0:
+            return None
+        limit = max(
+            1, context_window - self.config.headroom_tokens - output_reserve_tokens
+        )
+        hard = min(int(context_window * ratio), limit - self.config.hard_margin_tokens)
+        trigger = self._threshold(
+            self.config.trigger_tokens, context_window, output_reserve_tokens
+        )
+        return hard if hard > trigger else None
+
+    def _eligible_chars(self, nodes: list[SessionNode]) -> int:
+        """Raw chars the guarded rungs could reclaim now. The retry watermark
+        measures growth in these."""
+        chars = _chars_of(nodes, self.trimmer._eligible(nodes))
+        if self.config.enabled:
+            chars += sum(
+                block_chars(b) for span in self._eligible_spans(nodes)
+                for node in span for b in node.message.content
+            )
+        return chars
+
+    def _reclaimable_chars(self, nodes: list[SessionNode]) -> int:
+        """Chars the guarded rungs could take out of the current view: the
+        rendered size of every eligible span plus every trimmable result
+        outside those spans.
+
+        ``_eligible_chars`` counts a span at its raw size, results that are
+        already placeholders included, and counts an untrimmed result twice
+        when its span is eligible too. That is fine for the legacy floor
+        watermark, but it would let the shortfall watermark pass long before
+        a batch could really reclaim the shortfall.
+        """
+        trimmed = self.trimmer._trimmed
+        consumed = self.trimmer._image_consumed
+        chars = 0
+        in_spans: set[str] = set()
+        if self.config.enabled:
+            for span in self._eligible_spans(nodes):
+                for node in span:
+                    in_spans.add(node.node_id)
+                    chars += sum(
+                        block_chars(b)
+                        for b in self._render_live(node, trimmed, consumed).content
+                    )
+        pairs = [p for p in self.trimmer._eligible(nodes) if p[0] not in in_spans]
+        return chars + _chars_of(nodes, pairs)
 
     def _image_threshold(self, threshold: int) -> int:
         """Estimated tokens at which the consume-once image rung arms.

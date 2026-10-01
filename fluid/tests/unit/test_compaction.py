@@ -1465,10 +1465,15 @@ def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
 # path. Plan item 4 turned below_threshold_skips_retry on by default; with it
 # on, the ladder, windowed and optional mega-turn scenarios commit earlier.
 # Plan item 6 turned image_rung_in_batch on, which runs the size rungs in the
-# same batch as the images. The trim-only scenario needs no flag: that
+# same batch as the images. Plan item 5 turned on the deep target, the hard
+# zone and the shortfall watermark, which change every windowed scenario.
+# The trim-only scenario needs no flag: that
 # contract keeps the legacy path.
 _LEGACY_FLAGS = {"below_threshold_skips_retry": False,
-                 "image_rung_in_batch": False}
+                 "image_rung_in_batch": False,
+                 "deep_target_window_ratio": 0.0,
+                 "hard_window_ratio": 0.0,
+                 "shortfall_watermark": False}
 
 
 def _parity_ladder() -> CompactionConfig:
@@ -1690,3 +1695,218 @@ async def test_rehydrate_over_events_persisted_without_the_new_fields(tmp_path) 
     await fresh._rehydrate_compaction(sid)
     assert fresh._compactor.view(nodes) == live.view(nodes)
     await fresh.aclose()
+
+
+# ── Plan item 5 (B2): deep target, hard zone, shortfall watermark ──────────
+#
+# The 272k window used below gives, with a 4k output reserve: trigger S =
+# 163,200, deep target T = 0.35W = 95,200, hard ceiling H = min(0.75W,
+# L - 32k) = 204,000 and window-protection limit L = 252,000.
+
+_ITEM5_OFF = {"deep_target_window_ratio": 0.0, "hard_window_ratio": 0.0,
+              "shortfall_watermark": False}
+_W, _RESERVE = 272_000, 4_000
+
+
+def _floor_heavy_turn(calls: int) -> list[SessionNode]:
+    """One long turn of small calls with typed delivery metadata, so its
+    completed segments become digestible as the turn grows."""
+    nodes = [_node("start", "user", [Text("Ship the release. Never touch prod credentials.")])]
+    for i in range(calls):
+        nodes.append(_node(f"a{i}", "assistant", [
+            ToolUseBlock(id=f"c{i}", name="Bash", input={"command": "x" * 2_000})]))
+        nodes.append(_node(f"r{i}", "user", [ToolResultBlock(
+            tool_use_id=f"c{i}", content=[Text("r" * 4_000)],
+            delivery_metadata_version=1)]))
+    return nodes
+
+
+def _drive_mega_turn(config: CompactionConfig, calls: int, *, overhead: int) -> tuple[
+        Compactor, list[SessionNode], list[list], list[dict], int]:
+    """Every call after a tool result, mid-turn, the way the engine drives a
+    long turn. Returns the batches, every decision, and the peak prompt."""
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    c = Compactor(config=config)
+    nodes = _floor_heavy_turn(calls)
+    batches, decisions, peak = [], [], 0
+    for end in range(3, len(nodes) + 1, 2):
+        prefix = nodes[:end]
+        peak = max(peak, overhead + estimate_tokens_of_messages(c.view(prefix)))
+        rendered, promotions = c.apply(
+            prefix, overhead_tokens=overhead, context_window=_W,
+            output_reserve_tokens=_RESERVE, turn_boundary=False)
+        assert rendered == c.view(prefix)
+        decisions.append(dict(c.last_decision))
+        if promotions:
+            batches.append(promotions)
+    return c, nodes, batches, decisions, peak
+
+
+def test_mega_turn_fires_at_most_two_batches_where_legacy_fires_five() -> None:
+    # The 33dc66c6 turn 1612b7 shape: a long turn over a large floor that no
+    # rung can reclaim (system prompt, tools, steers; 130k here). Each batch
+    # can only digest the newest aged segment, so the legacy commit reset the
+    # watermark and the ladder refired at each segment completion, about
+    # every 8-10 calls, each time for a shallow reclaim.
+    _, _, old, _, old_peak = _drive_mega_turn(
+        CompactionConfig(**_ITEM5_OFF), 60, overhead=130_000)
+    assert len(old) == 5
+    c, nodes, new, decisions, peak = _drive_mega_turn(
+        CompactionConfig(), 60, overhead=130_000)
+    assert len(new) <= 2
+    # The first batch is the same. The shortfall watermark then holds the
+    # next one until a batch can reclaim the shortfall, so it is deeper than
+    # any legacy refire.
+    assert [p.trimmed for p in new[0]] == [p.trimmed for p in old[0]]
+    legacy_drops = [b[0].before_tokens - b[0].after_tokens for b in old[1:]]
+    assert new[1][0].before_tokens - new[1][0].after_tokens > 2 * max(legacy_drops)
+    assert "awaiting_reclaimable_growth" in [d["reason"] for d in decisions]
+    # The cost is a higher peak, still under the hard ceiling and well under
+    # window protection.
+    assert old_peak < peak < 204_000
+    assert not any(d.get("window_protection") for d in decisions)
+    # Persisted decisions replay to the same view.
+    resumed = Compactor(config=CompactionConfig())
+    resumed.rehydrate(p for batch in new for p in batch)
+    assert resumed.view(nodes) == c.view(nodes)
+
+
+def _old_turns(turns: int) -> list[SessionNode]:
+    """Complete old turns whose bulk is tool arguments, which only a digest
+    reclaims (results stay under the trim size)."""
+    nodes: list[SessionNode] = []
+    for t in range(turns):
+        nodes.extend([
+            _node(f"u{t}", "user", [Text(f"turn {t}")]),
+            _node(f"a{t}", "assistant", [ToolUseBlock(
+                id=f"c{t}", name="Edit", input={"text": "e" * 4_000})]),
+            _node(f"r{t}", "user", [ToolResultBlock(
+                tool_use_id=f"c{t}", content=[Text("ok " * 100)])]),
+            _node(f"f{t}", "assistant", [Text(f"done {t}")]),
+        ])
+    return nodes
+
+
+def test_batch_reaches_the_deep_target_on_a_known_window() -> None:
+    # Window 100k: trigger 60k, legacy target 0.7 * 60k = 42k, T = 35k.
+    nodes = _old_turns(60)
+    config = dict(trigger_tokens=1_000, keep_recent_turns=2,
+                  trim=TrimConfig(min_result_chars=500, keep_recent_tool_results=2))
+
+    def run(**flags) -> tuple[Compactor, list]:
+        c = Compactor(config=CompactionConfig(**config, **flags))
+        _, promotions = c.apply(nodes, context_window=100_000)
+        return c, promotions
+
+    legacy, old = run(**_ITEM5_OFF)
+    deep, new = run()
+    assert legacy.last_decision["target_tokens"] == 42_000
+    assert deep.last_decision["target_tokens"] == 35_000
+    assert 35_000 < old[0].after_tokens <= 42_000
+    assert new[0].after_tokens <= 35_000
+    # Unknown window: the legacy target, whatever the flag says.
+    unknown = Compactor(config=CompactionConfig(**config))
+    unknown.apply(nodes)
+    assert unknown.last_decision["target_tokens"] == int(1_000 * 0.7)
+
+
+def _spy_escalate(c: Compactor) -> list[dict]:
+    calls: list[dict] = []
+    real = c.escalate
+
+    def spy(nodes, **kw):
+        calls.append(kw)
+        return real(nodes, **kw)
+
+    c.escalate = spy  # type: ignore[method-assign]
+    return calls
+
+
+def test_hard_zone_batch_that_misses_the_trigger_escalates() -> None:
+    # Over H mid-turn, with a floor no ordinary rung can take below S: the
+    # batch runs the guarded escalation rather than commit a shallow rewrite
+    # that the next few calls would repeat.
+    nodes = _floor_heavy_turn(40)
+    hard = Compactor(config=CompactionConfig())
+    calls = _spy_escalate(hard)
+    _, promotions = hard.apply(nodes, overhead_tokens=170_000, context_window=_W,
+                               output_reserve_tokens=_RESERVE, turn_boundary=False)
+    assert promotions
+    assert hard.last_decision["reason"] == "hard_ceiling"
+    assert hard.last_decision["hard_ceiling"] is True
+    assert hard.last_decision["hard_ceiling_tokens"] == 204_000
+    assert calls and all(kw["guarded_only"] for kw in calls)
+    assert {p.decision_reason for p in promotions} == {"hard_ceiling"}
+    # The in-flight turn-start node is never digested by the guarded rungs.
+    assert all(start != "start" for start, _end in hard._digested)
+    # With the hard zone off the same call is an ordinary batch.
+    legacy = Compactor(config=CompactionConfig(hard_window_ratio=0.0))
+    legacy_calls = _spy_escalate(legacy)
+    legacy.apply(nodes, overhead_tokens=170_000, context_window=_W,
+                 output_reserve_tokens=_RESERVE, turn_boundary=False)
+    assert legacy.last_decision["reason"] == "meaningful_reclaim"
+    assert not legacy_calls
+
+
+def test_hard_zone_batch_that_reaches_the_trigger_does_not_escalate() -> None:
+    # 140 calls of 1.5k tokens: about 213k, between H and L.
+    nodes = _floor_heavy_turn(140)
+    c = Compactor(config=CompactionConfig())
+    calls = _spy_escalate(c)
+    _, promotions = c.apply(nodes, overhead_tokens=3_000, context_window=_W,
+                            output_reserve_tokens=_RESERVE, turn_boundary=False)
+    assert c.last_decision["reason"] == "hard_ceiling"
+    assert promotions[0].after_tokens <= c.last_decision["threshold_tokens"]
+    assert not calls
+
+
+def test_shortfall_watermark_holds_mid_turn_and_yields_to_boundaries() -> None:
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _floor_heavy_turn(60)
+    c = Compactor(config=CompactionConfig())
+    kw = dict(overhead_tokens=130_000, context_window=_W,
+              output_reserve_tokens=_RESERVE)
+    committed = None
+    for end in range(3, len(nodes) + 1, 2):
+        _, promotions = c.apply(nodes[:end], turn_boundary=False, **kw)
+        if promotions:
+            committed = end
+            break
+    assert committed is not None
+    shortfall = c.last_decision["shortfall_tokens"]
+    assert shortfall == (c.last_decision["after_tokens"]
+                         - c.last_decision["target_tokens"])
+    assert c._shortfall_retry is not None and c._optional_retry is None
+    # A later mid-turn call over the trigger that the watermark holds.
+    held = None
+    for end in range(committed + 2, len(nodes) + 1, 2):
+        _, promotions = c.apply(nodes[:end], turn_boundary=False, **kw)
+        assert not promotions
+        if c.last_decision["reason"] == "awaiting_reclaimable_growth":
+            held = end
+            assert c.last_decision["shortfall_tokens"] == shortfall
+            break
+    assert held is not None
+    assert 130_000 + estimate_tokens_of_messages(c.view(nodes[:held])) > 163_200
+    # The legacy commit clears the watermark, so it never holds that call.
+    legacy = Compactor(config=CompactionConfig(shortfall_watermark=False))
+    for end in range(3, held + 1, 2):
+        legacy.apply(nodes[:end], turn_boundary=False, **kw)
+        assert legacy._shortfall_retry is None
+    # A turn boundary never waits on it.
+    c.apply(nodes[:held], turn_boundary=True, **kw)
+    assert c.last_decision["reason"] != "awaiting_reclaimable_growth"
+
+
+def test_shortfall_watermark_needs_a_known_window() -> None:
+    # No window means no hard zone and no window protection to cap the wait,
+    # so a commit above its target clears the watermark as before.
+    nodes = _floor_heavy_turn(40)
+    c = Compactor(config=CompactionConfig(trigger_tokens=60_000))
+    _, promotions = c.apply(nodes, overhead_tokens=50_000, turn_boundary=False)
+    assert promotions
+    assert c.last_decision["after_tokens"] > c.last_decision["target_tokens"]
+    assert c._shortfall_retry is None
+    assert "shortfall_tokens" not in c.last_decision
