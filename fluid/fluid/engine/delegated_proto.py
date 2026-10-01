@@ -486,6 +486,11 @@ class StreamJsonMapper:
         # tool_use_id → input, kept so a tool_result can be journaled with
         # the arguments that produced it.
         self.tool_inputs: dict[str, dict[str, Any]] = {}
+        # tool_use ids the MAIN thread of this turn issued (an assistant frame
+        # with no ``parent_tool_use_id``). A subagent's calls are left out: a
+        # peer message folded into one of their hook answers would reach the
+        # subagent, not the turn the peer addressed.
+        self.main_tool_use_ids: set[str] = set()
         self._usage_emitted = False
         # Model calls reported this turn; the last one's number is the
         # ``model_call_index`` of its Usage.
@@ -871,6 +876,8 @@ class StreamJsonMapper:
                 inp = block.get("input", {}) or {}
                 self._tool_names[tid] = name
                 self.tool_inputs[tid] = inp
+                if btype == "tool_use" and tid and not frame.get("parent_tool_use_id"):
+                    self.main_tool_use_ids.add(tid)
                 content.append(ToolUseBlock(id=tid, name=name, input=inp))
                 if not streamed:
                     # Order mirrors NativeLoop: BlockStart, BlockStop, then ToolUse.

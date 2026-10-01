@@ -474,6 +474,113 @@ async def test_actual_delegated_unread_result_keeps_peer_durably_queued(peers, m
         release.set(); await loop.aclose()
 
 
+async def test_actual_delegated_peer_joins_the_running_query_at_its_tool_boundary(peers, monkeypatch):
+    """MessageSession -> runtime steering -> HarnessAdapter -> DelegatedLoop
+    against the fake CLI: the peer rides the original query's next main-thread
+    PostToolUse answer, is receipted once before that query completes, and the
+    receipt retires its row as consumed. No extra stdin frame, CLI cycle or turn."""
+    import asyncio
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from fluid.context.steering import STEER_OPEN
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.events import (
+        PermissionRequest,
+        RespondPermission,
+        SteerDelivered,
+        TextDelta,
+        TurnComplete,
+        TurnStarted,
+    )
+    from fluid.events.ops import UserTurn
+    from fluid.hooks.bus import HookBus
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolCtx
+
+    from app.core import session_runtime, turn_scheduler
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import session_events
+
+    fake = Path(__file__).resolve().parents[2] / "fluid/tests/fixtures/fake_claude.py"
+    store = MemoryStore()
+    sdk = (await store.create_session()).session_id
+    loop = DelegatedLoop(store=store, session_id=sdk, model="claude-fake", hooks=HookBus(),
+        claude_cmd=[sys.executable, "-u", str(fake)], env={"FAKE_CLAUDE_SCENARIO": "w"})
+    frames = []
+    original_write = loop._write_frame
+
+    async def spy(frame):
+        frames.append(frame)
+        await original_write(frame)
+
+    loop._write_frame = spy
+    binding = orch._context("peer")["overrides"]
+    live = turns.enqueue_turn("peer", "user", prompt="original", profile_id="agent", overrides=binding)
+    assert turns.start_turn(live["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    monkeypatch.setitem(session_runtime._live_runtimes, "peer", runtime)
+    adapter = HarnessAdapter(); adapter._engine = loop
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda _: SimpleNamespace(adapter=adapter)))
+    monkeypatch.setattr(turn_scheduler, "kick", lambda _: None)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda _: None)
+    args = {"session_id": "peer", "message": "Coordinate edits", "request_id": "actual-cli-boundary"}
+    handler = orch.make_handler(lambda: "caller")
+    produced = {}
+
+    async def at_the_prompt():
+        async for event in loop.bus.subscribe(sdk):
+            if isinstance(event, PermissionRequest):
+                try:
+                    outcome = await handler("message", args, ToolCtx())
+                    assert not outcome.is_error, outcome.text
+                    produced.update(json.loads(outcome.text))
+                    # Admitted but not yet delivered: still queued, nothing receipted.
+                    assert turns.get_turn(produced["turn_id"])["state"] == "queued"
+                    assert produced["turn_id"] in runtime._steer_attempted
+                    assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sdk))
+                finally:
+                    # Never leave the CLI parked on its prompt, even on a failure.
+                    await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+                return
+
+    watcher = asyncio.create_task(at_the_prompt())
+    try:
+        await loop.submit(UserTurn(content="original admitted turn"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, 10)
+        await loop._discard_stale_stdout()
+        events = loop.bus.log(sdk)
+        [receipt] = [e for e in events if isinstance(e, SteerDelivered)]
+        complete = next(e for e in events if isinstance(e, TurnComplete))
+        assert receipt.seq < complete.seq
+        assert receipt.steers == [{"id": produced["turn_id"], "text": "Coordinate edits", "from": "caller"}]
+        seen = json.loads([e.text for e in events if isinstance(e, TextDelta)][-1])
+        assert "[agent message from='caller'" in seen["main"] and STEER_OPEN not in seen["main"]
+        assert seen["main"].count("Coordinate edits") == 1 and seen["sub"] == ""
+        assert len([f for f in frames if f.get("type") == "user"]) == 1
+        assert len([e for e in events if isinstance(e, TurnStarted)]) == 1
+        recorder = TurnRecorder("peer", "original-human", None, None, None)
+        recorder.turn_id = live["id"]
+        steer_event = {"type": "steer_delivered", "steers": receipt.steers}
+        await runtime._on_steer_delivered(recorder, steer_event)
+        await runtime._on_steer_delivered(recorder, steer_event)
+        again = await handler("message", args, ToolCtx())
+        assert json.loads(again.text)["delivery_status"] == "consumed"
+        row = turns.get_turn(produced["turn_id"])
+        assert row["state"] == "completed" and row["stop_reason"] == "steered"
+        delivered = [e for e in session_events.get_events("peer") if e["event_type"] == "message.user"]
+        assert len(delivered) == 1 and delivered[0]["turn_id"] == live["id"]
+        assert delivered[0]["payload"]["queued_turn_id"] == produced["turn_id"]
+        assert delivered[0]["payload"]["checkpoint_backed"] is False
+        assert not runtime._steer_absorbed
+    finally:
+        watcher.cancel()
+        await loop.aclose()
+
+
 def test_message_can_start_an_existing_empty_top_level_chat(peers):
     sessions.create_session("empty", "agent", title="Empty peer", is_active=True,
                             model="sonnet", permission_mode="default")
