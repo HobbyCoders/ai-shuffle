@@ -77,8 +77,6 @@
 	let navigationClaimed = false;
 	function handleNewSession() {
 		navigationClaimed = true;
-		// Historical voice sessions still reconnect; new calls attach to conversations.
-		if (appMode.current === 'voice') appMode.set('chat');
 		activeSession.newChat();
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
@@ -204,8 +202,11 @@
 		// A persisted empty composer is also an empty landing, not a selected work
 		// session. Default to Assistant once at startup, never as a reactive redirect:
 		// subsequent New conversation actions, drafts and restored sessions win.
+		// A deep link (see below) is an explicit destination; read it first so the
+		// landing never mounts Assistant only to be replaced a moment later.
+		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
 		const hasDraft = hasComposerDraft($activeSession.draft);
-		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !restoredSessionId && !hasDraft &&
+		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
 			(!$activeView || ($activeView.type === 'session' && currentViewSessionId === null));
 		if (emptyOwnerLanding) {
 			layout.openFeaturePage('assistant');
@@ -240,7 +241,6 @@
 		// $sessions on every install, so handleOpenSession resolves them and (when
 		// the session is owned by another device) relays exactly like a click in
 		// the Sessions board.
-		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
 		if (deepLinkSessionId) {
 			handleOpenSession(deepLinkSessionId);
 			const url = new URL(window.location.href);

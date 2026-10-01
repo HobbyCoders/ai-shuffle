@@ -139,7 +139,7 @@ async def update_voice_session_context(
     # app.api.voice: an API key may only edit the worker context (model,
     # permission mode, ...) of a voice session it owns and has in scope.
     from app.api.voice import _load_voice_session
-    session = await _load_voice_session(session_id)
+    session = await _load_voice_session(session_id, check_eligible=True)
     check_session_access(request, session)
 
     _validate_patch(body)

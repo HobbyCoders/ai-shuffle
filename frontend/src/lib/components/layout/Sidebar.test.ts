@@ -1145,6 +1145,12 @@ describe('Sidebar unified conversation history', () => {
   await fireEvent.click(screen.getByRole('radio', { name: 'Workspace' }));
   expect(onNewSession).not.toHaveBeenCalled();
  });
+ it('treats Chat as already selected while a historical voice session is open', async () => {
+  appMode.set('voice', false); const onNewSession = vi.fn(); render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+  expect(screen.getByRole('radio', { name: 'Chat' }).getAttribute('aria-checked')).toBe('true');
+  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+  expect(onNewSession).not.toHaveBeenCalled();
+ });
  it('supports roving keyboard focus with no implicit microphone action', async () => {
   render(Sidebar, { props: sidebarProps });
   await fireEvent.keyDown(screen.getByRole('radio', { name: 'Workspace' }), { key: 'End' });

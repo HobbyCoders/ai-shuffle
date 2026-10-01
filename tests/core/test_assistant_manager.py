@@ -473,3 +473,27 @@ async def test_source_failure_does_not_advance_watermark(producer, monkeypatch):
     assert source["watermark"] == before
     assert source["last_error"].startswith("Observation failed")
     assert store.get_activity(service.assistant_id()) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_run_past_deadline_is_not_reinterrupted(producer, monkeypatch):
+    from app.db import runs
+    from app.db.base import get_db
+    service.register_proactive_guard(1)
+    manager = module.AssistantManager()
+    events()
+    await manager.run_once()
+    run = store.get_activity(service.assistant_id())[0]
+    lease = runs.claim_run(run["session_id"], service.assistant_id(), 60)
+    turns.start_turn(run["turn_id"], run_id=lease["id"])
+    service.configure({"paused": True})
+    await manager.cancel_invalid_runs()
+    assert store.get_run(run["id"])["status"] == "cancelling"
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_runs SET deadline_at=%s WHERE id=%s", ("2000-01-01T00:00:00+00:00", run["id"]))
+    interrupt = AsyncMock()
+    monkeypatch.setattr(module.turn_manager, "interrupt_async", interrupt)
+    await manager.run_once(observe=False)
+    await manager.run_once(observe=False)
+    interrupt.assert_not_awaited()
+    assert store.get_run(run["id"])["status"] == "cancelling"

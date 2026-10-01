@@ -203,3 +203,24 @@ async def test_real_sdk_option_builder_preserves_agent_prompt_and_admission(admi
     assert set(options.aih_tool_allowlist) <= set(modes.PROACTIVE_TOOL_SURFACE)
     assert ha._tool_allowlist(projected) == options.aih_tool_allowlist
     assert "Read" in projected.disallowed_tools and "Task" in projected.disallowed_tools
+
+
+async def test_tool_recheck_denies_by_name_first_and_never_takes_install_lock(admitted, monkeypatch):
+    run, turn = admitted
+    metadata = turn["payload"]["_assistant_proactive"]
+    calls = []
+    real = service.assert_proactive_allowed
+    monkeypatch.setattr(service, "assert_proactive_allowed", lambda *a: calls.append(a) or real(*a))
+
+    def no_lock(*args):
+        raise AssertionError("a read-only recheck must not lock assistant_state")
+    monkeypatch.setattr(store, "lock_state", no_lock)
+    # Out-of-surface names are denied without any database round trip.
+    assert "read-only" in modes.proactive_tool_denial(metadata, run["session_id"], "Bash")
+    assert calls == []
+    # In-surface names still get the live recheck, without the row lock.
+    assert modes.proactive_tool_denial(metadata, run["session_id"], "mcp__fluid_bundled__AssistantReadSource") is None
+    with service.get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_state SET paused=TRUE WHERE id=%s", (service.assistant_id(),))
+    assert "paused" in modes.proactive_tool_denial(metadata, run["session_id"], "WebSearch")
+    assert len(calls) == 2

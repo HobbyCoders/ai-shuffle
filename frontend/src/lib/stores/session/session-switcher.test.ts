@@ -1062,13 +1062,26 @@ describe('session mode lanes', () => {
 	});
 
 	it('opens a new chat in the lane the sidepanel is showing', () => {
-		appMode.set('voice');
+		appMode.set('chat');
 		const { switcher, getState } = makeSwitcher(fullState());
 
 		switcher.newChat();
 		switcher.destroy();
 
-		expect(getState().mode).toBe('voice');
+		expect(getState().mode).toBe('chat');
+	});
+
+	it.each([true, false])('never starts a new conversation in the voice lane (persisted=%s)', (persist) => {
+		// Any new-chat path (sidebar, deleting the open voice session, fix-with-AI)
+		// lands here after a historical voice session put the lane on 'voice'.
+		appMode.set('voice', persist);
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'voice' }));
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().mode).toBe('chat');
+		expect(appMode.current).toBe('chat');
 	});
 
 	it('starts the projectless lanes with no repo, so no worktree can be cut', () => {
@@ -1125,7 +1138,7 @@ describe('session mode lanes', () => {
 		expect(getState().permissionModeOverride).toBeNull();
 	});
 
-	it.each(['code', 'voice'] as const)('restores project, worktree and permission for %s compose', (mode) => {
+	it.each(['code'] as const)('restores project, worktree and permission for %s compose', (mode) => {
 		appMode.set(mode);
 		localStorage.setItem('aihub_executionMode', 'worktree');
 		localStorage.setItem('aihub_selectedProject', 'proj-A');

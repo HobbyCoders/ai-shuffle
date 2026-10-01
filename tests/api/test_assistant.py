@@ -86,6 +86,32 @@ def test_identity_specialist_endpoint_preserves_all_other_config(client, assista
     assert client.patch("/api/v1/assistant/agents/assistant-agent/identity", json={"avatar_id": "https://host/avatar.svg"}).status_code == 422
 
 
+
+def test_identity_endpoint_rejects_unknown_agents_and_blank_names(client, assistant_fixture):
+    missing = client.patch("/api/v1/assistant/agents/no-such-agent/identity", json={"name": "Name"})
+    assert missing.status_code == 404
+    assert client.patch("/api/v1/assistant/agents/assistant-agent/identity", json={"name": "   "}).status_code == 422
+    assert database.get_profile("assistant-agent")["name"] == "Helper"
+    renamed = client.patch("/api/v1/assistant/agents/assistant-agent/identity", json={"name": "  Trimmed  "})
+    assert renamed.status_code == 200 and renamed.json()["name"] == "Trimmed"
+
+
+@pytest.mark.parametrize("home_model,kept", [
+    (None, None), ("old-model", None), ("prov:old-provider:m", None), ("prov:new-provider:m", "prov:new-provider:m"),
+])
+def test_agent_switch_drops_the_old_agents_model(client, assistant_fixture, home_model, kept):
+    """The next home turn must not send the old provider's model to the new one."""
+    home_id = assistant_fixture["id"]
+    database.update_session(session_id=home_id, launched_model="old-model")
+    if home_model:
+        database.set_session_run_binding(home_id, model=home_model)
+    assert database.get_session(home_id)["model"] == home_model
+    database.create_profile("specialist", "Specialist", None, {"provider": "new-provider"})
+    assert client.patch("/api/v1/assistant", json={"agent_id": "specialist"}).status_code == 200
+    home = database.get_session(home_id)
+    assert (home["profile_id"], home["provider_id"]) == ("specialist", "new-provider")
+    assert home["model"] == kept and home["launched_model"] is None
+
 def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     database.create_api_user("foreign", "Limited user", auth.hash_api_key("limited-key"))
     for path in ("", "/sources", "/activity"):

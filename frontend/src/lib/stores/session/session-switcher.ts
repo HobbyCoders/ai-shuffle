@@ -843,6 +843,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			? newChatEphemeral : null;
 
 		// A new session is created into whichever lane the sidepanel is showing.
+		// Voice is a call on a conversation, never a new-conversation lane: an
+		// opened historical voice session hands its new chat to the chat lane.
+		if (appMode.current === 'voice') appMode.set('chat');
 		const mode = appMode.current;
 
 		// Single update: reset everything (including draft from ephemeral cache)

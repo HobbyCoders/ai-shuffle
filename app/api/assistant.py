@@ -87,6 +87,12 @@ class AgentIdentity(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=80)
     avatar_id: Optional[str] = None
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def stripped_name(cls, value):
+        # Strip before min_length runs, so a whitespace-only name is a 422.
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("avatar_id")
     @classmethod
     def avatar(cls, value):
@@ -97,7 +103,8 @@ async def _value_error_call(fn, *args):
     try:
         return await run_sync(fn, *args)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        status = 404 if "does not exist" in str(exc) else 409
+        raise HTTPException(status, str(exc)) from exc
 
 
 @router.get("")

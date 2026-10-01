@@ -1761,6 +1761,38 @@ class TestConversationAttachment:
         assert response.status_code == 400
 
 
+    def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):
+        """Hanging up must not move the text conversation out of the Active group."""
+        _mk_voice_session("ordinary", mode="chat")
+        db.set_session_active("ordinary", True)
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
+        assert bool(db.get_session("ordinary")["is_active"]) is True
+
+    @pytest.mark.parametrize("change", [{"status": "archived"}, {"hidden": True}])
+    def test_hangup_detaches_after_the_chat_is_archived_mid_call(
+        self, attach_client, mock_db, sidebands, change,
+    ):
+        """An ineligible row must still hang up, or the sideband keeps billing."""
+        from app.core import voice_bridge
+        _mk_voice_session("ordinary", mode="chat")
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
+        assert voice_bridge.registry.get("ordinary") is not None
+        if "hidden" in change:
+            db.set_session_hidden("ordinary", True)
+        else:
+            db.update_session(session_id="ordinary", **change)
+        assert attach_client.get("/api/v1/voice/sessions/ordinary/state").status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
+        assert voice_bridge.registry.get("ordinary") is None
+        assert sidebands[0].closed is True
+        # Starting a new call on the ineligible row is still refused.
+        assert attach_client.post(
+            "/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-2"},
+        ).status_code == 404
+
 class TestVoiceSessionAccess:
     @pytest.fixture(autouse=True)
     def _voice_ready(self, mock_db, monkeypatch, sidebands):

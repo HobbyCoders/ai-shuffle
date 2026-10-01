@@ -1376,6 +1376,9 @@ class VoiceBridge:
             await run_sync(
                 _record_session_usage,
                 self.session_id, self.model, deltas, model_calls,
+                # An attached call must not restamp the text conversation's
+                # model: later typed turns fall back to ``launched_model``.
+                not self._conversation_surface,
             )
         except Exception:  # noqa: BLE001 — accounting must never end a call
             logger.warning(
@@ -2255,6 +2258,7 @@ def _record_session_usage(
     model: Optional[str],
     deltas: Dict[str, int],
     model_calls: int,
+    stamp_model: bool = True,
 ) -> None:
     """Add one slice of realtime usage to the session's cumulative counters.
 
@@ -2262,7 +2266,9 @@ def _record_session_usage(
     Anthropic-style), so the cached slice goes to ``cache_read_increment``
     instead of being counted twice. ``launched_model`` rides along on every
     write: ``sessions.model`` is the CHAT model the session was created with,
-    and without this the spend lands on a model that never spoke.
+    and without this the spend lands on a model that never spoke. A call
+    attached to a text conversation passes ``stamp_model=False`` so the
+    conversation keeps its own model.
     """
     cached_in = int(deltas.get("input_cached_tokens") or 0)
     database.update_session(
@@ -2272,7 +2278,7 @@ def _record_session_usage(
         tokens_out_increment=int(deltas.get("output_tokens") or 0),
         cache_read_increment=cached_in,
         model_calls_increment=int(model_calls),
-        launched_model=(model or None),
+        launched_model=((model or None) if stamp_model else None),
     )
 
 

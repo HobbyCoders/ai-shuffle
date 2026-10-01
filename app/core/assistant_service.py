@@ -91,7 +91,16 @@ def configure(changes):
             profile_config = profile.get("config") or {}
             if isinstance(profile_config, str):
                 profile_config = json.loads(profile_config)
-            cursor.execute("UPDATE sessions SET profile_id=%s,provider_id=%s WHERE id=%s AND api_user_id IS NULL", (agent_id, profile_config.get("provider"), current["home_session_id"]))
+            # The old agent's model would be sent to the new agent's provider:
+            # clear the legacy launched_model fallback, and keep the composer
+            # pick only when it is a composite naming the new provider.
+            from app.core.query_options import decode_provider_model
+            provider = profile_config.get("provider")
+            cursor.execute("SELECT model FROM sessions WHERE id=%s", (current["home_session_id"],))
+            home = row_to_dict(cursor.fetchone()) or {}
+            decoded = decode_provider_model(home.get("model"))
+            model = home.get("model") if decoded and provider and decoded[0] == provider else None
+            cursor.execute("UPDATE sessions SET profile_id=%s,provider_id=%s,model=%s,launched_model=NULL WHERE id=%s AND api_user_id IS NULL", (agent_id, provider, model, current["home_session_id"]))
         if name is not None or avatar is not None:
             if not agent_id:
                 raise ValueError("Choose an assistant agent before customizing identity")
@@ -288,10 +297,13 @@ def assert_proactive_allowed(metadata, session_id=None):
     if deadline <= store.now():
         raise ValueError("Proactive run deadline expired")
     with get_db() as conn:
-        state = store.lock_state(conn, assistant_id())
+        # A read-only recheck: never take the install mutex here. Tool hooks
+        # call this per tool call and must not queue behind admission writers.
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_state WHERE id=%s", (assistant_id(),))
+        state = store._parse(cursor.fetchone())
         if not state or not state["enabled"] or state["paused"] or not state["agent_id"]:
             raise ValueError("Assistant is disabled, paused or missing its agent")
-        cursor = conn.cursor()
         cursor.execute("SELECT id FROM agents WHERE id=%s", (state["agent_id"],))
         if not cursor.fetchone() or state["agent_id"] != run["agent_id"]:
             raise ValueError("Assistant is disabled, paused or missing its agent")

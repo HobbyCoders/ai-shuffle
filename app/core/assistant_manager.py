@@ -182,6 +182,9 @@ class AssistantManager:
                     remaining = (_deadline(run["deadline_at"]) - datetime.now(timezone.utc)).total_seconds()
                     if failed and remaining <= 0:
                         await self._cancel_locally(run)
+                    elif run.get("status") == "cancelling":
+                        # Already interrupted: poll for settlement, don't spin.
+                        timeout = min(timeout, 15)
                     else:
                         timeout = min(timeout, max(1, remaining))
             try:
@@ -218,6 +221,10 @@ class AssistantManager:
         if turn and turn["state"] not in turns.TERMINAL_STATES:
             removed = await run_sync(turn_manager.remove_queued, turn["id"]) if turn["state"] == "queued" else None
             if not removed:
+                if run["status"] == "cancelling" and not self._stopping:
+                    # The stop was already sent; wait for the provider to
+                    # settle instead of re-interrupting on every pass.
+                    return
                 await run_sync(store.mark_cancelling, run["id"], error)
                 await turn_manager.interrupt_async(run["session_id"], "stop", turn_id=turn["id"], source="assistant")
                 # Do not free concurrency/budget while its provider still runs.

@@ -95,3 +95,41 @@ def test_bounded_pending_inbox_and_soft_cost_admission(assistant_fixture):
     service.configure({"max_cost_per_day": 0.5, "max_cost_per_run": 1})
     assert store.admit_run(service.assistant_id()) is None
     assert service.get_state()["cost_accounting"] == "reported_after_run_not_hard_cap"
+
+
+def test_oversized_payload_is_marked_without_blocking_batch_or_watermark(assistant_fixture):
+    # Re-encoding grows quotes; the caller's 12k cap does not bound the result.
+    poison = {"data": '"' * 11999}
+    stored = store.record_observations(service.assistant_id(), "conn-mail", [
+        ("email_received", "poison", poison),
+        ("email_received", "normal", {"data": "fine"}),
+    ], {"seen_ids": ["poison", "normal"]})
+    assert len(stored) == 2
+    marked = stored[0]["payload"]
+    assert marked["truncated"] is True and marked["original_chars"] > store.MAX_PAYLOAD_CHARS
+    assert len(marked["data"]) == 2000
+    assert stored[1]["payload"] == {"data": "fine"}
+    assert store.get_sources(service.assistant_id())[0]["watermark"] == {"seen_ids": ["poison", "normal"]}
+    # The original fingerprint still deduplicates redelivery.
+    assert store.record_observations(service.assistant_id(), "conn-mail", [("email_received", "poison", poison)]) == []
+
+
+def test_disconnected_source_stays_pending_but_withdrawn_grant_revokes(assistant_fixture):
+    events()
+    database.update_connector_status("conn-mail", "disconnected")
+    assert store.admit_run(service.assistant_id()) is None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM assistant_events WHERE assistant_id=%s", (service.assistant_id(),))
+        assert [r["status"] for r in cursor.fetchall()] == ["pending"]
+    database.update_connector_status("conn-mail", "connected")
+    run = store.admit_run(service.assistant_id())
+    assert run and len(run["events"]) == 1
+    store.settle_run(run["id"], "completed")
+    events(message_id="message-2")
+    database.update_api_user("mail-user", is_active=False)
+    assert store.admit_run(service.assistant_id()) is None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM assistant_events WHERE assistant_id=%s AND status NOT IN ('completed')", (service.assistant_id(),))
+        assert [r["status"] for r in cursor.fetchall()] == ["revoked"]

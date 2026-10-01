@@ -44,14 +44,18 @@
  const statusText = $derived(!assistant ? '' : ({ unconfigured: 'Not set up', agent_unavailable: 'Agent unavailable', disabled: 'Background off', paused: 'Background paused', guard_unavailable: 'Research unavailable', ready: 'Background enabled' }[assistant.status]));
  const optedIn = $derived(sources.filter(s => s.enabled).length);
 
- async function load(initial = false) {
+ let loaded = false;
+ async function load() {
   if (refreshing) return;
   refreshing = true;
   try {
    const [, nextSources, nextActivity] = await Promise.all([refreshAssistant(), getAssistantSources(), getAssistantActivity()]);
    if (!current()) return;
    sources = nextSources; activity = nextActivity; error = '';
-   if (initial && (!$assistantState?.configured || requestedId)) {
+   // Setup opens on any successful load, not just the first: a failed first load
+   // followed by a retry or poll must still lead an unconfigured owner into setup.
+   const firstLoad = !loaded; loaded = true;
+   if (!editing && (!$assistantState?.configured || (firstLoad && requestedId))) {
     beginEdit();
     if (requestedId && $profiles.some(p => p.id === requestedId)) { agentId = requestedId; selectAgent(); }
    }
@@ -59,7 +63,7 @@
   finally { if (current()) { loading = false; refreshing = false; } }
  }
  onMount(() => {
-  void load(true);
+  void load();
   void isVoiceEnabled().then(enabled => { if (current()) voiceEnabled = enabled; });
   const tick = setInterval(() => { if (document.visibilityState === 'visible' && !busy && !editing) void load(); }, 15000);
   return () => { disposed = true; clearInterval(tick); };

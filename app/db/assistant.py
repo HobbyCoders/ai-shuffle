@@ -171,15 +171,34 @@ def connector_grant_available(conn, connector, agent_id):
     return not allowed or agent_id in allowed
 
 
-def trusted_source(conn, state, connector_id):
-    """Recheck the live connector grant, owner and runner inside admission/write."""
+def trusted_source(conn, state, connector_id, require_connected=True):
+    """Recheck the live connector grant, owner and runner inside admission/write.
+
+    ``require_connected=False`` ignores only the transient connection status,
+    so admission can tell a reconnecting source from a withdrawn grant.
+    """
     cursor = conn.cursor()
     cursor.execute("""SELECT c.* FROM connectors c JOIN assistant_sources s ON s.connector_id=c.id
         WHERE s.assistant_id=%s AND c.id=%s AND s.enabled=TRUE AND c.is_active=TRUE
-        AND c.runner_id=%s AND c.status='connected'""",
+        AND c.runner_id=%s""" + (" AND c.status='connected'" if require_connected else ""),
         (state["id"], connector_id, state["runner_id"]))
     connector = row_to_dict(cursor.fetchone())
     return connector if connector and connector_grant_available(conn, connector, state["agent_id"]) else None
+
+
+MAX_PAYLOAD_CHARS = 16000
+
+
+def _bounded_payload(payload, encoded):
+    """Replace one oversized payload with a truncation marker, never fail the batch.
+
+    Callers cap the inner text, but re-encoding can still grow quotes,
+    backslashes and control characters. JSON escaping expands a character
+    to at most 6, so a 2,000-character excerpt always fits the bound.
+    """
+    text = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), str) else encoded
+    return json.dumps({"truncated": True, "original_chars": len(encoded), "data": text[:2000]},
+                      sort_keys=True, ensure_ascii=False)
 
 
 def record_observations(assistant_id, connector_id, observations, watermark=None):
@@ -199,10 +218,11 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
         overflow = len(observations) > 50
         for event_type, external_id, payload in observations[:50]:
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-            if len(encoded) > 16000:
-                raise ValueError("Observation payload too large")
             identity = str(external_id) if external_id else encoded
             fingerprint = hashlib.sha256((event_type + ":" + identity).encode()).hexdigest()
+            if len(encoded) > MAX_PAYLOAD_CHARS:
+                # Fingerprint the original so redelivery still deduplicates.
+                encoded = _bounded_payload(payload, encoded)
             if remaining == 0:
                 overflow = True
                 break
@@ -310,14 +330,25 @@ def admit_run(assistant_id):
         reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", state["max_cost_per_run"]) for row in cursor.fetchall())
         if usage["n"] >= state["max_runs_per_day"] or usage["cost"] + reserved + state["max_cost_per_run"] > state["max_cost_per_day"]:
             return None
-        cursor.execute("SELECT * FROM assistant_events WHERE assistant_id=%s AND status='pending' ORDER BY observed_at,id LIMIT 10", (assistant_id,))
+        # The inbox is capped at 100, so scanning it all lets events from a
+        # reconnecting source wait without starving other sources' events.
+        cursor.execute("SELECT * FROM assistant_events WHERE assistant_id=%s AND status='pending' ORDER BY observed_at,id LIMIT 100", (assistant_id,))
         events = [_parse(row) for row in cursor.fetchall()]
         eligible = []
+        verdicts = {}
         for event in events:
-            if trusted_source(conn, state, event["source_id"]):
-                eligible.append(event)
-            else:
+            source_id = event["source_id"]
+            if source_id not in verdicts:
+                if trusted_source(conn, state, source_id):
+                    verdicts[source_id] = "trusted"
+                elif trusted_source(conn, state, source_id, require_connected=False):
+                    verdicts[source_id] = "wait"  # Only disconnected: keep pending.
+                else:
+                    verdicts[source_id] = "revoked"  # Opt-out or grant withdrawn.
+            if verdicts[source_id] == "revoked":
                 cursor.execute("UPDATE assistant_events SET status='revoked' WHERE id=%s", (event["id"],))
+            elif verdicts[source_id] == "trusted" and len(eligible) < 10:
+                eligible.append(event)
         if not eligible:
             return None
         # Reserve admission BEFORE minting a normal session: create_session

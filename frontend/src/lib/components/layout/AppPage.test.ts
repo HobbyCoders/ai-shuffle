@@ -127,6 +127,8 @@ describe('AppPage initial Assistant landing', () => {
  it('lets explicit session deep-links take priority', async () => {
   window.history.replaceState({}, '', '/?session=notification-task'); await boot();
   expect(mocks.openSession).toHaveBeenCalledWith('notification-task');
+  // Assistant is never mounted first (its requests would race the deep link).
+  expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(get(activeView)).toEqual({ type: 'session', sessionId: 'notification-task' });
   expect(window.location.search).toBe('');
  });

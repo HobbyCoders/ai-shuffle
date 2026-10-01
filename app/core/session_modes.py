@@ -382,6 +382,12 @@ def proactive_tool_denial(metadata, session_id, name):
     """
     if metadata is None:
         return None
+    # The CLI qualifies our bundled builtin; arbitrary MCP tools never match.
+    # Decide by name first: most denials need no database round trip, which
+    # matters because the delegated CLI hook calls this synchronously.
+    leaf = name.removeprefix("mcp__fluid_bundled__")
+    if leaf not in PROACTIVE_TOOL_SURFACE:
+        return "Background assistant observation is read-only; this tool is denied."
     from app.core.assistant_service import assert_proactive_allowed
     try:
         assert_proactive_allowed(metadata, session_id)
@@ -395,10 +401,6 @@ def proactive_tool_denial(metadata, session_id, name):
         import logging
         logging.getLogger(__name__).exception("Proactive authorization recheck failed")
         return "Background assistant authorization is unavailable; this tool is denied."
-    # The CLI qualifies our bundled builtin; arbitrary MCP tools never match.
-    leaf = name.removeprefix("mcp__fluid_bundled__")
-    if leaf not in PROACTIVE_TOOL_SURFACE:
-        return "Background assistant observation is read-only; this tool is denied."
     return None
 
 

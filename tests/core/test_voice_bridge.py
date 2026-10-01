@@ -2417,6 +2417,35 @@ async def test_usage_reaches_the_session_row_on_every_response(
     await bridge.stop()
 
 
+async def test_attached_call_bills_usage_without_restamping_the_text_model(
+    mock_db, fake_sockets
+):
+    """A spoken turn must not make later typed turns run on the realtime model."""
+    from app.db import database
+
+    sessions_db.create_session(SID, "default", model="text-model", mode="chat")
+    database.update_session(session_id=SID, launched_model="text-model")
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60,
+        conversation_surface=True,
+    )
+    await bridge.start()
+    sock = fake_sockets[0]
+    sock.push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await _drain(bridge, sock)
+
+    row = _session_row()
+    assert row["launched_model"] == "text-model"
+    assert row["first_model"] == "text-model"
+    assert row["total_tokens_out"] == 40
+    assert row["total_model_calls"] == 1
+    assert row["total_cost_usd"] == pytest.approx(
+        vb.estimate_cost_usd(MODEL, vb._usage_deltas(USAGE_BLOCK))
+    )
+    await bridge.stop()
+    assert _session_row()["launched_model"] == "text-model"
+
+
 async def test_a_tool_only_response_is_still_billed(mock_db, fake_sockets, monkeypatch):
     """No transcript means no exchange to flush — but the tokens were spent."""
     _mk_session()

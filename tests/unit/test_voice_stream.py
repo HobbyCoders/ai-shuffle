@@ -214,3 +214,20 @@ async def test_attached_live_voice_forces_same_session_agent_delegation(monkeypa
     config = voice_stream.live_session_config({"model": voice_stream.LIVE_MODEL, "voice": "marin", "conversation_surface": True,
         "options": {"delegation_type": "responses", "delegation_model": "different-model"}}, "")
     assert config["delegation"]["type"] == "client"
+
+@pytest.mark.asyncio
+async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypatch):
+    """A WebRTC binding stores RealtimeOptions; LiveOptions must not reject it."""
+    from app.core.voice_options import RealtimeOptions
+    row = {"mode": "chat", "model": "haiku", "profile_id": "primary", "voice_config": {
+        "model": "gpt-realtime", "voice": "marin", "conversation_surface": True,
+        "options": RealtimeOptions().model_dump(),
+    }}
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: row)
+    submit = AsyncMock(return_value="turn-1")
+    from app.core import turn_manager
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    assert await voice_stream.delegate_to_selected_model("home", "Spoken request", on_submitted=AsyncMock()) == ""
+    overrides = submit.await_args.kwargs["overrides"]
+    assert overrides["model"] == "haiku"
+    assert overrides["system_prompt_append"] == voice_stream.DELEGATION_INSTRUCTIONS

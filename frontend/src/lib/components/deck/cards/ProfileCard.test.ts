@@ -70,8 +70,11 @@ describe('ordinary agent autosave and independently edited identity', () => {
   expect(payload.description).toBe('Edited description');
   expect(payload.config).not.toHaveProperty('avatar_id');
   expect(payload.config.system_prompt.content).toBe('Keep my original prompt');
-  expect(payload.config.model).toBe('original-model');
-  expect(payload.config.custom_future_key).toEqual({ keep: true });
+  // Hidden legacy bindings are retired by the full-replace PUT, as before;
+  // keys outside the schema are preserved server-side, not echoed back.
+  expect(payload.config).not.toHaveProperty('model');
+  expect(payload.config).not.toHaveProperty('permission_mode');
+  expect(payload.config).not.toHaveProperty('custom_future_key');
   expect(serverAvatar).toBe('orbit');
  });
 });

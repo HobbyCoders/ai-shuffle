@@ -127,14 +127,19 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     binding = row.get("voice_config") or {}
     if isinstance(binding, str):
         binding = json.loads(binding)
-    options = validate_options(LIVE_MODEL, binding.get("options") or {})
+    # Only a live binding carries LiveOptions; a WebRTC binding stores the
+    # realtime option set, which LiveOptions rejects as extra fields.
+    instructions = DELEGATION_INSTRUCTIONS
+    if binding.get("model") == LIVE_MODEL:
+        options = validate_options(LIVE_MODEL, binding.get("options") or {})
+        instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     # Submit to the SAME session: reuse its history/client and normal queue,
     # approval, stop, placement and model-switch semantics. No worker creation.
     overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
     if provider_id is None and normal_conversation:
         provider_id = row.get("provider_id")
     overrides.update(model=selected, provider=provider_id,
-                     system_prompt_append=options["delegation_instructions"] or DELEGATION_INSTRUCTIONS)
+                     system_prompt_append=instructions)
     # VoiceStream flushes the spoken exchange before handing off. Keep the
     # context for the engine without adding a second giant user bubble.
     payload: dict = {"user_message_already_recorded": True}

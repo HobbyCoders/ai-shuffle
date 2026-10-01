@@ -51,7 +51,7 @@ describe('persistent semantic preference inventory', () => {
   expect(hotkeys.hotkeyPreferences.current.voiceSoundCues).toBe(false); expect((git.gitActionPreferences.current as unknown as Record<string,unknown>).futureFeature).toBe(42);
   expect(favorites.getFavoriteModels()).toEqual(['remote']); expect(files.files.current.viewMode).toBe('grid');
   expect(groups.groups.current.projects.groups[0].name).toBe('Shared'); expect(layout.layout.current.sidebarWidth).toBe(310);
-  expect(sidebar.sidebarWorkspace.isShown('notes')).toBe(true); expect(mode.appMode.current).toBe('voice');
+  expect(sidebar.sidebarWorkspace.isShown('notes')).toBe(true); expect(mode.appMode.current).toBe('chat'); // voice is a call, not a new-conversation lane
   for (const adapter of bindings.values()) adapter.apply(undefined);
   expect(chat.chatPreferences.current.showMessageTimestamps).toBe(false); expect(favorites.getFavoriteModels()).toEqual([]);
   expect(groups.groups.current.projects.groups).toEqual([]); expect(mode.appMode.current).toBe('code');

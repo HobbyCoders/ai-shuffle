@@ -18,7 +18,6 @@
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ChatModeHero from './ChatModeHero.svelte';
-	import VoiceModeHero from './VoiceModeHero.svelte';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
@@ -256,13 +255,10 @@
 						<h1 class="cleared-title" title={clearedTitle}>{clearedTitle}</h1>
 						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
 					</div>
-				{:else if surfaceMode === 'chat'}
-					<!-- Projectless conversation lane — no workspace to pick. -->
+				{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}
+					<!-- Projectless conversation lane — no workspace to pick. Voice is
+					     a call on a conversation, so a voice surface gets the chat hero. -->
 					<ChatModeHero />
-				{:else if surfaceMode === 'voice'}
-					<!-- Voice lane, unbound: the hero carries the only action (start a
-					     call), and .input-slot is withheld — see showComposer. -->
-					<VoiceModeHero />
 				{:else}
 					<WorkspaceSelector
 						selectedProject={$activeSession.project}

@@ -52,7 +52,6 @@
 		deriveStatus,
 		sessionTimestamp,
 		sessionDeviceId,
-		sessionModeOf,
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
@@ -504,7 +503,8 @@
 	 *  left and would otherwise sit there while the list beside it no longer
 	 *  contains it. */
 	function selectMode(mode: SessionMode) {
-		if (mode === $sessionMode) return;
+		// A historical voice session shows the Chat capability as selected.
+		if (mode === ($sessionMode === 'voice' ? 'chat' : $sessionMode)) return;
 		closeMenus();
 		appMode.set(mode);
 		onSelectMode?.(mode);

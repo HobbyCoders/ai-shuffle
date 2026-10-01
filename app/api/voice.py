@@ -646,7 +646,9 @@ def _reject_when_capped(session_id: str) -> None:
     )
 
 
-async def _load_voice_session(session_id: str) -> Dict[str, Any]:
+async def _load_voice_session(
+    session_id: str, *, check_eligible: bool = False,
+) -> Dict[str, Any]:
     """A legacy voice row or an explicitly attached normal conversation.
 
     Ordinary sessions remain 404 until /attach pins their separate call binding.
@@ -655,6 +657,10 @@ async def _load_voice_session(session_id: str) -> Dict[str, Any]:
     Existence only. Every HTTP route goes through :func:`_require_voice_session`
     so the caller's access is checked as well; the audio WebSocket, which has
     no ``Request``, applies :func:`_check_voice_session_access` itself.
+
+    ``check_eligible`` re-runs the attachability check, and only call starts
+    pass it: hangup and state must keep working after the user archives or
+    hides the chat mid-call, or the sideband keeps billing.
     """
     row = await run_sync(database.get_session, session_id)
     config = (row or {}).get("voice_config") or {}
@@ -662,7 +668,7 @@ async def _load_voice_session(session_id: str) -> Dict[str, Any]:
         config = json.loads(config)
     if not row or (row.get("mode") != "voice" and not config.get("conversation_surface")):
         raise HTTPException(status_code=404, detail="Voice session not found.")
-    if row.get("mode") != "voice":
+    if check_eligible and row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
     return row
 
@@ -685,14 +691,16 @@ def _check_voice_session_access(
     check_session_access_for_api_user(api_user, row)
 
 
-async def _require_voice_session(request: Request, session_id: str) -> Dict[str, Any]:
+async def _require_voice_session(
+    request: Request, session_id: str, *, check_eligible: bool = False,
+) -> Dict[str, Any]:
     """The voice session row the caller may operate.
 
     404 when the session is missing or is not a voice session — checked first,
     so a chat session never turns into a 403 — then 403 when it belongs to
     someone else (see :func:`_check_voice_session_access`).
     """
-    row = await _load_voice_session(session_id)
+    row = await _load_voice_session(session_id, check_eligible=check_eligible)
     _check_voice_session_access(get_api_user_from_request(request), row)
     return row
 
@@ -1115,7 +1123,9 @@ async def attach_voice_call(
 
     voice_settings = await _require_voice_enabled()
     api_user = get_api_user_from_request(http_request)
-    session_row = await _require_voice_session(http_request, session_id)
+    session_row = await _require_voice_session(
+        http_request, session_id, check_eligible=True,
+    )
     _reject_when_capped(session_id)
 
     call_id = (request.call_id or "").strip()
@@ -1265,7 +1275,7 @@ async def hangup_voice_call(
     """
     from app.core import voice_bridge
 
-    await _require_voice_session(http_request, session_id)
+    row = await _require_voice_session(http_request, session_id)
     _forget_client_secret(session_id)
     from app.core import voice_stream
     stream_stopped = await voice_stream.stop(session_id)
@@ -1273,11 +1283,13 @@ async def hangup_voice_call(
 
     # Creation stamps ``is_active`` True and, until this, nothing in the voice
     # lane ever wrote it back — so every finished call left a session card that
-    # looked live forever. Unconditional: the bridge clears it when there IS one
-    # to stop, and a hangup after the sideband already dropped is exactly the
-    # case that needs the write here.
+    # looked live forever. The bridge clears it when there IS one to stop, and
+    # a hangup after the sideband already dropped is exactly the case that
+    # needs the write here. An attached text conversation keeps its own Active
+    # state: hanging up a call must not move the chat out of the Active group.
     try:
-        await run_sync(database.set_session_active, session_id, False)
+        if row.get("mode") == "voice":
+            await run_sync(database.set_session_active, session_id, False)
     except Exception:  # noqa: BLE001 — ending a call must always succeed
         logger.warning(
             "Voice: could not clear is_active for session %s", session_id,
@@ -1332,7 +1344,7 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         return
     try:
         settings = await _require_voice_enabled()
-        row = await _load_voice_session(session_id)
+        row = await _load_voice_session(session_id, check_eligible=True)
         _check_voice_session_access(api_user, row)
         _reject_when_capped(session_id)
         config = session_config(row, settings)

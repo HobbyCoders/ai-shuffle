@@ -35,9 +35,26 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 // The dock reads its lane off `$activeSession.mode`, and `newChat()` is what
 // stamps the sidepanel's lane onto a fresh compose surface — so it is also how
 // a test puts the dock in one. Every test starts (and leaves) the code lane.
-function setLane(mode: SessionMode) {
+function setLane(mode: Exclude<SessionMode, 'voice'>) {
 	appMode.set(mode);
 	activeSession.newChat();
+}
+
+// A new conversation never starts in voice; the voice lane exists only for a
+// historical voice session, so that is how a test enters it.
+async function openVoiceSession(id = 'voice-history') {
+	await activeSession.switchSession(id);
+	await waitFor(() => expect(get(activeSession).sessionId).toBe(id));
+	activeSession.reconcileSessionMode([{ id, mode: 'voice' }]);
+	expect(get(activeSession).mode).toBe('voice');
+}
+
+// A historical voice session reads its own pinned binding; the global voice
+// settings carry the same engine so either read agrees.
+function voiceBinding(model: string, options?: Record<string, unknown>) {
+	return (path: string) => Promise.resolve(path.endsWith('/config')
+		? { model, voice: 'alloy', options }
+		: { voice_model: model, voice_options: options });
 }
 
 beforeEach(async () => {
@@ -56,7 +73,8 @@ it.each(['code', 'voice'] as const)('enables attach for an existing %s worker se
 	const status = vi.spyOn(api, 'get').mockResolvedValue({ authenticated: true, has_any_credential: true });
 	try {
 		await auth.checkAuth();
-		setLane(mode);
+		// A fresh compose has no voice lane; the existing session supplies it.
+		setLane('code');
 		activeSession.setProject('', 'pv2-worker');
 		const onAttachClick = vi.fn();
 		renderDock({ onAttachClick });
@@ -92,9 +110,9 @@ const voiceActions = createRawSnippet(() => ({
 
 describe('ControlsDock split controls', () => {
  it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
-  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: model });
+  const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding(model) as never);
   await loadVoiceSettings(true);
-  setLane('voice');
+  await openVoiceSession();
   renderDock();
   const label = model.startsWith('fal-') ? 'PersonaPlex' : 'GPT Realtime 2.1';
   await waitFor(() => expect((screen.getByRole('button', { name: `Model: ${label}` }) as HTMLButtonElement).disabled).toBe(true));
@@ -103,32 +121,32 @@ describe('ControlsDock split controls', () => {
   request.mockRestore();
  });
  it('locks Responses delegation to its saved backend', async () => {
-  const request = vi.spyOn(api, 'get').mockResolvedValue({voice_model:'gpt-live-1',voice_options:{delegation_type:'responses'}});
-  await loadVoiceSettings(true); setLane('voice'); renderDock();
+  const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding('gpt-live-1',{delegation_type:'responses'}) as never);
+  await loadVoiceSettings(true); await openVoiceSession(); renderDock();
   await waitFor(() => expect((screen.getByRole('button',{name:'Model: GPT Live 1'}) as HTMLButtonElement).disabled).toBe(true));
   request.mockRestore();
  });
  it('does not replace the composer with a retired voice delegation default', async () => {
   const model=getModels()[0].value;
-  const request=vi.spyOn(api,'get').mockResolvedValue({voice_model:'gpt-live-1',voice_options:{delegation_type:'client',delegation_model:model}});
-  await loadVoiceSettings(true);setLane('voice');activeSession.setModelOverride('composer-selection');renderDock();
+  const request=vi.spyOn(api,'get').mockImplementation(voiceBinding('gpt-live-1',{delegation_type:'client',delegation_model:model}) as never);
+  await loadVoiceSettings(true);await openVoiceSession();activeSession.setModelOverride('composer-selection');renderDock();
   await waitFor(()=>expect((screen.getByRole('button', {name:/^Model:/}) as HTMLButtonElement).disabled).toBe(false));
   expect(get(activeSession).modelOverride).toBe('composer-selection');
   request.mockRestore();
  });
  it('keeps the selected delegation model editable for GPT Live 1', async () => {
-  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: 'gpt-live-1' });
+  const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding('gpt-live-1') as never);
   await loadVoiceSettings(true);
-  setLane('voice');
+  await openVoiceSession();
   renderDock();
   await waitFor(() => expect((screen.getByRole('button', { name: /^Model:/ }) as HTMLButtonElement).disabled).toBe(false));
   expect(screen.queryByRole('button', { name: 'Model: GPT Live 1' })).toBeNull();
   request.mockRestore();
  });
  it('does not reload the voice binding on transcript or model selection updates', async () => {
-  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: 'gpt-live-1' });
+  const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding('gpt-live-1') as never);
   await loadVoiceSettings(true);
-  setLane('voice');
+  await openVoiceSession();
   activeSession.setModelOverride('sonnet');
   renderDock();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Model: Sonnet' })).toBeTruthy());
@@ -405,8 +423,8 @@ describe('ControlsDock split controls', () => {
 		expect(container.querySelector('.mobile-settings-trigger')).toBeTruthy();
 	});
 
-	it('keeps attach and tool access in the voice lane', () => {
-		setLane('voice');
+	it('keeps attach and tool access in the voice lane', async () => {
+		await openVoiceSession();
 		renderDock({ voiceActions });
 
 		expect(screen.getByRole('button', { name: /attach file/i })).toBeTruthy();

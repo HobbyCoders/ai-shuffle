@@ -126,6 +126,13 @@ describe('Assistant home', () => {
   expect(name.value).toBe('Editing');
   expect((screen.getByRole('textbox', { name: 'Repositories you care about' }) as HTMLTextAreaElement).value).toBe('owner/repo');
  });
+ it('opens setup for an unconfigured owner when a retry follows a failed first load', async () => {
+  mocks.getAssistantSources.mockRejectedValueOnce({ detail: 'Temporarily unavailable' });
+  render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Retry refresh' }));
+  expect(await screen.findByRole('combobox', { name: 'Assistant agent' })).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+ });
  it('keeps save errors visible with the editable draft intact', async () => {
   mocks.configureAssistant.mockRejectedValue({ detail: 'Agent is unavailable' }); render(AssistantHome); await choose();
   await fireEvent.click(screen.getByRole('button', { name: 'Save assistant' }));
