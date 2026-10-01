@@ -261,7 +261,11 @@ export const api = new ApiClient();
  * Fetch a file from the API and trigger a browser download.
  * Centralizes the common pattern of: fetch → check ok → extract filename → blob → download link.
  */
-export async function fetchAndDownload(path: string, fallbackFilename: string): Promise<void> {
+export async function fetchAndDownload(
+	path: string,
+	fallbackFilename: string,
+	validateResponse?: (response: Response) => void
+): Promise<void> {
 	const response = await fetch(`${apiBase()}${path}`, withAuth({
 		method: 'GET' }));
 
@@ -272,6 +276,9 @@ export async function fetchAndDownload(path: string, fallbackFilename: string): 
 			status: response.status
 		} as ApiError;
 	}
+
+	// Allow callers to fail closed before reading or downloading the file.
+	validateResponse?.(response);
 
 	const contentDisposition = response.headers.get('Content-Disposition');
 	let filename = fallbackFilename;

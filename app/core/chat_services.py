@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
+import hashlib
+import hmac
 import ipaddress
 import json
 import re
@@ -31,6 +34,7 @@ from dataclasses import dataclass
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
+from cryptography import x509
 
 from app.core.chat_files import LIMIT, AccessDenied
 
@@ -76,9 +80,56 @@ CONTENT_TYPE = re.compile(
 _REDACTED = b"[redacted]"
 
 
+def certificate_pin(value: str) -> str:
+    """An owner-entered SHA-256 certificate fingerprint, never a model input."""
+    value = value.strip().lower()
+    if value and not re.fullmatch(r"[0-9a-f]{64}|(?:[0-9a-f]{2}:){31}[0-9a-f]{2}", value):
+        raise AccessDenied("Enter the certificate's SHA-256 fingerprint: 64 hex digits, optionally colon-separated.")
+    return value.replace(":", "")
+
+
 def tls_context() -> ssl.SSLContext:
     """Certificate and host-name verification against the system trust store."""
     return ssl.create_default_context()
+
+
+def pinned_tls_context(pin: str) -> ssl.SSLContext:
+    """Replace CA trust with an exact owner-approved certificate for this grant only.
+
+    asyncio and HTTPX/AnyIO use SSLContext.wrap_bio. Check the certificate at
+    handshake completion AND before application writes, so authentication cannot
+    be sent to a different certificate, even if a consumer skips do_handshake.
+    No automatic discovery, TOFU, or fallback to an unverified connection.
+    """
+    pin = certificate_pin(pin)
+    if not pin:
+        raise AccessDenied("A pinned connection requires an owner-approved fingerprint.")
+
+    class PinnedCertificate(ssl.SSLObject):
+        def _verify_pin(self):
+            der = self.getpeercert(binary_form=True)
+            if not der or not hmac.compare_digest(hashlib.sha256(der).hexdigest(), pin):
+                raise ssl.SSLCertVerificationError("The service certificate does not match the approved fingerprint.")
+            cert = x509.load_der_x509_certificate(der)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if not cert.not_valid_before_utc <= now <= cert.not_valid_after_utc:
+                raise ssl.SSLCertVerificationError("The pinned service certificate is not currently valid.")
+
+        def do_handshake(self):
+            super().do_handshake()
+            self._verify_pin()
+
+        def write(self, data):
+            self._verify_pin()
+            return super().write(data)
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    # The exact certificate is the trust anchor, not a CA or a hostname claim.
+    # This context is never used without mandatory pin verification above.
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.sslobject_class = PinnedCertificate
+    return context
 
 
 @dataclass(frozen=True)
@@ -271,17 +322,17 @@ def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes
     return bytes(out)
 
 
-async def verify_origin(origin: Origin) -> None:
+async def verify_origin(origin: Origin, pin: str = "") -> None:
     """Complete a verified TLS handshake before granting. No HTTP or credential is sent."""
     try:
         async with asyncio.timeout(10):
             _, writer = await asyncio.open_connection(
-                origin.host, origin.port, ssl=tls_context(), server_hostname=origin.host
+                origin.host, origin.port, ssl=pinned_tls_context(pin) if pin else tls_context(), server_hostname=origin.host
             )
     except ssl.SSLCertVerificationError:
         raise AccessDenied(
-            "The service's TLS certificate is not trusted for this address. "
-            "Self-signed certificates are not supported."
+            "The service's TLS certificate is not trusted for this address or does not match a valid approved fingerprint. "
+            "For a self-signed service, verify its SHA-256 fingerprint independently and approve it in the private card."
         ) from None
     except TimeoutError:
         raise AccessDenied(
@@ -306,6 +357,7 @@ async def perform(
     path: str,
     body: str,
     content_type: str,
+    pin: str = "",
 ) -> dict:
     url = request_url(origin, path)
     headers = {
@@ -322,7 +374,7 @@ async def perform(
         async with (
             asyncio.timeout(REQUEST_DEADLINE),
             httpx.AsyncClient(
-                verify=tls_context(),
+                verify=pinned_tls_context(pin) if pin else tls_context(),
                 trust_env=False,
                 follow_redirects=False,
                 timeout=REQUEST_TIMEOUT,

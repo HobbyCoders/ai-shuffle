@@ -371,6 +371,117 @@ def test_redaction_counts_positions_in_the_input_so_partial_secrets_never_slide_
     assert b"correct-horse" not in chat_services.redact(echoed, needles)
 
 
+# --- Owner-approved certificate pinning, real TLS (including HTTPX/AnyIO) ---
+
+
+@pytest_asyncio.fixture
+async def pinned_service(tmp_path):
+    key = ec.generate_private_key(ec.SECP256R1())
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                         serialization.PrivateFormat.PKCS8,
+                                         serialization.NoEncryption()))
+    certificates = []
+    pins = []
+    for index in range(2):
+        # Two different certificates with the SAME key: pin the certificate,
+        # not merely its public key or the CA that issued it.
+        cert = _certificate("localhost", "localhost", key, key, ca=False)
+        path = tmp_path / f"cert-{index}.pem"
+        path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        certificates.append(path)
+        pins.append(cert.fingerprint(hashes.SHA256()).hex())
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificates[0], key_path)
+    target = Service()
+    server = await asyncio.start_server(target.handle, "127.0.0.1", 0, ssl=context)
+    target.port = server.sockets[0].getsockname()[1]
+    try:
+        yield target, context, certificates, key_path, pins
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("value", ["trust-any", "0" * 63, "g" * 64, "00:" * 33, ":" * 10])
+def test_certificate_pin_requires_an_exact_sha256(value):
+    with pytest.raises(AccessDenied, match="SHA-256"):
+        chat_services.certificate_pin(value)
+    with pytest.raises(AccessDenied, match="owner-approved"):
+        chat_services.pinned_tls_context("")
+
+
+async def test_self_signed_owner_pin_grants_without_sending_credentials_and_reads_without_prompts(broker, pinned_service):
+    target, _, _, _, pins = pinned_service
+    formatted = ":".join(pins[0][i:i + 2] for i in range(0, 64, 2)).upper()
+    request_task = asyncio.create_task(broker.request("chat", "service", "Read private API"))
+    async with asyncio.timeout(3):
+        while not broker.requests:
+            await asyncio.sleep(0.001)
+    request = next(iter(broker.requests.values()))
+    await broker.fulfill("chat", request.id, GrantSubmission(connection=spec(target, fingerprint=formatted)))
+    handle = await request_task
+    assert "fingerprint" not in handle and SECRET not in json.dumps(handle)
+    assert target.requests == []
+    assert broker.grants[handle["id"]].fingerprint == pins[0]
+    result = await broker.run("chat", handle["id"], "http", {"method": "GET", "path": "/echo"})
+    assert result["status"] == 200
+    assert target.requests[0]["headers"]["authorization"] == f"Bearer {SECRET}"
+    assert SECRET not in json.dumps(result) and not broker.actions
+    broker.revoke("chat", handle["id"])
+
+
+@pytest.mark.parametrize("outside_validity", ["expired", "not-yet-valid"])
+async def test_pinned_certificate_validity_is_enforced(broker, pinned_service, monkeypatch, outside_validity):
+    target, _, paths, _, pins = pinned_service
+    cert = x509.load_pem_x509_certificate(paths[0].read_bytes())
+    instant = (cert.not_valid_after_utc + datetime.timedelta(seconds=1) if outside_validity == "expired"
+               else cert.not_valid_before_utc - datetime.timedelta(seconds=1))
+
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant
+
+    monkeypatch.setattr(chat_services.datetime, "datetime", Clock)
+    with pytest.raises(AccessDenied, match="TLS certificate"):
+        await broker.create("chat", spec(target, fingerprint=pins[0]))
+    assert target.requests == [] and not broker.grants
+
+
+async def test_unpinned_self_signed_service_still_refused(broker, pinned_service):
+    target, _, _, _, _ = pinned_service
+    with pytest.raises(AccessDenied, match="TLS certificate"):
+        await broker.create("chat", spec(target))
+    assert target.requests == [] and not broker.grants
+
+
+async def test_wrong_pin_refuses_grant_and_http_before_credentials(broker, pinned_service):
+    target, _, _, _, pins = pinned_service
+    with pytest.raises(AccessDenied, match="TLS certificate"):
+        await broker.create("chat", spec(target, fingerprint=pins[1]))
+    origin = chat_services.parse_origin(spec(target).url)
+    header = chat_services.credential_header("Authorization", "Bearer", SECRET)
+    with pytest.raises(AccessDenied):
+        await chat_services.perform(origin, header, SECRET, "GET", "/echo", "", "", pin=pins[1])
+    assert target.requests == [] and not broker.grants
+
+
+async def test_certificate_replacement_same_key_refused_before_authentication(broker, pinned_service):
+    target, context, paths, key_path, pins = pinned_service
+    grant = await broker.create("chat", spec(target, fingerprint=pins[0]))
+    context.load_cert_chain(paths[1], key_path)
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/echo"})
+    assert target.requests == []
+    broker.revoke("chat", grant["id"])
+    # A fresh explicit owner approval of the new identity can connect again.
+    grant = await broker.create("chat", spec(target, fingerprint=pins[1]))
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/echo"})
+    assert result["status"] == 200 and len(target.requests) == 1
+    broker.revoke("chat", grant["id"])
+
+
 # --- Broker, real TLS service --------------------------------------------------
 
 

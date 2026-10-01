@@ -390,3 +390,169 @@ class TestImportJsonl:
         p = _jsonl(world)
         r = client.post("/api/v1/sessions/import-jsonl", headers=AUTH, json={"jsonl_path": str(p)})
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Separate sharing artifacts — exercise the real producing paths.
+# ---------------------------------------------------------------------------
+
+SYNTHETIC_PREVIEW = "v1.c3ludGhldGlj.1790942400." + "b" * 64
+SYNTHETIC_PASSWORD = "fixture-url-password"
+
+
+def _sharing_secret_text():
+    encoded = SYNTHETIC_PREVIEW.replace(".", "%252E")
+    return ("Useful result " + SYNTHETIC_PREVIEW + " encoded=" + encoded +
+            " postgres://user:" + SYNTHETIC_PASSWORD + "@host/db")
+
+
+def _create_sharing_source(source, world, client):
+    import asyncio
+
+    text = _sharing_secret_text()
+    nested = {"headers": {"Authorization": "fixture-opaque-auth"},
+              "nested": [{"preview": SYNTHETIC_PREVIEW, "api_key": "fixture-api-key"}]}
+    if source == "legacy":
+        database.create_session("share-legacy", "agent-a", title="Title " + SYNTHETIC_PREVIEW)
+        database.add_session_message("share-legacy", "user", text, metadata=nested)
+        database.add_session_message("share-legacy", "assistant", "", tool_name="Bash",
+                                     tool_input={"command": text, "credentials": nested})
+        database.add_session_message("share-legacy", "system", text, metadata=nested)
+        return "share-legacy", None
+
+    if source == "fluid":
+        from app.core.provider.fluid_pg_store import PgFluidStore
+        from fluid.messages.content import Message, Text, ToolUseBlock, ToolResultBlock
+        from fluid.store.base import SessionNode
+
+        async def produce():
+            store = PgFluidStore()
+            await store.create_session("ses_sharefixture")
+            await store.append("ses_sharefixture", SessionNode(
+                node_id="n1", parent_id=None,
+                message=Message(role="assistant", content=[
+                    Text(text=text), ToolUseBlock(id="t1", name="Bash",
+                                                input={"command": text, "nested": nested}),
+                ], provider_meta=nested),
+            ))
+            await store.append("ses_sharefixture", SessionNode(
+                node_id="n2", parent_id="n1",
+                message=Message(role="user", content=[
+                    ToolResultBlock(tool_use_id="t1", content=[Text(text=text)], is_error=True),
+                ], provider_meta=nested),
+            ))
+        asyncio.run(produce())
+        database.create_session("share-fluid", "agent-a", title="Title " + SYNTHETIC_PREVIEW)
+        database.update_session("share-fluid", sdk_session_id="ses_sharefixture")
+        return "share-fluid", None
+
+    path = _jsonl(world, lines=[
+        {"type": "user", "uuid": "u1", "message": {"role": "user", "content": text},
+         "metadata": nested},
+        {"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": text, **nested}},
+        ]}},
+        {"type": "user", "uuid": "u2", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": text, "is_error": True},
+        ]}},
+    ])
+    # Noncanonical spacing and no final newline make byte-fidelity meaningful.
+    raw = path.read_text().replace('"type":', '"type" :').rstrip("\n")
+    path.write_text(raw)
+    response = client.post("/api/v1/sessions/import-jsonl", json={"jsonl_path": str(path)})
+    assert response.status_code == 200, response.text
+    return response.json()["session_id"], path
+
+
+@pytest.mark.parametrize("source", ["legacy", "fluid", "raw-cli"])
+@pytest.mark.parametrize("format,extension,media", [
+    ("markdown", "md", "text/markdown"), ("json", "json", "application/json"),
+    ("jsonl", "jsonl", "application/x-ndjson"),
+])
+def test_separate_share_safe_export_from_real_producers(client, world, source, format, extension, media):
+    sid, path = _create_sharing_source(source, world, client)
+    url = f"/api/v1/sessions/{sid}/export"
+    before_session = database.get_session(sid)
+    before_messages = database.get_session_messages(sid)
+    before_fluid = None
+    if source == "fluid":
+        import asyncio
+        from app.core.provider.fluid_pg_store import PgFluidStore
+        before_fluid = asyncio.run(PgFluidStore().load_path("ses_sharefixture"))
+    raw = client.get(url, params={"format": format})
+    raw_jsonl = client.get(url, params={"format": "jsonl"})
+    assert raw.status_code == raw_jsonl.status_code == 200
+    assert SYNTHETIC_PREVIEW in raw_jsonl.text
+    if source != "raw-cli" or format == "jsonl":
+        assert SYNTHETIC_PREVIEW in raw.text
+    # Fresh CLI imports need not have a store-backed Markdown/JSON view yet;
+    # sharing renders the strictly parsed file without changing that raw path.
+    assert raw.headers["x-transcript-privacy"] == "private-raw"
+    if path:
+        assert raw_jsonl.content == path.read_bytes()
+
+    safe = client.get(url, params={"format": format, "share_safe": "true"})
+    assert safe.status_code == 200, safe.text
+    assert safe.headers["content-type"].startswith(media)
+    assert safe.headers["x-transcript-privacy"] == "share-safe"
+    assert f'-share-safe.{extension}"' in safe.headers["content-disposition"]
+    for secret in (SYNTHETIC_PREVIEW, SYNTHETIC_PREVIEW.replace(".", "%252E"),
+                   SYNTHETIC_PASSWORD, "fixture-opaque-auth", "fixture-api-key"):
+        assert secret not in safe.text and secret not in safe.headers["content-disposition"]
+    assert "Useful result" in safe.text and "Bash" in safe.text
+    if format == "markdown":
+        assert "review before posting" in safe.text
+    elif format == "json":
+        assert safe.json()["session"]["id"] == sid
+    else:
+        assert all(isinstance(json.loads(line), dict) for line in safe.text.splitlines())
+
+    private_again = client.get(url, params={"format": format, "share_safe": "false"})
+    if format == "json":
+        before_data, after_data = raw.json(), private_again.json()
+        # Export timestamps intentionally change on every render.
+        assert before_data.pop("exported_at") and after_data.pop("exported_at")
+        assert after_data == before_data
+    elif format == "markdown":
+        assert private_again.text.rsplit("*Exported from AI Shuffle on", 1)[0] == raw.text.rsplit("*Exported from AI Shuffle on", 1)[0]
+    else:
+        assert private_again.content == raw.content
+    assert client.get(url, params={"format": "jsonl"}).content == raw_jsonl.content
+    assert database.get_session(sid) == before_session
+    assert database.get_session_messages(sid) == before_messages
+    if source == "fluid":
+        # The cold store still carries the fixture tokens after all exports.
+        import asyncio
+        from app.core.provider.fluid_pg_store import PgFluidStore
+        nodes = asyncio.run(PgFluidStore().load_path("ses_sharefixture"))
+        assert nodes == before_fluid
+        persisted = json.dumps([node.message.to_dict() for node in nodes])
+        assert SYNTHETIC_PREVIEW in persisted and "fixture-opaque-auth" in persisted
+        assert nodes[1].message.content[0].is_error is True
+    if path:
+        assert path.read_bytes() == raw_jsonl.content
+
+
+@pytest.mark.parametrize("format", ["markdown", "json", "jsonl"])
+def test_share_safe_sdk_handle_with_legacy_fallback(client, world, format):
+    sid = _session_with_messages()
+    database.update_session(sid, sdk_session_id="missing-sdk-history")
+    response = client.get(f"/api/v1/sessions/{sid}/export",
+                          params={"format": format, "share_safe": "true"})
+    assert response.status_code == 200, response.text
+    assert "hello there" in response.text and "Bash" in response.text
+
+
+@pytest.mark.parametrize("format", ["markdown", "json", "jsonl"])
+@pytest.mark.parametrize("malformed", ['{broken', 'null', '{"secret": NaN}'])
+def test_share_safe_raw_cli_fails_closed_without_changing_private_backup(client, world, format, malformed):
+    sid, path = _create_sharing_source("raw-cli", world, client)
+    raw = path.read_bytes() + ("\n" + malformed + " " + "\n").encode()
+    path.write_bytes(raw)
+    url = f"/api/v1/sessions/{sid}/export"
+    response = client.get(url, params={"format": format, "share_safe": "true"})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"].startswith("Cannot create sharing export: malformed JSONL history.")
+    assert SYNTHETIC_PREVIEW not in response.text
+    assert client.get(url, params={"format": "jsonl"}).content == raw
+    assert path.read_bytes() == raw
