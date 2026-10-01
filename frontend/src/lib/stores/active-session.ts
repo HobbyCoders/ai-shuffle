@@ -717,11 +717,20 @@ feedController.attach({
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
-function rememberBranchIntent() {
-	composerPreferences.set('checkout', _state.worktreeBranch ? {
+/**
+ * Remember the staged branch as the account default. `oneTime` (a branch the
+ * New Branch flow just created) defaults to carrying over from the remembered
+ * pick for this same branch, so later base/mode/runner edits keep it one-time.
+ */
+function rememberBranchIntent(oneTime?: boolean) {
+	const branch = _state.worktreeBranch;
+	const prev = composerPreferences.current.checkout;
+	oneTime ??= prev?.kind === 'branch' && !!prev.oneTime && prev.branch === branch
+		&& prev.projectId === _state.project && prev.projectV2Id === _state.projectV2Id;
+	composerPreferences.set('checkout', branch ? {
 		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
-		branch:_state.worktreeBranch, baseBranch:_state.worktreeBaseBranch,
-		createNew:_state.worktreeCreateNewBranch,
+		branch, baseBranch:_state.worktreeBaseBranch,
+		createNew:_state.worktreeCreateNewBranch, ...(oneTime ? {oneTime:true as const} : {}),
 	} : null);
 }
 
@@ -1060,7 +1069,17 @@ export const activeSession = {
 		if (branch) rememberBranchIntent();
 	},
 
-	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); rememberBranchIntent(); },
+	/** An explicit pick (e.g. an existing branch from the list) stays the default. */
+	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); rememberBranchIntent(false); },
+	/**
+	 * Stage a branch the New Branch modal just created. It is sent as an existing
+	 * branch, but remembered as one-time: the first session created on it spends
+	 * the choice, so the next New Chat falls back to Auto/the project default.
+	 */
+	stageCreatedBranch(branch: string) {
+		_update(s => ({ ...s, worktreeBranch: branch, worktreeMode: 'new' as const, worktreeCreateNewBranch: false }));
+		rememberBranchIntent(true);
+	},
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); if (_state.worktreeBranch) rememberBranchIntent(); },
 	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); if (mode === 'new') rememberBranchIntent(); },
 	setWorktreeCreateNewBranch(val: boolean) { _update(s => ({ ...s, worktreeCreateNewBranch: val })); if (_state.worktreeBranch) rememberBranchIntent(); },
@@ -1085,7 +1104,9 @@ export const activeSession = {
 		const picks = composerPreferences.current;
 		const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
 		const code = _state.mode !== 'chat';
-		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout
+		// A one-time choice spoken for by a create still in flight belongs to that
+		// session, not to this new compose.
+		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout && !composerPreferences.checkoutClaimed
 			&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
 			? picks.checkout : null;
 		// A legacy worktree ID belongs to its original checkout. Never transplant

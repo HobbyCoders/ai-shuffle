@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => {
 		currentBranch: store({ name: 'main' }),
 		loadWorktrees: vi.fn().mockResolvedValue(undefined),
 		loadBranches: vi.fn().mockResolvedValue(undefined),
+		createBranch: vi.fn().mockResolvedValue(undefined),
 		syncWorktrees: vi.fn().mockResolvedValue({})
 	};
 });
@@ -59,7 +60,8 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	git: {
 		...mocks.git,
 		loadWorktrees: mocks.loadWorktrees,
-		loadBranches: mocks.loadBranches
+		loadBranches: mocks.loadBranches,
+		createBranch: mocks.createBranch
 	}
 }));
 
@@ -235,6 +237,25 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		expect(activeSession.current.worktreeBranch).toBe('feature/native');
 		expect(activeSession.current.worktreeMode).toBe('new');
 		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
+	});
+
+	it('stages a branch made with New branch as a one-time choice, and a listed branch as a default (#1528)', async () => {
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('New branch...'));
+		await fireEvent.input(screen.getByLabelText('Branch name'), { target: { value: 'live/1528-explicit' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		await vi.waitFor(() => expect(mocks.createBranch).toHaveBeenCalledWith('live/1528-explicit'));
+		await vi.waitFor(() => expect(activeSession.current.worktreeBranch).toBe('live/1528-explicit'));
+		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
+		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: 'repo', projectV2Id: null,
+			branch: 'live/1528-explicit', baseBranch: 'main', createNew: false, oneTime: true });
+
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		await fireEvent.click(screen.getByText('develop'));
+		expect(activeSession.current.worktreeBranch).toBe('develop');
+		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: 'repo', projectV2Id: null,
+			branch: 'develop', baseBranch: 'main', createNew: false });
 	});
 
 	it('does not render the new-worktree folder chip', () => {

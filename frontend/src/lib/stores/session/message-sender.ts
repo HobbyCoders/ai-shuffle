@@ -561,7 +561,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const projectV2Id = _state.projectV2Id;
 			const queryProfileId = _state.profile;
 			const branchName = _state.worktreeBranch;
-			const consumeBranchChoice = composerPreferences.captureNewBranchChoice(
+			// Claimed before the POST so a New Chat opened mid-create does not stage
+			// this one-time choice; consumed on success, released on failure.
+			const branchClaim = composerPreferences.claimBranchChoice(
 				{ projectId, projectV2Id }, branchName, _state.worktreeCreateNewBranch);
 			const remoteOnly = !projectId && !!projectV2Id;
 			const overridesSnapshot = buildOverrides();
@@ -592,7 +594,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				// A successful row consumes the one-time account default, even after
 				// navigation, but never a newer choice or a different owner's pick.
-				if (response.session_id) consumeBranchChoice();
+				if (response.session_id) branchClaim.consume();
 
 				// The pick is spent once the session row carries the ownership —
 				// only on the compose that spent it (see autoCreateWorktree).
@@ -677,6 +679,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					isCreatingWorktree: false,
 					worktreeError: formatted,
 				}));
+			} finally {
+				// No-op after consume; otherwise the choice stays for a retry.
+				branchClaim.release();
 			}
 		},
 

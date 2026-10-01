@@ -191,6 +191,57 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 	});
 });
 
+describe('branch created by the New Branch modal (#1528)', () => {
+	// The modal creates the branch up front, so the send carries
+	// create_new_branch=false. It must still be spent by the first session.
+	const created = { kind: 'branch' as const, projectId: 'proj-1', projectV2Id: null,
+		branch: 'live/1528-explicit', baseBranch: 'main', createNew: false, oneTime: true as const };
+	const ok = { session_id: 'wt-c', branch_name: created.branch, base_branch: 'main', worktree_path: '/w', status: 'ok' };
+	const staged = { worktreeBranch: created.branch, worktreeBaseBranch: 'main', worktreeCreateNewBranch: false };
+
+	beforeEach(() => {
+		composerPreferences.set('model', 'preserved-model');
+		composerPreferences.set('checkout', created);
+	});
+
+	it('claims the choice while the POST is in flight and consumes it after success', async () => {
+		let finish!: (value: typeof ok) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, state } = setup(staged);
+		const pending = sender.createWorktree();
+		expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.objectContaining({
+			branch_name: created.branch, create_new_branch: false }));
+		expect(composerPreferences.checkoutClaimed).toBe(true);
+		expect(composerPreferences.current.checkout).toEqual(created);
+		finish(ok);
+		await pending;
+		expect(composerPreferences.checkoutClaimed).toBe(false);
+		expect(composerPreferences.current.checkout).toBeNull();
+		expect(composerPreferences.current.model).toBe('preserved-model');
+		expect(state()).toMatchObject({ sessionId: 'wt-c', worktreeBranch: created.branch });
+	});
+
+	it('keeps the choice and the draft branch when creation fails', async () => {
+		post.mockRejectedValueOnce({ status: 500, detail: 'worktree add failed' });
+		const { sender, state } = setup(staged);
+		await sender.createWorktree();
+		expect(composerPreferences.checkoutClaimed).toBe(false);
+		expect(composerPreferences.current.checkout).toEqual(created);
+		expect(state()).toMatchObject({ sessionId: null, worktreeBranch: created.branch, isCreatingWorktree: false });
+		expect(state().worktreeError).toBeTruthy();
+	});
+
+	it('keeps an existing branch picked from the list as the default', async () => {
+		const listed = { ...created, branch: 'feature/existing' } as Record<string, unknown>;
+		delete listed.oneTime;
+		composerPreferences.set('checkout', listed as never);
+		post.mockResolvedValueOnce({ ...ok, branch_name: 'feature/existing' });
+		const { sender } = setup({ ...staged, worktreeBranch: 'feature/existing' });
+		await sender.createWorktree();
+		expect(composerPreferences.current.checkout).toEqual(listed);
+	});
+});
+
 describe('autoCreateWorktree', () => {
 	it('commits the new session in one step and opens its feed when the backend started the turn', async () => {
 		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
