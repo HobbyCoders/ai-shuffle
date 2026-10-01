@@ -1624,12 +1624,20 @@
 	.sheet-layout .narrow-only {
 		display: grid;
 	}
-	/* Keep room for the session title and download on a phone's single bar.
-	   The icon/tone and accessible name retain the full Git status. */
+	/* Phones keep a short label: the same one desktop shows (or the +/−
+	   numbers), or the branch name for an unreadable checkout. It truncates so
+	   the session title and download keep their room; the dimmer detail drops.
+	   The button's title, accessible name and panel carry the full status. */
 	@media (max-width: 500px) {
-		.sheet-layout .trigger .stat-line,
-		.sheet-layout .trigger .btn-label,
 		.sheet-layout .trigger .btn-detail { display: none; }
+		.sheet-layout .trigger .btn-label {
+			min-width: 0;
+			max-width: min(24vw, 112px);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			/* overflow clips at the line box; 1 would cut descenders. */
+			line-height: 1.3;
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {

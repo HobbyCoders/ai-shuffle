@@ -102,19 +102,22 @@ async function harness(viewport, { touch, shell }) {
 	// Git button and its panel (which hosts Swarm and Private access).
 	async function checkoutChecks() {
 		const label = page.locator('.git-btn.trigger .btn-label');
-		const labelShown = () => label.evaluate((el) => getComputedStyle(el).display !== 'none');
-		// Phones (<=500px sheet) show the icon alone by design (#1544).
+		const shown = (selector) => page.locator(`.git-btn.trigger ${selector}`).evaluate((el) => getComputedStyle(el).display !== 'none');
+		// Phones (<=500px sheet) keep a short, truncated label and drop the detail.
 		const compact = touch && viewport.width <= 500;
+		const labelCap = compact ? Math.min(viewport.width * 0.24, 112) : 180;
 		for (const [scenario, detail] of [['checking', 'checking'], ['unreadable', 'unavailable']]) {
 			await fx((s) => window.gitPanelFixture.scenario(s), scenario);
 			check(await page.locator('.git-btn.trigger').isVisible(), `${scenario}: the Git button stays in the header`);
 			check((await label.textContent()) === 'feature/inline-git-editors-with-a-long-name', `${scenario}: the button names the branch`, await label.textContent());
 			check((await page.locator('.git-btn.trigger').textContent()).includes(detail), `${scenario}: the button says ${detail}`);
-			check((await labelShown()) === !compact, `${scenario}: label ${compact ? 'hidden on a phone' : 'visible'}`);
-			if (!compact) {
-				const fits = await label.evaluate((el) => el.getBoundingClientRect().width <= 181 && el.getBoundingClientRect().right <= document.documentElement.clientWidth);
-				check(fits, `${scenario}: a long branch name is truncated inside the viewport`);
-			}
+			check(await shown('.btn-label'), `${scenario}: the branch label is visible`);
+			check((await shown('.btn-detail')) === !compact, `${scenario}: "${detail}" ${compact ? 'drops on a phone' : 'is visible'}`);
+			const fits = await label.evaluate((el, cap) => {
+				const b = el.getBoundingClientRect();
+				return b.width > 20 && b.width <= cap + 1 && el.scrollWidth > el.clientWidth && b.right <= document.documentElement.clientWidth;
+			}, labelCap);
+			check(fits, `${scenario}: a long branch name is truncated inside the viewport`);
 		}
 		await openPanel();
 		check((await page.locator('.git-panel .gp-rows').count()) === 0, 'unreadable: no action rows in the panel');
@@ -129,9 +132,35 @@ async function harness(viewport, { touch, shell }) {
 		check((await open()) === null, 'recovered: close control closes the panel', await open());
 	}
 
+	// Owner decision on #1615: phones show the desktop label, truncated, not a
+	// bare icon, without shrinking the tap target or overflowing the header.
+	async function phoneLabelChecks() {
+		if (!(touch && viewport.width <= 500)) return;
+		const LABELS = [['dirty', '+120 −14'], ['ahead', '2 to push'], ['behind', '3 behind'], ['openpr', 'PR #1565'], ['unreadable', 'feature/']];
+		for (const [scenario, text] of LABELS) {
+			await fx((s) => window.gitPanelFixture.scenario(s), scenario);
+			const s = await page.evaluate(() => {
+				const btn = document.querySelector('.git-btn.trigger');
+				const b = btn.getBoundingClientRect();
+				const vw = document.documentElement.clientWidth;
+				return {
+					text: btn.innerText.replace(/\s+/g, ' ').trim(),
+					w: b.width, h: b.height, right: b.right,
+					title: document.querySelector('.fx-title').getBoundingClientRect().width,
+					overflow: document.documentElement.scrollWidth > vw || [...document.querySelectorAll('.fx-header *')].some((e) => e.getBoundingClientRect().right > vw + 0.5),
+				};
+			});
+			check(s.text.startsWith(text), `${scenario}: phone button shows "${text}"`, s.text);
+			check(s.h >= 36 && s.w >= 44, `${scenario}: phone button keeps its tap target`, { w: s.w, h: s.h });
+			check(!s.overflow && s.right <= viewport.width, `${scenario}: phone header has no horizontal overflow`);
+			check(s.title >= 100, `${scenario}: the chat title keeps room beside the button`, s.title);
+		}
+	}
+
 	async function mobileShellChecks() {
 		check((await page.locator('html').getAttribute('data-platform')) === 'mobile', 'mobile shell sets data-platform');
 		check((await page.locator('.git-actions.sheet-layout').count()) === 1, 'mobile shell uses the bottom sheet');
+		await phoneLabelChecks();
 		await checkoutChecks();
 		for (const editor of EDITORS) {
 			await fx((s) => window.gitPanelFixture.scenario(s), editor.scenario);
@@ -182,6 +211,7 @@ async function harness(viewport, { touch, shell }) {
 		const sheet = (await page.locator('.git-actions.sheet-layout').count()) === 1;
 		check(sheet === touch, touch ? 'touch viewport uses the bottom sheet' : 'desktop viewport uses the anchored panel');
 		if (!touch) await handlerChecks();
+		await phoneLabelChecks();
 		await checkoutChecks();
 		for (const editor of EDITORS) {
 			const { chevron, id } = editor;
@@ -292,10 +322,14 @@ async function harness(viewport, { touch, shell }) {
 }
 
 try {
+	await harness({ width: 320, height: 640 }, { touch: true });
 	await harness({ width: 375, height: 812 }, { touch: true });
+	await harness({ width: 390, height: 844 }, { touch: true });
 	await harness({ width: 768, height: 940 }, { touch: true });
 	await harness({ width: 1280, height: 800 }, { touch: false });
+	await harness({ width: 320, height: 640 }, { touch: true, shell: 'mobile' });
 	await harness({ width: 375, height: 812 }, { touch: true, shell: 'mobile' });
+	await harness({ width: 390, height: 844 }, { touch: true, shell: 'mobile' });
 	await harness({ width: 768, height: 940 }, { touch: true, shell: 'mobile' });
 	console.log(`Git panel: ${passed} checks passed`);
 } catch (error) {

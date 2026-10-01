@@ -23,6 +23,8 @@
  *  - everything disables under actionsBusy (isStreaming)
  *  - the private-access row reads chatAccessSummary and opens the dialog
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { flushSync, tick } from 'svelte';
@@ -356,6 +358,18 @@ describe('GitHeaderActions header label', () => {
 		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false } });
 		expect(trigger().textContent).toContain('2 to approve');
 		expect(trigger().textContent).not.toContain('conflicts');
+	});
+
+	// Owner decision on #1615: the phone sheet layout shows a truncated label,
+	// not a bare icon. jsdom ignores media queries, so this guards the rule's
+	// text; tests/verify-git-panel.mjs checks the rendered result at 320–390px.
+	it('keeps a truncated label (not a bare icon) in the phone rule', () => {
+		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/git/GitHeaderActions.svelte'), 'utf8');
+		const phone = source.match(/@media \(max-width: 500px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(phone).toContain('.btn-label');
+		expect(phone).toMatch(/text-overflow:\s*ellipsis/);
+		const hidden = phone.match(/([^{}]*)\{\s*display:\s*none;?\s*\}/)?.[1] ?? '';
+		expect(hidden).not.toMatch(/btn-label|stat-line/);
 	});
 });
 
