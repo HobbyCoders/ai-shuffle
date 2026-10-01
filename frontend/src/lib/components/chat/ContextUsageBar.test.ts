@@ -497,6 +497,17 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 	});
 
+	it('does not ask for billing access when fal.ai refuses the ordinary key', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'fal-ai', provider_type: 'fal', provider_name: 'fal.ai', status: 'unavailable', last_error_kind: 'billing_access_denied' },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.provider-status')?.textContent).toBe('Balance unavailable for this key');
+		expect(container.textContent).not.toContain('Billing access required');
+		expect(container.textContent).not.toContain('$0.00');
+	});
+
 	it('keeps stale API balances and actionable billing errors without refresh narration', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },

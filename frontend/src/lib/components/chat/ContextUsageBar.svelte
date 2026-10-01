@@ -400,7 +400,9 @@
 		// spend only, and the billing endpoints refuse API and Admin keys.
 		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'Credit balance not available for this key';
 		const status = providerStatusAt(pb, nowMs);
-		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') ? 'Balance unavailable for this key' : 'Billing access required';
+		// OpenRouter and fal.ai read the balance with the key already saved; no
+		// extra billing access exists to add, so a refusal is about that key.
+		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' ? 'Balance unavailable for this key' : 'Billing access required';
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
 		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
 		if (status === 'stale') return 'Last reported · not live';
