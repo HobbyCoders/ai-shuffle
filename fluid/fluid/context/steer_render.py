@@ -33,7 +33,9 @@ from fluid.store.base import SessionNode
 # Render version 1 is the original renderer: every steer verbatim. Version 2
 # adds system-notice receipts, and in fluid.context.compaction the epoch
 # stub's pinned intent block and the longer cap on a real user's turn-start
-# text in span digests. Persisted decisions carry the version they
+# text in span digests, plus the outrank line, code-cell summaries and the
+# epoch stub's list of files read and tools loaded (fluid.context.trim's
+# summarize_cell). Persisted decisions carry the version they
 # were made under, so an old session keeps rendering exactly as it did.
 RENDER_VERSION_LEGACY = 1
 CURRENT_RENDER_VERSION = 2

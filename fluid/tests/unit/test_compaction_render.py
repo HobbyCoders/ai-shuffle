@@ -10,6 +10,7 @@ import re
 from dataclasses import replace
 
 from fluid.context.compaction import (
+    OUTRANK_LINE,
     SPAN_DIGEST,
     CompactionConfig,
     Compactor,
@@ -20,7 +21,7 @@ from fluid.context.compaction import (
 )
 from fluid.context.recall import expand_ref
 from fluid.context.steer_render import render_steers
-from fluid.context.trim import TrimConfig
+from fluid.context.trim import TrimConfig, summarize_cell
 from fluid.events import ContextCompaction
 from fluid.events.model import event_from_dict, event_to_dict
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
@@ -254,7 +255,8 @@ def test_v2_decisions_resume_byte_identical() -> None:
 def test_rolled_back_rung_restores_span_versions() -> None:
     nodes = _turn(0, [_system()])
     c = Compactor()
-    c.rehydrate([Promotion(tier=2, spans=(("node_0a", "node_0d", SPAN_DIGEST),))])
+    c.rehydrate([Promotion(tier=2, spans=(("node_0a", "node_0d", SPAN_DIGEST),),
+                           render_version=1)])
     before = c.view(nodes)
     restore = c._tier_snapshot()
     c._mark_span("node_0a", "node_0d", SPAN_DIGEST)  # re-marked at version 2
@@ -382,3 +384,149 @@ def test_digest_keeps_real_user_turn_text_to_the_turn_cap() -> None:
     v1 = render_span_digest(_pair(0, request), CompactionConfig(render_version=1))
     assert " ".join(request.split()) not in v1.content[0].text
     assert "… (+" in v1.content[0].text
+
+
+# ─── Code-cell summaries and traceback eligibility (plan item 10, B8, B9) ───
+
+CELL_CODE = (
+    "from tools import Read, Skill\nimport json\n\n"
+    'spec = Read(file_path="docs/compaction/very/long/directory/name/REPORT.md", limit=400)\n'
+    'tools.ToolSearch(query="select:mcp__browser__browser_navigate")\n'
+    'guide = Skill(name="release-notes")\n'
+    "print(len(spec))\n"
+)
+CELL_OUT = (
+    "line\n" * 900
+    + 'Traceback (most recent call last):\n  File "<cell>", line 3\nKeyError: \'x\'\n'
+)
+
+
+def _cell_turn(t: int, out: str = CELL_OUT, *, code: str = CELL_CODE) -> list[SessionNode]:
+    return [
+        _node(f"n{t}a", "user", [Text(f"look at topic {t}")]),
+        _node(f"n{t}b", "assistant", [
+            Text("checking"),
+            ToolUseBlock(id=f"c{t}", name="run_python", input={"code": code}),
+        ]),
+        _node(f"n{t}c", "user", [ToolResultBlock(
+            tool_use_id=f"c{t}", content=[Text(out)], delivery_metadata_version=1,
+        )]),
+        _node(f"n{t}d", "assistant", [Text(f"done {t}")]),
+    ]
+
+
+def _results(messages: list[Message]) -> list[str]:
+    return [b.content[0].text for m in messages for b in m.content
+            if isinstance(b, ToolResultBlock)]
+
+
+def test_summarize_cell_names_nested_calls_and_skips_imports() -> None:
+    line = summarize_cell(CELL_CODE + 'Bash(command="git status --short")\n')
+    assert line.startswith('first line: spec = Read(file_path="docs/')
+    for call in ('Read(file_path="docs/', 'ToolSearch(query="select:',
+                 'Skill(name="release-notes")', 'Bash(command="git status --short")'):
+        assert call in line
+    # The 60-char hint clips the path, so the full path is listed once more.
+    assert "paths: docs/compaction/very/long/directory/name/REPORT.md" in line
+    assert "commands:" not in line  # the hint already shows the whole command
+    assert "still loaded: ToolSearch browser_navigate; Skill release-notes" in line
+    # Imported names that are not tools are never taken for calls.
+    assert "calls" not in summarize_cell("p = Path('x')\nCounter([1])")
+    # A cell that does not parse still names its tool calls.
+    assert "calls Read(…)" in summarize_cell('import tools\nRead("a.py"')
+    assert summarize_cell(CELL_CODE) == summarize_cell(CELL_CODE)
+
+
+def test_digest_and_epoch_name_nested_read_skill_and_toolsearch() -> None:
+    nodes = _cell_turn(0) + _cell_turn(1)
+    config = CompactionConfig()
+    digest = render_span_digest(nodes[:4], config).content[0].text
+    lines = digest.split("\n")
+    assert lines[1] == OUTRANK_LINE and lines[2] == "tools: run_python×1"
+    assert "  → run_python: first line: spec = Read(" in digest
+    assert "still loaded: ToolSearch browser_navigate; Skill release-notes" in digest
+    assert "✓ result 4573 chars (n0c); last line: \"KeyError: 'x'\"" in digest
+    assert '{"code"' not in digest
+
+    epoch = render_epoch_stub(split_spans(nodes), config).content[0].text
+    lines = epoch.split("\n")
+    assert lines[1] == OUTRANK_LINE
+    assert lines[2] == (
+        "files read in these turns: docs/compaction/very/long/directory/name/REPORT.md"
+    )
+    assert lines[3] == (
+        "still loaded from these turns: ToolSearch browser_navigate; Skill release-notes"
+    )
+    assert lines[4].startswith("Pinned intent:")
+    no_recall = render_span_digest(nodes[:4], CompactionConfig(recall_tools=False))
+    assert "HistoryExpand" not in no_recall.content[0].text
+
+
+def test_compactor_placeholder_describes_the_cell_from_the_full_call_map() -> None:
+    nodes = _cell_turn(0) + _cell_turn(1)
+    compactor = _trim_only()
+    compactor.trimmer.trim_batch(nodes, keep_recent=0)
+    text = _results(compactor.view(nodes))[0]
+    assert "This cell ran: first line: spec = Read(" in text
+    assert "Skill(name=\"release-notes\")" in text
+    assert "Its output ended: \"KeyError: 'x'\"." in text
+    # The same pairs persisted at version 1 keep the old, call-less text.
+    v1 = _trim_only()
+    v1.rehydrate([Promotion(tier=1, trimmed=(("n0c", "c0"),), render_version=1)])
+    assert "This cell ran" not in _results(v1.view(nodes))[0]
+
+
+def test_traceback_result_survives_one_turn() -> None:
+    plain = "ok line\n" * 600
+    nodes = _cell_turn(0) + _cell_turn(1, plain) + _cell_turn(2, plain)
+    trimmer = _trim_only().trimmer
+    # One turn start follows the traceback: it stays, plain output goes.
+    first = trimmer._eligible(nodes[:8])
+    assert ("n0c", "c0") not in first and ("n1c", "c1") in first
+    # A second turn start follows it: now it is trimmed like anything else.
+    assert ("n0c", "c0") in trimmer._eligible(nodes)
+    # A traceback early in a long output is not held.
+    early = "Traceback (most recent call last):\n" + "x\n" * 2_000
+    assert ("n0c", "c0") in trimmer._eligible(_cell_turn(0, early) + _cell_turn(1))
+    # Overflow recovery's keep_recent=0 waives the hold.
+    assert ("n0c", "c0") in trimmer._eligible(nodes[:8], keep_recent=0)
+
+
+# Version 1 output for the cell fixture, captured from origin/main 0163171fe.
+V1_DIGEST = (
+    '[compacted turn n0a..n0d — mechanical digest; originals intact: '
+    'HistoryExpand("n0a..n0d") re-reads verbatim, HistorySearch finds text]\n'
+    "tools: run_python×1\n"
+    "user (n0a): look at topic 0\n"
+    "assistant (n0b): checking\n"
+    '  → run_python({"code": "from tools import Read, Skill\\nimport json\\n\\n'
+    'spec = Read(file_path=\\"docs/compaction/very/long/directory/name…)\n'
+    "  ✓ result 4573 chars (n0c)\n"
+    "assistant (n0d): done 0"
+)
+V1_EPOCH = (
+    "[epoch n0a..n1d — 2 older turns folded; HistorySearch finds their "
+    'content, HistoryExpand("n0a..n1d") re-reads them; began with: look at topic 0]'
+)
+V1_PLACEHOLDER = (
+    "[old tool result trimmed to save context — 4573 chars removed. It began: \""
+    + "line " * 32 + "…\" The rest is NOT in context: do not reconstruct it "
+    'from memory; recover it verbatim with HistoryExpand("n0c") when any detail matters]'
+)
+
+
+def test_v1_render_version_output_unchanged_for_code_cells() -> None:
+    nodes = _cell_turn(0) + _cell_turn(1)
+    v1 = CompactionConfig(render_version=1)
+    assert render_span_digest(nodes[:4], v1).content[0].text == V1_DIGEST
+    assert [b.text for b in render_epoch_stub(split_spans(nodes), v1).content] == [V1_EPOCH]
+    compactor = _trim_only(render_version=1)
+    compactor.trimmer.trim_batch(nodes, keep_recent=0)
+    assert _results(compactor.view(nodes)) == [
+        V1_PLACEHOLDER, V1_PLACEHOLDER.replace("n0c", "n1c"),
+    ]
+    # Spans persisted at version 1 under a version 2 compactor render the same.
+    resumed = Compactor()
+    resumed.rehydrate([Promotion(tier=2, spans=(("n0a", "n0d", SPAN_DIGEST),),
+                                 render_version=1)])
+    assert resumed.view(nodes)[0].content[0].text == V1_DIGEST
