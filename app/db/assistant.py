@@ -1,6 +1,13 @@
 """Durable owner assistant configuration, observation inbox and linked activity.
 
-The configuration row is also the per-install admission mutex. A guarded UPDATE
+There is one assistant per owner, not one per worker. ``assistant_account``
+holds the owner's configuration and names the one home conversation; it syncs
+between workers as the ``assistant`` network collection. ``assistant_state``
+is this worker's runner row: the account view it runs under (projected by
+``assistant_service.reconcile``) plus its own limits. Runs, events and source
+watermarks stay on the worker that runs research.
+
+The runner row is also the per-install admission mutex. A guarded UPDATE
 locks it on PostgreSQL (and serializes writers in the SQLite test shim). No
 configuration or source is seeded by a migration.
 """
@@ -50,6 +57,11 @@ EVENT_PAYLOAD_RETENTION_DAYS = 30
 HISTORY_RETENTION_DAYS = 180
 RETENTION_BATCH = 500
 SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
+# The owner's single assistant row. Every worker uses the same key, so the
+# synced row is one record across the network.
+ACCOUNT_ID = "owner"
+ACCOUNT_DEFAULTS = dict(agent_id=None, enabled=False, paused=False, sources={}, introduction={},
+                        home_session_id=None, home_device_id=None, home_created_at=None)
 
 
 def now():
@@ -101,6 +113,15 @@ def create_schema(cursor):
         observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (assistant_id, source_id, fingerprint)
     )""")
+    # Synced (network collection "assistant"). No foreign keys: a peer's row
+    # can name an agent or a home session that has not reached this worker yet.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_account (
+        id TEXT PRIMARY KEY, agent_id TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE, paused BOOLEAN NOT NULL DEFAULT FALSE,
+        sources JSONB NOT NULL DEFAULT '{}', introduction JSONB NOT NULL DEFAULT '{}',
+        home_session_id TEXT, home_device_id TEXT, home_created_at TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
 
@@ -115,7 +136,7 @@ def research_limits(state):
 def _parse(row):
     row = row_to_dict(row)
     if row:
-        for key in ("watermark", "payload", "event_ids", "source_ids", "introduction", "limits"):
+        for key in ("watermark", "payload", "event_ids", "source_ids", "introduction", "limits", "sources"):
             if isinstance(row.get(key), str):
                 row[key] = json.loads(row[key])
     return row
@@ -151,26 +172,76 @@ def configure(assistant_id, changes, _conn=None):
         return state
 
 
+def get_account(_conn=None):
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_account WHERE id=%s", (ACCOUNT_ID,))
+        return _parse(cursor.fetchone())
+
+
+def lock_account(conn):
+    """Lock and return the account row, or None when nothing was configured."""
+    cursor = conn.cursor()
+    cursor.execute("UPDATE assistant_account SET updated_at=updated_at WHERE id=%s RETURNING *", (ACCOUNT_ID,))
+    return _parse(cursor.fetchone())
+
+
+def write_account(conn, changes):
+    """Create the account row if needed, apply ``changes`` and return the row."""
+    if set(changes) - set(ACCOUNT_DEFAULTS):
+        raise ValueError("Unknown assistant account setting")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO assistant_account (id) VALUES (%s) ON CONFLICT DO NOTHING", (ACCOUNT_ID,))
+    if not changes:
+        return lock_account(conn)
+    changes = {key: json.dumps(value) if key in ("sources", "introduction") else value
+               for key, value in changes.items()}
+    cursor.execute("UPDATE assistant_account SET " + ", ".join(key + "=%s" for key in changes) +
+                   ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), ACCOUNT_ID))
+    return _parse(cursor.fetchone())
+
+
+def project(conn, assistant_id, values, sources):
+    """Copy the account view this worker runs under into its runner row.
+
+    ``values`` holds runner-row columns (agent, flags, introduction, home).
+    ``sources`` maps connector id to the owner's opt-in. A connector this
+    worker does not know yet is skipped. Switching a source off here revokes
+    its pending events, as an explicit opt-out does.
+    """
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO assistant_state (id, runner_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (assistant_id, assistant_id))
+    state = lock_state(conn, assistant_id)
+    changes = {key: value for key, value in values.items() if state.get(key) != value}
+    if changes:
+        if "introduction" in changes:
+            changes["introduction"] = json.dumps(changes["introduction"])
+        cursor.execute("UPDATE assistant_state SET " + ", ".join(key + "=%s" for key in changes) +
+                       ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), assistant_id))
+        state = _parse(cursor.fetchone())
+    cursor.execute("SELECT connector_id, enabled FROM assistant_sources WHERE assistant_id=%s", (assistant_id,))
+    local = {row["connector_id"]: bool(row["enabled"]) for row in cursor.fetchall()}
+    wanted = {connector_id: bool(on) for connector_id, on in (sources or {}).items()}
+    for connector_id in sorted(set(local) | set(wanted)):
+        enabled = wanted.get(connector_id, False)
+        if local.get(connector_id, False) == enabled:
+            continue
+        cursor.execute("SELECT 1 FROM connectors WHERE id=%s", (connector_id,))
+        if not cursor.fetchone():
+            continue
+        cursor.execute("""INSERT INTO assistant_sources (assistant_id,connector_id,enabled)
+            VALUES (%s,%s,%s) ON CONFLICT (assistant_id,connector_id) DO UPDATE SET
+            enabled=EXCLUDED.enabled, updated_at=NOW()""", (assistant_id, connector_id, enabled))
+        if not enabled:
+            cursor.execute("UPDATE assistant_events SET status='revoked' WHERE assistant_id=%s AND source_id=%s AND status='pending'", (assistant_id, connector_id))
+    return state
+
+
 def get_sources(assistant_id):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM assistant_sources WHERE assistant_id=%s ORDER BY connector_id", (assistant_id,))
         return [_parse(row) for row in cursor.fetchall()]
-
-
-def set_source(assistant_id, connector_id, enabled):
-    with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not state:
-            raise ValueError("Choose an assistant agent first")
-        cursor = conn.cursor()
-        cursor.execute("""INSERT INTO assistant_sources (assistant_id,connector_id,enabled)
-            VALUES (%s,%s,%s) ON CONFLICT (assistant_id,connector_id) DO UPDATE SET
-            enabled=EXCLUDED.enabled, updated_at=NOW() RETURNING *""", (assistant_id, connector_id, enabled))
-        row = _parse(cursor.fetchone())
-        if not enabled:
-            cursor.execute("UPDATE assistant_events SET status='revoked' WHERE assistant_id=%s AND source_id=%s AND status='pending'", (assistant_id, connector_id))
-        return row
 
 
 def owner_connector(conn, connector):

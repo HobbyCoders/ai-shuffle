@@ -186,6 +186,14 @@ _register(Collection(
     notes="Profiles and their MCP definitions."))
 
 _register(Collection(
+    name="assistant", table="assistant_account", keys=("id",),
+    fields=("id", "agent_id", "enabled", "paused", "sources", "introduction", "home_session_id",
+            "home_device_id", "home_created_at", "created_at", "updated_at"),
+    json_fields=("sources", "introduction"), resource="assistant", priority=21,
+    notes="The owner's one assistant: its agent, research switches and which session is its home. "
+          "Research runs, events and source watermarks stay on the worker that owns the home."))
+
+_register(Collection(
     name="model_providers", table="model_providers", keys=("id",),
     fields=("id", "name", "provider_type", "base_url", "api_dialect", "auth_token", "models_json",
             "default_model", "small_fast_model", "extra_env_json", "context_window", "max_output_tokens",

@@ -173,6 +173,12 @@ class AssistantManager:
             self._wake.clear()
             failed = False
             try:
+                # Adopt the account's choices (a peer's edit, a home elected
+                # or moved elsewhere) before admitting anything on this worker.
+                await run_sync(service.reconcile)
+            except Exception:
+                logger.exception("Assistant account reconcile failed")
+            try:
                 await self.run_once(observe=False)
                 active = await run_sync(store.get_activity, service.assistant_id(), 100, True)
                 self._active_runs = {run["id"]: run for run in active}
