@@ -9,7 +9,14 @@
  *   - refs persist across snapshot calls within a single navigation (Playwright
  *     caches `element._ariaRef`, so a surviving element keeps its ref);
  *   - every snapshot response carries a monotonic `snapshot_id`;
- *   - any committed navigation invalidates all refs;
+ *   - any committed navigation to a NEW document invalidates all refs. A
+ *     same-document navigation (history.pushState/replaceState, a hash change)
+ *     keeps the document, its elements and Playwright's ref map alive, so it
+ *     must not reject refs to elements that are still current. Playwright
+ *     reports both kinds as `framenavigated`, so such an event only marks the
+ *     refs as unverified; the next resolution compares the document identity
+ *     (the main frame's CDP loaderId) recorded with the snapshot and drops
+ *     every ref when it changed or cannot be read;
  *   - acting on a ref we have never handed out (or one from a prior navigation)
  *     is rejected up-front with a `stale_ref` error; acting on a ref that no
  *     longer resolves is caught at the Playwright layer and mapped the same way.
@@ -32,6 +39,17 @@ export class RefRegistry {
    * rejected. Cleared whenever a new full snapshot lands.
    */
   private scopedRefs = new Set<string>();
+  /**
+   * Identity of the document the known refs were taken from (the main frame's
+   * CDP loaderId), or null when it could not be read. Same-document
+   * navigations keep it; a new document always gets a new one.
+   */
+  private documentId: string | null = null;
+  /**
+   * Main-frame navigations observed since the refs were last verified against
+   * the live document. Non-zero means "verify before trusting a ref".
+   */
+  private unverifiedNavigations = 0;
 
   /**
    * Record the refs from a freshly taken snapshot and advance snapshot_id.
@@ -42,14 +60,17 @@ export class RefRegistry {
    * keep resolving ("refs persist across calls within a navigation") while
    * stale refs from superseded snapshots are pruned.
    */
-  registerSnapshot(refs: Iterable<string>, scoped = false): number {
+  registerSnapshot(refs: Iterable<string>, scoped = false, documentId: string | null = null): number {
     this.snapshotId += 1;
     if (scoped) {
+      // Full-snapshot refs only survive a scoped re-read of the SAME document.
+      if (documentId !== this.documentId) this.fullRefs.clear();
       this.scopedRefs = new Set(refs);
     } else {
       this.fullRefs = new Set(refs);
       this.scopedRefs.clear();
     }
+    this.documentId = documentId;
     return this.snapshotId;
   }
 
@@ -61,6 +82,41 @@ export class RefRegistry {
   invalidateForNavigation(): void {
     this.fullRefs.clear();
     this.scopedRefs.clear();
+    this.unverifiedNavigations = 0;
+  }
+
+  /**
+   * The main frame navigated, but Playwright does not say whether to a new
+   * document. Keep the refs, but require {@link verifyDocument} before any of
+   * them is trusted again.
+   */
+  noteNavigation(): void {
+    this.unverifiedNavigations += 1;
+  }
+
+  /** Has a main-frame navigation happened since the refs were last verified? */
+  get needsVerification(): boolean {
+    return this.unverifiedNavigations > 0;
+  }
+
+  /** Token to pass to {@link verifyDocument} (read it before the async lookup). */
+  get navigationMark(): number {
+    return this.unverifiedNavigations;
+  }
+
+  /**
+   * Settle pending navigations against the live document identity read after
+   * `mark` was taken. A different (or unreadable) document drops every ref; the
+   * same document keeps them. Navigations that arrived during the lookup stay
+   * pending so the next resolution checks again.
+   */
+  verifyDocument(liveDocumentId: string | null, mark: number): void {
+    if (this.unverifiedNavigations === 0) return;
+    if (liveDocumentId === null || liveDocumentId !== this.documentId) {
+      this.invalidateForNavigation();
+      return;
+    }
+    this.unverifiedNavigations = Math.max(0, this.unverifiedNavigations - mark);
   }
 
   isKnown(ref: string): boolean {
