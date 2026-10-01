@@ -2964,12 +2964,18 @@ def init_database():
     logger.info("Database initialized successfully")
 
 
+#: Days of ``usage_log`` the maintenance pass keeps. The Stats page's longest
+#: range is 90 days; owner decision 2026-10-01: keep 400, delete older.
+USAGE_LOG_RETENTION_DAYS = 400
+
+
 def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     """Run periodic database maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
     - PostgreSQL: ANALYZE, VACUUM ANALYZE
     - Cleanup of unbounded log tables (older than 7 days)
+    - Cleanup of the usage ledger (older than USAGE_LOG_RETENTION_DAYS)
 
     Args:
         skip_vacuum: If True, skip the VACUUM step. Used when sessions are
@@ -2982,6 +2988,9 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     from datetime import timedelta
     results = {}
     cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    cutoff_usage = (
+        datetime.now(timezone.utc) - timedelta(days=USAGE_LOG_RETENTION_DAYS)
+    ).isoformat()
     # Notifications are user-facing history (the bell), not debug logs — keep them
     # longer than the 7-day log cutoff, but still bound growth (errors auto-persist).
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -3002,7 +3011,7 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         # ``usage_log`` is NOT one of them: it is the usage ledger behind the
         # Stats page's 30/90-day ranges and the per-turn cost footers, and
         # pruning it at 7 days made every longer range silently report one
-        # week of usage.
+        # week of usage. It has its own, much longer cutoff just below.
         log_tables = {
             "audit_log": "created_at",
             "sync_log": "created_at",
@@ -3016,6 +3025,18 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
                 results[f"cleaned_{table}"] = cleaned
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
+
+        # Usage ledger retention: bounded, but well past the longest Stats
+        # range, so a year-over-year look still has data.
+        try:
+            with _savepoint(cursor, "sp_maint_usage_log"):
+                cursor.execute(
+                    "DELETE FROM usage_log WHERE created_at < %s", (cutoff_usage,)
+                )
+                cleaned = cursor.rowcount
+            results["cleaned_usage_log"] = cleaned
+        except Exception as e:
+            results["cleaned_usage_log"] = f"error: {e}"
 
         # 2a. Cross-install carrier tables (D5/D8). Both are transport, not
         # history: a terminal git_op has already been executed and its result

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, logger
@@ -21,6 +21,36 @@ def _interval_date_expressions() -> Dict[str, str]:
         "week": sql_strftime("%Y-W%W", "u.created_at"),
         "month": sql_strftime("%Y-%m", "u.created_at"),
     }
+
+
+def _created_at_range(
+    column: str, start_date: Optional[str], end_date: Optional[str]
+) -> tuple[str, List[Any]]:
+    """Inclusive YYYY-MM-DD range filter on a timestamp column, as SQL + params.
+
+    Compares the raw column against day boundaries (``>= start``,
+    ``< end + 1 day``) instead of casting it with ``::date``, so PostgreSQL can
+    serve the Stats date range from ``idx_usage_log_created``; the cast form
+    forces a sequential scan of the whole ledger. The days are the same: a bare
+    'YYYY-MM-DD' compared with a timestamptz is midnight in the session time
+    zone, as is the ``::date`` cast. An end date that does not parse keeps the
+    cast form rather than guessing a boundary.
+    """
+    sql = ""
+    params: List[Any] = []
+    if start_date:
+        sql += f" AND {column} >= %s"
+        params.append(start_date)
+    if end_date:
+        try:
+            next_day = datetime.strptime(end_date, "%Y-%m-%d").date() + timedelta(days=1)
+        except ValueError:
+            sql += f" AND {sql_date(column)} <= %s"
+            params.append(end_date)
+        else:
+            sql += f" AND {column} < %s"
+            params.append(next_day.isoformat())
+    return sql, params
 
 
 def _to_iso(value: Any) -> Any:
@@ -314,19 +344,11 @@ def get_analytics_usage_stats(
     Returns:
         Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
     """
-    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build date filter clause
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("ul.created_at", start_date, end_date)
 
         # Add user filter if specified
         user_filter = ""
@@ -385,19 +407,11 @@ def get_analytics_cost_breakdown(
     Returns:
         List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
     """
-    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build date filter clause
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("ul.created_at", start_date, end_date)
 
         # Add user filter if specified
         user_filter = ""
@@ -504,19 +518,11 @@ def get_analytics_usage_trends(
     Returns:
         List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
     """
-    _date_expr = sql_date("u.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build filter clauses
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("u.created_at", start_date, end_date)
 
         # User filter for API users (join with sessions to get api_user_id)
         user_filter = ""
@@ -721,14 +727,7 @@ def get_analytics_provider_breakdown(
     from app.core.usage_attribution import claude_billing, provider_billing
 
     date_expr = sql_date("ul.created_at")
-    params: List[Any] = []
-    where = ""
-    if start_date:
-        where += f" AND {date_expr} >= %s"
-        params.append(start_date)
-    if end_date:
-        where += f" AND {date_expr} <= %s"
-        params.append(end_date)
+    where, params = _created_at_range("ul.created_at", start_date, end_date)
     if api_user_id:
         where += " AND s.api_user_id = %s"
         params.append(api_user_id)

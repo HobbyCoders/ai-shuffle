@@ -177,8 +177,9 @@ def test_mobile_expiry_without_a_sweep(pg, monkeypatch):
 
 
 def test_usage_provider_breakdown_on_real_postgres(pg, monkeypatch):
-    """#1614: the per-provider breakdown, its daily split and the usage
-    ledger's retention on real PostgreSQL (the SQLite shim drops ``::date``)."""
+    """#1614: the per-provider breakdown, its daily split, the indexed date
+    range and the usage ledger's 400-day retention on real PostgreSQL (the
+    SQLite shim drops ``::date`` and has no planner to check)."""
     from app.core import claude_auth_mode
     from app.db import database
     from app.db.database import init_database, run_database_maintenance
@@ -229,8 +230,32 @@ def test_usage_provider_breakdown_on_real_postgres(pg, monkeypatch):
     mine = database.get_analytics_provider_breakdown("2026-09-01", "2026-09-30", api_user_id="u-1")
     assert sorted((i["key"], i["query_count"]) for i in mine) == [("claude", 2), ("p-codex", 1)]
 
+    # Both end days are whole days: the filter compares raw timestamps
+    # against day boundaries rather than casting with ::date.
+    assert database.get_analytics_usage_stats("2026-09-01", "2026-09-01")["query_count"] == 2
+    assert database.get_analytics_usage_stats("2026-09-02", "2026-09-03")["query_count"] == 3
+    assert database.get_analytics_usage_stats("2026-09-02", "2026-09-02")["query_count"] == 0
+
+    # That form is what lets the Stats range use idx_usage_log_created.
+    from app.db.analytics import _created_at_range
+    where, params = _created_at_range("ul.created_at", "2026-09-01", "2026-09-30")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL enable_seqscan = off")
+        cur.execute(f"EXPLAIN SELECT COUNT(*) FROM usage_log ul WHERE 1=1 {where}", params)
+        plan = "\n".join(next(iter(dict(r).values())) for r in cur.fetchall())
+    # An Index Cond on created_at, not a whole-index walk filtered by ::date.
+    assert "idx_usage_log_created" in plan, plan
+    assert any("Index Cond" in line and "created_at" in line
+               for line in plan.splitlines()), plan
+
+    # Retention: 400 days are kept, older rows go.
+    database.log_usage(None, None, "expired", 10, 1, 0.001, 1)
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE usage_log SET created_at = NOW() - INTERVAL '401 days' WHERE model = 'expired'")
     result = run_database_maintenance(skip_vacuum=True)
-    assert "cleaned_usage_log" not in result
+    assert result["cleaned_usage_log"] == 1
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) AS n FROM usage_log")

@@ -2,8 +2,8 @@
 
 Every usage writer stamps the provider leg that served the turn
 (``usage_log.provider_id/provider_type/billing``), the breakdown groups the
-ledger by it, and the maintenance pass no longer prunes the ledger at 7 days
-(which made the 30/90-day Stats ranges report one week).
+ledger by it, and the maintenance pass keeps the ledger for 400 days instead
+of pruning it at 7 (which made the 30/90-day Stats ranges report one week).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -301,15 +301,49 @@ def test_breakdown_honours_the_date_range_user_filter_and_daily_split(mock_db):
 # Retention
 # ---------------------------------------------------------------------------
 
-def test_maintenance_keeps_usage_older_than_a_week(mock_db):
-    """The ledger behind the 30/90-day ranges must survive the log sweep."""
+def test_maintenance_keeps_a_year_of_usage_and_drops_older_rows(mock_db):
+    """The ledger behind the 30/90-day ranges must survive the 7-day log
+    sweep; only rows past the 400-day retention go."""
+    assert database.USAGE_LOG_RETENTION_DAYS == 400
     database.create_session(session_id="s-old", profile_id="default")
-    database.log_usage("s-old", "default", "m", 1, 1, 0.01, 1)
-    old = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
-    mock_db.execute("UPDATE usage_log SET created_at=?", (old,))
+    now = datetime.now(timezone.utc)
+    for key, age in (("recent", 40), ("year", 399), ("expired", 401)):
+        _book("s-old", key, provider_type="claude", billing="api")
+        stamp = (now - timedelta(days=age)).strftime("%Y-%m-%d %H:%M:%S")
+        mock_db.execute(
+            "UPDATE usage_log SET created_at=? WHERE settlement_key=?", (stamp, key))
     mock_db.commit()
 
     results = database.run_database_maintenance(skip_vacuum=True)
 
-    assert "cleaned_usage_log" not in results
-    assert mock_db.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0] == 1
+    assert results["cleaned_usage_log"] == 1
+    kept = {r[0] for r in mock_db.execute("SELECT settlement_key FROM usage_log")}
+    assert kept == {"recent", "year"}
+
+
+def test_stats_date_range_includes_both_end_days_whole(mock_db):
+    """The range filter compares raw timestamps against day boundaries (so
+    PostgreSQL can use idx_usage_log_created); both end days stay inclusive."""
+    database.create_session(session_id="s1", profile_id="default")
+    stamps = {
+        "before": "2026-08-31 23:59:59",
+        "first": "2026-09-01 00:00:00",
+        "last": "2026-09-30 23:59:59",
+        "after": "2026-10-01 00:00:00",
+    }
+    for key, stamp in stamps.items():
+        _book("s1", key, provider_type="claude", billing="api")
+        mock_db.execute(
+            "UPDATE usage_log SET created_at=? WHERE settlement_key=?", (stamp, key))
+    mock_db.commit()
+
+    start, end = "2026-09-01", "2026-09-30"
+    assert [i["query_count"] for i in
+            database.get_analytics_provider_breakdown(start, end)] == [2]
+    assert database.get_analytics_usage_stats(start, end)["query_count"] == 2
+    assert sum(e["query_count"] for e in
+               database.get_analytics_cost_breakdown(start, end)) == 2
+    assert sum(e["query_count"] for e in
+               database.get_analytics_usage_trends(start, end)) == 2
+    # One day on its own is that whole day.
+    assert database.get_analytics_usage_stats(end, end)["query_count"] == 1
