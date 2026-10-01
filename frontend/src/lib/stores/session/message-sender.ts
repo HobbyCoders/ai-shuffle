@@ -34,6 +34,9 @@ function formatWorktreeError(rawError: string, branchName: string): string {
 		lower.includes('unknown revision') || (lower.includes('pathspec') && lower.includes('did not match'))) {
 		return `Branch '${branchName}' doesn't exist. Fetch from remote first or create a new branch.`;
 	}
+	if (lower.includes('already exists') && lower.includes('new branch')) {
+		return `Branch '${branchName}' already exists. Select it as an existing branch, or choose a different name.`;
+	}
 	if (lower.includes('already exists') && (lower.includes('path') || lower.includes('folder') || lower.includes('directory'))) {
 		return `A folder already exists at the worktree path for '${branchName}'. Try a different branch name.`;
 	}
@@ -75,6 +78,23 @@ function formatWorktreeError(rawError: string, branchName: string): string {
 
 	// Fallback with the raw error for debugging
 	return `Failed to create worktree for '${branchName}': ${rawError}`;
+}
+
+/**
+ * The backend refuses a "create new branch" request whose branch already
+ * exists (409) instead of binding the new session to that branch's existing
+ * checkout — usually another session's working tree (#1528). The phrase is
+ * pinned by the backend's `new_branch_exists_detail`.
+ */
+function isNewBranchAlreadyExists(error: unknown): boolean {
+	const err = error as { status?: number; detail?: unknown } | null;
+	return err?.status === 409 && typeof err.detail === 'string'
+		&& /^Branch '.+' already exists/.test(err.detail);
+}
+
+/** A fresh variant of an auto-generated branch name that collided. */
+function uniqueBranchName(branchName: string): string {
+	return `${branchName}-${Math.random().toString(36).slice(2).padEnd(4, '0').slice(0, 4)}`;
 }
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -567,8 +587,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					target_instance_id: _state.deviceIntent?.id || undefined,
 				});
 
-				// The pick is spent once the session row carries the ownership.
-				if (_state.deviceIntent) update(s => ({ ...s, deviceIntent: null }));
+				// The pick is spent once the session row carries the ownership —
+				// only on the compose that spent it (see autoCreateWorktree).
+				if (_state.deviceIntent && creationGen === internal.worktreeCreationGeneration) {
+					update(s => ({ ...s, deviceIntent: null }));
+				}
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
@@ -619,6 +642,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
+							overrides: overridesSnapshot,
 							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
 						return;
@@ -730,7 +754,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}));
 				}
 
-				const response = await api.post<{
+				const postCreate = (name: string) => api.post<{
 					session_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
 					query_started?: boolean;
@@ -739,7 +763,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...(remoteOnly
 						? { project_v2_id: projectV2Id }
 						: { project_id: projectId }),
-					branch_name: branchName,
+					branch_name: name,
 					base_branch: baseBranch,
 					profile_id: queryProfileId,
 					create_new_branch: true,
@@ -753,8 +777,28 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					target_instance_id: deviceIntentSnap?.id || undefined,
 				}, { keepalive: true });
 
-				// The pick is spent once the session row carries the ownership.
-				if (deviceIntentSnap) update(s => ({ ...s, deviceIntent: null }));
+				let response: Awaited<ReturnType<typeof postCreate>>;
+				try {
+					response = await postCreate(branchName);
+				} catch (error) {
+					// The generated name collided with a branch that already exists
+					// (e.g. the same task sent twice). The backend refused rather
+					// than sharing that branch's checkout; mint a distinct name once.
+					if (!isNewBranchAlreadyExists(error)) throw error;
+					const retryName = uniqueBranchName(branchName);
+					branchName = retryName;
+					if (creationGen === internal.worktreeCreationGeneration) {
+						update(s => ({ ...s, worktreeBranch: retryName }));
+					}
+					response = await postCreate(retryName);
+				}
+
+				// The pick is spent once the session row carries the ownership —
+				// but only on the compose that spent it. After navigation the
+				// current view's device pick belongs to a different compose.
+				if (deviceIntentSnap && creationGen === internal.worktreeCreationGeneration) {
+					update(s => ({ ...s, deviceIntent: null }));
+				}
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
@@ -857,6 +901,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						session_id: response.session_id,
 						profile: queryProfileId,
 						project: projectId,
+						overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 					});
 					return;
 				}

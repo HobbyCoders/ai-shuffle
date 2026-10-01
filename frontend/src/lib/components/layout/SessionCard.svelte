@@ -23,7 +23,7 @@
 	 * action on release. Rename, Fork, and Delete live on the header
 	 * session-title menu.
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import {
 		ArrowUpFromLine,
 		Check,
@@ -159,9 +159,22 @@
 		});
 	});
 
+	// Lease on the checkout's identity, not on the row object: every session-list
+	// reload (visibility return, reconnect, `resources_changed`) hands the card a
+	// fresh `session`, and re-running the lease on that would release it — aborting
+	// the in-flight poll — and immediately re-request the same checkout (#1282).
+	// Primitive deriveds only notify when the value actually changes.
+	const leaseSessionId = $derived(session.id);
+	const leaseProjectId = $derived(session.project_id ?? null);
+	const leaseWorktreeId = $derived(session.worktree_id ?? null);
+	const leasing = $derived(!compact && !usesOpenGit);
+
 	$effect(() => {
-		if (compact || usesOpenGit) return;
-		return sessionGitState.watch(session.id, session.project_id ?? null, session.worktree_id ?? null);
+		if (!leasing) return;
+		const id = leaseSessionId;
+		const projectId = leaseProjectId;
+		const worktreeId = leaseWorktreeId;
+		return untrack(() => sessionGitState.watch(id, projectId, worktreeId));
 	});
 
 	const gitStatus = $derived.by(() => {

@@ -1325,3 +1325,146 @@ async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_con
     assert turns_db.get_turn(turn["id"])["state"] == "aborted"
     assert database.get_session(first.session_id)["branch"] == first.branch_name
     assert checkout_manager.git_service.get_current_branch(second.worktree_path) == second.branch_name
+
+
+def _intake_env(monkeypatch):
+    """Wire the real branch-intake producer for local (this-runner) creation.
+
+    Session rows, branch binding, checkout materialization and Git all run for
+    real; only the sidebar broadcast is substituted.
+    """
+    from app.api import sessions_worktree as intake
+    from app.core.config import settings
+
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: RUNNER))
+    monkeypatch.setattr(intake, "_broadcast_session_created", lambda sid: None)
+    return intake
+
+
+def _new_branch_body(branch, *, create_new_branch=True):
+    from app.api.sessions_helpers import CreateWorktreeSessionRequest
+
+    return CreateWorktreeSessionRequest(
+        project_v2_id=None, branch_name=branch, base_branch="HEAD",
+        profile_id="default", create_new_branch=create_new_branch,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_switched_head", [False, True])
+async def test_new_branch_intake_refuses_to_bind_another_sessions_checkout(
+    project, base_checkout, workspace_root, monkeypatch, agent_switched_head
+):
+    """#1528: a back-to-back second session whose compose still carries the
+    first task's (new) branch must not be silently bound to the first session's
+    checkout. A "create new branch" request for a branch that already exists is
+    refused before any session row is written; the first checkout's HEAD and
+    uncommitted work are untouched."""
+    from fastapi import HTTPException
+
+    from app.db import database
+
+    intake = _intake_env(monkeypatch)
+    desktop = "fix/desktop-update-feedback-and-fresh-ui"
+    first = await intake._create_v2_branch_session(
+        _new_branch_body(desktop), None, None, project
+    )
+    first_path = Path(first.worktree_path)
+    sentinel = first_path / "uncommitted.txt"
+    sentinel.write_text("first task's work", encoding="utf-8")
+    expected_head = desktop
+    if agent_switched_head:
+        # The historical producing path: the agent ran `git switch -c` inside the
+        # first session's checkout for a different task.
+        _git(first_path, "switch", "-c", "feat/live-session-effort-fast-mode")
+        expected_head = "feat/live-session-effort-fast-mode"
+    checkouts_before = checkouts_db.list_checkouts(project["id"])
+    created = []
+    real_create = database.create_session
+    monkeypatch.setattr(
+        database, "create_session",
+        lambda **kw: created.append(kw["session_id"]) or real_create(**kw),
+    )
+
+    for branch in sorted({desktop, expected_head}):
+        with pytest.raises(HTTPException) as exc:
+            await intake._create_v2_branch_session(
+                _new_branch_body(branch), None, None, project
+            )
+        assert exc.value.status_code == 409
+        assert f"Branch '{branch}' already exists" in exc.value.detail
+
+    assert created == []
+    assert checkouts_db.list_checkouts(project["id"]) == checkouts_before
+    assert database.get_session(first.session_id)["branch"] == desktop
+    assert checkout_manager.git_service.get_current_branch(str(first_path)) == expected_head
+    assert sentinel.read_text(encoding="utf-8") == "first task's work"
+
+
+@pytest.mark.asyncio
+async def test_existing_branch_intake_still_reuses_its_checkout(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """Choosing an EXISTING branch deliberately shares its checkout — unchanged."""
+    from app.db import database
+
+    intake = _intake_env(monkeypatch)
+    first = await intake._create_v2_branch_session(
+        _new_branch_body("fix/shared"), None, None, project
+    )
+    second = await intake._create_v2_branch_session(
+        _new_branch_body("fix/shared", create_new_branch=False), None, None, project
+    )
+
+    assert second.session_id != first.session_id
+    assert second.worktree_path == first.worktree_path
+    assert database.get_session(second.session_id)["branch"] == "fix/shared"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_new_branch_intake_for_one_name_binds_exactly_one_session(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """Two rapid creations that race on the SAME new branch name: one session
+    mints and owns the branch, the other is refused — never two sessions silently
+    sharing one freshly minted checkout."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.db import database
+
+    intake = _intake_env(monkeypatch)
+    run_sync = intake.run_sync
+    in_checkout = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated(fn, *args, **kwargs):
+        # Hold the first materialization open so the second request arrives
+        # while the branch is being minted.
+        if fn is checkout_manager.ensure_checkout and not in_checkout.is_set():
+            in_checkout.set()
+            await release.wait()
+        return await run_sync(fn, *args, **kwargs)
+
+    monkeypatch.setattr(intake, "run_sync", gated)
+    branch = "feat/same-generated-name"
+    first = asyncio.create_task(intake._create_v2_branch_session(
+        _new_branch_body(branch), None, None, project
+    ))
+    await asyncio.wait_for(in_checkout.wait(), timeout=10)
+    second = asyncio.create_task(intake._create_v2_branch_session(
+        _new_branch_body(branch), None, None, project
+    ))
+    await asyncio.sleep(0.05)
+    release.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(first, second, return_exceptions=True), timeout=30
+    )
+
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, HTTPException)]
+    assert len(ok) == 1 and len(refused) == 1, results
+    assert refused[0].status_code == 409
+    assert database.get_session(ok[0].session_id)["branch"] == branch
+    assert checkout_manager.git_service.get_current_branch(ok[0].worktree_path) == branch

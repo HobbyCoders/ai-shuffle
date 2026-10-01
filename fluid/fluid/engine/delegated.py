@@ -74,6 +74,7 @@ import signal
 import socket
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
@@ -237,6 +238,15 @@ PERMISSION_TIMEOUT = 900.0
 # with a deny if the hooks have not decided by then.
 PRE_TOOL_USE_CLI_TIMEOUT = 600
 PRE_TOOL_USE_HOOK_BUDGET = 570.0
+
+# The CLI hook events whose answer can carry a peer message into the running
+# query (as ``additionalContext`` on that tool's result), and how long after
+# the CLI asked an answer may still carry one. Their callbacks are registered
+# without a ``timeout``, so the CLI's own default (60 s) applies; an answer
+# readied later than this budget is still written but carries no peer, since a
+# CLI that already gave up on it would drop the text the receipt vouches for.
+_PEER_BOUNDARY_HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure")
+PEER_BOUNDARY_HOOK_BUDGET = 30.0
 
 # The CLI's spelling of a permission mode, by CLI version. 2.1.280's ``--help``
 # lists ``manual`` and no longer lists ``default``, but both the flag and the
@@ -563,6 +573,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._wake_in_flight = False
         # Peer input may not start a CLI cycle after the admitted host turn ends.
         self._peer_admission_open = False
+        # Peer messages admitted to the running turn and waiting for its next
+        # main-thread tool boundary (see ``_admit_peer``), and every peer id
+        # this turn admitted, so a resubmitted id is never delivered twice.
+        self._pending_peers: list[AgentMessage] = []
+        self._turn_peer_ids: set[str] = set()
         # A hook on a bridge-served call answered ``continue: false``: the
         # reason, reported as the turn's ErrorEvent once the CLI's result
         # lands (the native loop ends its turn the same way).
@@ -704,6 +719,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
             self._peer_admission_open = False
+            self._drop_pending_peers()
         sequenced = await self.bus.publish(event)
         await persist_event(self.store, sequenced)
         if isinstance(event, DelegatedSurface):
@@ -736,14 +752,26 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         await self._wait_background_turns()
 
     async def cancel_steer(self, steer_id: str) -> bool:
-        """Always False: a delegated steer is delivered the moment it is sent.
+        """False for a user steer: it is delivered the moment it is sent.
 
-        There is no pending queue to recall from here. ``_deliver_steer``
-        writes the text straight to the CLI's stdin and receipts it as soon as
-        the write drains, so by the time any caller could ask to cancel, the
-        CLI already owns the message. Saying False keeps the host honest: the
-        text is part of the conversation and must be treated as sent.
+        There is no pending queue of user steers to recall from here.
+        ``_deliver_steer`` writes the text straight to the CLI's stdin and
+        receipts it as soon as the write drains, so by the time any caller
+        could ask to cancel, the CLI already owns the message. Saying False
+        keeps the host honest: the text is part of the conversation and must
+        be treated as sent.
+
+        The one True answer is a peer message still waiting for its tool
+        boundary (``_admit_peer``): nothing of it has reached the CLI, and the
+        boundary that would deliver it runs on this event loop without
+        suspending between taking the batch and writing it, so removing it
+        here is atomic against that delivery.
         """
+        for index, pending in enumerate(self._pending_peers):
+            if steer_id and pending.id == steer_id:
+                del self._pending_peers[index]
+                self._turn_peer_ids.discard(steer_id)
+                return True
         return False
 
     # ─── ExecutionEngine interface ───────────────────────────────────────
@@ -765,10 +793,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The CLI owns its own transcript; fluid cannot hand it a head node
             # to continue from. Say so plainly rather than dropping the op.
             raise NotImplementedError("Resume is not supported by the delegated engine")
-        elif isinstance(op, (Steer, AgentMessage)):
+        elif isinstance(op, AgentMessage):
+            self._admit_peer(op)
+        elif isinstance(op, Steer):
             await self._deliver_steer(op)
         elif isinstance(op, Interrupt):
             self._peer_admission_open = False
+            self._drop_pending_peers()
             self._interrupted.set()
             pulse, self._stop_pulse = self._stop_pulse, asyncio.Event()
             pulse.set()
@@ -825,6 +856,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def aclose(self) -> None:
         self._peer_admission_open = False
+        self._drop_pending_peers()
         await self._close_background_lifecycle()
         self._interrupted.set()
         # Settle anyone parked on a control reply: the CLI is going away, so
@@ -1399,6 +1431,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             )
         finally:
             self._peer_admission_open = False
+            self._drop_pending_peers()
+            self._turn_peer_ids.clear()
             self._active_turn_id = None
             self._pending_usage_snapshots.clear()
             self._snapshot_call_index.clear()
@@ -1469,6 +1503,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if failure is None:
                 return mapper
             self._peer_admission_open = False
+            self._drop_pending_peers()
             if attempt == 1 and self._resume_handle_rejected(mapper):
                 logger.warning(
                     "claude did not accept --resume %s (%s); starting a fresh "
@@ -1554,7 +1589,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     # ─── mid-turn steering ───────────────────────────────────────────────
 
-    async def _deliver_steer(self, op: Steer | AgentMessage) -> None:
+    async def _deliver_steer(self, op: Steer) -> None:
         """Hand mid-turn user text to the running CLI as a second ``user`` frame.
 
         Where NativeLoop queues a steer and folds it into the next tool result
@@ -1588,16 +1623,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Raises ``RuntimeError`` when there is nothing live to steer into: no
         running turn (send a ``UserTurn`` instead), an interrupt already
         requested for the running turn, or no live CLI process behind it. The
-        caller is expected to fall back to queueing the message. AgentMessage
-        is refused on this lane: stdin frames have no same-query binding/ack,
-        unlike native peer delivery at a proven tool boundary. The authorized
-        user result-in-flight window above does not authorize peer follow-ups.
+        caller is expected to fall back to queueing the message. A peer's
+        AgentMessage never takes this lane (see ``_admit_peer``): a stdin frame
+        has no same-query binding, and the user's result-in-flight window above
+        does not authorize a peer follow-up cycle.
         """
-        if isinstance(op, AgentMessage):
-            # stdin user frames have no original-query binding/ack. Even a
-            # still-running host task can have an unread, completed CLI result.
-            # Never let a peer wake an unadmitted follow-up CLI cycle.
-            raise RuntimeError("peer same-turn admission is unproven; queue the message instead")
         if self._turn_task is None or self._turn_task.done():
             raise RuntimeError("no turn is running; submit a UserTurn instead")
         if self._interrupted.is_set():
@@ -1614,13 +1644,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             raise RuntimeError("no live CLI turn to steer; queue the message instead")
         text = op.text
         record: dict[str, Any] = {"id": op.id, "text": op.text}
-        if isinstance(op, AgentMessage):
-            from fluid.context.peer import format_peer_message
-            from fluid.tools.hardening import defang_harness_markers
-
-            text = format_peer_message(op.sender, defang_harness_markers(op.text)).strip()
-            record["from"] = op.sender
-        elif op.origin != "user":
+        if op.origin != "user":
             # A harness notice rides the same user frame — the CLI has no other
             # mid-turn channel — so the marker is the only thing separating it
             # from the user's own words. Wrap it, and defang the body first:
@@ -1637,6 +1661,120 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             session_id=self.session_id, turn_id=self._active_turn_id,
             steers=[record],
         ))
+
+    def _admit_peer(self, op: AgentMessage) -> None:
+        """Hold a peer's message for the running query's next tool boundary.
+
+        A stdin ``user`` frame cannot carry a peer: nothing binds it to the
+        query that is running, and one that lands after the CLI finished
+        (its ``result`` written but not read yet) starts a follow-up CLI cycle
+        nobody admitted. So a peer waits here instead, and the answer to the
+        next ``PostToolUse`` (or ``PostToolUseFailure``) hook callback of a
+        tool THIS turn's main thread called carries it, as the hook's
+        ``additionalContext`` on that tool's result (``_peer_boundary``). The
+        CLI blocks on that answer, so the query cannot have ended: the text
+        joins the original query at its next model call, exactly once, and
+        no extra cycle can follow. The analogue of NativeLoop folding a peer
+        into the next tool result.
+
+        Raises ``RuntimeError`` (so the host keeps the message durably
+        queued for its own scheduling) when no such boundary can come: no
+        running turn, a Stop already requested, no live CLI, the turn's
+        result already read or its terminal event published, or no
+        PostToolUse callback registered with this CLI process. A message
+        accepted here that the turn then ends without delivering (no further
+        tool call, a Stop, a failure) is dropped without a receipt; the host's
+        queued row stays and runs as the turn it always was.
+        """
+        if self._turn_task is None or self._turn_task.done():
+            raise RuntimeError("peer message not admitted: no turn is running; queue it instead")
+        if self._interrupted.is_set() or not self._peer_admission_open:
+            raise RuntimeError(
+                "peer message not admitted: the running turn is ending or "
+                "being interrupted; queue it instead"
+            )
+        if (
+            self._proc is None
+            or self._proc.returncode is not None
+            or self._active_turn_id is None
+        ):
+            raise RuntimeError("peer message not admitted: no live CLI turn; queue it instead")
+        if not self._peer_boundary_available():
+            raise RuntimeError(
+                "peer message not admitted: the CLI has no PostToolUse "
+                "callback to carry it; queue it instead"
+            )
+        if op.id is not None and op.id in self._turn_peer_ids:
+            return  # already admitted (or delivered) this turn: never twice
+        from fluid.tools.hardening import defang_harness_markers
+
+        self._pending_peers.append(replace(op, text=defang_harness_markers(op.text)))
+        if op.id is not None:
+            self._turn_peer_ids.add(op.id)
+
+    def _peer_boundary_available(self) -> bool:
+        """True when this CLI process will ask the loop at each tool boundary."""
+        return self.cli_hooks_registered and all(
+            event in self._cli_hook_events() for event in _PEER_BOUNDARY_HOOK_EVENTS
+        )
+
+    def _drop_pending_peers(self) -> None:
+        """Forget peers no boundary of this turn can deliver any more.
+
+        No receipt is emitted for them: the host's durable row is the record,
+        and it runs through ordinary scheduling.
+        """
+        for op in self._pending_peers:
+            if op.id is not None:
+                self._turn_peer_ids.discard(op.id)
+        self._pending_peers.clear()
+
+    def _peer_boundary(
+        self,
+        request: HookCallbackRequest,
+        event: str | None,
+        output: dict[str, Any],
+        mapper: StreamJsonMapper | None,
+        asked_at: float,
+    ) -> list[AgentMessage]:
+        """Take the pending peers this hook answer may carry, folded into ``output``.
+
+        Only an answer the running turn's own reader is giving (``mapper``),
+        for a PostToolUse/PostToolUseFailure of a tool that turn's main thread
+        called, while admission is still open (no result read, no terminal
+        published, no Stop) and the answer does not end the query
+        (``continue: false``). Anything else carries nothing and the peers
+        keep waiting. Synchronous on purpose: nothing can cancel or add a
+        peer between taking the batch and writing the answer.
+        """
+        if not self._pending_peers or mapper is None or event not in _PEER_BOUNDARY_HOOK_EVENTS:
+            return []
+        if (
+            not self._peer_admission_open
+            or self._interrupted.is_set()
+            or self._hook_stop_reason is not None
+            or output.get("continue") is False
+            or mapper.turn_id != self._active_turn_id
+        ):
+            return []
+        tool_use_id = request.tool_use_id or request.input.get("tool_use_id")
+        if not tool_use_id or tool_use_id not in mapper.main_tool_use_ids:
+            return []
+        if request.input.get("agent_id"):
+            return []  # a subagent's call, whatever id it reuses
+        if asyncio.get_running_loop().time() - asked_at > PEER_BOUNDARY_HOOK_BUDGET:
+            return []
+        from fluid.context.peer import format_peer_message
+
+        peers, self._pending_peers = self._pending_peers, []
+        context = "".join(format_peer_message(op.sender, op.text) for op in peers).strip()
+        specific = output.get("hookSpecificOutput")
+        if not isinstance(specific, dict):
+            specific = {"hookEventName": event}
+            output["hookSpecificOutput"] = specific
+        existing = specific.get("additionalContext")
+        specific["additionalContext"] = f"{existing}\n\n{context}" if existing else context
+        return peers
 
     def _persist_cli_session_id(
         self, session_id: str, cli_session_id: str | None,
@@ -1950,11 +2088,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A completed CLI result cannot admit an unrequested peer cycle,
                 # even while terminal publication or storage is still pending.
                 self._peer_admission_open = False
+                self._drop_pending_peers()
             mapped = mapper.feed(frame)
             if mapped.hook_request is not None:
                 # The CLI waits on this answer before it goes on, so it is
                 # given here, in stream order.
-                await self._answer_hook_request(mapped.hook_request)
+                await self._answer_hook_request(mapped.hook_request, mapper=mapper)
                 continue
             if mapped.unsupported_request is not None:
                 await self._refuse_control_request(*mapped.unsupported_request)
@@ -2408,13 +2547,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         await self._answer_hook_request(hook)
         return True
 
-    async def _answer_hook_request(self, request: HookCallbackRequest) -> None:
+    async def _answer_hook_request(
+        self, request: HookCallbackRequest, *, mapper: StreamJsonMapper | None = None,
+    ) -> None:
         """Run one CLI hook through the HookBus and write the CLI's answer.
 
         An unknown callback id or a failure inside the forwarding answers with
         the error subtype, which the CLI treats as a failed hook and carries
         on; it never ends the turn.
+
+        ``mapper`` is passed only by the running turn's own frame reader: a
+        tool-boundary answer given there may carry waiting peer messages
+        (``_peer_boundary``), receipted once the answer is written.
         """
+        asked_at = asyncio.get_running_loop().time()
+        peers: list[AgentMessage] = []
         event = None
         if request.callback_id.startswith(_HOOK_CALLBACK_PREFIX):
             event = request.callback_id[len(_HOOK_CALLBACK_PREFIX):]
@@ -2426,6 +2573,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 output = await self._guarded_pre_tool_use(request)
             else:
                 output = await self._run_cli_hook(event, request.input, request.tool_use_id)
+            peers = self._peer_boundary(request, event, output, mapper, asked_at)
             response = {
                 "subtype": "success",
                 "request_id": request.cli_request_id,
@@ -2442,6 +2590,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._write_frame({"type": "control_response", "response": response})
         except (OSError, RuntimeError):
             logger.debug("could not answer the CLI's hook callback", exc_info=True)
+            # The CLI never got the text: no receipt, and the host's queued
+            # row runs through ordinary scheduling.
+            for op in peers:
+                if op.id is not None:
+                    self._turn_peer_ids.discard(op.id)
+            return
+        if peers:
+            await self._emit(SteerDelivered(
+                session_id=self.session_id, turn_id=self._active_turn_id,
+                steers=[{"id": op.id, "text": op.text, "from": op.sender} for op in peers],
+            ))
 
     async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
         """PreToolUse, failing closed. The CLI treats a failed or late

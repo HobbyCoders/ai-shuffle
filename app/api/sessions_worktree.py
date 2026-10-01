@@ -5,8 +5,10 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+import asyncio
 import shutil
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +46,35 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "mode",
     "hidden",
 }
+
+
+# One lock per (project_v2, branch) being minted by new-session intake. Weak
+# values: an entry lives only while a request holds or awaits it.
+_NEW_BRANCH_INTAKE_LOCKS: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _new_branch_intake_lock(project_v2_id: str, branch: str) -> asyncio.Lock:
+    key = (project_v2_id, branch)
+    lock = _NEW_BRANCH_INTAKE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _NEW_BRANCH_INTAKE_LOCKS[key] = lock
+    return lock
+
+
+def new_branch_exists_detail(branch: str) -> str:
+    """409 detail for a "create new branch" request naming an existing branch.
+
+    The composer keys its auto-name retry on the leading
+    ``Branch '<name>' already exists`` phrase; keep it stable.
+    """
+    return (
+        f"Branch '{branch}' already exists, so it can't be created as a new "
+        f"branch for this session. Select it as an existing branch, or choose "
+        f"a different name."
+    )
 
 
 def _merge_session_create_overrides(
@@ -492,13 +523,34 @@ async def _create_v2_branch_session(
     #    nowhere yields None (never a silently-fabricated empty branch). None → the
     #    branch isn't materializable on this runner (no base checkout, or a
     #    non-new branch absent locally and on origin).
-    checkout_path = await run_sync(
-        checkout_manager.ensure_checkout,
-        pv2,
-        branch_name,
-        base_branch=body.base_branch,
-        create_new_branch=body.create_new_branch,
-    )
+    #    A "new" branch must really be new (#1528). If it already exists, the
+    #    deterministic checkout lookup would silently bind this session to the
+    #    checkout another session already works in (e.g. a back-to-back compose
+    #    that still carried the previous task's branch). Refuse instead; the
+    #    per-(project, branch) lock makes two concurrent mints of one name
+    #    resolve to exactly one owner.
+    if body.create_new_branch:
+        async with _new_branch_intake_lock(pv2["id"], branch_name):
+            if await run_sync(checkout_manager.local_branch_exists, pv2, branch_name):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=new_branch_exists_detail(branch_name),
+                )
+            checkout_path = await run_sync(
+                checkout_manager.ensure_checkout,
+                pv2,
+                branch_name,
+                base_branch=body.base_branch,
+                create_new_branch=True,
+            )
+    else:
+        checkout_path = await run_sync(
+            checkout_manager.ensure_checkout,
+            pv2,
+            branch_name,
+            base_branch=body.base_branch,
+            create_new_branch=False,
+        )
     if not checkout_path:
         if not body.create_new_branch:
             detail = (

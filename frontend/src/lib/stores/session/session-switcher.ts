@@ -375,6 +375,29 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		};
 	}
 
+	/**
+	 * Ephemeral snapshot for the view being LEFT. An unbound compose whose
+	 * worktree session is still being created has already handed its checkout
+	 * identity (staged/auto-named branch, create-new flag, picked worktree) to
+	 * that in-flight creation. Saving it under '__new_chat__' made the NEXT
+	 * compose restore the first task's branch, so a second back-to-back task was
+	 * bound to the first task's branch and checkout (#1528). Keep everything
+	 * else (e.g. text typed meanwhile), but never the spent checkout binding.
+	 */
+	function buildLeavingEphemeral(state: ActiveSessionState): SessionEphemeral {
+		const ephemeral = buildEphemeral(state);
+		if (state.sessionId || !state.isCreatingWorktree) return ephemeral;
+		return {
+			...ephemeral,
+			worktreeId: null,
+			worktreeBranch: '',
+			selectedWorktreeBranch: null,
+			worktreeMode: 'new',
+			worktreeCreateNewBranch: false,
+			worktreeDeleted: false,
+		};
+	}
+
 	function saveSelectionToBackend(profile: string, project: string) {
 		composerPreferences.set('profile', profile);
 		const v2 = appData.current.clusterProjects.find(p => p.local_project_id === project)?.project_v2_id ?? getState().projectV2Id;
@@ -512,7 +535,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
-		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
+		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
@@ -817,7 +840,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Save ephemeral for the session we're leaving
 		const leavingKey = leavingSessionId || '__new_chat__';
-		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
+		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
 
 		// Tell backend to release session lock
 		if (leavingSessionId) {

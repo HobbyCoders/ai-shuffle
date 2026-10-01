@@ -85,3 +85,46 @@ def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_i
     card = adapter._build_workspace_card(ha.SessionOptions(model="m", cwd="."))
     assert card.startswith("card preview=")
     assert (preview_access.REDIRECT_PATH in card) is has_token
+
+
+def test_workspace_card_is_byte_identical_across_reconnects(tmp_path, monkeypatch):
+    """#1237: the card sits in the cached system prefix, and an idle-evicted
+    client re-renders it when the session comes back from a park. The URL's
+    token used to expire at "now + 24h", so every reconnect produced a new
+    card and a ``changed=system`` cache miss. Two connects twenty minutes
+    apart must now render the same bytes, and the token must still verify."""
+    import sys
+    from types import SimpleNamespace
+    from urllib.parse import unquote
+
+    import app.core.provider.harness_adapter as ha
+    from app.core import environment, mcp_config
+
+    root = tmp_path / "ai-shuffle"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "preview.py").write_text("# preview")
+    (root / "fluid").mkdir()
+    monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    # One minute past a six-hour boundary (UTC): the two connects below fall
+    # inside the same stable window.
+    clock = [1_799_992_860.0]
+    monkeypatch.setattr(preview_access, "time", SimpleNamespace(time=lambda: clock[0]))
+
+    def connect():
+        adapter = ha.HarnessAdapter()
+        monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: OWNER)
+        return adapter._build_workspace_card(ha.SessionOptions(model="m", cwd=str(root)))
+
+    first = connect()
+    clock[0] += 20 * 60  # parked; the cold client was evicted and reconnects
+    second = connect()
+    assert preview_access.REDIRECT_PATH in first
+    assert first == second
+
+    token = unquote(first.split("token=", 1)[1].split("&", 1)[0])
+    grant = preview_access.verify(token)
+    assert grant is not None and grant.session_id == OWNER
+    lifetime = grant.expires_at - clock[0]
+    shortest = preview_access.DEFAULT_TTL - preview_access.STABLE_WINDOW
+    assert shortest < lifetime <= preview_access.DEFAULT_TTL

@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.core import codex_usage, encryption, usage_sources
+from app.core import codex_usage, encryption, usage_polling, usage_sources
 from app.core.usage_polling import UsageDeferred, capability_fingerprint, usage_get
 from app.db.async_database import run_sync
 
@@ -958,6 +958,23 @@ def _failure_kind(status: Optional[int]) -> str:
     return "unavailable"
 
 
+async def _record_timeout(provider_id: str | None, provider_type: str, log_key: str) -> None:
+    """Record a timed-out attempt so the row reports it next to its last success.
+
+    The budget already backs the endpoint off; this only keeps the failure
+    state honest instead of leaving the row looking like an unattempted one.
+    """
+    from app.db import database as db
+
+    if not provider_id:
+        return
+    _log_poll_failure(f"{log_key}:{provider_id}", "Usage poll for provider %s timed out", provider_id)
+    try:
+        await run_sync(db.record_provider_usage_failure, provider_id, provider_type, "timeout")
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a poll
+        logger.debug("Usage timeout for provider %s not recorded", provider_id)
+
+
 def _is_capability_refusal(status: Optional[int]) -> bool:
     return status in usage_sources.DENIED_STATUSES or status in usage_sources.UNSUPPORTED_STATUSES
 
@@ -1191,7 +1208,10 @@ class ProviderUsageMonitor:
             for source in usage_sources.polled_sources(row or {}):
                 if _snapshot_id(source, row) not in cooling:
                     jobs.append(bounded(getattr(self, source.poller), row))
-        await asyncio.gather(*jobs, return_exceptions=True)
+        # Rows that share a credential share one observation per pass rather
+        # than the later rows being deferred by the budget the first one spent.
+        with usage_polling.shared_pass():
+            await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _poll_openrouter_account(self, row: Dict[str, Any]) -> None:
         from app.core.openrouter_usage import poll
@@ -1255,6 +1275,8 @@ class ProviderUsageMonitor:
             )
         except UsageDeferred:
             return
+        except (httpx.TimeoutException, TimeoutError):
+            await _record_timeout(provider_id, "openrouter", "openrouter-poll")
         except Exception as e:
             # Never include `key` / the Authorization header value here.
             _log_poll_failure(
@@ -1371,6 +1393,8 @@ class ProviderUsageMonitor:
             )
         except UsageDeferred:
             return
+        except (httpx.TimeoutException, TimeoutError):
+            await _record_timeout(provider_id, "grok", "grok-poll")
         except Exception as e:
             # Never include the bearer token here.
             _log_poll_failure(
@@ -1458,6 +1482,8 @@ class ProviderUsageMonitor:
             )
         except UsageDeferred:
             return
+        except (httpx.TimeoutException, TimeoutError):
+            await _record_timeout(provider_id, "chatgpt", "codex-poll")
         except Exception as e:
             # Never include the bearer token here.
             _log_poll_failure(
