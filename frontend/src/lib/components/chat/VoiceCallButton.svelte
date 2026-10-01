@@ -1,19 +1,6 @@
 <script lang="ts">
-	/**
-	 * VoiceCallButton — re-open the call on the voice session being viewed
-	 * (ruling VM19).
-	 *
-	 * VM19 (user directive, 2026-08-15): voice activation is an ACTION BUTTON in
-	 * the composer's controls cluster — next to the VoiceRecorder (STT) button
-	 * and the send button — not a pill in the ContextPillBar. It originally
-	 * doubled as "create a voice session" from any brand-new chat (VM6/VM18
-	 * gating), because a call had nowhere else to start from. Voice is now its
-	 * own sidepanel lane with its own new-session screen, so creation moved to
-	 * `startNewVoiceSession` and this button keeps only the resume half: it
-	 * shows on an existing voice session and nowhere else. A live call replaces
-	 * ChatInput wholesale (VM18), so the button is never on screen during one —
-	 * no extra live-call gating needed.
-	 */
+	/** An explicit microphone action on the current conversation. Legacy calls
+	 * keep their original reconnect path; normal calls never create a new session. */
 	import { onMount } from 'svelte';
 	import { AudioLines } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -33,8 +20,9 @@
 	const sessionRow = $derived(
 		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
 	);
-	const isVoiceSession = $derived(sessionRow?.mode === 'voice');
-	const show = $derived(voiceEnabled && isVoiceSession && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
+	const legacyVoice = $derived($activeSession.mode === 'voice');
+	const permittedSurface = $derived(!!$activeSession.sessionId && !sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote);
+	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
 
 	onMount(async () => {
 		voiceEnabled = await isVoiceEnabled();
@@ -46,7 +34,7 @@
 		if (startingVoice || !sessionId) return;
 		startingVoice = true;
 		try {
-			await startCallForSession(sessionId);
+			await startCallForSession(sessionId, { attach: !legacyVoice });
 		} finally {
 			startingVoice = false;
 		}
@@ -60,8 +48,8 @@
 		class:starting={startingVoice}
 		onclick={resumeVoiceCall}
 		disabled={disabled || startingVoice}
-		aria-label="Start a call on this voice session"
-		title="Start a call on this voice session"
+		aria-label="Start a call in this conversation"
+		title="Start a call in this conversation"
 	>
 		<AudioLines size={15} strokeWidth={1.7} />
 	</button>
@@ -102,6 +90,9 @@
 		animation: voice-call-pulse 1s ease-in-out infinite;
 	}
 
+	.voice-call-btn:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
+	@media (hover:none) { .voice-call-btn { min-width:44px; min-height:44px; } }
+	@media (prefers-reduced-motion:reduce) { .voice-call-btn { transition:none; } .voice-call-btn.starting :global(svg) { animation:none; } }
 	@keyframes voice-call-pulse {
 		0%,
 		100% {

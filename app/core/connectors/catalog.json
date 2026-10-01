@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "4c5b610b50f7953ea4a1d93f558b3f191d795991",
+  "revision": "a0f62f741d31ddf6d9e297790012b871072ede46",
   "packages": {
     "telegram": {
       "module": "telegram",
@@ -109,7 +109,7 @@
       "module": "gmail",
       "class": "GmailConnector",
       "files": {
-        "gmail.py": "6f68921223a1cb24bf58ffb6ec5bbaadf35c322eee6ea8d190a55946a315c985",
+        "gmail.py": "dde3938aab9193c9ccbe8872d5d6dae8ee6ea4fbad05cc19f8acc95e120f7275",
         "gmail_actions.py": "5d822d18f57077ec12f1e3ac9db0fbd887c3e6be0c488d463b092812373195b2"
       }
     },
@@ -140,5 +140,5 @@
     ]
   },
   "sdk": 1,
-  "release": "c4c457d7284f66a3"
+  "release": "07ce98d28e294991"
 }

@@ -1,58 +1,11 @@
 <script lang="ts">
 	import { sidebarGroups } from '$lib/stores/expansion-preferences';
-	/**
-	 * Sidebar - Studio Noir session navigator.
-	 *
-	 * A 256px black plane in three bands:
-	 *
-	 * 1. A STICKY TOP BLOCK — brand + search + notifications + the host's header
-	 *    action on one row, and "New session" directly beneath it as the first
-	 *    row of the nav. It is deliberately not styled as a header with a border:
-	 *    at rest it shares the 1px row rhythm of the Workspace rows that follow,
-	 *    and only when the scroll region has actually moved does a hairline and a
-	 *    soft shadow fade in under it, so the separator means "there is content
-	 *    above" instead of decorating an empty state.
-	 * 2. A SCROLL REGION — the customizable Workspace nav (see WorkspaceNav /
-	 *    sidebar-prefs), the project + device scope filters on a hairline rule,
-	 *    then the session ledger: three-line cards grouped Active / Settled with
-	 *    an archived shelf.
-	 * 3. A MODE DOCK — the Code / Chat / Voice lane switcher on a raised plate at
-	 *    the bottom edge, where it stays reachable on a phone and stops competing
-	 *    with the brand row for the top of the panel.
-	 *
-	 * POPOVER ANCHORING. The scope menus and the Workspace "More" flyout are
-	 * opened from rows INSIDE the scroll region, so an absolutely-positioned
-	 * popover would be clipped by it. Both are `position: fixed` with coordinates
-	 * measured from their button at open time, and both close on scroll rather
-	 * than tracking it — the snapshot is only ever as old as one gesture.
-	 *
-	 * MODE LANES. The panel shows one lane at a time and the lane is a hard
-	 * partition: a code session is never listed while Chat is selected, and vice
-	 * versa. Everything downstream of `sidebarSessions` — the project and device
-	 * filter options, `rows`, Active / Settled / Archived, and the set of
-	 * (project, branch) pairs the PR badges poll for — derives from that one
-	 * list, so the lane filter is applied there and nowhere else. Chat and voice
-	 * sessions are projectless, so the project filter row is hidden outside the
-	 * code lane rather than offering a menu holding only "Ungrouped".
-	 *
-	 * The switcher writes the lane to the shared `appMode` store itself rather
-	 * than routing through the page: AppLayout and AppTopBar thread this
-	 * component's props explicitly, and neither is worth widening for a store
-	 * write. It then calls `onNewSession`, because the session on screen belongs
-	 * to the lane just left. `onSelectMode` stays available for a host that
-	 * wants to observe the switch.
-	 *
-	 * The desktop shell hosts it beside the main panel (as an overlay when the
-	 * window is narrow); on the mobile shell the same component is rendered
-	 * inside AppTopBar's slide-in drawer, so every navigation path is identical
-	 * on both.
-	 *
-	 * Data comes exclusively from the stores the app already loads ($sessions,
-	 * streamingSessions, backgroundPermissions). Internal worker sessions, and
-	 * chats from deleted projects or devices, are list-hidden and never enter
-	 * the filters or either visible group.
-	 */
-	import { onDestroy, untrack, type Snippet } from 'svelte';
+	/** Studio Noir navigator: pinned Assistant, unified conversation history,
+	 * explicit project/device scopes, and a new-conversation capability picker.
+	 * Voice is a call action, not a mutually exclusive history lane. */
+	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
+	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import { assistantState, refreshAssistant } from '$lib/stores/assistant';
 	import {
 		Search,
 		FolderClosed,
@@ -99,7 +52,6 @@
 		deriveStatus,
 		sessionTimestamp,
 		sessionDeviceId,
-		sessionModeOf,
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
@@ -180,7 +132,7 @@
 	// all derive from `sidebarSessions`, so a row excluded here is absent from
 	// every one of them.
 	const sidebarSessions = $derived(
-		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys) && sessionModeOf(s) === $sessionMode)
+		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys))
 	);
 
 	// User-wide run and task updates own sidebar state, not transcript replay.
@@ -355,14 +307,7 @@
 	$effect(() => {
 		if (projectFilter && !projectOptions.some((p) => p.id === projectFilter)) projectFilter = null;
 	});
-	// Leaving the code lane clears the project filter outright. The effect above
-	// would eventually do it (no chat session matches a code project key), but
-	// only once `projectOptions` recomputes — and the row that would let you
-	// clear it by hand is hidden in the other two lanes, so a stale filter there
-	// could empty the list with no way back.
-	$effect(() => {
-		if ($sessionMode !== 'code') untrack(() => { projectFilter = null; });
-	});
+	// Conversation type no longer filters history. Project scope is explicit.
 	$effect(() => {
 		if (deviceFilter && !deviceOptions.some((d) => d.id === deviceFilter)) deviceFilter = null;
 	});
@@ -425,13 +370,8 @@
 
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
-	const emptyLabel = $derived(
-		$sessionMode === 'chat'
-			? 'No chats yet'
-			: $sessionMode === 'voice'
-				? 'No voice sessions yet'
-				: 'No sessions yet'
-	);
+	const emptyLabel = 'No sessions yet';
+	onMount(() => { if (isAdmin) void refreshAssistant().catch(() => {}); });
 
 	// Keep the ticker in step with what's actually on screen. The prompt-parked
 	// states keep their live timer too — a session blocked on you is still live.
@@ -450,7 +390,7 @@
 	const railItems = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
 		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
-		{ id: 'build', label: 'Build', icon: Hammer, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
+		{ id: 'build', label: 'Agents & tools', icon: Hammer, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
@@ -563,7 +503,8 @@
 	 *  left and would otherwise sit there while the list beside it no longer
 	 *  contains it. */
 	function selectMode(mode: SessionMode) {
-		if (mode === $sessionMode) return;
+		// A historical voice session shows the Chat capability as selected.
+		if (mode === ($sessionMode === 'voice' ? 'chat' : $sessionMode)) return;
 		closeMenus();
 		appMode.set(mode);
 		onSelectMode?.(mode);
@@ -611,8 +552,14 @@
 			{/if}
 		</header>
 
-		<!-- New session is the first row of the nav, not a header icon: it reads as
-		     a destination like the Workspace rows that continue below it. -->
+		{#if isAdmin}
+			<button class="assistant-pin" aria-label="Assistant home" class:on={currentType === 'assistant'} aria-current={currentType === 'assistant' ? 'page' : undefined} onclick={() => pickFeature('assistant')}>
+				<AgentAvatar avatar={$assistantState?.avatar_id ?? 'robot'} size={32} />
+				<span><strong>Assistant</strong><small>{$assistantState?.assistant_name || 'Make yourself at home'}</small></span>
+				<span class="home-dot" class:ready={$assistantState?.status === 'ready'} aria-hidden="true"></span>
+			</button>
+		{/if}
+		<!-- One history. The composer type controls capabilities, not a history lane. -->
 		<button
 			class="ghostrow newrow"
 			onclick={onNewSession}
@@ -638,9 +585,8 @@
 
 		<!-- Scope filters: two ghost buttons on one rule, heading the ledger. -->
 		<div class="scope" role="group" aria-label="Scope">
-			<!-- Chat and voice sessions carry no project, so outside the code lane this
-			     menu would only ever offer "Ungrouped". -->
-			{#if $sessionMode === 'code'}
+			<!-- Explicit project scope applies to the shared history, independently of composer type. -->
+			{#if projectOptions.length > 0}
 				<div class="rowmenu" bind:this={projectMenuRef}>
 					<button
 						class="fbtn"
@@ -834,6 +780,7 @@
 	<!-- Mode dock: the lane switcher on a raised plate at the panel's bottom edge,
 	     where a thumb reaches it and it no longer competes with the brand row. -->
 	<footer class="sb-dock">
+		<p class="dock-label">New conversation</p>
 		<SessionModeSwitcher value={$sessionMode} onSelect={selectMode} />
 	</footer>
 
@@ -843,6 +790,17 @@
 </aside>
 
 <style>
+ .assistant-pin { display:flex; align-items:center; gap:10px; width:100%; margin:8px 0 6px; padding:10px; border:1px solid var(--sidebar-border); background:color-mix(in oklch,var(--primary) 5%,var(--sidebar)); color:var(--sidebar-foreground); border-radius:9px; text-align:left; cursor:pointer; min-height:58px; transition:background .2s,border-color .2s; }
+ .assistant-pin>span:not(.home-dot) { flex:1; min-width:0; }
+ .assistant-pin strong { display:block; font-size:12px; font-weight:550; }
+ .assistant-pin small { display:block; font-size:10px; margin-top:3px; color:var(--sidebar-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+ .assistant-pin:hover,.assistant-pin.on { background:color-mix(in oklch,var(--primary) 10%,var(--sidebar)); border-color:color-mix(in oklch,var(--primary) 45%,var(--sidebar-border)); }
+ .assistant-pin:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+ .assistant-pin:active { transform:translateY(1px); }
+ .home-dot { width:5px; height:5px; border-radius:50%; background:var(--sidebar-muted); }
+ .home-dot.ready { background:var(--primary); }
+ .dock-label { margin:0 0 8px 3px; color:var(--sidebar-muted); font-size:10px; }
+
 	.sidebar {
 		position: relative;
 		width: 100%;

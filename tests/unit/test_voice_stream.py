@@ -195,3 +195,39 @@ def test_turn_reply_filters_other_turns_reasoning_and_pre_tool_commentary(monkey
     ]
     monkeypatch.setattr(session_events, "get_events", lambda sid, from_seq, limit: [e for e in events if e["seq"] > from_seq])
     assert voice_stream._turn_reply("session", "target") == "Verified result."
+
+@pytest.mark.asyncio
+async def test_attached_live_voice_forces_same_session_agent_delegation(monkeypatch):
+    row = {"mode": "chat", "model": None, "profile_id": "primary", "provider_id": "text-provider", "voice_config": {}}
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: row)
+    monkeypatch.setattr(voice_stream.database, "get_profile", lambda _: {"config": {"model": "agent-model"}})
+    accepted = []
+    async def submit(sid, source, **kwargs):
+        accepted.append((sid, source, kwargs))
+        return "same-turn"
+    from app.core import turn_manager
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    assert await voice_stream.delegate_to_selected_model("home", "Spoken request", on_submitted=AsyncMock()) == ""
+    assert accepted[0][0] == "home" and accepted[0][2]["profile_id"] == "primary"
+    assert accepted[0][2]["overrides"]["model"] == "agent-model"
+    assert accepted[0][2]["overrides"]["provider"] == "text-provider"
+    config = voice_stream.live_session_config({"model": voice_stream.LIVE_MODEL, "voice": "marin", "conversation_surface": True,
+        "options": {"delegation_type": "responses", "delegation_model": "different-model"}}, "")
+    assert config["delegation"]["type"] == "client"
+
+@pytest.mark.asyncio
+async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypatch):
+    """A WebRTC binding stores RealtimeOptions; LiveOptions must not reject it."""
+    from app.core.voice_options import RealtimeOptions
+    row = {"mode": "chat", "model": "haiku", "profile_id": "primary", "voice_config": {
+        "model": "gpt-realtime", "voice": "marin", "conversation_surface": True,
+        "options": RealtimeOptions().model_dump(),
+    }}
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: row)
+    submit = AsyncMock(return_value="turn-1")
+    from app.core import turn_manager
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    assert await voice_stream.delegate_to_selected_model("home", "Spoken request", on_submitted=AsyncMock()) == ""
+    overrides = submit.await_args.kwargs["overrides"]
+    assert overrides["model"] == "haiku"
+    assert overrides["system_prompt_append"] == voice_stream.DELEGATION_INSTRUCTIONS

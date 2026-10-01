@@ -200,6 +200,11 @@ from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
     tool_selection_mode,
 )
 
+# This builder and both harness execution legs now enforce proactive provenance.
+# Registration changes only process capability state, not assistant policy.
+from app.core.assistant_service import register_proactive_guard
+register_proactive_guard(1)
+
 
 def _ai_tools_available() -> bool:
     """Whether the AI-generation tools have a credential to run on.
@@ -1176,6 +1181,14 @@ def build_options_from_profile(
     if context_window not in context_window_choices(model_to_use, main_provider_row):
         context_window = None
 
+    from app.core.assistant_service import assert_proactive_allowed, build_role_context
+    from app.core.session_modes import narrow_tool_access_for_proactive
+    assistant_proactive = overrides.get("_assistant_proactive")
+    if assistant_proactive is not None:
+        assert_proactive_allowed(assistant_proactive, session_id)
+    final_system_prompt = _append_system_block(
+        final_system_prompt, build_role_context(session_id),
+    )
     # SDK-shaped tool fields. ``tools`` / ``tools_preset`` feed
     # ``AgentOptions.tools``, which the harness adapter ignores.
     tools_config = config.get("tools")  # Explicit list of tools
@@ -1200,6 +1213,7 @@ def build_options_from_profile(
     # row — the cwd-override spawn has no ``session_row`` but does have a
     # binding row, and both legs must agree on the lane.)
     access = narrow_tool_access_for_mode(access, session_mode)
+    access = narrow_tool_access_for_proactive(access, assistant_proactive)
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
 
@@ -1741,6 +1755,8 @@ def build_options_from_profile(
     # fluid id at connect time at all.
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
+    options.aih_assistant_proactive = assistant_proactive
+    # Durable turn provenance must also survive SDK option rebuilding.
 
     # The volatile half of the app's <env> block — execution mode and the
     # branch pair — carried as INPUTS, not as rendered text. The adapter

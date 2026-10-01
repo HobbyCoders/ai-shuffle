@@ -36,7 +36,7 @@
  */
 
 import { get, writable } from 'svelte/store';
-import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
+import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
 import type { VoiceAudioStream } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
@@ -764,7 +764,7 @@ function micErrorOrMessage(e: Error): string {
  * The re-mint route is VW3's, so a missing route is reported as a plain,
  * non-fatal message rather than an error state the user cannot clear.
  */
-export async function startCallForSession(sessionIdIn: string): Promise<void> {
+export async function startCallForSession(sessionIdIn: string, options: { attach?: boolean } = {}): Promise<void> {
 	if (isCallActiveFor(sessionIdIn)) return;
 	if (!(await confirmCallReplacement(sessionIdIn))) return;
 	// Another start may have won while confirmation/hangup was pending.
@@ -774,7 +774,9 @@ export async function startCallForSession(sessionIdIn: string): Promise<void> {
 	patch({ sessionId: sessionIdIn, status: 'connecting', error: null, notice: null });
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
-		cred = await mintVoiceSecret(sessionIdIn);
+		// Only an explicit call action creates a normal conversation's audio binding.
+		// Historical voice sessions and timed reconnects retain the secret endpoint.
+		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn);
 		if (attempt !== generation) return;
 	} catch (e) {
 		if (attempt !== generation) return;

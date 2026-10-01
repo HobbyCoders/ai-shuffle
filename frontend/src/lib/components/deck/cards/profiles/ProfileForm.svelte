@@ -10,6 +10,7 @@
 	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
+	import AgentIdentitySettings from '$lib/components/assistant/AgentIdentitySettings.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
 		getProviders,
@@ -200,6 +201,9 @@
 
 <div class="card-system pf-body">
 	{#if activeTab === 'general'}
+		{#if editingProfile && isAdmin}
+			{#key editingProfile.id}<AgentIdentitySettings agentId={editingProfile.id} builtin={editingProfile.is_builtin} />{/key}
+		{/if}
 		<!-- GENERAL TAB -->
 		<div class="set-group">
 			<div class="set-grouphead"><h3><Users />Identity</h3></div>

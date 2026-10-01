@@ -12,6 +12,11 @@
 	import type { Profile } from '$lib/api/client';
 	import { Users, Download, Trash2, RotateCcw, Plus, Sparkles, Upload, Search } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import { onMount } from 'svelte';
+	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import { agentIdentities, assistantState, refreshAssistant } from '$lib/stores/assistant';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	onMount(() => { if ($isAdmin) void refreshAssistant().catch(() => {}); });
 
 	interface GroupState {
 		profiles?: {
@@ -153,8 +158,8 @@
 					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEditProfile(profile); } }}
 				>
 					<div class="bpg-card-top">
-						<span class="bpg-ico"><Users size={16} strokeWidth={1.7} /></span>
-						<h3 class="bpg-name">{profile.name}</h3>
+						<AgentAvatar avatar={$agentIdentities.find(a => a.id === profile.id)?.avatar_id ?? 'robot'} size={34} />
+						<h3 class="bpg-name">{profile.name}{#if $assistantState?.agent_id === profile.id}<span class="assistant-label">Personal assistant</span>{/if}</h3>
 					</div>
 
 					<!-- No model or permission pill: an agent is configuration, and
@@ -213,6 +218,7 @@
 </div>
 
 <style>
+	.assistant-label { display:block; font-size:10px; font-weight:400; color:var(--primary); margin-top:4px; }
 	.bpg { display: flex; flex-direction: column; gap: 16px; }
 
 	/* Toolbar */
@@ -270,12 +276,6 @@
 	.bpg-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	.bpg-card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-	.bpg-ico {
-		display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0;
-		border-radius: calc(var(--radius, 0.75rem) - 4px);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-	}
 	.bpg-name {
 		flex: 1; min-width: 0; margin: 0;
 		font-family: var(--font-display, Georgia, serif);

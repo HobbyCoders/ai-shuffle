@@ -2,11 +2,12 @@
  * ChatView's per-lane empty state.
  *
  * Three things have to stay true and are all easy to break by accident:
- *  1. The cleared-session hero wins over the lane heroes. A cleared session
- *     shows its own title in EVERY lane — reordering those branches would make
+ *  1. For ordinary sessions, the cleared-session hero wins over the lane heroes.
+ *     The designated Assistant home has a personalized role-level welcome;
+ *     other cleared sessions show their own title in EVERY lane. Reordering would make
  *     a cleared chat-lane session read as a brand-new one, the exact regression
  *     #558 fixed for the code lane.
- *  2. All three lanes keep the same mounted composer and its draft.
+ *  2. Every lane keeps the same mounted composer and its draft.
  *  3. Only desktop balances the hero and input; mobile scrolls natural content.
  *
  * Mounting ChatView pulls in the whole session/store graph (see
@@ -39,19 +40,30 @@ describe('ChatView — lane heroes', () => {
 		expect(codeOnly).toMatch(/const surfaceMode = \$derived\(\$activeSession\.mode\)/);
 	});
 
-	it('mounts a hero per lane', () => {
+	it('mounts a hero per new-conversation lane', () => {
 		expect(codeOnly).toMatch(/<ChatModeHero\s*\/>/);
-		expect(codeOnly).toMatch(/<VoiceModeHero\s*\/>/);
 		expect(codeOnly).toMatch(/<WorkspaceSelector/);
 	});
 
+	it('never offers a standalone new voice session', () => {
+		// Voice is a call on the current conversation; a voice surface reads as chat.
+		expect(codeOnly).not.toMatch(/VoiceModeHero|startNewVoiceSession/);
+		expect(codeOnly).toContain("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
+	});
+
+	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
+		expect(codeOnly).toContain('$assistantState?.home_session_id === $activeSession.sessionId');
+		const primary = codeOnly.indexOf('{#if primaryAssistant}');
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		expect(primary).toBeGreaterThan(-1);
+		expect(cleared).toBeGreaterThan(primary);
+	});
+
 	it('keeps the cleared-session hero ahead of the lane branches', () => {
-		const cleared = codeOnly.indexOf('{#if isClearedSession}');
-		const chatLane = codeOnly.indexOf("{:else if surfaceMode === 'chat'}");
-		const voiceLane = codeOnly.indexOf("{:else if surfaceMode === 'voice'}");
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		const chatLane = codeOnly.indexOf("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
 		expect(cleared).toBeGreaterThan(-1);
 		expect(chatLane).toBeGreaterThan(cleared);
-		expect(voiceLane).toBeGreaterThan(cleared);
 	});
 });
 
@@ -94,27 +106,6 @@ describe('ChatView — stable empty layout', () => {
 		expect(codeOnly).toContain("focused.scrollIntoView({ block: 'nearest' })");
 		expect(codeOnly.match(/<ChatInput\s/g)).toHaveLength(1);
 		expect(codeOnly).toContain('{onBrowserToggle} {onBrowserPreload} {browserOpen}');
-	});
-});
-
-describe('VoiceModeHero — the only action on its surface', () => {
-	const hero = src('VoiceModeHero.svelte');
-
-	it('delegates to the shared start-a-voice-session service', () => {
-		expect(hero).toMatch(/import \{ startNewVoiceSession \} from '\$lib\/services\/startVoiceSession'/);
-	});
-
-	it('gates on the voice setting and routes to Settings when it is off', () => {
-		expect(hero).toMatch(/isVoiceEnabled\(\)/);
-		expect(hero).toMatch(/layout\.openFeaturePage\('settings'\)/);
-	});
-
-	it('disables its button while the call is being set up', () => {
-		expect(hero).toMatch(/disabled=\{starting\}/);
-	});
-
-	it('does not re-report errors the service already toasts', () => {
-		expect(hero).not.toMatch(/notify\./);
 	});
 });
 

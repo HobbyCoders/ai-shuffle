@@ -2162,7 +2162,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     specific["permissionDecisionReason"] = decision.note
             if decision.additional_context:
                 specific["additionalContext"] = decision.additional_context
-        denial = self._policy_denial(name, tool_input)
+        denial = await asyncio.to_thread(self._policy_denial, name, tool_input)
         if denial is not None:
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

@@ -2426,3 +2426,85 @@ async def test_assigned_agent_passes_the_access_check(endpoint):
         with pytest.raises(HTTPException) as exc_info:
             await getattr(agents, endpoint)(create_mock_request(), "test-profile", token="t")
     assert exc_info.value.status_code == 404
+
+@pytest.mark.asyncio
+async def test_normal_agent_put_preserves_unrepresented_identity_and_custom_config():
+    from app.api.agents import update_profile
+    from app.core.models import ProfileUpdate, ProfileConfig
+    existing = {**sample_profile(), "config": {"model": "sonnet", "allowed_tools": ["Read"],
+                "avatar_id": "robot", "custom_extension": {"keep": True}}}
+    with patch("app.api.agents.database") as mocked:
+        mocked.get_profile.return_value = existing
+        mocked.update_profile.return_value = existing
+        await update_profile("test-profile", ProfileUpdate(config=ProfileConfig(model="opus")), token="t")
+    written = mocked.update_profile.call_args.kwargs["config"]
+    assert written["avatar_id"] == "robot" and written["custom_extension"] == {"keep": True}
+    assert written["model"] == "opus" and "allowed_tools" not in written
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("avatar", ["orbit", None, "invalid", ["robot"]])
+async def test_normal_agent_put_deliberate_avatar_change_clear_and_validation(avatar):
+    from app.api.agents import update_profile
+    from app.core.models import ProfileUpdate, ProfileConfig
+    from fastapi import HTTPException
+    from unittest.mock import AsyncMock
+    http_request = AsyncMock()
+    http_request.json.return_value = {"config": {"avatar_id": avatar}}
+    existing = {**sample_profile(), "config": {"avatar_id": "robot", "custom_extension": "keep"}}
+    with patch("app.api.agents.database") as mocked:
+        mocked.get_profile.return_value = existing
+        mocked.update_profile.return_value = existing
+        if isinstance(avatar, list) or avatar == "invalid":
+            with pytest.raises(HTTPException) as caught:
+                await update_profile("test-profile", ProfileUpdate(config=ProfileConfig()), token="t", http_request=http_request)
+            assert caught.value.status_code == 400
+            mocked.update_profile.assert_not_called()
+        else:
+            await update_profile("test-profile", ProfileUpdate(config=ProfileConfig()), token="t", http_request=http_request)
+            written = mocked.update_profile.call_args.kwargs["config"]
+            assert written.get("avatar_id") == avatar
+            assert written["custom_extension"] == "keep"
+
+
+@pytest.mark.parametrize("payload", [{"model": "opus"}, {"avatar_id": "orbit"}, {"avatar_id": None}])
+def test_http_agent_put_preserves_or_deliberately_changes_identity(mock_db, payload):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import agents
+    from app.db import database
+    from app.api import assistant
+    database.create_profile("identity-editor", "Identity", None, {"extension": "keep"})
+    app = FastAPI()
+    app.include_router(agents.router)
+    app.include_router(assistant.router)
+    app.dependency_overrides[agents.require_admin] = lambda: "owner"
+    app.dependency_overrides[agents.require_auth] = lambda: "owner"
+    with TestClient(app) as client:
+        identity = client.patch("/api/v1/assistant/agents/identity-editor/identity", json={"avatar_id": "robot"})
+        assert identity.status_code == 200, identity.text
+        detail = client.get("/api/v1/agents/identity-editor")
+        assert detail.status_code == 200 and detail.json()["config"]["avatar_id"] == "robot"
+        listing = client.get("/api/v1/agents")
+        assert listing.status_code == 200
+        assert next(row for row in listing.json() if row["id"] == "identity-editor")["config"]["avatar_id"] == "robot"
+        response = client.put("/api/v1/agents/identity-editor", json={"config": payload})
+        assert response.status_code == 200, response.text
+        expected_avatar = payload.get("avatar_id", "robot")
+        assert response.json()["config"]["avatar_id"] == expected_avatar
+        reloaded = client.get("/api/v1/agents/identity-editor")
+        assert reloaded.status_code == 200 and reloaded.json()["config"]["avatar_id"] == expected_avatar
+    written = database.get_profile("identity-editor")["config"]
+    assert written.get("avatar_id") == payload.get("avatar_id", "robot")
+    assert written["extension"] == "keep"
+
+
+@pytest.mark.parametrize("stored", ["robot", "spark", "orbit", "sprout", "pixel", None, "invalid", ["robot"]])
+def test_profile_presentation_validates_avatar_without_changing_update_schema(stored):
+    from app.api.agents import ProfilePresentation
+    from app.core.models import ProfileConfig
+    profile = {**sample_profile(), "config": {"avatar_id": stored}}
+    response = ProfilePresentation.model_validate(profile).model_dump()
+    expected = stored if isinstance(stored, str) and stored in {"robot", "spark", "orbit", "sprout", "pixel"} else None
+    assert response["config"]["avatar_id"] == expected
+    assert "avatar_id" not in ProfileConfig.model_fields

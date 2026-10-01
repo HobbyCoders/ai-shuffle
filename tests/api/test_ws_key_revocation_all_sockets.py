@@ -197,7 +197,7 @@ def test_voice_audio_socket_and_its_upstream_close_when_the_key_is_revoked(keys)
 
     m = keys.monkeypatch
     m.setattr(voice, "_require_voice_enabled", AsyncMock(return_value={"voice_max_call_minutes": 5}))
-    m.setattr(voice, "_load_voice_session", AsyncMock(side_effect=lambda sid: {"id": sid}))
+    m.setattr(voice, "_load_voice_session", AsyncMock(side_effect=lambda sid, **kw: {"id": sid}))
     m.setattr(voice, "_check_voice_session_access", lambda api_user, row: None)
     m.setattr(voice, "_reject_when_capped", lambda sid: None)
     m.setattr(voice, "session_config", lambda row, settings: {"model": "m", "provider_id": "p"})

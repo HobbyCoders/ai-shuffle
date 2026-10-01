@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 90
+SCHEMA_VERSION = 91
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1929,6 +1929,9 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
         "ON upload_blobs(session_id)"
     )
+
+    from app.db.assistant import create_schema as create_assistant_schema
+    create_assistant_schema(cursor)
 
     # ==================================================================
     # SEED DATA

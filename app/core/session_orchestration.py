@@ -148,6 +148,9 @@ def _queue(sender_id, data, action):
 
     sender = _caller(sender_id)
     context = _context(sender_id)
+    if ((context.get("payload") or {}).get("_assistant_proactive") is not None
+            or (context.get("overrides") or {}).get("_assistant_proactive") is not None):
+        raise PermissionError("Background observation cannot start or message sessions.")
     request_id = _text(data, "request_id", 120)
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.
@@ -246,6 +249,10 @@ def _queue(sender_id, data, action):
             overrides=overrides, payload=payload, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
         )
+    from app.core.assistant_service import home_for_session, link_job
+    home = home_for_session(sender_id)
+    if home and target["id"] != home:
+        link_job(home, target["id"])
     return {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
             "delivery_status": "queued", "created": action == "start", "url": "/?session=" + target["id"],
             "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}

@@ -14,19 +14,15 @@
 	 * - SpotlightSearch (Cmd+K) for quick navigation
 	 * - Full keyboard shortcut support
 	 *
-	 * Session modes (code / chat / voice) are NOT threaded from here. AppLayout
-	 * and AppTopBar pass Sidebar's props one by one, so rather than widen two
-	 * intermediaries for a single store write, Sidebar sets `appMode` itself and
-	 * then calls the `onNewSession` it already receives — which is exactly the
-	 * "switching lanes lands you on that lane's compose screen" behaviour. What
-	 * this page still owns is the reverse direction: any path that opens or
-	 * creates a session has to put the sidepanel in the matching lane, which is
-	 * what handleOpenSession does.
+	 * Session modes still determine tool capabilities, not separate histories.
+	 * Text and calls share existing sessions. Sidebar owns the new-conversation
+	 * capability picker; ordinary navigation continues through handleOpenSession.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
+	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { openSession as handleOpenSession } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
@@ -78,7 +74,9 @@
 	/**
 	 * Create a new chat session and navigate to it
 	 */
+	let navigationClaimed = false;
 	function handleNewSession() {
+		navigationClaimed = true;
 		activeSession.newChat();
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
@@ -108,6 +106,7 @@
 	 * Open a feature page (settings, files, plugins, etc.)
 	 */
 	function handleOpenFeature(type: ViewType, itemId?: string | null) {
+		navigationClaimed = true;
 		if (type === 'session') {
 			handleNewSession();
 			return;
@@ -200,11 +199,24 @@
 		// user last chose is the one that compose belongs in.
 		const followRestoredLane = () => { if (restoredMode) appMode.set(restoredMode, false); };
 
-		if (!$activeView) {
-			// No persisted layout view — open the restored session or a new chat
+		// A persisted empty composer is also an empty landing, not a selected work
+		// session. Default to Assistant once at startup, never as a reactive redirect:
+		// subsequent New conversation actions, drafts and restored sessions win.
+		// A deep link (see below) is an explicit destination; read it first so the
+		// landing never mounts Assistant only to be replaced a moment later.
+		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
+		const hasDraft = hasComposerDraft($activeSession.draft);
+		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
+			(!$activeView || ($activeView.type === 'session' && currentViewSessionId === null));
+		if (emptyOwnerLanding) {
+			layout.openFeaturePage('assistant');
+		} else if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
 				layout.openChat(restoredSessionId);
+			} else if (hasDraft) {
+				// Do not clear a surviving draft just because the layout snapshot is absent.
+				layout.openChat(null);
 			} else {
 				handleNewSession();
 			}
@@ -229,7 +241,6 @@
 		// $sessions on every install, so handleOpenSession resolves them and (when
 		// the session is owned by another device) relays exactly like a click in
 		// the Sessions board.
-		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
 		if (deepLinkSessionId) {
 			handleOpenSession(deepLinkSessionId);
 			const url = new URL(window.location.href);
