@@ -111,6 +111,41 @@ async def test_message_to_a_busy_engine_rides_the_next_tool_result(tmp_path, wak
     ]
 
 
+async def test_several_peers_at_one_boundary_stay_separate_and_deliver_once() -> None:
+    """#1618: messages from several subagents that arrive during one tool call
+    ride that call's result together, but each keeps its own attributed
+    envelope and its own receipt entry, and none is delivered again at the
+    next boundary."""
+    from fluid.context.peer import PEER_CLOSE
+    from fluid.engine.native import NativeLoop
+
+    loop = NativeLoop(provider=_NullProvider(), store=MemoryStore(), model="m")
+    await loop._ensure_session()
+    loop._turn_task = asyncio.create_task(asyncio.sleep(30))
+    try:
+        for sender, text in (("w1", "first"), ("w2", "second"), ("w1", "third")):
+            await loop.submit(AgentMessage(text=text, sender=sender, wake=False, id=f"id-{text}"))
+        first = await loop._finish_tool(
+            loop.session_id, "turn_1", "Read", "tu_1", ToolOutcome(text="body"),
+        )
+        second = await loop._finish_tool(
+            loop.session_id, "turn_1", "Read", "tu_2", ToolOutcome(text="body two"),
+        )
+    finally:
+        loop._turn_task.cancel()
+
+    assert first.text.count(PEER_OPEN_PREFIX) == 3 and first.text.count(PEER_CLOSE) == 3
+    assert first.text.index("first") < first.text.index("second") < first.text.index("third")
+    assert "<system-reminder>" not in first.text
+    assert PEER_OPEN_PREFIX not in second.text
+    receipts = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+    assert [r.steers for r in receipts] == [[
+        {"id": "id-first", "text": "first", "from": "w1"},
+        {"id": "id-second", "text": "second", "from": "w2"},
+        {"id": "id-third", "text": "third", "from": "w1"},
+    ]]
+
+
 async def test_user_steer_and_peer_message_keep_their_own_markers(tmp_path) -> None:
     """Both share the queue; neither borrows the other's attribution."""
     from fluid.engine.native import NativeLoop

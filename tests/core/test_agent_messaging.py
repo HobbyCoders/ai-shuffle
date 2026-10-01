@@ -163,10 +163,25 @@ async def test_running_delegated_worker_queues_instead_of_using_native_engine(ru
     engines["worker"].adapter.provider_kind = "delegated"
     queue = AsyncMock(return_value="message-turn")
     monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    steer = AsyncMock(return_value=1)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
     result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "progress?"}, ToolCtx())
     assert not result.is_error
     queue.assert_awaited_once_with("worker", "parent", "progress?")
     engine.submit.assert_not_awaited()
+    # The queued row is offered to the running receiver's next tool boundary.
+    steer.assert_awaited_once_with("worker")
+
+
+async def test_held_message_is_not_offered_to_a_live_turn(runtime, monkeypatch):
+    worker(runtime, "parent", "worker")
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", AsyncMock(return_value=turn_scheduler.HELD))
+    steer = AsyncMock()
+    monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
+    result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "hi"}, ToolCtx())
+    assert result.text == messaging.held_receipt("Helper")
+    steer.assert_not_awaited()
 
 
 async def test_policy_rejected_worker_is_not_resumed(runtime, monkeypatch):

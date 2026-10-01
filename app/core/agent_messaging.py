@@ -83,6 +83,11 @@ def peer_rows(session_id: str | None) -> list[dict]:
     return rows
 
 
+def may_message(sender: str, target: str) -> bool:
+    """Whether ``sender`` can still address ``target`` (the roster's rule)."""
+    return any(row["worker_session_id"] == target for row in peer_rows(sender))
+
+
 def make_roster(supplier):
     def roster(data, ctx):
         rows = peer_rows(supplier())
@@ -180,6 +185,10 @@ def make_message(supplier):
             return ToolOutcome(text=held_receipt(row["name"]))
         if resuming:
             return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
+        # A receiver that is running (a delegated CLI turn, or a native one the
+        # engine path above could not reach) takes the queued message at its
+        # next tool boundary; the row's receipt retires it exactly once.
+        await session_runtime.try_steer_pending(target)
         return ToolOutcome(text=f"Queued for {row['name']}")
 
     return message

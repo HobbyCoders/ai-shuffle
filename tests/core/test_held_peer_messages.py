@@ -74,8 +74,38 @@ async def test_a_message_to_a_session_that_is_not_parked_still_queues_a_turn(moc
     assert turn_id and turn_id != turn_scheduler.HELD
     (row,) = turns_db.get_queued_turns("s2")
     assert row["source"] == "agent_message"
+    # Attributed, so a live turn can take it at a tool boundary (#1618).
+    assert row["payload"]["task_peer_sender"] == "w1"
+    assert row["payload"]["peer_message_content"] == "hello"
     assert _held("s2") == []
     assert _quiet == ["s2"]
+
+
+async def test_an_urgent_message_carrying_held_ones_is_not_a_single_peer_steer(mock_db, _quiet):
+    """The peer channel carries one message; a row that also delivers held
+    messages must run whole, never be steered as its newest message only."""
+    _parked("s9")
+    assert await turn_scheduler.on_agent_message("s9", "w1", "note") == turn_scheduler.HELD
+    await turn_scheduler.on_agent_message("s9", "w2", "blocked", urgent=True)
+
+    (row,) = turns_db.get_queued_turns("s9")
+    assert "note" in row["payload"]["held_peer_messages"]
+    assert "task_peer_sender" not in row["payload"]
+    assert "peer_message_content" not in row["payload"]
+
+
+def test_held_peer_deliveries_attribute_each_message_once():
+    from fluid.context.peer import format_peer_message
+
+    held = turn_scheduler._join_held(
+        turn_scheduler._held_entry(format_peer_message("w1", "one").strip()),
+        turn_scheduler._held_entry(format_peer_message("w2", "two\n\nparas").strip()),
+    )
+    assert turn_scheduler.held_peer_deliveries(held) == [
+        {"sender": "w1", "content": "one"},
+        {"sender": "w2", "content": "two\n\nparas"},
+    ]
+    assert turn_scheduler.held_peer_deliveries("") == []
 
 
 async def test_cancelling_some_tasks_keeps_the_held_message_in_the_wake(mock_db):
@@ -183,9 +213,10 @@ async def test_held_messages_survive_an_urgent_message_that_fails_to_enqueue(
 # Held messages ride the parent's next turn, however it starts
 # ---------------------------------------------------------------------------
 
-async def _run_turn(turn):
+async def _run_turn(turn, notes=None):
     """Run ``turn`` through a real SessionRuntime with the pump stubbed;
-    return the prompt the engine was given."""
+    return the prompt the engine was given. ``notes`` collects the
+    ``agent_message`` events the turn recorded."""
     from app.core import session_runtime
     from tests.core.test_send_steering import _pump_env
 
@@ -196,7 +227,13 @@ async def _run_turn(turn):
         yield {"type": "done", "metadata": {}}
 
     with _pump_env(_impl):
+        recorder = session_runtime.TurnRecorder.create_for_run.return_value
         await session_runtime.SessionRuntime(turn).execute()
+    if notes is not None:
+        notes.extend(
+            call.args[0]["data"] for call in recorder.on_event.await_args_list
+            if call.args[0].get("subtype") == "agent_message"
+        )
     return seen.get("prompt") or ""
 
 
@@ -219,14 +256,62 @@ async def test_a_user_turn_carries_held_messages_once(mock_db, _clean_delivered)
     assert await turn_scheduler.on_agent_message("g1", "w1", "halfway") == turn_scheduler.HELD
 
     first = turns_db.enqueue_turn("g1", "user", prompt="how is it going?")
-    prompt = await _run_turn(first)
+    notes = []
+    prompt = await _run_turn(first, notes)
     assert prompt.startswith("how is it going?")
     assert prompt.count("halfway") == 1
     assert "[held-peer-message" not in prompt
     assert _held("g1") == []
+    # #1618: the held message is shown once, attributed, instead of only
+    # riding the engine prompt where the user never sees it.
+    assert notes == [{"sender": "w1", "content": "halfway", "delivery": "delivered"}]
 
     second = turns_db.enqueue_turn("g1", "user", prompt="and now?")
-    assert "halfway" not in await _run_turn(second)
+    notes = []
+    assert "halfway" not in await _run_turn(second, notes)
+    assert notes == []
+
+
+def _events(session_id):
+    from app.db import session_events
+
+    return session_events.get_events(session_id)
+
+
+def _agent_notes(session_id):
+    return [
+        {k: e["payload"]["data"][k] for k in ("sender", "content", "delivery")}
+        for e in _events(session_id)
+        if e["event_type"] == "system.note" and e["payload"].get("subtype") == "agent_message"
+    ]
+
+
+async def test_a_steered_completion_receipt_shows_its_held_messages(mock_db, _clean_delivered):
+    """#1618: held messages that rode a steered task notification are shown as
+    one attributed agent message each when that steer is receipted."""
+    from fluid.context.peer import format_peer_message
+
+    from app.core import session_runtime
+    from app.core.turn_recorder import TurnRecorder
+
+    _seed("g8")
+    live = turns_db.enqueue_turn("g8", "user", prompt="ongoing", profile_id="profile")
+    turns_db.start_turn(live["id"], None, "runner")
+    held = turn_scheduler._join_held(
+        turn_scheduler._held_entry(format_peer_message("w1", "first").strip()),
+        turn_scheduler._held_entry(format_peer_message("w2", "second\nline").strip()),
+    )
+    runtime = session_runtime.SessionRuntime(live)
+    recorder = TurnRecorder("g8", "cmd", None, None, None)
+    recorder.turn_id = live["id"]
+
+    assert await runtime._on_task_notification_delivered(
+        recorder, {"frames": [], "task_ids": [], "held_peer_messages": held},
+    )
+    assert _agent_notes("g8") == [
+        {"sender": "w1", "content": "first", "delivery": "delivered"},
+        {"sender": "w2", "content": "second\nline", "delivery": "delivered"},
+    ]
 
 
 async def test_an_unpark_wake_carries_held_messages_once(mock_db, _clean_delivered):
@@ -305,28 +390,34 @@ async def test_a_steer_the_turn_never_delivers_hands_held_messages_to_the_wake(
     assert wake["prompt"].count("halfway") == 1
 
 
-async def test_a_message_after_the_unpark_is_claimed_is_not_held_for_the_deadline(
-    mock_db, _clean_delivered,
+@pytest.mark.parametrize("live_source", ["unpark", "user"])
+async def test_a_message_to_a_running_parked_session_queues_for_its_live_turn(
+    mock_db, _clean_delivered, live_source,
 ):
-    import asyncio
-    import time
-
+    """#1618: a live turn beside the park (the wake just claimed, or a user turn
+    running while background work continues) is a running receiver. The
+    message queues as one attributed agent message the live turn can take at
+    its next tool boundary; it is not held until that turn ends."""
     _parked("g6")
-    wake = _queued_unpark("g6", "w1")
-    # The wake is claimed; the park row has not settled yet.
-    assert turns_db.start_turn(wake["id"], None, "runner") is not None
+    if live_source == "unpark":
+        live = _queued_unpark("g6", "w1")
+    else:
+        live = turns_db.enqueue_turn("g6", "user", prompt="next", profile_id="profile")
+    # The live turn is claimed; the park row has not settled yet.
+    assert turns_db.start_turn(live["id"], None, "runner") is not None
 
-    assert await turn_scheduler.on_agent_message("g6", "w2", "late news") == turn_scheduler.HELD
-    rows = _held("g6")
-    assert all(float(r["fire_at"]) <= time.time() + 1 for r in rows)
-
-    carried = await turn_scheduler.fold_held_peer_messages_for_turn(
-        "g6", turns_db.get_turn(wake["id"]),
-    )
-    await asyncio.sleep(0.2)  # let an immediate promotion run if it won
-    queued = [t["prompt"] for t in turns_db.get_queued_turns("g6")]
-    assert (carried + "".join(queued)).count("late news") == 1
+    turn_id = await turn_scheduler.on_agent_message("g6", "w2", "late news")
+    assert turn_id not in (None, turn_scheduler.HELD)
     assert _held("g6") == []
+    (row,) = turns_db.get_queued_turns("g6")
+    assert row["id"] == turn_id and row["source"] == "agent_message"
+    assert row["payload"]["task_peer_sender"] == "w2"
+    assert row["payload"]["peer_message_content"] == "late news"
+    assert row["prompt"].count("late news") == 1
+    # Nothing is left for the live turn's start to fold in a second time.
+    assert await turn_scheduler.fold_held_peer_messages_for_turn(
+        "g6", turns_db.get_turn(live["id"]),
+    ) == ""
 
 
 async def test_held_message_defaults(mock_db, monkeypatch, _clean_delivered):
