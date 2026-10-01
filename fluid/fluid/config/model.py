@@ -304,6 +304,12 @@ class ContextConfig:
     # Tier-1 (tool-result trim) knobs.
     keep_recent_tool_results: int = 5
     min_result_chars: int = 2_000
+    # Render the input of an old call whose result is trimmed as a small JSON
+    # summary (CompactionConfig.elide_old_args). Off by default.
+    # TODO: fluid/config/loader.py does not pass this into the CompactionConfig
+    # it builds yet, so the key parses and round-trips here while the engine
+    # keeps the flag at its default.
+    elide_old_args: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ContextConfig:
@@ -322,6 +328,7 @@ class ContextConfig:
             tool_result_stub_chars=int(d.get("tool_result_stub_chars", 50_000)),
             keep_recent_tool_results=int(d.get("keep_recent_tool_results", 5)),
             min_result_chars=int(d.get("min_result_chars", 2_000)),
+            elide_old_args=bool(d.get("elide_old_args", False)),
         )
 
 
@@ -549,6 +556,7 @@ class HarnessConfig:
                 "tool_result_stub_chars": self.context.tool_result_stub_chars,
                 "keep_recent_tool_results": self.context.keep_recent_tool_results,
                 "min_result_chars": self.context.min_result_chars,
+                "elide_old_args": self.context.elide_old_args,
             },
             "hooks": [h.to_dict() for h in self.hooks],
             "providers": {
