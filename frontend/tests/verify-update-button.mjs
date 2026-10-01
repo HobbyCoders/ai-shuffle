@@ -117,6 +117,17 @@ async function harness(viewport, touch) {
 	check(run.errors.length === 0, 'no page errors', run.errors);
 	await run.context.close();
 
+	// 2b. An unreadable peer holds the restart and says why.
+	run = await open(all([{ ...self, phase: 'ready' }, { ...unraid, phase: 'unknown', supported: false }]));
+	await run.page.getByRole('button', { name: 'Check for updates' }).waitFor();
+	tip = await hover(run.page, button(run.page));
+	text = await tip.innerText();
+	check(text.includes('Restart waits for Unraid (Status unavailable)'), 'held summary names the unknown worker', text);
+	check(/Unraid\s+Status unavailable/.test(text), 'unknown worker row', text);
+	await inViewport(run.page, tip, 'held tooltip');
+	await shot(run.page, '2b-held');
+	await run.context.close();
+
 	// 3. Fresh profile, staged update, an older completed install on record: no pop.
 	for (const [label, completedAt] of [['old completion', 1_000_000], ['recent completion', 1_999_990]]) {
 		run = await open(all([{ ...self, phase: 'ready' }, { ...unraid, phase: 'ready' }], { operation: finished(completedAt) }));

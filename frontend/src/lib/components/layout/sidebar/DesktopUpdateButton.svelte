@@ -5,7 +5,7 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import { notify } from '$lib/stores/notifications';
 
-	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
 	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
@@ -42,7 +42,7 @@
 	const operation = $derived(snapshot?.operation);
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
-	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...classify(worker) })) ?? []);
+	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...classify(worker, snapshot!.update_all_workers) })) ?? []);
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
 	const downloading = $derived(targets.some(row => row.role === 'preparing'));
 	const available = $derived(targets.some(row => row.role === 'available'));
@@ -69,7 +69,9 @@
 	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
 	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
 
-	function classify(w: Worker): { role: Role; label: string } {
+	function classify(w: Worker, all: boolean): { role: Role; label: string } {
+		// A peer read only to verify an earlier all-worker install is outside a current-worker update.
+		if (!all && w.is_self === false) return { role: 'excluded', label: 'Not in scope; current worker only' };
 		if (!w.online) return { role: 'excluded', label: w.reason || 'Offline; not included' };
 		// A failed status read is not proof the worker sits this update out.
 		if (w.phase === 'unknown') return { role: 'unknown', label: 'Status unavailable' };
@@ -109,7 +111,7 @@
 		// while a newer update is staged or being prepared.
 		const recent = watched === done.id || (typeof done.completed_at === 'number' && typeof next.server_time === 'number'
 			&& next.server_time - done.completed_at < CELEBRATE_WINDOW_S);
-		if (!recent || ready || available || downloading) return;
+		if (!recent || staged || available || downloading) return;
 		clearTimeout(finishTimer); clearTimeout(hideTimer);
 		celebration = 'complete';
 		finishTimer = setTimeout(() => { celebration = 'leaving'; }, 1850);

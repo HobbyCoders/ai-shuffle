@@ -91,6 +91,11 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error")
         return {key: result[key] for key in fields if key in result}
+    except control.ControlRefused:
+        # The peer answered and declined (an older build without the updater
+        # endpoint answers 404): it is definitively outside this update.
+        return {"accepted": None, "reason": "Worker declined application updates; not included",
+                "supported": False, "phase": "unsupported"}
     except Exception:
         # "unknown", not "unsupported": an online worker whose status cannot be
         # read may still be preparing, so it must never count as excluded.

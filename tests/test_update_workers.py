@@ -130,6 +130,18 @@ def test_all_snapshot_handles_partial_failures_without_aborting(setup):
     assert result["workers"][2]["phase"] == "unsupported"
     assert "private endpoint" not in str(result)
 
+def test_peer_that_answers_with_a_refusal_is_excluded_not_unknown(setup):
+    # #1623: a peer that answers 4xx (e.g. an older build without the update
+    # endpoint) will never stage, so it must not hold restart as "unknown".
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    remote.side_effect = fleet.control.ControlRefused("Unknown control action")
+    result = asyncio.run(fleet.snapshot())
+    peer = result["workers"][1]
+    assert peer["phase"] == "unsupported" and not peer["supported"]
+    assert peer["reason"] == "Worker declined application updates; not included"
+
+
 A, B = "a" * 40, "b" * 40
 
 

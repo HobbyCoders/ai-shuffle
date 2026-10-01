@@ -357,3 +357,19 @@ it('celebrates a just-finished install once after the app restarts into it', asy
  view.unmount();render(DesktopUpdateButton);await waitFor(()=>expect(api.get).toHaveBeenCalledTimes(2));
  expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
 });
+it('does not let a peer outside a current-worker update hold or join the restart', async()=>{
+ // A peer read only to verify an earlier all-worker install stays out of a current-worker update.
+ api.get.mockResolvedValue({...state,workers:[{...worker,is_self:true,phase:'ready'},{...peer,is_self:false,phase:'unknown',supported:false}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Update and restart'});
+ expect(button.title).not.toContain('Restart waits');
+ expect(button.title).toContain('Unraid: Not in scope; current worker only');
+});
+it('never celebrates a recent completion while an update is staged but held for an unknown worker', async()=>{
+ api.get.mockResolvedValue({...justSettled,update_all_workers:true,workers:[{...worker,phase:'ready',version:'cccccccccccc',running_version:'b'.repeat(40)},{...peer,phase:'unknown',supported:false}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Check for updates'});
+ expect(button.title).toContain('Restart waits for Unraid');
+ expect(document.querySelector('.complete')).toBeNull();
+ expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
+});
