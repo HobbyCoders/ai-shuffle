@@ -1993,9 +1993,28 @@ def test_delegated_code_session_carries_the_tool_use_block():
 
     unrestricted = SessionOptions(model="opus")
     assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(unrestricted, None)
-    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
+    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
     assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(picked, None)
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK
+
+
+def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
+    from app.core.provider.harness_adapter import (
+        DELEGATED_TOOL_USE_BLOCK,
+        DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
+        _delegated_guidance_blocks,
+    )
+
+    # Bash is the only permitted way to search here, so the block must not
+    # forbid grep and find through it.
+    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
+    blocks = _delegated_guidance_blocks(picked, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in blocks
+    assert DELEGATED_TOOL_USE_BLOCK_NO_SEARCH in blocks
+    assert "grep" not in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+    assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+    globbed = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Glob"])
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(globbed, None)
 
 
 def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
@@ -2013,7 +2032,7 @@ def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
     # Without Edit the block would forbid the only permitted way to edit.
     read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
     assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(read_only, None)
-    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
+    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
     assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(shell_and_files, None)
     blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
     assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(blocked, None)

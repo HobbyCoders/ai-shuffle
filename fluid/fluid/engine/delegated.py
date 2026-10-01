@@ -307,6 +307,26 @@ def _cli_permission_mode(mode: str, cli_version: str | None) -> str:
 # both. A known older CLI keeps the old argv.
 _CLI_FLAGS_SINCE = "2.1.0"
 
+_ON_WINDOWS = os.name == "nt"
+
+
+def _root_outside_deliberate_sandbox(env: dict[str, str]) -> bool:
+    """Whether the CLI would refuse ``--allow-dangerously-skip-permissions``.
+
+    Mirrors CLI 2.1.285's ``isRootOutsideDeliberateSandbox``: not Windows,
+    uid 0, ``IS_SANDBOX`` not ``"1"`` and ``CLAUDE_CODE_BUBBLEWRAP`` unset in
+    the child's env. The CLI applies it to that flag as well as to a Bypass
+    launch and exits 1, so sending the flag there would stop every session,
+    not only Bypass ones.
+    """
+    if _ON_WINDOWS:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or getuid() != 0:
+        return False
+    return env.get("IS_SANDBOX") != "1" and not env.get("CLAUDE_CODE_BUBBLEWRAP")
+
+
 # The steer check reads at most this much of the end of a CLI transcript.
 _STEER_SCAN_BYTES = 8 * 1024 * 1024
 
@@ -316,9 +336,8 @@ def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, An
 
     The CLI writes every ``auto_mode`` attachment it adds to a turn into its
     transcript at ``<config>/projects/<slug>/<session id>.jsonl``. The slug is
-    derived from the working directory, so the file is found by glob. Only
-    entries after the last compact boundary count: a compaction drops older
-    attachments from the model's context. Blocking; run it off the loop.
+    derived from the working directory, so the file is found by glob. See
+    :func:`bash_first_steer_in_transcript`. Blocking; run it off the loop.
     """
     if not cli_session_id or any(c in cli_session_id for c in "/\\:") or ".." in cli_session_id:
         return None  # an id is a bare name; never let one walk the tree
@@ -327,7 +346,18 @@ def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, An
     ))
     if not paths:
         return None
-    path = max(paths, key=lambda p: os.path.getmtime(p))
+    return bash_first_steer_in_transcript(max(paths, key=lambda p: os.path.getmtime(p)))
+
+
+def bash_first_steer_in_transcript(path: str) -> dict[str, Any] | None:
+    """The bash-first ``auto_mode`` attachment in a CLI transcript, or None.
+
+    Only entries after the last compact boundary count: a compaction drops
+    older attachments from the model's context. The CLI adds the attachment
+    once per conversation, so a transcript written while the steer was on
+    keeps it on every ``--resume`` until the CLI compacts. Reads at most the
+    last ``_STEER_SCAN_BYTES``. Blocking; run it off the loop.
+    """
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         size = fh.tell()
@@ -1022,11 +1052,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += [
                 "--permission-mode", _cli_permission_mode(self.permission_mode, self.cli_version),
             ]
-            if not _cli_older_than(self.cli_version, _CLI_FLAGS_SINCE):
+            if not _cli_older_than(
+                self.cli_version, _CLI_FLAGS_SINCE,
+            ) and not _root_outside_deliberate_sandbox(self._child_env()):
                 # Makes Bypass selectable later without turning it on. The
                 # CLI refuses ``set_permission_mode bypassPermissions`` from a
                 # process launched in another mode unless this flag was given
                 # (``bypass_not_launched``), and a switch to Bypass then fails.
+                # Left off for a root-run CLI outside a sandbox, which exits
+                # on this flag: there only a later switch to Bypass fails,
+                # as a Bypass launch would.
                 argv += ["--allow-dangerously-skip-permissions"]
         # Route permission decisions to the harness: without this the headless
         # CLI never emits ``can_use_tool`` control_requests (it silently

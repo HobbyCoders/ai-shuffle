@@ -25,8 +25,8 @@ NOT acceptable — it would drop the CLI's session and re-prime its prompt cache
 So this module is a plain module-level cache with an explicit ingest point:
 
 * ``record_cli_tools(names)`` — called from the adapter's ``DelegatedSurface``
-  translation branch, i.e. once per CLI process start. Adds the announced names
-  to the cache.
+  translation branch. The CLI sends an init frame at the start of every turn,
+  so this runs once per turn; it adds the announced names to the cache.
 * ``cached_cli_tools()`` — what the adapter reads at argv-build time: every name
   seen so far plus ``KNOWN_CLI_TOOLS``.
 

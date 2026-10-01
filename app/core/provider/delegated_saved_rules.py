@@ -11,8 +11,10 @@ tool calls without that approver and use this lookup to keep the same order:
   own (in-cwd edits under Accept Edits, classifier approvals under Auto) never
   raise a prompt, so a saved Deny is enforced there. That covers the CLI's
   built-in tools only: ``DelegatedLoop._cli_pre_tool_use`` skips the
-  bridge-served ``mcp__fluid_bundled__*`` app tools, which the bridge checks
-  against fluid's permission engine and hooks, not these saved rules.
+  bridge-served ``mcp__fluid_bundled__*`` app tools. The bridge runs fluid's
+  hooks on those, but no permission engine (the adapter builds DelegatedLoop
+  without one), so a saved Deny on a bridged app tool is not enforced when
+  the CLI runs it without a prompt.
 
 Session rules are keyed by the app session id, the agent's rules by its
 profile id; the lookup is ``permission_handler.saved_rule``.

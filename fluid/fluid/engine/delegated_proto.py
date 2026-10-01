@@ -750,9 +750,10 @@ class StreamJsonMapper:
         if mix.bash_heavy:
             logger.warning(
                 "delegated turn did most of its file work through the shell: "
-                "bash_file_ops=%d dedicated_file_ops=%d model=%s. Claude Code's "
-                "bash-first steer may be on (the child env should carry "
-                "CLAUDE_CODE_THRIFTY_SONIC=0)",
+                "bash_file_ops=%d dedicated_file_ops=%d model=%s. The model "
+                "chose the shell over Read/Edit/Grep; a bash_first_steer "
+                "DelegatedDiagnostic on this session would mean Claude Code's "
+                "steer was attached despite the forced env",
                 mix.bash_file_ops, mix.dedicated_file_ops, model,
             )
 

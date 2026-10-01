@@ -367,12 +367,16 @@ What the child CLI is given, and what it is not:
   Only a CLI known to be older than 2.1.0 gets the text inline.
 - Every spawn passes `--allow-dangerously-skip-permissions`, so a session
   started in another mode can switch to `bypassPermissions` later. It does not
-  turn Bypass on.
+  turn Bypass on. The flag is left off when the CLI would run as root outside
+  a sandbox (POSIX uid 0 with neither `IS_SANDBOX=1` nor
+  `CLAUDE_CODE_BUBBLEWRAP` in the child env), because the CLI exits on it
+  there; such a session cannot switch to Bypass later.
 - The child always runs with `CLAUDE_CODE_THRIFTY_SONIC=0` (turns off the
   CLI's "do your work through Bash" steer in bypass and auto modes) and
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, in its process env and again in
-  the `env` block of `--settings`, so neither the host env nor a settings file
-  can change them. After each CLI process's first turn, Fluid checks the CLI's
+  the `env` block of `--settings`, so neither the host env nor a user, project
+  or local settings file can change them. A managed policy settings file is
+  applied after `--settings` and still can. After each CLI process's first turn, Fluid checks the CLI's
   transcript for a bash-first steer it attached anyway; a hit is logged as a
   warning and stored as a `DelegatedDiagnostic` event.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the

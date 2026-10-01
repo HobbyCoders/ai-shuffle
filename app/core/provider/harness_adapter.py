@@ -171,6 +171,11 @@ logger = logging.getLogger(__name__)
 
 _ENGINE_CLOSE_GRACE_SECONDS = 5.0
 
+# Fluid sessions this process already re-seeded because their CLI transcript
+# carried the bash-first steer (``_cli_reseed_reason``). Never re-seeded for
+# that reason twice.
+_STEER_RESEEDED: set = set()
+
 
 def _extra_opt(options: SessionOptions, key: str, default: Any = None) -> Any:
     """Read ``extra["fluid_<key>"]``, falling back to the legacy ``omni_<key>``.
@@ -536,20 +541,24 @@ class HarnessAdapter(ProviderAdapter):
                 disallowed_tools=delegated_blocked,
                 # The session's tool surface: the agent's ``allow`` list
                 # intersected with a file-agent worker's definition list (CE12).
-                # DelegatedLoop uses it twice: it filters the bundled bridge's
-                # tools, and it goes out (with permission_grants below) as
-                # --allowed-tools, which the CLI reads as permission grants, so
-                # a tool on an allow-mode surface runs without a can_use_tool
-                # prompt. The wall for the CLI's own tools is therefore the
-                # complement in --disallowed-tools above, and saved Deny rules
-                # are enforced by tool_policy (PreToolUse; see
-                # _delegated_policy_with_saved_rules). On the chat
-                # lane the CLI's Read is banned outright and reads go through
-                # the bundled attachment reader.
+                # DelegatedLoop uses it only to filter the bundled bridge's
+                # tools; it never reaches the CLI's argv. Being on an
+                # allow-mode surface is not a permission grant, so Bash, Read,
+                # Edit, Write and the rest still prompt in Ask mode. The wall
+                # for the CLI's own tools is the complement in
+                # --disallowed-tools above, and saved Deny rules are enforced
+                # by tool_policy (PreToolUse; see
+                # _delegated_policy_with_saved_rules). On the chat lane the
+                # CLI's Read is banned outright and reads go through the
+                # bundled attachment reader.
                 allowed_tools=_delegated_allowed(options),
-                # The app's safe MCP tools run unprompted: the SDK permission
-                # allowlist's in-proc entries the native leg rates ``safe``,
-                # in the CLI's spelling.
+                # The whole --allowed-tools list, so these run unprompted:
+                # the app's in-proc MCP tools the native leg rates ``safe``
+                # (in the CLI's spelling), the CLI's Glob and Grep and their
+                # bundled fallbacks on the code lane, and the web tools fluid
+                # rates safe (WebSearch; WebFetch keeps prompting, see
+                # _web_grants). Never Bash, Read or a file-writing
+                # tool; nothing in plan mode.
                 permission_grants=_delegated_permission_grants(options),
                 claude_cmd=claude_cmd,
                 # The CLI's hooks, forwarded into the same bus the native leg
@@ -1824,10 +1833,13 @@ class HarnessAdapter(ProviderAdapter):
         (in-cwd edits under Accept Edits, classifier approvals under Auto,
         every tool on an ``--allowed-tools`` grant), so neither the watched
         approver nor ``_answer_without_approver`` sees them. PreToolUse sees
-        every call to the CLI's built-in tools (fluid skips it for the
-        bridge-served ``mcp__fluid_bundled__*`` app tools, which the bridge
-        checks against the permission engine and hooks instead), so a saved
-        Deny on a built-in is enforced here: ``inner``'s denial
+        every call to the CLI's built-in tools, so a saved Deny on a built-in
+        is enforced here. fluid skips PreToolUse for the bridge-served
+        ``mcp__fluid_bundled__*`` app tools, and the bridge runs only fluid's
+        hooks on them: this adapter builds DelegatedLoop without a permission
+        engine, so a saved Deny on a bridged app tool is not enforced when the
+        CLI runs that tool without a prompt (a safe tool on --allowed-tools,
+        an Auto classifier approval). Order here: ``inner``'s denial
         (``_delegated_tool_policy``) wins, then unless the live mode is
         Bypass a saved Deny denies with "Denied by saved rule". A failed
         lookup denies too. A saved Allow grants nothing here; asks stay with
@@ -1939,6 +1951,24 @@ class HarnessAdapter(ProviderAdapter):
                 f"Claude Code transcript {handle}.jsonl does not end on the "
                 "session's latest prompts"
             )
+        # A transcript written by a worker without the steer override keeps
+        # the CLI's once-per-conversation bash-first attachment on every
+        # resume. Fluid's path has no attachments, so a re-seed drops it.
+        # Once per session per process: if the CLI attached it again (it no
+        # longer honours the override), re-seeding every connect would only
+        # throw away its prompt cache.
+        if fluid_session_id not in _STEER_RESEEDED:
+            from fluid.engine.delegated import bash_first_steer_in_transcript
+
+            steer = await asyncio.to_thread(
+                bash_first_steer_in_transcript, str(transcript)
+            )
+            if steer is not None:
+                _STEER_RESEEDED.add(fluid_session_id)
+                return (
+                    f"Claude Code transcript {handle}.jsonl carries the CLI's "
+                    "bash-first steer"
+                )
         return None
 
     async def _reseed_cli_session(
@@ -5596,6 +5626,20 @@ DELEGATED_TOOL_USE_BLOCK = (
     "Bash."
 )
 
+# The same rule for a surface with neither Grep nor Glob: there the shell is
+# the only permitted way to search, so the block leaves searching to Bash.
+DELEGATED_TOOL_USE_BLOCK_NO_SEARCH = (
+    "# Tool use on this session\n"
+    "Use Claude Code's dedicated tools for file work: Read to read files "
+    "(offset and limit for large ones), Edit and Write to change files, "
+    "NotebookEdit for notebooks. Keep Bash for searching, git, gh, builds, "
+    "tests, package managers and running scripts. Do not read or edit files "
+    "with cat, head, tail, sed, awk, echo redirection, heredocs or inline "
+    "scripts. This holds even if another instruction (for example one "
+    "beginning \"While bypass permissions mode is active\" or \"While auto "
+    "mode is active\") says to do file work through Bash."
+)
+
 
 def _joined(names: List[str]) -> str:
     """``A``, ``A and B``, ``A, B and C``."""
@@ -5661,7 +5705,13 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     if _session_mode(options) != "chat" and (
         permitted("Bash") or permitted("PowerShell")
     ) and permitted("Read") and permitted("Edit"):
-        blocks.append(DELEGATED_TOOL_USE_BLOCK)
+        # The full block forbids grep/find through Bash, so it needs a
+        # permitted Grep or Glob to search with.
+        blocks.append(
+            DELEGATED_TOOL_USE_BLOCK
+            if permitted("Grep") or permitted("Glob")
+            else DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+        )
     notes: List[str] = []
     # The bundled Glob/Grep are only registered where the CLI may lack its own
     # (_registers_bundled_search), so the note exists only there.

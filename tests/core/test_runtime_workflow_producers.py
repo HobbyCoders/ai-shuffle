@@ -1,4 +1,5 @@
 """The query->SDK boundary->full prompt uses runtime bindings, not permissions."""
+import dataclasses
 from unittest.mock import AsyncMock
 
 import pytest
@@ -69,7 +70,12 @@ def test_delegated_preset_keeps_automatic_guidance_and_profile_text(tmp_path):
     options = SessionOptions(model="fake", cwd=str(tmp_path), tool_allowlist=["Read", "Monitor"])
     options.extra["automatic_workflows"] = True
     registry = ToolRegistry()
-    for module in (read, monitor): registry.register_builtin(module.SPEC, module.handler)
+    registry.register_builtin(read.SPEC, read.handler)
+    # The delegated leg serves Monitor only through the bundled bridge, as
+    # mcp__builtins__Monitor, so register it under that name.
+    registry.register_builtin(
+        dataclasses.replace(monitor.SPEC, name="mcp__builtins__Monitor"), monitor.handler,
+    )
     text = ha._delegated_append_text("USER", options, registry)
     assert "USER" in text and "belong in Monitor" in text
     assert "# Subagent delegation" not in text

@@ -102,6 +102,32 @@ def test_the_bypass_flag_is_left_off_only_for_a_known_older_cli(version, expecte
     assert (_ALLOW_BYPASS in loop._build_argv()) is expected
 
 
+@pytest.mark.parametrize("env,expected", [
+    ({}, False),
+    ({"IS_SANDBOX": "1"}, True),
+    ({"IS_SANDBOX": "yes"}, False),
+    ({"CLAUDE_CODE_BUBBLEWRAP": "1"}, True),
+])
+def test_a_root_run_cli_outside_a_sandbox_gets_no_bypass_flag(monkeypatch, env, expected) -> None:
+    # CLI 2.1.285 exits 1 on --allow-dangerously-skip-permissions as root
+    # outside IS_SANDBOX=1 or bubblewrap, so the flag would stop every session.
+    monkeypatch.setattr(delegated_mod, "_ON_WINDOWS", False)
+    monkeypatch.setattr(delegated_mod.os, "getuid", lambda: 0, raising=False)
+    for name in ("IS_SANDBOX", "CLAUDE_CODE_BUBBLEWRAP"):
+        monkeypatch.delenv(name, raising=False)
+    loop = DelegatedLoop(store=MemoryStore(), model="m", permission_mode="default", env=env)
+    argv = loop._build_argv()
+    assert (_ALLOW_BYPASS in argv) is expected
+    assert _flag(argv, "--permission-mode") == "default"
+
+
+def test_a_non_root_posix_cli_keeps_the_bypass_flag(monkeypatch) -> None:
+    monkeypatch.setattr(delegated_mod, "_ON_WINDOWS", False)
+    monkeypatch.setattr(delegated_mod.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.delenv("IS_SANDBOX", raising=False)
+    assert _ALLOW_BYPASS in DelegatedLoop(store=MemoryStore(), model="m")._build_argv()
+
+
 async def test_a_session_started_in_ask_mode_switches_to_bypass(tmp_path) -> None:
     loop, record = _scripted(tmp_path, permission_mode="default")
     try:

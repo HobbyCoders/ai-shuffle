@@ -525,3 +525,56 @@ def test_a_long_cwd_without_a_cli_dir_keeps_the_old_name(tmp_path, _short_dir_li
         [{"type": "user"}], "cli-uuid", long_cwd, tmp_path,
     )
     assert path.parent.name == get_project_dir_name(long_cwd)
+
+
+# ─── a transcript carrying the bash-first steer ──────────────────────────────
+
+
+_STEER = {"type": "attachment", "attachment": {
+    "type": "auto_mode", "reminderType": "full", "bashFirst": True,
+}}
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_with_the_bash_first_steer_is_reseeded_once(monkeypatch, tmp_path):
+    """A worker without CLAUDE_CODE_THRIFTY_SONIC=0 left the CLI's
+    once-per-conversation steer in the transcript; resuming it would keep the
+    model on Bash. Fluid's path carries no attachments, so a re-seed drops
+    it, but only once per session per process."""
+    monkeypatch.setattr(ha, "_STEER_RESEEDED", set())
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user([{"type": "text", "text": "My codename is PELICAN"}]),
+        _STEER,
+        _assistant("Noted: PELICAN"),
+    ])
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "new-uuid"
+    assert len(calls) == 1
+
+    # The stored handle still names a steered transcript (the fake wrote
+    # nothing); a second connect resumes it rather than re-seed again.
+    await store.set_cli_session_id(SID, "cli-handle")
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_before_a_compaction_is_not_a_reseed_reason(monkeypatch, tmp_path):
+    monkeypatch.setattr(ha, "_STEER_RESEEDED", set())
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    _write_cli_jsonl(tmp_path, "cli-handle", [
+        _STEER,
+        {"type": "system", "subtype": "compact_boundary"},
+        _user([{"type": "text", "text": "My codename is PELICAN"}]),
+        _assistant("Noted: PELICAN"),
+    ])
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-handle"

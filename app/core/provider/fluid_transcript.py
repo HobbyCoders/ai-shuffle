@@ -918,7 +918,7 @@ def build_cli_transcript_entries(
 #: to this many characters and gets ``-<hash>`` appended (Claude Code 2.1.285).
 CLI_PROJECT_DIR_MAX = 200
 
-#: How much of a CLI transcript's end :func:`cli_transcript_prompts` reads.
+#: How much of a CLI transcript's end :func:`cli_transcript_prompt_tail` reads.
 CLI_TRANSCRIPT_TAIL_BYTES = 1024 * 1024
 
 _CLI_HANDLE_CHARS = frozenset(
@@ -1033,14 +1033,6 @@ def prompt_text(content: Any) -> Optional[str]:
             texts.append(block.get("text") or "")
     joined = "\n".join(texts).strip()
     return joined or None
-
-
-def cli_transcript_prompts(
-    path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
-) -> List[str]:
-    """The typed user prompts in the last ``tail_bytes`` of a CLI transcript,
-    oldest first. See :func:`cli_transcript_prompt_tail`."""
-    return cli_transcript_prompt_tail(path, tail_bytes)[0]
 
 
 def cli_transcript_prompt_tail(
