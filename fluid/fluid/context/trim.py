@@ -30,12 +30,20 @@ drives it through :meth:`ToolResultTrimmer.trim_batch`.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from functools import lru_cache
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.steer_render import (
+    CURRENT_RENDER_VERSION,
+    RENDER_VERSION_LEGACY,
+    SteerRenderConfig,
+    render_steers,
+)
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode
 
@@ -176,7 +184,243 @@ def _full_text(block: Any) -> str:
     return "\n".join(parts)
 
 
-def describe_trimmed_call(call: Any, full_text: str) -> str:
+# ── Code-mode cells ──────────────────────────────────────────────────────
+# A run_python cell's input is Python that calls tools inside the kernel, and
+# its JSON form is often half imports. Render version 2 summarizes it instead:
+# the first line of real code, the tools it calls with short argument hints,
+# the paths and commands it names, and which ToolSearch and Skill loads still
+# hold. Everything here is a pure function of the code text.
+
+CELL_ARG_CAP = 60
+CELL_FIRST_LINE_CAP = 100
+CELL_LAST_LINE_CAP = 160
+_CELL_LITERAL_CAP = 120
+_CELL_MAX_CALLS = 8
+_CELL_MAX_LITERALS = 6
+# Tools a cell may call by bare name because an earlier cell imported them.
+# Any other bare name counts only when this cell imports it from ``tools``,
+# so ``Path(...)`` or ``Counter(...)`` are never taken for a tool call.
+_KNOWN_TOOLS = frozenset({
+    "AskUser", "Bash", "Edit", "Forget", "GetUsage", "Glob", "Grep",
+    "HistoryExpand", "HistorySearch", "Ledger", "ListAgents", "Monitor",
+    "Note", "Read", "Recall", "Remember", "SendMessage", "SessionSearch",
+    "SessionView", "Skill", "Task", "ToolSearch", "WebFetch", "WebSearch",
+    "Write",
+})
+_PATH_KEYS = ("file_path", "path", "notebook_path")
+_COMMAND_KEYS = ("command",)
+# What a tool's first positional string argument is, for the tools whose
+# first argument is a path, a command or a load target.
+_POSITIONAL_KEY = {
+    "Read": "file_path", "Write": "file_path", "Edit": "file_path",
+    "Bash": "command", "Skill": "name", "ToolSearch": "query",
+}
+_TOOLS_ATTR_CALL_RE = re.compile(r"\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_BARE_CALL_RE = re.compile(r"(?<![.\w])([A-Z][A-Za-z]+)\s*\(")
+_CELL_FOOTER_PREFIX = "[refs created this cell"
+
+
+@dataclass(frozen=True)
+class CellCall:
+    """One tool call found in a cell's source."""
+
+    name: str
+    # The call's argument source, whitespace-collapsed and clipped.
+    args: str
+    # (keyword, value) for every string-literal argument, with the first
+    # positional one named after ``_POSITIONAL_KEY``.
+    literals: tuple[tuple[str, str], ...] = ()
+
+    def values(self) -> dict[str, str]:
+        return dict(self.literals)
+
+
+def _clip_one_line(text: str, cap: int) -> str:
+    text = " ".join(text.split())
+    return text[:cap] + ("…" if len(text) > cap else "")
+
+
+def _first_code_line(code: str) -> str:
+    """The first line that is not blank, a comment or an import."""
+    first = ""
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        first = first or stripped
+        if not stripped.startswith(("import ", "from ")):
+            return stripped
+    return first
+
+
+def _tool_name(func: ast.expr, aliases: dict[str, str], modules: set[str]) -> str:
+    if isinstance(func, ast.Name):
+        if func.id in aliases:
+            return aliases[func.id]
+        return func.id if func.id in _KNOWN_TOOLS else ""
+    chain: list[str] = []
+    while isinstance(func, ast.Attribute):
+        chain.append(func.attr)
+        func = func.value
+    if isinstance(func, ast.Name) and func.id in modules and chain:
+        return chain[0].split("__")[-1]
+    return ""
+
+
+def cell_calls(code: str) -> list[CellCall]:
+    """The tool calls in a cell's source, in source order.
+
+    A cell that does not parse still names its calls, from the ``tools.X(``
+    and known bare-name spellings, without argument hints.
+    """
+    return list(_cell_calls(code))
+
+
+# Digests and epoch stubs re-render on every request, and an epoch can fold
+# hundreds of cells; parsing each one again every time costs whole seconds in
+# a long session. The result is a pure function of the code text, so it is
+# cached.
+@lru_cache(maxsize=4096)
+def _cell_calls(code: str) -> tuple[CellCall, ...]:
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        names = _TOOLS_ATTR_CALL_RE.findall(code) + [
+            n for n in _BARE_CALL_RE.findall(code) if n in _KNOWN_TOOLS
+        ]
+        return tuple(CellCall(name=n.split("__")[-1], args="…")
+                     for n in dict.fromkeys(names))
+    aliases: dict[str, str] = {}
+    modules = {"tools"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and (
+            node.module == "tools" or node.module.startswith("tools.")
+        ):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name.split("__")[-1]
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tools" and alias.asname:
+                    modules.add(alias.asname)
+    found: list[tuple[int, int, CellCall]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _tool_name(node.func, aliases, modules)
+        if not name:
+            continue
+        whole = ast.get_source_segment(code, node) or ""
+        func = ast.get_source_segment(code, node.func) or ""
+        args = whole[len(func):].strip() if func and whole.startswith(func) else ""
+        args = args[1:-1] if args.startswith("(") and args.endswith(")") else "…"
+        literals: list[tuple[str, str]] = []
+        if (
+            node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and name in _POSITIONAL_KEY
+        ):
+            literals.append((_POSITIONAL_KEY[name], node.args[0].value))
+        for kw in node.keywords:
+            if (
+                kw.arg
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                literals.append((kw.arg, kw.value.value))
+        found.append((
+            node.lineno, node.col_offset,
+            CellCall(name=name, args=_clip_one_line(args, CELL_ARG_CAP),
+                     literals=tuple(literals)),
+        ))
+    return tuple(call for _, _, call in sorted(found, key=lambda f: (f[0], f[1])))
+
+
+def loaded_by(name: str, values: dict[str, Any]) -> list[str]:
+    """What a ToolSearch or Skill call loaded, as display names."""
+    if name == "Skill":
+        skill = str(values.get("name") or "").strip()
+        return [skill] if skill else []
+    if name == "ToolSearch":
+        query = str(values.get("query") or "").strip()
+        if query.startswith("select:"):
+            return [n.strip().split("__")[-1]
+                    for n in query[len("select:"):].split(",") if n.strip()]
+        return [f"{query!r} matches"] if query else []
+    return []
+
+
+def describe_loaded(loads: Iterable[tuple[str, str]]) -> str:
+    """``Skill a, b; ToolSearch x, y`` from (tool, item) pairs, deduped."""
+    grouped: dict[str, list[str]] = {}
+    for tool, item in loads:
+        items = grouped.setdefault(tool, [])
+        if item not in items:
+            items.append(item)
+    return "; ".join(
+        f"{tool} {', '.join(items[:_MAX_NAMED])}"
+        + (f" (+{len(items) - _MAX_NAMED} more)" if len(items) > _MAX_NAMED else "")
+        for tool, items in grouped.items()
+    )
+
+
+@lru_cache(maxsize=4096)
+def summarize_cell(code: str) -> str:
+    """One line saying what a run_python cell did, for digests and
+    placeholders. Pure: the same code always gives the same line."""
+    parts: list[str] = []
+    first = _first_code_line(code)
+    if first:
+        parts.append(f"first line: {_clip_one_line(first, CELL_FIRST_LINE_CAP)}")
+    calls = cell_calls(code)
+    if calls:
+        shown = list(dict.fromkeys(f"{c.name}({c.args})" for c in calls))
+        more = (f" (+{len(shown) - _CELL_MAX_CALLS} more)"
+                if len(shown) > _CELL_MAX_CALLS else "")
+        parts.append(f"calls {', '.join(shown[:_CELL_MAX_CALLS])}{more}")
+        hints = " ".join(shown[:_CELL_MAX_CALLS])
+        for label, keys, sep in (("paths", _PATH_KEYS, ", "),
+                                 ("commands", _COMMAND_KEYS, " | ")):
+            # A literal the call hint already shows in full is not repeated.
+            values = [
+                _clip_one_line(v, _CELL_LITERAL_CAP)
+                for c in calls for k, v in c.literals
+                if k in keys and v.strip() and v not in hints
+            ]
+            values = list(dict.fromkeys(values))
+            if values:
+                parts.append(f"{label}: {sep.join(values[:_CELL_MAX_LITERALS])}")
+        loaded = describe_loaded(
+            (c.name, item) for c in calls for item in loaded_by(c.name, c.values())
+        )
+        if loaded:
+            parts.append(f"still loaded: {loaded}")
+    return "; ".join(parts) if parts else "(empty cell)"
+
+
+def last_output_line(text: str, cap: int = CELL_LAST_LINE_CAP) -> str:
+    """The last printed line of a result, skipping the refs footer."""
+    for line in reversed((text or "").splitlines()):
+        line = " ".join(line.split())
+        if line and not line.startswith(_CELL_FOOTER_PREFIX):
+            return line[:cap] + ("…" if len(line) > cap else "")
+    return ""
+
+
+# A traceback in the last TRACEBACK_TAIL_CHARS of a successful result is an
+# error the model printed rather than raised. It is held back from trimming
+# one turn longer than other output (see ToolResultTrimmer._eligible).
+TRACEBACK_TAIL_CHARS = 2_000
+_TRACEBACK_MARK = "Traceback (most recent call last)"
+
+
+def has_traceback_tail(block: Any) -> bool:
+    return _TRACEBACK_MARK in _full_text(block)[-TRACEBACK_TAIL_CHARS:]
+
+
+def describe_trimmed_call(
+    call: Any, full_text: str, *, render_version: int = RENDER_VERSION_LEGACY,
+) -> str:
     """What a trimmed result WAS, in terms the model can act on.
 
     A bare "trimmed" placeholder makes the model redo work it can recover
@@ -187,6 +431,10 @@ def describe_trimmed_call(call: Any, full_text: str) -> str:
     * a Read says which file and which lines were dropped;
     * a ToolSearch restates the tool names it loaded — they are still
       loaded; reloading costs the schema text again.
+
+    From render version 2 a code-mode cell also says what it ran (see
+    ``summarize_cell``), naming the Read, Skill and ToolSearch calls inside
+    it, and how its output ended. Version 1 output is unchanged.
     """
     name = getattr(call, "name", None)
     input = getattr(call, "input", None) or {}
@@ -197,14 +445,24 @@ def describe_trimmed_call(call: Any, full_text: str) -> str:
     # ``_refs[3]`` in its text must not be mistaken for one.
     is_cell = leaf == "run_python" or (call is None and "refs created this cell" in (full_text or ""))
     refs = list(dict.fromkeys(_REF_RE.findall(full_text or ""))) if is_cell else []
+    cell = ""
+    if render_version > RENDER_VERSION_LEGACY and leaf == "run_python":
+        code = input.get("code")
+        if isinstance(code, str) and code.strip():
+            cell = f" This cell ran: {summarize_cell(code)}."
+        last = last_output_line(full_text)
+        if last:
+            cell += f' Its output ended: "{last}".'
     if refs:
         shown = ", ".join(f"_refs[{r}]" for r in refs[:_MAX_NAMED])
         more = f" (+{len(refs) - _MAX_NAMED} more)" if len(refs) > _MAX_NAMED else ""
-        return (
+        return cell + (
             f" The tool results this cell produced are still in the kernel as "
             f"{shown}{more} (unless the kernel restarted since) — slice those "
             f"before reaching for HistoryExpand or re-running the tools."
         )
+    if cell:
+        return cell
     if leaf == "Read":
         path = str(input.get("file_path") or "?")
         offset = input.get("offset")
@@ -248,9 +506,10 @@ def describe_trimmed_call(call: Any, full_text: str) -> str:
 def _placeholder(
     node_id: str, chars: int, head: str = "", *, recall: bool = True,
     call: Any = None, full_text: str = "",
+    render_version: int = RENDER_VERSION_LEGACY,
 ) -> Text:
     excerpt = f' It began: "{head}"' if head else ""
-    what = describe_trimmed_call(call, full_text)
+    what = describe_trimmed_call(call, full_text, render_version=render_version)
     route = (
         f'recover it verbatim with HistoryExpand("{node_id}") when any detail matters'
         if recall
@@ -368,6 +627,14 @@ class ToolResultTrimmer:
     # Text verbatim, so the 57-line test summary that shared a ToolResultBlock
     # with a PNG stops leaving context with it.
     _image_consumed: set = field(default_factory=set)
+    # The render version new trim decisions are made under (see
+    # fluid.context.steer_render). The owning Compactor sets it from its own
+    # config, together with the receipt caps in ``steer_render``.
+    render_version: int = CURRENT_RENDER_VERSION
+    steer_render: SteerRenderConfig = field(default_factory=SteerRenderConfig)
+    # Render version of each rehydrated trim decision. A pair missing here
+    # was decided by this process and renders at ``render_version``.
+    _trim_versions: dict = field(default_factory=dict)
 
     @staticmethod
     def _has_image(block: ToolResultBlock) -> bool:
@@ -440,19 +707,26 @@ class ToolResultTrimmer:
         nodes: list[SessionNode],
         trimmed: set[tuple[str, str]] | None = None,
         consumed: set[tuple[str, str]] | None = None,
+        calls: dict[str, Any] | None = None,
     ) -> list[Message]:
+        """``calls`` maps tool_use_id to its call for a caller that renders
+        one node at a time (the Compactor). Without it the map is built from
+        ``nodes``. A version 1 decision always uses the map built from
+        ``nodes``, so it renders exactly as it did before the map was passed.
+        """
         trimmed = self._trimmed if trimmed is None else trimmed
         consumed = self._image_consumed if consumed is None else consumed
         if not trimmed and not consumed:
             return [n.message for n in nodes]
         # The call behind each result, so a placeholder can say what the
         # result was (see describe_trimmed_call).
-        calls: dict[str, Any] = {}
+        local_calls: dict[str, Any] = {}
         for node in nodes:
             if node.message.role == "assistant":
                 for block in node.message.content:
                     if isinstance(block, ToolUseBlock):
-                        calls[block.id] = block
+                        local_calls[block.id] = block
+        call_map = local_calls if calls is None else calls
         out: list[Message] = []
         for node in nodes:
             message = node.message
@@ -476,17 +750,26 @@ class ToolResultTrimmer:
                             recall=self.config.recall_tools,
                         )
                     else:
+                        version = self._trim_versions.get(key, self.render_version)
+                        source = (
+                            local_calls if version <= RENDER_VERSION_LEGACY
+                            else call_map
+                        )
                         rendered = _placeholder(
                             node.node_id, block_chars(block), block_head(block),
                             recall=self.config.recall_tools,
-                            call=calls.get(block.tool_use_id),
+                            call=source.get(block.tool_use_id),
                             full_text=_full_text(block),
+                            render_version=version,
                         )
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
                             content=[rendered]
-                            + [Text(s.render()) for s in block.delivered_steers],
+                            + [Text(s) for s in render_steers(
+                                block.delivered_steers,
+                                self._steer_config(key), node=node,
+                            )],
                             is_error=block.is_error,
                             delivered_steers=block.delivered_steers,
                             delivery_metadata_version=block.delivery_metadata_version,
@@ -517,6 +800,16 @@ class ToolResultTrimmer:
                 if changed else message
             )
         return out
+
+    def _steer_config(self, key: tuple[str, str]) -> SteerRenderConfig | None:
+        """How the steers on trimmed result ``key`` render: None (verbatim)
+        for a version-1 decision, receipts for a later one."""
+        version = self._trim_versions.get(key, self.render_version)
+        if version <= RENDER_VERSION_LEGACY:
+            return None
+        if self.steer_render.recall_tools != self.config.recall_tools:
+            return replace(self.steer_render, recall_tools=self.config.recall_tools)
+        return self.steer_render
 
     def _eligible(
         self,
@@ -568,12 +861,29 @@ class ToolResultTrimmer:
             else keep_recent
         )
         candidates = found[:-keep] if keep else found
+        # A traceback printed by a successful call stays one extra turn: it is
+        # held until two turn starts follow it. Overflow recovery's explicit
+        # keep_recent=0 waives the hold.
+        held: set[tuple[str, str]] = set()
+        starts = 0
+        for node in reversed(nodes) if keep_recent != 0 else ():
+            if starts < 2 and node.message.role == "user":
+                held.update(
+                    (node.node_id, b.tool_use_id) for b in node.message.content
+                    if isinstance(b, ToolResultBlock) and not b.is_error
+                    and has_traceback_tail(b)
+                )
+            if node.message.role == "user" and any(
+                not isinstance(b, ToolResultBlock) for b in node.message.content
+            ):
+                starts += 1
         return [
             (nid, tuid)
             for nid, tuid, chars, is_error in candidates
             if not is_error
             and chars >= self.config.min_result_chars
             and (nid, tuid) not in self._trimmed
+            and (nid, tuid) not in held
         ]
 
     def trim_batch(
@@ -619,9 +929,22 @@ class ToolResultTrimmer:
         self._image_consumed.update(newly)
         return newly
 
-    def mark_trimmed(self, pairs: Iterable[tuple[str, str]]) -> None:
-        """Re-apply previously persisted trim decisions (resume rehydration)."""
-        self._trimmed.update(tuple(p) for p in pairs)
+    def mark_trimmed(
+        self,
+        pairs: Iterable[tuple[str, str]],
+        *,
+        render_version: int = RENDER_VERSION_LEGACY,
+    ) -> None:
+        """Re-apply previously persisted trim decisions (resume rehydration).
+
+        ``render_version`` is the version the decision was persisted under;
+        events written before the field existed are version 1 and keep
+        rendering exactly as they did.
+        """
+        for pair in pairs:
+            key = tuple(pair)
+            self._trimmed.add(key)
+            self._trim_versions[key] = render_version
 
     def mark_image_consumed(self, pairs: Iterable[tuple[str, str]]) -> None:
         """Re-apply persisted image-consumption decisions (resume)."""

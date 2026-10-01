@@ -57,12 +57,24 @@ from fluid.context.cache_signal import (
     Zones,
     decide_schedule,
 )
+from fluid.context.peer import PEER_OPEN_PREFIX
 from fluid.context.recall import parse_ref
+from fluid.context.steer_render import (
+    CURRENT_RENDER_VERSION,
+    RENDER_VERSION_LEGACY,
+    SteerRenderConfig,
+    render_steers,
+)
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
     block_chars,
+    cell_calls,
+    describe_loaded,
     estimate_tokens_of_messages,
+    last_output_line,
+    loaded_by,
+    summarize_cell,
 )
 from fluid.messages import (
     Image,
@@ -77,6 +89,19 @@ SPAN_DIGEST = "digest"
 EPOCH_STUB = "epoch"
 
 _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+# Version 2 digests and epoch stubs carry this line under their header, so a
+# compacted region never reads as more current than what the user said last.
+OUTRANK_LINE = (
+    "Latest user message outranks this; HistoryExpand a node before relying "
+    "on an exact value."
+)
+OUTRANK_LINE_NO_RECALL = (
+    "Latest user message outranks this; do not rely on an exact value from it."
+)
+# Files and loads an epoch stub names, at most.
+_EPOCH_MAX_PATHS = 12
+_EPOCH_PATH_CAP = 120
 
 
 @dataclass(kw_only=True)
@@ -134,8 +159,11 @@ class CompactionConfig:
     # pure-function-of-size contract as the user-attachment stub; errors are
     # never stubbed (losing an error message is how doom loops start).
     tool_result_stub_chars: int = 50_000
-    # Digest extraction caps.
+    # Digest extraction caps. ``user_text_cap`` covers user text that is not
+    # a real user's request (wake and harness notices); from render version 2
+    # a real user's turn-start text gets ``user_turn_text_cap`` instead.
     user_text_cap: int = 600
+    user_turn_text_cap: int = 2_000
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
@@ -244,6 +272,26 @@ class CompactionConfig:
     # tool calls on the path, so a replay derives the same ones.
     sweep_pin_tokens: int = 16_000
     sweep_min_reclaim_tokens: int = 2_000
+    # Render version new decisions are made under (fluid.context.steer_render).
+    # Persisted decisions keep the version they were made under, so raising
+    # this never re-renders an old session. 1 is the original renderer.
+    render_version: int = CURRENT_RENDER_VERSION
+    # Version 2 steer receipts: a harness notice (origin "system") at least
+    # this long renders, once compacted, as its sender, a preview of this many
+    # chars and a HistoryExpand ref. User and peer steers stay verbatim.
+    steer_receipt_chars: int = 1_000
+    steer_receipt_preview_chars: int = 300
+    # Version 2 epoch stubs pin the folded turns' user requests verbatim
+    # (each at most ``user_turn_text_cap``) within this many tokens, counted
+    # at 4 chars per token like every other estimate here.
+    intent_pin_tokens: int = 4_000
+
+    def steer_render(self) -> SteerRenderConfig:
+        return SteerRenderConfig(
+            receipt_min_chars=self.steer_receipt_chars,
+            receipt_preview_chars=self.steer_receipt_preview_chars,
+            recall_tools=self.recall_tools,
+        )
 
 
 # TurnStarted sources that are wakes rather than a person's message. Their
@@ -323,6 +371,13 @@ class Promotion:
     token_basis: str = ""
     # The measured next-prompt size the decision used; 0 with an estimate.
     measured_prompt_tokens: int = 0
+    # Renderer version the decision was made under (fluid.context.steer_render).
+    # The default is the current version, because the promotions that omit it
+    # are the ones Compactor.apply and escalate make now. A decision read back
+    # from a ContextCompaction event passes the event's value, which is 1 for
+    # an event written before the field existed, so it renders as it did then.
+    # Compactor.rehydrate never replays above the compactor's own version.
+    render_version: int = CURRENT_RENDER_VERSION
 
 
 def describe_promotions(
@@ -442,6 +497,82 @@ def strip_system_reminders(text: str) -> str:
     return _REMINDER_RE.sub("", text).strip()
 
 
+def _user_text(node: SessionNode) -> str:
+    """A user node's own text, harness reminders stripped."""
+    return strip_system_reminders(
+        "".join(b.text for b in node.message.content if isinstance(b, Text))
+    )
+
+
+def is_wake_text(text: str) -> bool:
+    """True for turn-start text the harness wrote rather than the user.
+
+    Judged from the stored text alone, because a SessionNode records no turn
+    source: an empty text once reminders are stripped (fluid's own unpark
+    wake is one reminder block), a peer's message (the agent-message marker)
+    and a task notification (the host's ``<task-notification>`` substring
+    convention). None of these is a request that governs the work.
+    """
+    return (
+        not text
+        or text.startswith(PEER_OPEN_PREFIX)
+        or "<task-notification>" in text
+    )
+
+
+def _clip_verbatim(text: str, cap: int) -> str:
+    """Like ``_clip`` but keeps the text's own line breaks and spacing."""
+    if len(text) <= cap:
+        return text
+    return f"{text[:cap]}… (+{len(text) - cap} chars)"
+
+
+def _intent_pin(
+    spans: list[list[SessionNode]], config: CompactionConfig
+) -> list[str]:
+    """The pinned intent block of a version 2 epoch stub.
+
+    The folded run's first real user request comes first, then the later
+    real user requests newest-first, each clipped to ``user_turn_text_cap``,
+    while they fit in ``intent_pin_tokens``. Wake and harness notices are
+    left out, so they can never push a user's request out of the budget.
+    """
+    requests = [
+        (node.node_id, text)
+        for span in spans
+        for node in span
+        if is_turn_start(node)
+        and not is_wake_text(text := _user_text(node))
+    ]
+    if not requests:
+        return []
+    cap = config.user_turn_text_cap
+    budget = config.intent_pin_tokens * 4
+    first_id, first_text = requests[0]
+    first = _clip_verbatim(first_text, cap)
+    budget -= len(first)
+    lines = [
+        "Pinned intent: the user's own requests in these folded turns, "
+        "verbatim (a later user message outranks them).",
+        f"original request ({first_id}):",
+        first,
+    ]
+    later = requests[1:][::-1]
+    for i, (node_id, text) in enumerate(later):
+        clipped = _clip_verbatim(text, cap)
+        if len(clipped) > budget:
+            omitted = len(later) - i
+            lines.append(
+                f"({omitted} older request(s) not pinned for space"
+                + ("; HistoryExpand the epoch to read them)"
+                   if config.recall_tools else ")")
+            )
+            break
+        budget -= len(clipped)
+        lines.extend([f"later request ({node_id}):", clipped])
+    return lines
+
+
 def _clip(text: str, cap: int) -> str:
     text = " ".join(text.split())  # collapse newlines/runs for one-line-ness
     if len(text) <= cap:
@@ -457,13 +588,90 @@ def _arg_hint(input_: dict[str, Any], cap: int) -> str:
     return rendered[:cap] + ("…" if len(rendered) > cap else "")
 
 
+def _outrank_line(config: CompactionConfig) -> str:
+    return OUTRANK_LINE if config.recall_tools else OUTRANK_LINE_NO_RECALL
+
+
+def _leaf(name: str) -> str:
+    return str(name or "").split("__")[-1]
+
+
+def _cell_code(block: ToolUseBlock) -> str | None:
+    """A run_python call's code, or None for any other call."""
+    if _leaf(block.name) != "run_python" or not isinstance(block.input, dict):
+        return None
+    code = block.input.get("code")
+    return code if isinstance(code, str) else ""
+
+
+def _call_inventory(spans: list[list[SessionNode]]) -> list[str]:
+    """The files read and the tools and skills loaded in a folded run,
+    counting the Read, Skill and ToolSearch calls made inside code cells."""
+    paths: list[str] = []
+    loads: list[tuple[str, str]] = []
+
+    def note(name: str, values: dict[str, Any]) -> None:
+        if name == "Read":
+            path = values.get("file_path") or values.get("path")
+            if isinstance(path, str) and path.strip():
+                clipped = _clip(path, _EPOCH_PATH_CAP)
+                if clipped not in paths:
+                    paths.append(clipped)
+        loads.extend((name, item) for item in loaded_by(name, values))
+
+    for span in spans:
+        for node in span:
+            if node.message.role != "assistant":
+                continue
+            for block in node.message.content:
+                if not isinstance(block, ToolUseBlock):
+                    continue
+                code = _cell_code(block)
+                if code is None:
+                    note(_leaf(block.name), block.input if isinstance(block.input, dict) else {})
+                    continue
+                for call in cell_calls(code):
+                    note(call.name, call.values())
+    lines: list[str] = []
+    if paths:
+        more = len(paths) - _EPOCH_MAX_PATHS
+        lines.append(
+            "files read in these turns: "
+            + ", ".join(paths[:_EPOCH_MAX_PATHS])
+            + (f" (+{more} more)" if more > 0 else "")
+        )
+    loaded = describe_loaded(loads)
+    if loaded:
+        lines.append(f"still loaded from these turns: {loaded}")
+    return lines
+
+
+def _steer_config(config: CompactionConfig) -> SteerRenderConfig | None:
+    """None (every steer verbatim) at render version 1, receipts above it."""
+    if config.render_version <= RENDER_VERSION_LEGACY:
+        return None
+    return config.steer_render()
+
+
 def render_span_digest(
     span: list[SessionNode], config: CompactionConfig
 ) -> Message:
     """Extractive digest of one whole turn, as a single user-role Text message.
 
     Pure and deterministic: same span + same config → byte-identical output.
+    ``config.render_version`` picks the shape. Version 1 renders steers
+    verbatim and every call as clipped JSON. Version 2 renders large harness
+    notices as receipts, adds the outrank line under the header, summarizes
+    code cells with ``summarize_cell`` and ends a successful cell's result
+    line with its last printed line.
     """
+    steer_cfg = _steer_config(config)
+    v2 = config.render_version > RENDER_VERSION_LEGACY
+    calls = {
+        block.id: block
+        for node in span if node.message.role == "assistant"
+        for block in node.message.content if isinstance(block, ToolUseBlock)
+    } if v2 else {}
     start, end = span[0].node_id, span[-1].node_id
     ref = start if start == end else f"{start}..{end}"
     tool_names: list[str] = []
@@ -475,6 +683,8 @@ def render_span_digest(
         "not recoverable in this session, so do not reconstruct their detail "
         "from memory]"
     ]
+    if v2:
+        lines.append(_outrank_line(config))
     for node in span:
         message = node.message
         if message.role == "user":
@@ -482,7 +692,9 @@ def render_span_digest(
                 b for b in message.content if isinstance(b, ToolResultBlock)
             ]
             for block in results:
-                lines.extend(s.render() for s in block.delivered_steers)
+                lines.extend(render_steers(
+                    block.delivered_steers, steer_cfg, node=node,
+                ))
                 size = block_chars(block)
                 if block.is_error:
                     error_text = " ".join(
@@ -495,17 +707,24 @@ def render_span_digest(
                         f"{_clip(error_text, config.error_text_cap)}"
                     )
                 else:
+                    last = ""
+                    call = calls.get(block.tool_use_id)
+                    if call is not None and _cell_code(call) is not None:
+                        last = last_output_line("\n".join(
+                            inner.text for inner in block.content
+                            if isinstance(inner, Text)
+                        ))
                     lines.append(
                         f"  ✓ result {size} chars ({node.node_id})"
+                        + (f'; last line: "{last}"' if last else "")
                     )
-            user_text = strip_system_reminders(
-                "".join(
-                    b.text for b in message.content if isinstance(b, Text)
-                )
-            )
+            user_text = _user_text(node)
             if user_text:
+                cap = config.user_text_cap
+                if steer_cfg is not None and not is_wake_text(user_text):
+                    cap = config.user_turn_text_cap
                 lines.append(
-                    f"user ({node.node_id}): {_clip(user_text, config.user_text_cap)}"
+                    f"user ({node.node_id}): {_clip(user_text, cap)}"
                 )
         elif message.role == "assistant":
             texts = [b for b in message.content if isinstance(b, Text)]
@@ -517,6 +736,12 @@ def render_span_digest(
             for block in message.content:
                 if isinstance(block, ToolUseBlock):
                     tool_names.append(block.name)
+                    code = _cell_code(block) if v2 else None
+                    if code is not None:
+                        lines.append(
+                            f"  → {block.name}: {summarize_cell(code)}"
+                        )
+                        continue
                     lines.append(
                         f"  → {block.name}("
                         f"{_arg_hint(block.input, config.tool_line_cap)})"
@@ -528,26 +753,33 @@ def render_span_digest(
         for name in tool_names:
             counts[name] = counts.get(name, 0) + 1
         summary = ", ".join(f"{n}×{c}" for n, c in sorted(counts.items()))
-        lines.insert(1, f"tools: {summary}")
+        lines.insert(2 if v2 else 1, f"tools: {summary}")
     return Message(role="user", content=[Text("\n".join(lines))])
 
 
 def render_epoch_stub(
     spans: list[list[SessionNode]], config: CompactionConfig
 ) -> Message:
-    """One-line stub replacing a run of digested spans. Deterministic."""
+    """Stub replacing a run of digested spans. Deterministic.
+
+    ``config.render_version`` picks the shape. Version 1 is one line that
+    quotes the first folded turn's first 120 chars, and steers render
+    verbatim. Version 2 drops that quote for the outrank line, the files
+    read and the tools and skills loaded in the folded turns (including the
+    calls made inside code cells), and a pinned intent block (see
+    ``_intent_pin``); it renders large harness notices as receipts.
+    """
     start = spans[0][0].node_id
     end = spans[-1][-1].node_id
-    first_user = ""
-    for node in spans[0]:
-        if is_turn_start(node):
-            first_user = strip_system_reminders(
-                "".join(
-                    b.text for b in node.message.content if isinstance(b, Text)
-                )
-            )
-            break
-    hint = f"; began with: {_clip(first_user, 120)}" if first_user else ""
+    steer_cfg = _steer_config(config)
+    hint = ""
+    if steer_cfg is None:
+        first_user = ""
+        for node in spans[0]:
+            if is_turn_start(node):
+                first_user = _user_text(node)
+                break
+        hint = f"; began with: {_clip(first_user, 120)}" if first_user else ""
     if config.recall_tools:
         text = (
             f"[epoch {start}..{end} — {len(spans)} older turns folded; "
@@ -559,14 +791,61 @@ def render_epoch_stub(
             f"[epoch {start}..{end} — {len(spans)} older turns folded; their "
             f"content is not recoverable in this session{hint}]"
         )
-    deliveries = [Text(s.render()) for span in spans for node in span
+    if steer_cfg is not None:
+        text = "\n".join([
+            text, _outrank_line(config), *_call_inventory(spans),
+            *_intent_pin(spans, config),
+        ])
+    deliveries = [Text(s) for span in spans for node in span
                   for block in node.message.content if isinstance(block, ToolResultBlock)
-                  for s in block.delivered_steers]
+                  for s in render_steers(block.delivered_steers, steer_cfg, node=node)]
     return Message(role="user", content=[Text(text), *deliveries])
 
 
+# Lines of a harness task notification that identify the task rather than
+# say what happened: tag-only lines, the identity fields, and the untrusted-data
+# fence note. A preview made of them tells the model nothing it can act on.
+_NOTIFICATION_ID_TAGS = frozenset({
+    "kind", "task-id", "tool-use-id", "output-file",
+    "usage", "subagent_tokens", "tool_uses", "duration_ms",
+})
+_TAG_ONLY_LINE_RE = re.compile(r"^(?:</?[\w-]+(?:\s[^<>]*)?>\s*)+$")
+_ID_FIELD_LINE_RE = re.compile(r"^<([\w-]+)>[^<>]*</\1>$")
+_FENCE_NOTE_HEAD = "The content below was retrieved from an external source."
+
+
+def _intake_preview(text: str, config: CompactionConfig) -> str:
+    """The first ``intake_preview_chars`` of an oversized user text.
+
+    At render version 2 a harness task notification skips its header lines,
+    so the preview shows the summary and result instead of the task id and
+    output path. Every other text, and every text at version 1, previews from
+    its first char.
+    """
+    cap = config.intake_preview_chars
+    if config.render_version < 2 or "<task-notification>" not in text:
+        return text[:cap]
+    kept: list[str] = []
+    size = 0
+    for line in text.splitlines():
+        bare = line.strip()
+        field = _ID_FIELD_LINE_RE.match(bare)
+        if (
+            not bare
+            or _TAG_ONLY_LINE_RE.match(bare)
+            or (field and field.group(1) in _NOTIFICATION_ID_TAGS)
+            or bare.startswith(_FENCE_NOTE_HEAD)
+        ):
+            continue
+        kept.append(bare)
+        size += len(bare) + 1
+        if size >= cap:
+            break
+    return "\n".join(kept)[:cap]
+
+
 def _intake_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
-    preview = text[: config.intake_preview_chars]
+    preview = _intake_preview(text, config)
     route = (
         f'read the rest with HistoryExpand("{node_id}", offset=N)'
         if config.recall_tools
@@ -710,10 +989,30 @@ class Compactor:
     # Rent the warm deferrals since the last commit have paid (plan item 3),
     # in measured tokens. Process memory: a resumed engine is cold anyway.
     _rent_paid: float = 0.0
+    # Render version per promoted span key; a key made by this process
+    # renders at config.render_version.
+    _span_versions: dict = field(default_factory=dict)
+    # Span keys rehydrated from persisted decisions, in replay order. Live
+    # promotion retires the decisions a new span contains (segment
+    # retirement, epoch folds). That needs node order, which rehydrate does
+    # not have, so the pops are replayed the first time a path is seen.
+    _replayed_spans: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
             self.trimmer = ToolResultTrimmer(config=self.config.trim)
+        self.trimmer.render_version = self.config.render_version
+        self.trimmer.steer_render = self.config.steer_render()
+
+    @property
+    def render_version(self) -> int:
+        """The render version this compactor's new decisions are made under.
+
+        Whoever persists a Promotion as a ContextCompaction event records this
+        value, and whoever rehydrates passes the event's value back on the
+        Promotion.
+        """
+        return self.config.render_version
 
     # ── Mode ─────────────────────────────────────────────────────────────
 
@@ -742,6 +1041,14 @@ class Compactor:
         # render never rewrites a message inside an already-cached prefix.
         trimmed = self.trimmer._trimmed
         consumed = self.trimmer._image_consumed
+        # The whole path's calls, so a placeholder rendered one node at a
+        # time can still say what its call was (version 2 decisions only;
+        # see ToolResultTrimmer._render).
+        calls: dict[str, Any] = {
+            block.id: block
+            for n in nodes if n.message.role == "assistant"
+            for block in n.message.content if isinstance(block, ToolUseBlock)
+        } if trimmed else {}
         out: list[Message] = []
         i = 0
         while i < len(nodes):
@@ -751,7 +1058,7 @@ class Compactor:
                 # persisted one rehydrated from a session that *did* run the
                 # ladder stays inert rather than digesting history behind the
                 # host app's back.
-                out.append(self._render_live(node, trimmed, consumed))
+                out.append(self._render_live(node, trimmed, consumed, calls))
                 i += 1
                 continue
             end_id = self._epoch_by_start.get(node.node_id)
@@ -759,7 +1066,8 @@ class Compactor:
                 j = index[end_id]
                 out.append(
                     render_epoch_stub(
-                        split_spans(nodes[i : j + 1]), self.config
+                        split_spans(nodes[i : j + 1]),
+                        self._config_at(node.node_id, end_id),
                     )
                 )
                 i = j + 1
@@ -768,22 +1076,33 @@ class Compactor:
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
                 out.append(
-                    render_span_digest(nodes[i : j + 1], self.config)
+                    render_span_digest(
+                        nodes[i : j + 1], self._config_at(node.node_id, end_id)
+                    )
                 )
                 i = j + 1
                 continue
-            out.append(self._render_live(node, trimmed, consumed))
+            out.append(self._render_live(node, trimmed, consumed, calls))
             i += 1
         return out
+
+    def _config_at(self, start: str, end: str) -> CompactionConfig:
+        """The config a promoted span renders with: this compactor's own,
+        with ``render_version`` set to the version the span was decided at."""
+        version = self._span_versions.get((start, end), self.config.render_version)
+        if version == self.config.render_version:
+            return self.config
+        return replace(self.config, render_version=version)
 
     def _render_live(
         self,
         node: SessionNode,
         trimmed: set[tuple[str, str]],
         consumed: set[tuple[str, str]],
+        calls: dict[str, Any] | None = None,
     ) -> Message:
         message = (
-            self.trimmer._render([node], trimmed, consumed)[0]
+            self.trimmer._render([node], trimmed, consumed, calls)[0]
             if self.trimmer.config.enabled
             else node.message
         )
@@ -818,7 +1137,14 @@ class Compactor:
                             and len(b.text) > self.config.tool_result_stub_chars
                             else b
                             for b in block.content
-                        ] + [Text(s.render()) for s in block.delivered_steers],
+                        # A stub is stateless (a pure function of size, from
+                        # the first request on), so it cannot know when the
+                        # result leaves the protected tail. Its steers stay
+                        # verbatim; a receipt needs a trim, digest or fold
+                        # decision, which re-renders them at that version.
+                        ] + [Text(s) for s in render_steers(
+                            block.delivered_steers, None,
+                        )],
                         is_error=block.is_error,
                         delivered_steers=block.delivered_steers,
                         delivery_metadata_version=block.delivery_metadata_version,
@@ -1735,6 +2061,38 @@ class Compactor:
             )
         ]
 
+    def consume_images_after_rejection(
+        self, nodes: list[SessionNode], *, overhead_tokens: int = 0
+    ) -> list[Promotion]:
+        """Recovery for a request the provider rejected for its payload.
+
+        A non-size ``invalid_request_error`` about an image (a decoded image
+        over the provider's patch limit, say) is not an overflow, so the size
+        ladder does not apply. The one thing compaction can do is the image
+        rung: consume every image a completed model call already saw, with no
+        pressure trigger and no turn boundary, as ``escalate`` runs it. The
+        rung is idempotent, so a second rejection finds nothing new and the
+        engine surfaces the error instead of retrying.
+        """
+        if not self.active:
+            return []
+        before = self._estimate(nodes, overhead_tokens)
+        newly = self.trimmer.consume_images(nodes)
+        if not newly:
+            return []
+        after = self._estimate(nodes, overhead_tokens)
+        return [
+            Promotion(
+                tier=1,
+                reason="image_consumed",
+                trimmed=tuple(newly),
+                reclaimed_chars=_chars_of(nodes, newly),
+                before_tokens=before,
+                after_tokens=after,
+                decision_reason="provider_payload_rejection",
+            )
+        ]
+
     def _apply_trim_only(
         self,
         nodes: list[SessionNode],
@@ -2040,8 +2398,26 @@ class Compactor:
 
     def rehydrate(self, promotions: Iterable[Promotion]) -> None:
         """Re-apply persisted decisions (resume). Rendering is deterministic,
-        so the rehydrated view is byte-identical to the pre-restart one."""
+        so the rehydrated view is byte-identical to the pre-restart one.
+
+        Each promotion renders at its own ``render_version``, capped at this
+        compactor's, so decisions persisted before version 2 existed keep
+        their version-1 text.
+
+        TODO(lane owning fluid/engine/native.py): the engine must persist and
+        replay the version, and both lines must land together.
+        ``_emit_compaction`` should set
+        ``render_version=self._compactor.render_version`` on the event, and
+        ``_rehydrate_compaction`` should pass ``render_version=e.render_version``
+        into each Promotion. Until then the engine's rehydrated promotions take
+        the Promotion default (the current version): sessions compacted after
+        this change resume byte-identical, and a session whose decisions were
+        persisted at version 1 re-renders them at version 2 once on its first
+        resume. Passing ``e.render_version`` without writing it on emit would
+        replay every new decision at version 1 instead.
+        """
         for promo in promotions:
+            version = min(promo.render_version, self.config.render_version)
             # The two tier-1 reasons rewrite different amounts of the block, so
             # they replay into different sets: an image consumption that came
             # back as a full trim would take the sibling text with it and the
@@ -2049,11 +2425,50 @@ class Compactor:
             if promo.reason == "image_consumed":
                 self.trimmer.mark_image_consumed(promo.trimmed)
             else:
-                self.trimmer.mark_trimmed(promo.trimmed)
+                self.trimmer.mark_trimmed(promo.trimmed, render_version=version)
             if not self.config.enabled:
                 continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
-                self._mark_span(start, end, kind)
+                self._mark_span(start, end, kind, render_version=version)
+                self._replayed_spans.append((start, end))
+
+    def _settle_replay(self, nodes: list[SessionNode]) -> None:
+        """Replay the retirement and fold pops of rehydrated decisions.
+
+        A live span promotion drops every decision it contains: a whole-turn
+        digest retires that turn's segment digests, and an epoch fold retires
+        the digests it folds. Rehydrate marks each persisted span without
+        node order, so those contained decisions would linger, and ``stats()``
+        would count them as resident. Walking the replay order with the path
+        in hand removes each decision a later one contains, which leaves the
+        state the live process had. The rendered view does not change,
+        because the renderer already skips anything inside a promoted span.
+        """
+        if not self._replayed_spans:
+            return
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        order = [
+            key for key in dict.fromkeys(self._replayed_spans)
+            if key in self._digested and key[0] in index and key[1] in index
+        ]
+        self._replayed_spans = []
+        for pos, (start, end) in enumerate(order):
+            lo, hi = index[start], index[end]
+            for older in order[:pos]:
+                if older not in self._digested:
+                    continue
+                if lo <= index[older[0]] and index[older[1]] <= hi:
+                    self._retire(older)
+
+    def _retire(self, key: tuple[str, str]) -> None:
+        """Drop one promoted span, leaving any newer span with its start."""
+        start, end = key
+        self._digested.pop(key, None)
+        self._span_versions.pop(key, None)
+        if self._digest_by_start.get(start) == end:
+            self._digest_by_start.pop(start)
+        if self._epoch_by_start.get(start) == end:
+            self._epoch_by_start.pop(start)
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -2068,6 +2483,7 @@ class Compactor:
         digested = dict(self._digested)
         epochs = dict(self._epoch_by_start)
         digests = dict(self._digest_by_start)
+        versions = dict(self._span_versions)
         trimmed = set(self.trimmer._trimmed)
         consumed = set(self.trimmer._image_consumed)
 
@@ -2078,6 +2494,8 @@ class Compactor:
             self._epoch_by_start.update(epochs)
             self._digest_by_start.clear()
             self._digest_by_start.update(digests)
+            self._span_versions.clear()
+            self._span_versions.update(versions)
             self.trimmer._trimmed.clear()
             self.trimmer._trimmed.update(trimmed)
             self.trimmer._image_consumed.clear()
@@ -2085,8 +2503,13 @@ class Compactor:
 
         return restore
 
-    def _mark_span(self, start: str, end: str, kind: str) -> None:
+    def _mark_span(
+        self, start: str, end: str, kind: str, *, render_version: int | None = None
+    ) -> None:
         self._digested[(start, end)] = kind
+        self._span_versions[(start, end)] = (
+            self.config.render_version if render_version is None else render_version
+        )
         if kind == EPOCH_STUB:
             self._epoch_by_start[start] = end
         else:
@@ -2261,7 +2684,13 @@ class Compactor:
     ) -> list[tuple[str, str]]:
         """Fold the oldest run(s) of resident span digests into epoch stubs
         whenever more than max_resident_span_digests are resident (force →
-        fold everything foldable regardless of the residency cap)."""
+        fold everything foldable regardless of the residency cap).
+
+        A run never crosses a live gap. When a gap cuts off the oldest
+        digests, the fold slides past them to the next contiguous run instead
+        of stopping for good; the digests before the gap stay resident.
+        """
+        self._settle_replay(nodes)
         index = {n.node_id: i for i, n in enumerate(nodes)}
         resident = sorted(
             (
@@ -2278,14 +2707,24 @@ class Compactor:
         )
         folded: list[tuple[str, str]] = []
         fold_n = self.config.epoch_fold_spans
+        count = len(resident)  # digests still resident, skipped ones included
         while (
-            len(resident) > (0 if force else self.config.max_resident_span_digests)
+            count > (0 if force else self.config.max_resident_span_digests)
             and len(resident) >= (1 if force else fold_n)
         ):
             chunk = resident[:fold_n]
-            if any(index[a[2]] + 1 != b[0] for a, b in zip(chunk, chunk[1:])):
-                break  # A live gap must never be swallowed by an epoch range.
+            gap = next(
+                (k for k, (a, b) in enumerate(zip(chunk, chunk[1:]))
+                 if index[a[2]] + 1 != b[0]),
+                None,
+            )
+            if gap is not None:
+                # A live gap must never be swallowed by an epoch range. Leave
+                # the digests before it resident and try the run after it.
+                resident = resident[gap + 1:]
+                continue
             resident = resident[fold_n:]
+            count -= len(chunk)
             start = chunk[0][1]
             end = chunk[-1][2]
             for _pos, s, e in chunk:  # spans leave the digest tier
@@ -2300,6 +2739,7 @@ class Compactor:
     # ── Stats (for the context-usage breakdown) ──────────────────────────
 
     def stats(self, nodes: list[SessionNode]) -> dict[str, int]:
+        self._settle_replay(nodes)
         index = {n.node_id: i for i, n in enumerate(nodes)}
         digests = sum(
             1

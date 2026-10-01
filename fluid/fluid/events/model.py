@@ -376,6 +376,10 @@ class ContextCompaction(Event):
     target_tokens: int = 0
     rent_paid: int = 0
     turn_live_tokens: int = 0
+    # Renderer version the decisions were made under (see
+    # fluid.context.steer_render). 1 on every event persisted before the field
+    # existed, which keeps old sessions rendering byte-for-byte as they did.
+    render_version: int = 1
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

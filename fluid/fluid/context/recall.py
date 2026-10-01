@@ -22,6 +22,7 @@ from fluid.store.base import SessionNode, SessionStore
 
 # A ref is one node id or an inclusive range: "node_ab12" / "node_a..node_b".
 _REF_RE = re.compile(r"^(node_[0-9a-f]+)(?:\.\.(node_[0-9a-f]+))?$")
+_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 DEFAULT_EXPAND_CHARS = 20_000
 MAX_EXPAND_CHARS = 50_000
@@ -71,6 +72,24 @@ def _image_note(count: int, caption: str) -> str:
     )
 
 
+def _user_text_for_recall(text: str) -> str:
+    """User text with its <system-reminder> blocks left out.
+
+    Reminders appended to a user turn are harness plumbing (tool catalogs,
+    ledger recitations) that the harness re-injects on fresh turns; one
+    expanded request once came back carrying 6k chars of them. A text that is
+    nothing but reminders stays verbatim, because a wake that fluid delivers
+    as a single reminder block holds the only copy of its task reports.
+    """
+    removed = sum(len(m.group(0)) for m in _REMINDER_RE.finditer(text))
+    if not removed:
+        return text
+    kept = _REMINDER_RE.sub("", text).strip()
+    if not kept:
+        return text
+    return f"{kept} [{removed} chars of <system-reminder> harness text omitted]"
+
+
 def _render_node(node: SessionNode) -> str:
     """Verbatim plain-text rendering of one stored node."""
     lines: list[str] = []
@@ -78,7 +97,10 @@ def _render_node(node: SessionNode) -> str:
     loose_images = 0
     for block in node.message.content:
         if isinstance(block, Text):
-            lines.append(f"{role} ({node.node_id}): {block.text}")
+            text = (
+                _user_text_for_recall(block.text) if role == "user" else block.text
+            )
+            lines.append(f"{role} ({node.node_id}): {text}")
         elif isinstance(block, ToolUseBlock):
             lines.append(
                 f"{role} ({node.node_id}) tool_use {block.name}: {block.input!r}"
@@ -104,6 +126,19 @@ def _render_node(node: SessionNode) -> str:
     if loose_images:
         lines.append(f"{role} ({node.node_id}){_image_note(loose_images, '')}")
     return "\n".join(lines)
+
+
+def steer_body_offset(node: SessionNode, body: str) -> int | None:
+    """Where ``body`` starts in ``HistoryExpand(node_id)`` output, or None.
+
+    A steer receipt (:mod:`fluid.context.steer_render`) names this offset so
+    the model can page straight to a long notice. None means the stored node
+    does not carry the text, and the steer must then stay verbatim.
+    """
+    if not body:
+        return None
+    pos = _render_node(node).find(body)
+    return pos if pos >= 0 else None
 
 
 def expand_ref(
@@ -156,23 +191,61 @@ class Hit:
     matches: int
 
 
+def calling_node_ids(
+    nodes: list[SessionNode], tool_use_id: str | None = None
+) -> set[str]:
+    """The nodes that hold the call being answered right now.
+
+    That is the newest assistant node when one of its tool calls has no
+    result on the path yet (the in-flight call or code cell), plus the node
+    holding ``tool_use_id`` when one is given. A search must not return them:
+    the calling cell spells out the query, so it would rank as its own best
+    hit.
+    """
+    answered = {
+        block.tool_use_id
+        for node in nodes if node.message.role == "user"
+        for block in node.message.content if isinstance(block, ToolResultBlock)
+    }
+    out: set[str] = set()
+    newest = next(
+        (n for n in reversed(nodes) if n.message.role == "assistant"), None
+    )
+    for node in nodes:
+        if node.message.role != "assistant":
+            continue
+        for block in node.message.content:
+            if not isinstance(block, ToolUseBlock):
+                continue
+            if block.id == tool_use_id or (
+                node is newest and block.id not in answered
+            ):
+                out.add(node.node_id)
+                break
+    return out
+
+
 def search_path(
     nodes: list[SessionNode],
     query: str,
     *,
     max_results: int = DEFAULT_SEARCH_RESULTS,
+    exclude: set[str] | frozenset[str] = frozenset(),
 ) -> list[Hit]:
     """Case-insensitive keyword search over every node on the path.
 
     Scores by matched-term count then total occurrences; one hit per node with
     a snippet around the first match. Searches the STORED nodes — content that
-    compaction evicted from the rendered view is still found here.
+    compaction evicted from the rendered view is still found here. Node ids in
+    ``exclude`` are skipped (the caller's own in-flight node).
     """
     terms = [t for t in query.lower().split() if t]
     if not terms:
         return []
     scored: list[tuple[int, int, int, Hit]] = []
     for pos, node in enumerate(nodes):
+        if node.node_id in exclude:
+            continue
         text = _render_node(node)
         lowered = text.lower()
         matched = [t for t in terms if t in lowered]
