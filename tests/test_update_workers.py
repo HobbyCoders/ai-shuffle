@@ -124,7 +124,10 @@ def test_all_snapshot_handles_partial_failures_without_aborting(setup):
     assert len(result["workers"]) == 3
     assert result["workers"][0]["supported"]
     assert "unavailable" in result["workers"][1]["reason"]
+    # An online worker that cannot be read is unknown, not excluded (#1623).
+    assert result["workers"][1]["phase"] == "unknown"
     assert result["workers"][2]["reason"] == "Offline; not queued"
+    assert result["workers"][2]["phase"] == "unsupported"
     assert "private endpoint" not in str(result)
 
 A, B = "a" * 40, "b" * 40
@@ -209,6 +212,22 @@ def test_completed_install_stops_reading_its_cohort(setup):
         assert state["operation"]["phase"] == "complete"
         assert [w["device_id"] for w in state["workers"]] == ["self"]
     remote.assert_not_called()
+
+
+def test_completion_is_stamped_once_so_the_ui_can_tell_news_from_history(setup, monkeypatch):
+    # #1623: a fresh browser replayed an old completion while a newer update was staged.
+    fleet.progress.begin("done", [{"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("done", "self", target_version=B[:12], result={"accepted": True})
+    updates.desktop_exchange({"phase": "idle", "running_version": B})
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: 1_000.0)
+    first = asyncio.run(fleet.snapshot())
+    assert first["operation"]["phase"] == "complete"
+    assert first["operation"]["completed_at"] == 1_000.0
+    assert fleet.progress.load()["completed_at"] == 1_000.0
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: 5_000.0)
+    later = asyncio.run(fleet.snapshot())
+    assert later["operation"]["completed_at"] == 1_000.0
+    assert later["server_time"] > later["operation"]["completed_at"]
 
 
 def test_an_action_discards_cached_peer_readings(setup):
