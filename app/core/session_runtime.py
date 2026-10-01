@@ -892,6 +892,12 @@ class SessionRuntime:
             if network_engine.context() is not None:
                 current = await asyncio.to_thread(current_database.get_session, sid)
                 moved = current is None or owner_of(current) is not None
+                if not moved:
+                    # A handoff is publishing or receiving this session's
+                    # checkout/branch. Wait queued; the handoff wakes the claim
+                    # pass when it releases its reservation.
+                    from app.network import handoff as network_handoff
+                    moved = await asyncio.to_thread(network_handoff.admission_held, sid)
         except Exception:
             moved = True
         if moved:

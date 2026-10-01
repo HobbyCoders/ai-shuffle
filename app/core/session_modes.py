@@ -73,7 +73,8 @@ CHAT_MODE_MEMORY_TOOLS: List[str] = [
 ]
 CHAT_MODE_RESOURCE_TOOLS: List[str] = [
     f"mcp__chat-access__{name}" for name in (
-        "RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand"
+        "RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand",
+        "ChatHttpRequest",
     )
 ]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
@@ -368,7 +369,7 @@ PROACTIVE_DENIED_TOOLS = [
     "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
-    "ChatWriteFile", "GenerateNativeImage", "Skill", "ToolSearch",
+    "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "Skill", "ToolSearch",
     "run_python", "list_tools", "search_tools", "read_tool_docs",
     "save_skill", "delete_skill",
 ]

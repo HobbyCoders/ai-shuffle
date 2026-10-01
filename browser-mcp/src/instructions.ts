@@ -25,6 +25,7 @@ REFS AND SNAPSHOTS
 - To act on an element, pass its ref to browser_act. Refs are the primary way to target things — prefer them over coordinates.
 - Refs stay valid for the whole time you are on one page. A committed navigation (new URL) invalidates every ref; take a fresh snapshot afterward.
 - Every snapshot response includes a snapshot_id. If you act on a ref that no longer exists you get a stale_ref error — the fix is always: take a new browser_snapshot and use the new refs.
+- A not_actionable error is different: the ref is still valid, but the element was covered, still moving, hidden or disabled. Re-snapshotting returns the same ref; deal with the blocker and retry, or act by coordinate from a fresh browser_screenshot.
 - Snapshots can be large. Use filter=interactive to see only controls plus headings/landmarks, and scope_ref=eN to re-snapshot just one subtree. Long lists of similar rows are collapsed with a "... and N more (scope_ref=eX to expand)" marker. Output is truncated at max_chars (default 40000) with a note telling you how to see more.
 
 ACTING

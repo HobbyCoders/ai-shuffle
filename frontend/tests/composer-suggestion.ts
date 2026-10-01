@@ -4,11 +4,22 @@ import '@fontsource-variable/jetbrains-mono';
 import '../src/app.css';
 // Install BEFORE loading production modules. No request may reach the real API.
 const requests: string[] = [];
-window.fetch = async input => {
+// Server stand-in for the durable hint (app/db/composer_suggestions.py): one
+// hint per session, saved only for that session's latest turn, read on demand.
+const retained = new Map<string, { session_id: string; turn_id: string; suggestion: string }>();
+const latestTurn = new Map<string, string>();
+window.fetch = async (input, init) => {
 	const url = String(input);
-	requests.push(url);
+	requests.push(`${init?.method ?? 'GET'} ${url}`);
 	let body: unknown = {};
-	if (url.includes('/auth/status'))
+	const hintRead = url.match(/\/sessions\/([^/]+)\/composer-suggestion(?:\?|$)/);
+	if (hintRead) {
+		// Eligible only while that turn is still the latest and has completed.
+		const id = decodeURIComponent(hintRead[1]);
+		const hint = retained.get(id);
+		const live = activeSession.current.sessionId === id && activeSession.current.isStreaming;
+		body = hint && hint.turn_id === latestTurn.get(id) && !live ? hint : null;
+	} else if (url.includes('/auth/status'))
 		body = { authenticated: true, has_any_credential: true, onboarding_complete: true };
 	else if (url.includes('computer-use'))
 		body = { available: false, enabled: false, active: false, reason: 'no-display' };
@@ -91,7 +102,8 @@ Object.assign(window, {
 			activeSession.setWorktreeBranch('fixture');
 		},
 		async start() {
-			this.state({ liveTurnId: `turn-${++serial}`, isStreaming: true, draft: '' });
+			latestTurn.set(activeSession.current.sessionId!, `turn-${++serial}`);
+			this.state({ liveTurnId: `turn-${serial}`, isStreaming: true, draft: '' });
 			await tick();
 			return `turn-${serial}`;
 		},
@@ -99,7 +111,10 @@ Object.assign(window, {
 			this.state({ liveTurnId: null, isStreaming: false });
 			await tick();
 		},
-		receive(turn = `turn-${serial}`, session = activeSession.current.sessionId, text = literal) {
+		receive(turn = `turn-${serial}`, session = activeSession.current.sessionId!, text = literal) {
+			// A late generation for an older turn is not saved, but still notifies.
+			if (latestTurn.get(session) === turn)
+				retained.set(session, { session_id: session, turn_id: turn, suggestion: text });
 			transport.handleMessage({
 				type: 'composer_suggestion',
 				session_id: session,
