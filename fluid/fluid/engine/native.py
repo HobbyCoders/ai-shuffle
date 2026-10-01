@@ -63,7 +63,12 @@ from fluid.codemode.session import (
     CodeModeSession,
     register_code_mode_tools,
 )
-from fluid.context.cache_miss_classes import PROVIDER_FALLBACK, usage_miss_class
+from fluid.context.cache_miss_classes import (
+    COMPACTION_FOLLOWON_CALLS,
+    DEFAULT_CACHE_TTL_SECONDS,
+    PROVIDER_FALLBACK,
+    usage_miss_class,
+)
 from fluid.context.cache_plan import plan_cache
 from fluid.context.cache_probe import (
     CacheProbeConfig,
@@ -1185,6 +1190,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         # ``describe_promotions`` records. Consumed by the next cache-miss
         # diagnosis, which reports a rewrite instead of blaming the provider.
         self._history_rewrites: list[dict[str, Any]] = []
+        # The newest compaction rewrite with a known first changed message,
+        # waiting for the request that carries it: that message index and the
+        # estimated tokens from it to the end of the rewritten view. The next
+        # Usage row logs both beside the cache_read the rewrite actually got.
+        self._pending_rewrite_tail: dict[str, int] | None = None
+        # Calls since that rewrite was sent (0 is the call that carried it).
+        # Tracked only inside the compaction_followon window, None after it.
+        self._calls_since_rewrite: int | None = None
+        # Measured cache_read of the first call after a rewrite, per provider
+        # name and smoothed (EWMA, alpha 0.5). See ``reuse_floor_tokens``.
+        self._reuse_floor: dict[str, int] = {}
         # Host pricing hook: ``resolver(model) -> ModelPrice | mapping | None``,
         # consulted before fluid's own table so an app with its own model
         # catalog prices its own models. See fluid.providers.pricing.
@@ -2657,6 +2673,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                       if isinstance(event, Usage)]
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             return
+        provider = str(getattr(self.provider, "name", ""))
+        for event in reversed(events):
+            floor = event.raw.get("reuse_floor_tokens")
+            if (
+                isinstance(floor, int) and not isinstance(floor, bool)
+                and event.raw.get("reuse_floor_provider") == provider
+            ):
+                self._reuse_floor.setdefault(provider, floor)
+                break
         for event in reversed(events):
             if not isinstance(event, Usage):
                 continue
@@ -2676,10 +2701,19 @@ class NativeLoop(BackgroundLifecycleMixin):
                     event.input_tokens + event.cache_read_tokens
                     + event.cache_creation_tokens
                 ) or None
+                # A rewrite a few calls back still owns the next misses.
+                calls = event.raw.get("calls_since_rewrite")
+                if (
+                    isinstance(calls, int) and not isinstance(calls, bool)
+                    and self._calls_since_rewrite is None
+                    and self._pending_rewrite_tail is None
+                ):
+                    self._calls_since_rewrite = calls
             return
 
     async def _emit_compaction(
-        self, sid: str, turn_id: str, promo: Promotion
+        self, sid: str, turn_id: str, promo: Promotion,
+        rewrite_tail_tokens_est: int | None = None,
     ) -> None:
         await self._emit(ContextCompaction(
             session_id=sid, turn_id=turn_id,
@@ -2692,7 +2726,101 @@ class NativeLoop(BackgroundLifecycleMixin):
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
             measured_prompt_tokens=promo.measured_prompt_tokens,
+            rewrite_tail_tokens_est=(
+                rewrite_tail_tokens_est
+                if promo.first_changed_message is not None else None
+            ),
         ))
+
+    def _note_rewrite_tail(
+        self, view: list[Message], promotions: Sequence[Promotion]
+    ) -> int | None:
+        """Estimated tokens the provider re-bills for this batch's rewrite.
+
+        Counts chars/4 from the earliest ``first_changed_message`` to the end
+        of ``view``, the rewritten history. Everything before that index is
+        byte-identical to the last request and can still be read from cache.
+        The value is also parked for the next Usage row, which logs it beside
+        the cache_read the provider actually returned. None when no promotion
+        knows where the view first changed.
+        """
+        starts = [
+            p.first_changed_message for p in promotions
+            if p.first_changed_message is not None
+        ]
+        if not starts:
+            return None
+        first = max(0, min(starts))
+        try:
+            tail = estimate_tokens_of_messages(view[first:])
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("rewrite tail estimate failed", exc_info=True)
+            return None
+        pending = self._pending_rewrite_tail
+        # Two rewrites before one request: the earlier change point decides
+        # what the request re-bills.
+        if pending is None or first <= pending["rewrite_first_changed_message"]:
+            self._pending_rewrite_tail = {
+                "rewrite_first_changed_message": first,
+                "rewrite_tail_tokens_est": tail,
+            }
+        return tail
+
+    @property
+    def reuse_floor_tokens(self) -> int | None:
+        """How much of a rewritten prompt the current provider still reuses.
+
+        The measured cache_read of the first call after each compaction
+        rewrite, smoothed per provider (EWMA, alpha 0.5), in provider tokens,
+        not chars/4. None until a rewrite has been measured on this provider.
+        A warm call after a rewrite on openai_responses reads back a coarse
+        checkpoint (about 22-24k after a shallow change), well above the
+        system and tools alone, so a buy price built on the overhead alone
+        overstates what a rewrite costs. Calls past the cache lifetime are not
+        measured: they read nothing for reasons unrelated to the rewrite.
+        """
+        # TODO(lane A, plan item 3): pass this into the compactor's
+        # CacheSignal.reuse_floor, as max(overhead, this) in estimate units.
+        return self._reuse_floor.get(str(getattr(self.provider, "name", "")))
+
+    def _advance_rewrite_window(self, out: dict[str, Any]) -> None:
+        """Stamp the rewrite tail and the follow-on call count on a Usage row.
+
+        Called once per sent request. The request that carried a rewrite gets
+        the parked tail and count 0; the next ``COMPACTION_FOLLOWON_CALLS``
+        requests get 1, 2, ... and the miss classifier files their
+        grown-prefix shortfalls as ``compaction_followon``.
+        """
+        pending, self._pending_rewrite_tail = self._pending_rewrite_tail, None
+        if pending is not None:
+            out.update(pending)
+            calls: int | None = 0
+        elif self._calls_since_rewrite is not None:
+            calls = self._calls_since_rewrite + 1
+        else:
+            calls = None
+        if calls is not None and calls > COMPACTION_FOLLOWON_CALLS:
+            calls = None
+        self._calls_since_rewrite = calls
+        if calls is not None:
+            out["calls_since_rewrite"] = calls
+
+    def _fold_reuse_floor(
+        self, out: dict[str, Any], usage: dict[str, Any],
+        cache_read: int, prompt_tokens: int | None,
+    ) -> None:
+        """Feed the first post-rewrite call's cache_read into the reuse floor."""
+        if not prompt_tokens or usage.get("input_tokens_estimated"):
+            return
+        interval = out.get("request_interval_seconds")
+        if isinstance(interval, float) and interval > DEFAULT_CACHE_TTL_SECONDS:
+            return
+        provider = str(getattr(self.provider, "name", ""))
+        previous = self._reuse_floor.get(provider)
+        floor = cache_read if previous is None else round((previous + cache_read) / 2)
+        self._reuse_floor[provider] = floor
+        out["reuse_floor_tokens"] = floor
+        out["reuse_floor_provider"] = provider
 
     def _context_overhead_tokens(self) -> int:
         """Estimated tokens of everything the next request carries besides
@@ -2787,8 +2915,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if promotions:
                 self._history_rewrites.extend(describe_promotions(promotions))
                 await self._emit_pre_compact(sid, turn_id, promotions)
+            tail = self._note_rewrite_tail(rendered, promotions) if promotions else None
             for promo in promotions:
-                await self._emit_compaction(sid, turn_id, promo)
+                await self._emit_compaction(sid, turn_id, promo, tail)
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
             call_was_sticky = not self._sticky_poisoned and (
@@ -3044,8 +3173,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                             describe_promotions(escalations)
                         )
                         await self._emit_pre_compact(sid, turn_id, escalations)
+                        tail = self._note_rewrite_tail(
+                            self._compactor.view(nodes), escalations
+                        )
                         for promo in escalations:
-                            await self._emit_compaction(sid, turn_id, promo)
+                            await self._emit_compaction(sid, turn_id, promo, tail)
                         continue
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
@@ -3729,6 +3861,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             pass
+        self._advance_rewrite_window(out)
         if fingerprint is None:
             return out
         self._prefix_fingerprint = None
@@ -3774,6 +3907,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             out["prev_prompt_coverage"] = round(
                 min(1.0, cache_read / previous_prompt), 4
             )
+        if "rewrite_tail_tokens_est" in out:
+            self._fold_reuse_floor(out, usage, cache_read, prompt_tokens)
         try:
             diagnosis = diagnose_cache_miss(
                 previous=self._prev_prefix_fingerprint,

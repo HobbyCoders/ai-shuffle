@@ -1437,3 +1437,175 @@ async def test_prev_prompt_coverage_survives_a_rebuilt_engine() -> None:
     await asyncio.wait_for(second.wait_turn(), timeout=10)
     usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
     assert usage.raw["prev_prompt_coverage"] == 0.75
+
+
+# ─── Follow-on misses and the rewrite tail (plan item 7) ─────────────────────
+
+
+_GREW = {
+    "reason": "prefix_grew_only", "full_coverage": True,
+    "reuse_shortfall_tokens_estimated": 50_000,
+}
+
+
+def test_a_grown_prefix_miss_after_a_rewrite_is_a_compaction_followon() -> None:
+    from fluid.context.cache_miss_classes import (
+        COMPACTION_FOLLOWON,
+        COMPACTION_FOLLOWON_CALLS,
+        IDLE_PAST_TTL,
+        MISS_CLASSES,
+        PROVIDER_FALLBACK,
+        UNEXPECTED_CLASSES,
+        classify_cache_miss,
+    )
+
+    assert COMPACTION_FOLLOWON in MISS_CLASSES
+    assert COMPACTION_FOLLOWON not in UNEXPECTED_CLASSES
+    for calls in range(1, COMPACTION_FOLLOWON_CALLS + 1):
+        assert classify_cache_miss(
+            _GREW, request_interval_seconds=12.0, calls_since_rewrite=calls
+        ) == COMPACTION_FOLLOWON
+    # Call 0 carried the rewrite itself; past the window it is the provider.
+    for calls in (None, 0, COMPACTION_FOLLOWON_CALLS + 1):
+        assert classify_cache_miss(
+            _GREW, request_interval_seconds=12.0, calls_since_rewrite=calls
+        ) == PROVIDER_FALLBACK
+    # Expiry still explains a miss better than an earlier rewrite does.
+    assert classify_cache_miss(
+        _GREW, request_interval_seconds=1_800.0, calls_since_rewrite=2
+    ) == IDLE_PAST_TTL
+    # Only a grown prefix is a follow-on; an unchanged one stays the provider's.
+    assert classify_cache_miss(
+        {**_GREW, "reason": "prefix_unchanged"}, calls_since_rewrite=2
+    ) == PROVIDER_FALLBACK
+
+
+def test_the_usage_record_carries_the_followon_count() -> None:
+    from fluid.context.cache_miss_classes import usage_miss_class
+
+    usage = {
+        "cache_miss": dict(_GREW), "request_interval_seconds": 12.0,
+        "calls_since_rewrite": 3,
+    }
+    assert usage_miss_class(usage) == "compaction_followon"
+    assert usage_miss_class({**usage, "calls_since_rewrite": None}) == "provider_fallback"
+    # A malformed count is ignored, not trusted.
+    assert usage_miss_class({**usage, "calls_since_rewrite": True}) == "provider_fallback"
+    assert usage_miss_class({**usage, "calls_since_rewrite": "3"}) == "provider_fallback"
+
+
+def _loop_with_rewrites(
+    usages: list[dict], rewrite_on: set[int], *, store: MemoryStore | None = None,
+    session_id: str | None = None,
+) -> tuple[NativeLoop, list[list[Message]]]:
+    """A loop whose compactor reports a rewrite before the given calls.
+
+    The view itself is left alone; only the decision is injected, with the
+    first change at message 1, so the probe and the classifier see exactly
+    what a real batch reports.
+    """
+    from fluid.context.compaction import Promotion
+
+    kwargs = {"session_id": session_id} if session_id else {}
+    loop = NativeLoop(
+        provider=_CoverageProvider(usages), store=store or MemoryStore(),
+        model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+        **kwargs,
+    )
+    original = loop._compactor.apply
+    rendered_on_rewrite: list[list[Message]] = []
+    applied = 0
+
+    def apply(nodes, **kw):
+        nonlocal applied
+        rendered, promotions = original(nodes, **kw)
+        applied += 1
+        if applied in rewrite_on:
+            rendered_on_rewrite.append(rendered)
+            promotions = [*promotions, Promotion(
+                tier=1, reason="trigger", trimmed=(("n", "c"),),
+                reclaimed_chars=40_000, before_tokens=90_000, after_tokens=80_000,
+                decision_reason="meaningful_reclaim", first_changed_message=1,
+            )]
+        return rendered, promotions
+
+    loop._compactor.apply = apply
+    return loop, rendered_on_rewrite
+
+
+async def test_the_rewrite_tail_is_logged_and_the_next_misses_are_followons() -> None:
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.events import ContextCompaction
+
+    miss = {"input_tokens": 60_000, "cache_read_input_tokens": 0}
+    loop, rendered = _loop_with_rewrites([
+        miss,
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        miss, miss, miss, miss, miss,  # follow-on calls 1-5
+        miss,  # call 6 after the rewrite: the provider again
+    ], rewrite_on={2})
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    events = loop.bus.log(loop.session_id)
+
+    (compaction,) = [e for e in events if isinstance(e, ContextCompaction)]
+    tail = estimate_tokens_of_messages(rendered[0][1:])
+    assert tail > 0
+    assert compaction.first_changed_message == 1
+    assert compaction.rewrite_tail_tokens_est == tail
+
+    raws = [e.raw for e in events if isinstance(e, Usage)]
+    assert "rewrite_tail_tokens_est" not in raws[0]
+    assert "calls_since_rewrite" not in raws[0]
+    # The request that carried the rewrite logs the tail beside its read.
+    assert raws[1]["rewrite_tail_tokens_est"] == tail
+    assert raws[1]["rewrite_first_changed_message"] == 1
+    assert raws[1]["calls_since_rewrite"] == 0
+    assert raws[1]["reuse_floor_tokens"] == 24_000
+    assert raws[1]["reuse_floor_provider"] == "openai_responses"
+    assert all("rewrite_tail_tokens_est" not in r for r in raws[2:])
+    assert [r.get("calls_since_rewrite") for r in raws] == [None, 0, 1, 2, 3, 4, 5, None]
+    assert [r.get("cache_miss_class") for r in raws] == (
+        ["planned_rebuild", "planned_rebuild"]
+        + ["compaction_followon"] * 5
+        + ["provider_fallback"]
+    )
+    assert loop.reuse_floor_tokens == 24_000
+
+
+async def test_the_reuse_floor_smooths_each_measured_rewrite() -> None:
+    loop, _ = _loop_with_rewrites([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        {"input_tokens": 1_000, "cache_read_input_tokens": 54_000},
+        {"input_tokens": 50_000, "cache_read_input_tokens": 10_000},  # rewrite
+    ], rewrite_on={2, 4})
+    assert loop.reuse_floor_tokens is None
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    raws = [e.raw for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    assert [r.get("reuse_floor_tokens") for r in raws] == [None, 24_000, None, 17_000]
+    assert loop.reuse_floor_tokens == 17_000
+
+
+async def test_the_followon_window_and_floor_survive_a_rebuilt_engine() -> None:
+    store = MemoryStore()
+    miss = {"input_tokens": 60_000, "cache_read_input_tokens": 0}
+    first, _ = _loop_with_rewrites([
+        miss,
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        miss,
+    ], rewrite_on={2}, store=store)
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+
+    second, _ = _loop_with_rewrites([miss], rewrite_on=set(), store=store, session_id=sid)
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    assert usage.raw["calls_since_rewrite"] == 2
+    assert usage.raw["cache_miss_class"] == "compaction_followon"
+    assert second.reuse_floor_tokens == 24_000
