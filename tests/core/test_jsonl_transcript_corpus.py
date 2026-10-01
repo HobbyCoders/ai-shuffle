@@ -1178,7 +1178,10 @@ class TestJsonlRewind:
         res = jsonl_rewind_service.truncate_to_checkpoint(SID, "zzz", WD)
         assert (res.success, res.message) == (False, message)
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="root ignores permission bits; Windows has no POSIX mode bits",
+    )
     def test_rewind_in_read_only_dir_fails_cleanly(self, projects):
         path = write_raw(projects, RAW_VARIANTS["clean"])
         before = path.read_bytes()
@@ -1467,7 +1470,10 @@ class TestErrorPaths:
         jp.invalidate_parse_cache(SID)  # what a transcript change triggers
         assert len(jp.parse_session_history(SID, WD)[0]) == 3
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="root ignores permission bits; Windows has no POSIX mode bits",
+    )
     def test_unreadable_file_degrades_to_empty(self, projects):
         path = write_raw(projects, RAW_VARIANTS["clean"])
         path.chmod(0)

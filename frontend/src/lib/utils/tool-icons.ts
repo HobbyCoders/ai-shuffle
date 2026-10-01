@@ -66,16 +66,31 @@ const TOOL_ICON_MAP: Record<string, IconType> = {
 };
 
 /**
+ * On the delegated Claude Code leg every app tool reaches the CLI through one
+ * bundled MCP server, so the CLI reports it as `mcp__fluid_bundled__<name>`,
+ * where `<name>` is the tool's own name on the other legs (`Glob`,
+ * `mcp__builtins__Task`, `mcp__ai-tools__...`). The prefix says nothing about
+ * the tool, so it is dropped before any other rule runs.
+ */
+const BUNDLED_PREFIX = 'mcp__fluid_bundled__';
+
+/**
  * The bare tool name, with any `mcp__<server>__` prefix stripped.
  *
  * MCP-bridged app builtins arrive as `mcp__builtins__TaskGet`, which is a wire
  * name, not something to show a human. The server segment is dropped rather
  * than kept as a "builtins: " prefix because the app has exactly one bridged
  * server the user ever sees named, and the raw name is still available as the
- * element's `title`. Names that are not MCP-prefixed pass through untouched.
+ * element's `title`. The delegated leg's `mcp__fluid_bundled__` wrapper is
+ * removed first, so `mcp__fluid_bundled__mcp__builtins__Task` shows as `Task`,
+ * the same as on every other leg. Names that are not MCP-prefixed pass through
+ * untouched.
  */
 export function displayToolName(toolName: string): string {
 	if (!toolName?.startsWith('mcp__')) return toolName ?? '';
+	if (toolName.startsWith(BUNDLED_PREFIX) && toolName.length > BUNDLED_PREFIX.length) {
+		return displayToolName(toolName.slice(BUNDLED_PREFIX.length));
+	}
 	const parts = toolName.split('__');
 	// mcp__<server>__<tool>; a tool whose own name contains `__` keeps it.
 	return parts.length >= 3 ? parts.slice(2).join('__') : toolName;

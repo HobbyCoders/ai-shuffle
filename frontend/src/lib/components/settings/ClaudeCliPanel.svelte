@@ -29,6 +29,7 @@
 	} from '$lib/api/claude-cli';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { auth } from '$lib/stores/auth.svelte';
+	import { hydrateModelRegistry } from '$lib/constants/models.svelte';
 
 	interface Props {
 		/** Only the install owner may run the sign-in terminal. */
@@ -76,9 +77,16 @@
 			if (disposed) return;
 			const changed = status !== null && (status.signed_in !== next.signed_in
 				|| !!status.relogin_notice !== !!next.relogin_notice);
+			const accountChanged = status !== null && (status.signed_in !== next.signed_in
+				|| (status.plan ?? null) !== (next.plan ?? null));
 			status = next;
 			// The app-wide gates and the upgrade notice read /auth/status.
 			if (changed) auth.checkAuth().catch(() => {});
+			// The model picker lists Claude models only while the registry says
+			// Claude is signed in (its `claude.auth_kind`), and the registry is
+			// otherwise fetched once per page load. Re-read it so a sign-in, a
+			// sign-out or a plan change shows up in the composer right away.
+			if (accountChanged) void hydrateModelRegistry();
 			loadError = '';
 			onStatus?.(next);
 		} catch (e) {

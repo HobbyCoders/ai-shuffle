@@ -1196,11 +1196,38 @@ def _build_memory_bridge_tools(
         from fluid.tools.builtins import session_search as session_search_mod
         from fluid.tools.builtins import session_view as session_view_mod
 
-        def _session_ctx() -> Any:
+        # The session store keys conversations by the fluid session id
+        # (sessions.sdk_session_id, e.g. ses_…), not the app id this server
+        # was built with, and SessionSearch excludes the caller by
+        # ctx.session_id. Resolved once, off the event loop; the app id stays
+        # the fallback while the fluid id is not yet recorded.
+        store_session_id: Dict[str, str] = {}
+
+        async def _store_session_id() -> Optional[str]:
+            if not session_id:
+                return session_id
+            cached = store_session_id.get("id")
+            if cached:
+                return cached
+            try:
+                from app.db import sessions as sessions_db
+
+                row = await asyncio.to_thread(sessions_db.get_session, session_id)
+            except Exception:  # noqa: BLE001 — exclusion is best effort
+                logger.debug("SessionSearch: session lookup failed", exc_info=True)
+                row = None
+            sdk_id = (row or {}).get("sdk_session_id") if isinstance(row, dict) else None
+            if isinstance(sdk_id, str) and sdk_id:
+                store_session_id["id"] = sdk_id
+                return sdk_id
+            return session_id
+
+        async def _session_ctx() -> Any:
             from app.core.provider.fluid_pg_store import PgFluidStore
 
             store = PgFluidStore()
             ctx = _fluid_ctx()
+            ctx.session_id = await _store_session_id()
             ctx.extra["session_search"] = store.search
             ctx.extra["session_recent"] = store.recent_sessions
             ctx.extra["session_view"] = store.session_slice
@@ -1213,7 +1240,7 @@ def _build_memory_bridge_tools(
         )
         async def session_search_tool(args: dict) -> dict:
             try:
-                outcome = await session_search_mod.handler(args, _session_ctx())
+                outcome = await session_search_mod.handler(args, await _session_ctx())
                 return _fluid_outcome_result(outcome)
             except Exception as e:  # noqa: BLE001
                 logger.exception("SessionSearch bridge failed")
@@ -1228,7 +1255,7 @@ def _build_memory_bridge_tools(
         )
         async def session_view_tool(args: dict) -> dict:
             try:
-                outcome = await session_view_mod.handler(args, _session_ctx())
+                outcome = await session_view_mod.handler(args, await _session_ctx())
                 return _fluid_outcome_result(outcome)
             except Exception as e:  # noqa: BLE001
                 logger.exception("SessionView bridge failed")
@@ -1451,12 +1478,16 @@ def create_builtin_tools_server(
             }
         else:
             from app.core.task_dispatch import dispatch_task_tool
+            from fluid.tools.registry import current_tool_use_id
 
             payload = await dispatch_task_tool(
                 args,
                 caller_session_id=session_id,
                 caller_profile_id=profile_id,
                 caller_provider_id=provider_id,
+                # The CLI's id for this call, forwarded by the bundled bridge:
+                # the worker card absorbs this launch card by it.
+                launch_tool_use_id=current_tool_use_id.get(),
                 # Fluid file/plugin definitions have no DB provider map. They
                 # remain a fallback and borrow this exact caller binding.
                 agent_registry=agent_registry,
@@ -1488,6 +1519,27 @@ def create_builtin_tools_server(
 
     all_tools.extend(_orchestration_bridge(spec, handler)
                      for spec, handler in orchestration_specs)
+
+    # ListAgents / SendMessage — talk to this session's Task workers (and,
+    # from a worker, to the parent as `main`). The native leg wires fluid's
+    # bare-named originals through agent_roster / agent_message on the engine
+    # ctx; the delegated CLI can only reach them through this server, and the
+    # session orchestration tools above refuse worker sessions.
+    from fluid.tools.builtins import list_agents as list_agents_mod
+    from fluid.tools.builtins import send_message as send_message_mod
+    from app.core.agent_messaging import make_message, make_roster
+
+    def _messaging_bridge(module):
+        async def invoke(args: dict) -> dict:
+            ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
+            ctx.extra["agent_roster"] = make_roster(lambda: session_id)
+            ctx.extra["agent_message"] = make_message(lambda: session_id)
+            return _fluid_outcome_result(await module.handler(args, ctx))
+        spec = module.SPEC
+        return tool(spec.name, spec.description, spec.input_schema)(invoke)
+
+    all_tools.extend(_messaging_bridge(module)
+                     for module in (list_agents_mod, send_message_mod))
 
     # ------------------------------------------------------------------
     # NotifyDevices (formerly PushNotification)
@@ -1776,10 +1828,15 @@ def create_builtin_tools_server(
         from types import SimpleNamespace
         from app.core.monitor_spawn import make_fluid_monitor_spawner
         from fluid.tools.hardening import fence_shell_output
+        from fluid.tools.registry import current_tool_use_id
 
+        # The CLI's id for this call (forwarded by the bundled bridge) keys
+        # the shell's task row, so its completion chip joins this card.
+        launch_tool_use_id = current_tool_use_id.get()
+        extra = {"tool_use_id": launch_tool_use_id} if launch_tool_use_id else {}
         try:
             outcome = await make_fluid_monitor_spawner(session_id)(
-                args, SimpleNamespace(cwd=cwd, extra={}),
+                args, SimpleNamespace(cwd=cwd, extra=extra),
             )
             if outcome.is_error:
                 return _err(outcome.text)
@@ -2506,12 +2563,23 @@ def create_builtin_tools_server(
 
 
 def get_builtin_tool_names() -> List[str]:
-    """Return MCP tool names so they can be added to ``allowed_tools``."""
+    """Return MCP tool names so they can be added to ``allowed_tools``.
+
+    Every tool ``create_builtin_tools_server`` can register must be listed:
+    the delegated leg grants its ``safe`` tools to the CLI from this list, so
+    a tool missing here prompts in Ask mode even though it is read-only.
+    """
     names = [
         "mcp__builtins__AndroidDevices",
         "mcp__builtins__AndroidAction",
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
+        # Top-level session coordination and Task-worker messaging.
+        "mcp__builtins__ListSessions",
+        "mcp__builtins__MessageSession",
+        "mcp__builtins__StartSession",
+        "mcp__builtins__ListAgents",
+        "mcp__builtins__SendMessage",
         "mcp__builtins__NotifyDevices",
         "mcp__builtins__CronCreate",
         "mcp__builtins__CronList",

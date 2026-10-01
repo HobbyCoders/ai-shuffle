@@ -339,14 +339,16 @@ def test_provider_bound_target_admission(agents):
     assert "provider" in payload["error"]
 
 
-def test_native_model_override_requires_provider_list(agents):
+def test_native_model_override_refuses_a_non_claude_model(agents):
+    """A native target takes Claude aliases only (see
+    test_task_native_model_choice.py for the accepted choices)."""
     _mk_session(agents, "s-model-override", "root-agent")
     payload = asyncio.run(_dispatch(
-        {"agent": "helper", "prompt": "go", "model": "opus"},
+        {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol"},
         "s-model-override",
     ))
     assert payload["ok"] is False
-    assert "configured provider model list" in payload["error"]
+    assert "not a Claude model" in payload["error"]
 
 
 def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(

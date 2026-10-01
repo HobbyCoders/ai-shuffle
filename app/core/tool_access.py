@@ -70,6 +70,92 @@ def apply_legacy_tool_aliases(tool_names: Iterable[Any]) -> List[str]:
     return out
 
 
+# The delegated (Claude Code CLI) leg names some features differently from the
+# picker, which offers fluid's builtin names. Each bare picker name on the left
+# also permits the CLI tools on the right on that leg. Only the delegated leg
+# reads this; native sessions run the fluid tools the picker names.
+DELEGATED_CLI_ALIASES: Dict[str, tuple] = {
+    # fluid's AskUser; the CLI's question tool is AskUserQuestion.
+    "AskUser": ("AskUserQuestion",),
+    # On Windows the CLI adds a PowerShell tool next to Bash.
+    "Bash": ("PowerShell",),
+    "Edit": ("NotebookEdit",),
+    # The CLI's language-server tool reads code; it follows Read and Grep.
+    "Read": ("LSP",),
+    "Grep": ("LSP",),
+}
+
+# CLI tools whose schemas the CLI defers behind its own ToolSearch. A surface
+# that permits one of them must permit ToolSearch, or the model cannot load it.
+DELEGATED_DEFERRED_CLI_TOOLS = frozenset({"WebSearch", "WebFetch", "LSP", "NotebookEdit"})
+
+
+def expand_delegated_blocklist(
+    names: Iterable[Any],
+    *,
+    bridged_builtins: Iterable[str] = (),
+) -> List[str]:
+    """``names`` plus the delegated leg's spellings of the same features.
+
+    A blocklist needs the same spellings as a surface, or blocking Bash would
+    leave PowerShell callable and blocking Remember would leave the bridged
+    ``mcp__builtins__Remember`` served. ``ToolSearch`` is never added:
+    blocking one deferred tool must not take the loader away from the rest.
+    Order is kept and nothing is duplicated. Patterns pass through unchanged.
+    """
+    bridged = set(bridged_builtins)
+    out: List[str] = []
+
+    def add(name: str) -> None:
+        if name not in out:
+            out.append(name)
+
+    for raw in names or ():
+        name = str(raw).strip()
+        if not name:
+            continue
+        add(name)
+        if name in bridged:
+            add(f"mcp__builtins__{name}")
+        for alias in DELEGATED_CLI_ALIASES.get(name, ()):
+            add(alias)
+    return out
+
+
+def expand_delegated_surface(
+    names: Iterable[Any],
+    *,
+    bridged_builtins: Iterable[str] = (),
+    external_servers: Iterable[str] = (),
+) -> List[str]:
+    """``names`` plus the delegated leg's spellings of the same features.
+
+    * a bare name in ``bridged_builtins`` (a tool the app's ``builtins`` server
+      serves, such as Task, Monitor or Remember) also permits
+      ``mcp__builtins__<name>``, the registry name the bundled bridge serves;
+    * ``DELEGATED_CLI_ALIASES`` adds the CLI's names for picker tools;
+    * ``ToolSearch`` is added when a deferred CLI tool, or a tool of one of the
+      ``external_servers`` (MCP servers the CLI connects and defers), is
+      permitted.
+
+    Order is kept and nothing is duplicated. Patterns pass through unchanged.
+    """
+    external = set(external_servers)
+    out = expand_delegated_blocklist(names, bridged_builtins=bridged_builtins)
+
+    def add(name: str) -> None:
+        if name not in out:
+            out.append(name)
+
+    needs_search = any(name in DELEGATED_DEFERRED_CLI_TOOLS for name in out) or any(
+        name.startswith("mcp__") and name[len("mcp__"):].partition("__")[0] in external
+        for name in out
+    )
+    if needs_search:
+        add("ToolSearch")
+    return out
+
+
 @dataclass(frozen=True)
 class ToolAccess:
     """The resolved answer for one agent config.

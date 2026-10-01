@@ -1,7 +1,7 @@
 """The delegated (Claude subscription) leg end to end, through the app adapter.
 
 A scripted fake ``claude`` (``fluid/tests/fixtures/fake_claude_script.py``) is
-installed as ``claude`` on PATH, so the real CLI discovery, the real
+what the adapter's CLI resolver returns, so the real
 ``HarnessAdapter`` → ``DelegatedLoop`` → stream-json pipe and the adapter's
 translation into the app's provider events all run. Each test asserts on what
 the app sees (tool calls, results, the permission callback, the terminal
@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,16 +52,24 @@ def _isolated_home(monkeypatch, tmp_path):
     monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
 
 
+def _use_fake_cli(monkeypatch) -> list:
+    """Make the scripted fake the ``claude`` the adapter runs.
+
+    The adapter's resolver is patched to run the fake with this interpreter
+    rather than relying on a shim on PATH: on Windows ``shutil.which`` skips a
+    file without a PATHEXT extension, so a shim was passed over and the search
+    reached the machine's real ``claude.exe``, which billed the subscription.
+    PATH discovery itself is covered by ``test_claude_cmd_resolution.py``.
+    """
+    command = [sys.executable, str(FAKE)]
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda **_: list(command))
+    assert ha._resolve_claude_cmd() == command, "the adapter must run the scripted fake"
+    return command
+
+
 @pytest.fixture(autouse=True)
-def _claude_on_path(monkeypatch, tmp_path):
-    """Install the scripted fake as the ``claude`` the adapter discovers."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    shim = bin_dir / "claude"
-    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n', encoding="utf-8")
-    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    return shim
+def _claude_on_path(monkeypatch):
+    return _use_fake_cli(monkeypatch)
 
 
 class PermissionResultAllow:  # the app's callback results, matched by class name
@@ -274,7 +280,11 @@ async def test_the_permission_mode_and_grants_decide_what_prompts(tmp_path, mode
     argv = start["argv"]
     assert argv[argv.index("--permission-mode") + 1] == mode
     grants = argv[argv.index("--allowed-tools") + 1].split(",")
-    assert grants == [BRIDGED_RECALL]  # Remember is a write tool: never granted
+    # Remember is a write tool: never granted. Of the CLI's own tools only
+    # read-only search and WebSearch are; never Edit, Write, Bash or Read.
+    assert grants[0] == BRIDGED_RECALL and BRIDGED_REMEMBER not in grants
+    assert {"Glob", "Grep", "WebSearch"} <= set(grants)
+    assert not {"Edit", "Write", "Bash", "PowerShell", "Read", "NotebookEdit"} & set(grants)
 
 
 # ─── Stop ───────────────────────────────────────────────────────────────────
@@ -311,6 +321,37 @@ async def test_stop_mid_turn_ends_with_an_aborted_result_that_keeps_the_cost(tmp
     assert final.total_cost_usd == pytest.approx(0.004)
     assert final.num_turns == 1
     assert not again[-1].is_error
+
+
+# ─── A refused call's HTTP status ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_failed_results_http_status_reaches_the_apps_result(tmp_path):
+    """A lapsed Claude Code login ends the turn with ``api_error_status`` 401.
+
+    The status travels from the CLI's result frame through fluid's ErrorEvent
+    to the ResultMessage the query loops read, which is what raises the
+    "sign in to Claude Code again" notice.
+    """
+    turn = [
+        {"op": "frame", "frame": {
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "api_error_status": 401, "num_turns": 1, "total_cost_usd": 0.0,
+            "duration_ms": 5, "duration_api_ms": 3,
+            "errors": ["Invalid API key · Please run /login"],
+            "usage": {"input_tokens": 0, "output_tokens": 0,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        }},
+    ]
+    run = Run(tmp_path, {"turns": [turn]})
+    async with run:
+        messages = await run.turn("hello")
+
+    final = messages[-1]
+    assert isinstance(final, ResultMessage)
+    assert final.is_error
+    assert final.api_error_status == 401
 
 
 # ─── Usage the app books for the turn ───────────────────────────────────────

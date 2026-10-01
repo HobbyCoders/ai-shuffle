@@ -108,15 +108,106 @@ async def _stream_query_with_failover(
 
 
 async def require_claude_auth():
-    """Dependency: this worker may start agent runs (license plus the active
-    Claude Code mode's credential; see ``app.core.credential_gate``)."""
-    from app.core import credential_gate
+    """Dependency: the license lets this worker start agent runs.
 
-    ready, reason = await credential_gate.agent_credentials_ready_async()
-    if not ready:
+    Only the license half of ``app.core.credential_gate``. Whether a run also
+    needs the Claude Code credential depends on the leg it runs on: a turn on
+    an OpenAI, xAI, OpenRouter or custom provider row needs none. Each route
+    checks that with :func:`_refuse_unready_leg` once it knows the profile,
+    the overrides and the session.
+    """
+    from app.core.license import license_allows_agent_runs
+
+    allowed, reason = await asyncio.to_thread(license_allows_agent_runs)
+    if not allowed:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=reason or "This worker is not set up to start agents.",
+        )
+
+
+def _request_overrides(request) -> dict | None:
+    if not request.overrides:
+        return None
+    return request.overrides.model_dump(exclude_none=True)
+
+
+def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None) -> str | None:
+    """The harness leg a request will run on, or None when it cannot tell.
+
+    Mirrors how ``query_options.build_options_from_profile`` binds a run
+    without building the options (which can create a git worktree): the
+    overrides' provider, else the session's bound provider (a new session is
+    bound from the agent's ``config.provider``, as ``create_session`` does);
+    the model from the overrides, then the session, then the agent. A
+    ``prov:<provider>:<model>`` pick binds that provider, and a plain Claude
+    pick the bound provider does not curate drops back to native Claude. The
+    leg itself comes from the adapter's own decision table.
+    """
+    from types import SimpleNamespace
+
+    from app.core.model_registry import DEFAULT_MODEL
+    from app.core.provider.harness_adapter import provider_kind_for_sdk_options
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+
+    profile = database.get_profile(profile_id)
+    if not profile:
+        return None  # the engine reports the unknown agent
+    config = profile.get("config") or {}
+    overrides = overrides or {}
+    session = database.get_session(session_id) if session_id else None
+
+    if session is not None:
+        provider_id = overrides.get("provider") or session.get("provider_id")
+    else:
+        provider_id = overrides.get("provider") or config.get("provider")
+    selected = overrides.get("model") or (session or {}).get("model")
+    model = selected or (session or {}).get("launched_model") or config.get("model")
+
+    decoded = decode_provider_model(selected)
+    if decoded is not None:
+        provider_id, model = decoded
+    elif selected and provider_id and not overrides.get("provider") \
+            and is_native_claude_model(selected):
+        from app.core.provider_agent import curated_model_ids
+
+        row = database.get_model_provider(provider_id, include_token=False)
+        if selected not in curated_model_ids(row):
+            provider_id = None
+    if not model and not provider_id:
+        model = DEFAULT_MODEL
+    return provider_kind_for_sdk_options(
+        SimpleNamespace(model=model, aih_provider_id=provider_id)
+    )
+
+
+async def _refuse_unready_leg(
+    profile_id: str, overrides: dict | None, session_id: str | None = None,
+) -> None:
+    """503 with the setup message when the run's leg is not set up.
+
+    A run on the Claude Code CLI needs the active Claude Code mode's
+    credential; a run on a provider row needs only the license (see
+    ``credential_gate.turn_refusal``). The error carries the gate's
+    ``agent_setup_required`` code in the ``X-Error-Code`` header. When the leg
+    cannot be worked out here, the request goes on: every engine runs the same
+    per-leg check on its built options before it starts a turn.
+    """
+    from app.core import credential_gate
+
+    try:
+        leg = await asyncio.to_thread(_request_leg, profile_id, overrides, session_id)
+    except Exception:  # noqa: BLE001 — the engine's own gate still applies
+        logger.debug("Could not work out the leg for the credential gate", exc_info=True)
+        return
+    if leg is None:
+        return
+    reason = await credential_gate.turn_refusal_async(leg)
+    if reason:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=reason,
+            headers={"X-Error-Code": credential_gate.SETUP_CODE},
         )
 
 
@@ -141,12 +232,10 @@ async def one_shot_query(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No profile configured. Provide 'profile' in the request."
         )
+    overrides = _request_overrides(request)
+    await _refuse_unready_leg(profile_id, overrides)
 
     try:
-        overrides = None
-        if request.overrides:
-            overrides = request.overrides.model_dump(exclude_none=True)
-
         result = await _execute_query_with_failover(
             prompt=request.prompt,
             profile_id=profile_id,
@@ -194,13 +283,11 @@ async def stream_one_shot_query(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No profile configured. Provide 'profile' in the request."
         )
+    overrides = _request_overrides(request)
+    await _refuse_unready_leg(profile_id, overrides)
 
     async def event_generator():
         try:
-            overrides = None
-            if request.overrides:
-                overrides = request.overrides.model_dump(exclude_none=True)
-
             async for event in _stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
@@ -285,9 +372,7 @@ async def conversation(
         )
 
     try:
-        overrides = None
-        if request.overrides:
-            overrides = request.overrides.model_dump(exclude_none=True)
+        overrides = _request_overrides(request)
 
         from app.core import turn_manager, turn_outcome
         from app.db import database
@@ -307,7 +392,10 @@ async def conversation(
                     detail="Unknown session_id",
                 )
             check_session_access_for_api_user(api_user, existing)
-        else:
+        # The queued turn is refused by the engine too, but only as a failed
+        # outcome after the wait; refuse here, before a session row is made.
+        await _refuse_unready_leg(profile_id, overrides, session_id)
+        if not session_id:
             session_id = str(uuid.uuid4())
             title = derive_session_title(
                 request.prompt, max_chars=50, word_boundary=False
@@ -440,13 +528,11 @@ async def stream_conversation(
             detail="No profile configured. Provide 'profile' in the request."
         )
     await _check_continued_session(api_user, request.session_id)
+    overrides = _request_overrides(request)
+    await _refuse_unready_leg(profile_id, overrides, request.session_id)
 
     async def event_generator():
         try:
-            overrides = None
-            if request.overrides:
-                overrides = request.overrides.model_dump(exclude_none=True)
-
             async for event in _stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
@@ -523,12 +609,12 @@ async def start_conversation(
             detail="No profile configured. Provide 'profile' in the request."
         )
     await _check_continued_session(api_user, request.session_id)
+    overrides = _request_overrides(request)
+    # The background turn is refused by the engine too, but only after this
+    # call has already answered "started"; refuse here so the caller sees it.
+    await _refuse_unready_leg(profile_id, overrides, request.session_id)
 
     try:
-        overrides = None
-        if request.overrides:
-            overrides = request.overrides.model_dump(exclude_none=True)
-
         result = await start_background_query(
             prompt=request.prompt,
             profile_id=profile_id,

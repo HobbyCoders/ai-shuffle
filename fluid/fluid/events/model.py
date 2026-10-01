@@ -516,13 +516,52 @@ class DelegatedSurface(Event):
     ``mcp_servers`` the announced server entries (each a raw dict, typically
     ``{"name": ..., "status": ...}``).
 
-    Emitted once per ``init`` frame, i.e. once per CLI process start, not per
-    turn. Purely informational — never terminal, never part of the model
+    The same frame says what the CLI is: ``cli_version`` (its
+    ``claude_code_version``), the ``permission_mode`` and ``model`` it runs,
+    and ``api_key_source`` (where its credentials come from, e.g. ``none`` on
+    a subscription login). ``cli_session_id`` names the CLI's own transcript.
+    ``child_env_overrides`` is the environment the loop forced on the child
+    (``FORCED_CHILD_ENV``), so a session records whether the bash-first steer
+    override was in force. All of these default to empty, so rows persisted
+    before they existed still load.
+
+    Emitted once per ``init`` frame. In stream-json input mode the CLI writes
+    an init frame at the start of every turn, not once per process, so this
+    event is per turn: nothing scoped to a CLI process may be keyed on it.
+    Purely informational — never terminal, never part of the model
     conversation.
     """
 
     tools: tuple[str, ...]
     mcp_servers: tuple[dict[str, Any], ...] = ()
+    cli_version: str | None = None
+    permission_mode: str | None = None
+    model: str | None = None
+    api_key_source: str | None = None
+    cli_session_id: str | None = None
+    child_env_overrides: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class DelegatedDiagnostic(Event):
+    """Something the delegated engine found out about its CLI child that a
+    later audit needs to see.
+
+    ``kind`` names the finding; ``message`` says it in words; ``data`` holds
+    the details. Kinds:
+
+    * ``"bash_first_steer"``: the CLI's transcript shows it attached its
+      "do your work through Bash" steer although the loop turned it off.
+      ``data`` carries ``cli_version``, ``variant`` (the CLI's
+      ``bashFirstSteer`` value), ``resumed`` and ``cli_session_id``.
+
+    Stored with the session for audits; hosts that do not know it skip it.
+    Never terminal, never part of the model conversation.
+    """
+
+    kind: str
+    message: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 # ``SubagentEvent.wake_disposition`` values. See the field's docstring.
@@ -652,7 +691,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ContextCompaction, Usage, RateLimit, ProviderRetry, ProviderAlive,
         SubagentEvent, HookEvent,
         CacheMissAlert,
-        ContinualUpdate, DelegatedSurface, SwarmUpdated,
+        ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,
     )
 }
 

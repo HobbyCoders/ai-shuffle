@@ -51,27 +51,144 @@ class TestQueryModuleImports:
 class TestRequireClaudeAuth:
     """Tests for the require_claude_auth dependency."""
 
-    async def test_require_claude_auth_passes_when_ready(self):
-        """Should not raise when the credential gate reports ready."""
+    async def test_require_claude_auth_passes_when_licensed(self):
+        """Only the license is checked here, not the Claude credential."""
         from app.api.query import require_claude_auth
         from app.core import credential_gate
+        from app.core import license as license_mod
 
-        with patch.object(credential_gate, "agent_credentials_ready", return_value=(True, None)):
+        with patch.object(license_mod, "license_allows_agent_runs", return_value=(True, None)), \
+                patch.object(credential_gate, "claude_credential_ready",
+                             return_value=(False, credential_gate.NOT_SIGNED_IN_MESSAGE)):
             assert await require_claude_auth() is None
 
-    async def test_require_claude_auth_raises_with_the_setup_message(self):
-        """Should raise 503 with the gate's setup message when not ready."""
+    async def test_require_claude_auth_raises_without_a_license(self):
+        """Should raise 503 with the license reason when runs are not licensed."""
         from fastapi import HTTPException
         from app.api.query import require_claude_auth
-        from app.core import credential_gate
+        from app.core import license as license_mod
 
-        with patch.object(credential_gate, "agent_credentials_ready",
-                          return_value=(False, credential_gate.NOT_SIGNED_IN_MESSAGE)):
+        with patch.object(license_mod, "license_allows_agent_runs",
+                          return_value=(False, "This worker has no license.")):
             with pytest.raises(HTTPException) as exc_info:
                 await require_claude_auth()
 
         assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "This worker has no license."
+
+
+# =============================================================================
+# The Claude credential is checked per leg, not for every run
+# =============================================================================
+
+@pytest.mark.real_agent_gate
+class TestPerLegCredentialGate:
+    """Subscription mode with the Claude Code CLI signed out: a run on a
+    ChatGPT provider row starts, a run on a Claude model is refused with the
+    setup message, and a missing license still refuses everything."""
+
+    @pytest.fixture
+    def signed_out(self, mock_db):
+        from app.core import claude_auth_mode, claude_cli_status
+        from app.core import license as license_mod
+        from app.db import database
+
+        claude_auth_mode.set_mode("subscription")
+        database.create_model_provider(
+            "chatgpt", "ChatGPT", "openai", "https://example.invalid/v1",
+            models=[{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-sol"}],
+            default_model="gpt-5.6-luna",
+        )
+        database.create_profile("gpt-agent", "GPT Agent", None,
+                                {"provider": "chatgpt", "model": "gpt-5.6-luna"})
+        database.create_profile("claude-agent", "Claude Agent", None, {"model": "opus"})
+        not_signed_in = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)
+        with patch.object(claude_cli_status, "get_status", return_value=not_signed_in), \
+                patch.object(license_mod, "license_allows_agent_runs", return_value=(True, None)) as lic, \
+                patch("app.api.query.start_background_query",
+                      new=AsyncMock(return_value={"session_id": "s", "status": "started"})) as start:
+            yield lic, start
+
+    @staticmethod
+    async def _start(profile, overrides=None):
+        from app.api.query import require_claude_auth, start_conversation
+        from app.core.models import ConversationRequest, QueryOverrides
+
+        await require_claude_auth()
+        request = ConversationRequest(
+            prompt="Hi", profile=profile,
+            overrides=QueryOverrides(**overrides) if overrides else None,
+        )
+        return await start_conversation(request, {"id": "u1", "profile_ids": None})
+
+    async def test_a_provider_row_agent_starts_without_a_claude_sign_in(self, signed_out):
+        _, start = signed_out
+        result = await self._start("gpt-agent")
+        assert result["status"] == "started"
+        start.assert_awaited_once()
+
+    async def test_a_provider_model_pick_starts_without_a_claude_sign_in(self, signed_out):
+        _, start = signed_out
+        result = await self._start("claude-agent", {"model": "prov:chatgpt:gpt-5.6-sol"})
+        assert result["status"] == "started"
+        start.assert_awaited_once()
+
+    async def test_a_claude_agent_is_refused_with_the_setup_message(self, signed_out):
+        from fastapi import HTTPException
+        from app.core import credential_gate
+
+        _, start = signed_out
+        with pytest.raises(HTTPException) as exc_info:
+            await self._start("claude-agent")
+        assert exc_info.value.status_code == 503
         assert exc_info.value.detail == credential_gate.NOT_SIGNED_IN_MESSAGE
+        assert exc_info.value.headers == {"X-Error-Code": credential_gate.SETUP_CODE}
+        start.assert_not_awaited()
+
+    async def test_a_claude_pick_on_a_provider_agent_is_refused(self, signed_out):
+        from fastapi import HTTPException
+
+        _, start = signed_out
+        with pytest.raises(HTTPException) as exc_info:
+            await self._start("gpt-agent", {"model": "sonnet"})
+        assert exc_info.value.status_code == 503
+        start.assert_not_awaited()
+
+    async def test_a_missing_license_still_refuses(self, signed_out):
+        from fastapi import HTTPException
+
+        lic, start = signed_out
+        lic.return_value = (False, "This worker has no license.")
+        with pytest.raises(HTTPException) as exc_info:
+            await self._start("gpt-agent")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "This worker has no license."
+        start.assert_not_awaited()
+
+    @pytest.mark.parametrize("endpoint,model", [
+        ("one_shot_query", "QueryRequest"),
+        ("stream_one_shot_query", "QueryRequest"),
+        ("conversation", "ConversationRequest"),
+        ("stream_conversation", "ConversationRequest"),
+        ("start_conversation", "ConversationRequest"),
+    ])
+    async def test_every_route_refuses_a_claude_run_before_the_engine(
+        self, signed_out, endpoint, model,
+    ):
+        from fastapi import HTTPException
+        from app.api import query
+        from app.core import models
+
+        request = getattr(models, model)(prompt="Hi", profile="claude-agent")
+        with patch("app.core.query_engine.execute_query", new=AsyncMock()) as execute, \
+                patch("app.api.query._stream_query_with_failover") as stream, \
+                patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
+            with pytest.raises(HTTPException) as exc_info:
+                await getattr(query, endpoint)(request, {"id": "u1", "profile_ids": None})
+        assert exc_info.value.status_code == 503
+        execute.assert_not_awaited()
+        stream.assert_not_called()
+        submit.assert_not_awaited()
 
 
 # =============================================================================

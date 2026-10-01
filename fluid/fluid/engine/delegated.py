@@ -63,6 +63,8 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import glob
+import inspect
 import json
 import logging
 import os
@@ -71,12 +73,13 @@ import secrets
 import signal
 import socket
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.delegated_proto import (
+    FORCED_CHILD_ENV,
     ControlReply,
     HookCallbackRequest,
     PermissionBridge,
@@ -88,6 +91,8 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    DelegatedDiagnostic,
+    DelegatedSurface,
     ErrorEvent,
     Event,
     HookEvent,
@@ -294,6 +299,116 @@ def _cli_permission_mode(mode: str, cli_version: str | None) -> str:
     )
     return renamed
 
+
+# The oldest CLI the loop sends two newer flags: ``--allow-dangerously-skip-
+# permissions`` (makes Bypass selectable mid-session without turning it on)
+# and ``--append-system-prompt-file`` / ``--system-prompt-file`` (the prompt
+# rides a file, not the command line). A CLI whose version is unknown is
+# assumed to be newer: the installed CLI is unpinned and current ones have
+# both. A known older CLI keeps the old argv.
+_CLI_FLAGS_SINCE = "2.1.0"
+
+_ON_WINDOWS = os.name == "nt"
+
+
+def _root_outside_deliberate_sandbox(env: dict[str, str]) -> bool:
+    """Whether the CLI would refuse ``--allow-dangerously-skip-permissions``.
+
+    Mirrors CLI 2.1.285's ``isRootOutsideDeliberateSandbox``: not Windows,
+    uid 0, ``IS_SANDBOX`` not ``"1"`` and ``CLAUDE_CODE_BUBBLEWRAP`` unset in
+    the child's env. The CLI applies it to that flag as well as to a Bypass
+    launch and exits 1, so sending the flag there would stop every session,
+    not only Bypass ones.
+    """
+    if _ON_WINDOWS:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or getuid() != 0:
+        return False
+    return env.get("IS_SANDBOX") != "1" and not env.get("CLAUDE_CODE_BUBBLEWRAP")
+
+
+# The steer check reads at most this much of the end of a CLI transcript.
+_STEER_SCAN_BYTES = 8 * 1024 * 1024
+
+
+def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, Any] | None:
+    """The bash-first steer the CLI recorded for ``cli_session_id``, or None.
+
+    The CLI writes every ``auto_mode`` attachment it adds to a turn into its
+    transcript at ``<config>/projects/<slug>/<session id>.jsonl``. The slug is
+    derived from the working directory, so the file is found by glob. See
+    :func:`bash_first_steer_in_transcript`. Blocking; run it off the loop.
+    """
+    if not cli_session_id or any(c in cli_session_id for c in "/\\:") or ".." in cli_session_id:
+        return None  # an id is a bare name; never let one walk the tree
+    paths = glob.glob(os.path.join(
+        glob.escape(config_dir), "projects", "*", f"{glob.escape(cli_session_id)}.jsonl",
+    ))
+    if not paths:
+        return None
+    return bash_first_steer_in_transcript(max(paths, key=lambda p: os.path.getmtime(p)))
+
+
+def bash_first_steer_in_transcript(path: str) -> dict[str, Any] | None:
+    """The bash-first ``auto_mode`` attachment in a CLI transcript, or None.
+
+    Only entries after the last compact boundary count: a compaction drops
+    older attachments from the model's context. The CLI adds the attachment
+    once per conversation, so a transcript written while the steer was on
+    keeps it on every ``--resume`` until the CLI compacts. Reads at most the
+    last ``_STEER_SCAN_BYTES``. Blocking; run it off the loop.
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _STEER_SCAN_BYTES))
+        tail = fh.read()
+    lines = tail.split(b"\n")
+    if size > _STEER_SCAN_BYTES:
+        lines = lines[1:]  # the first line was cut by the seek
+    found: dict[str, Any] | None = None
+    for raw in lines:
+        if b"compact_boundary" not in raw and b"auto_mode" not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
+            found = None
+            continue
+        attachment = entry.get("attachment")
+        if (
+            entry.get("type") == "attachment"
+            and isinstance(attachment, dict)
+            and attachment.get("type") == "auto_mode"
+            and attachment.get("bashFirst") is True
+        ):
+            found = attachment
+    return found
+
+
+def _cli_older_than(version: str | None, minimum: str) -> bool:
+    """True only when ``version`` parses and sorts below ``minimum``; an
+    unknown or unparsable version counts as current."""
+    have, need = _version_key(version), _version_key(minimum)
+    return have is not None and need is not None and have < need
+
+
+def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
+    """``settings`` with ``FORCED_CHILD_ENV`` on top of its ``env`` block."""
+    env = settings.get("env")
+    return {**settings, "env": {**(env if isinstance(env, dict) else {}), **FORCED_CHILD_ENV}}
+
+
+def _settings_json(settings: dict[str, Any]) -> str:
+    """Deterministic JSON: the same settings are the same bytes every spawn."""
+    return json.dumps(settings, sort_keys=True, separators=(",", ":"))
+
+
 # Poll interval while another reader (a live turn) owns stdout and is expected
 # to deliver our reply. Also caps a single pump read, so the pump notices a turn
 # starting within one interval instead of sitting in ``readline`` until the
@@ -328,6 +443,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     provider = "claude"
 
+    # ``tool_policy`` may return an awaitable (an async saved-rule check). A
+    # host passes an async policy only when this attribute exists, so an older
+    # loop is never handed a coroutine it would read as a denial text.
+    supports_async_tool_policy = True
+
     def __init__(
         self,
         *,
@@ -356,7 +476,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         setting_sources: tuple[str, ...] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
-        tool_policy: Callable[[str, dict[str, Any]], str | None] | None = None,
+        tool_policy: Callable[
+            [str, dict[str, Any]], str | None | Awaitable[str | None]
+        ] | None = None,
         journal: Any | None = None,
     ) -> None:
         self.store = store
@@ -376,17 +498,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.cwd = cwd
         self.env = env
         self.add_dirs = add_dirs
-        # Tool restriction (ruling CE12), the CLI's own flags: allowed is the
-        # whole surface when set, disallowed subtracts. The native leg enforces
-        # the same pair itself; here the child CLI does the enforcing.
+        # Tool restriction (ruling CE12). ``allowed_tools`` is the surface the
+        # bundled bridge serves (None serves everything); it never reaches the
+        # CLI's argv, because the CLI reads a bare name on --allowed-tools as a
+        # blanket pre-approval, not a restriction. ``disallowed_tools`` goes out
+        # as --disallowed-tools, which hides a CLI tool, and also subtracts
+        # from the bridge.
         self.allowed_tools = allowed_tools
         # The delegated CLI supplies these tools itself; keep them off its surface.
         self.disallowed_tools = list(dict.fromkeys([
             *(disallowed_tools or ()), "EnterPlanMode", "ExitPlanMode",
         ]))
-        # Extra CLI permission rules (tools that run without a prompt), in the
-        # names the CLI calls them. Joined into --allowed-tools only: unlike
-        # ``allowed_tools`` they never narrow the bridge's surface.
+        # CLI permission rules (tools that run without a prompt), in the names
+        # the CLI calls them. The whole of --allowed-tools; they never narrow
+        # the bridge's surface.
         self.permission_grants = list(permission_grants or ())
         # Gates for the bundled bridge only: the CLI owns its own tools, but a
         # registry tool served over the bridge is harness dispatch and gets the
@@ -395,9 +520,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.hooks = hooks
         # Deny-only policy for the CLI's own tool calls, applied at the
         # PreToolUse hook: (tool name, input) -> the denial text, or None to
-        # let the CLI's permission flow decide. None falls back to the
-        # permission engine's deny rules. Bridge-served calls are gated at the
-        # bridge instead and never reach it.
+        # let the CLI's permission flow decide; it may also return an
+        # awaitable of either. A policy that raises denies the call. None
+        # falls back to the permission engine's deny rules. Bridge-served
+        # calls are gated at the bridge instead and never reach it.
         self.tool_policy = tool_policy
         # True once the CLI accepted the ``initialize`` request that registered
         # this loop's hook callbacks (per process; reset on every spawn).
@@ -424,6 +550,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # single frame on a resumed process means the handle is dead.
         self._spawn_resume: str | None = None
         self._proc_results = 0
+        # The live CLI's running total_cost_usd after the last result this
+        # loop booked: the baseline its next result's cost is measured from
+        # (the CLI reports the process total, not the turn's). None on a
+        # process spawned with --resume until its first result.
+        self._cli_cost_total: float | None = 0.0
         # Loop time the last turn's result was read (see _discard_stale_stdout).
         self._last_result_at: float | None = None
         # The CLI started a turn of its own (a wake) whose result has not been
@@ -456,6 +587,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # list; also published as a DelegatedSurface event.
         self.cli_tools: tuple[str, ...] | None = None
         self.cli_mcp_servers: tuple[dict[str, Any], ...] | None = None
+        # Per-session scratch directory: the bundled bridge's mcp.json and
+        # socket, and the prompt file. Created on first use.
+        self._tmpdir: str | None = None
+        # The file the appended (or replacing) system prompt rides in, and the
+        # text last written to it: rewritten only when the text changes, so
+        # every spawn reads the same bytes.
+        self._prompt_file: str | None = None
+        self._prompt_file_text: str | None = None
+        self._settings_path_logged = False
+        # The steer check (see ``_scan_for_bash_first_steer``): armed on every
+        # spawn, run once after that process's first terminal event.
+        self._steer_scan_armed = False
+        self._steer_scans: set[asyncio.Task] = set()
+        # The CLI's own session id from the latest DelegatedSurface, which
+        # names its transcript before the turn's end records it on the loop.
+        self._surface_cli_session_id: str | None = None
+        self._surface_cli_version: str | None = None
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -558,6 +706,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._peer_admission_open = False
         sequenced = await self.bus.publish(event)
         await persist_event(self.store, sequenced)
+        if isinstance(event, DelegatedSurface):
+            self._surface_cli_session_id = event.cli_session_id or self._surface_cli_session_id
+            self._surface_cli_version = event.cli_version or self._surface_cli_version
+        elif isinstance(event, (TurnComplete, ErrorEvent, Interrupted)):
+            self._start_steer_scan(event.session_id)
         return sequenced
 
     async def _flush_events(self, sid: str) -> None:
@@ -641,11 +794,34 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 
     async def set_run_settings(self, *, effort: str | None, fast: bool) -> None:
-        """Session-only flag settings; never write account/project configuration."""
-        settings = {**json.loads(self.settings or "{}"), "effortLevel": effort, "fastMode": fast}
+        """Session-only flag settings; never write account/project configuration.
+
+        The payload keeps the settings' ``env`` block with ``FORCED_CHILD_ENV``
+        on top, as ``--settings`` does, so a re-sent flag layer never drops
+        the steer override.
+        """
+        base = self._settings_object()
+        if base is None:
+            raise ValueError(
+                "the delegated loop's settings name a file, so run settings "
+                "cannot be merged into them"
+            )
+        settings = _with_forced_env({**base, "effortLevel": effort, "fastMode": fast})
         await self._apply_setting({"subtype": "apply_flag_settings", "settings": settings})
         self.effort = effort
-        self.settings = json.dumps(settings)
+        self.settings = _settings_json(settings)
+
+    def _settings_object(self) -> dict[str, Any] | None:
+        """The host's ``settings`` as a JSON object ({} when unset), or None
+        when it is something else (the CLI also accepts a file path)."""
+        raw = getattr(self, "settings", None)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     async def aclose(self) -> None:
         self._peer_admission_open = False
@@ -679,12 +855,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 pass
         # A "tcp:..." bridge address names no file — closing the server above is
         # the whole cleanup; only real paths get unlinked.
-        for path in (self._socket_path, self._mcp_config_path):
+        for path in (self._socket_path, self._mcp_config_path, self._prompt_file):
             if path and not path.startswith("tcp:") and os.path.exists(path):
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
+        self._prompt_file = self._prompt_file_text = None
+        if self._tmpdir is not None:
+            try:
+                os.rmdir(self._tmpdir)  # only once empty; never a tree delete
+            except OSError:
+                pass
+            self._tmpdir = None
+        # A steer check still reading a transcript gets a moment to report.
+        if self._steer_scans:
+            try:
+                await asyncio.wait(set(self._steer_scans), timeout=2)
+            except Exception:
+                logger.debug("waiting for the steer check failed", exc_info=True)
+            for task in list(self._steer_scans):
+                task.cancel()
         # Let any in-flight resume-handle write land — losing it here is exactly
         # the restart case this persistence exists for.
         if self._cli_id_writes:
@@ -732,17 +923,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         from fluid.tools.child_env import child_env_with_overlay
 
         env = child_env_with_overlay(self.env, os.environ)
-        # The loop reads stdout only during its own turns, so the CLI's
-        # background jobs (run_in_background, auto-backgrounding, Monitor)
-        # would report into a between-turn wake no one reads. A no-op on a
-        # CLI that predates the switch.
-        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
-        # In bypass mode the CLI can attach a per-turn "do your work through
-        # Bash" steer (a GrowthBook cohort, 2.1.265) that pushes reads,
-        # searches and edits off Read/Grep/Glob/Edit onto cat/grep/sed. This
-        # override turns it off. It is undocumented, so a CLI that renames
-        # it simply ignores the variable.
-        env["CLAUDE_CODE_THRIFTY_SONIC"] = "0"
+        # ``FORCED_CHILD_ENV`` goes on last, so neither the host environment
+        # nor the caller's overlay can change it:
+        #
+        # * CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1. The loop reads stdout only
+        #   during its own turns, so the CLI's background jobs
+        #   (run_in_background, auto-backgrounding, Monitor) would report into
+        #   a between-turn wake no one reads. A no-op on a CLI that predates
+        #   the switch.
+        # * CLAUDE_CODE_THRIFTY_SONIC=0. In bypassPermissions and auto modes
+        #   CLI 2.1.285 attaches a per-turn "do your work through Bash" steer
+        #   that moves reads, searches and edits off Read/Grep/Glob/Edit onto
+        #   cat/grep/sed, and the same switch trims the Read/Edit/Write tool
+        #   descriptions. It is forced on for the Opus 5.5 and Fable 5.1
+        #   prompt bundles (every session on those models) and cohort-gated
+        #   for other models. The variable is read before either gate, so
+        #   this override must stay unconditional. It is undocumented: a CLI
+        #   that renames it ignores it, which the steer check after each
+        #   spawn's first turn reports (``_scan_for_bash_first_steer``).
+        #
+        # Settings-file env blocks are applied over the process env at CLI
+        # startup, so ``_build_argv`` also sends these through ``--settings``.
+        env.update(FORCED_CHILD_ENV)
         return env
 
     async def _stop_process(self, *, grace: float = 5.0) -> None:
@@ -821,7 +1023,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Written even when it names no server: the config is what carries
         # --strict-mcp-config, and an empty one is how the child is told to
         # connect none of the user's own servers.
-        tmpdir = tempfile.mkdtemp(prefix="fluid-delegated-")
+        tmpdir = self._ensure_tmpdir()
         self._mcp_config_path = os.path.join(tmpdir, "mcp.json")
         use_unix = hasattr(socket, "AF_UNIX")
         self._socket_path = (
@@ -857,6 +1059,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += [
                 "--permission-mode", _cli_permission_mode(self.permission_mode, self.cli_version),
             ]
+            if not _cli_older_than(
+                self.cli_version, _CLI_FLAGS_SINCE,
+            ) and not _root_outside_deliberate_sandbox(self._child_env()):
+                # Makes Bypass selectable later without turning it on. The
+                # CLI refuses ``set_permission_mode bypassPermissions`` from a
+                # process launched in another mode unless this flag was given
+                # (``bypass_not_launched``), and a switch to Bypass then fails.
+                # Left off for a root-run CLI outside a sandbox, which exits
+                # on this flag: there only a later switch to Bypass fails,
+                # as a Bypass launch would.
+                argv += ["--allow-dangerously-skip-permissions"]
         # Route permission decisions to the harness: without this the headless
         # CLI never emits ``can_use_tool`` control_requests (it silently
         # auto-denies), so the PermissionBridge below would never fire.
@@ -868,26 +1081,89 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # bridge plus the session's configured servers) and none of the
             # ones its own settings files name.
             argv += ["--mcp-config", self._mcp_config_path, "--strict-mcp-config"]
-        if self.append_system_prompt:
-            argv += ["--append-system-prompt", self.append_system_prompt]
-        elif self.system:
-            argv += ["--system-prompt", self.system]
+        argv += self._prompt_argv()
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
-        granted = list(dict.fromkeys([*(self.allowed_tools or ()), *self.permission_grants]))
+        granted = list(dict.fromkeys(self.permission_grants))
         if granted:
             argv += ["--allowed-tools", ",".join(granted)]
         if self.disallowed_tools:
             argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
         if self.effort:
             argv += ["--effort", self.effort]
-        if self.settings:
-            argv += ["--settings", self.settings]
+        argv += ["--settings", self._settings_arg()]
         if self.setting_sources is not None:
             argv += ["--setting-sources", ",".join(self.setting_sources)]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
+
+    def _ensure_tmpdir(self) -> str:
+        """The per-session scratch directory, created on first use."""
+        tmpdir = getattr(self, "_tmpdir", None)
+        if tmpdir is None or not os.path.isdir(tmpdir):
+            tmpdir = tempfile.mkdtemp(prefix="fluid-delegated-")
+            self._tmpdir = tmpdir
+        return tmpdir
+
+    def _prompt_argv(self) -> list[str]:
+        """The system prompt flag pair: a file flag naming the prompt file.
+
+        The appended prompt is tens of thousands of characters once project
+        AGENTS.md files join it. On the command line that breaks on Windows:
+        CreateProcess refuses a command line over 32,767 characters (WinError
+        206, reported as a failed spawn), and an npm ``claude.cmd`` shim cuts
+        every argument at its first newline. A file has neither limit. Only a
+        CLI known to be older than ``_CLI_FLAGS_SINCE`` gets the text inline.
+        """
+        if self.append_system_prompt:
+            flag, text = "--append-system-prompt", self.append_system_prompt
+        elif self.system:
+            flag, text = "--system-prompt", self.system
+        else:
+            return []
+        if _cli_older_than(getattr(self, "cli_version", None), _CLI_FLAGS_SINCE):
+            return [flag, text]
+        return [f"{flag}-file", self._write_prompt_file(text)]
+
+    def _write_prompt_file(self, text: str) -> str:
+        """Write ``text`` to the session's prompt file when it changed; its path.
+
+        Written as UTF-8 with no newline translation, so the CLI reads exactly
+        the bytes of ``text`` on every spawn and its cached prefix holds.
+        """
+        path = getattr(self, "_prompt_file", None)
+        if path is None or not os.path.isdir(os.path.dirname(path)):
+            path = os.path.join(self._ensure_tmpdir(), "system-prompt.txt")
+        if getattr(self, "_prompt_file_text", None) != text or not os.path.exists(path):
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+            self._prompt_file_text = text
+        self._prompt_file = path
+        return path
+
+    def _settings_arg(self) -> str:
+        """The ``--settings`` value: the host's settings with the forced env.
+
+        At startup the CLI copies each settings source's ``env`` block into
+        its process env (user, project, local, then flag settings, then
+        policy), so a settings file could set CLAUDE_CODE_THRIFTY_SONIC back
+        to 1 over the spawn env. Flag settings come after user, project and
+        local, so ``FORCED_CHILD_ENV`` rides here too. Serialized with sorted
+        keys and no spaces, so every spawn sends the same bytes. Settings that
+        are not a JSON object (a file path) are passed unchanged.
+        """
+        base = self._settings_object()
+        if base is None:
+            if not getattr(self, "_settings_path_logged", False):
+                logger.info(
+                    "delegated settings are not a JSON object (a file path?); "
+                    "passing them unchanged, so the forced env reaches the "
+                    "claude CLI through its process env only",
+                )
+                self._settings_path_logged = True
+            return str(self.settings)
+        return _settings_json(_with_forced_env(base))
 
     def _proc_usable(self) -> bool:
         """True while the CLI process can still take a turn.
@@ -920,6 +1196,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             spawn_kwargs["start_new_session"] = True
         self._spawn_resume = self.cli_session_id
         self._proc_results = 0
+        self._cli_cost_total = None if self._spawn_resume else 0.0
         self._proc = await asyncio.create_subprocess_exec(
             *self._build_argv(),
             stdin=asyncio.subprocess.PIPE,
@@ -936,14 +1213,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # mode it runs are the recorded ones (they are its argv).
         self._wake_in_flight = False
         self._unconfirmed_settings.clear()
+        self._steer_scan_armed = True
+        self._surface_cli_session_id = None
+        self._surface_cli_version = None
         # Once per CLI process: the installed CLI is unpinned, and its version
-        # is what ties a production report to the CLI behaviour behind it.
+        # is what ties a production report to the CLI behaviour behind it. The
+        # forced env says whether the bash-first steer override was in force.
         logger.info(
             "claude CLI started: version=%s leg=delegated session=%s model=%s "
-            "permission_mode=%s resume=%s pid=%s",
+            "permission_mode=%s resume=%s pid=%s forced_env=%s settings_env=%s",
             self.cli_version or "unknown",
             self._session.session_id if self._session else None,
             self.model, self.permission_mode, bool(self._spawn_resume), self._proc.pid,
+            ",".join(f"{k}={v}" for k, v in sorted(FORCED_CHILD_ENV.items())),
+            "forced" if self._settings_object() is not None else "not-json",
         )
         if self._cli_hook_events():
             async with self._stdout_lock:
@@ -964,6 +1247,82 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     def _needs_policy_hook(self) -> bool:
         """True when a deny policy rides the CLI's PreToolUse hook."""
         return self.tool_policy is not None or self._has_deny_rules()
+
+    # ─── bash-first steer check ──────────────────────────────────────────
+
+    def _start_steer_scan(self, sid: str) -> None:
+        """Start the steer check for this CLI process, once, after its first
+        terminal event. Stays armed while no CLI session id is known yet
+        (a turn stopped before it reached a fresh CLI)."""
+        if not getattr(self, "_steer_scan_armed", False):
+            return
+        cli_session_id = self._surface_cli_session_id or self.cli_session_id
+        if not cli_session_id:
+            return
+        self._steer_scan_armed = False
+        try:
+            task = asyncio.get_running_loop().create_task(self._scan_for_bash_first_steer(
+                sid, cli_session_id,
+                resumed=bool(self._spawn_resume),
+                cli_version=self._surface_cli_version or self.cli_version,
+            ))
+        except RuntimeError:  # no running loop: nothing to check from
+            return
+        self._steer_scans.add(task)
+        task.add_done_callback(self._steer_scans.discard)
+
+    async def _scan_for_bash_first_steer(
+        self, sid: str, cli_session_id: str, *, resumed: bool, cli_version: str | None,
+    ) -> None:
+        """Report a bash-first steer the CLI attached despite the override.
+
+        The CLI records each steer it adds to a turn in its transcript, so
+        this is the one place that shows whether ``CLAUDE_CODE_THRIFTY_SONIC``
+        still works: a CLI that renamed it, or a settings layer that beat
+        both overrides, shows up here. A transcript recorded before the
+        override existed also keeps its steer after ``--resume`` until the
+        CLI compacts, because bypass mode writes no ``auto_mode_exit``. On a
+        hit: one WARNING and a ``DelegatedDiagnostic``. Never raises.
+        """
+        try:
+            config_dir = self._child_env().get("CLAUDE_CONFIG_DIR") or os.path.join(
+                os.path.expanduser("~"), ".claude",
+            )
+            steer = await asyncio.to_thread(_find_bash_first_steer, config_dir, cli_session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a diagnostic never fails a session
+            logger.debug("bash-first steer check failed for %s", cli_session_id, exc_info=True)
+            return
+        if steer is None:
+            logger.debug(
+                "no bash-first steer (or no transcript) for claude CLI session %s",
+                cli_session_id,
+            )
+            return
+        variant = str(steer.get("bashFirstSteer") or "unknown")
+        message = (
+            f"claude CLI {cli_version or 'unknown'} attached its bash-first steer "
+            f"({variant}) to session {cli_session_id} although "
+            "CLAUDE_CODE_THRIFTY_SONIC=0 was set"
+            + (
+                "; the process was resumed, so the steer may predate the override "
+                "and stays until the CLI compacts"
+                if resumed else
+                "; the CLI may have renamed the override or a settings layer beat it"
+            )
+        )
+        logger.warning(message)
+        try:
+            await self._emit(DelegatedDiagnostic(
+                session_id=sid, kind="bash_first_steer", message=message,
+                data={
+                    "cli_version": cli_version, "variant": variant,
+                    "resumed": resumed, "cli_session_id": cli_session_id,
+                },
+            ))
+        except Exception:  # noqa: BLE001 — the log line already reported it
+            logger.debug("could not publish the bash-first steer diagnostic", exc_info=True)
 
     # ─── turn lifecycle ──────────────────────────────────────────────────
 
@@ -1092,6 +1451,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             mapper = StreamJsonMapper(
                 session_id=sid, turn_id=turn_id, model=self.model,
                 provider=self.provider, user_node_id=user_node.node_id,
+                cost_baseline=self._cli_cost_total,
             )
             failure: str | None
             try:
@@ -1122,6 +1482,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 usage=dict(mapper.failed_usage),
                 cost_usd=mapper.failed_cost_usd,
                 num_model_calls=mapper.model_calls or None,
+                # The HTTP status the CLI's result carried (429 for a
+                # subscription usage limit, 401 for a lapsed login), so a
+                # host handles it like the same status from any provider.
+                status=mapper.failed_status,
+                provider_message=mapper.failed_provider_message,
             ))
             return mapper
         return mapper
@@ -1146,6 +1511,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _drop_resume_handle(self, sid: str) -> None:
         self.cli_session_id = None
         self._spawn_resume = None
+        # The retry runs on a fresh process, whose cost total starts at zero.
+        self._cli_cost_total = 0.0
         self._persist_cli_session_id(sid, None)
         await self._stop_process(grace=1.0)
 
@@ -1413,10 +1780,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if subtype == "set_model":
             return {"subtype": "set_model", "model": self.model}
         if subtype == "apply_flag_settings":
-            return {"subtype": subtype, "settings": {
-                **json.loads(self.settings or "{}"), "effortLevel": self.effort,
-                "fastMode": bool(json.loads(self.settings or "{}").get("fastMode", False)),
-            }}
+            base = self._settings_object() or {}
+            return {"subtype": subtype, "settings": _with_forced_env({
+                **base, "effortLevel": self.effort,
+                "fastMode": bool(base.get("fastMode", False)),
+            })}
         return {
             "subtype": "set_permission_mode",
             "mode": _cli_permission_mode(self.permission_mode, self.cli_version),
@@ -1520,13 +1888,53 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """Map frames until the turn's result. None on a completed turn (its
         TurnComplete or Interrupted already emitted); otherwise the failure,
         with no terminal event emitted yet, for the caller to report or
-        retry."""
+        retry.
+
+        A read that ends early (the stream closed, the reader cancelled, or
+        an exception) first emits the call whose Usage the mapper still
+        holds for its final counts, and any snapshot waiting on it: the
+        kill-path booking and the error roll-up sum those per-call records,
+        and that call's input and cache tokens are most of its cost.
+        """
+        # Context snapshots (by model_call_index) whose call's own Usage is
+        # still held by the mapper; each is emitted right after that Usage.
+        held_snapshots: dict[int, Usage] = {}
+        try:
+            return await self._map_until_result(
+                sid, turn_id, mapper, user_node, held_snapshots,
+            )
+        except BaseException:
+            try:
+                await self._release_held_usage(mapper, held_snapshots)
+            except Exception:
+                logger.debug("could not record the held model call's usage", exc_info=True)
+            raise
+
+    async def _release_held_usage(
+        self, mapper: StreamJsonMapper, held_snapshots: dict[int, Usage],
+    ) -> None:
+        """Emit the call the mapper still holds, then its waiting snapshots."""
+        for event in mapper.flush_usage():
+            await self._emit(event)
+        snapshots = list(held_snapshots.values())
+        held_snapshots.clear()
+        for snapshot in snapshots:
+            await self._emit(snapshot)
+
+    async def _map_until_result(
+        self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
+        held_snapshots: dict[int, Usage],
+    ) -> str | None:
+        """The frame loop of ``_read_until_result``."""
         assert self._proc is not None and self._proc.stdout is not None
         parent = user_node
         last_assistant: Message | None = None
         while True:
             line = await self._next_stdout_line()
             if not line:
+                # A model call whose Usage was held for its final counts is
+                # still a call the turn paid for: record it before failing.
+                await self._release_held_usage(mapper, held_snapshots)
                 return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
             if not text:
@@ -1607,10 +2015,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 else:
                     await self._emit(event)
                 self._journal_event(event, mapper)
-                if isinstance(event, Usage) and event.node_id:
-                    await self._ask_usage_snapshot(
-                        event.node_id, event.raw.get("model_call_index"),
-                    )
+                if isinstance(event, Usage) and not event.context_usage:
+                    # The call's own record is out: a snapshot of it that
+                    # arrived first follows it now.
+                    held = held_snapshots.pop(event.raw.get("model_call_index"), None)
+                    if held is not None:
+                        await self._emit(held)
+            if mapped.opened_call is not None:
+                # A model call started. Its context snapshot is asked now,
+                # while its Usage waits for the final token counts; a reply
+                # that beats that Usage is held (see _emit_usage_snapshot).
+                await self._ask_usage_snapshot(*mapped.opened_call)
             if mapped.message is not None and mapped.node_id is not None:
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
@@ -1629,10 +2044,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapped.control_reply is not None:
                 # A control call issued while this turn runs: the turn owns
                 # stdout, so its reader is what delivers the answer.
-                if not await self._emit_usage_snapshot(sid, turn_id, mapped.control_reply):
+                if not await self._emit_usage_snapshot(
+                    sid, turn_id, mapped.control_reply, mapper=mapper, held=held_snapshots,
+                ):
                     self._resolve_control(mapped.control_reply)
             if mapped.is_result:
                 self._last_result_at = asyncio.get_running_loop().time()
+                # The next turn's cost is measured from the total this result
+                # reported, whether it completed, failed or was interrupted.
+                if mapper.cli_total_cost_usd is not None:
+                    self._cli_cost_total = mapper.cli_total_cost_usd
                 # Snapshots the CLI never got round to answering die with the
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
@@ -2105,14 +2526,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         call's hooks and gates it, so the CLI's hooks leave it alone."""
         return tool_name.startswith(_BUNDLED_PREFIX) and self._socket_server is not None
 
-    def _policy_denial(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
-        """Why the deny policy refuses this call, or None."""
+    async def _policy_denial(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+        """Why the deny policy refuses this call, or None.
+
+        Fails closed: a ``tool_policy`` that raises, or returns an awaitable
+        that raises, denies the call. Letting it through instead would turn
+        the policy off for that call, and in Bypass mode nothing else gates
+        it (a HookBus ``allow`` would even skip the CLI's own prompt).
+        """
         if self.tool_policy is not None:
             try:
-                return self.tool_policy(tool_name, tool_input) or None
-            except Exception:  # noqa: BLE001 — the CLI's own permission flow still runs
-                logger.warning("tool policy failed for %s", tool_name, exc_info=True)
-                return None
+                # A sync policy may block on a DB read (the app's saved-rule
+                # lookup), so it runs off the loop; an async policy returns
+                # its coroutine from the thread and is awaited here.
+                verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input)
+                if inspect.isawaitable(verdict):
+                    verdict = await verdict
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — answered as a deny
+                logger.error("tool policy failed for %s; denying the call", tool_name, exc_info=True)
+                return f"tool policy error ({type(exc).__name__}); call refused"
+            return verdict or None
         if self.permissions is None:
             return None
         from fluid.permissions.engine import Verdict
@@ -2162,7 +2597,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     specific["permissionDecisionReason"] = decision.note
             if decision.additional_context:
                 specific["additionalContext"] = decision.additional_context
-        denial = await asyncio.to_thread(self._policy_denial, name, tool_input)
+        denial = await self._policy_denial(name, tool_input)
         if denial is not None:
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -2601,7 +3036,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _ask_usage_snapshot(
         self, node_id: str, call_index: int | None = None,
     ) -> None:
-        """Ask the CLI what the context looked like for the call just reported.
+        """Ask the CLI what the context looked like for the call just started
+        (its first assistant frame arrived).
 
         Sent, not awaited. The turn's frame reader is the only stdout consumer
         while a turn runs, so awaiting the reply from inside that reader would
@@ -2628,24 +3064,38 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.debug("context-usage snapshot request failed", exc_info=True)
 
     async def _emit_usage_snapshot(
-        self, sid: str, turn_id: str, reply: ControlReply,
+        self, sid: str, turn_id: str, reply: ControlReply, *,
+        mapper: StreamJsonMapper | None = None,
+        held: dict[int, Usage] | None = None,
     ) -> bool:
         """Publish a snapshot reply as a second ``Usage`` for the same node.
 
-        Token fields stay 0 — the call's tokens were already reported by the
-        first event, and double-counting them would inflate every host's spend
-        accounting. Returns False when the reply belongs to somebody else.
+        Token fields stay 0 — the call's tokens are reported by the call's
+        own Usage, and double-counting them would inflate every host's spend
+        accounting. That record must come first: a host counts a zero-token
+        record with an index it has not seen as a call of its own. So while
+        ``mapper`` still holds the call's Usage (waiting for its final token
+        counts), the snapshot goes into ``held`` and the reader emits it right
+        after that Usage. Returns False when the reply belongs to somebody
+        else.
         """
         node_id = self._pending_usage_snapshots.pop(reply.request_id, None)
         call_index = self._snapshot_call_index.pop(reply.request_id, None)
         if node_id is None:
             return False
         if reply.ok and reply.payload is not None:
-            await self._emit(Usage(
+            snapshot = Usage(
                 session_id=sid, node_id=node_id, turn_id=turn_id,
                 context_usage=reply.payload,
                 raw={"model_call_index": call_index} if call_index is not None else {},
-            ))
+            )
+            if (
+                held is not None and mapper is not None and call_index is not None
+                and mapper.call_is_held(call_index)
+            ):
+                held[call_index] = snapshot
+            else:
+                await self._emit(snapshot)
         else:
             logger.debug("context-usage snapshot unavailable: %s", reply.error)
         return True

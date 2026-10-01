@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid as _uuid
@@ -913,6 +914,221 @@ def build_cli_transcript_entries(
     return out
 
 
+#: Longest project dir name the CLI keeps whole. A longer encoded cwd is cut
+#: to this many characters and gets ``-<hash>`` appended (Claude Code 2.1.285).
+CLI_PROJECT_DIR_MAX = 200
+
+#: How much of a CLI transcript's end :func:`cli_transcript_prompt_tail` reads.
+CLI_TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+
+_CLI_HANDLE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+
+
+def cli_project_dir_name(path: str) -> str:
+    """The project dir name Claude Code gives ``path``: every character other
+    than an ASCII letter or digit becomes ``-``.
+
+    ``jsonl_parser.get_project_dir_name`` keeps ``.``, ``_`` and other symbols,
+    so for a cwd such as ``...\\.claude\\worktrees\\a_b`` it names a directory
+    the CLI never looks in. Names longer than :data:`CLI_PROJECT_DIR_MAX` are
+    returned whole; the CLI shortens those with a hash this module does not
+    reproduce (see :func:`_cli_project_dir`).
+    """
+    return "".join(
+        ch if ch.isascii() and ch.isalnum() else "-" for ch in str(path)
+    )
+
+
+def _cli_project_dir(root: Path, working_dir: str) -> Path:
+    """Where the CLI keeps transcripts for ``working_dir`` under ``root``."""
+    name = cli_project_dir_name(working_dir)
+    if len(name) <= CLI_PROJECT_DIR_MAX:
+        return root / name
+    prefix = name[:CLI_PROJECT_DIR_MAX]
+    try:
+        matches = [
+            child for child in root.iterdir()
+            if child.is_dir() and child.name.startswith(prefix)
+        ]
+    except OSError:
+        matches = []
+    if len(matches) == 1:
+        return matches[0]
+    from app.core.jsonl_parser import get_project_dir_name
+
+    fallback = get_project_dir_name(working_dir)
+    logger.info(
+        "CLI project dir for a %d-character cwd is hashed and %d existing dirs "
+        "match its first %d characters; writing under %s",
+        len(name), len(matches), CLI_PROJECT_DIR_MAX, fallback,
+    )
+    return root / fallback
+
+
+def cli_projects_root(env: Optional[Dict[str, str]] = None) -> Path:
+    """The CLI's transcript root: ``$CLAUDE_CONFIG_DIR/projects`` when the
+    CLI's env (``env``, else this process's) sets it, else the app setting."""
+    config_dir = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get(
+        "CLAUDE_CONFIG_DIR"
+    )
+    if config_dir:
+        return Path(config_dir) / "projects"
+    from app.core.config import settings
+
+    return Path(settings.get_claude_projects_dir)
+
+
+def find_cli_transcript(
+    cli_session_id: str,
+    projects_dir: Path,
+    working_dir: Optional[str] = None,
+) -> Optional[Path]:
+    """The ``<handle>.jsonl`` file ``--resume <handle>`` would load, or None.
+
+    Claude Code 2.1.285 looks in the cwd's project dir first. Failing that it
+    scans every project dir under the root for ``<handle>.jsonl`` and gives up
+    when more than one dir holds it (its "transcript_id_scan_fallback"). This
+    follows the same order: ``working_dir``'s dir (under its absolute and its
+    resolved path), then the scan, which must find exactly one file. Returns
+    None when the CLI would not find the file, or the handle is not a plain id.
+    """
+    if not cli_session_id or not set(cli_session_id) <= _CLI_HANDLE_CHARS:
+        return None
+    root = Path(projects_dir)
+    if not root.is_dir():
+        return None
+    name = f"{cli_session_id}.jsonl"
+    if working_dir:
+        for cwd in dict.fromkeys(
+            (os.path.abspath(working_dir), os.path.realpath(working_dir))
+        ):
+            candidate = _cli_project_dir(root, cwd) / name
+            if candidate.is_file():
+                return candidate
+    found = [c for c in root.glob(f"*/{name}") if c.is_file()]
+    return found[0] if len(found) == 1 else None
+
+
+def prompt_text(content: Any) -> Optional[str]:
+    """A user message's prompt text, or None when it is not a typed prompt.
+
+    Text blocks are joined with newlines and stripped, the same way
+    :func:`build_cli_transcript_entries` collapses a text-only user turn. A
+    message carrying a ``tool_result`` is a tool echo, not a prompt.
+    """
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    texts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "tool_result":
+            return None
+        if kind == "text":
+            texts.append(block.get("text") or "")
+    joined = "\n".join(texts).strip()
+    return joined or None
+
+
+def cli_transcript_prompt_tail(
+    path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
+) -> Tuple[List[str], bool]:
+    """``(typed user prompts, whole file read)`` for a CLI transcript.
+
+    The prompts come from the last ``tail_bytes``, oldest first. A partial
+    first line and lines that are not JSON are skipped, and so are the CLI's
+    meta and compaction-summary entries. The flag is False when the file is
+    longer than ``tail_bytes``, so earlier prompts were not read.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        start = max(0, size - tail_bytes)
+        handle.seek(start)
+        data = handle.read()
+    lines = data.split(b"\n")
+    if start > 0 and lines:
+        lines = lines[1:]
+    prompts: List[str] = []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "user":
+            continue
+        if entry.get("isMeta") or entry.get("isCompactSummary"):
+            continue
+        text = prompt_text((entry.get("message") or {}).get("content"))
+        if text:
+            prompts.append(text)
+    return prompts, start == 0
+
+
+#: How many of fluid's latest prompts :func:`cli_prompts_cover` lines up.
+CLI_PROMPT_MATCH_WINDOW = 3
+
+# "/name args": a command the delegated leg hands the CLI unexpanded. The CLI
+# records its own command entries for it, not this text. "/some/path ..." is
+# not a command.
+_SLASH_COMMAND = re.compile(r"^/[A-Za-z][\w:.-]*(?:\s|$)")
+
+
+def is_slash_command_prompt(text: str) -> bool:
+    """Whether a prompt is a slash command the CLI records in its own form."""
+    return bool(_SLASH_COMMAND.match(text))
+
+
+def cli_prompts_cover(
+    fluid_prompts: Sequence[str],
+    cli_prompts: Sequence[str],
+    *,
+    complete: bool,
+    window: int = CLI_PROMPT_MATCH_WINDOW,
+) -> bool:
+    """Whether a CLI transcript ends on fluid's latest turns.
+
+    ``fluid_prompts`` are the typed prompts on fluid's path, oldest first;
+    ``cli_prompts`` those read from the CLI transcript's tail, and
+    ``complete`` says whether that tail is the whole file.
+
+    CLI entries whose text is not one of fluid's prompts are dropped first:
+    mid-turn steers, "[Request interrupted by user]" markers and command
+    wrappers are written into the CLI transcript but never become prompt
+    nodes in fluid. Slash-command prompts are left out on both sides, because
+    the CLI records its own command entries instead of the typed text. The
+    CLI's remaining prompts must then end with fluid's last ``window``
+    prompts, in order. A turn that ran on another provider is therefore
+    caught even when its prompt repeats an earlier one ("continue"): the
+    CLI's sequence then ends one prompt short.
+
+    When the tail was cut and holds fewer than ``window`` of fluid's prompts,
+    what it holds must be the end of fluid's window. A cut tail with none of
+    them (one very long turn) gives no evidence either way and counts as
+    covered. A steer whose text equals one of fluid's prompts breaks the
+    match and costs a re-seed, which is the safe direction.
+    """
+    ours = [p for p in fluid_prompts if not is_slash_command_prompt(p)]
+    if not ours:
+        return True
+    known = set(ours)
+    theirs = [p for p in cli_prompts if p in known]
+    expected = ours[-window:]
+    if len(theirs) >= len(expected):
+        return theirs[-len(expected):] == expected
+    if complete:
+        return False
+    return not theirs or theirs == expected[-len(theirs):]
+
+
 def _write_cli_transcript(
     lines: Sequence[Dict[str, Any]],
     cli_session_id: str,
@@ -921,15 +1137,16 @@ def _write_cli_transcript(
 ) -> Path:
     """Write the materialized transcript to ``<projects>/<cwd>/<uuid>.jsonl``.
 
+    The cwd is encoded the way the CLI encodes it (:func:`cli_project_dir_name`).
+
     Atomic (temp file + rename in the same directory), matching how
     ``JSONLRewindService.truncate_to_checkpoint`` rewrites a transcript: a
     half-written session file is one the CLI would refuse to resume.
     """
     from app.core.config import settings
-    from app.core.jsonl_parser import get_project_dir_name
 
-    root = projects_dir or settings.get_claude_projects_dir
-    project_dir = Path(root) / get_project_dir_name(working_dir)
+    root = Path(projects_dir or settings.get_claude_projects_dir)
+    project_dir = _cli_project_dir(root, working_dir)
     project_dir.mkdir(parents=True, exist_ok=True)
     target = project_dir / f"{cli_session_id}.jsonl"
 
@@ -963,7 +1180,10 @@ def reseed_delegated_cli_session(
     ``force=True`` writes even when this session has no stored CLI handle.
     Fork uses that: the new fluid session is empty of a handle, but the parent
     was delegated, so the fork must mint its own CLI conversation from the
-    copied path or the next turn starts with empty model context.
+    copied path or the next turn starts with empty model context. A delegated
+    connect uses it too (``HarnessAdapter._resolve_cli_session_id``), when the
+    session ran on another provider, its transcript is not on this worker, or
+    turns ran elsewhere since the CLI last saw it.
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that

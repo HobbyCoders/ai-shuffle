@@ -1170,6 +1170,24 @@ def _caller_provider_id(
     return ((profile.get("config") or {}).get("provider")) or None
 
 
+def _native_task_model(requested: str) -> Optional[str]:
+    """The registry alias a Task ``model`` names for a native Claude target.
+
+    Accepts a registry alias (``haiku``/``sonnet``/``opus``/``fable``) or a
+    legacy full Claude id that normalizes onto one, and returns the alias.
+    Anything else (another provider's model, an unknown ``claude-*`` id) is
+    None: the Task contract offers only the aliases for native targets.
+    """
+    from app.core.model_registry import model_values, normalize_model
+    from app.core.query_options import is_native_claude_model
+
+    value = (requested or "").strip()
+    if not is_native_claude_model(value):
+        return None
+    alias = normalize_model(value)
+    return alias if alias in model_values() else None
+
+
 def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     """A ready-to-return error when the resolved leg has no credentials.
 
@@ -1413,12 +1431,24 @@ async def dispatch_task_tool(
 
     # Resolve the target's effective leg first, including owner-configured pins.
     # A call may choose another curated model, but never another provider.
-    if requested_model:
-        if not effective_provider_id:
+    if requested_model and not effective_provider_id:
+        # A native target runs on Claude (the Claude Code CLI on a
+        # subscription, or the Anthropic API with a key), whose model list is
+        # the registry's Claude aliases. The worker stays native: no provider.
+        native_model = _native_task_model(requested_model)
+        if native_model is None:
+            from app.core.model_registry import model_values
+
             return {
                 "ok": False,
-                "error": "Task model overrides require a configured provider model list.",
+                "error": (
+                    f"Model '{requested_model.strip()}' is not a Claude model. "
+                    "This target runs on Claude; choose one of: "
+                    + ", ".join(model_values()) + "."
+                ),
             }
+        requested_model = native_model
+    elif requested_model:
         validation = provider_agent.validate_provider_model(
             effective_provider_id, requested_model, require_servable=False
         )

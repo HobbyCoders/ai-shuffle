@@ -11,8 +11,9 @@
 
 Tests 2 and 3 run a real turn through the real pump
 (``query_engine._stream_to_websocket_impl``), the fluid harness adapter and the
-delegated loop, against a fake ``claude`` executable put first on PATH. The
-fake records its argv and environment, then speaks the stream-json protocol
+delegated loop, against a fake ``claude`` executable put first on PATH (on
+Windows, where an extension-less file cannot be found on PATH, the adapter
+runs the fake directly). The fake records its argv and environment, then speaks the stream-json protocol
 (``fluid/tests/fixtures/fake_claude.py``). The worker's file access is audited
 with a Python audit hook (``open``, directory listings) plus wrappers around
 ``os.stat``, ``os.lstat`` and ``os.access`` for the duration of the turn.
@@ -125,8 +126,13 @@ def file_audit(monkeypatch):
 
 @pytest.fixture
 def fake_cli(tmp_path, monkeypatch):
-    """Put a recording ``claude`` first on PATH and give the CLI a config dir
-    holding a credentials file the worker must never touch."""
+    return _install_fake_cli(tmp_path, monkeypatch)
+
+
+def _install_fake_cli(tmp_path, monkeypatch) -> dict:
+    """Put a recording ``claude`` first on PATH, make it the only CLI the
+    adapter can resolve, and give the CLI a config dir holding a credentials
+    file the worker must never touch."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "cli-calls.jsonl"
@@ -149,6 +155,24 @@ def fake_cli(tmp_path, monkeypatch):
     credentials.write_text(json.dumps({"claudeAiOauth": {"accessToken": "cli-owned-token"}}))
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    # On POSIX the adapter's own PATH search must land on the wrapper above.
+    # On Windows ``shutil.which`` skips a file without a PATHEXT extension, so
+    # the search would walk on to the machine's real ``claude.exe``; there the
+    # recorder runs directly. Either way, any other result fails the test
+    # instead of starting a real CLI.
+    from app.core.provider import harness_adapter as ha
+
+    real_resolve = ha._resolve_claude_cmd
+
+    def resolve(**kwargs) -> list:
+        if os.name == "nt":
+            return [sys.executable, str(recorder)]
+        found = real_resolve(**kwargs)
+        assert found == [str(script)], f"resolved {found}, not the fake CLI"
+        return found
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", resolve)
+    assert ha._resolve_claude_cmd()[-1] in (str(script), str(recorder))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "a")
     # Start from a host environment with no credential-shaped variables, so
@@ -162,7 +186,8 @@ def fake_cli(tmp_path, monkeypatch):
             return []
         return [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
 
-    return {"calls": calls, "credentials": credentials, "config_dir": config_dir}
+    return {"calls": calls, "credentials": credentials, "config_dir": config_dir,
+            "script": script, "recorder": recorder}
 
 
 def _cli_status(signed_in: bool):

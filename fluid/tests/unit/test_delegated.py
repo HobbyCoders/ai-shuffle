@@ -2091,7 +2091,7 @@ async def test_missing_cli_turn_reports_setup_message() -> None:
 # ─── Requests the CLI blocks on are always answered ──────────────────────────
 
 
-def test_permission_grants_join_allowed_tools_without_narrowing_the_bridge() -> None:
+def test_permission_grants_alone_form_allowed_tools_without_narrowing_the_bridge() -> None:
     loop = DelegatedLoop(
         store=MemoryStore(), model="fake",
         permission_grants=["mcp__fluid_bundled__mcp__builtins__Task", "mcp__browser"],
@@ -2103,12 +2103,18 @@ def test_permission_grants_join_allowed_tools_without_narrowing_the_bridge() -> 
     # A grant is not a surface: every bridge tool is still served.
     assert loop._bridge_tool_permitted("mcp__builtins__Remember")
 
+    # The surface filters the bridge but is never a grant: the CLI reads a
+    # bare name on --allowed-tools as a blanket pre-approval.
     surfaced = DelegatedLoop(
-        store=MemoryStore(), model="fake", allowed_tools=["Read"], permission_grants=["mcp__browser"],
+        store=MemoryStore(), model="fake", allowed_tools=["Read", "Bash"],
+        permission_grants=["mcp__browser"],
     )
     argv = surfaced._build_argv()
-    assert argv[argv.index("--allowed-tools") + 1] == "Read,mcp__browser"
+    assert argv[argv.index("--allowed-tools") + 1] == "mcp__browser"
     assert not surfaced._bridge_tool_permitted("mcp__builtins__Remember")
+
+    ungranted = DelegatedLoop(store=MemoryStore(), model="fake", allowed_tools=["Read"])
+    assert "--allowed-tools" not in ungranted._build_argv()
 
 
 def test_an_unknown_control_request_is_mapped_for_an_answer() -> None:

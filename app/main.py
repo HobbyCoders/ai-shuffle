@@ -161,18 +161,19 @@ async def lifespan(app: FastAPI):
     # pytest collection with the real settings singleton) must never create the
     # log dir or truncate a previous crash's fatal.log. Additive only — does not
     # touch the ring buffer (app/api/logs.py) or the error_log DB handler.
-    # Then the startup banner (pid/version/instance_id) so restart boundaries —
+    # Then the startup banner (pid/version/revision/instance_id) so restart boundaries —
     # and the LAST line before a crash — are obvious on disk, and the asyncio
     # loop exception handler now that a running loop exists.
     from app.core.file_logging import (
         setup_file_logging, log_startup_banner, install_asyncio_exception_handler,
+        source_revision,
     )
     setup_file_logging()
     log_startup_banner()
     install_asyncio_exception_handler()
 
     logger.info("=" * 60)
-    logger.info(f"Starting AI Shuffle v{settings.version}")
+    logger.info(f"Starting AI Shuffle v{settings.version} (revision {source_revision()})")
     logger.info("=" * 60)
 
     # Before any child is spawned: same-uid children must not be able to read
