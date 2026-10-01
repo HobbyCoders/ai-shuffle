@@ -29,6 +29,16 @@ completion cannot reach the authority, the ten-minute reservation remains in
 place; its unknown response status cannot be applied until a later observation.
 No provider request is replayed after an uncertain claim response.
 
+Model-provider rows that send the same request (a duplicated OpenRouter row,
+for example) share one observation within a poll pass: the first row makes the
+budgeted request, the others wait for it and write the same successful reading,
+so every row refreshes at the cost of one upstream request. Only a successful
+response is shared; on a failure the other rows are deferred exactly as the
+budget would defer them, and only the requesting row records the failure.
+Nothing is reused across passes or across workers. Responses still never leave
+the worker that made the request, so a second worker with a mirrored credential
+keeps its own last reading until it wins a later lease.
+
 Ordinary usage reads never wait on an upstream request. A stale provider
 reading starts one shared background refresh; explicit refreshes join the same
 task and still need a budget lease. Claude usage is not polled at all: it comes
@@ -44,11 +54,13 @@ from the source registry in `app/core/usage_sources.py`:
 | --- | --- |
 | OpenRouter key and account credits, each endpoint | 300 seconds |
 | Grok subscription billing and settings, each endpoint | 300 seconds |
+| ChatGPT/Codex subscription usage | 300 seconds |
 | OpenAI Admin usage or costs, each endpoint | 900 seconds |
 | fal.ai Admin billing | 300 seconds |
 
 All add zero to thirty seconds of jitter. Failures back off exponentially to
-one hour, honoring a longer `Retry-After`. Authentication and unsupported-capability
+one hour, honoring a longer `Retry-After`. A timed-out attempt is recorded on
+the row as `timeout` next to its last successful reading. Authentication and unsupported-capability
 responses (401, 403, 405, 410, 501) pause that identity until explicit credential
 configuration resumes it, or a changed credential creates a new identity.
 Resuming a paused identity cannot bypass a successful-observation cooldown.
@@ -59,7 +71,9 @@ the founder to reconnect.
 Regression coverage counts actual HTTP-client requests through the peer API
 with separate worker databases, including simultaneous refresh, auth pauses,
 Retry-After, credential changes, cancellation, coordinator outage and late
-completion. Opt-in PostgreSQL contracts cover competing connections, pool
+completion. Poller-level tests count upstream requests for repeated popover
+opens, duplicate rows sharing a credential, timeouts and 403/429/5xx on
+duplicate rows. Opt-in PostgreSQL contracts cover competing connections, pool
 restart and migration of existing paused rows.
 
 The [provider source matrix](../provider-usage-sources.md) describes credentials,

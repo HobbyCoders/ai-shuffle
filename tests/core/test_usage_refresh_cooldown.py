@@ -207,6 +207,130 @@ async def test_failed_refresh_keeps_last_good_values(provider, clock, upstream):
     assert entry.credits["usage"] == 1.0 and entry.fetched_at == fetched
 
 
+@pytest.mark.asyncio
+async def test_timeouts_back_off_and_keep_last_good_values(provider, clock, upstream):
+    from app.api.usage import _load_provider_usage
+
+    respond(upstream)
+    monitor = provider_usage.ProviderUsageMonitor()
+    await monitor.poll_once()
+    fetched = int(clock.now * 1000)
+    clock.now += 300
+    upstream.side_effect = httpx.ReadTimeout("slow")
+    # A forced refresh every minute for an hour while the provider times out:
+    # backoff 300, 600, 1200, 2400 s, not one request per open.
+    await popover_opens(monitor, clock, every=60, until=3600, cooldown=30)
+    assert upstream.await_count == 1 + 4
+    entry = next(p for p in await _load_provider_usage() if p.provider_id == PROVIDER)
+    # Before: a timeout was only logged, so the row showed its last success as
+    # if nothing had been attempted since.
+    assert entry.last_error_kind == "timeout" and entry.status == "stale"
+    assert entry.credits["usage"] == 1.0 and entry.fetched_at == fetched
+    assert entry.last_attempt_at > entry.last_success_at
+
+
+# ---------------------------------------------------------------------------
+# Duplicate rows: rows that share a credential share one observation
+# ---------------------------------------------------------------------------
+
+def _duplicate_rows(*ids):
+    for provider_id in ids:
+        db.create_model_provider(
+            provider_id=provider_id, name=provider_id, provider_type="openrouter",
+            base_url="https://router.example.test/api/v1", auth_token="shared-model-key",
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_rows_share_one_request_and_all_refresh(clock, counts, upstream):
+    """Before: the first row spent the budget and the others were deferred on
+    every pass, so they stayed stale forever while the provider was asked once."""
+    from app.api.usage import _load_provider_usage
+
+    ids = ("dup-a", "dup-b", "dup-c", "dup-d", "dup-e", "dup-f")
+    _duplicate_rows(*ids)
+    respond(upstream)
+    monitor = provider_usage.ProviderUsageMonitor()
+    for passes in range(1, 5):
+        await monitor.request_refresh(force=True, cooldown=30)
+        assert upstream.await_count == passes
+        entries = {p.provider_id: p for p in await _load_provider_usage()}
+        assert {entries[i].fetched_at for i in ids} == {int(clock.now * 1000)}
+        assert all(entries[i].status == "fresh" for i in ids)
+        clock.now += 301
+    # One budget claim per pass: the other rows reuse the observation.
+    assert counts["claims"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 503])
+async def test_duplicate_rows_do_not_multiply_failed_requests(clock, upstream, status):
+    _duplicate_rows("dup-a", "dup-b", "dup-c")
+    respond(upstream, status)
+    await popover_opens(provider_usage.ProviderUsageMonitor(), clock, every=60, until=600, cooldown=30)
+    # 403 pauses; 429/503 back off 300 then 600 s. Never once per row.
+    assert upstream.await_count == {403: 1, 429: 2, 503: 2}[status]
+
+
+@pytest.mark.asyncio
+async def test_shared_pass_coalesces_only_identical_requests(monkeypatch, clock):
+    calls, release = [], asyncio.Event()
+
+    async def get(url, headers=None, **_):
+        calls.append(headers["Authorization"])
+        await release.wait()
+        return httpx.Response(200, json={"seen": headers["Authorization"]},
+                              request=httpx.Request("GET", url))
+
+    client = Mock(get=get)
+    context = Mock(__aenter__=AsyncMock(return_value=client), __aexit__=AsyncMock(return_value=False))
+    monkeypatch.setattr(polling.httpx, "AsyncClient", Mock(return_value=context))
+
+    async def fetch(token):
+        return await polling.usage_get("https://router.example.test/api/v1/key",
+                                       headers={"Authorization": f"Bearer {token}"})
+
+    with polling.shared_pass():
+        tasks = [asyncio.create_task(fetch(t)) for t in ("one", "one", "two", "one")]
+        await asyncio.sleep(0.05)
+        release.set()
+        results = await asyncio.gather(*tasks)
+    assert sorted(calls) == ["Bearer one", "Bearer two"]
+    assert [r.json()["seen"] for r in results] == ["Bearer one", "Bearer one", "Bearer two", "Bearer one"]
+    # Outside a pass nothing is reused: the budget defers the repeat.
+    with pytest.raises(polling.UsageDeferred):
+        await fetch("one")
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_shared_pass_defers_waiters_when_the_request_is_cancelled(monkeypatch, clock):
+    started, calls = asyncio.Event(), []
+
+    async def get(url, **_):
+        calls.append(url)
+        started.set()
+        await asyncio.Event().wait()
+
+    client = Mock(get=get)
+    context = Mock(__aenter__=AsyncMock(return_value=client), __aexit__=AsyncMock(return_value=False))
+    monkeypatch.setattr(polling.httpx, "AsyncClient", Mock(return_value=context))
+    headers = {"Authorization": "Bearer one"}
+    url = "https://router.example.test/api/v1/key"
+
+    with polling.shared_pass():
+        owner = asyncio.create_task(polling.usage_get(url, headers=headers))
+        await started.wait()
+        waiter = asyncio.create_task(polling.usage_get(url, headers=headers))
+        await asyncio.sleep(0)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        with pytest.raises(polling.UsageDeferred):
+            await waiter
+    assert len(calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # Claude: refresh=true re-persists and broadcasts at most once per cooldown
 # ---------------------------------------------------------------------------

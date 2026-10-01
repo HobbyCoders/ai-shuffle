@@ -1,11 +1,13 @@
 """Durable, credential-scoped budgets for account usage requests."""
 
 import asyncio
+import contextlib
 import hashlib
 import math
 import random
 import secrets
 import time
+from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -15,6 +17,51 @@ from app.db.base import get_db
 
 class UsageDeferred(Exception):
     """A cached read must not bypass an upstream cooldown."""
+
+
+# One poll pass's usage requests, keyed by the exact request. Model-provider
+# rows that share a credential (for example a duplicated OpenRouter row) send
+# identical requests under one budget identity. Without this, the first row's
+# request spent the budget and the later rows were deferred, pass after pass,
+# so they never refreshed. Within a pass the rows now share that one
+# observation: a single upstream request, every row updated.
+_pass_requests: ContextVar[dict | None] = ContextVar("usage_pass_requests", default=None)
+
+
+@contextlib.contextmanager
+def shared_pass():
+    """Coalesce identical usage requests made while the block runs.
+
+    Tasks started inside the block (``asyncio.gather``) copy the context and
+    therefore share one table. It is dropped with the block, so nothing is
+    reused across passes: the durable budget still decides when to ask again.
+    """
+    token = _pass_requests.set({})
+    try:
+        yield
+    finally:
+        _pass_requests.reset(token)
+
+
+def _request_key(url, headers, params, paginate):
+    # Every header and parameter, not only the budget identity's credential and
+    # organization: rows share a response only when they send the same request.
+    def pairs(values):
+        return sorted((str(k).lower(), str(v)) for k, v in (values or {}).items())
+
+    text = repr((url, pairs(headers), pairs(params), bool(paginate)))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _copy(response):
+    return httpx.Response(response.status_code, headers=response.headers,
+                          content=response.content, request=response.request)
+
+
+def _mark_retrieved(future):
+    # The request's owner raises its own failure; waiting rows are optional.
+    if not future.cancelled():
+        future.exception()
 
 
 # Authentication refusals and permanently unsupported capabilities should not
@@ -103,7 +150,41 @@ async def usage_get(url, *, headers, params=None, timeout=20, paginate=False, in
 
     A paginated observation owns one lease. Partial observations never escape.
     Authentication refusals stay paused across restart, until the key changes.
+    Inside :func:`shared_pass`, an identical request already made in the pass
+    (or still in flight) is answered from that observation, not the network.
     """
+    shared = _pass_requests.get()
+    if shared is None:
+        return await _budgeted_get(url, headers=headers, params=params, timeout=timeout,
+                                   paginate=paginate, interval=interval)
+    key = _request_key(url, headers, params, paginate)
+    pending = shared.get(key)
+    if pending is not None:
+        # Only a successful observation is shared. Any other outcome is the
+        # deferral the budget would give this row anyway; the row that made
+        # the request records the failure (and handles a 401 token refresh).
+        # A request that raised resolves to ``UsageDeferred`` for its waiters.
+        response = await asyncio.shield(pending)
+        if not 200 <= response.status_code < 300:
+            raise UsageDeferred()
+        return _copy(response)
+    pending = asyncio.get_running_loop().create_future()
+    pending.add_done_callback(_mark_retrieved)
+    shared[key] = pending
+    try:
+        response = await _budgeted_get(url, headers=headers, params=params, timeout=timeout,
+                                       paginate=paginate, interval=interval)
+    except BaseException:
+        # Includes cancellation: rows waiting on this request are deferred,
+        # not cancelled themselves.
+        pending.set_exception(UsageDeferred())
+        raise
+    pending.set_result(response)
+    return response
+
+
+async def _budgeted_get(url, *, headers, params, timeout, paginate, interval):
+    """One budgeted observation: claim a lease, request, release into cooldown."""
     key = identity(url, headers)
     from app.network.usage_budget import acquire
     budget = await acquire(key, interval)
