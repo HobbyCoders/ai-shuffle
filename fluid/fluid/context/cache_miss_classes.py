@@ -1,4 +1,4 @@
-"""Classify each prompt-cache miss the fluid probe reports into one of six classes.
+"""Classify each prompt-cache miss the fluid probe reports into one of seven classes.
 
 fluid's cache probe (``fluid/context/cache_probe.py``) puts a ``cache_miss``
 diagnosis on the ``Usage`` event of a call that paid for a large fresh prompt,
@@ -26,6 +26,12 @@ through ``app.core.provider.cache_miss_classes``.
     the engine dropped the sticky routing key (OpenRouter's ``session_id``)
     following an empty completion: the request changed only because the
     engine gave up on the replica.
+``compaction_followon``
+    The same shortfall on a grown prefix within a few calls of a compaction
+    rewrite (``Usage.raw["calls_since_rewrite"]``). After a rewrite the
+    OpenAI Responses cache often snaps back to a coarse checkpoint for
+    several calls, so these misses are the rewrite's after-cost, not a
+    routing fault, and are kept out of ``provider_fallback``.
 ``idle_past_ttl``
     The same shortfall after a gap longer than the cache lifetime.
 ``harness_mutation``
@@ -46,6 +52,7 @@ APPEND_GROWTH = "append_growth"
 PLANNED_REBUILD = "planned_rebuild"
 HARNESS_UPGRADE = "harness_upgrade"
 PROVIDER_FALLBACK = "provider_fallback"
+COMPACTION_FOLLOWON = "compaction_followon"
 IDLE_PAST_TTL = "idle_past_ttl"
 HARNESS_MUTATION = "harness_mutation"
 
@@ -54,6 +61,7 @@ MISS_CLASSES = (
     PLANNED_REBUILD,
     HARNESS_UPGRADE,
     PROVIDER_FALLBACK,
+    COMPACTION_FOLLOWON,
     IDLE_PAST_TTL,
     HARNESS_MUTATION,
 )
@@ -64,6 +72,11 @@ UNEXPECTED_CLASSES = frozenset({HARNESS_MUTATION})
 #: Default prompt-cache lifetime. Anthropic's default TTL is five minutes and
 #: OpenAI keeps an idle prefix for five to ten, so a longer gap is idle expiry.
 DEFAULT_CACHE_TTL_SECONDS = 300.0
+
+#: How many calls after the one that carried a compaction rewrite still count
+#: as its follow-on. The call carrying the rewrite is call 0 and is already
+#: ``planned_rebuild``; calls 1 to 5 after it are the window.
+COMPACTION_FOLLOWON_CALLS = 5
 
 # Verdicts of fluid's ``cache_read_report`` for a call that reused less than
 # 90% of its prompt from cache.
@@ -79,12 +92,18 @@ def classify_cache_miss(
     *,
     request_interval_seconds: Optional[float] = None,
     ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+    calls_since_rewrite: Optional[int] = None,
 ) -> str:
     """The class of one probe diagnosis (a ``Usage.raw["cache_miss"]`` dict).
 
     ``request_interval_seconds`` is the gap since the previous request
     (``Usage.raw["request_interval_seconds"]``). Without it, a shortfall on a
     matching prefix is attributed to the provider, not to expiry.
+
+    ``calls_since_rewrite`` is how many calls ago the last compaction rewrite
+    with a known first changed message was sent
+    (``Usage.raw["calls_since_rewrite"]``). A grown-prefix shortfall inside
+    that window is ``compaction_followon``. Expiry still wins over it.
     """
     reason = diagnosis.get("reason")
     if reason == "no_previous_request":
@@ -96,7 +115,9 @@ def classify_cache_miss(
             return PROVIDER_FALLBACK
         # Headers that moved on their own are an unannounced routing change.
         # Headers that moved with the model or endpoint (a provider switch)
-        # are part of that switch.
+        # are part of that switch. One of these on the first call after the
+        # OpenAI Responses routing arm changes (arm A to B on upgrade) is
+        # expected: the new arm sends new identity headers once.
         if diagnosis.get("routing_headers_changed") and not diagnosis.get(
             "other_settings_changed"
         ):
@@ -113,6 +134,8 @@ def classify_cache_miss(
     if reason in ("prefix_grew_only", "prefix_unchanged"):
         if _past_ttl(request_interval_seconds, ttl_seconds):
             return IDLE_PAST_TTL
+        if reason == "prefix_grew_only" and _within_followon(calls_since_rewrite):
+            return COMPACTION_FOLLOWON
         return PROVIDER_FALLBACK
     # A reason this module does not know yet is counted as unexpected so that
     # it gets looked at, not silently filed as a routine miss.
@@ -140,6 +163,7 @@ def usage_miss_class(
                 usage.get("request_interval_seconds")
             ),
             ttl_seconds=ttl_seconds,
+            calls_since_rewrite=_int_or_none(usage.get("calls_since_rewrite")),
         )
     report = usage.get("cache_read_report")
     if (
@@ -153,6 +177,16 @@ def usage_miss_class(
 
 def _past_ttl(interval: Optional[float], ttl_seconds: float) -> bool:
     return interval is not None and interval > ttl_seconds
+
+
+def _within_followon(calls: Optional[int]) -> bool:
+    return calls is not None and 0 < calls <= COMPACTION_FOLLOWON_CALLS
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _float_or_none(value: Any) -> Optional[float]:

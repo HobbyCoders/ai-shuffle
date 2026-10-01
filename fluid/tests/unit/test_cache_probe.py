@@ -14,6 +14,8 @@ Pins three things the audit asked for:
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.context.cache_probe import (
     CacheProbeConfig,
     checkpoint_positions,
@@ -1164,11 +1166,18 @@ def test_headers_that_move_with_a_settings_switch_are_reported_with_it() -> None
     assert diagnosis["other_settings_changed"] is True
 
 
-async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> None:
+async def test_the_responses_client_routing_headers_are_the_ones_it_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.providers.openai_responses.client import (
         CODEX_RESPONSES_URL,
+        ROUTING_ARM_ENV,
+        ROUTING_HINT_ENV,
         OpenAIResponsesClient,
     )
+
+    monkeypatch.delenv(ROUTING_ARM_ENV, raising=False)
+    monkeypatch.delenv(ROUTING_HINT_ENV, raising=False)
 
     class _Auth:
         account_id = "acct-1"
@@ -1248,3 +1257,389 @@ async def test_an_anthropic_prefix_mutation_is_classified_as_a_mutation() -> Non
     assert second["cache_miss"]["reason"] == "prefix_changed"
     assert second["cache_miss"]["changed"] == "system"
     assert second["cache_miss_class"] == "harness_mutation"
+
+
+# ─── OpenAI routing arm and previous-prompt coverage ─────────────────────────
+
+
+class _CodexAuth:
+    account_id = "acct-1"
+
+    async def get_access_token(self) -> str:
+        return "secret-token"
+
+    async def on_401(self) -> None:
+        return None
+
+
+def _codex_client(arm: str | None = None):
+    from fluid.providers.openai_responses.client import (
+        CODEX_RESPONSES_URL,
+        OpenAIResponsesClient,
+    )
+
+    return OpenAIResponsesClient(
+        auth=_CodexAuth(), base_url=CODEX_RESPONSES_URL, routing_arm=arm,
+    )
+
+
+class _CodexRoutedProvider(_MissProvider):
+    """Full misses, with the routing arm and headers of a real Codex-backend
+    Responses client. ``switch_after`` calls in, a second client takes over
+    (a worker restarted onto a new arm)."""
+
+    def __init__(
+        self, tool_calls: int, *, arm: str | None = None,
+        then: str | None = None, switch_after: int = 0,
+    ) -> None:
+        super().__init__(tool_calls)
+        self.first = _codex_client(arm)
+        self.second = _codex_client(then) if then is not None else self.first
+        self.switch_after = switch_after
+
+    def _current(self):
+        if self.switch_after and self.calls >= self.switch_after:
+            return self.second
+        return self.first
+
+    @property
+    def routing_arm(self) -> str:
+        return self._current().routing_arm
+
+    def routing_headers(self, request=None) -> dict[str, str]:
+        return self._current().routing_headers(request)
+
+
+@pytest.fixture
+def _no_routing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.providers.openai_responses.client import ROUTING_ARM_ENV, ROUTING_HINT_ENV
+
+    monkeypatch.delenv(ROUTING_ARM_ENV, raising=False)
+    monkeypatch.delenv(ROUTING_HINT_ENV, raising=False)
+
+
+@pytest.mark.usefixtures("_no_routing_env")
+async def test_the_default_arm_gives_each_session_its_own_route_hash() -> None:
+    first = await _run_misses(2, provider=_CodexRoutedProvider(2))
+    second = await _run_misses(2, provider=_CodexRoutedProvider(2))
+
+    def hashes(loop: NativeLoop) -> list[dict]:
+        return [e.raw["prefix_hashes"] for e in loop.bus.log(loop.session_id)
+                if isinstance(e, Usage)]
+
+    one, two = hashes(first), hashes(second)
+    assert {h["_routing_arm"] for h in one + two} == {"B"}
+    assert len({h["_routing_headers"] for h in one}) == 1, "constant within a session"
+    assert len({h["_routing_headers"] for h in two}) == 1
+    assert one[0]["_routing_headers"] != two[0]["_routing_headers"]
+
+    diagnoses = [e.raw["cache_miss"] for e in first.bus.log(first.session_id)
+                 if isinstance(e, Usage)]
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request", "prefix_grew_only", "prefix_grew_only",
+    ]
+    assert not any(d.get("routing_headers_changed") for d in diagnoses)
+
+
+@pytest.mark.usefixtures("_no_routing_env")
+async def test_an_arm_change_is_one_routing_headers_change() -> None:
+    provider = _CodexRoutedProvider(3, arm="A", then="B", switch_after=2)
+    loop = await _run_misses(3, provider=provider)
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    diagnoses = [u.raw["cache_miss"] for u in usages]
+
+    assert [u.raw["prefix_hashes"]["_routing_arm"] for u in usages] == ["A", "A", "B", "B"]
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request",
+        "prefix_grew_only",
+        "request_settings_changed",
+        "prefix_grew_only",
+    ]
+    assert [bool(d.get("routing_headers_changed")) for d in diagnoses] == [
+        False, False, True, False,
+    ]
+
+
+def test_the_routing_arm_key_never_marks_a_miss() -> None:
+    previous = _fp(_routing_arm="A")
+    current = _fp(_routing_arm="B")
+    diagnosis = diagnose_cache_miss(previous=previous, current=current,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "prefix_unchanged"
+
+
+class _CoverageProvider(_MissProvider):
+    """Scripted prompt usage per call, on top of the miss provider's turn."""
+
+    def __init__(self, usages: list[dict]) -> None:
+        super().__init__(len(usages) - 1)
+        self.usages = usages
+
+    async def stream(self, request: ProviderRequest):
+        index = self.calls
+        async for chunk in super().stream(request):
+            if chunk.kind == "message_start":
+                chunk = StreamChunk("message_start", {"usage": self.usages[index]})
+            yield chunk
+
+
+async def test_prev_prompt_coverage_is_the_share_of_the_last_prompt_read() -> None:
+    provider = _CoverageProvider([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 1_000, "cache_read_input_tokens": 30_000},
+        # More than the previous prompt read back: capped at 1.0.
+        {"input_tokens": 500, "cache_read_input_tokens": 40_000},
+    ])
+    loop = await _run_misses(0, provider=provider)
+    raws = [e.raw for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+
+    assert "prev_prompt_coverage" not in raws[0], "nothing to compare on the first call"
+    assert raws[1]["prev_prompt_coverage"] == 0.5
+    assert raws[2]["prev_prompt_coverage"] == 1.0
+
+
+async def test_prev_prompt_coverage_starts_over_with_a_new_session() -> None:
+    first = await _run_misses(0, provider=_CoverageProvider([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 1_000, "cache_read_input_tokens": 60_000},
+    ]))
+    assert [e.raw.get("prev_prompt_coverage") for e in first.bus.log(first.session_id)
+            if isinstance(e, Usage)] == [None, 1.0]
+
+    fresh = await _run_misses(0, provider=_CoverageProvider([
+        {"input_tokens": 70_000, "cache_read_input_tokens": 0},
+    ]))
+    (usage,) = [e for e in fresh.bus.log(fresh.session_id) if isinstance(e, Usage)]
+    assert "prev_prompt_coverage" not in usage.raw
+
+
+async def test_prev_prompt_coverage_survives_a_rebuilt_engine() -> None:
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 40_000, "cache_read_input_tokens": 0},
+        ]),
+        store=store, model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+
+    second = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 2_000, "cache_read_input_tokens": 30_000},
+        ]),
+        store=store, model="m", system="sys " * 50_000, session_id=sid,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    assert usage.raw["prev_prompt_coverage"] == 0.75
+
+
+async def test_a_malformed_old_usage_row_does_not_fail_the_rehydrate() -> None:
+    import dataclasses
+
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 40_000, "cache_read_input_tokens": 0},
+        ]),
+        store=store, model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+    # An old row whose token count did not survive as an int.
+    events = store._events[sid]
+    last = max(i for i, e in enumerate(events) if isinstance(e, Usage))
+    events[last] = dataclasses.replace(events[last], input_tokens=None)
+
+    second = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 2_000, "cache_read_input_tokens": 30_000},
+        ]),
+        store=store, model="m", system="sys " * 50_000, session_id=sid,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    # The fingerprint still comes back; only the coverage metric is dropped.
+    assert usage.raw.get("cache_miss", {}).get("reason") != "no_previous_request"
+    assert "prev_prompt_coverage" not in usage.raw
+
+
+# ─── Follow-on misses and the rewrite tail (plan item 7) ─────────────────────
+
+
+_GREW = {
+    "reason": "prefix_grew_only", "full_coverage": True,
+    "reuse_shortfall_tokens_estimated": 50_000,
+}
+
+
+def test_a_grown_prefix_miss_after_a_rewrite_is_a_compaction_followon() -> None:
+    from fluid.context.cache_miss_classes import (
+        COMPACTION_FOLLOWON,
+        COMPACTION_FOLLOWON_CALLS,
+        IDLE_PAST_TTL,
+        MISS_CLASSES,
+        PROVIDER_FALLBACK,
+        UNEXPECTED_CLASSES,
+        classify_cache_miss,
+    )
+
+    assert COMPACTION_FOLLOWON in MISS_CLASSES
+    assert COMPACTION_FOLLOWON not in UNEXPECTED_CLASSES
+    for calls in range(1, COMPACTION_FOLLOWON_CALLS + 1):
+        assert classify_cache_miss(
+            _GREW, request_interval_seconds=12.0, calls_since_rewrite=calls
+        ) == COMPACTION_FOLLOWON
+    # Call 0 carried the rewrite itself; past the window it is the provider.
+    for calls in (None, 0, COMPACTION_FOLLOWON_CALLS + 1):
+        assert classify_cache_miss(
+            _GREW, request_interval_seconds=12.0, calls_since_rewrite=calls
+        ) == PROVIDER_FALLBACK
+    # Expiry still explains a miss better than an earlier rewrite does.
+    assert classify_cache_miss(
+        _GREW, request_interval_seconds=1_800.0, calls_since_rewrite=2
+    ) == IDLE_PAST_TTL
+    # Only a grown prefix is a follow-on; an unchanged one stays the provider's.
+    assert classify_cache_miss(
+        {**_GREW, "reason": "prefix_unchanged"}, calls_since_rewrite=2
+    ) == PROVIDER_FALLBACK
+
+
+def test_the_usage_record_carries_the_followon_count() -> None:
+    from fluid.context.cache_miss_classes import usage_miss_class
+
+    usage = {
+        "cache_miss": dict(_GREW), "request_interval_seconds": 12.0,
+        "calls_since_rewrite": 3,
+    }
+    assert usage_miss_class(usage) == "compaction_followon"
+    assert usage_miss_class({**usage, "calls_since_rewrite": None}) == "provider_fallback"
+    # A malformed count is ignored, not trusted.
+    assert usage_miss_class({**usage, "calls_since_rewrite": True}) == "provider_fallback"
+    assert usage_miss_class({**usage, "calls_since_rewrite": "3"}) == "provider_fallback"
+
+
+def _loop_with_rewrites(
+    usages: list[dict], rewrite_on: set[int], *, store: MemoryStore | None = None,
+    session_id: str | None = None,
+) -> tuple[NativeLoop, list[list[Message]]]:
+    """A loop whose compactor reports a rewrite before the given calls.
+
+    The view itself is left alone; only the decision is injected, with the
+    first change at message 1, so the probe and the classifier see exactly
+    what a real batch reports.
+    """
+    from fluid.context.compaction import Promotion
+
+    kwargs = {"session_id": session_id} if session_id else {}
+    loop = NativeLoop(
+        provider=_CoverageProvider(usages), store=store or MemoryStore(),
+        model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+        **kwargs,
+    )
+    original = loop._compactor.apply
+    rendered_on_rewrite: list[list[Message]] = []
+    applied = 0
+
+    def apply(nodes, **kw):
+        nonlocal applied
+        rendered, promotions = original(nodes, **kw)
+        applied += 1
+        if applied in rewrite_on:
+            rendered_on_rewrite.append(rendered)
+            promotions = [*promotions, Promotion(
+                tier=1, reason="trigger", trimmed=(("n", "c"),),
+                reclaimed_chars=40_000, before_tokens=90_000, after_tokens=80_000,
+                decision_reason="meaningful_reclaim", first_changed_message=1,
+            )]
+        return rendered, promotions
+
+    loop._compactor.apply = apply
+    return loop, rendered_on_rewrite
+
+
+async def test_the_rewrite_tail_is_logged_and_the_next_misses_are_followons() -> None:
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.events import ContextCompaction
+
+    miss = {"input_tokens": 60_000, "cache_read_input_tokens": 0}
+    loop, rendered = _loop_with_rewrites([
+        miss,
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        miss, miss, miss, miss, miss,  # follow-on calls 1-5
+        miss,  # call 6 after the rewrite: the provider again
+    ], rewrite_on={2})
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    events = loop.bus.log(loop.session_id)
+
+    (compaction,) = [e for e in events if isinstance(e, ContextCompaction)]
+    tail = estimate_tokens_of_messages(rendered[0][1:])
+    assert tail > 0
+    assert compaction.first_changed_message == 1
+    assert compaction.rewrite_tail_tokens_est == tail
+
+    raws = [e.raw for e in events if isinstance(e, Usage)]
+    assert "rewrite_tail_tokens_est" not in raws[0]
+    assert "calls_since_rewrite" not in raws[0]
+    # The request that carried the rewrite logs the tail beside its read.
+    assert raws[1]["rewrite_tail_tokens_est"] == tail
+    assert raws[1]["rewrite_first_changed_message"] == 1
+    assert raws[1]["calls_since_rewrite"] == 0
+    assert raws[1]["reuse_floor_tokens"] == 24_000
+    assert raws[1]["reuse_floor_provider"] == "openai_responses"
+    assert all("rewrite_tail_tokens_est" not in r for r in raws[2:])
+    assert [r.get("calls_since_rewrite") for r in raws] == [None, 0, 1, 2, 3, 4, 5, None]
+    assert [r.get("cache_miss_class") for r in raws] == (
+        ["planned_rebuild", "planned_rebuild"]
+        + ["compaction_followon"] * 5
+        + ["provider_fallback"]
+    )
+    assert loop.reuse_floor_tokens == 24_000
+
+
+async def test_the_reuse_floor_smooths_each_measured_rewrite() -> None:
+    loop, _ = _loop_with_rewrites([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        {"input_tokens": 1_000, "cache_read_input_tokens": 54_000},
+        {"input_tokens": 50_000, "cache_read_input_tokens": 10_000},  # rewrite
+    ], rewrite_on={2, 4})
+    assert loop.reuse_floor_tokens is None
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    raws = [e.raw for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    assert [r.get("reuse_floor_tokens") for r in raws] == [None, 24_000, None, 17_000]
+    assert loop.reuse_floor_tokens == 17_000
+
+
+async def test_the_followon_window_and_floor_survive_a_rebuilt_engine() -> None:
+    store = MemoryStore()
+    miss = {"input_tokens": 60_000, "cache_read_input_tokens": 0}
+    first, _ = _loop_with_rewrites([
+        miss,
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # rewrite
+        miss,
+    ], rewrite_on={2}, store=store)
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+
+    second, _ = _loop_with_rewrites([miss], rewrite_on=set(), store=store, session_id=sid)
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    assert usage.raw["calls_since_rewrite"] == 2
+    assert usage.raw["cache_miss_class"] == "compaction_followon"
+    assert second.reuse_floor_tokens == 24_000

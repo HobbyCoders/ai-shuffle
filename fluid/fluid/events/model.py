@@ -380,6 +380,12 @@ class ContextCompaction(Event):
     # fluid.context.steer_render). 1 on every event persisted before the field
     # existed, which keeps old sessions rendering byte-for-byte as they did.
     render_version: int = 1
+    # Estimated tokens (chars/4) from ``first_changed_message`` to the end of
+    # the rewritten view: the part of the prompt the provider has to bill
+    # fresh on the next call. The next Usage row repeats it in ``raw`` next
+    # to the cache_read it actually got. None when the batch has no
+    # ``first_changed_message`` and on events written before the field.
+    rewrite_tail_tokens_est: int | None = None
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────
@@ -425,7 +431,7 @@ class CacheMissAlert(Event):
     ``prompt_cache_key`` / OpenRouter ``session_id``), so a reader can tell a
     routing problem from a partitioning one.
 
-    ``miss_class`` is one of the six classes in
+    ``miss_class`` is one of the classes in
     :mod:`fluid.context.cache_miss_classes`. The engine also raises this
     alert, with ``reason="sticky_key_dropped"`` and class
     ``provider_fallback``, when it drops OpenRouter's sticky routing key after
