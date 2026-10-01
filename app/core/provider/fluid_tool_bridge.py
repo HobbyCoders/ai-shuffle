@@ -58,6 +58,7 @@ def register_sdk_tools(
     risk_map: Optional[Mapping[str, str]] = None,
     default_risk: str = "safe",
     defer: bool = False,
+    call_timeouts: Optional[Mapping[str, Optional[float]]] = None,
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
     ``mcp__<server_name>__<tool>`` (fluid's naming, matching Claude Code).
@@ -69,6 +70,9 @@ def register_sdk_tools(
     ``defer=True`` registers the server's tools in fluid's deferred tier
     (announced by name + one-line description, schema loaded on demand via
     ToolSearch) instead of pushing every schema into the prompt prefix.
+
+    ``call_timeouts`` ({tool name: seconds or None}) replaces the registry's
+    per-call bound for the named tools (see ``ToolRegistry.register_inproc``).
     """
     risk_map = risk_map or {}
     tools: List[InprocTool] = [
@@ -76,11 +80,10 @@ def register_sdk_tools(
         for t in sdk_tools
     ]
     server = create_inproc_server(server_name, tools, version=version)
-    try:
+    if call_timeouts:
+        registry.register_inproc(server, defer=defer, call_timeouts=call_timeouts)
+    else:
         registry.register_inproc(server, defer=defer)
-    except TypeError:
-        # Older vendored fluid without the defer parameter: eager fallback.
-        registry.register_inproc(server)
     return server
 
 
@@ -112,6 +115,10 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ListSessions": "safe",
     "MessageSession": "write",
     "StartSession": "write",
+    # Agent messaging with this session's Task workers and its parent — the
+    # same risk fluid's bare-named originals carry.
+    "ListAgents": "safe",
+    "SendMessage": "write",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
     # Monitor runs a host shell command; fluid rates its own Monitor "write".
@@ -235,12 +242,46 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 # availability marking (what tells the picker why the row is greyed). The
 # memory four (Remember/Recall/SessionSearch/SessionView) are the delegated
 # leg's app-memory bridge; native legs run fluid's originals over the same
-# stores via ctx.extra.
+# stores via ctx.extra. ListAgents/SendMessage are the delegated leg's route to
+# its Task workers; native legs wire fluid's originals through agent_roster /
+# agent_message on the engine ctx.
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "Task", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
     "ListSessions", "MessageSession", "StartSession",
+    "ListAgents", "SendMessage",
 })
+
+
+def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]]:
+    """Per-tool call bounds for the ``builtins`` server, over the registry's.
+
+    A synchronous Task blocks until its worker reports, and task_dispatch
+    caps the run at ``task_worker_sync_max_seconds``. That cap starts only
+    after the dispatch clears pool admission, which can queue for up to
+    ``_ADMISSION_WAIT_SECONDS`` (or the longer provider-row queue budget),
+    and a retry attempt queues for admission again inside the cap. The
+    registry's general bound (330 s by default) would cancel such a call
+    with ``tool_timeout`` before task_dispatch could return its own
+    worker-failed result, so Task gets the sync cap plus two admission
+    waits plus a margin for the report, or no bound when the cap is off.
+    The general bound still applies if it is the larger one. Monitor's
+    inline wait (at most 120 s) and TaskOutput (never blocks) fit under the
+    general bound and keep it.
+    """
+    from app.core import task_dispatch
+
+    cap = task_dispatch._sync_cap_seconds()
+    if cap <= 0:
+        return {"Task": None}
+    general = getattr(registry, "external_call_timeout", None)
+    if not general or general <= 0:
+        return {"Task": None}
+    queue = max(
+        float(task_dispatch._ADMISSION_WAIT_SECONDS),
+        task_dispatch._provider_queue_seconds(),
+    )
+    return {"Task": max(cap + 2 * queue + 60.0, float(general))}
 
 
 def register_recorded_sdk_servers(
@@ -288,6 +329,9 @@ def register_recorded_sdk_servers(
             risk_map=SERVER_RISK_MAPS.get(name),
             default_risk=SERVER_DEFAULT_RISK.get(name, "write"),
             defer=name in (defer_servers or ()),
+            call_timeouts=(
+                _builtins_call_timeouts(registry) if name == "builtins" else None
+            ),
         )
         registered.append(name)
     return registered

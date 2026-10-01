@@ -12,12 +12,15 @@ serialized across a process boundary:
     runs a socket server speaking newline-delimited JSON. It answers
     ``{"op":"list"}`` and ``{"op":"call","name":...,"arguments":...}`` by
     consulting / dispatching the *live* registry — the single source of truth.
+    A call may carry the CLI's ``tool_use_id``; a reply carries ``text``,
+    ``is_error`` and, when the tool returned any, ``images`` (base64).
 
   * **Child side (subprocess):** ``python -m fluid.tools.mcp.bundled_server
     --socket <addr>`` runs an ``mcp`` stdio ``Server`` whose list/call handlers
     proxy over that socket to the parent. This is the process the CLI actually
     launches (declared by ``write_bundled_config`` in an ``.mcp.json``-style
-    file passed as ``--mcp-config``).
+    file passed as ``--mcp-config``). It forwards the id Claude Code puts in
+    a call's ``_meta`` and turns the parent's images into ``ImageContent``.
 
 Both halves accept two address forms so the bridge works off-unix (Windows has
 no ``AF_UNIX``):
@@ -43,11 +46,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hmac
 import json
 import os
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, MutableMapping
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,6 +77,14 @@ OnStop = Callable[[str], Awaitable[None]]
 # Environment entry the child reads its bridge token from.
 TOKEN_ENV = "FLUID_BUNDLED_TOKEN"
 _UNAUTHORIZED = {"error": "unauthorized: bridge token missing or wrong"}
+# Most base64 image data one call result carries across the bridge. Half of
+# STREAM_LINE_LIMIT, so the JSON line with its text still fits; an image that
+# would pass it is dropped and the result text says so.
+IMAGE_BUDGET_CHARS = 8 * 1024 * 1024
+# Where Claude Code puts the calling tool_use id in a tools/call request's
+# ``_meta`` (seen in 2.1.285). The child forwards it so the parent's hooks and
+# host tools can key on the same id the CLI's transcript uses.
+TOOL_USE_ID_META_KEY = "claudecode/toolUseId"
 
 
 # ─── Address scheme ──────────────────────────────────────────────────────────
@@ -179,12 +191,65 @@ def _permitted(filt: Callable[[str], bool] | None, name: str) -> bool:
     return filt(name) if filt is not None else True
 
 
+class _CallExtra(MutableMapping[str, Any]):
+    """``ctx.extra`` as one bridge call sees it.
+
+    Reads find the call's own keys (its ``tool_use_id``) first, then the
+    session's. Writes of any other key go to the session's dict, so state a
+    handler keeps there outlives the call as it does on the native loop. The
+    bridge serves concurrent calls on one shared ctx, which is why the call's
+    keys cannot be written into that dict.
+    """
+
+    def __init__(self, base: dict[str, Any], own: dict[str, Any]) -> None:
+        self._base = base
+        self._own = own
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._own:
+            return self._own[key]
+        return self._base[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self._own:
+            self._own[key] = value
+        else:
+            self._base[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._own:
+            del self._own[key]
+        else:
+            del self._base[key]
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._own
+        yield from (k for k in self._base if k not in self._own)
+
+    def __len__(self) -> int:
+        return len(self._own) + sum(1 for k in self._base if k not in self._own)
+
+
+def _call_ctx(ctx: ToolCtx, tool_use_id: str | None) -> ToolCtx:
+    """A shallow copy of ``ctx`` whose ``extra`` carries this call's id.
+
+    The copy shares every per-session registry (read_files, read_seen, ...)
+    with ``ctx``. ``ToolRegistry.dispatch`` publishes the id as
+    ``current_tool_use_id`` for handlers that take no ctx.
+    """
+    if not tool_use_id:
+        return ctx
+    extra = _CallExtra(ctx.extra, {"tool_use_id": tool_use_id})
+    return replace(ctx, extra=extra)  # type: ignore[arg-type]
+
+
 async def _gate_call(
     registry: ToolRegistry, ctx: ToolCtx, name: str, args: dict[str, Any],
     *,
     permissions: PermissionEngine | None,
     hooks: HookBus | None,
     on_stop: OnStop | None = None,
+    tool_use_id: str | None = None,
 ) -> ToolOutcome:
     """PreToolUse hook → PermissionEngine → dispatch → PostToolUse, the order
     ``NativeLoop._gated_call`` uses, for a caller with no user on the far
@@ -198,6 +263,10 @@ async def _gate_call(
     PostToolUse ``deny`` or ``additionalContext`` rides back to the model
     appended to the result, and a PostToolUse ``stop`` ends the turn after
     it.
+
+    ``tool_use_id`` is the CLI's id for the call when its request carried
+    one. It goes into every hook payload and into the handler's
+    ``ctx.extra["tool_use_id"]``.
     """
     from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
@@ -206,7 +275,7 @@ async def _gate_call(
     hook_reason: str | None = None
     if hooks is not None:
         decision = await hooks.emit(
-            PRE_TOOL_USE, {"name": name, "input": args, "tool_use_id": None},
+            PRE_TOOL_USE, {"name": name, "input": args, "tool_use_id": tool_use_id},
         )
         if decision.action == "deny" or decision.stop:
             reason = decision.note or ("stopped by hook" if decision.stop else "denied")
@@ -244,13 +313,13 @@ async def _gate_call(
         # before it runs, as on the native loop.
         await hooks.tool_allowed({
             "session_id": ctx.session_id, "name": name, "input": args,
-            "tool_use_id": None,
+            "tool_use_id": tool_use_id,
         })
-    outcome = await registry.dispatch(name, args, ctx)
+    outcome = await registry.dispatch(name, args, _call_ctx(ctx, tool_use_id))
     if hooks is not None:
         decision = await hooks.emit(
             POST_TOOL_USE,
-            {"name": name, "tool_use_id": None, "input": args,
+            {"name": name, "tool_use_id": tool_use_id, "input": args,
              "output": outcome.text, "is_error": outcome.is_error},
         )
         additions: list[str] = []
@@ -303,9 +372,11 @@ async def _answer(
         name = req.get("name", "")
         if not _permitted(tool_filter, name):
             return {"text": f"tool not available in this session: {name}", "is_error": True}
+        tool_use_id = req.get("tool_use_id")
         outcome = await _gate_call(
             registry, ctx, name, req.get("arguments") or {},
             permissions=permissions, hooks=hooks, on_stop=on_stop,
+            tool_use_id=tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None,
         )
         # MRTR: the tool paused on input_required (an MCP server or a
         # builtin/in-proc tool). This bridge is a request/response socket with no event
@@ -322,8 +393,45 @@ async def _answer(
                 ),
                 "is_error": True,
             }
-        return {"text": outcome.text, "is_error": outcome.is_error}
+        return _call_answer(outcome)
     return {"error": f"unknown op: {op!r}"}
+
+
+def _call_answer(outcome: ToolOutcome) -> dict[str, Any]:
+    """The socket reply for one call: text, error flag and any images.
+
+    Images ride as ``{"media_type", "data"}`` with ``data`` base64, at most
+    ``IMAGE_BUDGET_CHARS`` of it per result. An image past the budget is
+    dropped and a line in the text says so, so the model knows it is missing
+    rather than seeing a result that silently lacks it. A result without
+    images keeps the two-key shape.
+    """
+    resp: dict[str, Any] = {"text": outcome.text, "is_error": outcome.is_error}
+    if not outcome.images:
+        return resp
+    images: list[dict[str, str]] = []
+    omitted: list[str] = []
+    used = 0
+    for image in outcome.images:
+        data = image.data
+        if isinstance(data, (bytes, bytearray)):
+            data = base64.b64encode(data).decode("ascii")
+        if not isinstance(data, str) or not data:
+            continue
+        if used + len(data) > IMAGE_BUDGET_CHARS:
+            omitted.append(
+                f"[image omitted: {image.media_type}, about "
+                f"{len(data) * 3 // 4} bytes, too large to return through the "
+                "tool bridge]"
+            )
+            continue
+        used += len(data)
+        images.append({"media_type": image.media_type, "data": data})
+    if images:
+        resp["images"] = images
+    if omitted:
+        resp["text"] = "\n".join([outcome.text, *omitted]) if outcome.text else "\n".join(omitted)
+    return resp
 
 
 # ─── Config generation ───────────────────────────────────────────────────────
@@ -458,13 +566,73 @@ def _tool_from_spec(types_mod: Any, spec: dict[str, Any]) -> Any:
     )
 
 
-def _call_result(types_mod: Any, text: str, is_error: bool) -> Any:
-    """A ``mcp.types.CallToolResult`` carrying one text block."""
-    key = _field_name(types_mod.CallToolResult, "isError", "is_error")
-    return types_mod.CallToolResult(
-        content=[types_mod.TextContent(type="text", text=text)],
-        **{key: is_error},
+def _reply_result(types_mod: Any, data: dict[str, Any]) -> Any:
+    """The ``CallToolResult`` for one ``{"op":"call"}`` reply from the parent."""
+    text = data.get("text", "")
+    images = data.get("images")
+    return _call_result(
+        types_mod, text if isinstance(text, str) else str(text),
+        bool(data.get("is_error")),
+        images if isinstance(images, list) else (),
     )
+
+
+def _call_result(
+    types_mod: Any, text: str, is_error: bool, images: Any = (),
+) -> Any:
+    """A ``mcp.types.CallToolResult``: one text block, then any images.
+
+    ``images`` are the parent's ``{"media_type", "data"}`` entries, each
+    becoming an ``ImageContent`` after the text block. A result with images
+    and no text leaves the empty text block out.
+    """
+    images = [
+        img for img in images
+        if isinstance(img, dict)
+        and isinstance(img.get("data"), str) and img["data"]
+    ]
+    content: list[Any] = []
+    if text or not images:
+        content.append(types_mod.TextContent(type="text", text=text))
+    if images:
+        mime_key = _field_name(types_mod.ImageContent, "mimeType", "mime_type")
+        for img in images:
+            media_type = img.get("media_type")
+            content.append(types_mod.ImageContent(
+                type="image", data=img["data"],
+                **{mime_key: media_type if isinstance(media_type, str) and media_type
+                   else "image/png"},
+            ))
+    key = _field_name(types_mod.CallToolResult, "isError", "is_error")
+    return types_mod.CallToolResult(content=content, **{key: is_error})
+
+
+def _tool_use_id_from_meta(meta: Any) -> str | None:
+    """The CLI's tool_use id from a tools/call request's ``_meta``, if any.
+
+    ``meta`` is the request's meta model (extra fields allowed) or a plain
+    mapping; the id is an extra field named ``TOOL_USE_ID_META_KEY``.
+    """
+    if meta is None:
+        return None
+    if isinstance(meta, dict):
+        value = meta.get(TOOL_USE_ID_META_KEY)
+    else:
+        extra = getattr(meta, "model_extra", None) or {}
+        value = extra.get(TOOL_USE_ID_META_KEY)
+        if value is None:
+            value = getattr(meta, TOOL_USE_ID_META_KEY, None)
+    return value if isinstance(value, str) and value else None
+
+
+def _call_request(
+    name: str, arguments: dict[str, Any] | None, tool_use_id: str | None,
+) -> dict[str, Any]:
+    """The ``{"op":"call"}`` socket request; ``tool_use_id`` only when known."""
+    req: dict[str, Any] = {"op": "call", "name": name, "arguments": arguments or {}}
+    if tool_use_id:
+        req["tool_use_id"] = tool_use_id
+    return req
 
 
 def build_child_server(socket_path: str, token: str | None = None) -> Any:
@@ -498,14 +666,17 @@ def build_child_server(socket_path: str, token: str | None = None) -> Any:
             )
 
         async def on_call_tool(ctx: Any, params: Any) -> Any:
+            tool_use_id = _tool_use_id_from_meta(getattr(params, "meta", None))
+            if tool_use_id is None:
+                tool_use_id = _tool_use_id_from_meta(getattr(ctx, "meta", None))
             data = await _socket_rpc(
                 socket_path,
-                {"op": "call", "name": params.name, "arguments": params.arguments or {}},
+                _call_request(params.name, params.arguments, tool_use_id),
                 token,
             )
             # Build the CallToolResult ourselves so the parent's is_error
             # survives instead of being flattened into a success.
-            return _call_result(t, data.get("text", ""), bool(data.get("is_error")))
+            return _reply_result(t, data)
 
         return Server(
             _BUNDLED_SERVER_NAME,
@@ -523,13 +694,20 @@ def build_child_server(socket_path: str, token: str | None = None) -> Any:
 
     @server.call_tool()
     async def legacy_call_tool(name: str, arguments: dict[str, Any] | None) -> Any:
+        # mcp 1.x hands the handler only name/arguments; the request's
+        # ``_meta`` lives on the per-request context, which is unset when the
+        # handler is driven outside a session (tests).
+        try:
+            meta = server.request_context.meta
+        except LookupError:
+            meta = None
         data = await _socket_rpc(
-            socket_path, {"op": "call", "name": name, "arguments": arguments or {}}, token,
+            socket_path, _call_request(name, arguments, _tool_use_id_from_meta(meta)), token,
         )
         # Returning a CallToolResult (rather than bare content) is what lets
         # the parent's is_error survive: the decorator's own normalization path
         # always reports success.
-        return _call_result(t, data.get("text", ""), bool(data.get("is_error")))
+        return _reply_result(t, data)
 
     return server
 

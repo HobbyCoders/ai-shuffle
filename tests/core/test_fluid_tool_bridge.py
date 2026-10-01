@@ -258,6 +258,9 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
             ))
             from fluid.tools.builtins.session_orchestration import SPECS
             actual.update(spec.name for spec, _ in SPECS)
+            # The agent-messaging bridge re-exposes fluid's own specs.
+            from fluid.tools.builtins import list_agents, send_message
+            actual.update({list_agents.SPEC.name, send_message.SPEC.name})
         mapped = set(SERVER_RISK_MAPS[server])
         stale = mapped - actual
         assert not stale, f"{server}: risk map entries with no matching registered tool: {sorted(stale)}"
