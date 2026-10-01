@@ -10,6 +10,9 @@
 
 	let isStreaming = $state(false);
 	let operationInProgress = $state(false);
+	// A worktree session whose status reads "not a repository" (#1615).
+	let isGitRepo = $state(true);
+	let worktreeBranch = $state<string | null>(null);
 	// argc tells a bare row click (no option bag) from an editor submit.
 	const calls: { name: string; argc: number; options?: unknown; open: string | null }[] = [];
 	const record = (name: string) => (...args: unknown[]) => {
@@ -29,15 +32,21 @@
 		{ name: 'main', current: false, remote: false },
 		{ name: 'release/1.2', current: false, remote: false }
 	];
-	/** dirty: uncommitted changes. ahead/behind: relative to upstream. openpr: clean, PR open. */
+	/** dirty: uncommitted changes. ahead/behind: relative to upstream. openpr: clean, PR open.
+	 *  unreadable: a worktree poll read "not a repository" while the earlier diff
+	 *  stays in the store. checking: that reading is a placeholder still loading. */
 	const scenarios = {
 		dirty: { branches: branches(0, 0), diffStats: { additions: 120, deletions: 14, files_changed: 9 }, changedFiles: files },
 		ahead: { branches: branches(2, 0) },
 		behind: { branches: branches(0, 3) },
-		openpr: { branches: branches(0, 0), openPr: { number: 1565, title: 'Inline editors', url: 'https://example.test/pr/1565', mergeable: true } }
+		openpr: { branches: branches(0, 0), openPr: { number: 1565, title: 'Inline editors', url: 'https://example.test/pr/1565', mergeable: true } },
+		unreadable: { branches: branches(0, 0), diffStats: { additions: 120, deletions: 14, files_changed: 9 }, changedFiles: files, status: { is_git_repo: false }, currentBranch: null },
+		checking: { branches: [], status: { is_git_repo: false }, currentBranch: null, hydrated: false, stale: true }
 	};
 	type Scenario = keyof typeof scenarios;
 	function scenario(name: Scenario) {
+		isGitRepo = !('status' in scenarios[name]);
+		worktreeBranch = isGitRepo ? null : branch;
 		gitSnapshot.set({
 			contextKey: name,
 			hydrated: true,
@@ -99,6 +108,8 @@
 		sessionId={null}
 		{isStreaming}
 		{operationInProgress}
+		{isGitRepo}
+		{worktreeBranch}
 		projectName="ai-shuffle"
 		onClickCommit={record('commit')}
 		onClickPush={record('push')}

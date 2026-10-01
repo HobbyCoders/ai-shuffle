@@ -16,6 +16,7 @@
 	import {
 		git,
 		gitStatus,
+		gitMode,
 		gitPrState,
 		githubFeaturesAvailable,
 		branches as branchStore
@@ -61,7 +62,7 @@
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import { privateAccessTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
+	import { privateAccessTrigger, shouldShowGitPanelTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -890,7 +891,11 @@
 					viewType: $activeView?.type, hasProject: !!activeProject,
 					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
 					isRemote: activeIsRemote, sessionMode: activeTab.mode
-				}) && $gitStatus?.is_git_repo !== false && !$git.error}
+				}) && shouldShowGitPanelTrigger({
+					isGitRepo: $gitStatus?.is_git_repo !== false,
+					worktreeMode: !!activeWorktreeBranch || $gitMode === 'worktree',
+					error: $git.error
+				})}
 			/>
 		{/key}
 	{/if}

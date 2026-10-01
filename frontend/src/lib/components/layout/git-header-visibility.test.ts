@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	shouldShowHeaderGitActions,
 	shouldShowGithubGitActions,
+	shouldShowGitPanelTrigger,
 	privateAccessTrigger,
 	type HeaderGitActionsInput
 } from './git-header-visibility';
@@ -123,5 +124,26 @@ describe('privateAccessTrigger', () => {
 	it('uses the git panel row when the git cluster is shown', () => {
 		expect(privateAccessTrigger(base({ sessionMode: 'code' }))).toBe('none');
 		expect(privateAccessTrigger(base({ sessionMode: 'voice' }))).toBe('none');
+	});
+});
+
+// #1615: the standalone Swarm button shows exactly when this is false, so a
+// worktree session must keep the panel through every "not a repo" reading.
+describe('shouldShowGitPanelTrigger', () => {
+	it('shows the panel for a repository', () => {
+		expect(shouldShowGitPanelTrigger({ isGitRepo: true, worktreeMode: false, error: null })).toBe(true);
+	});
+
+	it('keeps the panel for a worktree session whose status reads "not a repository"', () => {
+		expect(shouldShowGitPanelTrigger({ isGitRepo: false, worktreeMode: true, error: null })).toBe(true);
+	});
+
+	it('leaves a plain non-repository project to Init Repo', () => {
+		expect(shouldShowGitPanelTrigger({ isGitRepo: false, worktreeMode: false, error: null })).toBe(false);
+	});
+
+	it('leaves a load error to the Retry button', () => {
+		expect(shouldShowGitPanelTrigger({ isGitRepo: true, worktreeMode: true, error: 'boom' })).toBe(false);
+		expect(shouldShowGitPanelTrigger({ isGitRepo: true, worktreeMode: false, error: undefined })).toBe(true);
 	});
 });

@@ -34,7 +34,8 @@
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
-	import { computeHeaderSummary, computePipeline } from '$lib/stores/derived/git-header-summary';
+	import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
+	import { shouldShowGitPanelTrigger } from '$lib/components/layout/git-header-visibility';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
 	import type {
@@ -91,8 +92,10 @@
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
-	// work is running.
-	const actionsBusy = $derived(isStreaming || operationInProgress);
+	// work is running. A worktree session whose checkout reads as "not a
+	// repository" keeps its panel (see shouldShowGitPanelTrigger) but nothing
+	// can run against it, so its actions are locked the same way.
+	const actionsBusy = $derived(isStreaming || operationInProgress || !isGitRepo);
 
 	// ── ONE coherent snapshot ────────────────────────────────────────────────
 	// Every value the action decision depends on is read from a SINGLE store
@@ -121,6 +124,7 @@
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
+	const panelTriggerShown = $derived(shouldShowGitPanelTrigger({ isGitRepo, worktreeMode: isWorktreeMode, error }));
 
 	// ── Panel + popover state ────────────────────────────────────────────────
 	// Driven by the shared store so opening the panel closes the profile /
@@ -360,7 +364,9 @@
 	const accessPending = $derived(access?.pending ?? 0);
 
 	// ── What the one header button says ─────────────────────────────────────
-	const summary = $derived(computeHeaderSummary({
+	// An unreadable worktree checkout names its branch (the tab's branch first:
+	// a carried-over placeholder's branch belongs to the previous session).
+	const summary = $derived(!isGitRepo ? computeUnreadableCheckoutSummary(worktreeBranch ?? currentBranch, snapshotPending) : computeHeaderSummary({
 		accessPending,
 		mergeBlocked: mergeBlocked && showShipIt,
 		needsPull,
@@ -492,7 +498,7 @@
 		<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
 			<TriangleAlert size={13} /> Git unavailable · Retry
 		</button>
-	{:else if isGitRepo}
+	{:else if panelTriggerShown}
 	<button
 		class="git-btn trigger tone-{summary.tone}"
 		class:stale={snapshotPending}
@@ -516,7 +522,7 @@
 				{#if deletions > 0}<span class="stat deletions">−{deletions}</span>{/if}
 			</span>
 		{/if}
-		{#if summary.label}<span class="btn-label">{summary.label}</span>{/if}
+		{#if summary.label}<span class="btn-label" class:branch-label={!isGitRepo}>{summary.label}</span>{/if}
 		{#if summary.detail}<span class="btn-detail">{summary.detail}</span>{/if}
 		{#if prIsLastKnown}
 			<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
@@ -575,6 +581,17 @@
 				{/key}
 			{:else}
 				<GitProgressPopover />
+			{#if !isGitRepo}
+				<div class="gp-unreadable">
+					<!-- The head above already says what is wrong; this says what it means. -->
+					{#if snapshotPending}
+						<p class="gp-empty">Git actions appear once it loads.</p>
+					{:else}
+						<p class="gp-empty">Git actions are paused until it can be read again.</p>
+						<button class="gp-review" onclick={() => git.retryLoad()}>Check again</button>
+					{/if}
+				</div>
+			{:else}
 			<!-- Ship It pipeline: one-click commit → push → PR → merge → cleanup -->
 			<div class="gp-pipe" class:blocked={showShipIt && mergeBlocked}>
 				{#if showShipIt && mergeBlocked}<TriangleAlert size={15} strokeWidth={1.6} />{:else}<Rocket size={15} strokeWidth={1.6} />{/if}
@@ -752,6 +769,7 @@
 					<p class="gp-empty">Working tree is clean.</p>
 				{/if}
 			</div>
+			{/if}
 
 			<SwarmDropdown {sessionId} />
 
@@ -790,8 +808,9 @@
 		</div>
 	{/if}
 
-	{:else if !isWorktreeMode}
-		<!-- Only non-repo projects can be initialized, not removed branch checkouts. -->
+	{:else}
+		<!-- Only non-repo projects reach here: a worktree or branch session keeps
+		     the panel button above, and its checkout is never initialized. -->
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />
@@ -874,6 +893,16 @@
 
 	.btn-label {
 		line-height: 1;
+	}
+
+	/* A branch name stands in for the git state; keep a long one from
+	   crowding the header. The full name is in the panel head. */
+	.branch-label {
+		max-width: 180px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		/* overflow clips at the line box; 1 would cut descenders. */
+		line-height: 1.3;
 	}
 
 	.project-name {
@@ -1431,6 +1460,17 @@
 		padding: 2px 8px 4px;
 		font-size: 0.75rem;
 		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+
+	.gp-unreadable {
+		display: grid;
+		justify-items: start;
+		gap: 4px;
+		padding: 12px 6px 10px;
+	}
+
+	.gp-unreadable .gp-review {
+		margin-left: 4px;
 	}
 
 	.gp-foot {
