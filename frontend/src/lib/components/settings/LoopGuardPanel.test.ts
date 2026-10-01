@@ -57,3 +57,33 @@ it('saves a changed budget', async () => {
 	await fireEvent.change(input, { target: { value: '5' } });
 	await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/loop-guard', { session_turns_per_hour: 5 }));
 });
+
+it('explains what it counts, the defaults, holding and what it does not cover', async () => {
+	mocks.get.mockResolvedValue(status({ session_turns_per_hour: 5 }));
+	render(LoopGuardPanel, { isAdmin: false });
+	const explainer = await screen.findByTestId('loop-guard-explainer');
+	expect(explainer.tagName).toBe('DETAILS');
+	expect(explainer.querySelector('summary')?.textContent).toBe('What the loop guard counts and why');
+	const text = explainer.textContent?.replace(/\s+/g, ' ') ?? '';
+	// Every unattended source the backend counts, and only the CLI in subscription mode.
+	for (const source of ['automations', 'scheduled wake-ups', 'background workers', 'connector messages']) {
+		expect(text).toContain(source);
+	}
+	expect(text).toContain('Claude Code CLI in subscription mode');
+	// Defaults come from the backend, not the current (changed) values.
+	expect(text).toContain('Defaults: 12 per session, 60 per worker.');
+	expect(text).toContain('stops after 60 minutes by default');
+	expect(text).toContain('Confirm starts it now (it still counts toward the hour); Dismiss drops it.');
+	expect(text).toContain('API key mode');
+	expect(text).toContain('another provider');
+	expect(text).toContain('start from zero when the worker restarts');
+});
+
+it('says what Confirm and Dismiss do next to held turns', async () => {
+	mocks.get.mockResolvedValue(status({
+		held: [{ id: 'h1', session_id: 's1', turn_id: 't1', source: 'wakeup', prompt: 'check CI', reason: 'x', held_at: 0 }]
+	}));
+	render(LoopGuardPanel, { isAdmin: true });
+	const held = await screen.findByTestId('loop-guard-held');
+	expect(held.textContent).toContain('Confirm starts the turn now; it still counts toward the hour. Dismiss drops it.');
+});
