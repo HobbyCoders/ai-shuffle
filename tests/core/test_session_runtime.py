@@ -136,6 +136,29 @@ async def test_handoff_after_placement_read_releases_claim_without_running(mock_
     assert runs_db.get_active_run("handoff-race") is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", [True, False])
+async def test_checkout_reserved_by_a_handoff_keeps_the_turn_queued(mock_db, held):
+    """A handoff publishing/receiving this session's checkout holds admission."""
+    turn = turns_db.enqueue_turn("checkout-user", "user", prompt="hello")
+    admission = MagicMock(return_value=held)
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env, patch(
+        "app.network.engine.context", return_value=object()
+    ), patch("app.db.database.get_session", return_value={"id": "checkout-user"}), patch(
+        "app.network.control.owner_of", return_value=None
+    ), patch("app.network.handoff.admission_held", new=admission):
+        result = await session_runtime.SessionRuntime(turn).execute()
+    admission.assert_called_once_with("checkout-user")
+    if held:
+        assert result is None
+        env["recorder"].start.assert_not_awaited()
+        assert turns_db.get_turn(turn["id"])["state"] == "queued"
+        assert runs_db.get_active_run("checkout-user") is None
+    else:
+        assert result == "completed"
+        assert turns_db.get_turn(turn["id"])["state"] == "completed"
+
+
 @pytest.mark.parametrize("phase", ["start", "done", "close", "timer"])
 @pytest.mark.parametrize("background", [False, True])
 async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background):
