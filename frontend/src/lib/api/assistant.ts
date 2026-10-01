@@ -41,7 +41,12 @@ export interface AssistantState extends AssistantLimits {
  proactive_guard_ready: boolean;
  cost_accounting: string;
  usage: { runs_today: number; reported_cost_today: number; in_flight_runs: number };
+ /** False when the home conversation (and research) lives on another worker. */
+ runs_here?: boolean;
+ /** The worker that owns the home; null before a home exists or off-network. */
+ home_worker?: AssistantWorker | null;
 }
+export interface AssistantWorker { device_id: string | null; name: string; is_self: boolean; online: boolean }
 export interface AssistantSource {
  id: string; connector_id: string; name: string; type: string;
  enabled: boolean; available: boolean; status: string; trigger_ids: string[];

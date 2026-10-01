@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { AVATARS, type AssistantState, type AssistantSource } from '$lib/api/assistant';
+import { resourceSync } from '$lib/services/resource-sync';
 
 const mocks = vi.hoisted(() => ({
  getAssistant: vi.fn(), getAgentIdentities: vi.fn(), configureAssistant: vi.fn(), openAssistant: vi.fn(),
@@ -151,6 +152,27 @@ describe('Assistant home', () => {
   expect(screen.getByText(/not a hard billing cap/)).toBeTruthy();
   expect(screen.getByText('runs · last 24 hours')).toBeTruthy();
   expect(screen.queryByText(/UTC/)).toBeNull();
+ });
+ it('names the worker that holds the home and runs research when it is another one', async () => {
+  configured({ enabled: true, status: 'ready', runs_here: false, home_worker: { device_id: 'dev_desk', name: 'Desk', is_self: false, online: false } });
+  mocks.getAssistantSources.mockResolvedValue([source]);
+  render(AssistantHome);
+  expect(await screen.findByText(/run on Desk, which is offline right now/)).toBeTruthy();
+  expect(screen.getByText('gmail · Available on Desk')).toBeTruthy();
+  expect(screen.getByText(/Research runs on Desk, so its activity is listed there/)).toBeTruthy();
+  // This worker's counters say nothing about research on Desk.
+  expect(screen.queryByText('runs · last 24 hours')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }));
+  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home'));
+ });
+ it('reloads when another worker changes the shared assistant', async () => {
+  configured(); render(AssistantHome);
+  await screen.findByRole('button', { name: 'Open conversation' });
+  const before = mocks.getAssistant.mock.calls.length;
+  server = { ...server, assistant_name: 'Renamed elsewhere', agent: { id: 'guide', name: 'Renamed elsewhere', avatar_id: 'orbit' } };
+  resourceSync.invalidate(['assistant']);
+  await waitFor(() => expect(mocks.getAssistant.mock.calls.length).toBeGreaterThan(before));
+  expect(await screen.findByRole('heading', { name: 'Renamed elsewhere' })).toBeTruthy();
  });
  it('does not erase a setup draft when background state changes', async () => {
   configured(); render(AssistantHome);

@@ -8,6 +8,7 @@
  import { layout } from '$lib/stores/layout.svelte';
  import { sessionOwnerEpoch } from '$lib/stores/session-owner';
  import { openSession } from '$lib/services/session-navigation';
+ import { resourceSync } from '$lib/services/resource-sync';
  import { isVoiceEnabled } from '$lib/api/voice';
  import { startCallForSession } from '$lib/services/voiceCall';
  import AgentAvatar from './AgentAvatar.svelte';
@@ -43,6 +44,8 @@
  const hasAgent = $derived(!!assistant?.agent);
  const statusText = $derived(!assistant ? '' : ({ unconfigured: 'Not set up', agent_unavailable: 'Agent unavailable', disabled: 'Background off', paused: 'Background paused', guard_unavailable: 'Research unavailable', ready: 'Background enabled' }[assistant.status]));
  const optedIn = $derived(sources.filter(s => s.enabled).length);
+ // Set when the home conversation, and with it background research, lives on another worker.
+ const remoteHome = $derived(assistant?.home_worker && !assistant.home_worker.is_self ? assistant.home_worker : null);
 
  let loaded = false;
  async function load() {
@@ -66,7 +69,9 @@
   void load();
   void isVoiceEnabled().then(enabled => { if (current()) voiceEnabled = enabled; });
   const tick = setInterval(() => { if (document.visibilityState === 'visible' && !busy && !editing) void load(); }, 15000);
-  return () => { disposed = true; clearInterval(tick); };
+  // Another worker changed the shared assistant (setup, switches, which worker holds the home).
+  const unsubscribe = resourceSync.subscribe(['assistant'], () => { if (!busy && !editing) return load(); });
+  return () => { disposed = true; clearInterval(tick); unsubscribe(); };
  });
  function selectAgent() {
   const identity = $agentIdentities.find(a => a.id === agentId);
@@ -192,8 +197,12 @@
     <section class="research-panel" aria-label="Background research status">
      <div class="section-heading"><div><span class="eyebrow">PRESENCE</span><h2>While you’re away</h2></div><ShieldCheck size={20} /></div>
      <p class="muted">{assistant.status === 'ready' ? `Watching ${optedIn} opted-in ${optedIn === 1 ? 'source' : 'sources'}. Background work is read-only.` : assistant.status === 'guard_unavailable' ? 'Research cannot run until the server’s read-only safety guard is available.' : 'Background research is off. You can still talk, plan and coordinate work in your conversation.'}</p>
-     <div class="usage-grid"><div><strong>{assistant.usage.runs_today}<span> / {assistant.max_runs_per_day}</span></strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}<span> / {assistant.max_concurrent_runs}</span></strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>{money(assistant.max_cost_per_day)} admission limit · last 24 hours</small></div></div>
-     <p class="micro">Per run: {assistant.max_turns} turns · {assistant.timeout_seconds}s · {money(assistant.max_cost_per_run)} admission limit. Costs are reported after runs, not a hard billing cap.</p>
+     {#if remoteHome}
+      <p class="micro runner-note">Your conversation and background research run on {remoteHome.name}{remoteHome.online ? '' : ', which is offline right now'}. Opening the conversation here talks to it there, and its usage is counted there.</p>
+     {:else}
+      <div class="usage-grid"><div><strong>{assistant.usage.runs_today}<span> / {assistant.max_runs_per_day}</span></strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}<span> / {assistant.max_concurrent_runs}</span></strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>{money(assistant.max_cost_per_day)} admission limit · last 24 hours</small></div></div>
+      <p class="micro">Per run: {assistant.max_turns} turns · {assistant.timeout_seconds}s · {money(assistant.max_cost_per_run)} admission limit. Costs are reported after runs, not a hard billing cap.</p>
+     {/if}
      <div class="panel-actions">
       {#if assistant.enabled && !assistant.paused}<button class="secondary" disabled={!!busy} onclick={pause}><Pause size={15} />{busy === 'pause' ? 'Pausing…' : 'Pause background'} </button>
       {:else if assistant.enabled && assistant.paused}<button class="secondary" disabled={!!busy || !hasAgent} onclick={resume}><Play size={15} />{busy === 'resume' ? 'Resuming…' : 'Resume background'}</button>
@@ -205,12 +214,12 @@
    </div>
   {/if}
 
-  <section class="sources section" aria-labelledby="sources-heading"><div class="section-heading"><div><span class="eyebrow">EXPLICIT ACCESS</span><h2 id="sources-heading">Opted-in sources <span class="count">{optedIn}</span></h2></div><button class="text-button" onclick={() => layout.openFeaturePage('plugins')}>Manage connections<ArrowUpRight size={14} /></button></div><p class="muted">Only authorized connections on this worker can be enabled. Opting in permits read-only background observation, never action on instructions found in a source.</p>
+  <section class="sources section" aria-labelledby="sources-heading"><div class="section-heading"><div><span class="eyebrow">EXPLICIT ACCESS</span><h2 id="sources-heading">Opted-in sources <span class="count">{optedIn}</span></h2></div><button class="text-button" onclick={() => layout.openFeaturePage('plugins')}>Manage connections<ArrowUpRight size={14} /></button></div><p class="muted">Only authorized connections on {remoteHome ? `${remoteHome.name}, where research runs,` : 'this worker'} can be enabled. Opting in permits read-only background observation, never action on instructions found in a source.</p>
    {#if !sources.length}<div class="empty"><ShieldCheck size={24} /><div><strong>No sources connected</strong><p>Connect a service in Build → Plugins, then return here to opt in. Your assistant works without background sources.</p></div></div>
-   {:else}<ul class="source-list">{#each sources as source (source.id)}<li><div class="source-icon"><ShieldCheck size={19} /></div><div class="source-copy"><strong>{source.name}</strong><p>{source.type} · {source.available ? 'Available on this worker' : 'Unavailable · check connection, grant and agent access'}</p>{#if source.last_observed_at}<small>Last observed {when(source.last_observed_at)}</small>{/if}{#if source.last_error}<p class="source-error">{source.last_error}</p>{/if}</div><button class="source-toggle" role="switch" aria-checked={source.enabled} aria-label={`Observe ${source.name}`} disabled={!!busy || (!source.available && !source.enabled) || !assistant.configured} onclick={() => toggleSource(source)}><span aria-hidden="true"></span><span>{busy === source.id ? 'Saving…' : source.enabled ? 'On' : 'Off'}</span></button></li>{/each}</ul>{/if}
+   {:else}<ul class="source-list">{#each sources as source (source.id)}<li><div class="source-icon"><ShieldCheck size={19} /></div><div class="source-copy"><strong>{source.name}</strong><p>{source.type} · {source.available ? `Available on ${remoteHome ? remoteHome.name : 'this worker'}` : 'Unavailable · check connection, grant and agent access'}</p>{#if source.last_observed_at}<small>Last observed {when(source.last_observed_at)}</small>{/if}{#if source.last_error}<p class="source-error">{source.last_error}</p>{/if}</div><button class="source-toggle" role="switch" aria-checked={source.enabled} aria-label={`Observe ${source.name}`} disabled={!!busy || (!source.available && !source.enabled) || !assistant.configured} onclick={() => toggleSource(source)}><span aria-hidden="true"></span><span>{busy === source.id ? 'Saving…' : source.enabled ? 'On' : 'Off'}</span></button></li>{/each}</ul>{/if}
   </section>
   <section class="section" aria-labelledby="activity-heading"><div class="section-heading"><div><span class="eyebrow">IN THE OPEN</span><h2 id="activity-heading">Activity & linked work</h2></div><Activity size={20} /></div>
-   {#if !activity.length}<div class="empty"><Activity size={24} /><div><strong>Nothing running in the background</strong><p>Linked tasks and research will appear here with their source, outcome and reported cost.</p></div></div>
+   {#if !activity.length}<div class="empty"><Activity size={24} /><div><strong>Nothing running in the background</strong><p>{remoteHome ? `Research runs on ${remoteHome.name}, so its activity is listed there.` : 'Linked tasks and research will appear here with their source, outcome and reported cost.'}</p></div></div>
    {:else}<ol class="activity-list">{#each activity as item (item.id)}<li><AgentAvatar avatar={item.avatar_id} size={36} /><div class="activity-copy"><div class="activity-title">{#if item.session_id}<button class="text-button" onclick={() => item.session_id && openSession(item.session_id)}>{item.session_title || item.agent_name || 'Open linked conversation'}<ArrowUpRight size={14} /></button>{:else}<strong>{item.agent_name || 'Background research'}</strong>{/if}<span class="activity-status">{item.status}</span></div><p>{item.kind} · {when(item.created_at)} · {money(item.cost_usd)} reported</p>{#if item.source_ids.length}<small>Sources: {item.source_ids.map(id => sources.find(s => s.id === id)?.name ?? 'Unavailable source').join(', ')}</small>{/if}{#if item.error}<p class="source-error">{item.error}</p>{/if}</div></li>{/each}</ol>{/if}
   </section>
  {/if}
