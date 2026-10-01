@@ -237,23 +237,29 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
         return False
 
 
-def reclaim_untouched_worker_checkout(worker_session_id: str) -> bool:
+def reclaim_untouched_worker_checkout(
+    worker_session_id: str, checkout: Optional[WorkerCheckout] = None,
+) -> bool:
     """Reclaim a finished/unstarted worker's checkout if it holds no work.
 
-    Reads the worker's own session binding. Only a ``task/<worker id>`` branch
-    is eligible; anything with commits past its recorded base or uncommitted
-    changes is retained for review. Returns True when it was removed.
+    Uses ``checkout`` when the caller provisioned it, else the worker's own
+    session binding. Only a ``task/<worker id>`` branch is eligible; anything
+    with commits past its recorded base or uncommitted changes is retained for
+    review. Returns True when it was removed.
     """
     from app.core.git_service import git_service
     from app.db import database
 
-    try:
-        row: Optional[Dict[str, Any]] = database.get_session(worker_session_id)
-    except Exception:  # noqa: BLE001
-        return False
-    branch = (row or {}).get("branch") or ""
-    path = (row or {}).get("worktree_path")
-    project_id = (row or {}).get("project_v2_id")
+    if checkout is not None:
+        branch, path, project_id = checkout.branch, checkout.path, checkout.project_v2_id
+    else:
+        try:
+            row: Optional[Dict[str, Any]] = database.get_session(worker_session_id)
+        except Exception:  # noqa: BLE001
+            return False
+        branch = (row or {}).get("branch") or ""
+        path = (row or {}).get("worktree_path")
+        project_id = (row or {}).get("project_v2_id")
     if branch != f"{WORKER_BRANCH_PREFIX}{worker_session_id}" or not path or not project_id:
         return False
     if not os.path.isdir(path):
