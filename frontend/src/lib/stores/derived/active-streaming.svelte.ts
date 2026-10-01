@@ -12,6 +12,7 @@
 import { untrack } from 'svelte';
 import { activeSession, streamingSessions } from '../active-session';
 import { computeGitControlsStreaming } from './git-controls-streaming';
+import { git } from '../git.svelte';
 
 // ─── Multi-Store Derived Helper ──────────────────────────────────────────────
 
@@ -71,14 +72,12 @@ function createMultiDerived<T>(
 /**
  * Whether git controls should be locked due to streaming.
  *
- * For worktree/branch-mode: only locked if the active session's OWN session is
- * streaming. For project-mode: locked if any OTHER MAIN-CHECKOUT session in the
- * same project is streaming — a session with a worktree row or a logical branch
- * (v2 branch sessions have worktree_id NULL) runs its own checkout and never
- * locks main-checkout controls.
+ * Lock matching worktree/branch users, not only the viewed session. The owner
+ * status also checks live background jobs and physical checkout aliases.
+ * Unrelated identified branches remain usable; the dropdown remains readable.
  */
 export const gitControlsStreaming = createMultiDerived(
-	[activeSession, streamingSessions],
+	[activeSession, streamingSessions, git],
 	() => {
 		const active = activeSession.current;
 		// Pure decision logic lives in ./git-controls-streaming so it can be
@@ -87,6 +86,10 @@ export const gitControlsStreaming = createMultiDerived(
 			activeIsStreaming: active.isStreaming,
 			activeIsWorktree: !!(active.worktreeId || active.worktreeBranch),
 			activeProject: active.project || null,
+			activeProjectV2Id: active.projectV2Id,
+			activeWorktreeId: active.worktreeId,
+			activeBranch: active.worktreeBranch || git.current.status?.current_branch,
+			targetMutationsBlocked: git.current.status?.mutations_blocked === true,
 			crossDeviceStreaming: streamingSessions.current
 		});
 	}

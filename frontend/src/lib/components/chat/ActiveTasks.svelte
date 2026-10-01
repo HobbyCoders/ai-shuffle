@@ -123,10 +123,10 @@
 		return 1;
 	}
 
-	let sortedTasks = $derived([...tasks].sort((a, b) => sortKey(a) - sortKey(b)));
+	let sortedTasks = $derived(tasks.filter((task) => task.status === 'running'));
 </script>
 
-{#if tasks.length > 0}
+{#if sortedTasks.length > 0}
 	<div class="active-tasks" data-expanded={expanded}>
 		<button
 			type="button"

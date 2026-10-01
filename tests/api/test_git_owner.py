@@ -97,11 +97,15 @@ async def test_owner_uses_existing_flow_and_own_checkout(remote, monkeypatch, ac
     monkeypatch.setattr(control, "owner_of", lambda session: None)
     _original, signature, hints = git_owner._actions[action]
     execute = AsyncMock(return_value={"operation_id": "owner-op", "status": "running"})
+    guard = AsyncMock()
+    monkeypatch.setattr(git_owner, "_guard_mutation", guard)
     monkeypatch.setitem(git_owner._actions, action, (execute, signature, hints))
     result = await git_owner.handle_session_git({
         "action": action, "session_id": row["id"], "params": {"project_id": "pv2-shared", **params},
     }, "viewer")
     assert result["status"] == 200
+    guard.assert_awaited_once()
+    assert guard.call_args.args[0] == action
     args = execute.call_args.kwargs
     assert args["project_id"] == "project-b"
     if action == "finish":
@@ -147,7 +151,9 @@ async def test_owner_executes_real_commit_endpoint(remote, monkeypatch):
     }, from_device="viewer")
     assert result["status"] == 200
     assert result["result"]["commit_sha"] == "abc123"
-    resolve.assert_awaited_once_with("project-b", "owner-worktree", "session-b")
+    assert resolve.await_count == 2  # guard and endpoint use the SAME owner scope
+    for entry in resolve.await_args_list:
+        assert entry.args == ("project-b", "owner-worktree", "session-b")
     commit.assert_awaited_once_with("/owner/feature", "Saved", False)
 
 

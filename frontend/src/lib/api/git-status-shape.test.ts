@@ -38,6 +38,20 @@ const WIRE = {
 	github_repo_name: 'o/r'
 };
 
+describe('owner activity status', () => {
+	it('notifies on activity changes even when the file/branch state is unchanged', () => {
+		const idle = transformGitStatus({ ...WIRE, mutations_blocked: false });
+		const busy = transformGitStatus({ ...WIRE, mutations_blocked: true });
+		expect(gitStatusEqual(idle, busy)).toBe(false);
+	});
+	it('keeps the last activity check when an inline response omits it', () => {
+		const busy = transformGitStatus({ ...WIRE, mutations_blocked: true });
+		const inline = transformGitStatus({ is_git_repo: true });
+		expect(mergeStatusRepoMeta(busy, inline).mutations_blocked).toBe(true);
+		expect(mergeStatusRepoMeta(busy, transformGitStatus({ ...WIRE, mutations_blocked: false })).mutations_blocked).toBe(false);
+	});
+});
+
 describe('transformGitStatus', () => {
 	it('collapses the wire lists into counts plus a fingerprint', () => {
 		const s = transformGitStatus(WIRE);

@@ -17,7 +17,7 @@
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
-	import { tick, type Snippet } from 'svelte';
+	import { tick } from 'svelte';
 	import { Menu, Mic, X } from 'lucide-svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
@@ -37,7 +37,6 @@
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
-		actions?: Snippet;
 		hideGlobalStt?: boolean;
 	}
 
@@ -48,7 +47,6 @@
 		onOpenSession,
 		onOpenFeature,
 		onOpenSpotlight,
-		actions,
 		hideGlobalStt = false
 	}: Props = $props();
 
@@ -164,7 +162,6 @@
 				<Mic size={18} />
 			</button>
 		{/if}
-		{#if actions}{@render actions()}{/if}
 	</div>
 </header>
 
@@ -251,18 +248,9 @@
 		flex: none;
 		margin-left: auto;
 	}
-	/* Header controls share the same hit area on both Fold screens. */
-	.tb-actions :global(.git-btn),
-	.tb-actions :global(.download-jsonl-btn) {
-		box-sizing: border-box;
-		min-width: 44px;
-		min-height: 44px;
-		height: 44px;
-	}
-	.tb-actions :global(.download-jsonl-btn) { width: 44px; }
 	.recording { color: var(--destructive); }
 
-	/* The title yields space to the single compact action cluster. */
+	/* Chat actions live below this bar, leaving room for the title. */
 	.tb-context-title {
 		flex: 1 1 auto;
 		min-width: 0;

@@ -755,7 +755,7 @@ async def _execute_finish(
             op.set_step("push", STEP_SKIPPED, detail="Branch already up to date")
 
         # --- merge -----------------------------------------------------------
-        if not await _merge_step(op, repo, pr_number, merge_method):
+        if not await _merge_step(op, repo, pr_number, merge_method, working_dir):
             return
         # The PR just closed — drop the cached "open PR" answer for this
         # checkout so the header does not show a merged PR for another TTL.
@@ -881,7 +881,7 @@ async def _execute_ship(
         )
 
         # --- merge -----------------------------------------------------------
-        if not await _merge_step(op, repo, pr_number, merge_method):
+        if not await _merge_step(op, repo, pr_number, merge_method, working_dir):
             return
         _invalidate_pr_state_cache(working_dir)
         await persist_pr_state(
@@ -906,11 +906,18 @@ async def _execute_ship(
         op.status = "error"
 
 
-async def _merge_step(op: Operation, repo: str, pr_number: int, merge_method: str) -> bool:
+async def _merge_step(op: Operation, repo: str, pr_number: int, merge_method: str, working_dir=None) -> bool:
     """Run the merge step. Returns True to continue, False to stop (op errored).
     An already-merged PR counts as success.
     """
     op.set_step("merge", STEP_RUNNING)
+    from app.api.github import require_idle_pull_branches
+    try:
+        await require_idle_pull_branches(op.project_id, repo, pr_number, working_dir=working_dir, service=github_service)
+    except HTTPException as exc:
+        op.set_step("merge", STEP_ERROR, error=str(exc.detail))
+        op.status = "error"
+        return False
     ok, err = await asyncio.to_thread(github_service.merge_pull, repo, pr_number, merge_method)
     if ok:
         op.set_step("merge", STEP_DONE)

@@ -32,6 +32,7 @@ export interface StagedFileEntry {
  */
 export interface RawGitStatus {
     is_git_repo: boolean;
+    mutations_blocked?: boolean | null;
     current_branch?: string | null;
     is_detached?: boolean;
     head_commit?: string | null;
@@ -65,6 +66,7 @@ export interface RawGitStatus {
  */
 export interface GitStatus {
     is_git_repo: boolean;
+    mutations_blocked?: boolean;
     current_branch: string | null;
     is_detached: boolean;
     head_commit: string | null;
@@ -122,6 +124,7 @@ export function transformGitStatus(raw: RawGitStatus): GitStatus {
     const isClean = raw.is_clean ?? (staged + modified + untracked + conflicts === 0);
     return {
         is_git_repo: raw.is_git_repo ?? false,
+        mutations_blocked: typeof raw.mutations_blocked === 'boolean' ? raw.mutations_blocked : undefined,
         current_branch: raw.current_branch ?? null,
         is_detached: raw.is_detached ?? false,
         head_commit: raw.head_commit ?? null,
@@ -165,6 +168,7 @@ export function gitStatusEqual(a: GitStatus | null, b: GitStatus | null): boolea
     if (!a || !b) return false;
     return (
         a.is_git_repo === b.is_git_repo &&
+        a.mutations_blocked === b.mutations_blocked &&
         a.current_branch === b.current_branch &&
         a.is_detached === b.is_detached &&
         a.head_commit === b.head_commit &&
@@ -198,9 +202,12 @@ export function gitStatusEqual(a: GitStatus | null, b: GitStatus | null): boolea
  */
 export function mergeStatusRepoMeta(prev: GitStatus | null, next: GitStatus): GitStatus {
     if (!prev) return next;
-    if (next.repository_id !== null || next.default_branch !== null) return next;
+    // Inline mutation responses do not re-check activity. Preserve the last
+    // authoritative owner check, but allow a fresh GET false to unlock.
+    const merged = { ...next, mutations_blocked: next.mutations_blocked ?? prev.mutations_blocked };
+    if (next.repository_id !== null || next.default_branch !== null) return merged;
     return {
-        ...next,
+        ...merged,
         repository_id: prev.repository_id,
         default_branch: prev.default_branch,
         github_repo_name: prev.github_repo_name

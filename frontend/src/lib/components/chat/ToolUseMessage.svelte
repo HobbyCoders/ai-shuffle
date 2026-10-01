@@ -11,10 +11,11 @@
 	 * Screenshots stay OUTSIDE the collapsible body: a screenshot the user can't
 	 * see is useless.
 	 */
+	import { untrack } from 'svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
-	import SwarmCard from './SwarmCard.svelte';
-	import { isSwarmTool } from '$lib/utils/swarm';
+	import { swarms } from '$lib/stores/swarms';
+	import { isSwarmTool, parseSwarm } from '$lib/utils/swarm';
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
@@ -36,13 +37,26 @@
 	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	const prefs = $derived(chatPreferences.current);
+	// Scalar boundaries stop replay's store-backed prop getters from making
+	// this effect depend on the store it publishes into. Writes stay untracked.
+	const swarmTool = $derived(isSwarmTool(name));
+	const swarmResult = $derived(result);
+	const swarmOwner = $derived(sessionId);
+	$effect(() => {
+		if (!swarmTool) return;
+		const snapshot = parseSwarm(swarmResult);
+		const owner = swarmOwner;
+		if (snapshot && (!owner || snapshot.session_id === owner)) {
+			untrack(() => swarms.receive(snapshot, owner ?? undefined));
+		}
+	});
 
 	// Once the user has toggled this row, their choice outranks the preference.
 	let userToggled = $state(false);
 	let expanded = $state(false);
 
 	$effect(() => {
-		if (!userToggled) expanded = prefs.toolsStartExpanded;
+		if (!userToggled) expanded = !isSwarmTool(name) && prefs.toolsStartExpanded;
 	});
 
 	function toggle() {
@@ -91,9 +105,6 @@
 	}
 </script>
 
-{#if isSwarmTool(name)}
-	<SwarmCard {sessionId} {input} {result} {status} />
-{:else}
 <div class="wl-item">
 	<button
 		type="button"
@@ -189,7 +200,6 @@
 		<ToolScreenshot {screenshot} {name} {sessionId} />
 	{/if}
 </div>
-{/if}
 
 <style>
 	.wl-item {

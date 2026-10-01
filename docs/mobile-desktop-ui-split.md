@@ -60,8 +60,13 @@ through `frontend/src/lib/components/chat/composer-shell.ts`: the web build
 gets desktop no-op defaults, and `mobile/src/shell/register.ts` registers the
 real implementations at startup. `MainPanel` takes an optional `header`
 snippet so the mobile app can put its `AppTopBar` where the web UI renders
-`StudioTopBar`. The mobile bar hosts the session breadcrumbs, transcript download,
-and single Git trigger on the same row; there is no second chat action header.
+`StudioTopBar`. The mobile title bar hosts the session breadcrumbs and navigation.
+Chats have a dedicated second action row: transcript download pinned to the left
+and the single Git dropdown pinned to the right. Other pages keep just the title
+bar. The action row does not use an overflow rail that could clip the Git panel.
+Swarm workflow controls, stages, and history live in that dropdown; non-Git chats
+get a standalone workflow dropdown instead. The conversation's live task strip
+shows only running tasks, not completed/failed receipts or full swarm boards.
 At phone widths the Git trigger is icon-only to leave room for the chat title;
 its accessible name and the opened panel still expose the full status.
 Mobile header and Git-sheet actions use matching 44px touch targets; both halves
@@ -70,6 +75,13 @@ body below a fixed close/header row. Connection details wrap within the card and
 saved host-key fingerprints remain available through a disclosure. Mobile fields
 retain their touch size on unfolded screens; desktop cards do not inherit mobile
 spacing or platform rules. Authentication and approval behavior are unchanged.
+
+Git writes lock by checkout/branch, not just the viewed chat. Sessions sharing a
+worktree or logical branch disable mutations while status/swarm views stay
+readable; independent identified branches remain usable. Fresh owner-side leases,
+draining turns, and active background jobs also guard local/peer API writes.
+Unknown activity fails closed. PR merges check their head/base before writing,
+including a fresh check at the queued merge stage.
 
 Git uses a draggable bottom sheet in the mobile build at every width (including
 unfolded phones). Narrow or coarse-pointer web screens also use that sheet;

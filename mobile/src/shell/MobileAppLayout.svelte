@@ -4,8 +4,8 @@
 	 *
 	 * AppTopBar's compact bar plus its slide-in drawer (which hosts the same
 	 * Sidebar the desktop shell docks), over the shared MainPanel. MainPanel's
-	 * header snippet renders AppTopBar with MainPanel's download / git actions:
-	 * one header at every width, including an unfolded phone.
+	 * header snippet renders the title bar, then a dedicated chat-action row:
+	 * transcript download on the left, Git on the right at every mobile width.
 	 */
 	import { onMount } from 'svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -13,6 +13,7 @@
 	import MainPanel from '$lib/components/layout/MainPanel.svelte';
 	import CredentialStorageBanner from '$lib/components/CredentialStorageBanner.svelte';
 	import AppTopBar from './AppTopBar.svelte';
+	import PageHeader from './PageHeader.svelte';
 
 	let {
 		isAdmin,
@@ -42,12 +43,13 @@
 					{onOpenFeature}
 					{onOpenSpotlight}
 					hideGlobalStt={ctx.isSessionView || ctx.embedded}
-				>
-					{#snippet actions()}
-						{@render ctx.downloadAction()}
-						{@render ctx.headerActions()}
-					{/snippet}
-				</AppTopBar>
+				/>
+				{#if ctx.isSessionView}
+					<PageHeader hideGlobalStt>
+						{#snippet leftActions()}{@render ctx.downloadAction()}{/snippet}
+						{#snippet actions()}{@render ctx.headerActions()}{/snippet}
+					</PageHeader>
+				{/if}
 			{/snippet}
 		</MainPanel>
 	</div>
