@@ -1100,6 +1100,95 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     }
   }, 30000);
 
+  describe("fresh More menuitem refs (#1545)", () => {
+    const treeOf = (result: McpToolResult): string =>
+      result.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    const emitted = (result: McpToolResult, role: string, name: string): string => {
+      expect(result.isError, treeOf(result)).not.toBe(true);
+      const ref = new RegExp(`${role} "${name}"[^\n]*\\[ref=(e\\d+)\\]`).exec(treeOf(result))?.[1];
+      expect(ref, treeOf(result)).toBeTruthy();
+      return ref!;
+    };
+    /** Real producer: open More by its ref, then snapshot the open popup. */
+    async function openMoreAndSnapshot(): Promise<{ docs: string; snapshot: McpToolResult }> {
+      const nav = await runNavigate(session, { url: `${httpUrl}menu` });
+      expect(nav.isError, firstText(nav)).not.toBe(true);
+      const more = emitted(await runSnapshot(session, { filter: "interactive" }), "button", "More");
+      const opened = await runAct(session, { kind: "click", ref: more });
+      expect(opened.isError, firstText(opened)).not.toBe(true);
+      const snapshot = await runSnapshot(session, { filter: "interactive", max_chars: 8000 });
+      return { docs: emitted(snapshot, "menuitem", "Docs"), snapshot };
+    }
+    const docsOpened = async (): Promise<boolean> =>
+      (await session.ensurePage()).evaluate(() =>
+        !(document.querySelector("#docs") as HTMLElement).hidden && !document.querySelector("#docs-item"));
+
+    it("keeps a fresh ref across same-document URL rewrites", async () => {
+      const { docs } = await openMoreAndSnapshot();
+      // An SPA router rewriting the URL between snapshot and act: Playwright
+      // reports each of these as framenavigated, yet the document, the open
+      // popup and the menuitem are all unchanged.
+      await (await session.ensurePage()).evaluate(() => {
+        history.replaceState(history.state, "", "?panel=more");
+        history.pushState({}, "", "#more");
+        location.hash = "menu";
+      });
+      const res = await runAct(session, { kind: "click", ref: docs });
+      expect(res.isError, firstText(res)).not.toBe(true);
+      expect(await docsOpened()).toBe(true);
+      // The click really removed the menuitem: its ref is now stale.
+      const again = await runAct(session, { kind: "click", ref: docs });
+      expect(firstText(again)).toContain("stale_ref");
+    });
+
+    it("still rejects every ref once a new document commits", async () => {
+      const { docs } = await openMoreAndSnapshot();
+      const page = await session.ensurePage();
+      // Same URL, new document: only the document identity can tell.
+      await Promise.all([page.waitForEvent("load"), page.evaluate(() => location.reload())]);
+      const res = await runAct(session, { kind: "click", ref: docs });
+      expect(res.isError).toBe(true);
+      expect(firstText(res)).toContain("stale_ref");
+    });
+
+    it("reports a covered menuitem as not_actionable, and the same ref works once uncovered", async () => {
+      const { docs } = await openMoreAndSnapshot();
+      const page = await session.ensurePage();
+      await page.evaluate(() => {
+        const scrim = document.createElement("div");
+        scrim.id = "scrim";
+        scrim.style.cssText = "position:fixed;inset:0;background:transparent";
+        document.body.append(scrim);
+      });
+      const blocked = await runAct(session, { kind: "click", ref: docs });
+      expect(blocked.isError).toBe(true);
+      expect(firstText(blocked)).toContain(`not_actionable: ${docs} is still valid`);
+      expect(firstText(blocked)).toContain("intercepts pointer events");
+      expect(firstText(blocked)).not.toContain("stale_ref");
+      await page.evaluate(() => document.getElementById("scrim")?.remove());
+      const res = await runAct(session, { kind: "click", ref: docs });
+      expect(res.isError, firstText(res)).not.toBe(true);
+      expect(await docsOpened()).toBe(true);
+    });
+
+    it("keeps full-snapshot refs resolvable after a scoped snapshot", async () => {
+      const { docs, snapshot } = await openMoreAndSnapshot();
+      const more = emitted(snapshot, "button", "More");
+      const menu = /menu "More workspace destinations"[^\n]*\[ref=(e\d+)\]/.exec(treeOf(snapshot))?.[1];
+      expect(menu, treeOf(snapshot)).toBeTruthy();
+      const scoped = await runSnapshot(session, { scope_ref: menu! });
+      expect(emitted(scoped, "menuitem", "Docs")).toBe(docs);
+      expect(treeOf(scoped)).not.toContain('button "More"');
+      // More lies outside the scoped subtree but came from the latest full
+      // snapshot of this page, so it must still act.
+      const res = await runAct(session, { kind: "hover", ref: more });
+      expect(res.isError, firstText(res)).not.toBe(true);
+      const click = await runAct(session, { kind: "click", ref: docs });
+      expect(click.isError, firstText(click)).not.toBe(true);
+      expect(await docsOpened()).toBe(true);
+    });
+  });
+
   it("STDIO MCP acts on fresh More menuitem refs and rejects detached and navigated refs", async () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
