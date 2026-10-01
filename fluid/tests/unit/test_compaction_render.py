@@ -676,6 +676,7 @@ def test_payload_rejection_consumes_seen_images_once() -> None:
     [promo] = c.consume_images_after_rejection(nodes)
     assert promo.reason == "image_consumed"
     assert promo.decision_reason == "provider_payload_rejection"
+    assert promo.first_changed_message == 0  # the image sits in message 0
     assert promo.before_tokens > promo.after_tokens
     assert c.consume_images_after_rejection(nodes) == []  # once
     resumed = Compactor()
@@ -685,7 +686,7 @@ def test_payload_rejection_consumes_seen_images_once() -> None:
 
 async def test_engine_retries_a_payload_rejection_once(tmp_path) -> None:
     from fluid.engine.native import NativeLoop
-    from fluid.events import ErrorEvent, UserTurn
+    from fluid.events import ErrorEvent, Usage, UserTurn
     from fluid.messages import Image
     from fluid.providers.base import ProviderCaps, StreamChunk
     from fluid.store.base import MemoryStore
@@ -739,6 +740,15 @@ async def test_engine_retries_a_payload_rejection_once(tmp_path) -> None:
         events = loop.bus.log(loop.session_id)
         consumed = [e for e in events if isinstance(e, ContextCompaction)]
         assert [e.reason for e in consumed] == ["image_consumed"]
+        # The rewrite starts at the image's message, so the tail the retry
+        # re-bills is logged on the event and on the retry's Usage row.
+        assert consumed[0].first_changed_message == 0
+        tail = consumed[0].rewrite_tail_tokens_est
+        assert tail is not None and tail > 0
+        usage_rows = [e.raw for e in events if isinstance(e, Usage)]
+        assert usage_rows[-1]["rewrite_tail_tokens_est"] == tail
+        assert usage_rows[-1]["calls_since_rewrite"] == 0
+        assert all("rewrite_tail_tokens_est" not in r for r in usage_rows[:-1])
         assert len(provider.requests) == 3  # one retry, never a second
         assert images(provider.requests[1]) == 1
         assert images(provider.requests[2]) == 0

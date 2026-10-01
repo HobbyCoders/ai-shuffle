@@ -3364,8 +3364,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                             describe_promotions(consumed)
                         )
                         await self._emit_pre_compact(sid, turn_id, consumed)
+                        tail = self._note_rewrite_tail(
+                            self._compactor.view(nodes), consumed
+                        )
                         for promo in consumed:
-                            await self._emit_compaction(sid, turn_id, promo)
+                            await self._emit_compaction(
+                                sid, turn_id, promo, rewrite_tail_tokens_est=tail
+                            )
                         continue
                 if (
                     overflow_retries < 3

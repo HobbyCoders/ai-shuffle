@@ -2091,11 +2091,17 @@ class Compactor:
         """
         if not self.active:
             return []
+        before_view = self.view(nodes)
         before = self._estimate(nodes, overhead_tokens)
         newly = self.trimmer.consume_images(nodes)
         if not newly:
             return []
         after = self._estimate(nodes, overhead_tokens)
+        after_view = self.view(nodes)
+        # Where the rewrite starts, as escalate reports it, so the engine can
+        # log the tail the retry re-bills.
+        first_changed = next((i for i, (a, b) in enumerate(zip(before_view, after_view))
+                              if a != b), min(len(before_view), len(after_view)))
         return [
             Promotion(
                 tier=1,
@@ -2105,6 +2111,7 @@ class Compactor:
                 before_tokens=before,
                 after_tokens=after,
                 decision_reason="provider_payload_rejection",
+                first_changed_message=first_changed,
             )
         ]
 
