@@ -106,7 +106,7 @@
 		onClickCreatePR={record('pr')}
 		onClickShipIt={record('shipit')}
 		onOpenDiffReview={record('review')}
-		onDownloadChat={record('download')}
+		showChatExports={false}
 	/>
 </header>
 <main class="fx-main">

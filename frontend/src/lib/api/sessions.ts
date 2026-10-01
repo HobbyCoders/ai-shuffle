@@ -227,11 +227,22 @@ export async function renameSession(sessionId: string, title: string): Promise<S
  */
 export async function exportSession(
 	sessionId: string,
-	format: 'markdown' | 'json' | 'jsonl' = 'markdown'
+	format: 'markdown' | 'json' | 'jsonl' = 'markdown',
+	options: { shareSafe?: boolean } = {}
 ): Promise<void> {
 	const ext = format === 'json' ? 'json' : format === 'jsonl' ? 'jsonl' : 'md';
-	const fallback = `session-export.${ext}`;
-	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}`, fallback);
+	const fallback = options.shareSafe ? `session-export-share-safe.${ext}` : `session-export.${ext}`;
+	const sharingQuery = options.shareSafe ? '&share_safe=true' : '';
+	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}${sharingQuery}`, fallback,
+		options.shareSafe ? (response) => {
+			// Older workers may ignore the query and return a private raw export.
+			if (response.headers.get('X-Transcript-Privacy') !== 'share-safe') {
+				throw {
+					detail: 'Server did not confirm a sharing-safe export. Nothing was downloaded.',
+					status: response.status
+				};
+			}
+		} : undefined);
 }
 
 /**

@@ -163,7 +163,8 @@ async def export_session(
     request: Request,
     session_id: str,
     format: str = Query("markdown", description="Export format: markdown, json or jsonl"),
-    token: str = Depends(require_auth)
+    token: str = Depends(require_auth),
+    share_safe: bool = Query(False, description="Filter recognized credentials for sharing; review before posting"),
 ):
     """
     Export a session in the specified format.
@@ -177,6 +178,10 @@ async def export_session(
         - For JSON: Full session data including metadata and messages
         - For JSONL: The authoritative transcript as newline-delimited JSON;
           raw Claude history files are returned verbatim when available
+
+    Default exports are private backups, not sharing artifacts. Opt in with
+    share_safe=true to filter recognized credentials in any format; this does
+    not detect arbitrary secrets. Review before posting. Stored data is untouched.
     """
     from datetime import datetime
     from fastapi.responses import Response
@@ -195,25 +200,77 @@ async def export_session(
 
     working_dir = await run_sync(resolve_working_dir, dict(session))
 
-    # Generate base filename
+    from app.core.export_redaction import (
+        redact_external_export, redact_export_jsonl, redact_export_text,
+    )
+
+    # Keep the original session for source lookup; only redact rendering copies.
     title = session.get("title") or "untitled-session"
+    if share_safe:
+        title = redact_export_text(title)
+    privacy_headers = {"X-Transcript-Privacy": "share-safe" if share_safe else "private-raw"}
+    suffix = "-share-safe" if share_safe else ""
+
+    # Generate base filename
     # Sanitize title for filename
     safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
     safe_title = safe_title.strip().replace(" ", "-")[:50]
     date_str = datetime.now().strftime("%Y%m%d")
 
+    filtered_jsonl = None
+    if share_safe and (format == "jsonl" or session.get("sdk_session_id")):
+        # CLI parsers tolerate malformed records. Sharing must instead validate
+        # the authoritative raw input before any format can silently skip them.
+        raw_content = await _load_jsonl_content(session, working_dir)
+        try:
+            filtered_jsonl = redact_export_jsonl(raw_content)
+        except (ValueError, RecursionError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Cannot create sharing export: malformed JSONL history. Private raw backup remains available.",
+            ) from None
+
     if format == "jsonl":
-        content = await _load_jsonl_content(session, working_dir)
-        filename = f"{safe_title}-{date_str}.jsonl"
+        content = filtered_jsonl if share_safe else await _load_jsonl_content(session, working_dir)
+        filename = f"{safe_title}-{date_str}{suffix}.jsonl"
         return Response(
             content=content,
             media_type="application/x-ndjson",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                **privacy_headers,
             }
         )
 
-    messages = await _load_export_messages(session, working_dir)
+    if share_safe and filtered_jsonl is not None:
+        # Render the validated snapshot, without a lazy DB backfill or a second
+        # tolerant read of a CLI file. This is the same pure transcript transform
+        # used by Fluid and store-backed history views.
+        from app.core.jsonl_parser import parse_session_history_from_store
+        from app.core.pg_session_store import _load_entries_by_session_id_sync
+
+        entries = [json.loads(line) for line in filtered_jsonl.splitlines()]
+
+        def sharing_loader(sdk_id: str, subpath: Optional[str] = None) -> list:
+            if subpath is None:
+                return entries
+            # Preserve existing store-backed subagent children, without healing
+            # or caching any transcript. Filter them before the common parser.
+            return redact_external_export(_load_entries_by_session_id_sync(sdk_id, subpath))
+        if entries and all("role" in entry and "message" not in entry for entry in entries):
+            # The authoritative loader can fall back to already-rendered legacy
+            # rows when an SDK handle has no transcript.
+            messages = entries
+        else:
+            messages, _usage = await run_sync(
+                parse_session_history_from_store, session.get("sdk_session_id"),
+                working_dir, sharing_loader, use_cache=False,
+            )
+    else:
+        messages = await _load_export_messages(session, working_dir)
+    if share_safe:
+        session = redact_external_export(dict(session))
+        messages = redact_external_export(messages)
 
     if format == "json":
         # JSON export - include full session data
@@ -240,14 +297,15 @@ async def export_session(
             "format_version": "1.0"
         }
 
-        filename = f"{safe_title}-{date_str}.json"
+        filename = f"{safe_title}-{date_str}{suffix}.json"
         content = json.dumps(export_data, indent=2, default=str)
 
         return Response(
             content=content,
             media_type="application/json",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                **privacy_headers,
             }
         )
 
@@ -258,6 +316,9 @@ async def export_session(
         # Header
         md_lines.append(f"# {session.get('title') or 'Untitled Session'}")
         md_lines.append("")
+        if share_safe:
+            md_lines.append("> Sharing export: recognized credentials filtered; review before posting. Not a raw backup.")
+            md_lines.append("")
 
         # Metadata
         md_lines.append("## Session Info")
@@ -363,14 +424,15 @@ async def export_session(
         md_lines.append("---")
         md_lines.append(f"*Exported from AI Shuffle on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
 
-        filename = f"{safe_title}-{date_str}.md"
+        filename = f"{safe_title}-{date_str}{suffix}.md"
         content = "\n".join(md_lines)
 
         return Response(
             content=content,
             media_type="text/markdown",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                **privacy_headers,
             }
         )
 
