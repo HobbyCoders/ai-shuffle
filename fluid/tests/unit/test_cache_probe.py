@@ -1439,6 +1439,40 @@ async def test_prev_prompt_coverage_survives_a_rebuilt_engine() -> None:
     assert usage.raw["prev_prompt_coverage"] == 0.75
 
 
+async def test_a_malformed_old_usage_row_does_not_fail_the_rehydrate() -> None:
+    import dataclasses
+
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 40_000, "cache_read_input_tokens": 0},
+        ]),
+        store=store, model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+    # An old row whose token count did not survive as an int.
+    events = store._events[sid]
+    last = max(i for i, e in enumerate(events) if isinstance(e, Usage))
+    events[last] = dataclasses.replace(events[last], input_tokens=None)
+
+    second = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 2_000, "cache_read_input_tokens": 30_000},
+        ]),
+        store=store, model="m", system="sys " * 50_000, session_id=sid,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    # The fingerprint still comes back; only the coverage metric is dropped.
+    assert usage.raw.get("cache_miss", {}).get("reason") != "no_previous_request"
+    assert "prev_prompt_coverage" not in usage.raw
+
+
 # ─── Follow-on misses and the rewrite tail (plan item 7) ─────────────────────
 
 

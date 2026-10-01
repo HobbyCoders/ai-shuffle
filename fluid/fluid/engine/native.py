@@ -2697,10 +2697,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             }
             if recovered:
                 self._prev_prefix_fingerprint = recovered
-                self._prev_prompt_tokens = (
-                    event.input_tokens + event.cache_read_tokens
-                    + event.cache_creation_tokens
-                ) or None
+                try:
+                    self._prev_prompt_tokens = (
+                        int(event.input_tokens or 0)
+                        + int(event.cache_read_tokens or 0)
+                        + int(event.cache_creation_tokens or 0)
+                    ) or None
+                except (TypeError, ValueError):
+                    # A malformed old Usage row drops the coverage metric; it
+                    # must not fail the session open.
+                    self._prev_prompt_tokens = None
                 # A rewrite a few calls back still owns the next misses.
                 calls = event.raw.get("calls_since_rewrite")
                 if (
