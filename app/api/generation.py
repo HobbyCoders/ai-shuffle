@@ -387,14 +387,18 @@ async def generate_with_claude(
     # ``profile`` name and raised NameError on every call, so no generation
     # usage was ever written.)
     if result_usage is not None:
-        try:
-            from app.core.usage_attribution import usage_attribution
+        from app.core.usage_attribution import usage_attribution
 
-            # Attributed to the leg the generation setting routed to, so this
-            # spend lands under its provider in the Stats breakdown.
+        # Attributed to the leg the generation setting routed to, so this
+        # spend lands under its provider in the Stats breakdown. A failed
+        # attribution books the row unattributed instead of dropping it.
+        try:
             attribution = await run_sync(
                 usage_attribution, getattr(options, "aih_provider_id", None)
             )
+        except Exception:  # noqa: BLE001 - attribution only labels the row
+            attribution = {}
+        try:
             await run_sync(
                 database.log_usage,
                 session_id=None,

@@ -138,6 +138,24 @@ async def test_settlement_without_a_stamped_leg_falls_back_to_the_session(mock_d
 
 
 @pytest.mark.asyncio
+async def test_a_failed_attribution_still_books_the_turn(mock_db, monkeypatch):
+    """Attribution only labels the row; it must never cost the settlement."""
+    import app.core.usage_attribution as ua
+
+    def boom(_provider_id):
+        raise RuntimeError("lookup exploded")
+
+    monkeypatch.setattr(ua, "usage_attribution", boom)
+    sid = "s-boom"
+    database.create_session(session_id=sid, profile_id="default")
+    meta = {"usage_settlement_key": "k-boom", qp.USAGE_PROVIDER_KEY: "p-1",
+            "tokens_in": 3, "tokens_out": 1, "total_cost_usd": 0.001, "num_turns": 1}
+    await qp._persist_turn_results(sid, None, meta, "default")
+    assert _rows(mock_db, sid) == [(None, None, None)]
+    assert database.get_session(sid)["total_tokens_in"] == 3
+
+
+@pytest.mark.asyncio
 async def test_the_kill_path_attributes_its_recovered_usage(mock_db):
     _provider("p-xai", "xAI", "xai")
     sid = "s-killed"

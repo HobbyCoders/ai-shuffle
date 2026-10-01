@@ -68,7 +68,7 @@ def usage_attribution(provider_id: Optional[str]) -> UsageAttribution:
     ``provider_type="unknown"`` with no billing, which the Stats page shows as
     such rather than guessing.
     """
-    if not provider_id:
+    if not isinstance(provider_id, str) or not provider_id.strip():
         return {
             "provider_id": None,
             "provider_type": CLAUDE_PROVIDER_TYPE,
