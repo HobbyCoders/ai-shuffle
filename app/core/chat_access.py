@@ -377,8 +377,13 @@ class Broker:
                 origin = chat_services.parse_origin(spec.url.strip())
                 header = chat_services.credential_header(
                     spec.auth_header, spec.auth_scheme, spec.secret.get_secret_value())
-                # Verified TLS to the granted host before any credential is held.
-                await chat_services.verify_origin(origin)
+                # Only the owner's private submission can select the certificate.
+                pin = chat_services.certificate_pin(spec.fingerprint)
+                if pin:
+                    await chat_services.verify_origin(origin, pin)
+                else:
+                    await chat_services.verify_origin(origin)
+                grant.fingerprint = pin
                 grant.origin, grant.header = origin, header
                 grant.secret = spec.secret.get_secret_value()
                 grant.target = origin.url
@@ -582,7 +587,8 @@ class Broker:
                 work = self.remote_command(grant, arguments["command"])
             else:
                 work = chat_services.perform(grant.origin, grant.header, grant.secret, arguments["method"],
-                                             arguments["path"], arguments["body"], arguments["content_type"])
+                                             arguments["path"], arguments["body"], arguments["content_type"],
+                                             pin=grant.fingerprint)
             task = asyncio.create_task(work)
             grant.tasks.add(task)
             try:
