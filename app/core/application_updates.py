@@ -6,6 +6,7 @@ path, URL or command. No Docker socket or elevated container permissions.
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 import threading
@@ -18,6 +19,9 @@ _bridge_lock = threading.Lock()
 _desktop_state = {}
 _desktop_seen = 0.0
 _desktop_request = None
+# A download handed to a desktop shell that has not found the update yet: the
+# shell is sent a check and gets the download once it reports "available".
+_desktop_followup = None
 # The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
 # desktop/src/main/updater.ts) and at once on a phase change. One missed
 # report means about 60 s of silence, so presence spans two intervals plus
@@ -34,6 +38,12 @@ DESKTOP_REQUEST_SECONDS = 90
 # minutes later (docker/application_updates.py service() never replays old
 # requests); the UI then shows the finished pass and the owner can retry.
 CONTAINER_REQUEST_SECONDS = 10
+# How long a desktop check may run before the download chained to it is dropped.
+DESKTOP_FOLLOWUP_SECONDS = 120
+# An idle or ready updater is not doing anything. Older container supervisors
+# leave "Application update is running." on the idle status after an install,
+# which reads as work in progress, so a message like that is dropped.
+IN_PROGRESS = re.compile(r"\b(?:update is running|checking|downloading|building|preparing|installing)\b", re.I)
 
 
 def _desktop_present():
@@ -46,7 +56,7 @@ def all_workers():
 
 def desktop_exchange(state):
     """Only called by the token-authenticated local launcher, never a browser."""
-    global _desktop_state, _desktop_seen, _desktop_request
+    global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup
     with _bridge_lock:
         _desktop_state = dict(state)
         _desktop_seen = time.monotonic()
@@ -57,8 +67,21 @@ def desktop_exchange(state):
                 and state.get("phase") in ("checking", "downloading")):
             return {}
         request, _desktop_request = _desktop_request, None
+        if request is None and _desktop_followup:
+            # The check this download waits on was handed over. Keep the
+            # download while the check runs, send it once an update is found,
+            # and drop it when the check finds nothing, fails or runs too long.
+            phase = state.get("phase")
+            if _desktop_followup["expires_at"] < time.time() or phase not in ("checking", "available"):
+                _desktop_followup = None
+            elif phase == "available":
+                _desktop_followup = None
+                request = {"action": "download", "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
     # Most reports carry nothing back: answer those without the settings read.
     if not request or request["expires_at"] < time.time() or not allowed():
+        if request:
+            with _bridge_lock:
+                _desktop_followup = None  # its check was never sent
         return {}
     return request
 
@@ -83,11 +106,11 @@ def allowed():
 
 
 def mirror_policy():
-    global _desktop_request
+    global _desktop_request, _desktop_followup
     enabled = allowed()
     if not enabled:
         with _bridge_lock:
-            _desktop_request = None
+            _desktop_request = _desktop_followup = None
     path = os.environ.get("SHUFFLE_UPDATE_POLICY_FILE")
     if path:
         atomic_json(path, {"allow_updates": enabled})
@@ -104,7 +127,7 @@ def control_root():
 def status():
     root = control_root()
     result = {"allow_updates": mirror_policy(), "update_all_workers": all_workers(), "supported": root is not None,
-              "phase": "idle", "version": None, "error": None,
+              "phase": "idle", "version": None, "error": None, "request_pending": False,
               "running_version": os.environ.get("GIT_SHA") if root else None}
     if root:
         try:
@@ -115,17 +138,23 @@ def status():
             result["message"] = "Starting application updater…"
         except (ValueError, TypeError, AttributeError, OSError):
             result.update(phase="error", error="Cannot read application updater status. Check the container logs.")
+        # The supervisor deletes request.json when it takes the request.
+        result["request_pending"] = (root / "request.json").exists()
     else:
         with _bridge_lock:
             if _desktop_present():
                 result.update(_desktop_state)
                 result["supported"] = _desktop_state.get("phase") != "unsupported"
                 result["kind"] = "desktop"
+                result["request_pending"] = any(queued and queued["expires_at"] >= time.time()
+                                                for queued in (_desktop_request, _desktop_followup))
+    if result.get("phase") in ("idle", "ready") and IN_PROGRESS.search(str(result.get("message") or "")):
+        result["message"] = None
     return result
 
 
 def enqueue(action):
-    global _desktop_request
+    global _desktop_request, _desktop_followup
     if action not in ("check", "download", "install"):
         raise ValueError("Unknown update action")
     if not allowed():
@@ -140,4 +169,9 @@ def enqueue(action):
             raise ValueError("This worker's application updater is unavailable")
         if _desktop_request and _desktop_request["expires_at"] >= time.time():
             raise ValueError("An update request is already queued")
+        _desktop_followup = None
+        if action == "download" and _desktop_state.get("phase") == "idle":
+            # The shell only downloads an update it has already found.
+            request["action"] = "check"
+            _desktop_followup = {"action": "download", "expires_at": request["expires_at"] + DESKTOP_FOLLOWUP_SECONDS}
         _desktop_request = request
