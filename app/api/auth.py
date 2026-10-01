@@ -125,6 +125,24 @@ def _log_auth_failure(kind: str, message: str) -> None:
     logger.warning(f"[{_SERVER_INSTANCE_ID}] {message}")
 
 
+def _admit_preview(request: Request, preview: preview_access.Grant) -> str:
+    """Authenticate the agent browser's session-scoped preview cookie.
+
+    The grant (app.core.preview_access) already required a LAN peer on the
+    local listener (a LAN dev proxy in between is fine — the token is the
+    credential), a live session behind the token, and a request outside the
+    ownership/credential mutation ceiling, which ``enforce_limits`` also
+    applied to every other credential on this request. Unsafe methods still
+    need a same-origin page.
+    """
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        owner_auth.same_origin(request)
+    request.state.is_admin = True
+    request.state.api_user = None
+    request.state.auth_token = 'preview:' + preview.session_id
+    return request.state.auth_token
+
+
 def require_auth(request: Request) -> str:
     """Dependency that requires authentication (cookie or API key)"""
     preview_access.enforce_limits(request)
@@ -143,14 +161,6 @@ def require_auth(request: Request) -> str:
             request.state.api_user = None
             request.state.auth_token = token
             return token
-
-        # Diagnostic logging - session token exists but validation failed.
-        # No part of the token is logged.
-        _log_auth_failure(
-            "token",
-            f"Auth failed: session token present (len={len(token)}) "
-            f"but validation failed. Path: {request.url.path}",
-        )
 
     # Then try API key auth (Bearer token)
     api_key = get_api_key(request)
@@ -177,7 +187,30 @@ def require_auth(request: Request) -> str:
             request.state.auth_token = f"api_key:{api_user['id']}"
             return f"api_key:{api_user['id']}"
 
-    if token or api_key:
+    # A Bearer is an explicit credential: when it fails, nothing ambient
+    # (local listener, preview cookie) stands in for it.
+    if api_key:
+        raise HTTPException(401, 'Not authenticated')
+
+    if token:
+        # An ambient owner-session cookie that failed validation. Cookies are
+        # scoped to the host, not the port, so an isolated branch preview
+        # routinely receives the ``session`` cookie of a different
+        # installation on the same host (#1542). That obsolete cookie confers
+        # nothing, so it must not shadow this request's own valid preview
+        # grant — /auth/status, the WebSocket authenticator, the desktop
+        # listener and app.preview already honour the grant ahead of it. It
+        # still never falls back to passwordless local access.
+        preview = preview_access.grant(request)
+        if preview is not None:
+            return _admit_preview(request, preview)
+        # Diagnostic logging - session token exists but validation failed.
+        # No part of the token is logged.
+        _log_auth_failure(
+            "token",
+            f"Auth failed: session token present (len={len(token)}) "
+            f"but validation failed. Path: {request.url.path}",
+        )
         raise HTTPException(401, 'Not authenticated')
 
     if owner_auth.local_access(request):
@@ -188,18 +221,9 @@ def require_auth(request: Request) -> str:
         request.state.auth_token = 'local-owner'
         return 'local-owner'
 
-    # The agent browser's session-scoped preview cookie (app.core.preview_access):
-    # LAN peer on the local listener (a LAN dev proxy in between is fine — the
-    # token is the credential), a live session behind the token, and never a
-    # request that changes ownership or credentials.
     preview = preview_access.grant(request)
     if preview is not None:
-        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-            owner_auth.same_origin(request)
-        request.state.is_admin = True
-        request.state.api_user = None
-        request.state.auth_token = 'preview:' + preview.session_id
-        return request.state.auth_token
+        return _admit_preview(request, preview)
 
     # Log what auth methods were attempted
     has_cookie = token is not None

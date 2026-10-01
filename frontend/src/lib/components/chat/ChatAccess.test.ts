@@ -145,6 +145,20 @@ describe('private-access recovery and live invalidations', () => {
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: true});
   expect(screen.queryByText('Approve this remote command?')).toBeNull();
  });
+ it('shows an API request approval with its method, path and body, and the service grant scope', async () => {
+  snapshot = {...empty(),
+   grants: [{id: 'g1', label: 'Inventory', kind: 'service', target: 'https://api.example.com/v1', expires_at: 9999999999, writable: true, fingerprint: ''}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'http', arguments: {method: 'POST', path: '/items', body: '{"n":1}', content_type: 'application/json'}, expires_at: 9999999999}]};
+  const view = render(ChatAccess, {sessionId: 's1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  expect(screen.getByText('Approve this API request?')).toBeTruthy();
+  expect(screen.getByText('Inventory · https://api.example.com/v1')).toBeTruthy();
+  const pre = view.container.querySelector('pre.pa-mono')!;
+  expect(pre.textContent).toBe('POST /items\napplication/json\n\n{"n":1}');
+  expect(screen.getByText(/HTTPS API · changes follow session permission mode/)).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', {name: 'Deny'})); await flush();
+  expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: false});
+ });
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};
   render(ChatAccess,{sessionId:'s1'}); await flush();

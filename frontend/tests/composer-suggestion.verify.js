@@ -8,10 +8,9 @@ export async function verifyComposerSuggestions() {
 		if (!condition) throw new Error(label);
 		results.push(label);
 	};
+	// Hints arrive through an authoritative read (fetch), not the WS frame.
 	const flush = async () => {
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		for (let i = 0; i < 3; i++) await new Promise(resolve => setTimeout(resolve, 10));
 	};
 	const editor = () => document.querySelector('[contenteditable="true"]');
 	const ghost = () => document.querySelector('[data-testid="composer-suggestion"]');
@@ -40,12 +39,22 @@ export async function verifyComposerSuggestions() {
 	const originalColor = placeholderStyle.color;
 	await offer();
 	check(!!ghost(), 'ghost visible');
-	check(placeholder() === f.literal, 'suggestion uses existing placeholder');
-	check(getComputedStyle(editor().querySelector('p'), '::before').color === originalColor,
-		'suggestion matches placeholder color');
-	const useReply = () => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Use reply');
-	const dismiss = () => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Dismiss');
-	check(!!useReply() && !!dismiss(), 'touch-accessible suggestion actions');
+	const inlineHint = () => document.querySelector('.inline-suggestion');
+	check(
+		inlineHint()?.textContent.trim() === f.literal && !placeholder(),
+		'suggestion shown inline in place of the placeholder'
+	);
+	check(getComputedStyle(inlineHint()).color === originalColor, 'suggestion matches placeholder color');
+	// #1402: inline-only presentation; no separate Use reply / Dismiss row.
+	const buttons = () => [...document.querySelectorAll('button')].map(
+		button => button.getAttribute('aria-label') || button.textContent.trim()
+	);
+	check(
+		!buttons().some(name => /use reply|dismiss|suggestion/i.test(name)) &&
+			!document.querySelector('[aria-label*="suggestion actions" i]'),
+		'no separate suggestion action row'
+	);
+	const buttonsWithSuggestion = buttons();
 	const suggestionHeights = heights();
 	check(
 		!editor().textContent && !f.draft.includes('Keep this literal'),
@@ -59,7 +68,7 @@ export async function verifyComposerSuggestions() {
 	);
 	await offer();
 	await key('Enter');
-	check(editor().textContent === f.literal && f.sends === 0, 'Enter accepts without sending');
+	check(editor().textContent !== f.literal && f.sends === 0, 'Enter neither accepts nor sends');
 	await offer();
 	for (const extra of [
 		{ shiftKey: true },
@@ -83,17 +92,17 @@ export async function verifyComposerSuggestions() {
 	// A synthetic IME Enter can become ordinary editor input in Chromium and
 	// invalidate the hint. The touch path must work without keyboard events.
 	await offer();
-	useReply().click();
+	editor().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
 	await flush();
-	check(editor().textContent === f.literal && f.sends === 0, 'button accepts without keyboard or sending');
-	await offer();
-	dismiss().click();
-	await flush();
-	check(!ghost() && !editor().textContent, 'button dismisses without changing draft');
+	check(editor().textContent === f.literal && f.sends === 0, 'double click accepts without keyboard or sending');
 	await offer();
 	await key('Escape');
 	check(!ghost(), 'Escape dismisses');
 	check(placeholder() === originalPlaceholder, 'Escape restores original placeholder');
+	check(
+		JSON.stringify(buttons()) === JSON.stringify(buttonsWithSuggestion),
+		'suggestion adds no controls'
+	);
 	f.receive();
 	await flush();
 	check(!ghost(), 'dismissal rejects late duplicate');
@@ -117,13 +126,25 @@ export async function verifyComposerSuggestions() {
 	check(!ghost(), 'input during generation rejects late reply');
 	await offer();
 	const oldSession = f.session;
+	const reads = () => f.requests.filter(url => url.includes('/composer-suggestion')).length;
+	// The client has no generation path; any non-read suggestion request is one.
+	const generations = () =>
+		f.requests.filter(url => !url.startsWith('GET ') && /suggest/i.test(url)).length;
+	const before = generations();
+	f.state({ sessionId: 'other', liveTurnId: null });
+	await flush();
+	check(!ghost(), 'switch away hides hint');
+	const readsBefore = reads();
+	f.state({ sessionId: oldSession });
+	await flush();
+	check(!!ghost() && reads() > readsBefore && generations() === before,
+		'switch back restores retained hint by read, without generation');
+	await key('Escape');
 	f.state({ sessionId: 'other', liveTurnId: null });
 	await flush();
 	f.state({ sessionId: oldSession });
 	await flush();
-	f.receive();
-	await flush();
-	check(!ghost(), 'switch away and back never restores');
+	check(!ghost(), 'switch away and back never restores a dismissed hint');
 	await offer();
 	const oldTurn = await f.start();
 	await f.start();
@@ -141,18 +162,26 @@ export async function verifyComposerSuggestions() {
 		toggle.getAttribute('aria-checked') === 'false' && !ghost(),
 		'setting disable clears preview'
 	);
+	const generationsBeforeToggle = generations();
 	toggle.click();
 	await flush();
-	f.receive();
+	check(
+		!!ghost() && generations() === generationsBeforeToggle,
+		're-enable restores retained hint without generation'
+	);
+	await key('Escape');
+	toggle.click();
 	await flush();
-	check(!ghost(), 're-enable does not resurrect');
+	toggle.click();
+	await flush();
+	check(!ghost(), 're-enable does not resurrect a dismissed hint');
 	await clear();
 	const longReply = ('A long suggested reply that stays on the placeholder line. '.repeat(40) + '\nSecond line');
 	await f.offer(longReply);
 	await flush();
-	check(placeholder() === longReply && !editor().textContent && !f.draft.includes(longReply), 'long multiline suggestion stays outside draft');
+	check(inlineHint()?.textContent.trim() === longReply.trim() && !editor().textContent && !f.draft.includes(longReply), 'long multiline suggestion stays outside draft');
 	check(heights().every((height, index) => height === suggestionHeights[index]), 'long suggestion does not increase preview height');
-	const style = getComputedStyle(editor().querySelector('p'), '::before');
+	const style = getComputedStyle(inlineHint());
 	check(style.whiteSpace === 'nowrap' && style.overflowX === 'hidden' && style.textOverflow === 'ellipsis', 'long suggestion clipped to one placeholder line');
 	await key('Tab');
 	check([...editor().querySelectorAll('p')].map(p => p.textContent).join('\n') === longReply && f.sends === 0, 'long suggestion accepts in full without sending');

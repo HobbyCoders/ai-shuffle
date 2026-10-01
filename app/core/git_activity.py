@@ -41,14 +41,17 @@ def project_has_active_git_sessions(project_id, working_dir=None):
     except Exception as exc:
         raise HTTPException(503, 'Cannot verify repository activity. Git changes are blocked.') from exc
 
-def busy_git_target_sessions(project_id, working_dir, branches=()):
+def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=()):
     """Busy users of this cwd OR branch. Hidden/v2 alias sessions are included.
 
     Return an empty list only when idle has been positively established. Unknown
     liveness/cwd is not proof of safety; callers either block or return HTTP 503.
+    ``exclude`` names sessions the caller has already accounted for (a session
+    handoff's own reservations), which are skipped rather than evaluated.
     """
     try:
-        candidates = _project_candidates(project_id, working_dir)
+        skip = set(exclude)
+        candidates = [s for s in _project_candidates(project_id, working_dir) if s['id'] not in skip]
         if not candidates:
             return []
         target = Path(working_dir).resolve() if working_dir else None
