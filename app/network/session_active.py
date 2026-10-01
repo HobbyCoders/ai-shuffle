@@ -76,7 +76,7 @@ async def _broadcast(row: dict, session_id: str, active: bool) -> None:
         logger.warning("Could not broadcast settlement for %s", session_id, exc_info=True)
 
 
-def _offline_message(device_id: str) -> Optional[str]:
+def _offline_message(device_id: str, reason: str) -> Optional[str]:
     """Plain wording for an owner that is offline; None when it was removed."""
     ctx = engine.context()
     member = ctx.member(device_id) if ctx is not None else None
@@ -84,6 +84,10 @@ def _offline_message(device_id: str) -> Optional[str]:
         return None  # control.call already explains a removed worker
     name = (getattr(member, "name", None) or "").strip()
     who = f"{name}, the worker that runs this session," if name else "The worker that runs this session"
+    if reason.startswith("HTTP 500"):
+        # The owner was reached and failed; "can't be reached" would send the
+        # user looking for a network problem that is not there.
+        return f"{who} hit an error while updating it (HTTP 500). Its logs have the details."
     return f"{who} can't be reached right now. Try again once it is back online."
 
 
@@ -95,7 +99,7 @@ async def set_remote(owner: str, session_id: str, active: bool) -> dict:
     except control.RunnerUnreachable as exc:
         # The transport reason ("PeerError: HTTP 530") says nothing to the
         # person settling the session; name the worker they need back online.
-        message = _offline_message(owner)
+        message = _offline_message(owner, str(exc))
         if message is None:
             raise
         logger.info("Owner %s unreachable for settlement of %s: %s", owner, session_id, exc)

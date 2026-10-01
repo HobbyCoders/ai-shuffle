@@ -101,6 +101,29 @@ async def test_reversed_responses_cannot_restore_old_membership(workers, monkeyp
         assert bool(row["is_active"]) is True
 
 
+async def test_remote_settlement_owner_error_is_not_called_unreachable(workers, monkeypatch):
+    """#1621: an owner that answers 500 was reached; keep that distinct from offline."""
+    from fastapi import HTTPException
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    _new_session(a, "error-settle", "On owner")
+    converge([a, b])
+
+    async def failing_call(*_args, **_kwargs):
+        raise control.RunnerUnreachable("HTTP 500")
+
+    with b.active():
+        monkeypatch.setattr(control, "call", failing_call)
+        with pytest.raises(HTTPException) as error:
+            await settle("error-settle", False)
+        assert error.value.status_code == 503
+        assert error.value.detail.startswith("A, the worker that runs this session, hit an error")
+        assert "can't be reached" not in error.value.detail
+        assert bool(database.get_session("error-settle")["is_active"]) is True
+
+
 async def test_unpublishable_edit_rolls_back_and_nonowner_refuses(workers, monkeypatch):
     from app.network import session_active
     a, b = workers("a"), workers("b")
