@@ -49,6 +49,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fluid.context.cache_signal import (
+    ZONE_BELOW_FLOOR,
     ZONE_OPPORTUNISTIC,
     ZONE_PRICED,
     CacheSignal,
@@ -56,6 +57,7 @@ from fluid.context.cache_signal import (
     Zones,
     decide_schedule,
 )
+from fluid.context.recall import parse_ref
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
@@ -63,6 +65,7 @@ from fluid.context.trim import (
     estimate_tokens_of_messages,
 )
 from fluid.messages import (
+    Image,
     Message,
     Text,
     ToolResultBlock,
@@ -222,6 +225,25 @@ class CompactionConfig:
     # regardless. Off ignores the signal.
     cache_schedule: bool = True
     opportunistic_floor_window_ratio: float = 0.45
+    # Boundary sweep (plan item 8; tier 1, reason "sweep"). At the first call
+    # of a turn, non-error results of trim.min_result_chars or more in
+    # earlier turns become placeholders, except the newest sweep_keep_tokens
+    # measured tokens of such results and the pinned ones, and images the
+    # model has already seen are consumed in the same batch. A sweep is
+    # priced like any other rewrite: on a cold cache it commits on its own
+    # once it frees sweep_min_reclaim_tokens, at or over the trigger it rides
+    # the batch that is due anyway, and on a warm cache below the trigger it
+    # waits. Without a cache signal it only rides a due batch. "off" plans
+    # nothing, "shadow" logs the would-be sweep in the decision telemetry
+    # and leaves the view untouched, "on" commits it.
+    sweep_mode: str = "shadow"
+    sweep_keep_tokens: int = 20_000
+    # Results a HistoryExpand call in the turn that just ended asked for, and
+    # the expand call's own result, are pinned for the next turn, newest
+    # first, up to this many measured tokens. The pins are derived from the
+    # tool calls on the path, so a replay derives the same ones.
+    sweep_pin_tokens: int = 16_000
+    sweep_min_reclaim_tokens: int = 2_000
 
 
 # TurnStarted sources that are wakes rather than a person's message. Their
@@ -285,7 +307,8 @@ class Promotion:
     """What one batch rung did — the persistable decision, never the text."""
 
     tier: int  # 1 | 2 | 3
-    reason: str = "trigger"  # "trigger" | "overflow" | "image_consumed"
+    # "trigger" | "overflow" | "image_consumed" | "turn_budget" | "sweep"
+    reason: str = "trigger"
     trimmed: tuple[tuple[str, str], ...] = ()  # (node_id, tool_use_id)
     spans: tuple[tuple[str, str, str], ...] = ()  # (start, end, kind)
     reclaimed_chars: int = 0
@@ -565,6 +588,85 @@ def _tool_result_stub(node_id: str, text: str, config: CompactionConfig) -> Text
         f"[large tool result: {len(text)} chars — preview: {preview}… "
         f"The rest is NOT in context: do not reconstruct it from memory; {route}]"
     )
+
+
+# A literal HistoryExpand call in a code-mode cell's source.
+_EXPAND_CALL_RE = re.compile(
+    r"HistoryExpand\s*\(\s*(?:ref\s*=\s*)?[\"'](node_[0-9a-f]+(?:\.\.node_[0-9a-f]+)?)[\"']"
+)
+
+
+def _expand_refs(block: ToolUseBlock) -> list[tuple[str, str]]:
+    """Node ranges a tool call expands: the ``ref`` of a HistoryExpand call,
+    or each literal ``HistoryExpand("node_...")`` in the string arguments of
+    a code-mode cell."""
+    input_ = block.input if isinstance(block.input, dict) else {}
+    if block.name == "HistoryExpand":
+        ref = input_.get("ref")
+        parsed = parse_ref(ref) if isinstance(ref, str) else None
+        return [parsed] if parsed else []
+    found: list[tuple[str, str]] = []
+    for value in input_.values():
+        if isinstance(value, str) and "HistoryExpand" in value:
+            for match in _EXPAND_CALL_RE.finditer(value):
+                parsed = parse_ref(match.group(1))
+                if parsed:
+                    found.append(parsed)
+    return found
+
+
+def _result_text_chars(
+    nodes: list[SessionNode], pairs: Iterable[tuple[str, str]]
+) -> dict[tuple[str, str], int]:
+    """Chars of each named tool result without its images, which the sweep
+    consumes separately and the keep does not count."""
+    wanted = set(pairs)
+    out: dict[tuple[str, str], int] = {}
+    for node in nodes:
+        if node.message.role != "user":
+            continue
+        for block in node.message.content:
+            if isinstance(block, ToolResultBlock):
+                key = (node.node_id, block.tool_use_id)
+                if key in wanted:
+                    out[key] = block_chars(block) - sum(
+                        block_chars(inner) for inner in block.content or ()
+                        if isinstance(inner, Image)
+                    )
+    return out
+
+
+@dataclass(frozen=True, kw_only=True)
+class SweepPlan:
+    """What a boundary sweep would do on one call (plan item 8).
+
+    ``pairs`` are the results it placeholders and ``images`` the image
+    results it consumes. ``gate`` says how the schedule treats it: "cold"
+    (free, commits on its own), "batch" (rides the batch due at or over the
+    trigger), "warm_defer" (warm cache below the trigger), "below_threshold"
+    (no cache signal and below the trigger) or "empty" (nothing to sweep).
+    ``reclaim_tokens`` is in the chars/4 units of ``before_tokens``.
+    """
+
+    pairs: tuple[tuple[str, str], ...] = ()
+    images: tuple[tuple[str, str], ...] = ()
+    pinned: tuple[tuple[str, str], ...] = ()
+    pinned_chars: int = 0
+    reclaim_tokens: int = 0
+    first_changed: int | None = None
+    gate: str = "empty"
+
+    def fields(self, mode: str) -> dict[str, Any]:
+        return {
+            "sweep_mode": mode,
+            "sweep_gate": self.gate,
+            "swept_results": len(self.pairs),
+            "sweep_images": len(self.images),
+            "sweep_reclaim_tokens": self.reclaim_tokens,
+            "pinned_results": len(self.pinned),
+            "pinned_tokens": self.pinned_chars // 4,
+            "sweep_first_changed": self.first_changed,
+        }
 
 
 @dataclass
@@ -866,8 +968,35 @@ class Compactor:
                 floor_tokens=_in_estimate_units(zones.floor, scale),
                 cache_signal=cache.to_dict(),
             )
+        sweep = self._boundary_sweep(
+            nodes, before_view, scale=scale, schedule=schedule, cache=cache,
+            prompt=before * scale,
+            trigger=self._threshold(
+                self.config.trigger_tokens, context_window, output_reserve_tokens
+            ),
+            turn_boundary=turn_boundary, decision_fields=decision_fields,
+        )
+        free_sweep = sweep is not None and sweep.gate == "cold"
+
+        def sweep_alone() -> tuple[list[Message], list[Promotion]] | None:
+            # A cold cache makes the sweep free, so it commits on its own
+            # when nothing bigger is due or the bigger candidate was dropped.
+            if not free_sweep:
+                return None
+            assert sweep is not None
+            return self._sweep_only(
+                nodes, before_view, before, sweep,
+                overhead_tokens=overhead_tokens, scale=scale,
+                decision_fields=decision_fields, basis_fields=basis_fields,
+            )
+
+        if schedule is not None and schedule.action == "skip":
+            assert zones is not None
+            swept = sweep_alone()
+            if swept is not None:
+                return swept
             trigger_est = _in_estimate_units(zones.trigger, scale)
-            if schedule.action == "skip" and not (
+            if not (
                 turn_boundary and before > self._image_threshold(trigger_est)
             ):
                 # Below F, or warm between F and the trigger: build nothing,
@@ -923,7 +1052,7 @@ class Compactor:
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
-            scale=scale, force=opportunistic,
+            scale=scale, force=opportunistic, sweep=sweep,
         )
         # Reachability: a hard-zone batch still over the trigger would be
         # followed by another one within a few calls, so it runs the guarded
@@ -964,6 +1093,10 @@ class Compactor:
             )
         if before - after < minimum:
             restore()
+            if not mandatory and not hard:
+                swept = sweep_alone()
+                if swept is not None:
+                    return swept
             self._window_misses = self._window_misses + 1 if mandatory else 0
             below = self._candidate_below
             # The retry watermark makes later mid-turn calls wait for more
@@ -1002,8 +1135,12 @@ class Compactor:
             if priced.action != "commit":
                 # warm_defer: keep the cached prefix and pay one more call of
                 # rent. A cold opportunistic candidate that is not deep
-                # enough is dropped the same way and leaves no rent behind.
+                # enough is dropped the same way and leaves no rent behind,
+                # but a free sweep inside it can still commit on its own.
                 restore()
+                swept = sweep_alone()
+                if swept is not None:
+                    return swept
                 threshold_fields["rent_paid"] = round(self._rent_paid)
                 self._optional_retry = None
                 if priced.action == "defer":
@@ -1065,9 +1202,14 @@ class Compactor:
         turn_boundary: bool = True,
         scale: float = 1.0,
         force: bool = False,
+        sweep: SweepPlan | None = None,
     ) -> tuple[list[Message], list[Promotion]]:
         """Render history; when the estimated total crosses the threshold,
         run the ladder as one amortized batch and return what it did.
+
+        ``sweep`` is a boundary sweep planned by ``apply``. It runs as the
+        first size rung of a batch that is due, so it shares the one
+        rewrite; when no batch is due it does not run here.
 
         ``force`` runs the size rungs under the threshold too. The priced
         schedule sets it for a cold call between the opportunistic floor and
@@ -1126,6 +1268,14 @@ class Compactor:
         if deep is not None:
             target = min(target, deep)
         self._candidate_target = target
+
+        # Rung 0: the boundary sweep (plan item 8), when apply planned one.
+        if sweep is not None:
+            swept = self._run_sweep(nodes, sweep)
+            if swept:
+                promotions.extend(swept)
+                rendered = self._render(nodes)
+                total = overhead_tokens + estimate_tokens_of_messages(rendered)
 
         # Rung 1: batch-trim tool results.
         pairs = self.trimmer.trim_batch(nodes, protected_from=self._tail_from)
@@ -1192,6 +1342,235 @@ class Compactor:
                 # the next batch. Roll it back; the digests stay digests.
                 restore()
         return rendered, promotions
+
+    def _boundary_sweep(
+        self,
+        nodes: list[SessionNode],
+        before_view: list[Message],
+        *,
+        scale: float,
+        schedule: Schedule | None,
+        cache: CacheSignal | None,
+        prompt: float,
+        trigger: int,
+        turn_boundary: bool,
+        decision_fields: dict[str, Any],
+    ) -> SweepPlan | None:
+        """Plan the boundary sweep for this call, log it in the decision, and
+        return it when ``sweep_mode`` is "on" and the schedule lets it run.
+
+        The plan is made at every turn boundary of the full ladder while the
+        mode is not "off", so shadow mode logs what the sweep would do.
+        ``prompt`` and ``trigger`` are measured tokens.
+        """
+        mode = self.config.sweep_mode
+        if (
+            not turn_boundary or mode not in ("shadow", "on")
+            or not self.config.enabled or not self.trimmer.config.enabled
+        ):
+            return None
+        plan = self._plan_sweep(nodes, before_view, scale)
+        if not (plan.pairs or plan.images):
+            gate = "empty"
+        elif schedule is not None and cache is not None:
+            # Free when cold. Warm below the trigger it waits; at or over the
+            # trigger it is part of the batch the schedule prices anyway.
+            if cache.cold_now:
+                gate = "cold"
+            elif schedule.zone in (ZONE_BELOW_FLOOR, ZONE_OPPORTUNISTIC):
+                gate = "warm_defer"
+            else:
+                gate = "batch"
+        else:
+            gate = "batch" if prompt > trigger else "below_threshold"
+        plan = replace(plan, gate=gate)
+        decision_fields.update(plan.fields(mode))
+        if mode != "on" or gate not in ("cold", "batch"):
+            return None
+        return plan
+
+    def _plan_sweep(
+        self, nodes: list[SessionNode], before_view: list[Message], scale: float,
+    ) -> SweepPlan:
+        """What a sweep would take now. Pure for the caller: it runs the
+        sweep on the live state to measure it and then puts the state back.
+
+        Candidates are the trimmable results before the in-flight turn
+        (non-error, at least ``trim.min_result_chars``, not inside a digest).
+        Walking them newest first, the keep holds results while they fit in
+        ``sweep_keep_tokens``; the first one that does not fit and every
+        older one is swept, so the keep is always the newest content. Pinned
+        results are skipped and do not count toward the keep.
+        """
+        spans = split_spans(nodes)
+        if len(spans) < 2:
+            return SweepPlan()
+        inflight = len(nodes) - len(spans[-1])
+        covered = self._covered_ids(nodes)
+        restore = self._tier_snapshot()
+        try:
+            images = tuple(self.trimmer.consume_images(nodes))
+            candidates = [
+                p for p in self.trimmer._eligible(nodes, protected_from=inflight)
+                if p[0] not in covered
+            ]
+            sizes = _result_text_chars(nodes, candidates)
+            pins, pinned_chars = self._sweep_pins(
+                nodes, spans[-2], candidates, sizes, scale,
+            )
+            pinned = set(pins)
+            keep = max(0, _in_estimate_units(self.config.sweep_keep_tokens, scale)) * 4
+            kept = 0
+            keeping = True
+            swept: list[tuple[str, str]] = []
+            for pair in reversed(candidates):
+                if pair in pinned:
+                    continue
+                if keeping and kept + sizes[pair] <= keep:
+                    kept += sizes[pair]
+                    continue
+                keeping = False
+                swept.append(pair)
+            swept.reverse()
+            if not swept and not images:
+                return SweepPlan(pinned=tuple(pins), pinned_chars=pinned_chars)
+            self.trimmer.mark_trimmed(swept)
+            rendered = self._render(nodes)
+        finally:
+            restore()
+        first_changed = next(
+            (i for i, (a, b) in enumerate(zip(before_view, rendered)) if a != b),
+            None,
+        )
+        return SweepPlan(
+            pairs=tuple(swept), images=images, pinned=tuple(pins),
+            pinned_chars=pinned_chars,
+            reclaim_tokens=max(
+                0,
+                estimate_tokens_of_messages(before_view)
+                - estimate_tokens_of_messages(rendered),
+            ),
+            first_changed=first_changed,
+        )
+
+    def _sweep_pins(
+        self,
+        nodes: list[SessionNode],
+        previous: list[SessionNode],
+        candidates: list[tuple[str, str]],
+        sizes: dict[tuple[str, str], int],
+        scale: float,
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Candidates the sweep leaves for one more turn, and their chars.
+
+        A HistoryExpand call in the turn that just ended (``previous``), as
+        a tool call or inside a code-mode cell, pins its own result and the
+        results of the nodes it expanded: the model asked for them and is
+        likely still using them. Newest first, up to ``sweep_pin_tokens``.
+        """
+        cap = max(0, _in_estimate_units(self.config.sweep_pin_tokens, scale)) * 4
+        if cap <= 0:
+            return [], 0
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        expand_calls: set[str] = set()
+        expanded: set[str] = set()
+        for node in previous:
+            for block in node.message.content:
+                if not isinstance(block, ToolUseBlock):
+                    continue
+                refs = _expand_refs(block)
+                if not refs:
+                    continue
+                expand_calls.add(block.id)
+                for start, end in refs:
+                    if start in index and end in index:
+                        i, j = sorted((index[start], index[end]))
+                        expanded.update(n.node_id for n in nodes[i : j + 1])
+        if not expand_calls:
+            return [], 0
+        pins: list[tuple[str, str]] = []
+        used = 0
+        for pair in reversed(candidates):
+            if pair[1] not in expand_calls and pair[0] not in expanded:
+                continue
+            if used + sizes[pair] > cap:
+                break
+            pins.append(pair)
+            used += sizes[pair]
+        pins.reverse()
+        return pins, used
+
+    def _run_sweep(
+        self, nodes: list[SessionNode], plan: SweepPlan
+    ) -> list[Promotion]:
+        """Commit a planned sweep to the sticky state: one image_consumed
+        promotion for the images and one tier-1 ``sweep`` promotion for the
+        results. Anything an earlier rung of the same batch already took is
+        skipped, so each pair is decided once."""
+        trimmer = self.trimmer
+        promotions: list[Promotion] = []
+        images = [
+            p for p in plan.images
+            if p not in trimmer._image_consumed and p not in trimmer._trimmed
+        ]
+        if images:
+            trimmer.mark_image_consumed(images)
+            promotions.append(Promotion(
+                tier=1, reason="image_consumed", trimmed=tuple(images),
+                reclaimed_chars=_chars_of(nodes, images),
+            ))
+        pairs = [p for p in plan.pairs if p not in trimmer._trimmed]
+        if pairs:
+            before = estimate_tokens_of_messages(self._render(nodes))
+            trimmer.mark_trimmed(pairs)
+            promotions.append(Promotion(
+                tier=1, reason="sweep", trimmed=tuple(pairs),
+                reclaimed_chars=max(
+                    0,
+                    (before - estimate_tokens_of_messages(self._render(nodes))) * 4,
+                ),
+            ))
+        return promotions
+
+    def _sweep_only(
+        self,
+        nodes: list[SessionNode],
+        before_view: list[Message],
+        before: int,
+        plan: SweepPlan,
+        *,
+        overhead_tokens: int,
+        scale: float,
+        decision_fields: dict[str, Any],
+        basis_fields: dict[str, Any],
+    ) -> tuple[list[Message], list[Promotion]] | None:
+        """Commit a free sweep as its own batch, or put the state back and
+        return None when it frees less than ``sweep_min_reclaim_tokens``."""
+        restore = self._tier_snapshot()
+        promotions = self._run_sweep(nodes, plan)
+        if not promotions:
+            return None
+        rendered = self.view(nodes)
+        after = overhead_tokens + estimate_tokens_of_messages(rendered)
+        floor = max(1, _in_estimate_units(self.config.sweep_min_reclaim_tokens, scale))
+        if before - after < floor:
+            restore()
+            return None
+        self._optional_retry = None
+        self._rent_paid = 0.0
+        first_changed = next(
+            (i for i, (a, b) in enumerate(zip(before_view, rendered)) if a != b),
+            min(len(before_view), len(rendered)),
+        )
+        self.last_decision = {"reason": "sweep", "before_tokens": before,
+                              "after_tokens": after,
+                              "first_changed_message": first_changed,
+                              **decision_fields}
+        return rendered, [replace(p, before_tokens=before, after_tokens=after,
+                                  decision_reason="sweep",
+                                  first_changed_message=first_changed,
+                                  **basis_fields)
+                          for p in promotions]
 
     def _threshold(
         self,

@@ -458,3 +458,246 @@ async def test_resumed_engine_seeds_p_cold_from_persisted_usage(tmp_path) -> Non
     fresh.system = "a different system prompt"
     assert fresh._cache_signal(sid, overhead_tokens=1_000, turn_start=None).static_changed
     await fresh.aclose()
+
+
+# ── The boundary sweep (plan item 8) ────────────────────────────────────
+#
+# Results here are 16k chars (4k tokens), so the 20k-token keep holds the
+# newest five results of the earlier turns and a turn of eight calls carries
+# 32k tokens of them.
+
+
+def _sweep_turn(t: int, *, calls: int = 8, result_chars: int = 16_000,
+                tools: list[tuple[str, dict]] | None = None) -> list[SessionNode]:
+    """One complete turn. Node ids are hex so HistoryExpand refs parse."""
+    nodes = [_start(t)]
+    for k in range(calls):
+        name, input_ = tools[k] if tools and k < len(tools) else (
+            "Read", {"file_path": f"f{t}_{k}"})
+        nodes.extend([
+            _node(f"node_{t:02x}{k:02x}a", "assistant", [ToolUseBlock(
+                id=f"c{t}_{k}", name=name, input=input_)]),
+            _node(f"node_{t:02x}{k:02x}b", "user", [ToolResultBlock(
+                tool_use_id=f"c{t}_{k}",
+                content=[Text(f"{t}:{k} ".ljust(result_chars, "r"))],
+                delivery_metadata_version=1)]),
+        ])
+    nodes.append(_node(f"node_{t:02x}ffc", "assistant", [Text(f"done {t}")]))
+    return nodes
+
+
+def _start(t: int) -> SessionNode:
+    return _node(f"node_{t:02x}00", "user", [Text(f"turn {t} " + "q" * 400)])
+
+
+def _results(nodes: list[SessionNode]) -> list[tuple[str, str]]:
+    return [(n.node_id, n.message.content[0].tool_use_id) for n in nodes
+            if n.message.role == "user"
+            and isinstance(n.message.content[0], ToolResultBlock)]
+
+
+def _views(rendered: list) -> str:
+    return json.dumps([m.to_dict() for m in rendered], sort_keys=True, default=str)
+
+
+def _drive(mode: str, *, turns: int = 7, overhead: int = 20_000,
+           cold_boundaries: bool = True) -> list[tuple[str, list, dict]]:
+    """Every model-call point of a growing session: warm mid-turn, and cold
+    (or warm) at each turn's first call."""
+    c = Compactor(config=CompactionConfig(sweep_mode=mode))
+    nodes: list[SessionNode] = []
+    out: list[tuple[str, list, dict]] = []
+    for t in range(turns):
+        turn = _sweep_turn(t)
+        nodes.append(turn[0])
+        for k in range(8):
+            boundary = k == 0
+            signal = CacheSignal(**(_COLD if boundary and cold_boundaries else _WARM))
+            rendered, promotions = _apply(c, nodes, overhead=overhead,
+                                          cache=signal, boundary=boundary)
+            out.append((_views(rendered), _fields(promotions), dict(c.last_decision)))
+            nodes.extend(turn[1 + 2 * k: 3 + 2 * k])
+        nodes.append(turn[-1])
+    return out
+
+
+def test_shadow_sweep_leaves_the_view_byte_identical() -> None:
+    for cold in (True, False):
+        off = _drive("off", cold_boundaries=cold)
+        shadow = _drive("shadow", cold_boundaries=cold)
+        # The run crosses the trigger, so the ladder commits batches too.
+        assert any(promos for _, promos, _ in off)
+        assert [(v, p) for v, p, _ in shadow] == [(v, p) for v, p, _ in off]
+        # Shadow mode logs the would-be sweep on every turn boundary, and
+        # only there; off logs nothing.
+        logged = [d for _, _, d in shadow if "sweep_mode" in d]
+        assert len(logged) == 7
+        assert all("sweep_mode" not in d for _, _, d in off)
+        assert any(d["swept_results"] > 0 and d["sweep_reclaim_tokens"] > 0
+                   for d in logged)
+        gates = {d["sweep_gate"] for d in logged}
+        assert ("cold" in gates) is cold
+        assert ("warm_defer" in gates) is not cold
+
+
+def test_warm_sweep_below_the_trigger_defers() -> None:
+    overhead = 20_000
+    # Three finished turns (96k tokens of results) put the prompt between F
+    # and S; one puts it below F.
+    for turns, zone in ((3, "opportunistic"), (1, "below_floor")):
+        nodes = [n for t in range(turns) for n in _sweep_turn(t)] + [_start(turns)]
+        prompt = _prompt(nodes, overhead)
+        assert prompt < 120_000
+        assert (prompt >= 90_000) is (zone == "opportunistic")
+        c = Compactor(config=CompactionConfig(sweep_mode="on"))
+        view = c.view(nodes)
+        rendered, promotions = _apply(c, nodes, overhead=overhead,
+                                      cache=CacheSignal(**_WARM), boundary=True)
+        assert promotions == [] and rendered == view
+        d = c.last_decision
+        assert (d["reason"], d["schedule"], d["sweep_gate"]) == (
+            "below_threshold", zone, "warm_defer")
+        assert d["swept_results"] > 0
+        # Without a cache signal the sweep waits for a batch the same way.
+        unpriced = Compactor(config=CompactionConfig(sweep_mode="on"))
+        assert _apply(unpriced, nodes, overhead=overhead, cache=None,
+                      boundary=True)[1] == []
+        assert unpriced.last_decision["sweep_gate"] == "below_threshold"
+        # Cold, the same sweep is free. Below F it commits on its own; from
+        # F up it is the first rung of the cold opportunistic batch, which
+        # here has nothing else to take.
+        cold = Compactor(config=CompactionConfig(sweep_mode="on"))
+        rendered, promotions = _apply(cold, nodes, overhead=overhead,
+                                      cache=CacheSignal(**_COLD), boundary=True)
+        reason = "cold_opportunistic" if zone == "opportunistic" else "sweep"
+        assert [p.reason for p in promotions] == ["sweep"]
+        assert {p.decision_reason for p in promotions} == {reason}
+        assert cold.last_decision["reason"] == reason
+        assert len(promotions[0].trimmed) == d["swept_results"]
+        assert prompt - (
+            overhead + estimate_tokens_of_messages(rendered)
+        ) == d["sweep_reclaim_tokens"]
+        # Mid-turn there is no sweep at all.
+        mid = Compactor(config=CompactionConfig(sweep_mode="on"))
+        _apply(mid, nodes, overhead=overhead, cache=CacheSignal(**_COLD))
+        assert "sweep_gate" not in mid.last_decision
+
+
+def test_sweep_first_changed_stays_inside_the_previous_turn() -> None:
+    """A sweep rewrites only what fell out of the keep since the last one.
+
+    At the first sweep that is the older part of the previous turn. Later
+    the keep also hands back the results it held for one turn, which sit at
+    the very end of the turn before, so the rewrite starts there and never
+    reaches anything an earlier sweep already decided.
+    """
+    overhead = 20_000
+    c = Compactor(config=CompactionConfig(sweep_mode="on"))
+    nodes: list[SessionNode] = []
+    kept_before: list[int] = []
+    for t in range(5):
+        nodes.append(_start(t))
+        if t:
+            starts = [i for i, n in enumerate(nodes) if n.node_id.endswith("00")]
+            view = c.view(nodes)
+            rendered, promotions = _apply(c, nodes, overhead=overhead,
+                                          cache=CacheSignal(**_COLD), boundary=True)
+            assert [p.reason for p in promotions] == ["sweep"]
+            first = promotions[0].first_changed_message
+            assert first == next(i for i, (a, b) in enumerate(zip(view, rendered))
+                                 if a != b)
+            if t == 1:
+                assert starts[-2] < first < starts[-1]
+            else:
+                # The oldest result the last keep held, at the end of the
+                # turn before the previous one.
+                assert first == min(kept_before)
+                assert starts[-3] < first < starts[-2]
+            # Everything older than the change is untouched.
+            assert rendered[:first] == view[:first]
+            trimmed = c.trimmer._trimmed
+            kept_before = [
+                i for i, n in enumerate(nodes[:starts[-1]])
+                if n.message.role == "user"
+                and isinstance(n.message.content[0], ToolResultBlock)
+                and (n.node_id, n.message.content[0].tool_use_id) not in trimmed
+            ]
+            assert len(kept_before) == 5  # 20k tokens of 4k-token results
+        nodes.extend(_sweep_turn(t)[1:])
+
+
+def test_history_expand_pins_results_for_the_next_turn() -> None:
+    overhead = 20_000
+    old = _sweep_turn(0)
+    target = old[4]  # the second result of turn 0
+    expand = ("HistoryExpand", {"ref": target.node_id})
+    cell = ("run_python", {"code": "print(HistoryExpand(ref=%r))" % old[6].node_id})
+    turn1 = _sweep_turn(1, tools=[expand, cell])
+    nodes = old + turn1 + [_start(2)]
+    c = Compactor(config=CompactionConfig(sweep_mode="on"))
+    _, promotions = _apply(c, nodes, overhead=overhead,
+                           cache=CacheSignal(**_COLD), boundary=True)
+    swept = set(promotions[0].trimmed)
+    pinned = {(target.node_id, "c0_1"), (old[6].node_id, "c0_2"),
+              (turn1[2].node_id, "c1_0"), (turn1[4].node_id, "c1_1")}
+    assert not pinned & swept
+    d = c.last_decision
+    assert d["pinned_results"] == 4
+    assert d["pinned_tokens"] == 16_000
+    # Pins do not count toward the keep: the newest five other results stay.
+    unpinned = [p for p in _results(nodes) if p not in pinned]
+    assert [p for p in unpinned if p not in swept] == unpinned[-5:]
+    # The pin lasts one turn: with no expand in the turn that just ended,
+    # the next sweep takes the pinned results too.
+    nodes = nodes + _sweep_turn(2)[1:] + [_start(3)]
+    _, later = _apply(c, nodes, overhead=overhead,
+                      cache=CacheSignal(**_COLD), boundary=True)
+    assert pinned <= set(later[0].trimmed)
+    # The pin cap keeps the newest pins only.
+    capped = Compactor(config=CompactionConfig(sweep_mode="on", sweep_pin_tokens=9_000))
+    _apply(capped, old + turn1 + [_start(2)], overhead=overhead,
+           cache=CacheSignal(**_COLD), boundary=True)
+    assert capped.last_decision["pinned_results"] == 2
+
+
+def test_sweep_rides_a_due_batch_and_replays_byte_identically() -> None:
+    overhead = 28_000
+    nodes = [n for t in range(3) for n in _sweep_turn(t)] + [_start(3)]
+    assert 120_000 <= _prompt(nodes, overhead) < 148_000
+    # Warm over the trigger: the sweep is one rung of the priced batch, so
+    # it waits while the batch defers and commits with it at break-even.
+    c = Compactor(config=CompactionConfig(sweep_mode="on"))
+    signal = CacheSignal(reuse_floor=overhead, **_WARM)
+    for _ in range(20):
+        rendered, promotions = _apply(c, nodes, overhead=overhead,
+                                      cache=signal, boundary=True)
+        if promotions:
+            break
+        assert c.last_decision["reason"] == "warm_defer"
+        assert c.last_decision["sweep_gate"] == "batch"
+    assert promotions[0].reason == "sweep"
+    assert {p.decision_reason for p in promotions} == {"break_even"}
+    assert len({p.first_changed_message for p in promotions}) == 1
+    resumed = Compactor(config=CompactionConfig(sweep_mode="on"))
+    resumed.rehydrate(promotions)
+    assert resumed.view(nodes) == rendered
+    # The tree is never mutated, and errors are never swept.
+    assert nodes[2].message.content[0].content[0].text == "0:0 ".ljust(16_000, "r")
+    errs = _sweep_turn(9)
+    errs[2] = _node(errs[2].node_id, "user", [ToolResultBlock(
+        tool_use_id="c9_0", content=[Text("E" * 30_000)], is_error=True,
+        delivery_metadata_version=1)])
+    with_error = errs + [n for t in range(2) for n in _sweep_turn(t)] + [_start(5)]
+    e = Compactor(config=CompactionConfig(sweep_mode="on"))
+    _, promotions = _apply(e, with_error, overhead=overhead,
+                           cache=CacheSignal(**_COLD), boundary=True)
+    assert promotions and all(p[1] != "c9_0" for p in promotions[0].trimmed)
+
+
+def test_trim_only_never_sweeps() -> None:
+    nodes = [n for t in range(3) for n in _sweep_turn(t)] + [_start(3)]
+    config = CompactionConfig(enabled=False, trim=TrimConfig(enabled=True),
+                              sweep_mode="on")
+    c = Compactor(config=config)
+    _apply(c, nodes, overhead=20_000, cache=CacheSignal(**_COLD), boundary=True)
+    assert "sweep_gate" not in c.last_decision
