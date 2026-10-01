@@ -6,8 +6,10 @@ import difflib
 import hashlib
 import os
 import re
+import subprocess
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -107,18 +109,139 @@ def walk_files(root: Path, state: WalkState | None = None) -> Iterator[Path]:
         state.files_seen += 1
         yield root
         return
+    dirpath, base = "", root
+    for parent, name in _walk(root, state):
+        if parent is not dirpath:
+            dirpath, base = parent, Path(parent)
+        yield base / name
+
+
+def _walk(root: Path, state: WalkState) -> Iterator[tuple[str, str]]:
+    """``(dirpath, filename)`` for every file the pruned walk reaches."""
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
         if state.expired:
             state.deadline_hit = True
             return
-        base = Path(dirpath)
         for name in sorted(filenames):
             if state.expired:
                 state.deadline_hit = True
                 return
             state.files_seen += 1
-            yield base / name
+            yield dirpath, name
+
+
+def list_rel_files(
+    root: Path, state: WalkState | None = None, rg: str | None = None
+) -> Generator[str, None, None]:
+    """The files :func:`walk_files` yields, as root-relative POSIX paths.
+
+    This is what a glob is matched against, so the strings are built directly
+    rather than through ``Path.relative_to(...).as_posix()``, which costs more
+    than the listing itself on a few thousand files. The root itself, when it
+    is a file, comes back as ``.``, as ``relative_to`` would give it.
+
+    With ``rg``, a directory is listed by ``rg --files``: ``-uu`` (no ignore
+    files, hidden files included) plus the :data:`PRUNE_DIRS` excludes covers
+    the same tree as the walk, an order of magnitude faster. Ripgrep without
+    ``--follow`` differs in one place: it lists no symlinked files and enters
+    no symlinked directories or junctions, where the walk lists the former and
+    enters junctions. Following links is not an option, because a link out of
+    the tree (to a home or data directory) would turn every listing into a
+    walk of that tree. When ripgrep cannot be started, or exits with an error
+    having listed nothing, the walk runs instead; a listing that also met an
+    error (an unreadable directory) stands, as the walk skips such a
+    directory too. The deadline in ``state`` kills ripgrep and the listing
+    stops with ``deadline_hit`` set, exactly like the walk.
+    """
+    state = state or WalkState()
+    if root.is_file():
+        state.files_seen += 1
+        yield "."
+        return
+    if rg:
+        listing = _rg_listing(rg, root, state)
+        if listing is not None:
+            yield from listing
+            return
+    yield from _walk_rel(root, state)
+
+
+def _walk_rel(root: Path, state: WalkState) -> Iterator[str]:
+    top = len(os.fspath(root))
+    for dirpath, name in _walk(root, state):
+        sub = dirpath[top:].lstrip(os.sep)
+        if sub and os.sep != "/":
+            sub = sub.replace(os.sep, "/")
+        yield f"{sub}/{name}" if sub else name
+
+
+def rg_prune_globs() -> list[str]:
+    """``--glob`` arguments that make ripgrep prune exactly :data:`PRUNE_DIRS`.
+
+    A glob with no slash but a trailing one matches a *directory* of that name
+    at any depth below the search root, and only a directory, which is what
+    :func:`walk_files` prunes (case-sensitively, like the set lookup there).
+    Ripgrep lets the last matching glob win, so these go after any glob of the
+    caller's that could match the same directory.
+    """
+    args: list[str] = []
+    for name in sorted(PRUNE_DIRS):
+        args += ["--glob", f"!{name}/"]
+    return args
+
+
+def _rg_listing(rg: str, root: Path, state: WalkState) -> Iterator[str] | None:
+    """``rg --files`` under ``root`` as a stream, or ``None`` if it cannot start."""
+    args = [
+        rg, "--files", "--no-config", "-uu", "--null", "--path-separator", "/",
+        *rg_prune_globs(),
+    ]
+    try:
+        proc = subprocess.Popen(
+            args, cwd=str(root), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    return _rg_stream(proc, root, state)
+
+
+def _rg_stream(proc: subprocess.Popen[bytes], root: Path, state: WalkState) -> Iterator[str]:
+    timer = None
+    if state.deadline is not None:
+        timer = threading.Timer(max(0.0, state.deadline - time.monotonic()), proc.kill)
+        timer.daemon = True
+        timer.start()
+    assert proc.stdout is not None
+    listed = 0
+    try:
+        pending = b""
+        while chunk := proc.stdout.read(65536):
+            *names, pending = (pending + chunk).split(b"\0")
+            for raw in names:
+                if not raw:
+                    continue
+                if state.expired:
+                    state.deadline_hit = True
+                    return
+                state.files_seen += 1
+                listed += 1
+                rel = os.fsdecode(raw)
+                yield rel[2:] if rel.startswith("./") else rel
+        if state.expired:
+            state.deadline_hit = True
+            return
+        # rg: 0 = files listed, 1 = none, >=2 = an error.
+        if proc.wait() >= 2 and listed == 0:
+            yield from _walk_rel(root, state)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        proc.wait()
 
 
 def is_binary(path: Path) -> bool:
