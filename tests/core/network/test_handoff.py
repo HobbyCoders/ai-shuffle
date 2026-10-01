@@ -162,7 +162,9 @@ async def test_fluid_symlink_outside_target_checkout_refuses_and_keeps_owner(pai
         with pytest.raises(ValueError,match="outside the project checkout"):
             await handoff.receive(database.get_session("handoff-test"))
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
-    assert phases == ["begin","cancel"]
+    # The receiving path is checked before the owner is asked to commit/push.
+    assert phases == []
+    assert not git(source, "ls-remote", "origin", "refs/heads/feature/only-on-worker").strip()
     assert list(outside.iterdir()) == []
 
 
@@ -555,3 +557,238 @@ async def test_session_handed_back_to_its_first_worker_lists_as_local(pair, monk
         sessions_helpers._annotate_cluster_fields([row])
         assert row["is_remote"] is False
         assert "remote_runtime_state" not in row
+
+
+# --- Other sessions sharing the published or receiving checkout (#1524) ---
+
+BRANCH = "feature/only-on-worker"
+
+
+def _route_between(a, b, phases):
+    async def call(device, action, body, **kwargs):
+        caller = engine.require_context().device_id
+        phases.append(body["phase"])
+        with (a if device == a.device_id else b).active():
+            return await control.handle(action, body, from_device=caller)
+    return call
+
+
+def _bind_session(sid, branch, cwd=None):
+    """Bind another session to this worker's canonical checkout of ``branch``."""
+    from app.core import project_resolver
+    project_id = database.get_session("handoff-test")["project_v2_id"]
+    database.create_session(sid, "default", title=sid, project_v2_id=project_id)
+    database.set_session_branch(sid, branch)
+    row = database.get_session(sid)
+    assert control.owner_of(row) is None
+    if cwd is not None:
+        assert project_resolver.resolve_existing_cwd(row) == str(cwd)
+    return row
+
+
+def _start_work(sid, live_lease):
+    from app.db import turns
+    run = runs.claim_run(sid, settings.effective_instance_id, 300 if live_lease else -1)
+    assert run
+    turn = turns.enqueue_turn(sid, "user", prompt="Working in this checkout")
+    started = turns.start_turn(turn["id"], run["id"], settings.effective_instance_id)
+    assert started["state"] == "running"
+    return run, turn
+
+
+def _assert_still_working(sid, run, turn, live_lease):
+    from app.db import turns
+    assert turns.get_turn(turn["id"])["state"] == "running"
+    active = runs.get_active_run(sid)
+    if live_lease:
+        assert active and active["id"] == run["id"]
+    else:
+        assert active is None or active["id"] == run["id"]
+
+
+def _active_holds():
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT session_id, runner_id FROM runs WHERE state='active'")
+        return [row["session_id"] for row in cur.fetchall() if row["runner_id"].startswith(handoff.HOLD)]
+
+
+def _registered_receiving_worktree(a, b, source, target, tmp_path):
+    """B has a real registered checkout of the branch, behind the source."""
+    from pathlib import Path
+    with a.active():
+        state = checkout_transfer.export_checkout(source, BRANCH)
+    destination = Path(checkout_transfer.import_checkout(target, tmp_path / "existing", state))
+    with b.active():
+        project_id = database.get_session("handoff-test")["project_v2_id"]
+        checkouts.upsert_checkout(project_id, settings.effective_instance_id, str(destination), branch=BRANCH)
+    (source / "file.txt").write_text("newer source work")
+    git(source, "commit", "-am", "newer source work")
+    return destination, state["head"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize("live_lease", [True, False])
+async def test_move_refuses_publication_while_another_session_works_in_source_checkout(pair, monkeypatch, dirty, live_lease):
+    a, b, source, target = pair
+    if dirty:
+        (source / "file.txt").write_text("dirty staged work")
+        git(source, "add", "file.txt")
+        (source / "new.txt").write_text("untracked source work")
+    head = git(source, "rev-parse", "HEAD")
+    status = git(source, "status", "--porcelain")
+    with a.active():
+        _bind_session("sibling", BRANCH, cwd=source)
+        run, turn = _start_work("sibling", live_lease)
+    phases = []
+    monkeypatch.setattr(control, "call", _route_between(a, b, phases))
+    with a.active():
+        with pytest.raises(ValueError, match="Another session is working in this checkout"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        _assert_still_working("sibling", run, turn, live_lease)
+        assert runs.get_active_run("handoff-test") is None
+        assert _active_holds() == []
+    assert phases == ["receive", "begin"]
+    assert git(source, "rev-parse", "HEAD") == head
+    assert git(source, "status", "--porcelain") == status
+    assert not git(source, "ls-remote", "origin", "refs/heads/" + BRANCH).strip()
+    with b.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        assert not git(target, "branch", "--list", BRANCH).strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize("live_lease", [True, False])
+async def test_move_refuses_receiving_checkout_used_by_another_session(pair, monkeypatch, tmp_path, dirty, live_lease):
+    a, b, source, target = pair
+    destination, published = _registered_receiving_worktree(a, b, source, target, tmp_path)
+    if dirty:
+        (source / "new.txt").write_text("untracked source work")
+    source_head = git(source, "rev-parse", "HEAD")
+    with b.active():
+        _bind_session("receiver-sibling", BRANCH, cwd=destination)
+        run, turn = _start_work("receiver-sibling", live_lease)
+    phases = []
+    monkeypatch.setattr(control, "call", _route_between(a, b, phases))
+    with a.active():
+        with pytest.raises(ValueError, match="Another session is working in this checkout"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        assert runs.get_active_run("handoff-test") is None
+    # Refused before the owner was asked to commit or push anything.
+    assert phases == ["receive"]
+    assert git(destination, "rev-parse", "HEAD").decode().strip() == published
+    assert git(source, "rev-parse", "HEAD") == source_head
+    assert git(source, "ls-remote", "origin", "refs/heads/" + BRANCH).decode().split()[0] == published
+    if dirty:
+        assert (source / "new.txt").read_text() == "untracked source work"
+    with b.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        _assert_still_working("receiver-sibling", run, turn, live_lease)
+        assert _active_holds() == []
+
+
+@pytest.mark.asyncio
+async def test_receiving_checkout_work_started_during_publication_blocks_import(pair, monkeypatch, tmp_path):
+    """Work that starts on the receiving checkout after the first check still blocks the import."""
+    a, b, source, target = pair
+    destination, published = _registered_receiving_worktree(a, b, source, target, tmp_path)
+    with b.active():
+        _bind_session("late-sibling", BRANCH, cwd=destination)
+    phases = []
+    route = _route_between(a, b, phases)
+    started = {}
+
+    async def call(device, action, body, **kwargs):
+        reply = await route(device, action, body, **kwargs)
+        if body["phase"] == "begin":
+            with b.active():
+                # The pre-publication hold blocks run admission...
+                assert runs.claim_run("late-sibling", "probe", 60) is None
+                # ...so model a hold that lapsed while the owner published and
+                # a turn that started in that gap.
+                with get_db() as conn:
+                    conn.cursor().execute(
+                        "UPDATE runs SET lease_expires_at=NOW() + (%s * INTERVAL '1 second') "
+                        "WHERE session_id=%s AND state='active'", (-1, "late-sibling"))
+                started["run"], started["turn"] = _start_work("late-sibling", True)
+        return reply
+
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        with pytest.raises(ValueError, match="Another session is working in this checkout"):
+            await handoff.move(database.get_session("handoff-test"), b.device_id)
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    assert phases == ["receive", "begin", "cancel"]
+    assert git(destination, "rev-parse", "HEAD").decode().strip() == published
+    with b.active():
+        _assert_still_working("late-sibling", started["run"], started["turn"], True)
+        assert _active_holds() == []
+    with a.active():
+        assert runs.get_active_run("handoff-test") is None
+        assert _active_holds() == []
+
+
+@pytest.mark.asyncio
+async def test_idle_source_checkout_users_cannot_start_until_the_handoff_ends(pair, monkeypatch):
+    from app.core import turn_claim
+    a, b, source, _ = pair
+    with a.active():
+        _bind_session("idle-sibling", BRANCH, cwd=source)
+    real_export = checkout_transfer.export_checkout
+    probes = {}
+
+    def export(*args, **kwargs):
+        # Inside the owner's publication: admission is held for every session
+        # on this checkout/branch, including one bound after the scan.
+        probes["sibling_claim"] = runs.claim_run("idle-sibling", "probe", 60)
+        _bind_session("new-session", BRANCH)
+        _bind_session("other-branch", "unrelated-branch")
+        probes["new_held"] = handoff.admission_held("new-session")
+        probes["other_held"] = handoff.admission_held("other-branch")
+        return real_export(*args, **kwargs)
+
+    kicks = []
+    monkeypatch.setattr(turn_claim, "kick", lambda name=None: kicks.append(name))
+    monkeypatch.setattr(checkout_transfer, "export_checkout", export)
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    with a.active():
+        assert await handoff.move(database.get_session("handoff-test"), b.device_id) is True
+        assert probes == {"sibling_claim": None, "new_held": True, "other_held": False}
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+        assert _active_holds() == []
+        assert not handoff.admission_held("new-session")
+        assert runs.claim_run("idle-sibling", settings.effective_instance_id, 60)
+    assert "turn_claim" in kicks
+
+
+@pytest.mark.asyncio
+async def test_idle_receiving_checkout_users_cannot_start_until_the_import_ends(pair, monkeypatch, tmp_path):
+    a, b, source, target = pair
+    destination, _ = _registered_receiving_worktree(a, b, source, target, tmp_path)
+    with b.active():
+        _bind_session("idle-receiver", BRANCH, cwd=destination)
+    real_import = checkout_transfer.import_checkout
+    probes = {}
+
+    def import_checkout(*args, **kwargs):
+        probes["sibling_claim"] = runs.claim_run("idle-receiver", "probe", 60)
+        _bind_session("new-receiver", BRANCH)
+        probes["new_held"] = handoff.admission_held("new-receiver")
+        return real_import(*args, **kwargs)
+
+    monkeypatch.setattr(checkout_transfer, "import_checkout", import_checkout)
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    with a.active():
+        assert await handoff.move(database.get_session("handoff-test"), b.device_id) is True
+    assert probes == {"sibling_claim": None, "new_held": True}
+    assert git(destination, "rev-parse", "HEAD") == git(source, "rev-parse", "HEAD")
+    with b.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+        assert _active_holds() == []
+        assert runs.get_active_run("handoff-test") is None
+        assert not handoff.admission_held("new-receiver")
+        assert runs.claim_run("idle-receiver", settings.effective_instance_id, 60)

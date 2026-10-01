@@ -83,7 +83,7 @@ jobs:
   account-hub:
     if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
     name: Account hub Worker and D1 tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    timeout-minutes: 5
+    timeout-minutes: 8
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
@@ -105,6 +105,13 @@ jobs:
       - name: Website Worker tests
         working-directory: android/site
         run: npm ci && npm run typecheck && npm test
+      # The Vitest suite never lays a page out; this checks the docs pages in
+      # Chromium at phone and desktop widths (no page-wide horizontal scroll).
+      - name: Website rendered layout tests
+        working-directory: android/site
+        run: |
+          npx --no-install playwright-core install --with-deps --only-shell chromium
+          npm run test:rendered
       - name: Chat download bridge tests
         working-directory: android
         run: node --test app/src/test/js/chat-downloads.test.cjs

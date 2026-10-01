@@ -30,17 +30,30 @@ const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', '
 const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v']);
 const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac']);
 
+/**
+ * The file a media URL targets: the `?path=` of a by-path serve route, else the
+ * URL path. Decoded the way the server decodes it (`+` is a space in a query),
+ * so it reads the same before and after `chatFileUrl` re-encodes the URL for
+ * session-owner routing.
+ */
+function mediaTarget(url: string): { path: string; fromQuery: boolean } {
+	const bare = url.split(/[?#]/)[0];
+	if (url.startsWith('data:')) return { path: bare, fromQuery: false };
+	const query = url.match(/\?([^#]*)/);
+	const path = query ? new URLSearchParams(query[1]).get('path') : null;
+	if (path) return { path, fromQuery: true };
+	try {
+		return { path: decodeURIComponent(bare), fromQuery: false };
+	} catch {
+		return { path: bare, fromQuery: false };
+	}
+}
+
 /** Extract a lowercase file extension from a URL, handling `?path=` serve routes. */
 function extOf(url: string): string {
-	try {
-		// /api/.../by-path?path=ENCODED — test the decoded target path
-		const m = url.match(/[?&]path=([^&]+)/);
-		const candidate = m ? decodeURIComponent(m[1]) : url.split(/[?#]/)[0];
-		const dot = candidate.lastIndexOf('.');
-		return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
-	} catch {
-		return '';
-	}
+	const candidate = mediaTarget(url).path;
+	const dot = candidate.lastIndexOf('.');
+	return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
 }
 
 /**
@@ -68,20 +81,10 @@ export function classifyMediaUrl(url: string): MediaKind | null {
  * `/api/.../by-path?path=.../name.ext` or `/api/.../name.ext`.
  */
 export function filenameFromMediaUrl(url: string): string | null {
-	const m = url.match(/[?&]path=([^&]+)/);
-	if (m) {
-		try {
-			const name = decodeURIComponent(m[1]).split(/[/\\]/).pop();
-			if (name) return name;
-		} catch {
-			/* ignore */
-		}
-	}
-	if (!url.startsWith('data:')) {
-		const name = url.split(/[?#]/)[0].split('/').pop();
-		if (name && name.includes('.')) return name;
-	}
-	return null;
+	if (url.startsWith('data:')) return null;
+	const { path, fromQuery } = mediaTarget(url);
+	const name = path.split(fromQuery ? /[/\\]/ : '/').pop();
+	return name && (fromQuery || name.includes('.')) ? name : null;
 }
 
 /** Derive a download filename from a URL when none is supplied. */

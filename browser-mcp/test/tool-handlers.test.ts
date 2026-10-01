@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Session } from "../src/session.js";
+import { Session, StaleRefError } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
 import { runNetwork, NETWORK_BODY_TIMEOUT_MS } from "../src/tools/network.js";
 import { runReadText, READ_TEXT_MAX_CHARS } from "../src/tools/read_text.js";
@@ -286,6 +286,43 @@ describe("browser_act type budget", () => {
     const res = await runAct(actSession({ click }), { kind: "click", ref: "e7" });
     expect(res.isError).toBe(true);
     expect(texts(res)[0]).toMatch(/stale_ref: e7/);
+  });
+  it("maps a timeout to stale_ref only when the ref no longer resolves", async () => {
+    const click = vi.fn(async () => { throw new Error("locator.click: Timeout 2000ms exceeded.\nCall log:\n  - waiting for locator('aria-ref=e7')"); });
+    const count = vi.fn(async () => 0);
+    const res = await runAct(actSession({ click, count }), { kind: "click", ref: "e7" });
+    expect(bodyOf(res).error).toMatch(/^stale_ref: e7/);
+    expect(count).toHaveBeenCalled();
+  });
+  it("reports a still-resolving ref that cannot be clicked as not_actionable, not stale_ref", async () => {
+    const message = [
+      "locator.click: Timeout 2000ms exceeded.",
+      "Call log:",
+      "\x1b[2m  - waiting for locator('aria-ref=e7')\x1b[22m",
+      "\x1b[2m    - locator resolved to <button id=\"d\" role=\"menuitem\">Docs</button>\x1b[22m",
+      "\x1b[2m    2 × waiting for element to be visible, enabled and stable\x1b[22m",
+      "\x1b[2m      - element is visible, enabled and stable\x1b[22m",
+      "\x1b[2m      - <div class=\"scrim\"></div> intercepts pointer events\x1b[22m",
+      "\x1b[2m    - retrying click action\x1b[22m",
+    ].join("\n");
+    const click = vi.fn(async () => { throw new Error(message); });
+    const res = await runAct(actSession({ click, count: async () => 1 }), { kind: "click", ref: "e7" });
+    const error = String(bodyOf(res).error);
+    expect(error).toMatch(/^not_actionable: e7 is still valid/);
+    expect(error).toContain('<div class="scrim"></div> intercepts pointer events');
+    expect(error).not.toContain("stale_ref");
+    expect(error).not.toContain("\x1b");
+  });
+  it("resolves the ref before acting and rejects an unknown one without touching the page", async () => {
+    const beginWatch = vi.fn(async () => {});
+    const session = {
+      ...actSession({}),
+      beginWatch,
+      resolveRef: async (ref: string) => { throw new StaleRefError(ref); },
+    } as unknown as Session;
+    const res = await runAct(session, { kind: "click", ref: "e404" });
+    expect(bodyOf(res).error).toMatch(/^stale_ref: e404/);
+    expect(beginWatch).not.toHaveBeenCalled();
   });
   it("reports a missing value as a plain error", async () => {
     const res = await runAct(actSession({ fill: vi.fn() }), { kind: "fill", ref: "e1" });

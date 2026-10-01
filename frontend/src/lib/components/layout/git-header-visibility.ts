@@ -48,6 +48,16 @@ export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolea
 }
 
 /**
+ * How the conversation header reaches the private-access dialog. When the git
+ * cluster is shown, its panel has a "Private access" row, so ChatAccess renders
+ * the dialog only. Otherwise (Chat-lane and projectless sessions) ChatAccess
+ * renders its own Access button, or a pending request could never be answered.
+ */
+export function privateAccessTrigger(input: HeaderGitActionsInput): 'none' | 'button' {
+	return shouldShowHeaderGitActions(input) ? 'none' : 'button';
+}
+
+/**
  * Resolve whether the header's GITHUB-backed actions (Create PR / Finish /
  * Ship It) should render. Requires everything the local gate requires, plus
  * usable GitHub access.
