@@ -79,8 +79,10 @@ def monitor():
 
 
 @pytest.fixture(autouse=True)
-def _credential_generation(mock_db):
+def _credential_generation(mock_db, monkeypatch):
     from app.db import database as db
+    for name in ("FAL_KEY", "FAL_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     db.set_system_setting("fal_api_key", _KEY)
 
 

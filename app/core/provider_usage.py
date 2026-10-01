@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -1017,6 +1019,32 @@ FAL_USAGE_PROVIDER_ID = "fal-ai"
 FAL_USAGE_PROVIDER_TYPE = "fal"
 FAL_USAGE_PROVIDER_NAME = "fal.ai"
 FAL_KEY_SETTING = "fal_api_key"
+# Read when ``fal_api_key`` is not stored, in the media tools' order
+# (``app.mcp.ai_tools_sdk._get_fal_api_key``).
+FAL_KEY_ENV_VARS: Tuple[str, ...] = ("FAL_KEY", "FAL_API_KEY")
+_FAL_ENV_GENERATION_PREFIX = "env:"
+
+
+def fal_env_api_key() -> Optional[str]:
+    """The fal.ai key from the environment, or None. Never log the value."""
+    for name in FAL_KEY_ENV_VARS:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def fal_env_key_generation() -> Optional[str]:
+    """Credential generation for the environment key: a digest, never the key.
+
+    Stored with the cached balance in place of a settings revision, so a
+    changed environment key hides the old balance just as re-saving does.
+    """
+    key = fal_env_api_key()
+    if not key:
+        return None
+    digest = hashlib.sha256(f"fal_env_key\0{key}".encode()).hexdigest()[:32]
+    return _FAL_ENV_GENERATION_PREFIX + digest
 
 _FAL_CREDITS_FIELDS: Tuple[str, ...] = ("balance_remaining", "currency")
 
@@ -1568,8 +1596,10 @@ class ProviderUsageMonitor:
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.
 
-        Uses the ordinary fal.ai API key (``fal_api_key``) the media tools use;
-        no extra billing key is needed. Credential mutations invalidate
+        Uses the ordinary fal.ai API key (``fal_api_key``) the media tools use,
+        or, when none is stored, ``FAL_KEY``/``FAL_API_KEY`` from the
+        environment as the media tools do. No extra billing key is needed.
+        Credential mutations invalidate
         ``fal-ai`` inside their transaction; every result is conditionally
         committed against the captured revision.
         """
@@ -1583,6 +1613,10 @@ class ProviderUsageMonitor:
             key = await run_sync(get_decrypted_api_key, FAL_KEY_SETTING)
             if generation != await run_sync(db.get_system_setting_revision, FAL_KEY_SETTING):
                 return
+            if not key and generation is None:
+                # No stored key: fall back to the environment, like the media tools.
+                key = fal_env_api_key()
+                generation = fal_env_key_generation() if key else None
             if not key:
                 return
 

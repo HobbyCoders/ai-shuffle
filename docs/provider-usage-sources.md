@@ -36,7 +36,7 @@ popover keeps the rows it already shows.
 | `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (local only) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Existing model key; an already-saved legacy management key is preserved | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
-| `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
+| `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key: saved, or `FAL_KEY` / `FAL_API_KEY`) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
 
@@ -77,11 +77,15 @@ fal's documented billing API (`api.fal.ai/v1/account/billing`) needs a separate
 Admin key, so the registry lists the `rest.alpha.fal.ai/billing/user_balance`
 endpoint that accepts the ordinary key, labeled "Undocumented endpoint". The
 separate fal Admin billing key and its settings were removed; an upgrade
-deletes a stored one.
+deletes a stored one. When no key is saved, the poller uses `FAL_KEY` or
+`FAL_API_KEY` from the environment, the same fallback the media tools use. A
+saved key always wins. The cached balance records a digest of the environment
+key (never the key), so a changed or removed environment key hides it.
 
 Claude remains a credential-free, passive reader of Claude Code's own live
 usage reports; refresh cannot fetch usage spent outside a running CLI session.
-Old readings are labeled "Last reported" with their age. A passed reset does not prove
+Old readings are labeled "Last reported" with their age, on Claude and on every
+provider row. A passed reset does not prove
 100% remains: the panel retains the last reported percentage and says it awaits
 a new report. Compare the provider dashboard for exact idle/external usage.
 No CLI credential extraction, browser scraping, challenge bypass, or balance
@@ -138,7 +142,8 @@ capability is cached per credential revision:
 - While the digest matches, the poller skips that capability entirely: no
   budget claim, no peer round trip and no upstream request.
 - Replacing or re-saving the credential changes the digest. The fal.ai API key
-  and OpenRouter management keys use the stored setting revision; the OpenAI Admin
+  and OpenRouter management keys use the stored setting revision (a fal.ai key
+  from the environment uses a digest of that key); the OpenAI Admin
   key is re-encrypted on every save; OAuth tokens change on refresh or sign-in.
   The next poll probes again.
 - 404, 429, 5xx and timeouts are not negative-cached. They back off

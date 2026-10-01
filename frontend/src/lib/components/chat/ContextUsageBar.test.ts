@@ -392,7 +392,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'Credit balance not available for this key');
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
 		expect(container.textContent).not.toMatch(/Last known|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 		if (cached) {
@@ -404,7 +404,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'Credit balance not available for this key');
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
 		if (cached) expect(container.textContent).toContain('$12.34 left');
 	});
 
@@ -1030,9 +1030,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-as-of')?.textContent).toMatch(
-			/^Updated 10m ago · next check in 2m \d+s$/
-		);
+		// Same freshness as the Claude header: the age once, in the header.
+		const header = container.querySelector('[aria-label^="Router usage"]') as HTMLElement;
+		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
+		expect(container.querySelectorAll('.usage-as-of')).toHaveLength(1);
+		expect(container.querySelector('.usage-next-check')?.textContent).toMatch(/^Next check in 2m \d+s$/);
+		expect(container.textContent).not.toMatch(/not live|Updated/);
+		// Collapsed, the header still carries the freshness.
+		await fireEvent.click(header);
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
 	});
 
 	it('lists all windows with humanised labels on open', async () => {

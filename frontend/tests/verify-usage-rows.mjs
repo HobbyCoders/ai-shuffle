@@ -53,7 +53,12 @@ async function run(viewport, touch) {
 	const claudeText = (await claude.textContent()).replace(/\s+/g, ' ');
 	check(/Last reported 42m ago/.test(claudeText), 'Claude header shows Last reported with its age', claudeText);
 	check(!(await popover.textContent()).includes('not live'), 'no "not live" text in the popover');
-	check((await page.locator('.usage-as-of').count()) === 1, 'freshness shown once');
+	check((await page.locator('.usage-as-of').count()) === 2, 'freshness shown once per stale row (Claude, Router)');
+	const router = page.getByRole('button', { name: /^Router usage/ });
+	const routerText = (await router.textContent()).replace(/\s+/g, ' ');
+	check(/Last reported 25m ago/.test(routerText), 'stale provider header shows Last reported with its age', routerText);
+	check((await page.locator('.usage-next-check', { hasText: /^Next check in/ }).count()) === 1, 'stale provider rows keep the next check');
+	check(!(await popover.textContent()).includes('Updated '), 'no duplicate "Updated" line');
 
 	const chatgpt = page.getByRole('button', { name: /^OpenAI usage/ }).first();
 	check((await page.locator('.usage-credits', { hasText: '12.5 extra credits available' }).count()) === 1, 'ChatGPT extra credits in expanded rows');
@@ -72,10 +77,14 @@ async function run(viewport, touch) {
 	await press(claude);
 	const claudeCollapsed = (await page.getByRole('button', { name: /Plan usage limits — expand/ }).textContent()).replace(/\s+/g, ' ');
 	check(/Last reported 42m ago/.test(claudeCollapsed), 'collapsed Claude header keeps the freshness', claudeCollapsed);
+	await press(router);
+	const routerCollapsed = (await page.getByRole('button', { name: /^Router usage — expand/ }).textContent()).replace(/\s+/g, ' ');
+	check(/Last reported 25m ago/.test(routerCollapsed), 'collapsed provider header keeps the freshness', routerCollapsed);
 	if (shots) await page.screenshot({ path: join(shots, `usage-collapsed-${name}.png`) });
 	// Restore the shared expansion state for the next viewport.
 	await press(page.getByRole('button', { name: /^OpenAI usage — expand/ }).first());
 	await press(page.getByRole('button', { name: /Plan usage limits — expand/ }));
+	await press(page.getByRole('button', { name: /^Router usage — expand/ }));
 
 	// ── Settings panels ──
 	await page.goto(`${base}?view=settings`);

@@ -216,6 +216,11 @@ def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optiona
     # and deletion take this same lock before invalidating the cached balance.
     cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
     row = cursor.fetchone()
+    if provider_type == "fal" and row is None and expected:
+        # No stored key: the poller read FAL_KEY/FAL_API_KEY from the environment.
+        from app.core.provider_usage import fal_env_key_generation
+
+        return expected == fal_env_key_generation()
     return bool(expected and row and row["revision"] == expected)
 
 
@@ -287,6 +292,11 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         row["credits"] = _parse_json_dict(row.get("credits"))
         row["raw"] = _parse_json_dict(row.get("raw"))
         generation = row.pop("credential_generation", None)
+        if row["provider_type"] == "fal" and generation is None:
+            # No stored key: valid only for the current environment key.
+            from app.core.provider_usage import fal_env_key_generation
+
+            generation = fal_env_key_generation()
         observed = (row["raw"] or {}).get("credential_generation")
         if row["provider_type"] == "openrouter_account" and isinstance(observed, str) and observed.startswith("model:"):
             parent = parents.get(row["provider_id"].removeprefix(SNAPSHOT_PREFIX))

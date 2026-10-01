@@ -395,18 +395,22 @@
 		});
 	}
 
+	/** "Last reported <age>" for a stale provider row, like the Claude header; null when it is not stale. */
+	function providerStaleText(pb: ProviderUsageBucket, nowMs: number): string | null {
+		if (providerStatusAt(pb, nowMs) !== 'stale') return null;
+		return pb.fetchedAt != null ? `Last reported ${formatAsOf(pb.fetchedAt, nowMs)}` : 'Last reported · age unknown';
+	}
+
 	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
 		// No source can read an OpenAI API prepaid balance: the Admin API reports
 		// spend only, and the billing endpoints refuse API and Admin keys.
 		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'Credit balance not available for this key';
-		const status = providerStatusAt(pb, nowMs);
 		// OpenRouter and fal.ai read the balance with the key already saved; no
 		// extra billing access exists to add, so a refusal is about that key.
 		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' ? 'Balance unavailable for this key' : 'Billing access required';
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
 		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
-		if (status === 'stale') return 'Last reported · not live';
-		return null;
+		return providerStaleText(pb, nowMs);
 	}
 
 	function creditsSummary(credits: Record<string, unknown> | null, type: string | null): string | null {
@@ -824,6 +828,10 @@
 				{@const pbShowsRemaining = providerShowsRemaining(pb)}
 				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
 				{@const pbStatus = providerStatusText(pb, now)}
+				{@const pbAge = providerStaleText(pb, now)}
+				<!-- The age shows once: in the header when nothing more urgent is there,
+				     otherwise in the expanded rows. -->
+				{@const pbAgeInHeader = pbAge != null && pbStatus === pbAge}
 				<div class="popover-section">
 					<div class="provider-header">
 						<button
@@ -835,7 +843,7 @@
 						>
 							<span class="sec-head-labels">
 								<span class="section-device">{pbDisplay.name}</span>
-								{#if pbStatus}<span class="section-account provider-status">{pbStatus}</span>{/if}
+								{#if pbStatus}<span class="section-account provider-status" class:usage-as-of={pbAgeInHeader}>{pbStatus}</span>{/if}
 								{#if pbDisplay.subtext}
 									<span class="section-account">{pbDisplay.subtext}</span>
 								{/if}
@@ -907,9 +915,13 @@
 					{:else if pb.providerType?.startsWith('openrouter') && pbWindows.length === 0}
 						<div class="row-reset usage-credits">Balance unavailable for this key</div>
 					{/if}
-					{#if providerStatusAt(pb, now) === 'stale' && pb.fetchedAt != null}
+					{#if pbAge}
 						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
-						<div class="row-reset usage-as-of">Updated {formatAsOf(pb.fetchedAt, now)}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
+						{#if !pbAgeInHeader}
+							<div class="row-reset usage-as-of">{pbAge}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
+						{:else if nextCheck}
+							<div class="row-reset usage-next-check">Next check in {nextCheck}</div>
+						{/if}
 					{/if}
 				{/if}
 			{/each}

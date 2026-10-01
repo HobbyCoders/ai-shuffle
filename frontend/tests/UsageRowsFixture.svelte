@@ -27,7 +27,9 @@
 			{ provider_id: 'openai-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'unavailable',
 				last_error_kind: 'unsupported' },
 			{ provider_id: 'fal-ai', provider_type: 'fal', provider_name: 'fal.ai', status: 'fresh', fetched_at: now,
-				credits: { balance_remaining: 18.11 } }
+				credits: { balance_remaining: 18.11 } },
+			{ provider_id: 'router', provider_type: 'openrouter', provider_name: 'Router', status: 'stale',
+				fetched_at: now - 25 * 60_000, cooldown_until: now + 30 * 60_000, credits: { usage: 2, limit: 10 } }
 		]
 	});
 </script>
