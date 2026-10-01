@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import uuid
 
@@ -12,6 +13,8 @@ from app.db import database, runs, checkouts
 from app.db.base import get_db
 from app.db.async_database import run_sync
 from app.network import control, crypto, engine
+
+logger = logging.getLogger(__name__)
 
 TTL = 1800  # Covers commit/push, fetch and context sync; abandoned reservations expire.
 # Explicit columns only: no credentials, arbitrary tables, paths or executable jobs.
@@ -40,6 +43,151 @@ def _idle(cursor, sid):
         raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
 
 
+HANDOFF = "handoff:"
+# Runner id prefix for a handoff's reservation of another session's run slot.
+HOLD = "handoff-hold:"
+BUSY_CHECKOUT = ("Another session is working in this checkout or on this branch. "
+                 "Wait for it to finish before moving this session.")
+UNVERIFIED_CHECKOUT = ("Cannot verify which sessions use this checkout or branch. "
+                       "The session was not moved.")
+
+
+def _bound_branch(row):
+    return row.get("branch") or row.get("worktree_branch") or None
+
+
+def _session_cwd(row):
+    if row.get("worktree_id"):
+        from app.core.project_utils import get_worktree_working_dir
+        worktree = database.get_worktree(row["worktree_id"])
+        return get_worktree_working_dir(worktree) if worktree else None
+    return project_resolver.resolve_existing_cwd(row)
+
+
+def _checkout_users(session, project, path, branch):
+    """This worker's other sessions that work in ``path`` or on ``branch``.
+
+    Hidden sessions and legacy project aliases are included. Sessions another
+    worker executes run in that worker's checkout, not this one.
+    """
+    from app.db.sessions import list_sessions_for_cleanup
+    target = Path(path).resolve() if path else None
+    users = []
+    for row in list_sessions_for_cleanup(session.get("project_id") or project["id"], project["id"]):
+        sid = row.get("id")
+        if not sid or sid == session["id"] or control.owner_of(row) is not None:
+            continue
+        if branch and _bound_branch(row) == branch:
+            users.append(sid)
+            continue
+        cwd = _session_cwd(row) if target else None
+        if cwd and Path(cwd).resolve() == target:
+            users.append(sid)
+    return users
+
+
+def _quiet(cursor, sid):
+    """Refuse when a held session already has live work that predates the hold."""
+    from app.core.task_registry import task_registry
+    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('running','interrupting','draining') LIMIT 1", (sid,))
+    if cursor.fetchone():
+        raise ValueError(BUSY_CHECKOUT)
+    cursor.execute("SELECT 1 FROM background_tasks WHERE session_id=%s AND status IN ('running','pending') LIMIT 1", (sid,))
+    if cursor.fetchone() or task_registry.has_active_background_work(sid):
+        raise ValueError(BUSY_CHECKOUT)
+
+
+def _hold_checkout(session, project, path, branch, holder, held):
+    """Reserve run admission for every other session using this checkout/branch.
+
+    Turn admission claims a session's run lease before its turn may start, so
+    a held session cannot start until the hold is released or expires. The
+    caller's own reservation is written first and the scan runs after it, so a
+    concurrent start is either held here, refused here, or sees the
+    reservation in :func:`admission_held`. The caller releases ``held``.
+    """
+    from app.core.git_activity import GitActivityUnavailable, busy_git_target_sessions
+    try:
+        for _ in range(3):
+            fresh = [sid for sid in _checkout_users(session, project, path, branch) if sid not in held]
+            if not fresh:
+                break
+            for sid in fresh:
+                run = runs.claim_run(sid, holder, TTL)
+                if not run:
+                    raise ValueError(BUSY_CHECKOUT)
+                held[sid] = run
+        else:
+            raise ValueError(UNVERIFIED_CHECKOUT)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for sid in held:
+                if sid != session["id"]:
+                    _quiet(cursor, sid)
+        # Also apply the Git toolbar's guard to anything the scan missed, such
+        # as a session whose checkout is now on this branch.
+        existing = path if path and Path(path).is_dir() else None
+        busy = busy_git_target_sessions(project["id"], existing, (branch,), exclude=(session["id"], *held))
+    except GitActivityUnavailable as exc:
+        raise ValueError(UNVERIFIED_CHECKOUT) from exc
+    if busy:
+        raise ValueError(BUSY_CHECKOUT)
+
+
+def _release(held):
+    for run in held.values():
+        runs.release_run(run["id"], run["fence_token"])
+    held.clear()
+
+
+def _release_holds(cursor, holder):
+    cursor.execute("UPDATE runs SET state='released', updated_at=NOW() WHERE runner_id=%s AND state='active'", (holder,))
+
+
+def _wake_queued():
+    """Let turns that waited behind released holds start without a full poll."""
+    try:
+        from app.core import turn_claim
+        turn_claim.kick("turn_claim")
+    except Exception:  # The periodic claim pass still runs.
+        logger.debug("Could not wake the turn claim pass after a handoff", exc_info=True)
+
+
+def admission_held(sid):
+    """True while a handoff on this worker reserves this session's checkout.
+
+    Run admission calls this after claiming the session's lease. A handoff
+    writes its reservation before scanning for checkout users, so either the
+    scan sees that claim or this read sees the reservation.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, runner_id FROM runs WHERE state='active' "
+                       "AND lease_expires_at >= NOW() AND session_id <> %s", (sid,))
+        reserved = {row["session_id"] for row in cursor.fetchall()
+                    if str(row["runner_id"]).startswith((HANDOFF, HOLD))}
+    if not reserved:
+        return False
+    mine = database.get_session(sid)
+    project = project_resolver.resolve_project_v2(mine) if mine else None
+    if not project:
+        return False
+    cwd = None
+    for other_id in reserved:
+        other = database.get_session(other_id)
+        other_project = project_resolver.resolve_project_v2(other) if other else None
+        if not other_project or other_project["id"] != project["id"]:
+            continue
+        # Equal branches, or two base-checkout sessions, share a checkout.
+        if _bound_branch(other) == _bound_branch(mine):
+            return True
+        cwd = cwd or _session_cwd(mine)
+        other_cwd = _session_cwd(other)
+        if cwd and other_cwd and Path(cwd).resolve() == Path(other_cwd).resolve():
+            return True
+    return False
+
+
 def _history(session):
     rows = {}
     with get_db() as conn:
@@ -55,7 +203,7 @@ def _history(session):
 def _lease(cur, sid, target, token):
     cur.execute("SELECT * FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s "
                 "AND state='active' AND lease_expires_at >= NOW() FOR UPDATE",
-                (token, sid, "handoff:" + target))
+                (token, sid, HANDOFF + target))
     row = cur.fetchone()
     if not row:
         raise ValueError("The resume reservation expired. Retry from the owning worker.")
@@ -79,10 +227,15 @@ def begin(sid, target, remote=None):
             branch = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
     with get_db() as conn:
         _idle(conn.cursor(), sid)
-    run = runs.claim_run(sid, "handoff:" + target, TTL)
+    run = runs.claim_run(sid, HANDOFF + target, TTL)
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
+    held = {}
     try:
+        if project:
+            # Publication commits and pushes the shared checkout. Exclude other
+            # sessions working there; they keep their files and work.
+            _hold_checkout(session, project, cwd, branch, HOLD + run["id"], held)
         state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
                     project_id=project["id"] if project else None, token=run["id"])
@@ -90,6 +243,7 @@ def begin(sid, target, remote=None):
         ctx = engine.require_context()
         return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
     except BaseException:
+        _release(held)
         runs.release_run(run["id"], run["fence_token"])
         raise
 
@@ -102,14 +256,31 @@ def finish(sid, target, payload):
             cur = conn.cursor()
             run = _lease(cur, sid, target, token)
             cur.execute("UPDATE runs SET state='released' WHERE id=%s", (run["id"],))
+            _release_holds(cur, HOLD + run["id"])
         return {"cancelled": True}
+    try:
+        return _commit(sid, target, payload, token)
+    except BaseException:
+        # A refused commit never moves ownership. The receiver cancels the
+        # moving session's own lease; other sessions need not wait for that.
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='active'",
+                        (token, sid, HANDOFF + target))
+            if cur.fetchone():
+                _release_holds(cur, HOLD + token)
+        raise
+
+
+def _commit(sid, target, payload, token):
     session = database.get_session(sid)
     if session.get("owner_device_id") == target:
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='transferred'",
-                        (token, sid, "handoff:" + target))
+                        (token, sid, HANDOFF + target))
             if cur.fetchone():
+                _release_holds(cur, HOLD + token)
                 return {"committed": True}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
@@ -141,6 +312,7 @@ def finish(sid, target, payload):
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
         engine.record(cur, "sessions", sid, dict(cur.fetchone()), force=True)
         cur.execute("UPDATE runs SET state='transferred' WHERE id=%s", (token,))
+        _release_holds(cur, HOLD + token)
     engine.kick()
     return {"committed": True}
 
@@ -168,9 +340,16 @@ async def handle(payload, peer_device_id):
         invalidate_working_dir_cache(session_id=sid)
         return {"moved": cwd is not None}
     if payload.get("phase") == "begin":
-        return await run_sync(begin, sid, peer_device_id, payload.get("remote"))
+        try:
+            return await run_sync(begin, sid, peer_device_id, payload.get("remote"))
+        except BaseException:
+            _wake_queued()
+            raise
     if payload.get("phase") in ("commit", "cancel"):
-        return await run_sync(finish, sid, peer_device_id, payload)
+        try:
+            return await run_sync(finish, sid, peer_device_id, payload)
+        finally:
+            _wake_queued()
     raise ValueError("Unknown handoff phase")
 
 
@@ -260,7 +439,6 @@ async def receive(session):
 
     Project-less sessions skip the Git steps and transfer history only.
     """
-    sid = session["id"]
     owner = control.owner_of(session)
     ctx = engine.context()
     if owner is None:
@@ -277,6 +455,47 @@ async def receive(session):
         base_row = await run_sync(project_resolver._local_checkout, project["id"], settings.effective_instance_id)
         base = checkout_manager._resolve_checkout_path(base_row["path"])
         remote = await run_sync(checkout_transfer.remote_identity, base)
+    held = {}
+    try:
+        return await _pull(session, owner, ctx, project, base, remote, held, HOLD + str(uuid.uuid4()))
+    finally:
+        if held:
+            await run_sync(_release, held)
+            _wake_queued()
+
+
+def _receiving_path(base, branch):
+    try:
+        dest = checkout_manager._branch_checkout_path(base, branch)
+    except WorktreeError as e:
+        raise ValueError(str(e)) from e
+    return dest, checkout_transfer.receiving_checkout(base, dest, branch)
+
+
+def _reserve_mirror(sid, holder, held):
+    """Reserve this worker's mirror of the moving session for the import.
+
+    Placed only after the owner has begun, because a database shared with the
+    owner already holds the owner's handoff lease, which serves the same role.
+    """
+    if sid in held:
+        return
+    run = runs.claim_run(sid, holder, TTL)
+    if run:
+        held[sid] = run
+        return
+    active = runs.get_active_run(sid)
+    if not active or not str(active.get("runner_id") or "").startswith(HANDOFF):
+        raise ValueError("Stop this session's active run before moving it.")
+
+
+async def _pull(session, owner, ctx, project, base, remote, held, holder):
+    sid = session["id"]
+    expected_branch = project_resolver._effective_branch(session) if project else None
+    if expected_branch:
+        # Refuse a busy receiving checkout before the owner commits or pushes.
+        _, path = await run_sync(_receiving_path, base, expected_branch)
+        await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
     reply = await control.call(owner, "handoff", {"session_id": sid, "phase": "begin", "remote": remote}, timeout=600)
     blob = reply.get("payload", "")
     raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
@@ -302,13 +521,12 @@ async def receive(session):
             committed = True
             await run_sync(_accept_owner, sid, ctx.device_id, None)
             return cwd
-        expected_branch = project_resolver._effective_branch(session)
         if not state or (expected_branch and state["branch"] != expected_branch):
             raise ValueError("The owning worker's branch changed; refresh before resuming.")
-        try:
-            dest = checkout_manager._branch_checkout_path(base, state["branch"])
-        except WorktreeError as e:
-            raise ValueError(str(e)) from e
+        dest, path = await run_sync(_receiving_path, base, state["branch"])
+        # Exclude other sessions working in the checkout this import changes.
+        await run_sync(_reserve_mirror, sid, holder, held)
+        await run_sync(_hold_checkout, session, project, str(path), state["branch"], holder, held)
         cwd = await run_sync(checkout_transfer.import_checkout, base, dest, state)
         # Keep placement on the original owner while preparing local context.
         await run_sync(install_history, sid, data, cwd)

@@ -59,6 +59,41 @@ credentials, settings, network, plugins and the internal control plane refuse
 unsafe methods on it. The remote listener ignores it entirely. It is not a
 login: the local owner boundary above is unchanged.
 
+### Obsolete session cookies in an isolated preview
+
+Browsers scope cookies to the host, not the port, so an isolated branch
+preview opened in the agent browser often also receives the `session` cookie
+of a different installation on the same host (or one left over from an
+earlier preview). That cookie is not valid here, and it does not stop the
+preview cookie from working: every surface (`/api/v1/auth/status`, protected
+API reads and writes, the session's event stream and the WebSocket) honours a
+valid preview grant even when such an obsolete cookie is present, so status
+and the protected reads agree. The server leaves the obsolete cookie alone
+rather than deleting it, because on a shared host it can be another
+installation's live login.
+
+What the obsolete cookie never does:
+
+- It never falls back to passwordless local access. Only a valid preview
+  grant is honoured behind it; without one the request is refused as before.
+- It never lifts the preview limits. The mutation ceiling above and the
+  same-origin requirement for unsafe methods still apply.
+- A failed `Authorization: Bearer` credential is explicit, so it is never
+  replaced by the preview grant: the request is refused.
+
+To recover a preview that still shows "Not authenticated":
+
+1. Open `/api/v1/auth/status` on the preview origin. If `preview_access` is
+   `false`, the preview cookie itself is missing, expired, or bound to a
+   session that does not exist in this preview's database, or the browser
+   is not reaching the local listener from a private network. Open the
+   session's preview URL (`/api/v1/auth/preview-access?token=...`) again, or
+   mint a new one for a session in this preview's data directory.
+2. If an `Authorization` header is being sent (for example by a test
+   harness), remove it; an invalid Bearer is refused on purpose.
+3. Clearing the obsolete `session` cookie for the preview host is safe but
+   no longer required.
+
 ## Upgrading an existing installation
 
 1. Adopt the credential key first; see
