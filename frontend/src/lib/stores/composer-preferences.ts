@@ -19,6 +19,15 @@ const legacy: Partial<Record<keyof Picks, string>> = {
 const defaults: Picks = {profile:'', project:{projectId:'',projectV2Id:null}, checkout:null,
  model:null, effort:null, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
 const values = {...defaults};
+let checkoutRevision = 0;
+function sameCheckout(a: CheckoutPick | null, b: CheckoutPick | null) {
+ if (a === b) return true;
+ if (!a || !b || a.kind !== b.kind || a.projectId !== b.projectId
+  || a.projectV2Id !== b.projectV2Id || a.branch !== b.branch) return false;
+ return a.kind === 'branch' && b.kind === 'branch'
+  ? a.baseBranch === b.baseBranch && a.createNew === b.createNew
+  : a.kind === 'existing' && b.kind === 'existing' && a.worktreeId === b.worktreeId;
+}
 const listeners = new Set<() => void>();
 let pendingNotificationEpoch: number | null = null;
 function notifyRemote() {
@@ -54,7 +63,10 @@ function normalize<K extends keyof Picks>(key: K, value: unknown): Picks[K] {
  return (typeof value === 'string' ? value : defaults[key]) as Picks[K];
 }
 function store<K extends keyof Picks>(key: K, value: unknown) {
- values[key] = normalize(key, value);
+ const normalized = normalize(key, value);
+ // Identical account refreshes are not new choices. Actual remote changes are.
+ if (key === 'checkout' && !sameCheckout(values.checkout, normalized as CheckoutPick | null)) checkoutRevision++;
+ values[key] = normalized;
  try {
   localStorage.setItem(`ai-shuffle-composer:${key}`, JSON.stringify(values[key]));
   if (key === 'project') localStorage.setItem('aihub_selectedProject', values.project.projectId);
@@ -79,7 +91,23 @@ for (const key of Object.keys(defaults) as (keyof Picks)[]) {
 export const composerPreferences = {
  get current(): Readonly<Picks> { return values; },
  set<K extends keyof Picks>(key: K, value: Picks[K]) {
+  // A deliberate re-pick is a new intent even when its fields are identical.
+  if (key === 'checkout') checkoutRevision++;
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);
+ },
+ /** Capture before POST; consume only the unchanged choice after success. */
+ captureNewBranchChoice(project: ProjectPick, branch: string, createNew: boolean) {
+  const pick = values.checkout;
+  const matchesProject = pick && (pick.projectV2Id
+   ? pick.projectV2Id === project.projectV2Id : pick.projectId === project.projectId);
+  if (!createNew || pick?.kind !== 'branch' || !pick.createNew || pick.branch !== branch || !matchesProject) return () => {};
+  const revision = checkoutRevision;
+  const ownerEpoch = sessionOwnerEpoch();
+  return () => {
+   if (checkoutRevision === revision && sessionOwnerEpoch() === ownerEpoch) {
+    composerPreferences.set('checkout', null);
+   }
+  };
  },
  onRemote(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
  async hydrate() { await preferenceSync.reconnect(); },

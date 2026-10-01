@@ -36,6 +36,20 @@ def spec():
                       fingerprint="SHA256:" + "a" * 43, password="vault-only-password")
 
 
+def test_service_certificate_pin_is_encrypted_saved_and_reused(vault):
+    owner = ("local", "worker", None)
+    pin = "a" * 64
+    connection = GrantInput(kind="service", label="Home API", url="https://10.0.0.5/api",
+                            fingerprint=pin, secret="private-test-token")
+    connection_id = chat_vault.save(owner, connection)
+    ciphertext = next(iter(vault.values()))
+    assert pin not in ciphertext and "private-test-token" not in ciphertext
+    loaded = chat_vault.load(owner, connection_id)
+    assert loaded.fingerprint == pin
+    assert chat_vault.catalog(owner)[0]["fingerprint"] == pin
+    assert "private-test-token" not in json.dumps(chat_vault.catalog(owner))
+
+
 def test_explicit_save_encrypts_all_inputs_and_scope_binds_reuse(vault):
     owner = ("local", "worker", None)
     connection_id = chat_vault.save(owner, spec())

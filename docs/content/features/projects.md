@@ -71,6 +71,12 @@ Git worktrees allow parallel development on multiple branches without switching:
 3. Claude works in the isolated worktree directory
 4. Changes stay separate from the main branch
 
+A saved one-time request to **create a new branch** is cleared after a session is
+successfully created. Failed creation keeps the choice for retry. Clearing it
+does not delete the created branch or change the session using it, and project,
+model and other composer preferences remain remembered. A newer branch choice
+made while creation is in flight is not cleared by the earlier request.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \
   -H "Authorization: Bearer aih_your_key" \
