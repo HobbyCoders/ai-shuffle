@@ -23,7 +23,8 @@ npm run build    # -> build/ ; android/scripts/sync-mobile-ui.sh copies it into 
 `tests/composer-gesture.html` mounts the shared composer inside the mobile
 shell with isolated transports; `tests/verify-composer-gesture.mjs` drives it
 with Playwright (touch swipes in both layouts and both sheet states, native
-draft scrolling, the controls drawer, the context row geometry). Needs
+draft scrolling, the controls drawer, the context row geometry, 44px composer
+touch targets and 16px editor text). Needs
 `browser-mcp`'s `playwright-core` (`cd ../browser-mcp && npm ci`) and a
 Chromium binary.
 

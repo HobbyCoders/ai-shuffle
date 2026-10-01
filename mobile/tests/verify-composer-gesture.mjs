@@ -195,8 +195,39 @@ async function verifyContext(width, height, layout, context = 'new') {
 	await h.close();
 }
 
+// #1612: composer controls are 44px touch targets and the editor text is 16px,
+// in both composer states and with the controls sheet open.
+async function verifyTouchSizing(width, height, layout) {
+	const h = await harness(width, height);
+	await h.load({ layout, mode: 'code' });
+	const label = `${width}x${height}-${layout}`;
+	const check = async state => {
+		const result = await h.page.evaluate(() => {
+			const visible = selector => [...document.querySelectorAll(selector)].filter(node => node.getClientRects().length);
+			const small = visible('.send-btn, .send-cluster .stop-btn, .controls-dock .dock-ico, .controls-dock .voice-btn, .controls-dock .voice-call-btn, .controls-dock .usage-indicator, .model-control, .quick-choice')
+				.map(node => ({ cls: node.className, ...node.getBoundingClientRect().toJSON() }))
+				.filter(box => box.width < 44 || box.height < 44);
+			const editor = document.querySelector('.chat-input-wrapper .ProseMirror');
+			return { small, font: editor && getComputedStyle(editor).fontSize, overflow: document.documentElement.scrollWidth > window.innerWidth };
+		});
+		assert.deepEqual(result.small, [], `${label} ${state}: touch targets under 44px`);
+		assert.equal(result.font, '16px', `${label} ${state}: editor text size`);
+		assert.equal(result.overflow, false, `${label} ${state}: no horizontal page scroll`);
+	};
+	await check('idle');
+	await h.page.locator('.tiptap').tap();
+	await h.page.waitForTimeout(350);
+	await check('expanded');
+	await h.setOpen(true);
+	await check('sheet open');
+	console.log(`PASS ${label}: 44px composer touch targets and 16px editor text`);
+	await h.close();
+}
+
 try {
 	for (const width of [320, 390]) {
+		await verifyTouchSizing(width, 844, 'compact');
+		await verifyTouchSizing(width, 430, 'compact');
 		for (const layout of ['compact', 'centered']) {
 			await verifyGestures(width, layout);
 			await verifyContext(width, 844, layout);
