@@ -16,60 +16,65 @@ const items = [
 afterEach(cleanup);
 
 describe('TurnNavigator', () => {
-	it('keeps every long-history target available through bounded controls', async () => {
+	it('renders the same rail of ticks for long histories, with no second control set', async () => {
 		const onSelect = vi.fn();
 		const many = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), label: `Turn ${i}`, title: `Turn ${i}`, preview: '' }));
-		render(TurnNavigator, { props: { items: many, currentIndex: 500, onSelect } });
-		expect(screen.queryByRole('combobox')).toBeNull();
-		expect(screen.getAllByRole('button')).toHaveLength(14);
-		await fireEvent.click(screen.getByRole('button', { name: 'First user turn' }));
+		const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 500, onSelect } });
+		const ticks = screen.getAllByRole('button');
+		expect(ticks).toHaveLength(1000);
+		expect(ticks.every((tick) => tick.classList.contains('tick'))).toBe(true);
+		expect(screen.queryByRole('searchbox')).toBeNull();
+		expect(screen.queryByRole('button', { name: /First user turn|Browse session timeline/ })).toBeNull();
+		expect(container.querySelector('.long-history')).toBeNull();
+		expect(screen.getByRole('button', { name: 'User message 501 of 1000: Turn 500' }).getAttribute('aria-current')).toBe('true');
+		await fireEvent.click(screen.getByRole('button', { name: 'User message 1 of 1000: Turn 0' }));
 		expect(onSelect).toHaveBeenLastCalledWith(0);
-		await fireEvent.click(screen.getByRole('button', { name: 'Last user turn' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'User message 1000 of 1000: Turn 999' }));
 		expect(onSelect).toHaveBeenLastCalledWith(999);
-		await fireEvent.click(screen.getByRole('button', { name: /Browse session timeline/ }));
-		const search = screen.getByRole('searchbox');
-		expect(document.activeElement).toBe(search);
-		await fireEvent.input(search, { target: { value: '124' } });
-		await fireEvent.click(screen.getByRole('button', { name: '124 Turn 123' }));
-		expect(onSelect).toHaveBeenLastCalledWith(123);
-		expect(screen.queryByRole('searchbox')).toBeNull();
-		expect(document.activeElement).toBe(screen.getByRole('button', { name: /Browse session timeline/ }));
 	});
 
-	it('searches previews, handles empty results, and dismisses without navigating', async () => {
-		const onSelect = vi.fn();
-		const many = Array.from({ length: 100 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: i === 75 ? 'A unique detail' : '' }));
-		render(TurnNavigator, { props: { items: many, currentIndex: 50, onSelect } });
-		const trigger = screen.getByRole('button', { name: /Browse session timeline/ });
-		await fireEvent.click(trigger);
-		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'unique detail' } });
-		expect(screen.getByRole('button', { name: '76 Prompt 75 A unique detail' })).toBeTruthy();
-		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'no such message' } });
-		expect(screen.getByText('No messages found.')).toBeTruthy();
-		await fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
-		expect(screen.queryByRole('searchbox')).toBeNull();
-		expect(document.activeElement).toBe(trigger);
-		await fireEvent.click(trigger);
-		await fireEvent.pointerDown(document.body);
-		expect(screen.queryByRole('searchbox')).toBeNull();
-		expect(onSelect).not.toHaveBeenCalled();
-	});
-
-	it('keeps nearby targets and endpoint controls in bounds as the reading position changes', async () => {
+	it('moves focus with Home, End and arrows so keyboard users stay on a visible tick', async () => {
 		const onSelect = vi.fn();
 		const many = Array.from({ length: 45 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
-		const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-		expect((screen.getByRole('button', { name: 'Previous user turn' }) as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.getByRole('button', { name: 'User message 1 of 45: Prompt 0' }).getAttribute('aria-current')).toBe('true');
-		await view.rerender({ items: many, currentIndex: 44, onSelect });
-		expect((screen.getByRole('button', { name: 'Next user turn' }) as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.getByRole('button', { name: 'User message 45 of 45: Prompt 44' }).getAttribute('aria-current')).toBe('true');
-		const trigger = screen.getByRole('button', { name: /Browse session timeline/ });
-		await fireEvent.keyDown(trigger, { key: 'Home' });
-		expect(onSelect).toHaveBeenLastCalledWith(0);
-		await fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+		render(TurnNavigator, { props: { items: many, currentIndex: 20, onSelect } });
+		const tickNamed = (n: number) => screen.getByRole('button', { name: `User message ${n} of 45: Prompt ${n - 1}` });
+		tickNamed(21).focus();
+		await fireEvent.keyDown(tickNamed(21), { key: 'End' });
+		expect(onSelect).toHaveBeenLastCalledWith(44);
+		expect(document.activeElement).toBe(tickNamed(45));
+		await fireEvent.keyDown(tickNamed(45), { key: 'ArrowUp' });
 		expect(onSelect).toHaveBeenLastCalledWith(43);
+		expect(document.activeElement).toBe(tickNamed(44));
+		await fireEvent.keyDown(tickNamed(44), { key: 'Home' });
+		expect(onSelect).toHaveBeenLastCalledWith(0);
+		expect(document.activeElement).toBe(tickNamed(1));
 	});
+
+	it('scrolls only the rail to keep the current turn in view, without undoing browsing', async () => {
+		const many = Array.from({ length: 80 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
+		const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect: vi.fn() } });
+		const rail = view.container.querySelector('.turn-rail') as HTMLElement;
+		// jsdom has no layout: give the rail a 100px viewport over 13px-pitch ticks.
+		Object.defineProperty(rail, 'clientHeight', { value: 100 });
+		Object.defineProperty(rail, 'scrollHeight', { value: 80 * 13 + 20 });
+		Object.defineProperty(rail, 'scrollTop', { value: 0, writable: true });
+		Array.from(rail.children).forEach((tick, index) => {
+			Object.defineProperty(tick, 'offsetTop', { value: 10 + index * 13 });
+			Object.defineProperty(tick, 'offsetHeight', { value: 10 });
+		});
+		await view.rerender({ items: many, currentIndex: 60, onSelect: vi.fn() });
+		const tickTop = 10 + 60 * 13;
+		expect(rail.scrollTop).toBeLessThanOrEqual(tickTop);
+		expect(rail.scrollTop + 100).toBeGreaterThanOrEqual(tickTop + 10);
+
+		// The reader scrolls the rail elsewhere; a new turn arriving keeps it there.
+		rail.scrollTop = 0;
+		await view.rerender({ items: [...many, { id: '80', label: 'New', title: 'New', preview: '' }], currentIndex: 60, onSelect: vi.fn() });
+		expect(rail.scrollTop).toBe(0);
+		await view.rerender({ items: many, currentIndex: 2, onSelect: vi.fn() });
+		expect(rail.scrollTop).toBe(0);
+	});
+
 	it('selects a turn from the timeline', async () => {
 		const onSelect = vi.fn();
 		render(TurnNavigator, { props: { items, currentIndex: 1, onSelect } });
@@ -78,12 +83,19 @@ describe('TurnNavigator', () => {
 		expect(onSelect).toHaveBeenCalledWith(2);
 	});
 
-	it('marks the current turn and exposes the hovered preview', () => {
-		render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
+	it('marks the current turn and exposes the hovered preview outside the scrolling rail', async () => {
+		const { container } = render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
 		expect(
 			screen.getByRole('button', { name: 'User message 1 of 3: Set up the project' }).getAttribute('aria-current')
 		).toBe('true');
-		expect(screen.getByText('Details about the bug')).toBeTruthy();
+		await fireEvent.mouseEnter(screen.getByRole('button', { name: 'User message 2 of 3: Fix the transcript' }));
+		const preview = screen.getByText('Details about the bug').closest('.preview') as HTMLElement;
+		expect(preview.classList.contains('is-visible')).toBe(true);
+		expect(screen.getByText('Fix the transcript')).toBeTruthy();
+		// The rail scrolls (and clips); the preview must not be inside it.
+		expect(container.querySelector('.turn-rail')?.contains(preview)).toBe(false);
+		await fireEvent.mouseLeave(screen.getByRole('navigation'));
+		expect(preview.classList.contains('is-visible')).toBe(false);
 	});
 
 	it('moves a ripple between neighboring lines and resets when the cursor leaves', async () => {

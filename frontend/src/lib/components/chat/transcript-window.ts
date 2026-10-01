@@ -175,3 +175,32 @@ export function classifyTurnEntry(
 	if (rootTop === null || rootTop === undefined) return previous;
 	return anchorTop < rootTop ? 'above' : 'below';
 }
+
+/**
+ * Correct anchors the observer skipped. It only reports an anchor when its band
+ * membership changes, so a jump that carries an anchor from below the band to
+ * above it (or back) within one frame reports nothing, and the stale state then
+ * pins the rail to the wrong turn. An anchor just reported inside the band is
+ * real geometry and anchors are in document order, so earlier turns cannot be
+ * below the band and later turns cannot be above it. No layout is read.
+ */
+export function settleSkippedTurns(
+	turnIds: readonly string[],
+	states: Map<string, TurnVisibility>,
+	insideIds: ReadonlySet<string>
+): void {
+	if (insideIds.size === 0) return;
+	let first = -1;
+	let last = -1;
+	turnIds.forEach((id, index) => {
+		if (!insideIds.has(id)) return;
+		if (first < 0) first = index;
+		last = index;
+	});
+	if (first < 0) return;
+	turnIds.forEach((id, index) => {
+		const state = states.get(id);
+		if (index < first && state === 'below') states.set(id, 'above');
+		else if (index > last && state === 'above') states.set(id, 'below');
+	});
+}
