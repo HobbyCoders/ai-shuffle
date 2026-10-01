@@ -596,7 +596,15 @@ async def test_remote_existing_branch_intent_still_shares_the_branch(project):
 
     assert second.session_id != first.session_id
     assert _row(second.session_id)["branch"] == "feat/x"
-    assert len(git_ops_db.list_queued_for_runner(PEER)) == 2
+    queued = git_ops_db.list_queued_for_runner(PEER)
+    assert len(queued) == 2
+    # Only a NEW-branch op carries the session id: an existing-branch op never
+    # reads it, and an older worker would refuse the unknown param.
+    by_session = {op["params"].get("session_id"): op for op in queued}
+    assert set(by_session) == {first.session_id, None}
+    assert by_session[None]["params"] == {
+        "branch": "feat/x", "base_branch": "main", "create_new_branch": False,
+    }
 
 
 async def test_concurrent_remote_new_branch_creates_bind_exactly_one_session(project):

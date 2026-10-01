@@ -48,6 +48,10 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "hidden",
 }
 
+# What a worker's ``git-op`` handler answers for a param it does not know
+# (app/network/git.py ``handle_op``). Older workers send it for ``session_id``.
+_UNSUPPORTED_GIT_OP_PARAMS = "Unsupported Git operation parameters"
+
 
 # One lock per (project_v2, branch) being minted by new-session intake. Weak
 # values: an entry lives only while a request holds or awaits it.
@@ -413,20 +417,45 @@ async def _create_remote_branch_session(
     # 4. Queue the checkout work for the target. This row carries
     #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
     #    so the intent has to travel durably or the session can never spawn.
-    await network_git.enqueue(
-        target_instance_id,
-        "ensure_worktree",
-        project_v2_id=pv2["id"],
-        params={
-            "branch": branch_name,
-            "base_branch": body.base_branch,
-            "create_new_branch": bool(body.create_new_branch),
-            # Request identity for the target's new-branch refusal (#1528): a
-            # retried op for THIS session may find the branch it already
-            # minted; any other session asking to "create" it is refused.
-            "session_id": session_id,
-        },
-    )
+    op_params = {
+        "branch": branch_name,
+        "base_branch": body.base_branch,
+        "create_new_branch": bool(body.create_new_branch),
+    }
+    if body.create_new_branch:
+        # Request identity for the target's new-branch refusal (#1528): a
+        # retried op for THIS session may find the branch it already
+        # minted; any other session asking to "create" it is refused. Only
+        # sent for a new branch: an existing-branch op never reads it.
+        op_params["session_id"] = session_id
+    try:
+        await network_git.enqueue(
+            target_instance_id,
+            "ensure_worktree",
+            project_v2_id=pv2["id"],
+            params=op_params,
+        )
+    except control.ControlRefused as exc:
+        # A worker from before #1528's remote refusal rejects the unknown
+        # ``session_id`` param before inserting anything, and it has no
+        # new-branch refusal to feed. Re-send the params it understands so a
+        # mixed-version cluster keeps creating sessions.
+        if "session_id" not in op_params or (
+            _UNSUPPORTED_GIT_OP_PARAMS not in str(exc)
+        ):
+            raise
+        logger.warning(
+            "Worker %s does not accept ensure_worktree session_id; re-sending "
+            "without it (update the worker for its new-branch refusal)",
+            target_instance_id,
+        )
+        op_params.pop("session_id")
+        await network_git.enqueue(
+            target_instance_id,
+            "ensure_worktree",
+            project_v2_id=pv2["id"],
+            params=op_params,
+        )
 
     query_started = False
     if prompt:
