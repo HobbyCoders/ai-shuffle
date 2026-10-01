@@ -133,6 +133,7 @@ function mockState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: '',
 		scrollTop: 0,
@@ -2149,6 +2150,27 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 			getState: vi.fn(() => state),
 		});
 		handlers = createMessageHandlers(deps);
+	});
+
+	it('keeps attributed peer rows separate, replaces them on delivery, and ignores other sessions', () => {
+		const peerFrame = {
+			type: 'sync', event_type: 'queue_updated', session_id: 'session-1',
+			data: { queued_messages: [], pending_peer_messages: [{ id: 'peer-turn', content: 'coordinate',
+				sender_label: 'Reviewer', sender_session_id: 'sender', created_at: '2026-08-23T12:00:00.000Z' }] }
+		};
+		handlers.handleMessage(peerFrame);
+		handlers.handleMessage(peerFrame);
+		expect(state.pendingPeerMessages).toEqual([{ id: 'peer-turn', content: 'coordinate',
+			senderLabel: 'Reviewer', senderSessionId: 'sender', queuedAt: Date.parse('2026-08-23T12:00:00.000Z') }]);
+		expect(state.queuedMessages).toEqual([]);
+		expect(deps.wsSend).not.toHaveBeenCalled();
+		handlers.handleMessage({ ...peerFrame, session_id: 'other', data: { pending_peer_messages: [] } });
+		expect(state.pendingPeerMessages).toHaveLength(1);
+		state.messages = [{ id: 'delivered', role: 'user', content: 'wrapped peer content', turnId: 'peer-turn' }];
+		handlers.handleMessage(frame([]));
+		expect(state.pendingPeerMessages).toEqual([]);
+		handlers.handleMessage(peerFrame); // A stale pre-delivery snapshot must not resurrect it.
+		expect(state.pendingPeerMessages).toEqual([]);
 	});
 
 	it('renders the server snapshot', () => {

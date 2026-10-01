@@ -63,15 +63,17 @@ def _caller(session_id):
     return row
 
 
-def _target(caller, session_id):
+def _target(caller, session_id, *, allow_stopped=False):
     from app.db import sessions
     from app.core.task_registry import task_registry
     row = sessions.get_session(session_id)
     if (session_id == caller["id"] or not _local_top_level(row)
             or _owner(row) != _owner(caller)):
         raise ValueError("Session is not an eligible peer; use ListSessions.")
-    if task_registry.is_user_stopped(session_id):
+    if not allow_stopped and task_registry.is_user_stopped(session_id):
         raise ValueError("The receiver was stopped by the user; it will not be restarted.")
+    from app.core import mobile_tool_identity
+    mobile_tool_identity.validate(_principal(session_id))
     return row
 
 
@@ -126,6 +128,18 @@ def _context(session_id, *, allow_empty=False):
     return context
 
 
+def _delivery_status(turn):
+    """Bounded durable receipt, not an acknowledgement or automatic peer reply."""
+    from app.core.task_registry import task_registry
+    if turn.get("state") == "aborted" or task_registry.is_user_stopped(turn["session_id"]):
+        return "stopped"
+    if turn.get("state") == "queued":
+        return "queued"
+    if turn.get("state") in ("completed", "parked"):
+        return "consumed"
+    return "begun"
+
+
 def _queue(sender_id, data, action):
     from app.db import sessions, turns, mobile_tool_identity
     from app.db.base import transaction
@@ -145,22 +159,18 @@ def _queue(sender_id, data, action):
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
         (sender_id + ":" + request_id).encode()).hexdigest()
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
-    target = sender if action == "start" else _target(sender, _text(data, "session_id", 200))
+    target = sender if action == "start" else _target(sender, _text(data, "session_id", 200), allow_stopped=True)
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
-    # The in-memory stop generation is lost on restart. Conservatively require
-    # user continuation after a durable abort rather than replaying stopped work.
-    if context.get("state") == "aborted" or target_context.get("state") == "aborted":
-        raise ValueError("A participating session was aborted; the user must continue it first.")
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
     # Never retry a rejected peer's work by waking it through a different tool.
     terminal = turn_scheduler._turn_terminal_payload(target["id"], target_context["id"])
     errors = str(terminal.get("errors") or "").casefold()
-    if any(word in errors for word in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
-        raise ValueError("The target has a policy rejection; ask the user rather than replaying it.")
     payload = turn_scheduler._context_payload(target_context)
     # Keep transport attribution from the RECEIVER, never the sender.
     payload.update(orchestration_root=root_id, orchestration_depth=depth + 1,
-                   orchestration_sender=sender_id, orchestration_fingerprint=fingerprint)
+                   orchestration_sender=sender_id, orchestration_fingerprint=fingerprint,
+                   peer_message_content=defang_harness_markers(text),
+                   peer_sender_label=sender.get("title") or sender_id)
     if target.get("api_user_id"):
         payload["api_user_id"] = target["api_user_id"]
     prompt = format_peer_message(sender_id, defang_harness_markers(text)).strip()
@@ -175,15 +185,6 @@ def _queue(sender_id, data, action):
         cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
                        (root_id, command_id))
         previous = turns._row(cursor.fetchone())
-        if previous:
-            if previous["payload"].get("orchestration_fingerprint") != fingerprint:
-                raise ValueError("request_id was already used with different arguments.")
-            return {"session_id": previous["session_id"], "turn_id": previous["id"],
-                    "status": "already_queued", "created": False}
-        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%'", (root_id,))
-        commands = [row["command_id"] for row in cursor.fetchall()]
-        if len(commands) >= MAX_ACTIONS or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS):
-            raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); ask the user to continue.")
         # Recheck eligibility using THIS connection. Nested pool checkouts
         # while holding the origin lock can deadlock under concurrent fanout.
         # No model input can turn an archived/foreign/worker chat into a peer.
@@ -201,6 +202,22 @@ def _queue(sender_id, data, action):
             identity = cursor.fetchone()
             if (dict(identity) if identity else None) != principals[snapshot["id"]]:
                 raise ValueError("Session owner changed; rediscover the peer.")
+        if previous:
+            if previous["payload"].get("orchestration_fingerprint") != fingerprint:
+                raise ValueError("request_id was already used with different arguments.")
+            return {"session_id": previous["session_id"], "turn_id": previous["id"],
+                    "status": "already_queued", "delivery_status": _delivery_status(previous),
+                    "created": False,
+                    "note": "Existing request receipt. No automatic reply; retry the same request_id to read delivery status."}
+        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%'", (root_id,))
+        commands = [row["command_id"] for row in cursor.fetchall()]
+        if len(commands) >= MAX_ACTIONS or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS):
+            raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); ask the user to continue.")
+        # A receipt may be read after Stop, but fresh work must still fail closed.
+        if context.get("state") == "aborted" or target_context.get("state") == "aborted":
+            raise ValueError("A participating session was aborted; the user must continue it first.")
+        if any(word in errors for word in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
+            raise ValueError("The target has a policy rejection; ask the user rather than replaying it.")
         if task_registry.is_user_stopped(sender_id) or task_registry.is_user_stopped(target["id"]):
             raise ValueError("The user stopped a participating session.")
         if action == "start":
@@ -230,8 +247,8 @@ def _queue(sender_id, data, action):
             parent_turn_id=root_id, _conn=conn,
         )
     return {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
-            "created": action == "start", "url": "/?session=" + target["id"],
-            "note": "Queued is not delivered. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}
+            "delivery_status": "queued", "created": action == "start", "url": "/?session=" + target["id"],
+            "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}
 
 
 def make_handler(supplier):
@@ -249,12 +266,24 @@ def make_handler(supplier):
                 target_generation = task_registry.stop_generation(target_id)
                 async with turn_scheduler.message_resume_lock(target_id):
                     result = await asyncio.to_thread(_queue, sender_id, data, action)
-                    if (task_registry.stop_invalidated(sender_id, sender_generation)
+                    if result.get("delivery_status") == "queued" and (
+                            task_registry.stop_invalidated(sender_id, sender_generation)
                             or task_registry.stop_invalidated(target_id, target_generation)):
                         await asyncio.to_thread(turns.remove_queued_turn, result["turn_id"])
                         raise ValueError("The user stopped a participating session; queued work was cancelled.")
-                    turn_scheduler.note_wake_pending(result["session_id"])
-                    turn_scheduler.kick(result["session_id"])
+                    if result.get("delivery_status") == "queued":
+                        from app.core.session_runtime import try_steer_pending
+                        await try_steer_pending(result["session_id"])
+                        turn_scheduler.note_wake_pending(result["session_id"])
+                        turn_scheduler.kick(result["session_id"])
+                        try:
+                            from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view
+                            from app.core.sync_engine import sync_engine
+                            queue = await asyncio.to_thread(_v2_queue_view, result["session_id"])
+                            peers = await asyncio.to_thread(_v2_peer_queue_view, result["session_id"])
+                            await sync_engine.broadcast_queue_updated(result["session_id"], queue, pending_peer_messages=peers)
+                        except Exception:
+                            log.exception("Peer message queued, but queue broadcast failed")
                 if result.get("created"):
                     try:
                         from app.core.sync_engine import sync_engine

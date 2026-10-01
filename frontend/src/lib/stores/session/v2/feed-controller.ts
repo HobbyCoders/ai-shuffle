@@ -29,7 +29,7 @@ import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
-import { pendingQueue } from '../pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
@@ -494,6 +494,7 @@ function fold(hydrationComplete = false): void {
 					...s,
 					...patch,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
+					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 				}
 			: s
 	);

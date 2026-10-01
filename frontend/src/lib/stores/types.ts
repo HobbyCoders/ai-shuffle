@@ -80,6 +80,15 @@ export interface QueuedMessage {
 	queuedAt: number;
 }
 
+/** Attributed peer traffic; has no user unsend/interrupt controls. */
+export interface PendingPeerMessage {
+	id: string;
+	content: string;
+	senderLabel: string;
+	senderSessionId?: string;
+	queuedAt: number;
+}
+
 export interface ChatMessage {
 	id: string;
 	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)
@@ -98,6 +107,7 @@ export interface ChatMessage {
 	metadata?: Record<string, unknown>;
 	timestamp?: string; // ISO-8601 creation time — from server metadata.timestamp on load, stamped client-side on send; without it the UI falls back to "now"
 	turnId?: string; // Turn this message belongs to (user messages, from the wire event). Two user messages sharing one turn id means the later one was steered into a turn already running — see work-log's splitTurns.
+	queuedTurnId?: string; // Queued row absorbed into an already-running turn.
 	streaming?: boolean;
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)

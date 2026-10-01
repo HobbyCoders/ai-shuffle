@@ -653,7 +653,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
-			queuedMessages: [],  // Populated from backend via history/queue_updated
+			queuedMessages: [],
+			pendingPeerMessages: [],  // Populated from backend via history/queue_updated
 			// A send in flight belongs to the session being LEFT (S6).
 			optimisticStreaming: false,
 			isHydrationSlow: false,
@@ -901,6 +902,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deferredPermissions: [],
 			pendingQuestions: [],
 			queuedMessages: [],
+			pendingPeerMessages: [],
 			// Clear another session's running tasks so they don't flash in the
 			// ActiveTasks strip on the fresh compose screen (mirrors defaultState).
 			activeTasks: [],

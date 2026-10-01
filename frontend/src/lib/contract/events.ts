@@ -109,6 +109,7 @@ export type CreatedAt7 = string;
 export type Id7 = string;
 export type Kind = string | null;
 export type ProfileId1 = string | null;
+export type QueuedTurnId = string | null;
 export type RunId7 = string | null;
 export type Seq7 = number;
 export type SessionId7 = string;
@@ -501,6 +502,7 @@ export interface MessageUser {
   id: Id7;
   kind?: Kind;
   profile_id?: ProfileId1;
+  queued_turn_id?: QueuedTurnId;
   run_id?: RunId7;
   seq: Seq7;
   session_id: SessionId7;

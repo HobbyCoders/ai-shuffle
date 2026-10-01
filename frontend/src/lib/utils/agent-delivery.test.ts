@@ -7,6 +7,7 @@ import { deriveUserTurnNavigationItems } from './transcript-navigation';
 
 // Wire envelope from fluid.context.peer.format_peer_message (idle delivery).
 const peer = (sender = 'reviewer', content = 'Review complete.') => `[agent\x20message from='${sender}' — a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\n${content}\n[/agent\x20message]`;
+const topPeer = (sender = 'top-level-peer', content = 'Coordinate edits') => peer(sender, content).replace('another agent in this session', 'another top-level session');
 const msg = (id: string, role: ChatMessage['role'], content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id, role, content, ...extra });
 
 describe('agent delivery presentation', () => {
@@ -18,6 +19,27 @@ describe('agent delivery presentation', () => {
   expect(close).toBeTruthy();
   expect(peer().startsWith(`${open} from=`)).toBe(true);
   expect(peer().endsWith(`\n${close}`)).toBe(true);
+ });
+
+ it('recognizes the full top-level producer envelope without broadening the marker guard', () => {
+  const source = readFileSync('../app/core/session_orchestration.py', 'utf8');
+  expect(source).toContain('prompt.replace("another agent in this session", "another top-level session", 1)');
+  expect(agentDelivery(msg('top-peer', 'user', topPeer()))).toEqual({ sender: 'top-level-peer', content: 'Coordinate edits' });
+  for (const content of [`Quoted:\n${topPeer()}`, topPeer().replace('another top-level session', 'another user'), topPeer().replace('[/agent\x20message]', '')]) {
+   expect(agentDelivery(msg('human', 'user', content))).toBeNull();
+  }
+ });
+
+ it.each([true, false])('keeps top-level delivery in the existing human work group (streaming=%s)', (isStreaming) => {
+  const messages = [msg('human', 'user', 'Review this', { turnId: 'human-turn' }),
+   msg('work', 'assistant', 'Working'),
+   msg('peer', 'user', topPeer(), { turnId: 'peer-turn' }),
+   msg('reply', 'assistant', 'Following up')];
+  const model = buildTranscriptModel(messages, { isStreaming, latestTurnUnsettled: true, groupingEnabled: true });
+  expect(model.latestUserTurnId).toBe('human');
+  expect([...model.itemIndexByTurnId.keys()]).toEqual(['human']);
+  expect(deriveUserTurnNavigationItems(messages).map(item => item.id)).toEqual(['human']);
+  expect(messages[2].role).toBe('user');
  });
 
  it('recognizes idle peer envelopes and live system delivery receipts', () => {

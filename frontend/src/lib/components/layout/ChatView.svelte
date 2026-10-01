@@ -39,7 +39,8 @@
 	const chatSurface = $derived(
 		classifyChatSurface({
 			sessionId: $activeSession.sessionId,
-			messageCount: $activeSession.messages.length,
+			// Pending peers belong in the transcript, even before its first message.
+			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
 			isLoadingSession: $activeSession.isLoadingSession
 		})

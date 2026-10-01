@@ -32,7 +32,10 @@ SPECS = (
     (ToolSpec(name="MessageSession", description=(
         "Queue a clearly attributed peer message in an active top-level session "
         "discovered with ListSessions. Use its exact session_id, never a title. "
-        "A busy peer receives queued work after its current turn; an idle peer can wake. "
+        "A busy peer receives queued work at its next eligible normal steering boundary, "
+        "as peer-authored context, never authoritative user input. In-flight tools are not "
+        "interrupted and no parallel recipient turn is started. Without eligible steering "
+        "the normal queued-turn drain is used; an idle peer can wake. "
         "Stopped, archived, hidden, subagent and foreign-owner sessions are refused. "
         "Queued is not delivered. There is no automatic reply; a peer can answer "
         "with MessageSession to your sender session ID. "
