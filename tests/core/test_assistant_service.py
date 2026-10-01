@@ -129,3 +129,42 @@ def test_dedicated_connector_credential_revocation_and_agent_scope(assistant_fix
     database.update_api_user("mail-user", profile_ids=["assistant-agent"])
     assert service.assert_proactive_allowed(marker)["id"] == run["id"]
     assert events(message_id="allowed-agent")
+
+
+@pytest.mark.asyncio
+async def test_manager_loop_sweeps_retention_at_most_once_per_interval(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.core import assistant_manager as module
+
+    manager = module.AssistantManager()
+    monkeypatch.setattr(manager, "run_once", AsyncMock())
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    sweeps = []
+
+    def sweep(assistant_id):
+        sweeps.append(assistant_id)
+        raise RuntimeError("database unavailable")  # Logged; never stops the loop.
+    monkeypatch.setattr(store, "retention_sweep", sweep)
+    loop = asyncio.get_running_loop()
+    passes = []
+    done = asyncio.Event()
+
+    def activity(*args):
+        passes.append(True)
+        loop.call_soon_threadsafe(done.set if len(passes) >= 4 else manager._wake.set)
+        return []
+    monkeypatch.setattr(store, "get_activity", activity)
+    task = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(done.wait(), timeout=3)
+        assert len(sweeps) == 1 and not task.done()
+        clock.now += module.RETENTION_INTERVAL_SECONDS
+        await manager._maybe_retention_sweep()
+        await manager._maybe_retention_sweep()
+        assert len(sweeps) == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

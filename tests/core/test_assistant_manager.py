@@ -44,8 +44,10 @@ class Reply:
 @pytest.fixture
 def producer(assistant_fixture, monkeypatch):
     instance = GmailConnector("conn-mail", "gmail", {}, AsyncMock(), AsyncMock(), on_trigger=connector_manager._handle_trigger)
-    sdk = MailSDK()
-    instance._service = sdk
+    sdk = MailSDK()  # The observer's own client; the connector keeps a separate one.
+    instance._service = MailSDK()
+    instance._credentials = object()
+    monkeypatch.setattr(instance, "_build_service", lambda creds: sdk)
     monkeypatch.setattr(connector_manager, "get_running_connector", AsyncMock(return_value=instance))
     monkeypatch.setattr(automation_manager, "handle_connector_trigger", AsyncMock())
     monkeypatch.setattr(module, "provider_blocker", lambda agent_id: None)
@@ -66,6 +68,63 @@ async def test_actual_gmail_trigger_produces_external_deduplicated_event(produce
     assert event["trust"] == "external"
     assert "Actual normalized source event" in event["payload"]["data"]
     assert automation_manager.handle_connector_trigger.await_count == 2
+
+
+class LoopThreadOnly:
+    def __getattr__(self, name):
+        raise AssertionError("observer touched the connector's loop-thread Gmail client")
+
+
+@pytest.mark.asyncio
+async def test_observer_reads_through_its_own_client_not_connector_service(producer, monkeypatch):
+    instance, sdk = producer
+    instance._service = LoopThreadOnly()
+    built = []
+    monkeypatch.setattr(instance, "_build_service", lambda creds: built.append(creds) or sdk)
+    await module.AssistantManager()._observe()
+    assert built == [instance._credentials]  # Shares credentials, not the client.
+    assert store.get_sources(service.assistant_id())[0]["watermark"] == {"seen_ids": ["old"]}
+
+
+@pytest.mark.asyncio
+async def test_observer_and_connector_poll_never_share_an_http_object(assistant_fixture, monkeypatch):
+    """A concurrent observer pass and connector poll use distinct AuthorizedHttp objects."""
+    import threading
+    import time
+
+    import httplib2
+    from google.oauth2.credentials import Credentials
+    from google_auth_httplib2 import AuthorizedHttp
+
+    calls = []
+
+    def fake_request(self, uri, method="GET", body=None, headers=None, **kwargs):
+        calls.append((id(self), threading.get_ident()))
+        time.sleep(0.05)  # Hold the request open so the two passes overlap.
+        return httplib2.Response({"status": "200"}), b'{"messages": [{"id": "m1"}]}'
+
+    monkeypatch.setattr(AuthorizedHttp, "request", fake_request)
+    instance = GmailConnector("conn-mail", "gmail", {"refresh_token": "r", "client_id": "c", "client_secret": "s"}, AsyncMock(), AsyncMock())
+    creds = Credentials(token="t", refresh_token="r", client_id="c", client_secret="s", token_uri="https://oauth2.googleapis.com/token")
+    monkeypatch.setattr(instance, "_build_credentials", lambda: creds)
+    monkeypatch.setattr(instance, "_process_message", AsyncMock())
+    await instance._do_connect()
+    connector_http = instance._service._http
+    calls.clear()
+
+    loop_thread = threading.get_ident()
+    snapshot, _ = await asyncio.gather(
+        asyncio.to_thread(module._gmail_snapshot, instance, None),
+        instance._check_for_new_messages(),
+    )
+    assert snapshot == ([], {"seen_ids": ["m1"]})
+    loop_https = {http for http, thread in calls if thread == loop_thread}
+    worker_https = {http for http, thread in calls if thread != loop_thread}
+    assert loop_https == {id(connector_http)}
+    assert worker_https and id(connector_http) not in worker_https
+    observer_client = instance.build_thread_client()
+    assert observer_client._http is not connector_http
+    assert observer_client._http.credentials is creds  # Same token/refresh state.
 
 
 @pytest.mark.asyncio

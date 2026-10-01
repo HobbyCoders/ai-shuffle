@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -18,6 +19,8 @@ from app.db.async_database import run_sync
 from app.db.base import get_db, row_to_dict
 
 logger = logging.getLogger(__name__)
+
+RETENTION_INTERVAL_SECONDS = 3600
 
 
 def _deadline(value):
@@ -57,8 +60,12 @@ def _gmail_snapshot(instance, watermark):
     The first opt-in scan establishes a baseline. Subsequent scans list at most
     50 unread IDs and retrieve <=10 new message headers/snippets. A failed scan
     cannot advance the durable watermark.
+
+    This runs in a worker thread, so it reads through its own client and never
+    touches the connector's loop-thread ``_service`` (httplib2 is not
+    thread-safe).
     """
-    sdk = getattr(instance, "_service", None)
+    sdk = instance.build_thread_client()
     if sdk is None:
         return None
     label_ids = [s.strip() for s in str(instance.config.get("labels", "INBOX")).split(",") if s.strip()]
@@ -93,6 +100,8 @@ class AssistantManager:
         # Last durable active/admitted identities, for local shutdown/deadlines
         # when the database cannot be read. Never use this cache to admit work.
         self._active_runs = {}
+        # Monotonic time of the last retention attempt (None: not yet run).
+        self._retention_at = None
 
     async def start(self):
         if self._task and not self._task.done():
@@ -175,6 +184,7 @@ class AssistantManager:
                 timeout = retry_delay
                 retry_delay = min(60, retry_delay * 2)
                 failed = True
+            await self._maybe_retention_sweep()
             # DB outages deny new admission/tools, but must not kill this loop
             # or extend known inference deadlines. Retry with bounded backoff.
             for run in active:
@@ -191,6 +201,23 @@ class AssistantManager:
                 await asyncio.wait_for(self._wake.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
+
+    async def _maybe_retention_sweep(self):
+        """Low-cadence history retention, off the event loop and fail-safe.
+
+        The attempt time is recorded before the sweep, so a database outage
+        retries next interval instead of every backoff pass.
+        """
+        clock = time.monotonic()
+        if self._retention_at is not None and clock - self._retention_at < RETENTION_INTERVAL_SECONDS:
+            return
+        self._retention_at = clock
+        try:
+            counts = await run_sync(store.retention_sweep, service.assistant_id())
+            if any(counts.values()):
+                logger.info("Assistant retention sweep: %s", counts)
+        except Exception:
+            logger.exception("Assistant retention sweep failed")
 
     async def _observer_loop(self):
         while not self._stopping:

@@ -20,6 +20,18 @@ DEFAULTS = dict(agent_id=None, home_session_id=None, enabled=False, paused=False
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel")
 ACTIVE = ("admitted", "submitting", "running")
 IN_FLIGHT = ACTIVE + ("cancelling",)
+# Per-"day" admission limits use a rolling window anchored on each run's
+# created_at: a run counts, at whatever cost it later settles at, for 24h after
+# admission. No calendar midnight (UTC or owner-local) can reset the budget.
+USAGE_WINDOW = timedelta(hours=24)
+# Retention: settled/revoked event payloads are scrubbed after 30 days (the row
+# and fingerprint stay, so redelivered items still deduplicate); settled events
+# and terminal proactive runs are deleted after 180 days. Pending events and
+# in-flight runs are never touched. Each pass is bounded per table.
+EVENT_PAYLOAD_RETENTION_DAYS = 30
+HISTORY_RETENTION_DAYS = 180
+RETENTION_BATCH = 500
+SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
 
 
 def now():
@@ -249,12 +261,24 @@ def source_error(assistant_id, connector_id):
                               ("Observation failed; check this connector's connection", assistant_id, connector_id))
 
 
+def _window_usage(cursor, assistant_id):
+    """Proactive runs admitted in the rolling window and their reported cost.
+
+    Cost is attributed to the run's admission time, so a run settling after
+    any boundary still counts against the window it was admitted in.
+    """
+    since = (now() - USAGE_WINDOW).isoformat()
+    cursor.execute("SELECT COUNT(*) AS n,COALESCE(SUM(cost_usd),0) AS cost FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND created_at >= %s", (assistant_id, since))
+    return cursor.fetchone()
+
+
 def get_usage(assistant_id):
-    day = now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    """``runs_today``/``reported_cost_today`` keep their API names but cover
+    the rolling 24-hour window that admission enforces."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS runs_today,COALESCE(SUM(cost_usd),0) AS reported_cost_today FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND created_at >= %s", (assistant_id, day))
-        usage = row_to_dict(cursor.fetchone())
+        window = _window_usage(cursor, assistant_id)
+        usage = {"runs_today": window["n"], "reported_cost_today": window["cost"], "window_hours": 24}
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
         usage["in_flight_runs"] = cursor.fetchone()["n"]
         return usage
@@ -321,9 +345,7 @@ def admit_run(assistant_id):
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
         if cursor.fetchone()["n"] >= state["max_concurrent_runs"]:
             return None
-        day = now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        cursor.execute("SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS cost FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND created_at >= %s", (assistant_id, day))
-        usage = cursor.fetchone()
+        usage = _window_usage(cursor, assistant_id)
         # Reserve the configured per-run amount for *every* live run. Provider
         # billing is reported after a run, so this is not an exact dollar cap.
         cursor.execute("SELECT limits FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
@@ -419,3 +441,38 @@ def link_job(assistant_id, session_id, kind="delegated"):
             return existing
         cursor.execute("INSERT INTO assistant_runs (id,assistant_id,home_session_id,session_id,kind,status) VALUES (%s,%s,%s,%s,%s,'linked') RETURNING *", (str(uuid.uuid4()), assistant_id, state["home_session_id"], session_id, kind))
         return _parse(cursor.fetchone())
+
+
+def retention_sweep(assistant_id, at=None):
+    """Bounded retention pass; returns per-step row counts.
+
+    Linked-activity rows tolerate a missing event (event_ids is plain JSON and
+    events.run_id is ON DELETE SET NULL). Delegated/linked relationships are
+    kept while their session exists; only orphans past the horizon go.
+    """
+    at = at or now()
+    scrub_before = (at - timedelta(days=EVENT_PAYLOAD_RETENTION_DAYS)).isoformat()
+    delete_before = (at - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
+    held = ("pending",) + IN_FLIGHT
+    held_sql = ",".join(["%s"] * len(held))
+    in_flight_sql = ",".join(["%s"] * len(IN_FLIGHT))
+    counts = {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Delete past the horizon first so nothing is scrubbed only to be deleted.
+        cursor.execute(f"""DELETE FROM assistant_events WHERE id IN (
+            SELECT id FROM assistant_events WHERE assistant_id=%s AND status NOT IN ({held_sql})
+            AND observed_at < %s LIMIT %s)""", (assistant_id, *held, delete_before, RETENTION_BATCH))
+        counts["events_deleted"] = cursor.rowcount
+        cursor.execute(f"""DELETE FROM assistant_runs WHERE id IN (
+            SELECT r.id FROM assistant_runs r WHERE r.assistant_id=%s AND r.created_at < %s
+            AND ((r.kind='proactive' AND r.status NOT IN ({in_flight_sql})) OR (r.kind<>'proactive' AND r.session_id IS NULL))
+            AND NOT EXISTS (SELECT 1 FROM assistant_events e WHERE e.run_id=r.id AND e.status IN ({held_sql}))
+            LIMIT %s)""", (assistant_id, delete_before, *IN_FLIGHT, *held, RETENTION_BATCH))
+        counts["runs_deleted"] = cursor.rowcount
+        cursor.execute(f"""UPDATE assistant_events SET payload=%s WHERE id IN (
+            SELECT id FROM assistant_events WHERE assistant_id=%s AND status NOT IN ({held_sql})
+            AND observed_at < %s AND payload <> %s LIMIT %s)""",
+            (SCRUBBED_PAYLOAD, assistant_id, *held, scrub_before, SCRUBBED_PAYLOAD, RETENTION_BATCH))
+        counts["events_scrubbed"] = cursor.rowcount
+    return counts

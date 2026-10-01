@@ -1,6 +1,7 @@
 """Durable assistant storage exercised through the PostgreSQL test shim."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import pytest
 
@@ -133,3 +134,92 @@ def test_disconnected_source_stays_pending_but_withdrawn_grant_revokes(assistant
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM assistant_events WHERE assistant_id=%s AND status NOT IN ('completed')", (service.assistant_id(),))
         assert [r["status"] for r in cursor.fetchall()] == ["revoked"]
+
+
+def _backdate(table, column, row_id, **delta):
+    stamp = (store.now() - timedelta(**delta)).isoformat()
+    with get_db() as conn:
+        conn.cursor().execute(f"UPDATE {table} SET {column}=%s WHERE id=%s", (stamp, row_id))
+
+
+def _admit_settled(message_id, cost_usd=0.0):
+    events(message_id=message_id)
+    run = store.admit_run(service.assistant_id())
+    assert run
+    store.settle_run(run["id"], "completed", cost_usd=cost_usd)
+    return run
+
+
+def test_run_limit_is_a_rolling_24_hour_window(assistant_fixture):
+    service.configure({"max_runs_per_day": 1})
+    run = _admit_settled("window-1")
+    _backdate("assistant_runs", "created_at", run["id"], hours=23)
+    assert store.get_usage(service.assistant_id())["runs_today"] == 1
+    events(message_id="window-2")
+    # 23h ago is still inside the window: no midnight reset frees the slot.
+    assert store.admit_run(service.assistant_id()) is None
+    _backdate("assistant_runs", "created_at", run["id"], hours=25)
+    assert store.get_usage(service.assistant_id())["runs_today"] == 0
+    assert store.admit_run(service.assistant_id()) is not None
+
+
+def test_cost_settled_after_admission_counts_against_its_window(assistant_fixture):
+    service.configure({"max_runs_per_day": 50, "max_cost_per_run": 1, "max_cost_per_day": 2})
+    events(message_id="late-cost")
+    run = store.admit_run(service.assistant_id())
+    # Admitted shortly before a (UTC) midnight; the provider reports cost later.
+    _backdate("assistant_runs", "created_at", run["id"], hours=23, minutes=50)
+    store.settle_run(run["id"], "completed", cost_usd=1.5)
+    usage = store.get_usage(service.assistant_id())
+    assert usage["runs_today"] == 1 and usage["reported_cost_today"] == pytest.approx(1.5)
+    events(message_id="after-midnight")
+    assert store.admit_run(service.assistant_id()) is None  # 1.5 + 1 reserved > 2
+    _backdate("assistant_runs", "created_at", run["id"], hours=25)
+    assert store.admit_run(service.assistant_id()) is not None
+
+
+def _event_for(run_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_events WHERE run_id=%s", (run_id,))
+        return [store._parse(row) for row in cursor.fetchall()]
+
+
+def _event_by_id(event_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_events WHERE id=%s", (event_id,))
+        return store._parse(cursor.fetchone())
+
+
+def test_retention_scrubs_then_deletes_only_settled_history(assistant_fixture):
+    aid = service.assistant_id()
+    ancient = _admit_settled("ancient")
+    old = _admit_settled("old")
+    events(message_id="in-flight")
+    in_flight = store.admit_run(aid)
+    pending = events(message_id="still-pending")[0]
+    ancient_event, old_event = _event_for(ancient["id"])[0], _event_for(old["id"])[0]
+    in_flight_event = _event_for(in_flight["id"])[0]
+    for run_id, event_id, days in ((ancient["id"], ancient_event["id"], 200), (old["id"], old_event["id"], 40),
+                                   (in_flight["id"], in_flight_event["id"], 200)):
+        _backdate("assistant_runs", "created_at", run_id, days=days)
+        _backdate("assistant_events", "observed_at", event_id, days=days)
+    _backdate("assistant_events", "observed_at", pending["id"], days=200)
+
+    counts = store.retention_sweep(aid)
+    assert counts == {"events_scrubbed": 1, "events_deleted": 1, "runs_deleted": 1}
+    assert _event_by_id(ancient_event["id"]) is None and store.get_run(ancient["id"]) is None
+    scrubbed = _event_by_id(old_event["id"])
+    assert scrubbed["payload"] == {"retention_scrubbed": True}
+    assert scrubbed["fingerprint"] == old_event["fingerprint"] and scrubbed["status"] == "completed"
+    assert store.get_run(old["id"])["status"] == "completed"
+    # Pending events and in-flight runs (and their events) are never touched.
+    assert _event_by_id(pending["id"])["payload"] == pending["payload"]
+    assert _event_by_id(in_flight_event["id"])["payload"] == in_flight_event["payload"]
+    assert store.get_run(in_flight["id"])["status"] == "admitted"
+    # A redelivered item still deduplicates against the scrubbed fingerprint.
+    assert events(message_id="old") == []
+    # Scrubbed rows are not rewritten forever; activity still renders.
+    assert store.retention_sweep(aid) == {"events_scrubbed": 0, "events_deleted": 0, "runs_deleted": 0}
+    assert {row["id"] for row in store.get_activity(aid)} == {old["id"], in_flight["id"]}

@@ -116,6 +116,8 @@ describe('Assistant home', () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Repository review' }));
   expect(mocks.openSession).toHaveBeenCalledWith('task');
   expect(screen.getByText(/not a hard billing cap/)).toBeTruthy();
+  expect(screen.getByText('runs · last 24 hours')).toBeTruthy();
+  expect(screen.queryByText(/UTC/)).toBeNull();
  });
  it('does not erase an introduction draft when background state changes', async () => {
   configured({ introduction: { preferred_name: 'Original', repository_refs: ['owner/repo'] } }); render(AssistantHome);

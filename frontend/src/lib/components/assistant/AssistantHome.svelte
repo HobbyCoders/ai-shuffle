@@ -175,12 +175,12 @@
      <div class="section-heading"><div><span class="eyebrow">03 / BACKGROUND BOUNDARIES</span><h2>Always available. Never unbounded.</h2></div></div>
      <p class="muted">Optional background research is read-only and only uses sources you opt into below. Your normal conversation stays available while background work is off.</p>
      <div class="form-grid limits">
-      <label>Runs per day<input type="number" min="1" max="100" step="1" required bind:value={limits.max_runs_per_day} /></label>
+      <label>Runs per 24 hours<input type="number" min="1" max="100" step="1" required bind:value={limits.max_runs_per_day} /></label>
       <label>Concurrent runs<input type="number" min="1" max="3" step="1" required bind:value={limits.max_concurrent_runs} /></label>
       <label>Turns per run<input type="number" min="1" max="20" step="1" required bind:value={limits.max_turns} /></label>
       <label>Seconds per run<input type="number" min="30" max="900" step="1" required bind:value={limits.timeout_seconds} /></label>
       <label>Admission limit / run (USD)<input type="number" min="0.01" max="100" step="0.01" required bind:value={limits.max_cost_per_run} /></label>
-      <label>Admission limit / day (USD)<input type="number" min="0.01" max="1000" step="0.01" required bind:value={limits.max_cost_per_day} /></label>
+      <label>Admission limit / 24 hours (USD)<input type="number" min="0.01" max="1000" step="0.01" required bind:value={limits.max_cost_per_day} /></label>
      </div>
      <p class="micro">Dollar usage is reported after each run, not a hard provider billing cap. Actual charges can exceed these admission limits.</p>
      {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research with these limits</strong><small>Optional. No sources are enabled automatically.</small></span></label>{/if}
@@ -192,7 +192,7 @@
     <section class="research-panel" aria-label="Background research status">
      <div class="section-heading"><div><span class="eyebrow">PRESENCE</span><h2>While you’re away</h2></div><ShieldCheck size={20} /></div>
      <p class="muted">{assistant.status === 'ready' ? `Watching ${optedIn} opted-in ${optedIn === 1 ? 'source' : 'sources'}. Background work is read-only.` : assistant.status === 'guard_unavailable' ? 'Research cannot run until the server’s read-only safety guard is available.' : 'Background research is off. You can still talk, plan and coordinate work in your conversation.'}</p>
-     <div class="usage-grid"><div><strong>{assistant.usage.runs_today}<span> / {assistant.max_runs_per_day}</span></strong><small>runs today · UTC</small></div><div><strong>{assistant.usage.in_flight_runs}<span> / {assistant.max_concurrent_runs}</span></strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>{money(assistant.max_cost_per_day)} daily admission limit</small></div></div>
+     <div class="usage-grid"><div><strong>{assistant.usage.runs_today}<span> / {assistant.max_runs_per_day}</span></strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}<span> / {assistant.max_concurrent_runs}</span></strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>{money(assistant.max_cost_per_day)} admission limit · last 24 hours</small></div></div>
      <p class="micro">Per run: {assistant.max_turns} turns · {assistant.timeout_seconds}s · {money(assistant.max_cost_per_run)} admission limit. Costs are reported after runs, not a hard billing cap.</p>
      <div class="panel-actions">
       {#if assistant.enabled && !assistant.paused}<button class="secondary" disabled={!!busy} onclick={pause}><Pause size={15} />{busy === 'pause' ? 'Pausing…' : 'Pause background'} </button>
