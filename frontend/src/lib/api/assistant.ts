@@ -1,9 +1,15 @@
 /** Owner-only assistant controls over the existing unified agents and sessions. */
 import { api } from './client';
 
-export const AVATARS = ['robot', 'spark', 'orbit', 'sprout', 'pixel'] as const;
+export const AVATARS = [
+ 'robot', 'spark', 'orbit', 'sprout', 'pixel', 'owl', 'fox', 'cat',
+ 'bear', 'ghost', 'cloud', 'moon', 'sun', 'bolt', 'gem', 'drop'
+] as const;
 export type AvatarId = typeof AVATARS[number];
-export interface AgentIdentity { id: string; name: string; avatar_id: AvatarId }
+/** `dedicated` marks the agent Assistant setup created for itself. */
+export interface AgentIdentity { id: string; name: string; avatar_id: AvatarId; dedicated?: boolean }
+export const DEFAULT_ASSISTANT_NAME = 'Assistant';
+export const randomAvatar = (): AvatarId => AVATARS[Math.floor(Math.random() * AVATARS.length)];
 export interface AssistantIntroduction {
  preferred_name?: string;
  github_username?: string;
@@ -11,6 +17,7 @@ export interface AssistantIntroduction {
  project_ids?: string[];
  notes?: string;
 }
+/** Fixed server-side (RESEARCH_LIMITS in app/db/assistant.py); read-only here. */
 export interface AssistantLimits {
  max_runs_per_day: number;
  max_concurrent_runs: number;
@@ -47,9 +54,9 @@ export interface AssistantActivity {
  source_ids: string[]; event_ids: string[]; cost_usd: number;
  error: string | null; created_at: string; ended_at: string | null;
 }
-export type AssistantPatch = Partial<AssistantLimits & {
- agent_id: string; assistant_name: string; avatar_id: AvatarId;
- enabled: boolean; paused: boolean; introduction: AssistantIntroduction;
+export type AssistantPatch = Partial<{
+ agent_id: string; create_agent: boolean; assistant_name: string; avatar_id: AvatarId;
+ enabled: boolean; paused: boolean;
 }>;
 export const getAssistant = () => api.get<AssistantState>('/assistant');
 export const configureAssistant = (patch: AssistantPatch) => api.patch<AssistantState>('/assistant', patch);

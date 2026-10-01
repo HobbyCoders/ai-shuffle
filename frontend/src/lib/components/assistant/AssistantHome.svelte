@@ -2,9 +2,9 @@
  /** Assistant is a home for one existing agent, not a new conversation mode. */
  import { onMount } from 'svelte';
  import { ArrowUpRight, MessageSquare, AudioLines, Pause, Play, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight } from 'lucide-svelte';
- import { AVATARS, configureAssistant, openAssistant, pauseAssistant, resumeAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantLimits, type AvatarId } from '$lib/api/assistant';
+ import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, pauseAssistant, resumeAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId } from '$lib/api/assistant';
  import { assistantState, agentIdentities, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
- import { appData, profiles, projects } from '$lib/stores/app-data.svelte';
+ import { appData, profiles } from '$lib/stores/app-data.svelte';
  import { layout } from '$lib/stores/layout.svelte';
  import { sessionOwnerEpoch } from '$lib/stores/session-owner';
  import { openSession } from '$lib/services/session-navigation';
@@ -28,18 +28,18 @@
  let activity = $state<AssistantActivity[]>([]);
  let editing = $state(false);
  let activating = $state(false);
+ // 'dedicated' is the agent setup creates (or already created) for the
+ // assistant; 'mine' is any existing agent the owner picks instead.
+ let agentChoice = $state<'dedicated' | 'mine'>('dedicated');
  let agentId = $state('');
  let assistantName = $state('');
  let avatar = $state<AvatarId>('robot');
- let preferredName = $state('');
- let githubUsername = $state('');
- let repositories = $state('');
- let projectIds = $state<string[]>([]);
- let notes = $state('');
- // Initialized from server policy only, never an implicit activation default.
- let limits = $state<AssistantLimits | null>(null);
+ // Picked once per page so toggling the agent choice does not reshuffle it.
+ const suggestedAvatar = randomAvatar();
+ const dedicatedAgent = $derived($agentIdentities.find(a => a.dedicated));
  const chosenAgent = $derived($profiles.find(p => p.id === agentId));
- const identityEditable = $derived(!!chosenAgent && !chosenAgent.is_builtin);
+ const identityEditable = $derived(agentChoice === 'dedicated' || (!!chosenAgent && !chosenAgent.is_builtin));
+ const canSave = $derived(agentChoice === 'dedicated' || !!agentId);
  const hasAgent = $derived(!!assistant?.agent);
  const statusText = $derived(!assistant ? '' : ({ unconfigured: 'Not set up', agent_unavailable: 'Agent unavailable', disabled: 'Background off', paused: 'Background paused', guard_unavailable: 'Research unavailable', ready: 'Background enabled' }[assistant.status]));
  const optedIn = $derived(sources.filter(s => s.enabled).length);
@@ -57,7 +57,7 @@
    const firstLoad = !loaded; loaded = true;
    if (!editing && (!$assistantState?.configured || (firstLoad && requestedId))) {
     beginEdit();
-    if (requestedId && $profiles.some(p => p.id === requestedId)) { agentId = requestedId; selectAgent(); }
+    if (requestedId && $profiles.some(p => p.id === requestedId)) { agentChoice = 'mine'; agentId = requestedId; selectAgent(); }
    }
   } catch (e) { if (current()) error = assistantError(e); }
   finally { if (current()) { loading = false; refreshing = false; } }
@@ -73,17 +73,26 @@
   assistantName = identity?.name ?? $profiles.find(p => p.id === agentId)?.name ?? '';
   avatar = identity?.avatar_id ?? 'robot';
  }
+ function selectDedicated() {
+  assistantName = dedicatedAgent?.name ?? DEFAULT_ASSISTANT_NAME;
+  avatar = dedicatedAgent?.avatar_id ?? suggestedAvatar;
+ }
+ function chooseAgentKind(kind: 'dedicated' | 'mine') {
+  agentChoice = kind;
+  if (kind === 'dedicated') selectDedicated();
+  else if (agentId) selectAgent();
+ }
  function beginEdit(activate = false) {
   if (!assistant) return;
-  agentId = assistant.agent_id ?? '';
-  assistantName = assistant.assistant_name ?? '';
-  avatar = assistant.avatar_id;
-  preferredName = assistant.introduction.preferred_name ?? '';
-  githubUsername = assistant.introduction.github_username ?? '';
-  repositories = (assistant.introduction.repository_refs ?? []).join('\n');
-  projectIds = [...(assistant.introduction.project_ids ?? [])];
-  notes = assistant.introduction.notes ?? '';
-  limits = { max_runs_per_day: assistant.max_runs_per_day, max_concurrent_runs: assistant.max_concurrent_runs, max_turns: assistant.max_turns, timeout_seconds: assistant.timeout_seconds, max_cost_per_run: assistant.max_cost_per_run, max_cost_per_day: assistant.max_cost_per_day };
+  if (assistant.agent_id) {
+   agentChoice = assistant.agent?.dedicated ? 'dedicated' : 'mine';
+   agentId = assistant.agent?.dedicated ? '' : assistant.agent_id;
+   assistantName = assistant.assistant_name ?? '';
+   avatar = assistant.avatar_id;
+  } else {
+   agentChoice = 'dedicated'; agentId = '';
+   selectDedicated();
+  }
   activating = activate; editing = true; error = ''; notice = '';
  }
  async function act(key: string, operation: () => Promise<void>) {
@@ -94,19 +103,20 @@
  }
  async function save(event: SubmitEvent) {
   event.preventDefault();
-  if (!limits || !agentId) return;
-  const policy = { ...limits };
+  if (!canSave) return;
+  const target = agentChoice === 'dedicated' ? dedicatedAgent?.id : agentId;
+  const created = agentChoice === 'dedicated' && !target;
   await act('save', async () => {
-   const next = await configureAssistant({
-    agent_id: agentId, ...policy,
-    ...(assistant?.agent_id !== agentId ? { enabled: false, paused: true } : {}),
-    ...(identityEditable ? { assistant_name: assistantName.trim(), avatar_id: avatar } : {}),
-    introduction: { preferred_name: preferredName.trim(), github_username: githubUsername.trim(), repository_refs: repositories.split(/[\n,]+/).map(s => s.trim()).filter(Boolean), project_ids: projectIds, notes: notes.trim() },
+   const patch: AssistantPatch = {
+    ...(created ? { create_agent: true } : { agent_id: target }),
+    ...(created || assistant?.agent_id !== target ? { enabled: false, paused: true } : {}),
+    ...(identityEditable ? { assistant_name: assistantName.trim() || DEFAULT_ASSISTANT_NAME, avatar_id: avatar } : {}),
     ...(activating ? { enabled: true, paused: false } : {})
-   });
+   };
+   const next = await configureAssistant(patch);
    if (!current()) return;
    acceptAssistant(next); editing = false;
-   notice = activating ? 'Background research enabled. Only your opted-in sources can be observed.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
+   notice = activating ? 'Background research enabled. Only your opted-in sources can be observed.' : created ? 'Assistant created. Open the conversation whenever you’re ready.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
    await appData.loadProfiles();
    await load();
   });
@@ -122,7 +132,7 @@
   });
  }
  function pause() { void act('pause', async () => { const next = await pauseAssistant(); if (current()) { acceptAssistant(next); notice = 'Background research paused. Your conversation is still available.'; await load(); } }); }
- function resume() { void act('resume', async () => { const next = await resumeAssistant(); if (current()) { acceptAssistant(next); notice = 'Background research resumed with your saved limits and sources.'; await load(); } }); }
+ function resume() { void act('resume', async () => { const next = await resumeAssistant(); if (current()) { acceptAssistant(next); notice = 'Background research resumed with your opted-in sources.'; await load(); } }); }
  function toggleSource(source: AssistantSource) {
   void act(source.id, async () => { const next = await setAssistantSource(source.connector_id, !source.enabled); if (current()) sources = sources.map(s => s.id === next.id ? next : s); });
  }
@@ -138,53 +148,43 @@
   <div class="loading" role="status"><span class="skeleton orb"></span><span class="skeleton line"></span><span class="skeleton line short"></span><p>Getting your assistant ready…</p></div>
  {:else if assistant}
   <header class="hero">
-   <div class="portrait"><AgentAvatar avatar={assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
+   <div class="portrait"><AgentAvatar avatar={editing && identityEditable ? avatar : assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
    <div class="hero-copy"><div class="status" class:enabled={assistant.status === 'ready'}><span aria-hidden="true"></span>{statusText}</div>
     <h1>{hasAgent ? assistant.assistant_name : 'A familiar face. A lasting conversation.'}</h1>
-    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access and limits you control.` : 'Choose one of your agents to be your everyday assistant. Keep its knowledge, tools and personality — and give it a place to call home.'}</p>
+    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access and limits you control.` : 'Give it a name and a face. It gets one lasting conversation, and you can change any of this later.'}</p>
     {#if hasAgent && !editing}
      <div class="hero-actions"><button class="primary" disabled={!!busy} onclick={() => conversation()}><MessageSquare size={17} />{busy === 'open' ? 'Opening…' : 'Open conversation'}<ArrowUpRight size={16} /></button>
       {#if voiceEnabled}<button class="secondary" disabled={!!busy} onclick={() => conversation(true)}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}
-      <button class="icon-button" aria-label="Edit assistant and introduction" title="Edit assistant and introduction" disabled={!!busy} onclick={() => beginEdit()}><Settings2 size={18} /></button>
+      <button class="icon-button" aria-label="Edit assistant" title="Edit assistant" disabled={!!busy} onclick={() => beginEdit()}><Settings2 size={18} /></button>
      </div>
      <p class="micro">Text and voice share this conversation. The microphone is only used when you start a call or dictate.</p>
     {/if}
    </div>
   </header>
 
-  {#if editing && limits}
+  {#if editing}
    <form class="setup" onsubmit={save}>
     <fieldset disabled={!!busy}>
-     <div class="section-heading"><div><span class="eyebrow">01 / IDENTITY</span><h2>{assistant.configured ? 'Make it yours' : 'Meet your assistant'}</h2></div><button type="button" class="text-button" onclick={() => layout.openFeaturePage('profile')}><Plus size={15} />Manage agents</button></div>
-     <p class="muted">One of your existing agents, not a separate profile. Changing this selection deliberately changes the agent in your home conversation.</p>
-     <div class="form-grid">
+     <div class="section-heading"><div><span class="eyebrow">01 / IDENTITY</span><h2>{assistant.configured ? 'Make it yours' : 'Meet your assistant'}</h2></div></div>
+     <label class="name-field">Assistant name<input required={identityEditable} disabled={!identityEditable} maxlength="80" bind:value={assistantName} placeholder={DEFAULT_ASSISTANT_NAME} /></label>
+     <span class="field-label" id="avatar-label">Avatar</span>
+     <div class="avatar-picker" role="group" aria-labelledby="avatar-label">{#each AVATARS as choice}<button type="button" class:selected={avatar === choice} aria-pressed={avatar === choice} aria-label={`${choice} avatar`} title={choice} disabled={!identityEditable} onclick={() => avatar = choice}><AgentAvatar avatar={choice} size={44} /></button>{/each}</div>
+
+     <div class="section-heading"><div><span class="eyebrow">02 / AGENT</span><h2>What runs it</h2></div><button type="button" class="text-button" onclick={() => layout.openFeaturePage('profile')}><Plus size={15} />Manage agents</button></div>
+     <div class="agent-choices" role="radiogroup" aria-label="Assistant agent kind">
+      <label class="choice" class:selected={agentChoice === 'dedicated'}><input type="radio" name="agent-kind" value="dedicated" checked={agentChoice === 'dedicated'} onchange={() => chooseAgentKind('dedicated')} /><span><strong>A dedicated assistant agent</strong><small>{dedicatedAgent ? `Uses ${dedicatedAgent.name}, the agent setup made earlier.` : 'Setup creates a new agent on your default text model (Settings → Providers → Generated text).'} You can change its instructions and tools in Agents.</small></span></label>
+      <label class="choice" class:selected={agentChoice === 'mine'}><input type="radio" name="agent-kind" value="mine" checked={agentChoice === 'mine'} onchange={() => chooseAgentKind('mine')} /><span><strong>One of my agents</strong><small>Keeps that agent’s prompts, models and permissions. Switching later moves your home conversation to the new agent.</small></span></label>
+     </div>
+     {#if agentChoice === 'mine'}
       <label>Assistant agent<select required bind:value={agentId} onchange={selectAgent}><option value="" disabled>Choose an existing agent</option>{#each $profiles as agent (agent.id)}<option value={agent.id}>{agent.name}{agent.is_builtin ? ' · built-in' : ''}</option>{/each}</select></label>
-      <label>Assistant name<input required={identityEditable} disabled={!identityEditable} maxlength="80" bind:value={assistantName} placeholder="The name you’ll call it" /></label>
-     </div>
-     {#if !$profiles.length}<p class="message">No agents yet. Create an agent in Agents, then return here to choose it.</p>{/if}
-     {#if chosenAgent?.is_builtin}<p class="micro">Built-in identity is protected. Create a custom agent in Agents to give it a new name and avatar.</p>{/if}
-     <div class="avatar-picker" role="group" aria-label="Assistant avatar">{#each AVATARS as choice}<button type="button" class:selected={avatar === choice} aria-pressed={avatar === choice} aria-label={`${choice} avatar`} disabled={!identityEditable} onclick={() => avatar = choice}><AgentAvatar avatar={choice} size={46} /><span>{choice}</span></button>{/each}</div>
+      {#if !$profiles.length}<p class="message">No agents yet. Use a dedicated assistant agent, or create one in Agents.</p>{/if}
+      {#if chosenAgent?.is_builtin}<p class="micro">Built-in identity is protected. Create a custom agent in Agents to give it a new name and avatar.</p>{/if}
+     {/if}
 
-     <div class="section-heading"><div><span class="eyebrow">02 / A LITTLE ABOUT YOU</span><h2>Start with an introduction</h2></div><span class="optional">Optional</span></div>
-     <div class="form-grid"><label>What should I call you?<input bind:value={preferredName} maxlength="80" autocomplete="given-name" placeholder="Your preferred name" /></label><label>GitHub username<input bind:value={githubUsername} maxlength="39" pattern={'[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?'} placeholder="username, not a URL" autocapitalize="none" /></label></div>
-     <label>Repositories you care about<textarea rows="2" bind:value={repositories} placeholder="owner/repository — one per line"></textarea></label>
-     {#if $projects.length}<div class="project-picker"><span class="field-label">Your projects</span>{#each $projects as project (project.id)}<label class="check-label"><input type="checkbox" value={project.id} bind:group={projectIds} />{project.name}</label>{/each}</div>{/if}
-     <label>Anything else worth knowing?<textarea rows="3" maxlength="1000" bind:value={notes} placeholder="What you’re working on, how you like to collaborate…"></textarea></label>
-     <p class="trust-note"><ShieldCheck size={16} />This is context, not permission. It does not connect accounts, clone repositories, or enable any source.</p>
-
-     <div class="section-heading"><div><span class="eyebrow">03 / BACKGROUND BOUNDARIES</span><h2>Always available. Never unbounded.</h2></div></div>
-     <p class="muted">Optional background research is read-only and only uses sources you opt into below. Your normal conversation stays available while background work is off.</p>
-     <div class="form-grid limits">
-      <label>Runs per 24 hours<input type="number" min="1" max="100" step="1" required bind:value={limits.max_runs_per_day} /></label>
-      <label>Concurrent runs<input type="number" min="1" max="3" step="1" required bind:value={limits.max_concurrent_runs} /></label>
-      <label>Turns per run<input type="number" min="1" max="20" step="1" required bind:value={limits.max_turns} /></label>
-      <label>Seconds per run<input type="number" min="30" max="900" step="1" required bind:value={limits.timeout_seconds} /></label>
-      <label>Admission limit / run (USD)<input type="number" min="0.01" max="100" step="0.01" required bind:value={limits.max_cost_per_run} /></label>
-      <label>Admission limit / 24 hours (USD)<input type="number" min="0.01" max="1000" step="0.01" required bind:value={limits.max_cost_per_day} /></label>
-     </div>
-     <p class="micro">Dollar usage is reported after each run, not a hard provider billing cap. Actual charges can exceed these admission limits.</p>
-     {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research with these limits</strong><small>Optional. No sources are enabled automatically.</small></span></label>{/if}
-     <div class="form-actions"><button type="submit" class="primary" disabled={!agentId || !!busy}>{busy === 'save' ? 'Saving…' : activating ? 'Save & enable research' : 'Save assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
+     <div class="section-heading"><div><span class="eyebrow">03 / BACKGROUND RESEARCH</span><h2>What happens while you’re away</h2></div></div>
+     <p class="explain">Background research stays off until you turn it on and opt a connected source in below. Once it’s on, your assistant checks those sources about once a minute for new items, such as the subject and preview of unread email, and looks into them in a short research pass. A pass can search and read the web and the source, but it can’t send, change or delete anything. Each pass is capped at {assistant.max_turns} turns and {Math.round(assistant.timeout_seconds / 60)} minutes, with at most {assistant.max_runs_per_day} passes and about {money(assistant.max_cost_per_day)} of reported usage in any 24 hours. What it finds shows up under Activity below.</p>
+     {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research</strong><small>Optional. No sources are turned on automatically.</small></span></label>{/if}
+     <div class="form-actions"><button type="submit" class="primary" disabled={!canSave || !!busy}>{busy === 'save' ? 'Saving…' : activating ? 'Save & enable research' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
     </fieldset>
    </form>
   {:else if assistant.configured}
@@ -198,10 +198,10 @@
       {#if assistant.enabled && !assistant.paused}<button class="secondary" disabled={!!busy} onclick={pause}><Pause size={15} />{busy === 'pause' ? 'Pausing…' : 'Pause background'} </button>
       {:else if assistant.enabled && assistant.paused}<button class="secondary" disabled={!!busy || !hasAgent} onclick={resume}><Play size={15} />{busy === 'resume' ? 'Resuming…' : 'Resume background'}</button>
       {:else}<button class="secondary" disabled={!!busy || !hasAgent} onclick={() => beginEdit(true)}><Play size={15} />Review & enable</button>{/if}
-      <button class="text-button" disabled={!!busy} onclick={() => beginEdit()}>Edit limits<ChevronRight size={14} /></button>
+      <button class="text-button" disabled={!!busy} onclick={() => beginEdit()}>Edit setup<ChevronRight size={14} /></button>
      </div>
     </section>
-    <section class="identity-note"><AgentAvatar avatar={assistant.avatar_id} size={48} /><h2>Same agent.<br />More continuity.</h2><p class="muted">Your instructions, models, tools and permissions stay in Agents. Home adds a lasting conversation, an introduction and deliberate background boundaries.</p><button class="text-button" onclick={() => layout.openFeaturePage('profile', assistant.agent_id)}>Open agent settings<ArrowUpRight size={15} /></button></section>
+    <section class="identity-note"><AgentAvatar avatar={assistant.avatar_id} size={48} /><h2>Same agent.<br />More continuity.</h2><p class="muted">Your instructions, models, tools and permissions stay in Agents. Home adds a lasting conversation and optional read-only research with fixed limits.</p><button class="text-button" onclick={() => layout.openFeaturePage('profile', assistant.agent_id)}>Open agent settings<ArrowUpRight size={15} /></button></section>
    </div>
   {/if}
 
@@ -233,7 +233,7 @@
  button { cursor:pointer; transition:background .2s, border-color .2s, transform .2s; }
  button:active:not(:disabled) { transform:translateY(1px); }
  button:disabled,fieldset:disabled { opacity:.55; cursor:not-allowed; }
- button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
+ button:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
  .primary,.secondary,.icon-button,.text-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; border-radius:8px; border:1px solid transparent; font-size:12px; font-weight:550; }
  .primary { background:var(--primary); color:var(--primary-foreground); padding:0 18px; }
  .primary:hover:not(:disabled) { filter:brightness(1.08); }
@@ -282,26 +282,25 @@
  fieldset { border:0; padding:0; margin:0; min-width:0; }
  .setup .section-heading:not(:first-child) { margin:32px 0 18px; padding-top:24px; border-top:1px solid var(--border); }
  label,.field-label { display:flex; flex-direction:column; gap:8px; font-size:12px; font-weight:500; margin:16px 0; }
- input,select,textarea { width:100%; border:1px solid var(--border); background:var(--background); color:var(--foreground); border-radius:7px; padding:11px 12px; font:inherit; min-height:44px; }
- textarea { resize:vertical; line-height:1.7; }
- input:hover,select:hover,textarea:hover { border-color:var(--input-border-hover); }
+ input,select { width:100%; border:1px solid var(--border); background:var(--background); color:var(--foreground); border-radius:7px; padding:11px 12px; font:inherit; min-height:44px; }
+ input:hover,select:hover { border-color:var(--input-border-hover); }
  input:disabled { color:var(--muted-foreground); cursor:not-allowed; }
- .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 18px; }
- .limits { grid-template-columns:repeat(3,minmax(0,1fr)); }
- .avatar-picker { display:flex; gap:10px; flex-wrap:wrap; margin:20px 0; }
- .avatar-picker button { display:flex; flex-direction:column; align-items:center; gap:8px; border:1px solid transparent; border-radius:10px; padding:8px; background:transparent; color:var(--muted-foreground); font-size:10px; text-transform:capitalize; }
+ .name-field { max-width:420px; }
+ .avatar-picker { display:grid; grid-template-columns:repeat(4,max-content); gap:8px; margin:0 0 8px; }
+ .avatar-picker button { display:flex; align-items:center; justify-content:center; border:1px solid transparent; border-radius:12px; padding:6px; background:transparent; }
+ .agent-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+ .choice { flex-direction:row; align-items:flex-start; gap:12px; margin:0; padding:16px; border:1px solid var(--border); border-radius:10px; background:var(--background); cursor:pointer; font-weight:400; }
+ .choice.selected { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 5%,var(--background)); }
+ .choice input { width:18px; height:18px; min-height:0; padding:0; margin:1px 0 0; accent-color:var(--primary); flex:none; }
+ .choice strong { display:block; font-size:12px; font-weight:550; }
+ .choice small { display:block; margin-top:6px; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
+ .explain { max-width:680px; font-size:12px; line-height:1.8; color:var(--muted-foreground); margin:0; }
  .avatar-picker button.selected,.avatar-picker button:hover:not(:disabled) { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 6%,transparent); color:var(--foreground); }
- .optional { font-size:10px; color:var(--muted-foreground); }
  .check-label { flex-direction:row; align-items:center; gap:12px; min-height:44px; font-weight:400; }
  .check-label input { width:18px; height:18px; min-height:0; padding:0; accent-color:var(--primary); flex:none; }
- .project-picker { display:flex; flex-wrap:wrap; gap:0 20px; }
- .project-picker .field-label { width:100%; margin-bottom:0; }
- .project-picker label { margin:0; }
  .activation { padding:16px; border-radius:8px; background:var(--background); border:1px solid var(--border); margin-top:22px; }
  .activation strong { font-size:12px; font-weight:500; }
  .activation small { display:block; color:var(--muted-foreground); font-size:11px; margin-top:6px; line-height:1.6; }
- .trust-note { display:flex; align-items:flex-start; gap:9px; padding:12px 0; color:var(--muted-foreground); font-size:11px; line-height:1.7; }
- .trust-note :global(svg) { flex:none; margin-top:1px; color:var(--primary); }
  .form-actions { margin-top:24px; }
  .message { display:flex; align-items:center; gap:10px; padding:14px 16px; border:1px solid var(--border); background:var(--card); color:var(--foreground); border-radius:8px; font-size:12px; line-height:1.7; margin:14px 0; }
  .message :global(svg) { flex:none; color:var(--primary); }
@@ -313,7 +312,7 @@
  :global(.spin) { animation:spin 1s linear infinite; }
  @keyframes spin { to { transform:rotate(360deg); } } @keyframes pulse { to { opacity:.4; } }
  @media(min-width:800px) { .hero { animation:arrive .35s ease-out; } @keyframes arrive { from { opacity:0; transform:translateY(8px); } } }
- @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .limits { grid-template-columns:repeat(2,minmax(0,1fr)); } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
- @media(max-width:430px) { .form-grid:not(.limits) { grid-template-columns:1fr; gap:0; } .avatar-picker { gap:3px; } .avatar-picker button { padding:5px; } .usage-grid { gap:8px; } .usage-grid strong { font-size:20px; } .usage-grid small { font-size:10px; } .empty { padding:18px; } }
+ @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .agent-choices { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
+ @media(max-width:430px) { .avatar-picker { gap:4px; } .usage-grid { gap:8px; } .usage-grid strong { font-size:20px; } .usage-grid small { font-size:10px; } .empty { padding:18px; } }
  @media(prefers-reduced-motion:reduce) { .hero,.skeleton,:global(.spin) { animation:none!important; } button,.source-toggle>span:first-child::after { transition:none; } }
 </style>
