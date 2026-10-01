@@ -865,9 +865,11 @@ async def test_interrupted_turn_falls_back_to_provider_estimate() -> None:
     assert "cost_usd" not in ev.usage
 
 
-@pytest.mark.parametrize("completed_tool", [False, True])
-async def test_interrupted_transport_keeps_partial_output_without_replaying_tools(completed_tool):
+async def test_interrupted_transport_keeps_partial_output_without_replaying_tools():
+    # A drop after a tool call closed is never re-sent. A drop with no closed
+    # call is: see test_dropped_connection_without_a_closed_tool_call_is_resent.
     from fluid.messages import ToolUseBlock
+    completed_tool = True
     calls = []
 
     @tool("touch", "Record a side effect", {"type": "object", "properties": {}})
@@ -919,6 +921,172 @@ async def test_interrupted_transport_keeps_partial_output_without_replaying_tool
         assert provider.calls == 3
         assert calls == [{}]
         assert any(m.text() == "Partial answer" for m in provider.requests[-1].messages)
+    finally:
+        await loop.aclose()
+
+
+def _dropped(*, elapsed: float = 30.0, replay_safe: bool | None = None) -> list[StreamChunk]:
+    """A reply cut by the peer while a tool call's arguments were streaming."""
+    payload = {
+        "message": "RemoteProtocolError: incomplete chunked read",
+        "retriable": False,
+        "transport_failure": {
+            "chunks_delivered": True, "exception_type": "RemoteProtocolError",
+            "elapsed_seconds": elapsed, "lines_received": 12, "retrying": False,
+        },
+    }
+    if replay_safe is not None:
+        payload["replay_safe"] = replay_safe
+    return _text("Partial answer")[:3] + [
+        StreamChunk("block_start", {"index": 1, "block_type": "tool_use",
+                                    "tool_name": "mcp__test__touch", "tool_use_id": "cut"}),
+        StreamChunk("tool_args_delta", {"index": 1, "partial_json": '{"unfinished":'}),
+        StreamChunk("error", payload),
+    ]
+
+
+def _touch_registry(calls: list) -> ToolRegistry:
+    @tool("touch", "Record a side effect", {"type": "object", "properties": {}})
+    async def touch(args):
+        calls.append(args)
+        return {"content": [{"type": "text", "text": "executed once"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("test", [touch]))
+    return registry
+
+
+async def test_dropped_connection_without_a_closed_tool_call_is_resent(monkeypatch):
+    import fluid.engine.native as native
+    from fluid.events import ProviderRetry
+    from fluid.messages import ToolUseBlock
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
+    calls: list = []
+    provider = ScriptedProvider([
+        _tool("executed", "mcp__test__touch", "{}"), _dropped(), _text("Continued safely"),
+    ])
+    store = MemoryStore()
+    loop = NativeLoop(provider=provider, store=store, model="test",
+                      registry=_touch_registry(calls),
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        events = loop.bus.log(loop.session_id)
+        assert provider.calls == 3
+        # The completed tool ran exactly once; the cut call never ran.
+        assert calls == [{}]
+        assert not any(isinstance(e, ErrorEvent) for e in events)
+        assert any(isinstance(e, TurnComplete) for e in events)
+        [retry] = [e for e in events if isinstance(e, ProviderRetry)]
+        assert retry.cause == "connection_dropped"
+        assert (retry.attempt, retry.max_attempts) == (1, 2)
+        # The retry re-sent exactly the history the dropped call saw.
+        assert provider.requests[2].messages == provider.requests[1].messages
+        assert not any(isinstance(e, ToolResult) and e.tool_use_id == "cut" for e in events)
+        replayed = [e for e in events if isinstance(e, Usage) and e.raw.get("transport_drop_retry")]
+        assert [e.raw["transport_drop_retry"] for e in replayed] == [1]
+        path = await store.load_path(loop.session_id)
+        # Nothing of the dropped reply was stored; the answer that followed was.
+        assert not any(n.message.text() == "Partial answer" for n in path)
+        assert path[-1].message.text() == "Continued safely"
+        uses = [b.id for n in path for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert uses == ["executed"]
+    finally:
+        await loop.aclose()
+
+
+async def test_dropped_connection_gives_up_after_the_retry_budget(monkeypatch):
+    import fluid.engine.native as native
+    from fluid.events import ProviderRetry
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
+    calls: list = []
+    provider = ScriptedProvider([_dropped(), _dropped(), _dropped(), _text("never requested")])
+    store = MemoryStore()
+    loop = NativeLoop(provider=provider, store=store, model="test",
+                      registry=_touch_registry(calls),
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        events = loop.bus.log(loop.session_id)
+        assert provider.calls == 1 + native.TRANSPORT_DROP_MAX_RETRIES
+        assert calls == []
+        retries = [e for e in events if isinstance(e, ProviderRetry)]
+        assert [r.attempt for r in retries] == [1, 2]
+        error = next(e for e in events if isinstance(e, ErrorEvent))
+        assert "again after 2 automatic retries" in error.message
+        assert "No automatic replay" not in error.message
+        # The last partial reply is kept for a user-directed continuation.
+        path = await store.load_path(loop.session_id)
+        assert path[-1].message.text() == "Partial answer"
+    finally:
+        await loop.aclose()
+
+
+async def test_long_dropped_call_is_resent_once(monkeypatch):
+    import fluid.engine.native as native
+    from fluid.events import ProviderRetry
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
+    provider = ScriptedProvider([_dropped(elapsed=901.0), _dropped(elapsed=901.0), _text("x")])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="test",
+                      registry=_touch_registry([]),
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        events = loop.bus.log(loop.session_id)
+        assert provider.calls == 2
+        assert [(r.attempt, r.max_attempts) for r in events
+                if isinstance(r, ProviderRetry)] == [(1, 1)]
+        assert "again after 1 automatic retry." in next(
+            e for e in events if isinstance(e, ErrorEvent)).message
+    finally:
+        await loop.aclose()
+
+
+async def test_dropped_connection_marked_unsafe_by_the_client_is_not_resent(monkeypatch):
+    import fluid.engine.native as native
+    from fluid.events import ProviderRetry
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
+    provider = ScriptedProvider([_dropped(replay_safe=False), _text("never requested")])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="test",
+                      registry=_touch_registry([]),
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        events = loop.bus.log(loop.session_id)
+        assert provider.calls == 1
+        assert not any(isinstance(e, ProviderRetry) for e in events)
+        assert "No automatic replay was attempted" in next(
+            e for e in events if isinstance(e, ErrorEvent)).message
+    finally:
+        await loop.aclose()
+
+
+async def test_stop_during_the_reconnect_backoff_ends_the_turn(monkeypatch):
+    import fluid.engine.native as native
+    from fluid.events import ProviderRetry
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 5.0)
+    provider = ScriptedProvider([_dropped(), _text("never requested")])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="test",
+                      registry=_touch_registry([]),
+                      permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="Start"))
+        for _ in range(200):
+            if loop._session is not None and any(
+                isinstance(e, ProviderRetry) for e in loop.bus.log(loop.session_id)
+            ):
+                break
+            await asyncio.sleep(0.01)
+        await loop.submit(Interrupt())
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        events = loop.bus.log(loop.session_id)
+        assert provider.calls == 1
+        assert any(isinstance(e, Interrupted) for e in events)
+        assert not any(isinstance(e, ErrorEvent) for e in events)
     finally:
         await loop.aclose()
 

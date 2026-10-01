@@ -631,6 +631,10 @@ class OpenAIResponsesClient:
                             "message": f"{type(exc).__name__}: {exc}",
                             "retriable": False,
                             "transport_failure": evidence,
+                            # A native image generation may already have
+                            # produced (and billed) an image, so the engine
+                            # must not re-send it either.
+                            "replay_safe": not native_image,
                         },
                     )
                     return

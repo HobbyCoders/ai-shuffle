@@ -159,8 +159,10 @@ async def test_real_incomplete_chunked_read():
         await server.wait_closed()
 
 
-async def test_native_turn_preserves_real_truncated_stream_and_does_not_retry():
+async def test_native_turn_preserves_real_truncated_stream_after_bounded_retries(monkeypatch):
+    import fluid.engine.native as native
     from fluid.engine.native import NativeLoop
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
     from fluid.events import ErrorEvent, UserTurn, Usage
     from fluid.store.base import MemoryStore
 
@@ -195,7 +197,9 @@ async def test_native_turn_preserves_real_truncated_stream_and_does_not_retry():
             try:
                 await loop.submit(UserTurn(content="Start"))
                 await asyncio.wait_for(loop.wait_turn(), 5)
-                assert len(requests) == 1
+                # Every attempt drops mid-reply: the first call plus the
+                # automatic reconnects, then the turn ends on the error.
+                assert len(requests) == 1 + native.TRANSPORT_DROP_MAX_RETRIES
                 events = loop.bus.log(loop.session_id)
                 error = next(e for e in events if isinstance(e, ErrorEvent))
                 assert "connection was interrupted" in error.message

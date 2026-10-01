@@ -24,11 +24,17 @@ into the turn totals so nothing billed is lost. A stream cut while a tool
 call's arguments were still arriving is the same retry under its own label
 ("truncated stream") and a lower cap, ``TRUNCATED_STREAM_MAX_RETRIES``.
 
-A call that fails after content streamed keeps that content: the visible text
-and the tool calls that closed are stored as an assistant node marked
-``provider_meta["interrupted"]``, each closed call answered by an error
-result, whether the stream died on a dropped connection, an in-stream error or
-a body cut before its terminal event.
+A connection the provider drops mid-response is re-sent with the same history
+(up to ``TRANSPORT_DROP_MAX_RETRIES`` times, with a ProviderRetry event whose
+``cause`` is ``"connection_dropped"``) when the partial response closed no tool
+call: tools run only after a call completes, so nothing in it ran. A drop
+after a tool call closed is not re-sent.
+
+A call that fails after content streamed, and is not re-sent, keeps that
+content: the visible text and the tool calls that closed are stored as an
+assistant node marked ``provider_meta["interrupted"]``, each closed call
+answered by an error result, whether the stream died on a dropped connection,
+an in-stream error or a body cut before its terminal event.
 
 A turn that ends on an ErrorEvent leaves the head on an unanswered user node —
 a text prompt, or the tool results the model never got to read — or on the
@@ -403,6 +409,10 @@ class _CallResult:
     # normalized stop reason (OpenRouter's native_finish_reason). "stop" with a
     # native reason of "network_error" is how a dead upstream replica looks.
     native_stop_reason: str | None = None
+    # False when the provider client says the failed request must not be sent
+    # again even though no local tool ran (a native image generation that
+    # may already have produced a billed image).
+    replay_safe: bool = True
 
 
 # Provider error-message markers that mean "the prompt no longer fits" — the
@@ -577,6 +587,20 @@ EMPTY_COMPLETION_MAX_RETRIES = 10
 # spending ten full generations on a request that cannot get through.
 TRUNCATED_STREAM_MAX_RETRIES = 3
 
+# A provider connection that drops mid-response (the peer closes the stream
+# before its terminal event) is re-sent when nothing in the dropped response
+# can have run. Tools only run after a call completes, so a response that
+# closed no tool call left no side effect behind and was never stored: the
+# same request goes out again with the same history. Production drops on the
+# ChatGPT/Codex backend are one-offs (an upstream close mid tool arguments or
+# mid reasoning), so two attempts ride them out.
+TRANSPORT_DROP_MAX_RETRIES = 2
+# A call that had already streamed this long when it dropped gets one retry
+# only. The ChatGPT/Codex backend has closed response streams at about 900 s
+# (the engine's own stream deadline is 900 s too), and a request that ran into
+# that cap once may well run into it again.
+TRANSPORT_DROP_LONG_CALL_S = 600.0
+
 _EMPTY_STREAM_MARKER = "terminal usage chunk"
 
 # Stored on ``Message.provider_meta`` of an assistant node kept from a call
@@ -635,6 +659,32 @@ def _is_empty_completion(result: _CallResult) -> bool:
     if result.stop_reason == "error":
         return bool(result.error_message and _EMPTY_STREAM_MARKER in result.error_message)
     return _measured_prompt_tokens(result.usage) == 0
+
+
+def _transport_drop_retry_budget(result: _CallResult) -> int:
+    """How many times this failed call may be re-sent as-is (0: never).
+
+    Only a connection the provider dropped after the stream had started, with
+    no tool call closed in the partial response: those calls were never
+    dispatched or shown as made, and the request itself is idempotent. A drop
+    before anything arrived was already retried by the provider client; a
+    client that marks the request unsafe to replay (native image generation)
+    is respected.
+    """
+    evidence = result.usage.get("transport_failure")
+    if (
+        result.stop_reason != "error"
+        or result.interrupted
+        or not isinstance(evidence, dict)
+        or evidence.get("chunks_delivered") is not True
+        or result.tool_uses
+        or not result.replay_safe
+    ):
+        return 0
+    elapsed = evidence.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and elapsed >= TRANSPORT_DROP_LONG_CALL_S:
+        return 1
+    return TRANSPORT_DROP_MAX_RETRIES
 
 
 def _plain_text(blocks: list[Any]) -> str:
@@ -3068,6 +3118,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         continuations = 0
         stop_hook_continuations = 0
         arg_stream_retries = 0  # runaway tool-argument streams, retried once
+        drop_retries = 0  # CONSECUTIVE re-sends after a dropped connection
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
@@ -3298,7 +3349,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                         tool_use_id=result.arg_stream_tool["tool_use_id"],
                         name=result.arg_stream_tool["name"], input={},
                     ))
+            if result.stop_reason != "error":
+                drop_retries = 0
             if result.stop_reason == "error":
+                drop_budget = _transport_drop_retry_budget(result)
+                replay_drop = (
+                    drop_retries < drop_budget and not self._interrupted.is_set()
+                )
                 # A failed HTTP request can still be billable. Record and
                 # publish it before deciding whether the context-overflow path
                 # is eligible for another escalation retry.
@@ -3306,6 +3363,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 usage_raw = dict(result.usage)
                 usage_raw["model_call_index"] = num_calls
                 usage_raw["projected_prompt_tokens"] = projected_prompt
+                if replay_drop:
+                    usage_raw["transport_drop_retry"] = drop_retries + 1
                 usage_raw.update(self._cache_probe_fields(result.usage))
                 await self._emit(Usage(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
@@ -3318,6 +3377,47 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raw=usage_raw,
                 ))
                 await self._alert_unexplained_cache_misses(sid, turn_id, usage_raw)
+                if replay_drop:
+                    # The provider dropped the connection mid-response and no
+                    # tool call in that response closed, so none ran and none
+                    # was shown as made. Nothing is stored: the same history
+                    # goes out again, and the partial output the user saw
+                    # stays in the live stream only.
+                    drop_retries += 1
+                    delay = _empty_retry_delay(drop_retries)
+                    evidence = result.usage.get("transport_failure") or {}
+                    log.warning(
+                        "Provider connection dropped mid-response (session %s, "
+                        "turn %s, %s after %ss, %s lines); re-sending the same "
+                        "request in %.0fs (attempt %d of %d)",
+                        sid, turn_id, evidence.get("exception_type"),
+                        evidence.get("elapsed_seconds"),
+                        evidence.get("lines_received"), delay,
+                        drop_retries, drop_budget,
+                    )
+                    await self._emit(ProviderRetry(
+                        session_id=sid, turn_id=turn_id,
+                        attempt=drop_retries, max_attempts=drop_budget,
+                        reason=(
+                            "provider connection dropped before the response "
+                            "finished; reconnecting"
+                        ),
+                        delay_seconds=delay, model=self.model,
+                        cause="connection_dropped",
+                    ))
+                    try:
+                        await asyncio.wait_for(self._interrupted.wait(), timeout=delay)
+                    except TimeoutError:
+                        pass  # normal case: the backoff elapsed uninterrupted
+                    if self._interrupted.is_set():
+                        partial, partial_cost = self._partial_usage(total_usage)
+                        await self._emit_terminal_with_park(Interrupted(
+                            session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                            usage=partial, cost_usd=partial_cost,
+                            num_model_calls=num_calls,
+                        ))
+                        return
+                    continue
                 if (
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
@@ -3466,6 +3566,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                     await self.store.append(sid, node)
                     parent = node
+                if (
+                    drop_retries
+                    and isinstance(result.usage.get("transport_failure"), dict)
+                    and result.usage["transport_failure"].get("chunks_delivered") is True
+                ):
+                    # The default wording says no replay was attempted; here
+                    # the reconnects were made and the connection kept dropping.
+                    tries = "retry" if drop_retries == 1 else "retries"
+                    result.error_message = (
+                        "The provider connection was interrupted before the "
+                        f"response finished, again after {drop_retries} automatic "
+                        f"{tries}. The response may be incomplete. Review any "
+                        "completed actions before asking to continue."
+                    )
                 partial, partial_cost = self._partial_usage(total_usage)
                 await self._emit_terminal_with_park(ErrorEvent(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
@@ -4488,6 +4602,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         b["type"] == "tool_use" and "input" not in b
                         for b in blocks.values()
                     ),
+                    replay_safe=payload.get("replay_safe") is not False,
                 )
 
         if self._interrupted.is_set():

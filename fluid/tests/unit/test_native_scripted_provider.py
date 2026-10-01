@@ -748,14 +748,20 @@ async def test_a_chat_stream_cut_mid_arguments_is_retried(server):
     assert run.ran == [] and len(server.requests) == 2
 
 
-async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
-    server.script(Reply(frames=[
+def _dropped_text_reply() -> Reply:
+    return Reply(frames=[
         Messages.start(),
         Messages.ev("content_block_start", index=0, content_block={"type": "text", "text": ""}),
         Messages.ev("content_block_delta", index=0,
                     delta={"type": "text_delta", "text": "Partial"}),
         CUT,
-    ], framing="chunked"))
+    ], framing="chunked")
+
+
+async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
+    # Every attempt drops: the first call and each automatic reconnect.
+    server.script(*[_dropped_text_reply()
+                    for _ in range(1 + native_mod.TRANSPORT_DROP_MAX_RETRIES)])
     run = Harness(server, "anthropic")
     try:
         events = await run.turn()
@@ -766,18 +772,51 @@ async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
     error = _terminal(events)
     assert isinstance(error, ErrorEvent) and not error.retriable
     assert "connection was interrupted" in error.message
+    assert "again after 2 automatic retries" in error.message
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "Partial"
     assert stored[1].provider_meta == {"interrupted": "transport_failure"}
-    assert len(server.requests) == 1  # never replayed after content flowed
+    # No tool call closed, so the same request was re-sent within the budget.
+    assert len(server.requests) == 1 + native_mod.TRANSPORT_DROP_MAX_RETRIES
+    assert [r.cause for r in _of(events, ProviderRetry)] == ["connection_dropped"] * 2
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "responses"])
+async def test_a_socket_dropped_mid_tool_arguments_is_resent(server, kind):
+    """The production shape: the provider closes a chunked stream while a tool
+    call's arguments are still arriving. The call never closed, so nothing
+    ran; the same request goes out again and the turn completes."""
+    if kind == "anthropic":
+        cut = [Messages.start(),
+               *Messages.tool_block(0, "call_1", "Echo", '{"text": "hel', stop=False)]
+    else:
+        cut = [Responses.created(),
+               *Responses.function_call("fc_0", "call_1", "Echo", '{"text": "hel', done=False)]
+    server.script(Reply(frames=[*cut, CUT], framing="chunked"),
+                  text_reply(kind, "second try"))
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    [retry] = _of(events, ProviderRetry)
+    assert retry.cause == "connection_dropped" and retry.max_attempts == 2
+    assert _of(events, ToolUse) == [] and _of(events, ToolResult) == [] and run.ran == []
+    assert len(server.requests) == 2
+    assert server.requests[0].body == server.requests[1].body
+    assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "second try"
 
 
 async def test_a_stream_that_stalls_after_content_times_out_instead_of_hanging(server):
-    server.script([
+    stall = [
         Messages.start(),
         Messages.ev("content_block_start", index=0, content_block={"type": "text", "text": ""}),
         Messages.ev("content_block_delta", index=0, delta={"type": "text_delta", "text": "Hm"}),
         Sleep(10),
-    ])
+    ]
+    server.script(*[stall] * (1 + native_mod.TRANSPORT_DROP_MAX_RETRIES))
     run = Harness(server, "anthropic", client_kwargs={"timeout": 0.3})
     try:
         events = await run.turn()
@@ -786,7 +825,8 @@ async def test_a_stream_that_stalls_after_content_times_out_instead_of_hanging(s
 
     error = _terminal(events)
     assert isinstance(error, ErrorEvent) and "connection was interrupted" in error.message
-    assert len(server.requests) == 1
+    # A read timeout after content is a dropped connection: re-sent, then given up.
+    assert len(server.requests) == 1 + native_mod.TRANSPORT_DROP_MAX_RETRIES
 
 
 async def test_a_chat_provider_that_never_sends_data_is_given_up_on(server, monkeypatch):
@@ -1075,8 +1115,9 @@ async def test_an_in_stream_rate_limit_reports_status_429(server):
 
 
 async def test_a_dropped_connection_has_no_http_status(server):
-    server.script(Reply(frames=[Messages.start(), *Messages.text_block(0, "x")[:2], CUT],
-                        framing="chunked"))
+    dropped = Reply(frames=[Messages.start(), *Messages.text_block(0, "x")[:2], CUT],
+                    framing="chunked")
+    server.script(*[dropped] * (1 + native_mod.TRANSPORT_DROP_MAX_RETRIES))
     run = Harness(server, "anthropic")
     try:
         events = await run.turn()

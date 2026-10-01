@@ -474,6 +474,11 @@ class ProviderRetry(Event):
     reason: str  # short human text, e.g. "empty response from provider"
     delay_seconds: float  # backoff before this retry
     model: str | None = None
+    # Machine-readable kind of failure being retried, for hosts that show some
+    # retries and hide others. ``"connection_dropped"``: the provider closed the
+    # stream mid-response and the same request is being re-sent. None for the
+    # other retry kinds (empty or truncated responses, runaway arguments).
+    cause: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
