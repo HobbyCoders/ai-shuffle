@@ -279,8 +279,9 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     The read-path counterpart of :func:`resolve_cwd`. Looks up the session's
     checkout row (honoring ``session.branch``) via ``resolve_local_checkout`` and
     returns its ``path`` ONLY when the row exists AND that dir is present on this
-    runner's disk. Returns ``None`` otherwise — an unmaterialized (or vanished)
-    checkout surfaces honestly and the caller falls back to the default
+    runner's disk; branch-bound paths must also have their own matching Git HEAD.
+    Returns ``None`` otherwise — an unavailable checkout surfaces honestly and
+    the caller falls back to the default
     workspace. No ``git worktree add`` / no clone, so reads never mutate disk.
     """
     row = resolve_local_checkout(session_row)
@@ -288,5 +289,12 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
         return None
     path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
     if path and os.path.isdir(path):
+        branch = _effective_branch(session_row)
+        if branch:
+            try:
+                checkout_manager._require_branch_binding(path, branch)
+            except checkout_manager.WorktreeError as e:
+                logger.warning("project_resolver: refusing checkout for branch %r: %s", branch, e)
+                return None
         return path
     return None

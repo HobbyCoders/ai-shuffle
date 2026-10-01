@@ -465,6 +465,11 @@ def test_moved_checkout_resolves_existing_candidate(mock_db, monkeypatch, tmp_pa
     live_path = tmp_path / "live"
     old_path.mkdir()
     live_path.mkdir()
+    if branch:
+        # A branch checkout is a real Git binding, not just an existing folder.
+        from tests.git_repo_helpers import init_repo
+
+        init_repo(live_path, branch=branch)
     # Use the production writer: registering the new path retains the old row.
     old = checkouts_db.upsert_checkout(pv2["id"], runner, str(old_path), branch=branch)
     live = checkouts_db.upsert_checkout(pv2["id"], runner, str(live_path), branch=branch)

@@ -957,6 +957,24 @@ describe('transcript model lookups', () => {
 
 	const SETTLED_OPTS = { isStreaming: false, groupingEnabled: true };
 
+	it('excludes explicit and legacy same-turn steers from checkpoint occurrences', () => {
+		const first = user('again', undefined, 'turn-1');
+		const legacySteer = user('again', undefined, 'turn-1');
+		const explicitSteer = { ...user('again'), checkpointBacked: false };
+		const next = user('again', undefined, 'turn-2');
+		const messages = [first, tool(), legacySteer, explicitSteer, next];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(model.rewindEligible).toEqual([true, false, false, false, true]);
+		expect(model.promptOccurrence[4]).toBe(1);
+	});
+
+	it('does not treat the shared backfill sentinel as a mid-turn steer', () => {
+		const messages = [user('again', undefined, 'backfill'), user('again', undefined, 'backfill')];
+		const model = buildTranscriptModel(messages, SETTLED_OPTS);
+		expect(model.rewindEligible).toEqual([true, true]);
+		expect(model.promptOccurrence).toEqual([0, 1]);
+	});
+
 	it('matches the per-row prompt-occurrence scan for every message', () => {
 		const messages: ChatMessage[] = [
 			user('deploy the site'),

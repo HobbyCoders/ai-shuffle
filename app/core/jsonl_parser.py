@@ -835,14 +835,18 @@ def parse_jsonl_file(jsonl_path: Path) -> Generator[Dict[str, Any], None, None]:
     interleaved write leaves behind), is skipped with a warning; parsing
     continues with the next line.
 
-    Bytes that are not valid UTF-8 are decoded as U+FFFD instead of raising:
-    with a strict decoder ONE bad byte raised out of the read loop and dropped
-    every line from that point — for a small transcript the whole history.
+    Decode UTF-8 inside the per-record guard: a text iterator can fail while
+    filling its buffer, before yielding even the valid surrounding records.
+    Undecodable records are skipped with a warning, not silently repaired.
     """
     try:
-        with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
+        with open(jsonl_path, 'rb') as f:
             for line_num, line in enumerate(f, 1):
-                line = line.strip()
+                try:
+                    line = line.decode('utf-8').strip()
+                except UnicodeDecodeError as e:
+                    logger.warning(f"Skipping undecodable line {line_num} in {jsonl_path}: {e}")
+                    continue
                 if not line:
                     continue
                 try:

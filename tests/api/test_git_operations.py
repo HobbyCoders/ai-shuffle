@@ -525,11 +525,14 @@ class TestExecuteFinish:
         main = tmp_path / "main"
         wt = main / ".fluid" / "worktrees" / "feat-x"
         other = main / ".fluid" / "worktrees" / "feat-other"
-        wt.mkdir(parents=True)
-        other.mkdir(parents=True)
-        (wt / ".git").write_text(
-            f"gitdir: {main / '.git' / 'worktrees' / 'feat-x'}\n", encoding="utf-8"
-        )
+        # The resolver now verifies root + HEAD; exercise real worktree bindings
+        # rather than a .git marker pointing at a nonexistent repository.
+        from app.db.async_database import run_sync
+        from tests.git_repo_helpers import git, init_repo
+
+        await run_sync(init_repo, main)
+        for branch, path in [("feat/x", wt), ("feat/other", other)]:
+            await run_sync(git, main, "worktree", "add", str(path), "-b", branch)
         for branch, path in [(None, main), ("feat/x", wt), ("feat/other", other)]:
             checkouts.upsert_checkout(
                 project["id"], settings.effective_instance_id, str(path), branch=branch

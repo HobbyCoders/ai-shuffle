@@ -98,7 +98,8 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     from app.core.provider.types import SessionOptions
 
     class _Store:
-        def render_memory_section(self, project):
+        def render_memory_section(self, project, *, checkout=None):
+            assert project == "project:x" and checkout == "."
             return "# Memory\n(no saved facts yet — Remember saves one, Recall searches)"
 
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda *a: (_Store(), "project:x"))
@@ -111,7 +112,8 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     assert note.startswith("<system-reminder>")
 
     class _Empty(_Store):
-        def render_memory_section(self, project):
+        def render_memory_section(self, project, *, checkout=None):
+            assert project == "project:x" and checkout == "."
             return None
 
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda *a: (_Empty(), "project:x"))

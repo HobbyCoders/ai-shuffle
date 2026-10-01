@@ -8,6 +8,8 @@ import { activeSession } from '$lib/stores/active-session';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
 import { api } from '$lib/api/client';
+import { hydrateModelRegistry } from '$lib/constants/models';
+import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); platform.set('desktop'); appMode.set('code'); activeSession.newChat(); });
 afterAll(() => vi.unstubAllGlobals());
@@ -149,6 +151,29 @@ function props(overrides: Record<string, unknown> = {}) {
 }
 
 describe('integrated mobile composer controls', () => {
+	it('shows 272K and 1M in the Sol 6.1 model drawer', async () => {
+		vi.spyOn(api, 'get').mockResolvedValueOnce({
+			models: [
+				{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
+				{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 }
+			], default: 'sonnet', legacy_map: {},
+			providers: [{ id: 'codex', name: 'ChatGPT', provider_type: 'chatgpt',
+				default_model: 'gpt-6.1-sol', models: [{ id: 'gpt-6.1-sol', label: 'Sol 6.1',
+					context_window: 272_000, context_window_choices: [272_000, 1_000_000] }] }]
+		});
+		await hydrateModelRegistry();
+		const catalog = buildModelPickerCatalog();
+		const onContextChoiceSelect = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({
+			modelOptions: catalog.options, modelGroups: catalog.groups,
+			modelValue: 'prov:codex:gpt-6.1-sol', modelLabel: 'Sol 6.1', onContextChoiceSelect
+		}) });
+		await fireEvent.click(screen.getByRole('button', { name: 'Model: Sol 6.1' }));
+		await fireEvent.click(screen.getByRole('radio', { name: '272K · Standard' }));
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('standard');
+		await fireEvent.click(screen.getByRole('radio', { name: '1M · Extended' }));
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
+	});
 	it.each(['overview', 'models'])('keeps upward and downward swipes on the %s drawer native', async page => {
 		const onClose = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onClose }) });

@@ -1082,14 +1082,16 @@ class TestWorkerEndsWithOutstandingWork:
 
 class TestWorkerDoctrine:
 
-    def test_the_subagent_prompt_says_there_is_no_wake_seam(self, monkeypatch):
+    def test_the_subagent_prompt_distinguishes_parking_from_final_report(self, monkeypatch):
         monkeypatch.setattr(td, "_is_worker_session", lambda sid: True)
         monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "root-1", 1))
 
         prompt = td.subagent_system_prompt("w-1")
 
-        assert "NO WAKE SEAM" in prompt
-        assert "Never end with" in prompt
+        assert "NO WAKE SEAM" not in prompt
+        assert "runtime parks you and resumes" in prompt
+        assert "not your final assignment report" in prompt
+        assert "Never submit" in prompt
         assert "ONE sentence stating the result" in prompt
 
     def test_the_task_receipt_says_to_disambiguate_before_fanning_out(

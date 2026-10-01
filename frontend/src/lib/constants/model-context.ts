@@ -14,12 +14,13 @@ export type ContextWindowChoice = 'standard' | '1m';
 export const DEFAULT_CONTEXT_WINDOW_CHOICE: ContextWindowChoice = '1m';
 const CLAUDE_STANDARD_CONTEXT = 200_000;
 const GPT_STANDARD_CONTEXT = 256_000;
+const GPT_272K_CONTEXT = 272_000;
 const EXTENDED_CONTEXT = 1_000_000;
 
 export interface ModelContextControl {
-	standardTokens: typeof CLAUDE_STANDARD_CONTEXT | typeof GPT_STANDARD_CONTEXT;
+	standardTokens: typeof CLAUDE_STANDARD_CONTEXT | typeof GPT_STANDARD_CONTEXT | typeof GPT_272K_CONTEXT;
 	extendedTokens: typeof EXTENDED_CONTEXT;
-	standardLabel: '200K' | '256K';
+	standardLabel: '200K' | '256K' | '272K';
 	extendedLabel: '1M';
 }
 
@@ -60,11 +61,12 @@ export function getModelContextControl(
 		};
 	}
 	if (identity.includes('gpt')) {
-		if (choices && !choices.includes(GPT_STANDARD_CONTEXT)) return null;
+		const standard = choices?.includes(GPT_272K_CONTEXT) ? GPT_272K_CONTEXT : GPT_STANDARD_CONTEXT;
+		if (choices && !choices.includes(standard)) return null;
 		return {
-			standardTokens: GPT_STANDARD_CONTEXT,
+			standardTokens: standard,
 			extendedTokens: EXTENDED_CONTEXT,
-			standardLabel: '256K',
+			standardLabel: standard === GPT_272K_CONTEXT ? '272K' : '256K',
 			extendedLabel: '1M'
 		};
 	}

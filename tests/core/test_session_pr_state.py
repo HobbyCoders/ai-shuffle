@@ -257,7 +257,10 @@ async def test_reconcile_canonical_session_without_legacy_project(mock_db, tmp_p
     """PR discovery must use the owner checkout even without a legacy alias."""
     from app.core.config import settings
     from app.db import checkouts, projects_v2
+    from app.db.async_database import run_sync
+    from tests.git_repo_helpers import init_repo
 
+    await run_sync(init_repo, tmp_path, branch="feat/canonical")
     project = projects_v2.upsert_project("git:canonical-pr", name="Repo")
     sid = _mk(project_v2_id=project["id"])
     database.set_session_branch(sid, "feat/canonical")

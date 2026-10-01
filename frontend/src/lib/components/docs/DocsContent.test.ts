@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { getDocByFullSlug, preloadAllDocs } from '$lib/docs/index';
+import DocsCard from './DocsCard.svelte';
 import DocsContent from './DocsContent.svelte';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -36,6 +38,33 @@ describe('DocsContent code copy', () => {
 });
 
 describe('DocsContent in-app links', () => {
+	it.each([
+		['getting-started/_index', 'Remote access', 'getting-started/remote-access'],
+		['getting-started/remote-access', 'First run', 'getting-started/first-run']
+	])('opens the real prose link from %s in the bundled Docs card', async (source, linkName, target) => {
+		await preloadAllDocs();
+		const { layout } = await import('$lib/stores/layout.svelte');
+		layout.openFeaturePage('docs');
+		const sourceDoc = getDocByFullSlug(source)!;
+		const targetDoc = getDocByFullSlug(target)!;
+		const view = render(DocsContent, { content: sourceDoc.content });
+		const link = view.getByRole('link', { name: linkName });
+		expect(link.getAttribute('href')).toBe(`/docs/${target}`);
+		const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+		link.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(layout.current.activeView).toMatchObject({ type: 'docs', itemId: target });
+
+		// Feed the real value the click produced to the same consumer MainPanel
+		// uses, rather than seeding an unrelated deep-link fixture.
+		const initialItemId = layout.current.activeView!.itemId;
+		cleanup();
+		const card = render(DocsCard, { initialItemId });
+		await waitFor(() => expect(card.container.querySelector('.docs-content h1')?.textContent)
+			.toBe(targetDoc.content.match(/^# (.+)$/m)![1]));
+		expect(layout.current.activeView?.itemId).toBeNull();
+	});
+
 	it('opens a /docs/<category>/<slug> link inside the Docs panel instead of leaving the app', async () => {
 		const { layout } = await import('$lib/stores/layout.svelte');
 		const open = vi.spyOn(layout, 'openFeaturePage').mockImplementation(() => {});

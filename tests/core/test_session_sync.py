@@ -445,3 +445,154 @@ class TestSessionSyncAPIIntegration:
         import inspect
         sig = inspect.signature(list_sessions)
         assert "sync_claude_sessions" in sig.parameters
+
+
+# =============================================================================
+# Producing-file regressions: discovery -> import -> lazy transcript backfill
+# =============================================================================
+
+@pytest.fixture
+def cli_transcript(tmp_path, monkeypatch):
+    from app.core import cli_sessions
+    from app.core.config import settings
+
+    projects_dir = tmp_path / "claude-projects"
+    monkeypatch.setattr(settings, "claude_projects_dir", projects_dir)
+    sid = str(uuid.uuid4())
+    project_dir = projects_dir / cli_sessions.project_key_for_directory(str(tmp_path))
+    project_dir.mkdir(parents=True)
+    path = project_dir / f"{sid}.jsonl"
+    records = [
+        {"type": "user", "uuid": "cli-user", "parentUuid": None,
+         "cwd": str(tmp_path), "timestamp": "2024-01-01T00:00:00Z",
+         "message": {"role": "user", "content": "Historical question"}},
+        {"type": "assistant", "uuid": "cli-assistant", "parentUuid": "cli-user",
+         "message": {"role": "assistant", "content": [
+             {"type": "text", "text": "Historical answer"}]}},
+    ]
+    return sid, path, records
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2024-01-01T00:00:00Z",
+    "2026-09-23T12:34:56.789Z",
+    "2020-02-03T05:06:07+02:00",
+])
+def test_import_preserves_discovered_creation_date(mock_db, cli_transcript, timestamp):
+    import json
+    from datetime import datetime, timezone
+    from app.core.session_sync import SessionSyncService
+    from app.db import database
+
+    sid, path, records = cli_transcript
+    records[0]["timestamp"] = timestamp
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+    working_dir = records[0]["cwd"]
+    service = SessionSyncService()
+    discovered = service.discover_unimported_sessions(None, working_dir)
+    assert [info.session_id for info in discovered] == [sid]
+    expected = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+    assert discovered[0].created_at == int(expected.timestamp() * 1000)
+
+    imported = service.import_session(discovered[0], None, working_dir)
+    assert imported is not None
+    persisted = database.get_session(imported["id"])
+    assert datetime.fromisoformat(persisted["created_at"]) == expected
+
+
+@pytest.mark.parametrize("created_at, expected", [
+    (1704067200, "2024-01-01T00:00:00+00:00"),
+    (1704067200000, "2024-01-01T00:00:00+00:00"),
+    (None, None), (0, None), ("invalid", None),
+    (float("nan"), None), (float("inf"), None), (10 ** 100, None),
+])
+def test_import_creation_date_compatibility(mock_database, created_at, expected):
+    from app.core.session_sync import SessionSyncService
+
+    info = make_sdk_session_info()
+    info.created_at = created_at
+    with patch("app.core.session_sync.get_session_cost_from_jsonl", return_value={}):
+        assert SessionSyncService().import_session(info, None, "/workspace") is not None
+    assert mock_database.create_session_with_stats.call_args.kwargs["created_at"] == expected
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-a-date", 123])
+def test_import_missing_or_malformed_file_date_falls_back(mock_db, cli_transcript, timestamp):
+    import json
+    from datetime import datetime, timezone
+    from app.core.session_sync import SessionSyncService
+
+    sid, path, records = cli_transcript
+    records[0]["timestamp"] = timestamp
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+    service = SessionSyncService()
+    discovered = service.discover_unimported_sessions(None, records[0]["cwd"])
+    assert [info.session_id for info in discovered] == [sid]
+    assert discovered[0].created_at is None
+    before = datetime.now(timezone.utc)
+    imported = service.import_session(discovered[0], None, records[0]["cwd"])
+    assert imported is not None
+    assert before <= datetime.fromisoformat(imported["created_at"]) <= datetime.now(timezone.utc)
+
+
+@pytest.mark.parametrize("damaged", [
+    b'\xffmalformed record',
+    b'{"type":"user","uuid":"damaged","parentUuid":"cli-user",'
+    b'"message":{"role":"user","content":"corrupted \xff text"}}',
+])
+async def test_imported_archive_backfills_valid_records_around_bad_utf8(
+    mock_db, cli_transcript, damaged, caplog, monkeypatch,
+):
+    import json
+    import os
+    from app.core.history_backfill import ensure_backfilled
+    from app.core.session_sync import SessionSyncService
+    from app.db import session_events
+
+    # SQLite cannot implement PostgreSQL advisory locks. This single-reader
+    # regression exercises real inserts/projection, not lock concurrency.
+    mock_db.create_function("hashtext", 1, lambda value: 0)
+    mock_db.create_function("pg_advisory_xact_lock", 1, lambda value: None)
+    # Match psycopg's JSONB decoding for the store columns, which the shim
+    # otherwise returns as TEXT. All values still come from the real writer.
+    import sqlite3
+
+    def store_json_row(cursor, values):
+        row = sqlite3.Row(cursor, values)
+        if "entry" in row.keys() or "data" in row.keys():
+            return {key: json.loads(row[key]) if key in {"entry", "data"}
+                    and isinstance(row[key], str) else row[key] for key in row.keys()}
+        return row
+
+    mock_db.row_factory = store_json_row
+    from tests import pg_shim
+    translate_sql = pg_shim.translate_sql
+    monkeypatch.setattr(pg_shim, "translate_sql", lambda sql: translate_sql(sql).replace(
+        "EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)", "strftime('%s', 'now')",
+    ))
+    sid, path, records = cli_transcript
+    path.write_bytes(json.dumps(records[0]).encode("utf-8") + b"\n" + damaged + b"\n"
+                     + json.dumps(records[1]).encode("utf-8") + b"\n")
+    old = time.time() - 3600  # archived: outside the live-history freshness guard
+    os.utime(path, (old, old))
+    service = SessionSyncService()
+    discovered = service.discover_unimported_sessions(None, records[0]["cwd"])
+    assert [info.session_id for info in discovered] == [sid]
+    imported = service.import_session(discovered[0], None, records[0]["cwd"])
+    assert imported is not None
+    assert mock_db.execute("SELECT COUNT(*) FROM session_store_entries").fetchone()[0] == 0
+    assert session_events.get_events(imported["id"]) == []
+
+    await ensure_backfilled(imported["id"])
+
+    rows = session_events.get_events(imported["id"])
+    assert [row["event_type"] for row in rows] == ["message.user", "message.assistant"]
+    assert [row["payload"]["content"] for row in rows] == [
+        "Historical question", "Historical answer",
+    ]
+    assert all(row["turn_id"] == "backfill" for row in rows)
+    assert mock_db.execute("SELECT COUNT(*) FROM session_store_entries").fetchone()[0] == 2
+    assert f"Skipping undecodable line 2 in {path}" in caplog.text
+
+    await ensure_backfilled(imported["id"])
+    assert len(session_events.get_events(imported["id"])) == 2

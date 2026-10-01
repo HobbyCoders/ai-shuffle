@@ -496,10 +496,14 @@ def test_note_monitor_and_run_python_wording() -> None:
     assert "BOUNDED summary" in monitor and "TaskOutput has the full buffer" in monitor
     assert "exit code of 0 needs no TaskOutput" in monitor
     assert "returns a falsy MissingFile instead of raising" in _RUN_PYTHON_DESC
-    assert "other errors now return as results and do not abort the cell" in _RUN_PYTHON_DESC
+    assert "Recoverable failures return inspectable error text" in _RUN_PYTHON_DESC
+    assert "safety/validation barriers abort" in _RUN_PYTHON_DESC
+    assert "single-call cell is appropriate" in _RUN_PYTHON_DESC
     assert "Never continue past permission denials" not in _RUN_PYTHON_DESC
     addendum = compose_code_mode_addendum()
-    assert "Other errors now return as results and do not abort the cell" in addendum
+    assert "Recoverable failures return inspectable error text" in addendum
+    assert "safety/validation barriers abort" in addendum
+    assert "single-call cell is appropriate" in addendum
 
 
 def test_addendum_without_read_does_not_say_other_errors() -> None:
@@ -510,4 +514,5 @@ def test_addendum_without_read_does_not_say_other_errors() -> None:
     addendum = compose_code_mode_addendum(frozenset({"Grep", "Glob"}))
     assert "MissingFile" not in addendum
     assert "Other errors" not in addendum
-    assert "Tool errors now return as results and do not abort the cell" in addendum
+    assert "Recoverable failures return inspectable error text" in addendum
+    assert "safety/validation barriers abort" in addendum

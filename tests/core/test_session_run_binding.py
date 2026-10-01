@@ -357,19 +357,22 @@ class TestTurnResolution:
         assert opts.aih_context_window == 256_000
         assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "256000"
 
-    @pytest.mark.parametrize("window", [256_000, 1_000_000])
-    def test_astra_context_choice_reaches_the_runtime(self, mock_db, tmp_path, window):
+    @pytest.mark.parametrize("model_id,window", [
+        ("gpt-6-astra", 256_000), ("gpt-6-astra", 1_000_000),
+        ("gpt-6.1-sol", 272_000), ("gpt-6.1-sol", 1_000_000),
+    ])
+    def test_astra_context_choice_reaches_the_runtime(self, mock_db, tmp_path, model_id, window):
         encryption.set_encryption_key("pw", db)
         db.create_model_provider(
             provider_id="astra", name="OpenAI", provider_type="openai",
             base_url="https://api.openai.com/v1",
             auth_token=encryption.encrypt_value("test-token"),
-            models=[{"id": "gpt-6-astra", "label": "Astra", "context_window": 272000}],
+            models=[{"id": model_id, "label": model_id, "context_window": 272000}],
             enabled=True,
         )
         make_profile("agent", {"cwd": str(tmp_path)})
         db.create_session(
-            "s-astra", profile_id="agent", model="prov:astra:gpt-6-astra",
+            "s-astra", profile_id="agent", model=f"prov:astra:{model_id}",
             context_window=window,
         )
         opts = _build_options(

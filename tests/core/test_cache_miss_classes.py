@@ -1,4 +1,4 @@
-"""Every prompt-cache miss fluid's probe reports gets one of six classes.
+"""Every prompt-cache miss fluid's probe reports gets one of seven classes.
 
 fluid put a ``cache_miss`` diagnosis on each missing call's Usage event and
 raised ``CacheMissAlert`` on a streak, and nothing in the app read either.
@@ -56,6 +56,17 @@ SYNTHETIC_MISSES = {
             "reuse_shortfall_tokens_estimated": 50_000,
         },
     },
+    cmc.COMPACTION_FOLLOWON: {
+        # The same grown-prefix miss, two calls after a compaction rewrite:
+        # the provider is still rebuilding the rewritten tail.
+        **_report("no_cache_read"),
+        "request_interval_seconds": 12.0,
+        "calls_since_rewrite": 2,
+        "cache_miss": {
+            "reason": "prefix_grew_only", "full_coverage": True,
+            "reuse_shortfall_tokens_estimated": 50_000,
+        },
+    },
     cmc.IDLE_PAST_TTL: {
         **_report("no_cache_read"),
         "request_interval_seconds": 1_800.0,
@@ -74,9 +85,9 @@ SYNTHETIC_MISSES = {
 }
 
 
-def test_the_synthetic_set_covers_all_six_classes():
+def test_the_synthetic_set_covers_all_seven_classes():
     assert set(SYNTHETIC_MISSES) == set(cmc.MISS_CLASSES)
-    assert len(cmc.MISS_CLASSES) == 6
+    assert len(cmc.MISS_CLASSES) == 7
 
 
 @pytest.mark.parametrize("expected", cmc.MISS_CLASSES)
@@ -114,9 +125,10 @@ async def test_context_usage_reports_misses_by_class():
     report = (await adapter.get_context_usage())["cacheMisses"]
     assert report["byClass"] == {
         cmc.APPEND_GROWTH: 1, cmc.PLANNED_REBUILD: 1, cmc.HARNESS_UPGRADE: 1,
-        cmc.PROVIDER_FALLBACK: 1, cmc.IDLE_PAST_TTL: 1, cmc.HARNESS_MUTATION: 2,
+        cmc.PROVIDER_FALLBACK: 1, cmc.COMPACTION_FOLLOWON: 1,
+        cmc.IDLE_PAST_TTL: 1, cmc.HARNESS_MUTATION: 2,
     }
-    assert report["total"] == 7
+    assert report["total"] == 8
     assert report["unexpected"] == 2
 
 

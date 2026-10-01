@@ -17,12 +17,13 @@
 		sessionId?: string | null;
 		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
+		rewindEligible?: boolean;
 		streaming?: boolean;
 		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -63,6 +64,7 @@
 				messageRole="user"
 				{messageUuid}
 				{userPromptOccurrence}
+				{rewindEligible}
 				{onRewindComplete}
 				{fileCheckpointingEnabled}
 				visible={!streaming}

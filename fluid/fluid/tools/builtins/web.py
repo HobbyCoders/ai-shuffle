@@ -480,6 +480,10 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(
             text=f"WebFetch failed: HTTP {response.status_code} for {url}",
             is_error=True,
+            # HTTP failure is data, not an authorization or SSRF refusal.
+            # Preserve is_error telemetry while allowing independent host
+            # calls in the same code-mode cell to inspect/recover from it.
+            soft_error=True,
         )
     body = fetched.body
     content_type = (response.headers.get("content-type") or "").lower()

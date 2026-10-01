@@ -244,6 +244,16 @@ class TestResolveProviderContextWindow:
 
 
 class TestContextWindowChoices:
+    @pytest.mark.parametrize("model_id", ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-astra", "gpt-6.1"])
+    @pytest.mark.parametrize("kind", ["openai", "chatgpt"])
+    def test_new_gpt6_variants_offer_272k_and_1m(self, model_id, kind):
+        row = {"provider_type": kind, "context_window": 272000,
+               "models_json": [{"id": model_id, "context_window": 272000}]}
+        assert m.resolve_provider_context_window(row, model_id) == 272000
+        assert m.context_window_choices(model_id, row) == [272_000, 1_000_000]
+        assert m.context_window_choices(model_id + "-custom", row) == []
+        assert m.context_window_choices(model_id, {**row, "provider_type": "openrouter"}) == []
+
     @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-5.6-sol"])
     @pytest.mark.parametrize("provider", [
         {"provider_type": "openai"},
@@ -387,16 +397,20 @@ class TestRegistryPayloadProviders:
              "effort_metadata_version": 0},
         ]
 
-    def test_astra_payload_offers_1m_with_a_smaller_catalog_default(self, mock_db):
+    @pytest.mark.parametrize("model_id,standard", [
+        ("gpt-6-astra", 256_000), ("gpt-6.1-sol", 272_000),
+        ("gpt-6-luna", 272_000), ("gpt-6.1-terra", 272_000),
+    ])
+    def test_astra_payload_offers_1m_with_a_smaller_catalog_default(self, mock_db, model_id, standard):
         db.create_model_provider(
             provider_id="astra", name="ChatGPT", provider_type="chatgpt",
             base_url="https://chatgpt.example/api",
-            models=[{"id": "gpt-6-astra", "label": "GPT-6 Astra", "context_window": 272000}],
+            models=[{"id": model_id, "label": model_id, "context_window": 272000}],
             enabled=True,
         )
         model = m.registry_payload()["providers"][0]["models"][0]
         assert model["context_window"] == 272000
-        assert model["context_window_choices"] == [256_000, 1_000_000]
+        assert model["context_window_choices"] == [standard, 1_000_000]
 
     def test_chatgpt_row_is_subscription_and_carries_its_plan_type(self, mock_db):
         """A ChatGPT row reports ``auth_kind='subscription'`` and the plan string

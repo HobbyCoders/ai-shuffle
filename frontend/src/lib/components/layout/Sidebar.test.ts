@@ -80,6 +80,7 @@ vi.mock('$lib/stores/layout.svelte', () => ({
 vi.mock('$lib/api/client', () => ({
 	forkSession: vi.fn(),
 }));
+vi.mock('$lib/api/assistant', () => ({ getAssistant: vi.fn().mockResolvedValue(null), getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
@@ -879,7 +880,7 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('prefetches on focus, so keyboard navigation warms the same chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.focus(wsrow('Build'));
+		await fireEvent.focus(wsrow('Agents & tools'));
 		await Promise.resolve();
 
 		expect(panelSpies.preloadCalls).toEqual(['build']);
@@ -889,7 +890,7 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('maps every Build sub-view row onto the Build panel chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.pointerEnter(wsrow('Build'));
+		await fireEvent.pointerEnter(wsrow('Agents & tools'));
 		await Promise.resolve();
 
 		expect(panelSpies.chunkFetches).toEqual(['build']);
@@ -938,7 +939,7 @@ describe('Sidebar workspace nav customization', () => {
 	it('shows the default three rows inline and folds the rest into More', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		expect(wsLabels()).toEqual(['Files', 'Build', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Agents & tools', 'Projects']);
 
 		const items = await openMore();
 		expect(items.map((n) => n.textContent?.trim())).toEqual([
@@ -990,12 +991,12 @@ describe('Sidebar workspace nav customization', () => {
 		expect(dialog.textContent).toContain('Always first');
 
 		await fireEvent.click(screen.getByRole('checkbox', { name: 'Show Notes' }));
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Build', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents & tools', 'Projects']);
 
 		// And it survives the dialog, because the store wrote it.
 		await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
 		expect(screen.queryByRole('dialog', { name: /Customize workspace/ })).toBeNull();
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Build', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents & tools', 'Projects']);
 	});
 
 	it('reorders a row from the keyboard, so the feature is not pointer-only', async () => {
@@ -1011,7 +1012,7 @@ describe('Sidebar workspace nav customization', () => {
 			key: 'ArrowUp',
 		});
 
-		expect(wsLabels()).toEqual(['Files', 'Projects', 'Build']);
+		expect(wsLabels()).toEqual(['Files', 'Projects', 'Agents & tools']);
 	});
 });
 
@@ -1096,148 +1097,74 @@ describe('Sidebar header and sticky block', () => {
 	});
 });
 
-describe('Sidebar mode lanes', () => {
-	/** One session per lane, so every assertion below can name what leaked. */
-	function laneFixture() {
-		return [
-			// No `mode` at all: every row written before modes existed.
-			session('legacy', 'Legacy chat', 'visible-project', false),
-			session('coded', 'Code chat', 'visible-project', false, false, { mode: 'code' }),
-			session('chatty', 'Chat chat', null, false, false, { mode: 'chat' }),
-			session('spoken', 'Voice chat', null, false, false, { mode: 'voice' }),
-		];
-	}
-
-	function visibleTitles(): string[] {
-		return Array.from(document.querySelectorAll('[data-session-card]')).map(
-			(n) => n.querySelector('.title')?.textContent?.trim() ?? ''
-		);
-	}
-
-	it('lists pre-modes and explicit code rows in the code lane, and nothing else', () => {
-		mocks.sessions.set(laneFixture());
-
-		render(Sidebar, { props: sidebarProps });
-
-		expect(visibleTitles()).toEqual(['Legacy chat', 'Code chat']);
-	});
-
-	it('lists only chat rows in the chat lane', () => {
-		appMode.set('chat');
-		mocks.sessions.set(laneFixture());
-
-		render(Sidebar, { props: sidebarProps });
-
-		expect(visibleTitles()).toEqual(['Chat chat']);
-	});
-
-	it('lists only voice rows in the voice lane', () => {
-		appMode.set('voice');
-		mocks.sessions.set(laneFixture());
-
-		render(Sidebar, { props: sidebarProps });
-
-		expect(visibleTitles()).toEqual(['Voice chat']);
-	});
-
-	it('names the empty state after the lane', () => {
-		mocks.sessions.set([]);
-		appMode.set('voice');
-
-		render(Sidebar, { props: sidebarProps });
-
-		expect(document.querySelector('.empty')?.textContent).toBe('No voice sessions yet');
-	});
-
-	it('offers the project filter in code mode only', async () => {
-		mocks.sessions.set(laneFixture());
-
-		const { unmount } = render(Sidebar, { props: sidebarProps });
-		expect(screen.queryByRole('button', { name: /All projects/ })).toBeTruthy();
-		unmount();
-
-		for (const mode of ['chat', 'voice'] as const) {
-			appMode.set(mode);
-			const view = render(Sidebar, { props: sidebarProps });
-			// Chat and voice sessions are projectless — the menu could only ever
-			// offer "Ungrouped" — but the device filter still applies to both.
-			expect(screen.queryByRole('button', { name: /All projects/ })).toBeNull();
-			expect(screen.queryByRole('button', { name: /All devices/ })).toBeTruthy();
-			view.unmount();
-		}
-		await tick();
-	});
-
-	it('clears a project filter when the lane changes, so nothing is hidden by a control that is gone', async () => {
-		mocks.sessions.set(laneFixture());
-		render(Sidebar, { props: sidebarProps });
-
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
-		expect(document.querySelector('.fbtn.set')?.textContent).toContain('Visible Project');
-
-		await fireEvent.click(screen.getByRole('radio', { name: /Chat/ }));
-		await tick();
-		expect(screen.getByText('Chat chat')).toBeTruthy();
-
-		// Back in code mode the filter must be gone, not silently reapplied.
-		await fireEvent.click(screen.getByRole('radio', { name: /Code/ }));
-		await tick();
-		expect(screen.getByRole('button', { name: /All projects/ }).textContent).toContain('All projects');
-		expect(visibleTitles()).toEqual(['Legacy chat', 'Code chat']);
-	});
-
-	it('renders the three lanes as a radiogroup with the current one checked', () => {
-		render(Sidebar, { props: sidebarProps });
-
-		const radios = screen.getAllByRole('radio');
-		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Code', 'Chat', 'Voice']);
-		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
-	});
-
-	it('switches the store and lands on the new lane\'s compose screen', async () => {
-		const onNewSession = vi.fn();
-		mocks.sessions.set(laneFixture());
-		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-
-		await fireEvent.click(screen.getByRole('radio', { name: /Voice/ }));
-		await tick();
-
-		expect(appMode.current).toBe('voice');
-		// The session on screen belongs to the lane just left, so the switch has
-		// to navigate as well as filter.
-		expect(onNewSession).toHaveBeenCalledTimes(1);
-		expect(visibleTitles()).toEqual(['Voice chat']);
-	});
-
-	it('notifies onSelectMode after the store is already written', async () => {
-		const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
-		render(Sidebar, { props: { ...sidebarProps, onSelectMode } });
-
-		await fireEvent.click(screen.getByRole('radio', { name: /Chat/ }));
-
-		expect(onSelectMode).toHaveBeenCalledWith('chat');
-	});
-
-	it('does nothing when the current lane is re-selected', async () => {
-		const onNewSession = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-
-		await fireEvent.click(screen.getByRole('radio', { name: /Code/ }));
-
-		expect(onNewSession).not.toHaveBeenCalled();
-	});
-
-	it('moves lanes with the arrow keys', async () => {
-		render(Sidebar, { props: sidebarProps });
-
-		await fireEvent.keyDown(screen.getByRole('radio', { name: /Code/ }), { key: 'ArrowRight' });
-		expect(appMode.current).toBe('chat');
-
-		await fireEvent.keyDown(screen.getByRole('radio', { name: /Chat/ }), { key: 'ArrowLeft' });
-		expect(appMode.current).toBe('code');
-
-		await fireEvent.keyDown(screen.getByRole('radio', { name: /Code/ }), { key: 'End' });
-		expect(appMode.current).toBe('voice');
-	});
+describe('Sidebar unified conversation history', () => {
+ function fixture() {
+  return [
+   session('legacy', 'Legacy chat', 'visible-project', false),
+   session('coded', 'Code chat', 'visible-project', false, false, { mode: 'code' }),
+   session('chatty', 'Chat chat', null, false, false, { mode: 'chat' }),
+   session('spoken', 'Voice chat', null, false, false, { mode: 'voice' }),
+  ];
+ }
+ it.each(['code', 'chat', 'voice'] as const)('keeps every historical conversation visible while %s is selected', mode => {
+  appMode.set(mode); mocks.sessions.set(fixture());
+  render(Sidebar, { props: sidebarProps });
+  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+  expect(screen.getByRole('button', { name: /All projects/ })).toBeTruthy();
+ });
+ it('uses a single honest empty state', () => {
+  mocks.sessions.set([]); appMode.set('voice'); render(Sidebar, { props: sidebarProps });
+  expect(document.querySelector('.empty')?.textContent).toBe('No sessions yet');
+ });
+ it('retains explicit project scope when new-conversation capabilities change', async () => {
+  mocks.sessions.set(fixture()); render(Sidebar, { props: sidebarProps });
+  await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+  await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
+  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+  expect(cardIds()).toEqual(['legacy', 'coded']);
+  await fireEvent.click(screen.getByRole('button', { name: /Visible Project/ }));
+  await fireEvent.click(screen.getByRole('menuitem', { name: /All projects/ }));
+  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+ });
+ it('offers Workspace and narrow Chat capabilities, not a Voice history lane', () => {
+  render(Sidebar, { props: sidebarProps });
+  const radios = screen.getAllByRole('radio');
+  expect(radios.map(r => r.getAttribute('aria-label'))).toEqual(['Workspace', 'Chat']);
+  expect(radios.map(r => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+  expect(screen.getByRole('radiogroup', { name: 'New conversation capabilities' })).toBeTruthy();
+ });
+ it('opens a new Chat without filtering any session out', async () => {
+  const onNewSession = vi.fn(); const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
+  mocks.sessions.set(fixture()); render(Sidebar, { props: { ...sidebarProps, onNewSession, onSelectMode } });
+  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+  expect(onNewSession).toHaveBeenCalledTimes(1); expect(onSelectMode).toHaveBeenCalledWith('chat');
+  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+ });
+ it('does not discard the current conversation when its capability is reselected', async () => {
+  const onNewSession = vi.fn(); render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+  await fireEvent.click(screen.getByRole('radio', { name: 'Workspace' }));
+  expect(onNewSession).not.toHaveBeenCalled();
+ });
+ it('treats Chat as already selected while a historical voice session is open', async () => {
+  appMode.set('voice', false); const onNewSession = vi.fn(); render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+  expect(screen.getByRole('radio', { name: 'Chat' }).getAttribute('aria-checked')).toBe('true');
+  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+  expect(onNewSession).not.toHaveBeenCalled();
+ });
+ it('supports roving keyboard focus with no implicit microphone action', async () => {
+  render(Sidebar, { props: sidebarProps });
+  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Workspace' }), { key: 'End' });
+  expect(appMode.current).toBe('chat');
+  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Chat' }), { key: 'Home' });
+  expect(appMode.current).toBe('code');
+ });
+ it('pins the primary Assistant independently of customized workspace links', async () => {
+  const onOpenFeature = vi.fn(); render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Assistant home' }));
+  expect(onOpenFeature).toHaveBeenCalledWith('assistant');
+ });
+ it('does not expose owner assistant management to non-admins', () => {
+  render(Sidebar, { props: { ...sidebarProps, isAdmin: false } });
+  expect(screen.queryByRole('button', { name: 'Assistant home' })).toBeNull();
+ });
 });

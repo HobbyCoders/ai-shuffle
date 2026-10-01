@@ -76,6 +76,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('AppTopBar actions', () => {
+	it('names the integrated Assistant home without becoming a new session mode', () => {
+		activeView.set({ type: 'assistant' });
+		renderBar();
+		expect(screen.getByText('Assistant')).toBeTruthy();
+		expect(screen.queryByTestId('breadcrumbs')).toBeNull();
+	});
+
 	it('keeps chat action controls out of the title bar', () => {
 		activeView.set({ type: 'session' });
 		const { container } = renderBar();

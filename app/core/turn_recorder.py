@@ -674,6 +674,8 @@ class TurnRecorder:
         *,
         profile_id: str | None = None,
         command_id: str | None = None,
+        queued_turn_id: str | None = None,
+        checkpoint_backed: bool | None = None,
     ) -> bool:
         """Append a ``message.user`` for a message steered into the LIVE turn.
 
@@ -687,7 +689,9 @@ class TurnRecorder:
         not the live turn's) so the frontend collapses its pending bubble onto
         this message instead of rendering a second copy. Buffered deltas drain
         first, exactly as any non-delta pump event would, so log order still
-        mirrors stream order. Returns True when the append was made.
+        mirrors stream order. These messages have no standalone transcript
+        checkpoint, so explicitly disable their independent rewind capability.
+        Returns True when the append was made.
         """
         if self._closed or self._superseded or self._recording_failed:
             return False
@@ -700,6 +704,8 @@ class TurnRecorder:
                     command_id=command_id or self.command_id,
                     content=content or "",
                     profile_id=profile_id,
+                    queued_turn_id=queued_turn_id,
+                    checkpoint_backed=False,
                 ))
                 await self._append(events)
             return not (self._recording_failed or self._superseded)

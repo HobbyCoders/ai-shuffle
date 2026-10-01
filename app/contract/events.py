@@ -103,12 +103,15 @@ class TurnAborted(EventBase):
 class MessageUser(EventBase):
     type: Literal["message.user"] = "message.user"
     content: str
+    queued_turn_id: str | None = None
+    checkpoint_backed: bool | None = None
     attachments: list[str] = Field(default_factory=list)  # artifact hashes
     kind: str | None = None  # e.g. 'text' | 'command'
     command_name: str | None = None
     command_args: str | None = None
     profile_id: str | None = None
     uuid: str | None = None  # raw jsonl entry uuid (rewind target)
+    checkpoint_backed: bool | None = None  # False for mid-turn steers; None for legacy events
     timestamp: datetime | None = None  # preferred over created_at when stamping
 
 

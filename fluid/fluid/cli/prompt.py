@@ -1067,13 +1067,10 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
             ("an MCP tool error", True),
         ) if wanted
     ]
+    from fluid.tools.fragments import CODE_MODE_ERROR_RULE, DEPENDENCY_AWARE_BATCHING
     recovery = (
-        f"{missing_read} {'Other' if missing_read else 'Tool'} errors "
-        f"now return as results and do not abort the cell ({', '.join(soft_examples)}) "
-        "— read each result before depending on it. Denials, cancellation "
-        "and tool timeouts still abort the cell; do not catch broad "
-        "exceptions to get past those."
-        if discovery_tools else ""
+        f"{missing_read} {CODE_MODE_ERROR_RULE}"
+        + (f"Known result errors include {', '.join(soft_examples)}." if discovery_tools else "")
     )
     search = ""
     if has("Grep") and has("Glob"):
@@ -1108,18 +1105,17 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
     sequencing = ""
     if has("Read") and has("Edit"):
         sequencing = (
-            "\n\nSequence dependent calls inside one cell rather than across "
-            "turns: Read then Edit the same file in a single cell satisfies "
-            "the read-before-edit rule without a second round-trip, and a "
-            "failed Edit quotes the file's real text back to you, so copy from "
-            "that instead of re-Reading."
+            "\n\nA known Read/Edit recipe may share one cell. If the edit "
+            "depends on content you have not inspected, first select that "
+            "evidence and stop at the decision boundary. A failed Edit quotes "
+            "the real text; use that evidence instead of reacquiring it."
         )
 
     return f"""\
 # Code mode
 
 In this session tools are reached through run_python, not as individual tool \
-calls. Compose one cell that carries the several calls a step needs — discover \
+calls. {DEPENDENCY_AWARE_BATCHING} Discover \
 with list_tools/search_tools (top-level tool calls, not importable from \
 `tools`; inside a cell `dir(tools)` lists what is mounted), import with \
 `from tools import <name>`, \
@@ -1129,10 +1125,10 @@ and hold intermediate results in kernel variables rather than fetching them a \
 second time. Keep data in the \
 kernel: variables persist between cells, large results come back as refs you \
 can slice later, and only what you print or return enters the conversation. \
-Print what the user needs, not whole results. Every in-kernel call passes the \
-same permission gate; a denied or failed call raises (a command's non-zero exit \
-code does not: {exit_owner} its output with an [exit code N] line), and the rule above still holds — \
-do not route around it.{recovery} The file tools are the only way to touch the \
+Budget combined printed output below the stated stdout cap, not each print \
+individually. Inspect further windows through retained refs when needed. \
+Every in-kernel call passes the same permission gate. A command's non-zero exit \
+code is output, not an exception: {exit_owner} an [exit code N] line. {recovery} The file tools are the only way to touch the \
 filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 {shell}{search}
 

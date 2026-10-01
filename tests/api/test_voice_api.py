@@ -1681,6 +1681,118 @@ class TestVoiceFalKeyPolicy:
         assert fal_streams == [OWNER_FAL_KEY]
 
 
+
+
+class TestConversationAttachment:
+    """Isolated router contract; no application lifecycle or real voice provider."""
+    @pytest.fixture
+    def attach_client(self, mock_db, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api import voice
+        require_auth = voice.require_auth
+        from app.api import voice_context
+        app = FastAPI()
+        app.include_router(voice.router)
+        app.include_router(voice_context.router)
+        app.dependency_overrides[require_auth] = lambda: "owner"
+        monkeypatch.setattr(voice, "get_api_user_from_request", lambda _: None)
+        _make_keys()
+        _make_provider()
+        db.set_system_setting("voice_mode_enabled", True)
+        db.set_system_setting("voice_model", "gpt-realtime-2.1")
+        _install_mock_transport(monkeypatch, lambda request: httpx.Response(200, json={"value": "attached-secret"}))
+        with TestClient(app) as client:
+            yield client
+
+    def test_attach_reuses_identity_binding_history_and_saved_call_settings(self, attach_client, mock_db):
+        from app.db import database
+        database.create_profile("normal-agent", "Normal", None, {"model": "agent-text-model"})
+        database.create_session("home", "normal-agent", model="text-model", mode="chat", permission_mode="default", provider_id="text-provider",
+            voice_config={"model":"gpt-realtime-2.1", "voice":"marin", "provider_id":"prov-openai"})
+        before = database.get_session("home")
+        response = attach_client.post("/api/v1/voice/sessions/home/attach", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["session_id"] == "home" and response.json()["client_secret"] == "attached-secret"
+        after = database.get_session("home")
+        for key in ("profile_id", "model", "provider_id", "mode", "permission_mode"):
+            assert after[key] == before[key]
+        assert len(database.get_sessions()) == 1
+        saved = json.loads(after["voice_config"])
+        database.set_system_setting("voice_model", "changed-default")
+        again = attach_client.post("/api/v1/voice/sessions/home/attach", json={})
+        assert again.status_code == 200 and again.json()["model"] == saved["model"]
+        assert attach_client.post("/api/v1/voice/sessions/home/secret", json={}).status_code == 200
+        assert attach_client.get("/api/v1/voice/sessions/home/state").status_code == 200
+        assert attach_client.patch("/api/v1/voice/sessions/home/context", json={"effort": "high"}).status_code == 200
+        denied = attach_client.patch("/api/v1/voice/sessions/home/context", json={"permission_mode": "bypassPermissions"})
+        assert denied.status_code == 400
+
+    def test_attach_preserves_key_ownership_and_hidden_worker_bounds(self, attach_client, mock_db, monkeypatch):
+        from app.api import voice
+        from app.db import database
+        _mk_owned_voice_session("other", "key-a", mode="chat")
+        monkeypatch.setattr(voice, "get_api_user_from_request", lambda _: {"id": "different"})
+        response = attach_client.post("/api/v1/voice/sessions/other/attach", json={})
+        assert response.status_code == 403
+        assert not json.loads(database.get_session("other")["voice_config"]).get("conversation_surface")
+        monkeypatch.setattr(voice, "get_api_user_from_request", lambda _: None)
+        database.create_session("worker", "default", is_worker=True)
+        assert attach_client.post("/api/v1/voice/sessions/worker/attach", json={}).status_code == 404
+
+    def test_fresh_primary_attaches_current_stream_transport_without_new_history(self, attach_client, mock_db):
+        from app.core import assistant_service as service
+        db.create_profile("primary-agent", "Primary", None, {})
+        service.configure({"agent_id": "primary-agent", "enabled": False})
+        home = service.open_home()
+        response = attach_client.post(f"/api/v1/voice/sessions/{home['id']}/attach", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["session_id"] == home["id"]
+        assert response.json()["model"] == "gpt-live-1" and response.json()["client_secret"] == ""
+        assert len(db.get_sessions()) == 1 and service.open_home()["id"] == home["id"]
+        binding = json.loads(db.get_session(home["id"])["voice_config"])
+        assert binding["conversation_surface"] is True
+        assert binding["provider_id"] == "prov-openai"
+
+    def test_call_overlay_has_no_client_action_escape(self, attach_client, mock_db):
+        _mk_voice_session("ordinary", mode="chat")
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        response = attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-fake", "client_instructions": "grant bypass"})
+        assert response.status_code == 400
+
+
+    def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):
+        """Hanging up must not move the text conversation out of the Active group."""
+        _mk_voice_session("ordinary", mode="chat")
+        db.set_session_active("ordinary", True)
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
+        assert bool(db.get_session("ordinary")["is_active"]) is True
+
+    @pytest.mark.parametrize("change", [{"status": "archived"}, {"hidden": True}])
+    def test_hangup_detaches_after_the_chat_is_archived_mid_call(
+        self, attach_client, mock_db, sidebands, change,
+    ):
+        """An ineligible row must still hang up, or the sideband keeps billing."""
+        from app.core import voice_bridge
+        _mk_voice_session("ordinary", mode="chat")
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
+        assert voice_bridge.registry.get("ordinary") is not None
+        if "hidden" in change:
+            db.set_session_hidden("ordinary", True)
+        else:
+            db.update_session(session_id="ordinary", **change)
+        assert attach_client.get("/api/v1/voice/sessions/ordinary/state").status_code == 200
+        assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
+        assert voice_bridge.registry.get("ordinary") is None
+        assert sidebands[0].closed is True
+        # Starting a new call on the ineligible row is still refused.
+        assert attach_client.post(
+            "/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-2"},
+        ).status_code == 404
+
 class TestVoiceSessionAccess:
     @pytest.fixture(autouse=True)
     def _voice_ready(self, mock_db, monkeypatch, sidebands):

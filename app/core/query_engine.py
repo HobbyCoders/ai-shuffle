@@ -1039,7 +1039,10 @@ async def stream_query(
         # exist (e.g. a project path from another install) — surface a clear
         # error instead of an opaque subprocess spawn failure.
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
-        yield {"type": "error", "message": str(e)}
+        yield {
+            "type": "error", "message": str(e),
+            **({"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
+        }
         return
 
     # Credential gate (see _stream_to_websocket_impl).
@@ -1708,6 +1711,9 @@ async def _stream_to_websocket_impl(
     # divergence, not a redundancy.
     session_mode = session_mode_of(session)
     _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode)
+    from app.core.session_modes import narrow_tool_access_for_proactive
+    assistant_proactive = (overrides or {}).get("_assistant_proactive")
+    _tool_access = narrow_tool_access_for_proactive(_tool_access, assistant_proactive)
     allowed_tools = list(_tool_access.allowed or [])
     disallowed_tools = list(_tool_access.disallowed or [])
 
@@ -1749,7 +1755,10 @@ async def _stream_to_websocket_impl(
         # install): refuse to run in the main checkout / with an invalid cwd.
         # Surface a clear error to the user instead.
         logger.error(f"[WS] Cannot build session options for {session_id}: {e}")
-        yield {"type": "error", "message": str(e)}
+        yield {
+            "type": "error", "message": str(e),
+            **({"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
+        }
         return
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:

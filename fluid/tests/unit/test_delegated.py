@@ -36,6 +36,7 @@ from fluid.events import (
     ContextCompaction,
     DelegatedSurface,
     ErrorEvent,
+    Interrupted,
     PermissionRequest,
     RespondPermission,
     SteerDelivered,
@@ -462,6 +463,161 @@ def _spy_on_frames(loop: DelegatedLoop) -> list[dict]:
 
 def _user_frames(frames: list[dict]) -> list[dict]:
     return [f for f in frames if f.get("type") == "user"]
+
+
+async def test_peer_without_cli_binding_is_refused_at_active_permission_boundary() -> None:
+    from fluid.events.ops import AgentMessage
+    from fluid.context.peer import format_peer_message
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+
+    async def respond(after=0):
+        async for event in loop.bus.subscribe(sid, since_seq=after):
+            if isinstance(event, PermissionRequest):
+                with pytest.raises(RuntimeError, match="peer.*queue"):
+                    await loop.submit(AgentMessage(sender="reviewer", text="Coordinate edits", id="peer-1", wake=False))
+                await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+                return
+
+    watcher = asyncio.create_task(respond())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, 10)
+        assert len(_user_frames(frames)) == 1
+        assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
+        # Only a subsequent normal HOST admission may execute the queued peer.
+        watcher = asyncio.create_task(respond(loop.bus.log(sid)[-1].seq))
+        await loop.submit(UserTurn(content=format_peer_message("reviewer", "Coordinate edits")))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, 10)
+        assert len(_user_frames(frames)) == 2
+        assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 2
+        assert "another agent in this session" in _user_frames(frames)[1]["message"]["content"][0]["text"]
+        assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
+    finally:
+        await loop.aclose()
+
+
+async def test_peer_is_refused_with_actual_cli_result_unread() -> None:
+    from fluid.events.ops import AgentMessage
+
+    held, release = asyncio.Event(), asyncio.Event()
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("a", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+    results, readers = [], set()
+    write = loop._write_frame
+
+    async def install_actual_result_gate(frame):
+        reader = loop._proc.stdout
+        if reader not in readers:
+            readers.add(reader)
+            readline = reader.readline
+            async def gated_readline():
+                line = await readline()
+                if line and json.loads(line).get("type") == "result":
+                    results.append(json.loads(line))
+                    if len(results) == 1:
+                        held.set()
+                        await release.wait()
+                return line
+            reader.readline = gated_readline
+        await write(frame)
+
+    loop._write_frame = install_actual_result_gate
+    try:
+        await loop.submit(UserTurn(content="first admitted host turn"))
+        await asyncio.wait_for(held.wait(), 10)
+        assert not loop._turn_task.done()
+        assert not any(isinstance(e, TurnComplete) for e in loop.bus.log(sid))
+        with pytest.raises(RuntimeError, match="peer.*queue"):
+            await loop.submit(AgentMessage(sender="reviewer", text="unread-result peer", id="unread-peer", wake=False))
+        release.set()
+        await loop.wait_turn()
+        await loop._discard_stale_stdout()
+        assert len(_user_frames(frames)) == len(results) == 1
+        assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 1
+        assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
+    finally:
+        release.set()
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("scenario,terminal_type", [("a", TurnComplete), ("n", ErrorEvent), ("b", Interrupted)])
+async def test_late_peer_is_refused_before_terminal_store_barrier(scenario, terminal_type) -> None:
+    from fluid.events.ops import AgentMessage
+
+    published, release = asyncio.Event(), asyncio.Event()
+
+    class TerminalGateStore(MemoryStore):
+        async def append_event(self, session_id, event):
+            if isinstance(event, terminal_type):
+                published.set()
+                await release.wait()
+            return await super().append_event(session_id, event)
+
+    store = TerminalGateStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop(scenario, store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+    results = []
+    write_frame = loop._write_frame
+
+    recorded_readers = set()
+
+    async def record_cli_results(frame):
+        reader = loop._proc.stdout
+        if reader not in recorded_readers:
+            recorded_readers.add(reader)
+            readline = reader.readline
+
+            async def recorded_readline():
+                line = await readline()
+                if line and json.loads(line).get("type") == "result":
+                    results.append(json.loads(line))
+                return line
+
+            reader.readline = recorded_readline
+        await write_frame(frame)
+
+    loop._write_frame = record_cli_results
+
+    async def interrupt_permission():
+        async for event in loop.bus.subscribe(sid):
+            if isinstance(event, PermissionRequest):
+                await loop.submit(Interrupt())
+                await loop.submit(RespondPermission(request_id=event.request_id, decision="deny"))
+                return
+
+    watcher = asyncio.create_task(interrupt_permission()) if scenario == "b" else None
+    try:
+        await loop.submit(UserTurn(content="first admitted host turn"))
+        await asyncio.wait_for(published.wait(), 10)
+        terminal = next(e for e in loop.bus.log(sid) if isinstance(e, terminal_type))
+        assert not loop._turn_task.done()  # Persistence is still pending, not mocked running state.
+        with pytest.raises(RuntimeError, match="peer.*queue"):
+            await loop.submit(AgentMessage(sender="reviewer", text="late peer", id="late-peer", wake=False))
+        release.set()
+        await loop.wait_turn()
+        await loop._discard_stale_stdout()
+        assert len(_user_frames(frames)) == 1
+        assert len(results) == 1  # Actual stdout results, including error results.
+        assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 1
+        assert not any(isinstance(e, SteerDelivered) and e.seq > terminal.seq for e in loop.bus.log(sid))
+        if watcher is not None:
+            await asyncio.wait_for(watcher, 10)
+        with pytest.raises(RuntimeError, match="peer.*queue"):
+            await loop.submit(AgentMessage(sender="reviewer", text="after cleanup", id="after-turn", wake=False))
+        assert len(_user_frames(frames)) == 1 and len(results) == 1
+    finally:
+        release.set()
+        await loop.aclose()
+        if watcher is not None:
+            watcher.cancel()
 
 
 async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:

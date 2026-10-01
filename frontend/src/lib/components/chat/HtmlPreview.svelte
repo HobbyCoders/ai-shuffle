@@ -15,6 +15,10 @@
 	let dialog: HTMLDialogElement;
 	const previewDocument = $derived(source ? buildHtmlPreviewDocument(source) : '');
 	let downloadUrl = $state('');
+	// Store-backed prop getters can track the entire session (draft/scroll included).
+	// Scalar derived values stop unchanged file/owner identities invalidating the load.
+	const previewHref = $derived(href);
+	const previewSessionId = $derived(sessionId);
 
 	$effect(() => {
 		if (!source) { downloadUrl = ''; return; }
@@ -24,13 +28,14 @@
 	});
 
 	$effect(() => {
-		const url = href;
+		const url = previewHref;
+		const owner = previewSessionId;
 		revision;
 		const controller = new AbortController();
 		loading = true;
 		error = '';
 		source = '';
-		loadHtmlPreview(url, controller.signal, sessionId).then((html) => {
+		loadHtmlPreview(url, controller.signal, owner).then((html) => {
 			if (!controller.signal.aborted) { source = html; loading = false; }
 		}).catch((reason: unknown) => {
 			if (!controller.signal.aborted) {

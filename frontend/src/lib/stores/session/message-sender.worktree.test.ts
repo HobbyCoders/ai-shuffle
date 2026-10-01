@@ -36,6 +36,7 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 		projectV2Id: null,
 		messages: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [{ id: 'old-task' }],
 		isStreaming: false,
 		worktreeIntent: 'worktree',

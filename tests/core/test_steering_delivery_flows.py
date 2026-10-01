@@ -180,7 +180,7 @@ def _pump_env(pump, *, background_work=(), broadcaster=None):
     session_runtime.register_broadcaster(bc)
     queue_views = []
 
-    async def _queue_updated(session_id, queue):
+    async def _queue_updated(session_id, queue, *, pending_peer_messages=None):
         queue_views.append((session_id, [q["content"] for q in queue]))
 
     sync = MagicMock(name="sync_engine")
