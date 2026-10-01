@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/v1/chat-access", tags=["Chat access"])
 logger = logging.getLogger(__name__)
 
 
-async def checked(request: Request, session_id: str):
+async def checked(request: Request, session_id: str) -> dict:
     from app.core.owner_auth import loopback_request
     if (request.url.scheme != "https"
             and request.scope.get("shuffle.forwarded_https") is not True
@@ -22,14 +22,14 @@ async def checked(request: Request, session_id: str):
         raise HTTPException(403, "Private access requires the desktop loopback connection or HTTPS to this worker, directly or through its protected remote connection.")
     if getattr(request.state, "preview_grant", None) is not None:
         raise HTTPException(403, "Preview access cannot manage private connections.")
-    await require_session(request, session_id)
+    return await require_session(request, session_id)
 
 
 @router.get("/{session_id}")
 async def snapshot(session_id: str, request: Request, token: str = Depends(require_admin)):
-    await checked(request, session_id)
+    row = await checked(request, session_id)
     try:
-        return await broker.snapshot(session_id)
+        return await broker.snapshot(session_id, row)
     except AccessDenied as exc:
         raise HTTPException(409, str(exc)) from None
 

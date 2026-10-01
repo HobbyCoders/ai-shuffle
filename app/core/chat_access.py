@@ -123,8 +123,12 @@ class AccessRequest:
 async def session_owner(session_id: str) -> tuple:
     from app.db import database
     from app.db.async_database import run_sync
+    return owner_from_row(await run_sync(database.get_session, session_id))
+
+
+def owner_from_row(row: dict | None) -> tuple:
+    """Apply the private-access ownership rules to an already-loaded session row."""
     from app.network.control import owner_of
-    row = await run_sync(database.get_session, session_id)
     if not row or row.get("mode") not in (None, "code", "chat", "voice"):
         raise AccessDenied("Resource access requires an existing Code, Chat, or Voice session.")
     if owner_of(row):
@@ -423,8 +427,11 @@ class Broker:
             raise AccessDenied("Access expired or ownership changed. Request a new grant.")
         return grant
 
-    async def snapshot(self, session_id: str):
-        owner = await session_owner(session_id)
+    async def snapshot(self, session_id: str, row: dict | None = None):
+        # The access API has just loaded and authorized this session row; reuse
+        # it so each panel refresh reads the session once, not twice. Callers
+        # without a row still load it here.
+        owner = owner_from_row(row) if row is not None else await session_owner(session_id)
         result = []
         for grant in list(self.grants.values()):
             if grant.session_id == session_id:
