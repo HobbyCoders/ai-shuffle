@@ -83,6 +83,58 @@ it('retires a queued old-account notification and permits the new account reset'
  expect(mocks.save).not.toHaveBeenCalled();
 });
 
+it('clears only the successfully consumed choice in storage and account sync, not other preferences', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const project={projectId:'local',projectV2Id:'shared'};
+ const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
+ p.set('project',project); p.set('checkout',choice); p.set('model','model-to-keep');
+ const consume=p.captureNewBranchChoice(project,choice.branch,true);
+ // The same account snapshot arriving during POST is not a new selection.
+ mocks.adapters.get('composer.checkout')!.apply({...choice});
+ mocks.save.mockClear();
+ consume();
+ expect(p.current.checkout).toBeNull();
+ expect(p.current.project).toEqual(project); expect(p.current.model).toBe('model-to-keep');
+ expect(localStorage.getItem('ai-shuffle-composer:checkout')).toBe('null');
+ expect(mocks.save).toHaveBeenCalledExactlyOnceWith('composer.checkout',null);
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ expect(reloaded.current.checkout).toBeNull(); expect(reloaded.current.model).toBe('model-to-keep');
+});
+
+it.each(['explicit-repick','remote-change-and-return','account-change'])('protects later intent across %s', async (change) => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const project={projectId:'local',projectV2Id:null};
+ const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
+ p.set('checkout',choice);
+ const consume=p.captureNewBranchChoice(project,choice.branch,true);
+ if(change==='explicit-repick') p.set('checkout',{...choice});
+ if(change==='remote-change-and-return') {
+  mocks.adapters.get('composer.checkout')!.apply({...choice,branch:'topic/other'});
+  mocks.adapters.get('composer.checkout')!.apply({...choice});
+ }
+ if(change==='account-change') mocks.epoch++;
+ mocks.save.mockClear();
+ consume();
+ expect(p.current.checkout).toEqual(choice);
+ expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it('does not consume another project, branch, or existing-worktree preference', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const project={projectId:'local',projectV2Id:null};
+ const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
+ p.set('checkout',choice); mocks.save.mockClear();
+ p.captureNewBranchChoice({...project,projectId:'different'},choice.branch,true)();
+ p.captureNewBranchChoice(project,'topic/different',true)();
+ p.captureNewBranchChoice(project,choice.branch,false)();
+ expect(p.current.checkout).toEqual(choice); expect(mocks.save).not.toHaveBeenCalled();
+ const existing={...project,kind:'existing' as const,worktreeId:'wt',branch:choice.branch};
+ p.set('checkout',existing); mocks.save.mockClear();
+ p.captureNewBranchChoice(project,choice.branch,true)();
+ expect(p.current.checkout).toEqual(existing); expect(mocks.save).not.toHaveBeenCalled();
+});
+
 it('does not let an old queued callback consume a newer account snapshot', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const seen:unknown[]=[]; p.onRemote(()=>seen.push(p.current.model));

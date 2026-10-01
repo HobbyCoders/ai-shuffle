@@ -25,7 +25,7 @@ def describe(spec) -> dict:
     """Catalogue fields shown to the owner. Never includes a secret."""
     if spec.kind == "service":
         return {"kind": "service", "label": spec.label, "target": spec.url,
-                "fingerprint": "", "writable": spec.writable}
+                "fingerprint": spec.fingerprint, "writable": spec.writable}
     return {"kind": "machine", "label": spec.label, "target": f"{spec.username}@{spec.host}:{spec.port}",
             "fingerprint": spec.fingerprint}
 
