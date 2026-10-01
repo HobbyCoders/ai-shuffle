@@ -287,3 +287,6 @@ def test_remote_worktree_target_queues_only_on_the_target_owner(
     assert len(queued) == 1
     assert queued[0]["op"] == "ensure_worktree"
     assert queued[0]["params"]["branch"] == "feature/network-owner"
+    # The request identity crosses the owner boundary so the target's
+    # new-branch refusal can tell a retry of THIS session from another (#1528).
+    assert queued[0]["params"]["session_id"] == response.session_id

@@ -1358,6 +1358,19 @@ def list_sessions_for_branch(project_id: str, branch: str) -> list:
         return [row_to_dict(r) for r in cursor.fetchall()]
 
 
+def list_sessions_for_v2_branch(project_v2_id: str, branch: str) -> list:
+    """Sessions bound to ``branch`` of origin-keyed project ``project_v2_id``."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM sessions WHERE project_v2_id = {_ph}"
+            f" AND (worktree_branch = {_ph} OR branch = {_ph})",
+            (project_v2_id, branch, branch),
+        )
+        return [row_to_dict(r) for r in cursor.fetchall()]
+
+
 def latest_pr_number_for_branch(
     branch: str, project_v2_id: Optional[str] = None
 ) -> Optional[int]:

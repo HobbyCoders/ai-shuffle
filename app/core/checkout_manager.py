@@ -1320,6 +1320,20 @@ def register_unregistered_worktrees(
     return adopted
 
 
+def new_branch_exists_detail(branch: str) -> str:
+    """Refusal detail for a "create new branch" request naming an existing branch.
+
+    Shared by local intake (HTTP 409) and the remote ``ensure_worktree`` op (its
+    error). The composer keys its auto-name retry on the leading
+    ``Branch '<name>' already exists`` phrase; keep it stable.
+    """
+    return (
+        f"Branch '{branch}' already exists, so it can't be created as a new "
+        f"branch for this session. Select it as an existing branch, or choose "
+        f"a different name."
+    )
+
+
 def local_branch_exists(
     project_v2_row: dict[str, Any] | None,
     branch: str,
@@ -1350,6 +1364,80 @@ def local_branch_exists(
         timeout=10,
     )
     return result.returncode == 0
+
+
+# ``branch.<name>.<key>`` in the base clone's config: who minted a "new" branch.
+# Git drops the whole ``branch.<name>`` section when the branch is deleted, so a
+# later, unrelated branch of the same name never inherits an old owner.
+_NEW_BRANCH_OWNER_KEY = "aiShuffleNewBranchFor"
+
+
+def _base_path_for(
+    project_v2_row: dict[str, Any] | None, runner_id: str | None
+) -> str | None:
+    project_id = (project_v2_row or {}).get("id")
+    if not project_id:
+        return None
+    return _ensure_base_checkout(
+        project_id, runner_id or settings.effective_instance_id, project_v2_row
+    )
+
+
+def new_branch_owner(
+    project_v2_row: dict[str, Any] | None,
+    branch: str,
+    runner_id: str | None = None,
+) -> str | None:
+    """The request identity that minted ``branch`` here as a "new" branch.
+
+    Recorded by :func:`record_new_branch_owner` from the remote ``ensure_worktree``
+    op. Lets a retried op for the SAME session recognise a branch it already
+    minted, while any other session asking to "create" that branch is refused
+    (#1528). ``None`` when unrecorded or there is no base checkout here.
+    """
+    branch = (branch or "").strip()
+    base_path = _base_path_for(project_v2_row, runner_id) if branch else None
+    if not base_path:
+        return None
+    result = git_service._run_git(
+        base_path,
+        ["config", "--local", "--get", f"branch.{branch}.{_NEW_BRANCH_OWNER_KEY}"],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
+def record_new_branch_owner(
+    project_v2_row: dict[str, Any] | None,
+    branch: str,
+    owner: str,
+    runner_id: str | None = None,
+) -> bool:
+    """Record ``owner`` as the minter of new branch ``branch`` (best effort).
+
+    Written BEFORE the branch is created, so a crash between creation and the
+    op's settlement still lets that same session's retry succeed. Returns False
+    when it could not be written; minting proceeds, only retry recognition is lost.
+    """
+    branch = (branch or "").strip()
+    owner = (owner or "").strip()
+    base_path = _base_path_for(project_v2_row, runner_id) if branch and owner else None
+    if not base_path:
+        return False
+    result = git_service._run_git(
+        base_path,
+        ["config", "--local", f"branch.{branch}.{_NEW_BRANCH_OWNER_KEY}", owner],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "checkout_manager: could not record new-branch owner for %r: %s",
+            branch, (result.stderr or "").strip(),
+        )
+        return False
+    return True
 
 
 def ensure_checkout(
