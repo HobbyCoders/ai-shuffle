@@ -191,11 +191,11 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 	});
 });
 
-describe('branch created by the New Branch modal (#1528)', () => {
-	// The modal creates the branch up front, so the send carries
-	// create_new_branch=false. It must still be spent by the first session.
+describe('remembered existing-branch pick is one-time (#1528)', () => {
+	// The New branch modal creates the branch up front, so it and a branch picked
+	// from the list both send create_new_branch=false. The first session spends it.
 	const created = { kind: 'branch' as const, projectId: 'proj-1', projectV2Id: null,
-		branch: 'live/1528-explicit', baseBranch: 'main', createNew: false, oneTime: true as const };
+		branch: 'live/1528-explicit', baseBranch: 'main', createNew: false };
 	const ok = { session_id: 'wt-c', branch_name: created.branch, base_branch: 'main', worktree_path: '/w', status: 'ok' };
 	const staged = { worktreeBranch: created.branch, worktreeBaseBranch: 'main', worktreeCreateNewBranch: false };
 
@@ -231,14 +231,11 @@ describe('branch created by the New Branch modal (#1528)', () => {
 		expect(state().worktreeError).toBeTruthy();
 	});
 
-	it('keeps an existing branch picked from the list as the default', async () => {
-		const listed = { ...created, branch: 'feature/existing' } as Record<string, unknown>;
-		delete listed.oneTime;
-		composerPreferences.set('checkout', listed as never);
-		post.mockResolvedValueOnce({ ...ok, branch_name: 'feature/existing' });
-		const { sender } = setup({ ...staged, worktreeBranch: 'feature/existing' });
+	it('does not consume the choice for a request on a different branch', async () => {
+		post.mockResolvedValueOnce({ ...ok, branch_name: 'feature/other' });
+		const { sender } = setup({ ...staged, worktreeBranch: 'feature/other' });
 		await sender.createWorktree();
-		expect(composerPreferences.current.checkout).toEqual(listed);
+		expect(composerPreferences.current.checkout).toEqual(created);
 	});
 });
 

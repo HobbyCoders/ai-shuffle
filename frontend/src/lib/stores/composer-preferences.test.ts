@@ -135,33 +135,27 @@ it('does not consume another project, branch, or existing-worktree preference', 
  expect(p.current.checkout).toEqual(existing); expect(mocks.save).not.toHaveBeenCalled();
 });
 
-it('consumes a branch the New Branch flow created, but keeps an existing-branch pick (#1528)', async () => {
+it('consumes any remembered branch pick, including an existing branch, but not a legacy worktree pick (#1528)', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
- const created={...project,kind:'branch' as const,branch:'live/1528-explicit',baseBranch:'main',createNew:false,oneTime:true as const};
- p.set('checkout',created);
- // The flag survives storage and reload; anything but `true` is dropped.
- vi.resetModules();
- const {composerPreferences:reloaded} = await import('./composer-preferences');
- expect(reloaded.current.checkout).toEqual(created);
- mocks.adapters.get('composer.checkout')!.apply({...created,oneTime:'yes'});
- expect(reloaded.current.checkout).not.toHaveProperty('oneTime');
- reloaded.set('checkout',created);
+ // New branch... creates the branch up front, so it is remembered like a listed branch.
+ const listed={...project,kind:'branch' as const,branch:'live/1528-explicit',baseBranch:'main',createNew:false};
+ p.set('checkout',listed);
  // A request that would create the branch does not match the staged pick.
- reloaded.claimBranchChoice(project,created.branch,true).consume();
- expect(reloaded.current.checkout).toEqual(created);
- reloaded.claimBranchChoice(project,created.branch,false).consume();
- expect(reloaded.current.checkout).toBeNull();
- const listed={...project,kind:'branch' as const,branch:'feature/existing',baseBranch:'main',createNew:false};
- reloaded.set('checkout',listed);
- reloaded.claimBranchChoice(project,listed.branch,false).consume();
- expect(reloaded.current.checkout).toEqual(listed);
+ p.claimBranchChoice(project,listed.branch,true).consume();
+ expect(p.current.checkout).toEqual(listed);
+ p.claimBranchChoice(project,listed.branch,false).consume();
+ expect(p.current.checkout).toBeNull();
+ const legacy={...project,kind:'existing' as const,worktreeId:'wt',branch:'feature/legacy'};
+ p.set('checkout',legacy);
+ p.claimBranchChoice(project,legacy.branch,false).consume();
+ expect(p.current.checkout).toEqual(legacy);
 });
 
 it('marks the choice claimed while a create is in flight and keeps it after a failure', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
- const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:false,oneTime:true as const};
+ const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:false};
  p.set('checkout',choice);
  expect(p.checkoutClaimed).toBe(false);
  const claim=p.claimBranchChoice(project,choice.branch,false);

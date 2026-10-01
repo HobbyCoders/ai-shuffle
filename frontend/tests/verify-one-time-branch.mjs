@@ -1,5 +1,5 @@
-// Real-browser check for #1528: a branch made with the composer's New branch...
-// modal is a one-time choice. Drives the production ExecutionModeBar,
+// Real-browser check for #1528: a branch choice in the new-session composer
+// (New branch... or a branch picked from the list) is one-time. Drives the production ExecutionModeBar,
 // CreateBranchModal, activeSession and composer preferences with a local
 // transport (one-time-branch.ts) and a stub git store.
 //
@@ -59,7 +59,7 @@ async function scenario(name, run) {
 await scenario('repro: New branch, send, New session mid-create', async ({ page, fx, check, chipIs, button, newBranch }) => {
 	await chipIs('Auto from main');
 	await newBranch('live/1528-explicit');
-	check((await fx(() => window.oneTimeBranch.storedCheckout()))?.oneTime === true, 'stored as a one-time choice');
+	check((await fx(() => window.oneTimeBranch.storedCheckout()))?.branch === 'live/1528-explicit', 'choice remembered until a session is created');
 	await fx(() => window.oneTimeBranch.holdNextCreate());
 	await button('Send').click();
 	await page.waitForFunction(() => window.oneTimeBranch.creates.length === 1);
@@ -96,24 +96,31 @@ await scenario('failed create keeps the choice', async ({ page, fx, check, chipI
 	await page.getByRole('status').filter({ hasText: 'Create failed' }).waitFor();
 	await chipIs('live/fails');
 	const stored = await fx(() => window.oneTimeBranch.storedCheckout());
-	check(stored?.branch === 'live/fails' && stored?.oneTime === true, 'stored choice kept', stored);
+	check(stored?.branch === 'live/fails', 'stored choice kept', stored);
 	check(!(await fx(() => window.oneTimeBranch.checkoutClaimed)), 'claim released');
 	await button('New session').click();
 	await chipIs('live/fails');
 });
 
-await scenario('existing branch picked from the list stays the default', async ({ page, fx, check, chipIs, button }) => {
+await scenario('existing branch picked from the list is one-time too', async ({ page, fx, check, chipIs, button }) => {
 	await page.getByRole('button', { name: /^Worktree branch:/ }).click();
 	// The list under "Branches" (not the base-branch picker above it).
 	await page.locator('.branch-section-label', { hasText: 'Branches' }).waitFor();
 	await page.locator('.branch-dropdown .branch-item', { hasText: 'develop' }).last().click();
 	await chipIs('develop');
+	check((await fx(() => window.oneTimeBranch.storedCheckout()))?.branch === 'develop', 'listed pick remembered before send');
+	await fx(() => window.oneTimeBranch.holdNextCreate());
 	await button('Send').click();
-	await page.getByRole('status').filter({ hasText: 'Created session-1' }).waitFor();
-	const stored = await fx(() => window.oneTimeBranch.storedCheckout());
-	check(stored?.branch === 'develop' && !('oneTime' in stored), 'listed pick stays remembered', stored);
+	await page.waitForFunction(() => window.oneTimeBranch.creates.length === 1);
+	const create = (await fx(() => window.oneTimeBranch.creates))[0];
+	check(create.branch_name === 'develop' && create.create_new_branch === false, 'create request', create);
 	await button('New session').click();
-	await chipIs('develop');
+	await chipIs('Auto from main');
+	await fx(() => window.oneTimeBranch.finishCreate('ok'));
+	await page.waitForFunction(() => !window.oneTimeBranch.checkoutClaimed);
+	check((await fx(() => window.oneTimeBranch.storedCheckout())) === null, 'listed pick consumed after success');
+	await button('New session').click();
+	await chipIs('Auto from main');
 });
 
 await browser.close();

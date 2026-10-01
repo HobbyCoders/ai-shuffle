@@ -340,9 +340,10 @@
 	function handleBranchCreated(branchName: string) {
 		// Branch was already created by CreateBranchModal; stage it as the worktree
 		// branch (create_new_branch=false). The worktree itself is created at send
-		// time (POST /sessions/with-worktree in message-sender). Staged as one-time:
-		// the session created on it spends the choice (#1528).
-		activeSession.stageCreatedBranch(branchName);
+		// time (POST /sessions/with-worktree in message-sender).
+		activeSession.setWorktreeBranch(branchName);
+		activeSession.setWorktreeMode('new');
+		activeSession.setWorktreeCreateNewBranch(false);
 	}
 </script>
 

@@ -239,7 +239,7 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
 	});
 
-	it('stages a branch made with New branch as a one-time choice, and a listed branch as a default (#1528)', async () => {
+	it('stages a branch made with New branch as an existing branch, like a listed pick (#1528)', async () => {
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
 		await fireEvent.click(screen.getByText('New branch...'));
@@ -249,7 +249,7 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		await vi.waitFor(() => expect(activeSession.current.worktreeBranch).toBe('live/1528-explicit'));
 		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
 		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: 'repo', projectV2Id: null,
-			branch: 'live/1528-explicit', baseBranch: 'main', createNew: false, oneTime: true });
+			branch: 'live/1528-explicit', baseBranch: 'main', createNew: false });
 
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
 		await fireEvent.click(screen.getByText('develop'));

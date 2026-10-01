@@ -1,7 +1,9 @@
 /**
  * #1528 live-test failure: a branch made with the composer's New Branch modal
  * stayed staged for the next New Chat, so the next send silently opened a
- * second session on the same branch and worktree. These tests drive the real
+ * second session on the same branch and worktree. Owner decision: every branch
+ * pick in the new-session composer (New branch... or a branch from the list)
+ * is one-time. These tests drive the real
  * activeSession store (staging, send-time creation, New Chat and the remembered
  * composer defaults) with only the network stubbed.
  */
@@ -56,33 +58,39 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-/** The New Branch modal's success path in ExecutionModeBar. */
-function stageFromModal(name = BRANCH) {
-	activeSession.stageCreatedBranch(name);
+/**
+ * ExecutionModeBar stages both a branch the New branch modal just created and a
+ * branch picked from the list with these same calls.
+ */
+function stagePick(name = BRANCH) {
+	activeSession.setWorktreeBranch(name);
+	activeSession.setWorktreeMode('new');
+	activeSession.setWorktreeCreateNewBranch(false);
 	expect(activeSession.current).toMatchObject({ worktreeBranch: name, worktreeCreateNewBranch: false, worktreeMode: 'new' });
 }
 
-describe('one-time New Branch choice (#1528)', () => {
-	it('is consumed after the session is created; the next New Chat falls back to Auto', async () => {
-		stageFromModal();
-		// A later base-branch edit keeps the choice one-time.
-		activeSession.setWorktreeBaseBranch('main');
-		expect(composerPreferences.current.checkout).toMatchObject({ branch: BRANCH, createNew: false, oneTime: true });
-		post.mockResolvedValueOnce(created('session-c'));
+describe('one-time branch choice (#1528)', () => {
+	it.each([BRANCH, 'feature/existing'])('%s is consumed after the session is created; the next New Chat falls back to Auto', async (branch) => {
+		stagePick(branch);
+		activeSession.setWorktreeBaseBranch('develop');
+		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: PROJECT, projectV2Id: null,
+			branch, baseBranch: 'develop', createNew: false });
+		post.mockResolvedValueOnce(created('session-c', branch));
 		await activeSession.createWorktree();
 		expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.objectContaining({
-			project_id: PROJECT, branch_name: BRANCH, create_new_branch: false }));
-		expect(activeSession.current.sessionId).toBe('session-c');
+			project_id: PROJECT, branch_name: branch, base_branch: 'develop', create_new_branch: false }));
+		expect(activeSession.current).toMatchObject({ sessionId: 'session-c', worktreeBranch: branch });
 		expect(composerPreferences.current.checkout).toBeNull();
 		expect(JSON.parse(localStorage.getItem('ai-shuffle-composer:checkout')!)).toBeNull();
 
 		activeSession.newChat();
-		expect(activeSession.current).toMatchObject({ sessionId: null, project: PROJECT,
-			worktreeIntent: 'worktree', worktreeBranch: '', worktreeId: null, worktreeCreateNewBranch: false });
+		// Auto from the default base: the picked branch's base was part of the spent choice.
+		expect(activeSession.current).toMatchObject({ sessionId: null, project: PROJECT, worktreeIntent: 'worktree',
+			worktreeBranch: '', worktreeBaseBranch: 'main', worktreeId: null, worktreeCreateNewBranch: false });
 	});
 
 	it('is not staged by a New Chat opened while the first create is still in flight', async () => {
-		stageFromModal();
+		stagePick();
 		const first = deferred();
 		post.mockReturnValueOnce(first.promise);
 		const pending = activeSession.createWorktree();
@@ -105,12 +113,12 @@ describe('one-time New Branch choice (#1528)', () => {
 	});
 
 	it('keeps the choice when the create fails, in place and for the next New Chat', async () => {
-		stageFromModal();
+		stagePick();
 		post.mockRejectedValueOnce({ status: 500, detail: 'worktree add failed' });
 		await activeSession.createWorktree();
 		expect(activeSession.current).toMatchObject({ sessionId: null, worktreeBranch: BRANCH, isCreatingWorktree: false });
 		expect(activeSession.current.worktreeError).toBeTruthy();
-		expect(composerPreferences.current.checkout).toMatchObject({ branch: BRANCH, oneTime: true });
+		expect(composerPreferences.current.checkout?.branch).toBe(BRANCH);
 
 		Object.assign(activeSession.current, { worktreeBranch: '', draft: '' });
 		activeSession.newChat();
@@ -118,7 +126,7 @@ describe('one-time New Branch choice (#1528)', () => {
 	});
 
 	it('keeps the choice when an in-flight create fails after the user started a New Chat', async () => {
-		stageFromModal();
+		stagePick();
 		const first = deferred();
 		post.mockReturnValueOnce(first.promise);
 		const pending = activeSession.createWorktree();
@@ -126,40 +134,28 @@ describe('one-time New Branch choice (#1528)', () => {
 		first.reject({ status: 500, detail: 'worktree add failed' });
 		await pending;
 		expect(composerPreferences.checkoutClaimed).toBe(false);
-		expect(composerPreferences.current.checkout).toMatchObject({ branch: BRANCH, oneTime: true });
+		expect(composerPreferences.current.checkout?.branch).toBe(BRANCH);
 		activeSession.newChat();
 		expect(activeSession.current.worktreeBranch).toBe(BRANCH);
 	});
 
 	it('keeps a newer pick made while the first create was in flight', async () => {
-		stageFromModal();
+		stagePick();
 		const first = deferred();
 		post.mockReturnValueOnce(first.promise);
 		const pending = activeSession.createWorktree();
 		activeSession.newChat();
-		stageFromModal('live/next-task');
+		stagePick('live/next-task');
 		first.resolve(created('session-c'));
 		await pending;
-		expect(composerPreferences.current.checkout).toMatchObject({ branch: 'live/next-task', oneTime: true });
+		expect(composerPreferences.current.checkout?.branch).toBe('live/next-task');
 		expect(activeSession.current.worktreeBranch).toBe('live/next-task');
 	});
 
-	it('leaves an existing branch picked from the list as the default for the next New Chat', async () => {
-		activeSession.setWorktreeBranch('feature/existing');
-		activeSession.setWorktreeMode('new');
-		activeSession.setWorktreeCreateNewBranch(false);
-		expect(composerPreferences.current.checkout).not.toHaveProperty('oneTime');
-		post.mockResolvedValueOnce(created('session-e', 'feature/existing'));
-		await activeSession.createWorktree();
-		expect(composerPreferences.current.checkout?.branch).toBe('feature/existing');
+	it('does not remember an Auto base branch across New Chats (unchanged)', () => {
+		activeSession.setWorktreeBaseBranch('develop');
+		expect(composerPreferences.current.checkout).toBeNull();
 		activeSession.newChat();
-		expect(activeSession.current.worktreeBranch).toBe('feature/existing');
-	});
-
-	it('drops the one-time flag when the user then picks a listed branch', () => {
-		stageFromModal();
-		activeSession.setWorktreeBranch('feature/existing');
-		expect(composerPreferences.current.checkout).toMatchObject({ branch: 'feature/existing', createNew: false });
-		expect(composerPreferences.current.checkout).not.toHaveProperty('oneTime');
+		expect(activeSession.current).toMatchObject({ worktreeBranch: '', worktreeBaseBranch: 'main' });
 	});
 });

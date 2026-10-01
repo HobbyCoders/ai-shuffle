@@ -4,12 +4,11 @@ import type { ClusterProject } from '$lib/api/installs';
 import { sessionOwnerEpoch } from './session-owner';
 
 type ProjectPick = { projectId: string; projectV2Id: string | null };
-// `oneTime` marks a branch the composer's New Branch flow created up front. It
-// is sent as an existing branch (createNew=false) but, like a createNew pick, is
-// spent by the first session created on it. Branches picked from the list keep
-// persisting as the default.
+// A `branch` pick (New branch..., or a branch/checkout picked from the list) is
+// one-time: the first session created on it spends it (#1528), so the next new
+// chat falls back to Auto. A legacy `existing` worktree-ID pick still persists.
 type CheckoutPick = ProjectPick & ({kind:'existing'; worktreeId:string; branch:string}
- | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean; oneTime?:true});
+ | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean});
 interface Picks {
  profile: string; project: ProjectPick; checkout: CheckoutPick | null;
  model: string | null; effort: string | null; permissionMode: string | null;
@@ -31,7 +30,7 @@ function sameCheckout(a: CheckoutPick | null, b: CheckoutPick | null) {
  if (!a || !b || a.kind !== b.kind || a.projectId !== b.projectId
   || a.projectV2Id !== b.projectV2Id || a.branch !== b.branch) return false;
  return a.kind === 'branch' && b.kind === 'branch'
-  ? a.baseBranch === b.baseBranch && a.createNew === b.createNew && !!a.oneTime === !!b.oneTime
+  ? a.baseBranch === b.baseBranch && a.createNew === b.createNew
   : a.kind === 'existing' && b.kind === 'existing' && a.worktreeId === b.worktreeId;
 }
 const listeners = new Set<() => void>();
@@ -58,10 +57,7 @@ function normalize<K extends keyof Picks>(key: K, value: unknown): Picks[K] {
  if (key === 'checkout') {
   if (!projectPick(value) || typeof (value as CheckoutPick).branch !== 'string') return null as Picks[K];
   const pick = value as CheckoutPick;
-  if (pick.kind === 'branch' && typeof pick.baseBranch === 'string' && typeof pick.createNew === 'boolean') {
-   const {oneTime, ...rest} = pick;
-   return (oneTime === true ? {...rest, oneTime} : rest) as Picks[K];
-  }
+  if (pick.kind === 'branch' && typeof pick.baseBranch === 'string' && typeof pick.createNew === 'boolean') return {...pick} as Picks[K];
   if ('worktreeId' in pick && typeof pick.worktreeId === 'string') return {...pick,kind:'existing'} as Picks[K];
   return null as Picks[K];
  }
@@ -105,8 +101,8 @@ export const composerPreferences = {
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);
  },
  /**
-  * Claim a one-time branch choice (createNew, or created by New Branch) before
-  * the create POST. While claimed, `checkoutClaimed` is true so a New Chat
+  * Claim the remembered branch choice that this create request is spending,
+  * before the POST. While claimed, `checkoutClaimed` is true so a New Chat
   * opened mid-create does not stage it. `consume` clears the unchanged choice
   * after success; `release` (always safe to call, e.g. from `finally`) ends
   * the claim and keeps the choice for a retry.
@@ -115,8 +111,9 @@ export const composerPreferences = {
   const pick = values.checkout;
   const matchesProject = pick && (pick.projectV2Id
    ? pick.projectV2Id === project.projectV2Id : pick.projectId === project.projectId);
-  if (pick?.kind !== 'branch' || !(pick.createNew || pick.oneTime) || pick.createNew !== createNew
-   || pick.branch !== branch || !matchesProject) return {consume() {}, release() {}};
+  if (pick?.kind !== 'branch' || pick.createNew !== createNew || pick.branch !== branch || !matchesProject) {
+   return {consume() {}, release() {}};
+  }
   const claim = {revision: checkoutRevision, ownerEpoch: sessionOwnerEpoch()};
   claims.add(claim);
   return {
