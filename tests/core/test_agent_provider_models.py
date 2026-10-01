@@ -601,10 +601,10 @@ def test_background_doctrine_is_its_own_top_level_block(mock_db):
     assert "\n# Background work\n" in guidance
     background = guidance.split("# Background work", 1)[1]
     # It governs every producer, not just Task.
-    for producer in ("subagent", "Monitor", "Bash"):
+    for producer in ("subagent", "Monitor"):
         assert producer in background
     assert "end your turn" in background
-    assert "no `wait` polling" in background.lower()
+    assert "No sleep loops or status polling" in background
     # The Task block keeps its own contract and loses the doctrine.
     delegation = guidance.split("# Background work", 1)[0]
     assert "Never invent a subagent ID" in delegation
@@ -616,8 +616,8 @@ def test_monitor_is_named_as_the_trigger_for_long_commands(mock_db):
         "# Background work", 1
     )[1]
 
-    assert "outlast a Bash call" in background
-    assert "test suite" in background
+    assert "Long builds, installs, suites and CI waits belong in Monitor" in background
+    assert "end your turn" in background
 
 
 def test_ui_changes_are_verified_in_a_browser(mock_db):
@@ -626,6 +626,8 @@ def test_ui_changes_are_verified_in_a_browser(mock_db):
     assert "# Verifying a UI change" in guidance
     verification = guidance.split("# Verifying a UI change", 1)[1]
     assert "frontend/" in verification and ".svelte" in verification
-    assert "browser_resize" in verification and "ToolSearch" in verification
+    assert "affected viewport" in verification
+    assert "effective catalog" in verification
+    assert "not with unit tests alone" in verification
     # Two sentences, no more.
     assert verification.strip().count(". ") <= 2

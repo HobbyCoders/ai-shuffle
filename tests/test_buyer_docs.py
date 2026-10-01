@@ -20,6 +20,9 @@ REQUIRED = {
     "first-run", "modes-and-costs", "quick-start", "remote-access", "updates", "license",
     "troubleshooting", "faq", "changelog",
 }
+# The changelog remains available in the app, but is intentionally not published
+# or advertised in Start Here (the website generator also omits this page).
+IN_APP_ONLY = {"changelog"}
 FRONTMATTER = re.compile(r"^<!--\n((?:[\w-]+: .+\n)+)-->\n")
 MODEL_NAMES = re.compile(r"\b(opus|sonnet|haiku|fable|gpt-?\d|gemini|grok-\d|o\d-mini)\b", re.IGNORECASE)
 DOC_LINK = re.compile(r"\(/docs/getting-started/([\w-]+)\)")
@@ -68,7 +71,9 @@ def test_frontend_bundles_the_same_docs_everywhere():
 def test_index_links_every_page_and_every_link_resolves():
     found = pages()
     linked = set(DOC_LINK.findall(found["_index"]))
-    assert set(found) - {"_index"} <= linked, f"not linked from Start Here: {sorted(set(found) - {'_index'} - linked)}"
+    required_links = set(found) - {"_index"} - IN_APP_ONLY
+    assert required_links <= linked, f"not linked from Start Here: {sorted(required_links - linked)}"
+    assert not linked & IN_APP_ONLY, "Start Here must not advertise retired public pages"
     for slug, text in found.items():
         for target in DOC_LINK.findall(text):
             assert target in found, f"{slug} links to a missing page {target}"

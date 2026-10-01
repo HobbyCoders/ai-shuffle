@@ -1052,7 +1052,7 @@ def _package_dirs(cwd: Path) -> list:
     """Directories under ``cwd`` (root and one level of the usual names) that
     carry a package.json, as paths relative to ``cwd``."""
     found = []
-    for rel in ("", "frontend", "browser-mcp", "tools", "desktop"):
+    for rel in ("", "frontend", "browser-mcp", "tools", "desktop", "mobile"):
         directory = cwd / rel if rel else cwd
         if (directory / "package.json").is_file():
             found.append(rel or ".")
@@ -1060,19 +1060,32 @@ def _package_dirs(cwd: Path) -> list:
 
 
 def _node_dependency_facts(cwd: Path) -> list:
-    """One line per package dir: whether its node_modules is installed."""
-    missing = []
-    present = []
+    """Checkout-scoped receipts; never prescribe npm ci without a lockfile."""
+    missing, present, lockless = [], [], []
+    mobile_missing = False
     for rel in _package_dirs(cwd):
         directory = cwd / rel if rel != "." else cwd
-        (present if (directory / "node_modules" / ".bin").is_dir() else missing).append(rel)
+        if (directory / "node_modules" / ".bin").is_dir():
+            present.append(rel)
+        elif (directory / "package-lock.json").is_file():
+            missing.append(rel)
+        elif rel == "mobile" and _is_ai_shuffle_checkout(cwd):
+            mobile_missing = True
+        else:
+            lockless.append(rel)
     lines = []
     if missing:
-        lines.append(
-            "Node: node_modules MISSING in " + ", ".join(missing) + " — run `npm ci` "
-            "there before any dev server, build or test (never junction or copy "
-            "node_modules from another checkout)."
-        )
+        lines.append("Node: node_modules MISSING in " + ", ".join(missing)
+                     + " — run `npm ci` there before its scripts (never junction "
+                     "or copy node_modules from another checkout).")
+    if mobile_missing:
+        lines.append("Mobile: dependencies MISSING; install frontend in this SAME "
+                     "checkout, then run `npm run deps` in mobile (no lockfile: "
+                     "do not run npm ci in mobile).")
+    if lockless:
+        lines.append("Node: node_modules MISSING in " + ", ".join(lockless)
+                     + "; no lockfile — use the package's documented setup, "
+                     "not npm ci or another checkout's dependencies.")
     if present:
         lines.append("Node: node_modules installed in " + ", ".join(present) + ".")
     return lines
@@ -1127,10 +1140,30 @@ def pytest_interpreter() -> Optional[str]:
 def _python_facts(cwd: Path, is_shuffle: bool) -> list:
     exe = pytest_interpreter()
     if exe is None:
+        import shutil
+        import subprocess
+
+        # A console script can use a different interpreter than `python` on
+        # PATH. Its availability is a receipt, not permission for a global
+        # install or a claim that the worker interpreter gained pytest.
+        pytest_exe = shutil.which("pytest")
+        if pytest_exe:
+            try:
+                result = subprocess.run(
+                    [pytest_exe, "--version"], capture_output=True, timeout=10,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return [f"Python: pytest was not verified in worker interpreter "
+                            f"{sys.executable}, but verified pytest executable `{pytest_exe}` "
+                            "is available. Use it with the checkout's documented "
+                            "test environment; no install is needed for pytest."]
+            except (OSError, subprocess.SubprocessError):
+                pass
         return [
-            f"Python: no interpreter with pytest was found (this worker runs "
-            f"{sys.executable}); install pytest into a venv before running the "
-            "backend suite."
+            f"Python: no interpreter or executable with pytest was verified "
+            f"(worker {sys.executable}); install pytest in a project venv "
+            "before running the backend suite."
         ]
     own = os.path.normcase(exe) == os.path.normcase(sys.executable)
     where = "this worker's own interpreter" if own else "on PATH"
@@ -1221,9 +1254,10 @@ def workspace_facts_card(
     body = "\n".join(f"- {line}" for line in lines)
     card = (
         f"{WORKSPACE_FACTS_HEADER}\n"
-        "Probed once for this worker at session start; these hold for every "
-        "turn. Recall before re-probing anything not listed here, and Remember "
-        "what you establish.\n"
+        "Initial worker/checkout baseline, probed at session start. Current "
+        "turn receipts and verified setup changes supersede it. Do not "
+        "re-probe unchanged facts; use new setup results rather than stale "
+        "availability notes.\n"
         f"{body}"
     )
     if len(card) > WORKSPACE_FACTS_MAX_CHARS:

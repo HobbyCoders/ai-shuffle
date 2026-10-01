@@ -16,6 +16,7 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { galleryMediaForTurn, type GalleryMedia } from './media-gallery';
 import { agentDelivery } from './agent-delivery';
+import { canRewindUserMessage } from './message-presentation';
 import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
@@ -80,6 +81,8 @@ export interface TranscriptModel {
 	 * both carry their original message index.
 	 */
 	promptOccurrence: number[];
+	/** Whether each raw message has an independently resolvable user checkpoint. */
+	rewindEligible: boolean[];
 	/**
 	 * Tool ids that own a linked `subagent` card, so a Task/Agent `tool_use`
 	 * knows whether the richer card already renders its work. Use
@@ -658,16 +661,23 @@ export function buildTranscriptModel(
 	// below must not shift the ordinals the rewind API resolves against).
 	const promptOccurrence = new Array<number>(messages.length).fill(0);
 	const promptCounts = new Map<string, number>();
+	const promptTurnIds = new Set<string>();
+	const rewindEligible = new Array<boolean>(messages.length).fill(false);
 	const subagentToolIds = new Set<string>();
 	let lastAssistantMetadata: Record<string, unknown> | null = null;
 	let latestUserTurnId: string | null = null;
 	messages.forEach((message, index) => {
+		const realTurnId = message.turnId && message.turnId !== 'backfill' ? message.turnId : null;
+		rewindEligible[index] = canRewindUserMessage(message, !!realTurnId && promptTurnIds.has(realTurnId));
 		if (message.role === 'user' && message.type !== 'command') {
+			if (realTurnId) promptTurnIds.add(realTurnId);
+			if (message.id && !agentDelivery(message)) latestUserTurnId = message.id;
+		}
+		if (rewindEligible[index]) {
 			const key = (message.content ?? '').trim();
 			const count = promptCounts.get(key) ?? 0;
 			promptOccurrence[index] = count;
 			promptCounts.set(key, count + 1);
-			if (message.id && !agentDelivery(message)) latestUserTurnId = message.id;
 		} else if (message.type === 'subagent') {
 			subagentToolIds.add(message.toolId ?? NO_TOOL_ID);
 		}
@@ -777,6 +787,7 @@ export function buildTranscriptModel(
 	return {
 		items,
 		promptOccurrence,
+		rewindEligible,
 		subagentToolIds,
 		itemIndexByTurnId,
 		lastAssistantMetadata,

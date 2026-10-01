@@ -387,6 +387,26 @@ def _load_message_events(session_id: str) -> List[dict]:
                     rows = [r for r in rows if r["seq"] < from_seq]
         if len(page) < 500:
             break
+    # Old recorder events predate checkpoint_backed. A later user message in
+    # the same real turn is a steer, not a standalone prompt. Backfill uses one
+    # shared sentinel for independent legacy prompts and must remain eligible.
+    prompt_turns: set[str] = set()
+    for index, row in enumerate(rows):
+        if row["event_type"] != "message.user":
+            continue
+        payload = row.get("payload") or {}
+        turn_id = row.get("turn_id")
+        if not turn_id or turn_id == "backfill" or payload.get("kind") == "command":
+            continue
+        if (
+            turn_id in prompt_turns
+            and payload.get("checkpoint_backed") is None
+            and not payload.get("uuid")
+        ):
+            row = row.copy()
+            row["payload"] = {**payload, "checkpoint_backed": False}
+            rows[index] = row
+        prompt_turns.add(turn_id)
     return rows
 
 
@@ -396,6 +416,9 @@ def _is_prompt_event(row: dict) -> bool:
     Command prompts (kind='command') are excluded because the JSONL checkpoint
     list (`get_checkpoints`) skips command/meta entries, and ordinals must be
     computed against the SAME population on both sides.
+
+    Steered messages with checkpoint_backed=False have no standalone
+    transcript boundary and do not participate in checkpoint occurrences.
 
     Task-notification wake prompts (synthetic user rows containing a
     ``<task-notification>`` block) are likewise excluded: the UI
@@ -407,7 +430,7 @@ def _is_prompt_event(row: dict) -> bool:
     if row["event_type"] != "message.user":
         return False
     payload = row.get("payload") or {}
-    if payload.get("kind") == "command":
+    if payload.get("kind") == "command" or payload.get("checkpoint_backed") is False:
         return False
     if _is_task_notification(payload.get("content") or ""):
         return False
@@ -530,10 +553,14 @@ def _resolve_rewind_from_seq(
 
     if target_role == "assistant" or include_response:
         # Keep the target (and its response); drop from the NEXT user prompt.
-        # Commands count as a boundary here — mirroring _next_real_user_index,
-        # which cuts at any genuine user entry.
+        # A steer is part of the retained response, not the next standalone
+        # prompt. _load_message_events also marks inferred legacy steers.
+        # Commands remain real boundaries even without a prompt checkpoint.
         for row in events[target_idx + 1:]:
-            if row["event_type"] == "message.user":
+            if row["event_type"] != "message.user":
+                continue
+            payload = row.get("payload") or {}
+            if payload.get("kind") == "command" or payload.get("checkpoint_backed") is not False:
                 return int(row["seq"]), None
         return None, None  # already the tail — nothing to drop
     return int(events[target_idx]["seq"]), None

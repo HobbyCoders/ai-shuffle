@@ -11,6 +11,7 @@ Everything is driven directly (no ASGITransport); the event log rides the
 autouse SQLite shim.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -503,6 +504,22 @@ async def test_execute_rewind_content_guard_refuses(rewind_env, monkeypatch):
     assert rewind_env.truncate_calls == []
 
 
+async def test_execute_steer_rewind_refuses_before_any_mutation(rewind_env, monkeypatch):
+    steer = _user_ev("mid-turn only")
+    steer["payload"]["checkpoint_backed"] = False
+    se.append_events(SID, [_user_ev("normal"), steer])
+    _patch_checkpoints(monkeypatch, [_cp("u-1", "normal")])
+    before = se.get_events(SID)
+    resp = await execute_rewind(SID, RewindRequestV2(
+        target_content="mid-turn only", target_occurrence=0, include_response=False,
+    ))
+    assert resp.success is False
+    assert "0 user prompt" in resp.error
+    assert rewind_env.truncate_calls == []
+    assert rewind_env.evicted == []
+    assert se.get_events(SID) == before
+
+
 async def test_execute_rewind_missing_target_refused(rewind_env, monkeypatch):
     _patch_checkpoints(monkeypatch, [])
     resp = await execute_rewind(SID, RewindRequestV2(target_uuid=""))
@@ -636,3 +653,279 @@ async def test_failed_enriched_attachment_turn_rewinds_all_stores(
     assert _load_message_events(SID) == []
     assert not any(kw.get("sdk_session_id", "unchanged") is None
                    for _, kw in rewind_env.update_calls)
+
+async def _produce_checkpoint_and_steer_turns(session_id, sdk_session_id, tmp_path):
+    """NativeLoop delivery -> runtime receipt -> TurnRecorder persistence.
+
+    The next standalone prompt equals the intervening steer, guarding against
+    resolving an ordinary checkpoint to a message with no boundary of its own.
+    """
+    import asyncio
+
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from app.core.session_runtime import SessionRuntime
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import database, turns as turns_db
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import SteerDelivered, TextDelta, ToolResult, ToolUse, TurnComplete
+    from fluid.events.ops import Steer, UserTurn
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    prompt, steer = "Start a tool", "Continue normally"
+    database.create_profile("checkpoint-test", "Checkpoint test", None, {}, if_absent=True)
+    database.create_session(session_id, "checkpoint-test", derive_provider_from_profile=False)
+    database.update_session(session_id, sdk_session_id=sdk_session_id, v2_stream=True)
+    live = turns_db.enqueue_turn(session_id, "user", prompt=prompt)
+    turns_db.start_turn(live["id"])
+    live = turns_db.get_turn(live["id"])
+    queued = turns_db.enqueue_turn(session_id, "user", prompt=steer, command_id="steer-command")
+    runtime = SessionRuntime(live)
+
+    class Provider:
+        name = "openai_responses"
+        caps = ProviderCaps()
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            yield StreamChunk("message_start", {})
+            if self.calls == 1:
+                yield StreamChunk("block_start", {
+                    "index": 0, "block_type": "tool_use", "tool_name": "mcp__test__interject",
+                    "tool_use_id": "tool-interject",
+                })
+                yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"})
+            else:
+                yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+                yield StreamChunk("text_delta", {"index": 0, "text": "Finished normally"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {}, "stop_reason": "tool_use" if self.calls == 1 else "end_turn"})
+            yield StreamChunk("message_stop", {})
+
+    @tool("interject", "Deliver the pending user message during tool execution", {"type": "object"})
+    async def interject(args):
+        await loop.submit(Steer(text=steer, id=queued["id"]))
+        return {"content": [{"type": "text", "text": "tool completed"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("test", [interject]))
+    store = PgFluidStore()
+    loop = NativeLoop(
+        provider=Provider(), store=store, session_id=sdk_session_id, model="test-model",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        ctx=ToolCtx(cwd=str(tmp_path)), setting_sources=[],
+    )
+    recorder = TurnRecorder(session_id, None, live["id"], None, "test")
+
+    async def record_events(events):
+        for event in events:
+            if isinstance(event, ToolUse):
+                await recorder.on_event({"type": "tool_use", "id": event.tool_use_id,
+                                         "name": event.name, "input": event.input})
+            elif isinstance(event, ToolResult):
+                await recorder.on_event({"type": "tool_result", "tool_use_id": event.tool_use_id,
+                                         "output": event.output})
+            elif isinstance(event, SteerDelivered):
+                await runtime._on_steer_delivered(recorder, {"type": "steer_delivered", "steers": event.steers})
+            elif isinstance(event, TextDelta):
+                await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": event.text})
+            elif isinstance(event, TurnComplete):
+                await recorder.on_event({"type": "done", "metadata": {"stop_reason": event.stop_reason}})
+
+    try:
+        await recorder.start(prompt)
+        database.add_session_message(session_id, "user", prompt)
+        await loop.submit(UserTurn(content=prompt))
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        events = await store.events_since(sdk_session_id, 0)
+        result = next(e for e in events if isinstance(e, ToolResult))
+        receipt = next(e for e in events if isinstance(e, SteerDelivered))
+        assert receipt.seq > result.seq
+        assert steer in result.output
+        await record_events(events)
+        await recorder.close()
+        turns_db.settle_turn(live["id"], "completed")
+        absorbed = turns_db.get_turn(queued["id"])
+        assert absorbed["state"] == "completed"
+        assert absorbed["stop_reason"] == "steered"
+
+        recorder = TurnRecorder(session_id, None, "next-normal-turn", None, "test")
+        await recorder.start(steer)
+        database.add_session_message(session_id, "user", steer)
+        await loop.submit(UserTurn(content=steer))
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        await record_events(await store.events_since(sdk_session_id, events[-1].seq))
+        return prompt, steer
+    finally:
+        await recorder.close()
+        await loop.aclose()
+
+
+async def test_native_steer_reload_has_no_checkpoint_but_normal_prompt_resolves(mock_db, tmp_path):
+    from app.core.history_backfill import _convert_one
+    from app.core.provider.fluid_transcript import fluid_live_messages, get_fluid_checkpoints
+
+    sdk = "ses_checkpoint_steer"
+    prompt, steer = await _produce_checkpoint_and_steer_turns(SID, sdk, tmp_path)
+    rows = se.get_events(SID)
+    users = [r for r in rows if r["event_type"] == "message.user"]
+    assert [r["payload"]["content"] for r in users] == [prompt, steer, steer]
+    assert users[1]["payload"]["checkpoint_backed"] is False
+    assert users[1]["turn_id"] == users[0]["turn_id"]
+    assert [r["seq"] for r in _load_message_events(SID) if _is_prompt_event(r)] == [users[0]["seq"], users[2]["seq"]]
+
+    checkpoints = [cp for cp in get_fluid_checkpoints(sdk) if cp.role == "user"]
+    assert [cp.full_message for cp in checkpoints] == [prompt, steer]
+    target, error = _resolve_checkpoint_uuid_from_content(sdk, str(tmp_path), steer, 0)
+    assert error is None and target == checkpoints[1].uuid
+    from_seq, error = _resolve_rewind_from_seq(SID, sdk, str(tmp_path), target, False, "user")
+    assert error is None and from_seq == users[2]["seq"]
+    # A non-existent steer occurrence refuses rather than guessing a cut.
+    assert _resolve_checkpoint_uuid_from_content(sdk, str(tmp_path), steer, 1)[0] is None
+    messages, _ = fluid_live_messages(sdk, str(tmp_path))
+    normal = [m for m in messages if m["role"] == "user"]
+    assert [m["content"] for m in normal] == [prompt, steer]
+    assert all(m["checkpoint_backed"] is True for m in normal)
+    assert all(_convert_one(SID, m)[0]["payload"]["checkpoint_backed"] is True for m in normal)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("include_response", [None, True, False])
+async def test_native_steered_turn_rewind_keeps_native_and_replay_aligned(
+    mock_db, monkeypatch, tmp_path, legacy, include_response,
+):
+    from app.core.provider.fluid_transcript import (
+        fluid_live_messages, fluid_transcript_entries, get_fluid_checkpoints, load_fluid_path,
+    )
+    from app.db import database
+    from app.db.base import get_db
+
+    sdk = "ses_native_steer_rewind"
+    prompt, steer = await _produce_checkpoint_and_steer_turns(SID, sdk, tmp_path)
+    if legacy:
+        # A producer-built old log has no optional capability field; the real
+        # turn identity, duplicate text and native checkpoints stay untouched.
+        with get_db() as conn:
+            rows = se.get_events(SID)
+            for row in rows:
+                if row["event_type"] == "message.user":
+                    payload = dict(row["payload"])
+                    payload.pop("checkpoint_backed", None)
+                    conn.cursor().execute(
+                        "UPDATE session_events SET payload = %s WHERE session_id = %s AND seq = %s",
+                        (json.dumps(payload), SID, row["seq"]),
+                    )
+    users = [row for row in se.get_events(SID) if row["event_type"] == "message.user"]
+    assert [row["payload"]["content"] for row in users] == [prompt, steer, steer]
+    checkpoints = [cp for cp in get_fluid_checkpoints(sdk) if cp.role == "user"]
+    target = checkpoints[0].uuid
+    request_fields = {"target_uuid": target}
+    if include_response is not None:
+        request_fields["include_response"] = include_response
+    request = RewindRequestV2(**request_fields)
+    assert request.include_response is (include_response is not False)
+    expected_cut = users[2]["seq"] if request.include_response else users[0]["seq"]
+    assert _resolve_rewind_from_seq(SID, sdk, str(tmp_path), target, request.include_response, "user") == (expected_cut, None)
+    monkeypatch.setattr(cmd, "get_working_dir_for_project", lambda *a, **kw: str(tmp_path))
+    class Pool:
+        def contains(self, sid):
+            return False
+    monkeypatch.setattr(cmd, "get_session_pool", lambda: Pool())
+
+    response = await execute_rewind(SID, request)
+    assert response.success is True and response.chat_rewound is True
+    rewind = se.get_events(SID)[-1]
+    assert rewind["event_type"] == "transcript.rewound"
+    assert rewind["payload"]["from_seq"] == expected_cut
+    assert database.get_session(SID)["sdk_session_id"] == sdk
+    native, _ = fluid_live_messages(sdk, str(tmp_path))
+    replay = _load_message_events(SID)
+    if not request.include_response:
+        assert native == [] and load_fluid_path(sdk) == [] and replay == []
+    else:
+        assert [m["content"] for m in native if m["role"] == "user"] == [prompt]
+        assert [r["payload"]["content"] for r in replay if r["event_type"] == "message.user"] == [prompt, steer]
+        native_replies = [m["content"] for m in native if m["role"] == "assistant" and m.get("type") == "text"]
+        # The native producer streams assistant.text_delta, not closed
+        # message.assistant rows. Replay the retained stream payloads too;
+        # _load_message_events only indexes closed rows for rewind resolution.
+        kept_events = [row for row in se.get_events(SID) if row["seq"] < expected_cut]
+        replay_text = "".join(
+            row["payload"]["text"] for row in kept_events
+            if row["event_type"] == "assistant.text_delta"
+        )
+        assert native_replies == [replay_text] == ["Finished normally"]
+        # Rendering folds tool results into their tool-use card; inspect the
+        # authoritative retained native node payload for the delivered steer.
+        results = [
+            block
+            for entry in fluid_transcript_entries(sdk)
+            for block in entry["message"].get("content", [])
+            if isinstance(block, dict) and block.get("type") == "tool_result"
+        ]
+        assert len(results) == 1 and steer in str(results[0]["content"])
+        assert all(r["seq"] < expected_cut for r in replay)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("boundary_kind", [None, "command"])
+async def test_keep_response_skips_steers_but_retains_real_legacy_boundaries(
+    mock_db, monkeypatch, legacy, boundary_kind,
+):
+    first, interjection = _user_ev("again"), _user_ev("again")
+    first["turn_id"] = interjection["turn_id"] = "live-turn"
+    if not legacy:
+        interjection["payload"]["checkpoint_backed"] = False
+    following = _user_ev("again", kind=boundary_kind)
+    if boundary_kind == "command":
+        # Commands are real turn boundaries even though they aren't prompt
+        # checkpoint candidates. Preserve the existing command behavior.
+        following["payload"]["checkpoint_backed"] = False
+    se.append_events(SID, [first, interjection, _asst_ev("reply"), following])
+    _patch_checkpoints(monkeypatch, [_cp("u-1", "again"), _cp("u-2", "again")])
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", True, "user") == (4, None)
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", False, "user") == (1, None)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_keep_response_tail_steer_is_not_a_next_prompt(mock_db, monkeypatch, legacy):
+    first, steer = _user_ev("first"), _user_ev("mid-turn")
+    first["turn_id"] = steer["turn_id"] = "live-turn"
+    if not legacy:
+        steer["payload"]["checkpoint_backed"] = False
+    se.append_events(SID, [first, steer, _asst_ev("reply")])
+    _patch_checkpoints(monkeypatch, [_cp("u-1", "first")])
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", True, "user") == (None, None)
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", False, "user") == (1, None)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_assistant_checkpoint_boundary_skips_same_turn_steer(mock_db, monkeypatch, legacy):
+    first, steer = _user_ev("first"), _user_ev("mid-turn")
+    first["turn_id"] = steer["turn_id"] = "live-turn"
+    if not legacy:
+        steer["payload"]["checkpoint_backed"] = False
+    se.append_events(SID, [
+        first, _asst_ev("partial response", uuid="a-1"), steer,
+        _asst_ev("finished response"), _user_ev("next"),
+    ])
+    _patch_checkpoints(monkeypatch, [])
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "a-1", True, "assistant") == (5, None)
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "a-1", False, "assistant") == (5, None)
+
+
+async def test_legacy_same_turn_steer_does_not_shift_normal_checkpoint(mock_db, monkeypatch):
+    first, steer, following = _user_ev("again"), _user_ev("again"), _user_ev("again")
+    first["turn_id"] = steer["turn_id"] = "real-turn"
+    following["turn_id"] = "next-turn"
+    se.append_events(SID, [first, steer, following])
+    _patch_checkpoints(monkeypatch, [_cp("first", "again"), _cp("next", "again")])
+    rows = _load_message_events(SID)
+    assert [_is_prompt_event(row) for row in rows] == [True, False, True]
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "next", False, "user") == (3, None)
+    # Normal legacy events sharing the backfill sentinel are not inferred steers.
+    se.append_events(SID, [_user_ev("backfilled"), _user_ev("backfilled")])
+    assert all(_is_prompt_event(row) for row in _load_message_events(SID)[-2:])

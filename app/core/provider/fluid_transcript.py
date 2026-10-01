@@ -1386,4 +1386,9 @@ def fluid_live_messages(
         return [], {}
     from app.core.jsonl_parser import _transform_entries
 
-    return _transform_entries(entries, sdk_session_id, working_dir)
+    messages, usage = _transform_entries(entries, sdk_session_id, working_dir)
+    checkpoint_ids = {cp.uuid for cp in checkpoints_from_entries(entries) if cp.role == "user"}
+    for message in messages:
+        if message.get("role") == "user":
+            message["checkpoint_backed"] = message.get("uuid") in checkpoint_ids
+    return messages, usage
