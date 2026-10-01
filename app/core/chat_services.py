@@ -64,7 +64,10 @@ RESERVED_HEADERS = frozenset(
         "user-agent",
     }
 )
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 30  # Longest silence between reads (connect, write, read, pool).
+# Overall bound on one request, headers and body included: the per-read timeout
+# alone lets a slow-dripping service hold a request open for the grant's lifetime.
+REQUEST_DEADLINE = 60
 _TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 CONTENT_TYPE = re.compile(
@@ -121,9 +124,14 @@ def parse_origin(url: str) -> Origin:
             "Enter the service address without credentials, query or fragment."
         )
     try:
-        port = parts.port or 443
+        port = parts.port
     except ValueError:
-        raise AccessDenied("Enter a valid service port.") from None
+        port = 0
+    if port is None:
+        port = 443
+    elif not 1 <= port <= 65535:
+        # An explicit ":0" is not "the default port"; refuse it like any other bad port.
+        raise AccessDenied("Enter a valid service port.")
     host = (parts.hostname or "").lower()
     try:
         address = ipaddress.ip_address(host)
@@ -312,6 +320,7 @@ async def perform(
     keep = LIMIT + max((len(n) for n in needles), default=0)
     try:
         async with (
+            asyncio.timeout(REQUEST_DEADLINE),
             httpx.AsyncClient(
                 verify=tls_context(),
                 trust_env=False,
@@ -341,7 +350,13 @@ async def perform(
             }
     except httpx.TimeoutException:
         raise AccessDenied(
-            f"The service did not respond within {REQUEST_TIMEOUT} seconds. "
+            f"The service stopped responding for {REQUEST_TIMEOUT} seconds. "
+            "A change may already have been applied."
+        ) from None
+    except TimeoutError:
+        # The deadline cancelled the stream; leaving the context managers closed it.
+        raise AccessDenied(
+            f"The service did not finish responding within {REQUEST_DEADLINE} seconds. "
             "A change may already have been applied."
         ) from None
     except httpx.HTTPError:
