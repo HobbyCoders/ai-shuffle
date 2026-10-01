@@ -146,7 +146,20 @@ async def _drain_body() -> None:
                     exc_info=True,
                 )
             continue
+        _wake_network({s["session_id"] for s in snapshots})
         await broadcast_running_task_presence([s["session_id"] for s in snapshots])
+
+
+def _wake_network(session_ids: set) -> None:
+    """A committed task status change can flip a session's shared runtime
+    summary (Working/Idle); let the network publish it now. Never raises."""
+    try:
+        from app.db.session_events import notify_session_write
+
+        for session_id in session_ids:
+            notify_session_write(session_id, "session_runtime")
+    except Exception:
+        logger.debug("task persistence network wake failed", exc_info=True)
 
 
 async def broadcast_running_task_presence(session_ids: list[str]) -> None:

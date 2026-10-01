@@ -66,7 +66,9 @@ async def test_caught_up_sentinel_follows_legacy_backfill(mock_db, gw, monkeypat
     assert [f.get("event") for f in raw] == [
         "message.user", "message.assistant", "caught_up",
     ]
-    assert raw[2]["data"] == {"seq": 2}
+    # The log was empty when the stream started; caught_up still names the
+    # log the seeded rows belong to, so the next resume is not reset.
+    assert raw[2]["data"] == {"seq": 2, "epoch": raw[0]["data"]["id"]}
 
 
 async def test_backfilled_then_live_events_share_one_seq_space(mock_db, gw, monkeypatch):

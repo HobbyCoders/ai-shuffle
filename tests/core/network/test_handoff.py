@@ -276,3 +276,34 @@ async def test_source_branch_switch_at_same_commit_refuses_ownership(pair, monke
     with a.active():
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 
+
+
+@pytest.mark.asyncio
+async def test_session_handed_back_to_its_first_worker_lists_as_local(pair, monkeypatch):
+    """A -> B -> A: the first worker owns the row again and must not list it as
+    remote with an unknown state because instance_id still named B."""
+    from app.api import sessions_helpers
+
+    a,b,source,target=pair
+    for worker in (a,b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s",("handoff-test",))
+
+    def owner_call(owner):
+        async def call(device,action,body,**kwargs):
+            with owner.active():
+                return await control.handle(action,body,from_device=(b if owner is a else a).device_id)
+        return call
+
+    monkeypatch.setattr(control,"call",owner_call(a))
+    with b.active():
+        await handoff.receive(database.get_session("handoff-test"))
+    monkeypatch.setattr(control,"call",owner_call(b))
+    with a.active():
+        await handoff.receive(database.get_session("handoff-test"))
+        row = database.get_session("handoff-test")
+        assert row["owner_device_id"] == a.device_id
+        assert row["instance_id"] == settings.effective_instance_id
+        sessions_helpers._annotate_cluster_fields([row])
+        assert row["is_remote"] is False
+        assert "remote_runtime_state" not in row

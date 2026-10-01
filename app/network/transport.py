@@ -19,6 +19,7 @@ moves to a new incarnation and starts a fresh stream.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 import time
@@ -47,6 +48,12 @@ PRESENCE_INTERVAL_SECONDS = 300.0
 ONLINE_WINDOW_SECONDS = 90
 BATCH_LIMIT = 500
 REQUEST_TIMEOUT = 15.0
+# A regular pass keeps pulling full batches for this long before it pushes.
+SYNC_PULL_SECONDS = 3.0
+# Set for the launch barrier's requests only (a context variable, so the
+# background sync loop keeps its own timeouts): a dead address fails fast.
+connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "peer_connect_timeout", default=None)
 
 _wake: Optional[asyncio.Event] = None
 _scan_wake: Optional[asyncio.Event] = None
@@ -56,6 +63,12 @@ _dirty_collections: set[str] = set()
 # a catalog wake without ids (or too many): reconcile the whole catalog.
 _dirty_sessions: Optional[set[str]] = set()
 _full_scan_requested = False
+# Sessions named by owner-side write hooks (event appends, prompts, run and
+# background-task changes). They may name a mirrored session, so the scanner
+# keeps only the ones this device owns before it narrows a catalog pass to
+# them; ``None`` means too many to list: reconcile the whole catalog.
+_owner_candidates: Optional[set[str]] = set()
+_owner_collections: set[str] = set()
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _last_contact: Dict[str, float] = {}
@@ -91,6 +104,9 @@ class PeerLink:
         self.last_error: str | None = None
         self.backoff_until = 0.0
         self.failures = 0
+        # Set once an inbound contact has cut a failure streak's backoff short;
+        # cleared by the next successful sync. One early redial per streak.
+        self.contact_kick_used = False
         self._sync_lock = asyncio.Lock()
 
     def update_endpoints(self, endpoints: list[str]) -> None:
@@ -118,8 +134,12 @@ class PeerLink:
         headers = {"Accept": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer " + (self.token or "")
+        seconds = 120 if path == "/api/v1/network/peer/state" else timeout
+        connect = connect_timeout.get()
         response = await client.request(method, self.base_url + path, json=json_body, params=params,
-                                        headers=headers, timeout=120 if path == "/api/v1/network/peer/state" else timeout)
+                                        headers=headers,
+                                        timeout=httpx.Timeout(seconds, connect=min(seconds, connect))
+                                        if connect else seconds)
         if response.status_code == 401 and auth:
             self.token = None
             raise PeerTokenRejected("token rejected")
@@ -175,6 +195,7 @@ class PeerLink:
         summary: dict[str, Any] = {"received": 0, "sent": 0}
         target = None
         marks = await asyncio.to_thread(store.local_watermarks)
+        pull_deadline = time.monotonic() + SYNC_PULL_SECONDS
         while True:
             exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
@@ -197,7 +218,17 @@ class PeerLink:
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
             if not catch_up:
-                break
+                # A backlog drains in one pass instead of one batch per
+                # SYNC_ACTIVE_SECONDS; the time budget keeps the push below
+                # from waiting behind a long pull.
+                if (len(ops) < BATCH_LIMIT or exchange.get("snapshot_required")
+                        or time.monotonic() >= pull_deadline):
+                    break
+                current = await asyncio.to_thread(store.local_watermarks)
+                if current == marks:
+                    break  # nothing applied; the same batch would come back
+                marks = current
+                continue
             current = await asyncio.to_thread(store.local_watermarks)
             caught_up = all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
                             for origin, streams in target.items() for inc, seq in streams.items())
@@ -251,6 +282,7 @@ class PeerLink:
         if exchange.get("snapshot_required"):
             summary["snapshot_required"] = True
         self.failures = 0
+        self.contact_kick_used = False
         self.last_error = None
         return summary
 
@@ -385,8 +417,26 @@ def link_status() -> List[dict]:
 
 
 def note_contact(device_id: str) -> None:
-    """Called when a peer reached us (token, exchange), so liveness is symmetric."""
-    _last_contact[device_id] = time.monotonic()
+    """Called when a peer reached us (token, exchange), so liveness is symmetric.
+
+    A peer that reaches us is up: end our backoff towards it (after it
+    rebooted, our link would otherwise skip it for up to a minute) and sync
+    now. Only a link in backoff kicks, so two healthy peers do not wake each
+    other on every exchange. The failure count stays, and the early redial is
+    granted once per failure streak: with one-way reachability (the peer can
+    dial us, its advertised addresses are dead from here) every inbound call
+    would otherwise restart a redial that times out and delays every other
+    peer in the serial sync pass.
+    """
+    now = time.monotonic()
+    _last_contact[device_id] = now
+    link = _links.get(device_id)
+    if link is None or link.contact_kick_used:
+        return
+    if link.backoff_until > now or link.failures:
+        link.backoff_until = 0.0
+        link.contact_kick_used = True
+        engine.kick()
 
 
 def forward_pushed(sender: str) -> None:
@@ -539,7 +589,7 @@ async def scan_loop() -> None:
     Unhooked changes (including external file edits) still get a full scan:
     the next pass starts within SCAN_IDLE_MAX_SECONDS of the last completion.
     """
-    global _scan_wake, _full_scan_requested, _dirty_sessions
+    global _scan_wake, _full_scan_requested, _dirty_sessions, _owner_candidates
     _scan_wake = asyncio.Event()
     delay = SCAN_INTERVAL_SECONDS
     last_full_scan = float("-inf")
@@ -554,11 +604,20 @@ async def scan_loop() -> None:
             _dirty_sessions = set()
             full = _full_scan_requested
             _full_scan_requested = False
-        full = full or not dirty or time.monotonic() - last_full_scan >= SCAN_IDLE_MAX_SECONDS
+            candidates = None if _owner_candidates is None else set(_owner_candidates)
+            _owner_candidates = set()
+            candidate_collections = set(_owner_collections)
+            _owner_collections.clear()
+        owner_wake = candidates is None or bool(candidates)
+        full = full or (not dirty and not owner_wake) or time.monotonic() - last_full_scan >= SCAN_IDLE_MAX_SECONDS
         published = 0
         try:
             if full:
                 published = await asyncio.to_thread(engine.scan_all)
+            elif owner_wake:
+                published = await asyncio.to_thread(
+                    _owner_wake_pass, dirty=dirty, sessions=sessions, candidates=candidates,
+                    candidate_collections=candidate_collections)
             else:
                 catalog = bool(dirty.intersection(policy.CATALOG_COLLECTIONS))
                 narrow = {"session_ids": sorted(sessions)} if catalog and sessions else {}
@@ -594,6 +653,35 @@ async def scan_loop() -> None:
             delay = SCAN_INTERVAL_SECONDS
 
 
+def _owner_wake_pass(*, dirty: set, sessions: Optional[set], candidates: Optional[set],
+                     candidate_collections: set) -> int:
+    """A narrow pass that also covers hooked owner writes (in the scan thread).
+
+    Only sessions this device owns join the narrow catalog pass: a foreign
+    id would widen ``catalog.publish_owned`` to the whole catalog.
+    """
+    from app.network import catalog as catalog_mod
+    dirty = set(dirty)
+    if candidates is None:
+        dirty.update(candidate_collections)
+        sessions = None
+    else:
+        owned = catalog_mod.owned_session_ids(candidates)
+        if owned:
+            if not dirty.intersection(policy.CATALOG_COLLECTIONS):
+                sessions = set()
+            dirty.update(candidate_collections)
+            if sessions is not None:
+                sessions.update(owned)
+                if len(sessions) > SCAN_DIRTY_SESSIONS_MAX:
+                    sessions = None
+    if not dirty:
+        return 0  # every named session is a mirror; its owner publishes it
+    catalog = bool(dirty.intersection(policy.CATALOG_COLLECTIONS))
+    narrow = {"session_ids": sorted(sessions)} if catalog and sessions else {}
+    return engine.scan_all(collections=dirty, include_catalog=catalog, strict=True, **narrow)
+
+
 PRUNE_INTERVAL_SECONDS = 24 * 3600.0
 _last_prune = 0.0
 
@@ -623,13 +711,31 @@ async def presence_loop() -> None:
 
 
 def request_scan(collections: Optional[List[str]] = None, *,
-                 session_ids: Optional[Iterable[str]] = None) -> None:
+                 session_ids: Optional[Iterable[str]] = None, owned_only: bool = False) -> None:
     """Coalesce shared/catalog writes; unknown changes reconcile fully.
 
     ``session_ids`` names the sessions a catalog write touched. Without it,
     the next catalog pass covers every session.
+
+    ``owned_only`` is for post-commit hooks that cannot tell a mirrored
+    session from an owned one without a database read (they may run on the
+    event loop): the scanner drops the sessions this device does not own,
+    and a wake that names none of its own sessions publishes nothing.
     """
-    global _full_scan_requested, _dirty_sessions
+    global _full_scan_requested, _dirty_sessions, _owner_candidates
+    if owned_only:
+        names = [name for name in (collections or ()) if name in policy.CATALOG_COLLECTIONS]
+        ids = {sid for sid in (session_ids or ()) if isinstance(sid, str) and sid}
+        if not names or not ids:
+            return
+        with _scan_requests_lock:
+            _owner_collections.update(names)
+            if _owner_candidates is not None:
+                _owner_candidates.update(ids)
+                if len(_owner_candidates) > SCAN_DIRTY_SESSIONS_MAX:
+                    _owner_candidates = None
+        _scan_kick_from_thread()
+        return
     with _scan_requests_lock:
         if not collections or any(
                 name not in policy.SCANNED_COLLECTIONS and name not in policy.CATALOG_COLLECTIONS
@@ -684,10 +790,12 @@ def forget_peers() -> None:
 
 
 def reset_for_tests() -> None:
-    global _full_scan_requested, _dirty_sessions, _advertised
+    global _full_scan_requested, _dirty_sessions, _advertised, _owner_candidates
     forget_peers()
     _advertised = None
     with _scan_requests_lock:
         _dirty_collections.clear()
         _dirty_sessions = set()
         _full_scan_requested = False
+        _owner_candidates = set()
+        _owner_collections.clear()

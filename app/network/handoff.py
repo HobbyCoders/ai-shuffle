@@ -202,7 +202,10 @@ def install_history(sid, data, cwd):
 def _accept_owner(sid, device_id, branch=None):
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE sessions SET owner_device_id=%s, branch=%s WHERE id=%s", (device_id, branch, sid))
+        # instance_id moves too (as adopt/unpin do): left on the previous
+        # worker's id, the session listed as remote with an unknown state here.
+        cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, branch=%s WHERE id=%s",
+                    (device_id, settings.effective_instance_id, branch, sid))
         if branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
 

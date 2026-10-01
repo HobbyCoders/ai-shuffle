@@ -338,6 +338,7 @@
 					status: deriveStatus({
 						remoteRuntimeState: s.is_remote ? s.remote_runtime_state ?? 'unknown' : null,
 						streaming: isStreaming(s.id),
+						optimisticStreaming: activeStreamingId === s.id,
 						backgroundWork: !!s.has_running_tasks,
 						parked: !!s.parked_task_kind,
 						attention: $backgroundPermissions.get(s.id) ?? null,

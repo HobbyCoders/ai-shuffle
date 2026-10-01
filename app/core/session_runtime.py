@@ -76,6 +76,15 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
             "SessionRuntime: streaming_status notify failed for %s",
             session_id, exc_info=True,
         )
+    # Peers read this session's runtime summary (Working/Idle) from the
+    # network; a claim or release must reach them without the scanner's
+    # idle backoff. Post-commit, cheap, never raises.
+    try:
+        from app.db.session_events import notify_session_write
+
+        notify_session_write(session_id, "session_runtime")
+    except Exception:
+        logger.debug("SessionRuntime: network wake failed for %s", session_id, exc_info=True)
 
 # How long a runtime-driven interrupt waits for the turn to settle before it
 # escalates (mirrors chat_ws_handler._INTERRUPT_DRAIN_TIMEOUT_SECONDS). Tests

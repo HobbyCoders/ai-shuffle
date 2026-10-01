@@ -190,7 +190,8 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
 
     Ownership follows the app's user model (see app/api/websocket.py):
     admin sessions have ``api_user_id`` NULL and broadcast under the constant
-    ``"admin"`` user id; API-user sessions carry their ``api_user_id``.
+    ``"admin"`` user id; API-user sessions carry their ``api_user_id``. A
+    device paired to the owner (``"paired:<id>"``) sees the owner's sessions.
     Fails open (empty list) on any DB error.
     """
     # Reconnect must use the same runs OR live-turn truth as
@@ -207,7 +208,9 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            if user_id == "admin":
+            # Same owner test as sync_engine._is_owner_user_id, inlined because
+            # this module must not import the legacy engine at load time.
+            if user_id == "admin" or user_id.startswith("paired:"):
                 cursor.execute(base_sql + " AND s.api_user_id IS NULL")
             else:
                 cursor.execute(

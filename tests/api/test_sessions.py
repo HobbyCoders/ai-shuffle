@@ -346,6 +346,21 @@ class TestControllableAnnotation:
         assert sessions[0]["is_remote"] is False
         assert sessions[0]["controllable"] is True
 
+    def test_session_handed_back_here_is_local_despite_stale_instance(self):
+        """A session handed back to this device can still carry the other
+        worker's instance_id; owning it here must not read as remote."""
+        installs = {"B": {"online": True, "device_name": "Worker", "base_url": None}}
+        sessions = [
+            {"id": "s-back", "instance_id": "B", "owner_device_id": "dev-me"},
+            {"id": "s-there", "instance_id": "B", "owner_device_id": "dev-b"},
+        ]
+        with patch("app.network.runners.self_device_id", return_value="dev-me"),                 patch("app.network.session_runtime.for_sessions", return_value={}):
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is False
+        assert sessions[0]["controllable"] is True
+        assert "remote_runtime_state" not in sessions[0]
+        assert sessions[1]["is_remote"] is True
+
     def test_is_pinned_from_runner_placement(self):
         """``is_pinned`` is true only for an explicit runner:<id> placement."""
         installs = {"me-install": {"online": True, "device_name": "Primary"}}

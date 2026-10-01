@@ -74,6 +74,7 @@ _ORIGIN_COALESCABLE_TYPES = frozenset({
     "usage_snapshot",             # whole-state token/cost counters
     "tabs_sync",                  # whole-state open-tab list
     "user_streaming_sessions",    # whole-state streaming-session list
+    "session_attention_snapshot", # whole-state pending-prompt map
 })
 _ORIGIN_COALESCABLE_EVENT_TYPES = frozenset({
     "queue_updated",              # whole-state queue for one session
@@ -655,6 +656,16 @@ class ChatWebSocketHandler:
             "type": "user_streaming_sessions",
             "sessions": user_streaming or [],
             "session_ids": [s["session_id"] for s in user_streaming] if user_streaming else [],
+        })
+        # Same reasoning for the Needs permission / Has question label: the
+        # client's map is only fed by live frames, so a page load or reconnect
+        # would miss prompts still pending. The client REPLACES its map with
+        # this durable list.
+        from app.core.user_question_handler import get_user_attention_snapshot
+        attention = await asyncio.to_thread(get_user_attention_snapshot, self.user_id)
+        await self.send_json({
+            "type": "session_attention_snapshot",
+            "sessions": attention or [],
         })
 
         try:

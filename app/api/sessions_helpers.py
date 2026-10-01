@@ -667,6 +667,11 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             # A mirrored session from another network device.
             inst = owner_device
         is_remote = bool(inst) and inst != me and inst != my_device
+        if owner_device and my_device and owner_device == my_device:
+            # This device owns the session. A session handed back here can
+            # still carry the other worker's instance_id; treating it as
+            # remote read an empty runtime summary and showed "Unknown".
+            is_remote = False
         session["is_remote"] = is_remote
         session["is_pinned"] = is_pinned(session)
 

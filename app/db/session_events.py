@@ -17,7 +17,7 @@ gateway also polls), and ``pg_notify`` does not exist on the SQLite test shim, s
 the notify is guarded and non-fatal.
 
 The ONE exception to "append-only" is :func:`compact_session_deltas` — a
-retention pass for long-idle sessions that is *lossless by construction*: it
+retention pass for idle sessions that is *lossless by construction*: it
 performs exactly the merge the SSE replay already performs at read time
 (``app.api.events._coalesce_deltas``), so the bytes a client receives are
 unchanged. Nothing is ever deleted that a replay would have delivered. See its
@@ -30,7 +30,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from app.db.base import get_db, rows_to_list
 
@@ -42,6 +42,29 @@ from app.core.pg_session_store import _scrub_pg_illegal
 logger = logging.getLogger(__name__)
 
 NOTIFY_CHANNEL = "session_events"
+
+# Post-commit wake for the worker network, installed by
+# ``app.network.startup`` (app.db never imports app.network). Called with
+# ``(session_id, collection)`` after a local write to a session's events,
+# prompts or run state commits, so peers see it without waiting for the
+# scanner's idle backoff. It must be cheap and must not touch the database.
+_session_write_hook: Optional[Callable[[str, str], None]] = None
+
+
+def set_session_write_hook(hook: Optional[Callable[[str, str], None]]) -> None:
+    global _session_write_hook
+    _session_write_hook = hook
+
+
+def notify_session_write(session_id: Optional[str], collection: str) -> None:
+    """Tell the network a session's shared state changed. Never raises."""
+    hook = _session_write_hook
+    if hook is None or not session_id:
+        return
+    try:
+        hook(session_id, collection)
+    except Exception:
+        logger.debug("Session write hook failed for %s", session_id, exc_info=True)
 
 
 class FenceViolation(Exception):
@@ -144,6 +167,7 @@ def append_events(
         except Exception:
             logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
 
+    notify_session_write(session_id, "session_events")
     return first_seq, last_seq
 
 
@@ -356,6 +380,74 @@ def get_user_seq_for_turn(session_id: str, turn_id: str) -> Optional[int]:
     return int(seq) if seq is not None else None
 
 
+# Epoch reported for a session whose log holds no rows (new, or just cleared).
+EMPTY_LOG_EPOCH = "0"
+
+
+def get_log_epoch(session_id: str) -> str:
+    """Identity of the session's current event log, for resuming SSE clients.
+
+    It is the id of the log's lowest-seq row. That id is fixed for the life of
+    a log and replaced whenever the log is wiped and re-seeded:
+    ``clear_session`` deletes every row and the counter, so the next seq 1 gets
+    a fresh uuid. A client resuming at ``from_seq`` with an older epoch knows
+    its cursor points into a log that no longer exists.
+
+    Derived, not stored: no schema change, and every path that rewrites the log
+    is covered without having to remember to bump a column. Delta compaction
+    keeps a merged run's FIRST id on its survivor, and the network mirror and
+    handoff copy ids verbatim, so neither changes the epoch of a live log.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM session_events WHERE session_id = %s "
+            "ORDER BY seq ASC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return str(row["id"]) if row else EMPTY_LOG_EPOCH
+
+
+def has_event_at(session_id: str, seq: int) -> bool:
+    """True if the log still holds a row at exactly ``seq``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM session_events WHERE session_id = %s AND seq = %s",
+            (session_id, seq),
+        )
+        return cursor.fetchone() is not None
+
+
+def get_tool_use_seqs(
+    session_id: str, from_seq: int = 0
+) -> Dict[Tuple[Optional[str], str], int]:
+    """Map ``(turn_id, tool_use_id) -> last tool.use seq`` for ``seq > from_seq``.
+
+    The SSE backfill uses it to drop ``tool.input_delta`` rows whose complete
+    input a later ``tool.use`` row repeats. Only ``tool.use`` rows have their
+    payload read.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT seq, turn_id, payload->>'tool_use_id' AS tool_use_id "
+            "FROM session_events WHERE session_id = %s AND seq > %s "
+            "AND event_type = 'tool.use'",
+            (session_id, from_seq),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    seqs: Dict[Tuple[Optional[str], str], int] = {}
+    for row in rows:
+        tool_use_id = row.get("tool_use_id")
+        if not tool_use_id:
+            continue
+        key = (row.get("turn_id"), str(tool_use_id))
+        seqs[key] = max(int(row["seq"]), seqs.get(key, 0))
+    return seqs
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:
@@ -476,7 +568,7 @@ def copy_session_events(
 
 
 # ----------------------------------------------------------------------
-# Retention: lossless delta compaction for long-idle sessions
+# Retention: lossless delta compaction for idle sessions
 # ----------------------------------------------------------------------
 
 # The delta types the SSE replay already merges at read time
@@ -491,6 +583,12 @@ COMPACTABLE_DELTA_TYPES: Tuple[str, ...] = (
 # Rows at the tail of a session are never touched, so no plausible live cursor
 # can sit inside a compacted run (see the safety argument below).
 DEFAULT_KEEP_TAIL_EVENTS = 1000
+# How long a session must sit idle before maintenance compacts its deltas.
+# Short on purpose: until compaction runs, every open of the session reads and
+# decodes one row per 150 ms streaming flush. A resuming client whose cursor
+# was merged away is caught by the SSE feed's cursor check and reloaded, so the
+# window no longer has to outlast every plausible reconnect.
+DELTA_COMPACTION_IDLE_HOURS = 1.0
 # Per-call work caps: this runs inside the periodic maintenance transaction.
 DEFAULT_MAX_RUNS_PER_SESSION = 500
 DEFAULT_MAX_SESSIONS = 25
@@ -589,9 +687,13 @@ def compact_session_deltas(
     * **The one divergent case is excluded by the retention ceiling.** A cursor
       landing strictly INSIDE a compacted run would now receive the run's whole
       merged text instead of its tail. Only the last ``keep_tail_events`` seqs
-      of a session can hold a live or resumable cursor, and those are never
-      touched; callers additionally restrict this to sessions idle for days
-      (:func:`compact_idle_session_deltas`).
+      of a session can hold a live cursor, and those are never touched;
+      callers additionally restrict this to idle sessions with no active run
+      (:func:`compact_idle_session_deltas`). A client that disconnected
+      mid-run and resumes after the run was merged sends a cursor whose row
+      no longer exists; the SSE feed checks for exactly that when the client
+      sends its log epoch and answers with a ``reset`` and a full reload
+      (``app.api.events.event_stream``).
     * **Nothing else reads these rows.** Turn-outcome and worker-progress
       readers reconstruct text from the LAST turn's deltas — inside the retained
       tail. ``get_user_seq_for_turn`` (the elision bridge) reads ``message.user``
@@ -688,17 +790,20 @@ def _compact_session_deltas(
 
 
 def compact_idle_session_deltas(
-    older_than_days: int = 7,
+    older_than_days: float = 7,
     *,
+    older_than_hours: Optional[float] = None,
     keep_tail_events: int = DEFAULT_KEEP_TAIL_EVENTS,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
     max_runs_per_session: int = DEFAULT_MAX_RUNS_PER_SESSION,
     cursor: Optional[Any] = None,
 ) -> Dict[str, int]:
-    """Compact delta runs for sessions idle longer than ``older_than_days``.
+    """Compact delta runs for sessions idle longer than the given window.
 
-    Called from ``app.db.database.run_database_maintenance`` (step 2d).
-    ``older_than_days <= 0`` disables the pass and touches nothing.
+    Called from ``app.db.database.run_database_maintenance`` (step 2d) with
+    ``older_than_hours=DELTA_COMPACTION_IDLE_HOURS``. ``older_than_hours``,
+    when given, replaces ``older_than_days``. A non-positive window disables
+    the pass and touches nothing.
 
     Idleness comes from ``sessions.updated_at``, the same signal
     ``prune_fluid_delta_events`` uses: a streaming session bumps it constantly,
@@ -711,11 +816,16 @@ def compact_idle_session_deltas(
     Returns ``{"sessions": n, "runs": n, "rows": n}`` (rows = rows removed).
     """
     global _compaction_cursor
-    if older_than_days <= 0 or max_sessions <= 0:
+    idle_hours = (
+        float(older_than_hours)
+        if older_than_hours is not None
+        else float(older_than_days) * 24
+    )
+    if idle_hours <= 0 or max_sessions <= 0:
         return {"sessions": 0, "runs": 0, "rows": 0}
 
     cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        datetime.now(timezone.utc) - timedelta(hours=idle_hours)
     ).isoformat()
 
     def _work(cur: Any) -> Dict[str, int]:
@@ -757,8 +867,8 @@ def compact_idle_session_deltas(
     if totals["rows"]:
         logger.info(
             "session_events: compacted %d delta run(s) into %d fewer row(s) "
-            "across %d session(s) idle more than %d day(s)",
-            totals["runs"], totals["rows"], totals["sessions"], older_than_days,
+            "across %d session(s) idle more than %g hour(s)",
+            totals["runs"], totals["rows"], totals["sessions"], idle_hours,
         )
     return totals
 

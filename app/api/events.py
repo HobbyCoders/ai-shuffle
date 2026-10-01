@@ -27,6 +27,7 @@ import logging
 import time
 from typing import (
     Any,
+    AsyncGenerator,
     AsyncIterator,
     Dict,
     Iterator,
@@ -48,9 +49,13 @@ from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
 from app.db.session_events import (
+    EMPTY_LOG_EPOCH,
     get_events,
+    get_log_epoch,
     get_max_seq,
+    get_tool_use_seqs,
     get_user_seq_for_turn,
+    has_event_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +87,18 @@ _PAGE = 500
 # is never dropped: every event still reaches the client, and the live tail
 # (step 2) keeps streaming per-frame so typing still animates.
 _COALESCE_TYPES = ("assistant.thinking_delta", "assistant.text_delta")
+
+# Tool-argument deltas get the same treatment during backfill, one step
+# further: a block that later got its ``tool.use`` row has its whole input
+# there, so its deltas are dropped. Deltas with no later ``tool.use`` (a
+# background subagent launch, an interrupted block) are the only record of
+# that input and replay as one merged frame per run.
+_TOOL_INPUT_DELTA = "tool.input_delta"
+
+# Backfill frames reach the ASGI stack in chunks of about this size rather than
+# one per frame: every chunk crosses each BaseHTTPMiddleware layer, and that
+# per-frame cost dominated long replays.
+_BACKFILL_CHUNK_BYTES = 64 * 1024
 
 
 def _sdk_session_id(session_id: str) -> Optional[str]:
@@ -161,7 +178,15 @@ def _boundary_frame(
 
 def _delta_key(row: Dict[str, Any]) -> tuple:
     """What makes two delta rows part of the same run."""
-    return (row.get("event_type"), row.get("turn_id"), row.get("run_id"))
+    key = (row.get("event_type"), row.get("turn_id"), row.get("run_id"))
+    if row.get("event_type") == _TOOL_INPUT_DELTA:
+        return key + ((row.get("payload") or {}).get("tool_use_id"),)
+    return key
+
+
+def _delta_field(row: Dict[str, Any]) -> str:
+    """The payload field a delta row streams."""
+    return "partial_json" if row.get("event_type") == _TOOL_INPUT_DELTA else "text"
 
 
 def _merged_row(run: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,23 +198,46 @@ def _merged_row(run: Dict[str, Any]) -> Dict[str, Any]:
     first = run["first"]
     row = dict(first)
     payload = dict(first.get("payload") or {})
-    payload["text"] = "".join(run["texts"])
+    payload[run["field"]] = "".join(run["texts"])
+    if run.get("name") and not payload.get("name"):
+        # A tool block's name can arrive after its first fragment.
+        payload["name"] = run["name"]
     row["payload"] = payload
     row["seq"] = run["last_seq"]
     return row
 
 
 def _open_run(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    field = _delta_field(row)
+    payload = row.get("payload") or {}
+    run = {
         "key": _delta_key(row),
+        "field": field,
         "first": row,
-        "texts": [(row.get("payload") or {}).get("text") or ""],
+        "texts": [payload.get(field) or ""],
         "last_seq": row["seq"],
     }
+    if row.get("event_type") == _TOOL_INPUT_DELTA:
+        run["name"] = payload.get("name")
+    return run
+
+
+def _superseded_tool_input(
+    row: Dict[str, Any], tool_uses: Optional[Dict[Tuple[Any, str], int]]
+) -> bool:
+    """True for a tool.input_delta whose full input a LATER tool.use repeats."""
+    if not tool_uses:
+        return False
+    tool_use_id = (row.get("payload") or {}).get("tool_use_id")
+    if not tool_use_id:
+        return False
+    return row["seq"] < tool_uses.get((row.get("turn_id"), str(tool_use_id)), 0)
 
 
 def _coalesce_deltas(
-    rows: Sequence[Dict[str, Any]], pending: List[Optional[Dict[str, Any]]]
+    rows: Sequence[Dict[str, Any]],
+    pending: List[Optional[Dict[str, Any]]],
+    tool_uses: Optional[Dict[Tuple[Any, str], int]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield frame-ready rows, merging consecutive streaming deltas.
 
@@ -197,12 +245,26 @@ def _coalesce_deltas(
     page (``[None]`` to start), so a run split across a page boundary still
     merges; the caller drains what is left with :func:`_flush_pending` once
     paging ends. Any non-delta row closes the open run before it is emitted.
+
+    ``tool_uses`` maps ``(turn_id, tool_use_id)`` to the seq of that block's
+    ``tool.use`` row (``get_tool_use_seqs``). A tool.input_delta before it is
+    dropped. It still closes the open run, so the rows on either side merge
+    exactly as they did when the delta was sent.
     """
     for row in rows:
         run = pending[0]
-        if row.get("event_type") in _COALESCE_TYPES:
+        event_type = row.get("event_type")
+        if event_type == _TOOL_INPUT_DELTA and _superseded_tool_input(row, tool_uses):
+            if run is not None:
+                yield _merged_row(run)
+                pending[0] = None
+            continue
+        if event_type in _COALESCE_TYPES or event_type == _TOOL_INPUT_DELTA:
             if run is not None and run["key"] == _delta_key(row):
-                run["texts"].append((row.get("payload") or {}).get("text") or "")
+                payload = row.get("payload") or {}
+                run["texts"].append(payload.get(run["field"]) or "")
+                if "name" in run and not run["name"]:
+                    run["name"] = payload.get("name")
                 run["last_seq"] = row["seq"]
                 continue
             if run is not None:
@@ -485,10 +547,28 @@ async def _replay_from(
 ) -> AsyncIterator[Tuple[int, str]]:
     """Yield ``(seq, frame)`` for the backfill, coalescing streaming deltas."""
     pending: List[Optional[Dict[str, Any]]] = [None]
+    # Looked up once, at the first tool.input_delta, from just before it: a
+    # log without tool-argument deltas never pays for the lookup.
+    tool_uses: Optional[Dict[Tuple[Any, str], int]] = None
     page_from = from_seq
     while True:
         page = await asyncio.to_thread(get_events, session_id, page_from, _PAGE)
-        for row in _coalesce_deltas(page, pending):
+        if tool_uses is None:
+            first_delta = next(
+                (r["seq"] for r in page if r.get("event_type") == _TOOL_INPUT_DELTA),
+                None,
+            )
+            if first_delta is not None:
+                try:
+                    tool_uses = await asyncio.to_thread(
+                        get_tool_use_seqs, session_id, first_delta - 1
+                    )
+                except Exception:  # noqa: BLE001 — replay every delta instead
+                    logger.debug(
+                        "tool.use lookup failed for %s", session_id, exc_info=True
+                    )
+                    tool_uses = {}
+        for row in _coalesce_deltas(page, pending, tool_uses):
             yield row["seq"], _frame(row)
         if page:
             page_from = page[-1]["seq"]
@@ -520,12 +600,38 @@ async def _tail_from_db(
             return
 
 
-async def event_stream(session_id: str, from_seq: int = 0):
+def _resume_check(
+    session_id: str, from_seq: int, epoch: Optional[str]
+) -> Tuple[str, Optional[str]]:
+    """Return ``(current_epoch, reset_reason)`` for a connect.
+
+    A resume (``from_seq > 0``) that names the epoch it was served from is
+    reset when that log is gone (``"epoch"``: cleared or rewritten), or when
+    the row at its cursor no longer exists (``"cursor"``: delta compaction
+    merged the run the cursor sat inside, so resuming would repeat text).
+    Without an epoch the caller is an older client and is served as before.
+    """
+    current = get_log_epoch(session_id)
+    if from_seq > 0 and epoch:
+        if epoch != current:
+            return current, "epoch"
+        if not has_event_at(session_id, from_seq):
+            return current, "cursor"
+    return current, None
+
+
+async def event_stream(
+    session_id: str, from_seq: int = 0, epoch: Optional[str] = None
+):
     """Yield SSE frames for a session: backfill from ``from_seq``, then tail.
 
     Module-level (rather than a closure in the endpoint) so tests can consume
     the stream directly — ASGI test transports buffer the whole response and
     cannot read a never-ending SSE body incrementally.
+
+    ``epoch`` is the log epoch the client's cursor came from (the last
+    ``caught_up``). When it no longer matches, the stream opens with
+    ``event: reset`` and continues as a fresh ``from_seq=0`` load.
     """
     # Attach to the session's shared reader FIRST so no event can fall between
     # the backfill snapshot and the live tail.
@@ -537,6 +643,26 @@ async def event_stream(session_id: str, from_seq: int = 0):
         "SSE feed connected: session=%s from_seq=%s", session_id, from_seq
     )
     try:
+        # 0. Log epoch. Read BEFORE the backfill, so a clear that lands while
+        #    it runs leaves caught_up with the old epoch and the next resume
+        #    is reset rather than trusted.
+        log_epoch, reset_reason = await asyncio.to_thread(
+            _resume_check, session_id, from_seq, epoch
+        )
+        if reset_reason:
+            data = json.dumps({"reason": reset_reason, "epoch": log_epoch})
+            yield f"event: reset\ndata: {data}\n\n"
+            logger.info(
+                "SSE feed reset: session=%s from_seq=%s reason=%s",
+                session_id, from_seq, reset_reason,
+            )
+            from_seq = cursor = 0
+
+        # Replay stats for the fresh-load log line below.
+        frames_sent = 0
+        bytes_sent = 0
+        elided = 0
+
         # 1. A fresh load starts after the latest SAFE compacted prefix.  A
         #    reconnect keeps its own cursor and must never apply fresh-load
         #    elision.  The synthetic marker has no SSE id, so reconnect state is
@@ -546,9 +672,13 @@ async def event_stream(session_id: str, from_seq: int = 0):
                 _compacted_replay_start, session_id
             )
             if first_kept > 0:
-                yield _boundary_frame(
+                frame = _boundary_frame(
                     session_id, first_kept, elided_events, tier
                 )
+                yield frame
+                frames_sent += 1
+                bytes_sent += len(frame)
+                elided = elided_events
                 cursor = first_kept - 1
 
         # Consecutive historical streaming deltas remain coalesced into one
@@ -558,6 +688,8 @@ async def event_stream(session_id: str, from_seq: int = 0):
             yield frame
             cursor = seq
             replayed = True
+            frames_sent += 1
+            bytes_sent += len(frame)
 
         # 1a. Legacy-history seeding, made LAZY. ``ensure_backfilled``
         #     re-materializes a whole legacy transcript into ``session_events``;
@@ -572,17 +704,36 @@ async def event_stream(session_id: str, from_seq: int = 0):
             async for seq, frame in _replay_from(session_id, cursor):
                 yield frame
                 cursor = seq
+                frames_sent += 1
+                bytes_sent += len(frame)
 
         # Seed the shared reader from this client's post-backfill cursor, so the
         # very next append is pushed rather than waited for.
         tail.note_cursor(cursor)
 
+        if log_epoch == EMPTY_LOG_EPOCH and cursor > 0:
+            # The log was empty when we looked and has rows now (a first turn,
+            # or the legacy seed above). Every row sent belongs to the new log,
+            # so name it; otherwise the next resume would be reset for nothing.
+            log_epoch = await asyncio.to_thread(get_log_epoch, session_id)
+
         # 1b. Catch-up sentinel: mark the history/live boundary so the client can
         #     paint the whole backfilled transcript in ONE batch instead of
         #     repainting per backfilled frame. Carries no ``id:`` line, so it does
         #     not advance the reconnect cursor (``lastSeq``); it re-arms per connect
-        #     (a near-empty reconnect backfill just folds once).
-        yield f"event: caught_up\ndata: {json.dumps({'seq': cursor})}\n\n"
+        #     (a near-empty reconnect backfill just folds once). ``epoch`` names
+        #     the log the client's cursor now belongs to.
+        if from_seq == 0:
+            # Logged before the yield: a client that disconnects on caught_up
+            # would otherwise skip it.
+            logger.info(
+                "SSE feed replay: session=%s frames=%d bytes=%d elided=%d "
+                "caught_up_ms=%.0f",
+                session_id, frames_sent, bytes_sent, elided,
+                (time.monotonic() - start_time) * 1000,
+            )
+        caught_up = json.dumps({"seq": cursor, "epoch": log_epoch})
+        yield f"event: caught_up\ndata: {caught_up}\n\n"
 
         # 2. Live tail. Steady state is a pushed batch from the session's shared
         #    reader — no DB work per client. Everything else (a discontinuity, a
@@ -654,17 +805,53 @@ async def event_stream(session_id: str, from_seq: int = 0):
         tail.detach(sub)
 
 
+async def _batch_backfill(frames: AsyncGenerator[str, None]) -> AsyncIterator[str]:
+    """Join backfill frames into large chunks; pass the live tail through.
+
+    Frames are buffered until the ``caught_up`` sentinel (sent with them) or
+    about ``_BACKFILL_CHUNK_BYTES``, whichever comes first. From caught_up on,
+    each chunk goes out as-is so live typing still animates frame by frame.
+    A ``reset`` goes out on its own at once: the client drops the connection
+    and restarts the moment it sees one, so the fresh load behind it would
+    only delay that.
+    """
+    buf: List[str] = []
+    size = 0
+    live = False
+    try:
+        async for chunk in frames:
+            if live:
+                yield chunk
+                continue
+            buf.append(chunk)
+            size += len(chunk)
+            live = chunk.startswith("event: caught_up")
+            if live or size >= _BACKFILL_CHUNK_BYTES or chunk.startswith("event: reset"):
+                yield "".join(buf)
+                buf = []
+                size = 0
+        # The inner stream only ends when the client has gone, so anything
+        # still buffered has nobody to go to.
+    finally:
+        await frames.aclose()
+
+
 @router.get("/{session_id}/events")
 async def stream_session_events(
     request: Request,
     session_id: str,
     from_seq: int = 0,
+    epoch: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
-    """Stream the session event log as SSE, backfilling from ``from_seq``."""
+    """Stream the session event log as SSE, backfilling from ``from_seq``.
+
+    ``epoch`` is the log epoch from the client's last ``caught_up``; a resume
+    whose epoch is stale gets ``event: reset`` and a full reload.
+    """
     await require_session(request, session_id)
     return StreamingResponse(
-        event_stream(session_id, from_seq),
+        _batch_backfill(event_stream(session_id, from_seq, epoch)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -10,7 +10,7 @@ describe('streaming composer actions', () => {
 	it('routes existing remote-only attachments to session staging for picker and drop', () => {
 		expect(source).toContain('`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`');
 		expect(source).toContain('attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)');
-		const gates = source.match(/composerMode,\n\s*\$activeSession.sessionId\n\s*\);/g);
+		const gates = source.match(/composerMode,\r?\n\s*\$activeSession.sessionId\r?\n\s*\);/g); // \r? keeps CRLF checkouts matching
 		expect(gates).toHaveLength(2);
 		const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 		expect(dock).not.toContain('isRemoteOnlyCompose');

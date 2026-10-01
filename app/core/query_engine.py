@@ -2085,19 +2085,48 @@ async def _stream_to_websocket_impl(
                     If each prompt independently broadcast 0 on resolve, the first to
                     finish would clear the indicator while its siblings were still
                     pending. Counting up on enter and down on exit keeps the dot lit
-                    until the LAST prompt resolves. The read-modify-write is safe
-                    without a lock: it runs to completion before the first await, and
-                    the event loop is single-threaded."""
+                    until the LAST prompt resolves. The counter update itself needs
+                    no lock (no await before it, single-threaded loop), but the
+                    durable read below does await, so the read and the broadcast
+                    run under a FIFO lock and re-read the counter: the last bump
+                    broadcasts last, with the newest in-memory and durable state,
+                    instead of a stale non-zero count landing after a zero."""
                     if not _user_id:
                         return
-                    n = max(0, (callback_refs.get("attention_count") or 0) + delta)
-                    callback_refs["attention_count"] = n
-                    try:
-                        await sync_engine.broadcast_session_attention(
-                            _user_id, _sid, n, kind=kind
-                        )
-                    except Exception:
-                        logger.debug("[WS] session_attention broadcast failed", exc_info=True)
+                    callback_refs["attention_count"] = max(
+                        0, (callback_refs.get("attention_count") or 0) + delta
+                    )
+                    lock = callback_refs.get("attention_lock")
+                    if lock is None:
+                        lock = callback_refs["attention_lock"] = asyncio.Lock()
+                    async with lock:
+                        # Posted questions outlive this turn's counter, so never
+                        # report fewer than the durable pending rows: without this,
+                        # resolving a permission broadcast 0 and erased "Has
+                        # question" while its row was still pending.
+                        try:
+                            from app.core.user_question_handler import get_session_attention
+
+                            durable = await asyncio.to_thread(get_session_attention, _sid)
+                        except Exception:
+                            durable = None
+                            logger.debug("[WS] durable attention read failed", exc_info=True)
+                        n = callback_refs.get("attention_count") or 0
+                        try:
+                            count, out_kind = n, kind
+                            if durable is not None:
+                                _owner, d_count, d_kind = durable
+                                if d_count > count:
+                                    count = d_count
+                                if delta < 0 or d_kind == "permission":
+                                    # The prompt just resolved (or a permission is
+                                    # open): label by what is still pending.
+                                    out_kind = d_kind if d_count else kind
+                            await sync_engine.broadcast_session_attention(
+                                _user_id, _sid, count, kind=out_kind
+                            )
+                        except Exception:
+                            logger.debug("[WS] session_attention broadcast failed", exc_info=True)
 
                 async def _request_permission(**kwargs):
                     """Show a permission prompt, wrapped with the awaiting-input

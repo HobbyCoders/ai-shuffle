@@ -42,6 +42,11 @@ const hoisted = vi.hoisted(() => ({
 	fromSeq: undefined as number | undefined,
 	/** (sessionId, fromSeq) of every feed opened, oldest first. */
 	opened: [] as Array<{ sessionId: string; fromSeq: number | undefined }>,
+	/** `epoch` option of every feed opened, oldest first. */
+	epochs: [] as Array<string | null | undefined>,
+	/** What the fake feed reports as its log epoch (a real one learns it from
+	 *  `caught_up`); null falls back to the seed the controller passed. */
+	feedEpoch: null as string | null,
 }));
 
 vi.mock('./sse-feed', () => ({
@@ -52,9 +57,11 @@ vi.mock('./sse-feed', () => ({
 			onOpen?: () => void;
 			onError?: (e: unknown) => void;
 			fromSeq?: number;
+			epoch?: string | null;
 		},
 	) => {
 		hoisted.creates++;
+		hoisted.epochs.push(opts.epoch);
 		hoisted.onEvent = opts.onEvent;
 		hoisted.onOpen = opts.onOpen ?? null;
 		hoisted.onError = opts.onError ?? null;
@@ -66,6 +73,9 @@ vi.mock('./sse-feed', () => ({
 			},
 			get lastSeq() {
 				return 0;
+			},
+			get epoch() {
+				return hoisted.feedEpoch ?? opts.epoch ?? null;
 			},
 			revive() {
 				hoisted.revives++;
@@ -81,6 +91,9 @@ import {
 	feedController,
 	CATCHUP_FALLBACK_MS,
 	FIRST_FRAME_BUDGET_MS,
+	PROGRESSIVE_PAINT_AFTER_MS,
+	PROGRESSIVE_PAINT_EVERY_MS,
+	PROGRESSIVE_PAINT_EVERY_EVENTS,
 	HYDRATION_CEILING_MS,
 	STREAM_FOLD_MS,
 	TRANSCRIPT_CACHE_MAX,
@@ -241,6 +254,8 @@ beforeEach(() => {
 	hoisted.revives = 0;
 	hoisted.fromSeq = undefined;
 	hoisted.opened = [];
+	hoisted.epochs = [];
+	hoisted.feedEpoch = null;
 	rafQueue = [];
 	rafId = 0;
 	// Install fake timers FIRST — vitest's fake timers also replace
@@ -295,30 +310,49 @@ describe('feedController history-batch hydration', () => {
 		expect(msgs[0].content).toBe('foobar');
 	});
 
-	it('(a-atomic) a flowing backfill never publishes partially — caught_up is the boundary', () => {
+	it('(a-atomic) a flowing backfill never completes hydration early — caught_up is the boundary', () => {
 		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
 		feedController.attach(deps);
 		feedController.start('s1');
 		const callsAfterStart = deps.update.mock.calls.length;
 
 		// Gaps SHORTER than the idle window are an alive stream, not a stall: each
-		// frame re-arms the fallback, so a paging backfill stays atomic no matter
-		// how many pages it takes. caught_up remains the hydration boundary.
+		// frame re-arms the fallback, so hydration stays open no matter how many
+		// pages it takes. caught_up remains the hydration boundary. A backfill
+		// this long (18s) also gets bounded interim paints of its messages (see
+		// the progressive-paint tests), never a completed hydration.
 		for (let i = 0; i < 20; i++) {
 			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
 			vi.advanceTimersByTime(CATCHUP_FALLBACK_MS - 100);
+			expect(deps.state.isLoadingSession).toBe(true);
+			expect(deps.state.isRestoringSession).toBe(true);
 		}
-
-		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
-		expect(deps.state.messages).toHaveLength(0);
-		expect(deps.state.isLoadingSession).toBe(true);
-		expect(deps.state.isRestoringSession).toBe(true);
+		const interimPaints = deps.update.mock.calls.length - callsAfterStart;
 
 		hoisted.onEvent!(caughtUp(20));
-		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + interimPaints + 1);
 		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('x'.repeat(20));
 		expect(deps.state.isLoadingSession).toBe(false);
 		expect(deps.state.isRestoringSession).toBe(false);
+	});
+
+	it('(a-quick) a backfill shorter than the progressive-paint delay publishes only on caught_up', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		const steps = 10;
+		for (let i = 0; i < steps; i++) {
+			hoisted.onEvent!(textDelta(`e${i}`, 'x'));
+			vi.advanceTimersByTime(Math.floor((PROGRESSIVE_PAINT_AFTER_MS - 1) / steps));
+		}
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+		expect(deps.state.messages).toHaveLength(0);
+
+		hoisted.onEvent!(caughtUp(10));
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('x'.repeat(10));
 	});
 
 	it('(a-fallback) an idle stall mid-backfill publishes what arrived and completes hydration', () => {
@@ -1246,6 +1280,191 @@ function hydrate(sessionId: string, seqs: number[]): void {
 	for (const seq of seqs) hoisted.onEvent!(userMessageAt(seq, `m${seq}`));
 	hoisted.onEvent!(caughtUp(seqs[seqs.length - 1] ?? 0));
 }
+
+describe('feedController progressive paint (long backfill)', () => {
+	it('paints messages at a bounded cadence while hydration stays open, then completes on caught_up', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		// One frame every 100ms for 4s.
+		let seq = 0;
+		const lengths: number[] = [];
+		const paintedAt: number[] = [];
+		for (let t = 0; t < 4_000; t += 100) {
+			seq++;
+			const before = deps.update.mock.calls.length;
+			hoisted.onEvent!(userMessageAt(seq, `m${seq}`));
+			if (deps.update.mock.calls.length > before) {
+				paintedAt.push(t);
+				lengths.push((deps.state.messages as unknown[]).length);
+			}
+			// Only messages are published: hydration flags stay up.
+			expect(deps.state.isLoadingSession).toBe(true);
+			expect(deps.state.isRestoringSession).toBe(true);
+			vi.advanceTimersByTime(100);
+		}
+
+		// Nothing before the delay, then at most one paint per interval, each
+		// showing everything reduced so far.
+		expect(paintedAt.length).toBeGreaterThan(0);
+		expect(paintedAt[0]).toBeGreaterThanOrEqual(PROGRESSIVE_PAINT_AFTER_MS);
+		for (let i = 1; i < paintedAt.length; i++) {
+			expect(paintedAt[i] - paintedAt[i - 1]).toBeGreaterThanOrEqual(PROGRESSIVE_PAINT_EVERY_MS);
+		}
+		expect(paintedAt.length).toBeLessThanOrEqual(3);
+		expect(lengths[0]).toBe(paintedAt[0] / 100 + 1);
+
+		hoisted.onEvent!(caughtUp(seq));
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + paintedAt.length + 1);
+		expect(deps.state.messages).toHaveLength(seq);
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
+		// Only the real sentinel makes the state cacheable (R1).
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+	});
+
+	it('a same-instant burst paints again only at the event budget', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		// Frames keep flowing inside the idle budget until the delay has passed.
+		hoisted.onEvent!(userMessageAt(1, 'first'));
+		vi.advanceTimersByTime(PROGRESSIVE_PAINT_AFTER_MS / 2);
+		hoisted.onEvent!(userMessageAt(2, 'second'));
+		expect(deps.state.messages).toHaveLength(0);
+		vi.advanceTimersByTime(PROGRESSIVE_PAINT_AFTER_MS / 2);
+		hoisted.onEvent!(userMessageAt(3, 'third'));
+		expect(deps.state.messages).toHaveLength(3);
+		const callsAfterFirstPaint = deps.update.mock.calls.length;
+
+		for (let i = 0; i < PROGRESSIVE_PAINT_EVERY_EVENTS - 1; i++) {
+			hoisted.onEvent!(textDelta(`d${i}`, 'x'));
+		}
+		expect(deps.update.mock.calls.length).toBe(callsAfterFirstPaint);
+		hoisted.onEvent!(textDelta('last', 'x'));
+		expect(deps.update.mock.calls.length).toBe(callsAfterFirstPaint + 1);
+		expect(deps.state.messages).toHaveLength(4);
+		expect(deps.state.isLoadingSession).toBe(true);
+	});
+
+	it('a rewind replayed after an interim paint is not undone by optimistic seeding', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(userMessageAt(1, 'kept'));
+		vi.advanceTimersByTime(PROGRESSIVE_PAINT_AFTER_MS / 2);
+		hoisted.onEvent!(textDelta('reply', 'ok'));
+		vi.advanceTimersByTime(PROGRESSIVE_PAINT_AFTER_MS / 2);
+		hoisted.onEvent!(userMessageAt(2, 'rewound away'));
+		expect((deps.state.messages as Array<{ content: string }>).map((m) => m.content)).toEqual([
+			'kept',
+			'ok',
+			'rewound away',
+		]);
+
+		hoisted.onEvent!({
+			type: 'transcript.rewound',
+			id: 'evt-rw',
+			seq: 3,
+			session_id: 's1',
+			created_at: '2026-07-12T00:00:00.000Z',
+			from_seq: 2,
+		});
+		hoisted.onEvent!(userMessageAt(4, 'after'));
+		hoisted.onEvent!(caughtUp(4));
+
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs.map((m) => m.content)).toEqual(['kept', 'ok', 'after']);
+		expect(deps.state.isStreaming).toBe(false);
+	});
+
+	it('a cache resume never repaints mid-backfill', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', [1, 2, 3]);
+		feedController.stop();
+
+		feedController.start('s1');
+		const callsAfterResume = deps.update.mock.calls.length;
+		for (let seq = 4; seq < 40; seq++) {
+			hoisted.onEvent!(userMessageAt(seq, `m${seq}`));
+			vi.advanceTimersByTime(100);
+		}
+		expect(deps.update.mock.calls.length).toBe(callsAfterResume);
+	});
+});
+
+describe('feedController log epoch (resume verification)', () => {
+	it('caches the log epoch with the transcript and sends it on resume', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hoisted.feedEpoch = 'ep-1';
+		hydrate('s1', [1, 2, 3]);
+		expect(feedController.hasLogEpoch('s1')).toBe(true);
+		expect(feedController.hasLogEpoch('other')).toBe(false);
+		feedController.stop();
+		hoisted.feedEpoch = null;
+
+		feedController.start('s1');
+		expect(hoisted.fromSeq).toBe(3);
+		expect(hoisted.epochs.at(-1)).toBe('ep-1');
+		expect(feedController.hasLogEpoch('s1')).toBe(true);
+	});
+
+	it('a fresh load sends no epoch, and a feed without one reports none', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		expect(hoisted.epochs.at(-1)).toBeNull();
+		expect(feedController.hasLogEpoch('s1')).toBe(false);
+	});
+
+	it('a reset frame drops the cached transcript and reloads the session from seq 0', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hoisted.feedEpoch = 'ep-1';
+		hydrate('s1', [1, 2, 3]);
+		feedController.stop();
+		hoisted.feedEpoch = null;
+
+		feedController.start('s1');
+		expect(hoisted.fromSeq).toBe(3);
+		const opened = hoisted.creates;
+		hoisted.onEvent!({ type: 'reset', reason: 'epoch', epoch: 'ep-2' });
+
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		expect(hoisted.creates).toBe(opened + 1);
+		expect(hoisted.fromSeq).toBe(0);
+		expect(hoisted.epochs.at(-1)).toBeNull();
+		expect(deps.state.messages).toHaveLength(0);
+		expect(deps.state.isLoadingSession).toBe(true);
+
+		// The new log hydrates atomically as a fresh load.
+		hoisted.onEvent!(userMessageAt(1, 'new log'));
+		hoisted.onEvent!(caughtUp(1));
+		expect((deps.state.messages as Array<{ content: string }>).map((m) => m.content)).toEqual([
+			'new log',
+		]);
+	});
+
+	it('invalidateUnverified() keeps only transcripts the server can vouch for', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hoisted.feedEpoch = 'ep-a';
+		hydrate('with-epoch', [1, 2]);
+		feedController.stop();
+		hoisted.feedEpoch = null;
+		hydrate('no-epoch', [1, 2]);
+		feedController.stop();
+
+		feedController.invalidateUnverified();
+		expect(feedController.hasCachedTranscript('with-epoch')).toBe(true);
+		expect(feedController.hasCachedTranscript('no-epoch')).toBe(false);
+	});
+});
 
 describe('feedController transcript cache (S2)', () => {
 	it('a switch back folds the cached transcript synchronously and resumes at lastSeq', () => {

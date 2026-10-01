@@ -46,6 +46,8 @@ ws.send(JSON.stringify({
 | Type | Description | Key Fields |
 |------|-------------|------------|
 | `user_streaming_sessions` | Sent once on connect: your sessions that are running a turn now (for an API key, its own sessions) | `sessions` (each with `session_id`, `project_id`, `worktree_id`, `worktree_branch`), `session_ids` |
+| `session_attention_snapshot` | Sent once on connect: your sessions with a prompt still waiting for an answer | `sessions` (each with `session_id`, `count`, `kind` of `permission` or `question`) |
+| `session_attention` | A session's count of waiting prompts changed (sent to every device of the owner) | `session_id`, `count`, `kind` |
 | `history` | Message history for a session (on `load_session`) | `session_id`, `session`, `messages`, `isStreaming` |
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |

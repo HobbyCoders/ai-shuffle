@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, parse_jsonb as _parse_json, rows_to_list
+from app.db.session_events import notify_session_write
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,14 @@ def create_interaction(
         row = cursor.fetchone()
     parsed = _parse_row(dict(row))
     assert parsed is not None  # RETURNING * always yields exactly one row
+    notify_session_write(session_id, "pending_interactions")
     return parsed
+
+
+def _session_of(cursor, interaction_id: str) -> Optional[str]:
+    cursor.execute("SELECT session_id FROM pending_interactions WHERE id=%s", (interaction_id,))
+    row = cursor.fetchone()
+    return row["session_id"] if row else None
 
 
 def answer_interaction(
@@ -71,6 +79,7 @@ def answer_interaction(
     _conn: Any = None,
 ) -> bool:
     """Answer a still-pending, unexpired interaction. False otherwise."""
+    session_id = None
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -79,7 +88,12 @@ def answer_interaction(
             "WHERE id=%s AND state='pending' AND (expires_at IS NULL OR expires_at >= NOW())",
             (json.dumps(answer or {}), answered_by_device, interaction_id),
         )
-        return cursor.rowcount > 0
+        answered = cursor.rowcount > 0
+        if answered and _conn is None:
+            session_id = _session_of(cursor, interaction_id)
+    # With ``_conn`` the caller commits, and notifies after its commit.
+    notify_session_write(session_id, "pending_interactions")
+    return answered
 
 
 def answer_question_and_enqueue(
@@ -100,11 +114,13 @@ def answer_question_and_enqueue(
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}", _conn=conn,
         )
+    notify_session_write(row.get("session_id"), "pending_interactions")
     return True
 
 
 def cancel_interaction(interaction_id: str) -> bool:
     """Cancel a pending interaction. False if it is no longer pending."""
+    session_id = None
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -112,7 +128,11 @@ def cancel_interaction(interaction_id: str) -> bool:
             "WHERE id=%s AND state='pending'",
             (interaction_id,),
         )
-        return cursor.rowcount > 0
+        cancelled = cursor.rowcount > 0
+        if cancelled:
+            session_id = _session_of(cursor, interaction_id)
+    notify_session_write(session_id, "pending_interactions")
+    return cancelled
 
 
 def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
@@ -130,6 +150,8 @@ def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
         rows = rows_to_list(cursor.fetchall())
     for row in rows:
         row["payload"] = _parse_json(row.get("payload"))
+    for session_id in {row.get("session_id") for row in rows}:
+        notify_session_write(session_id, "pending_interactions")
     return rows
 
 

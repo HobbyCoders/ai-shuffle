@@ -2017,7 +2017,10 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
         # continuing the old counter instead would splice the NEXT
         # conversation's events onto the stale transcript of any tab that
         # missed that broadcast. Same treatment ``delete_session`` gives both
-        # tables via ``_SESSION_RUNTIME_TABLES``.
+        # tables via ``_SESSION_RUNTIME_TABLES``. Deleting every row also
+        # changes the log epoch (``session_events.get_log_epoch``, the id of the
+        # first row), which is how a tab resuming with ``from_seq`` + ``epoch``
+        # learns its cursor is stale and gets a ``reset`` instead of silence.
         cursor.execute(
             f"DELETE FROM session_events WHERE session_id = {_ph}",
             (session_id,),

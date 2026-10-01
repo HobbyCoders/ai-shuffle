@@ -494,6 +494,10 @@ def test_chat_websocket_initial_frames(server):
         first = json.loads(ws.recv(timeout=10))
         assert first["type"] == "user_streaming_sessions"
         assert first["session_ids"] == []
+        # The second connect frame: sessions still waiting on a prompt.
+        attention = json.loads(ws.recv(timeout=10))
+        assert attention["type"] == "session_attention_snapshot", attention
+        assert attention["sessions"] == []
 
         ws.send(json.dumps({"type": "load_session", "session_id": server.session_id}))
         history = json.loads(ws.recv(timeout=10))

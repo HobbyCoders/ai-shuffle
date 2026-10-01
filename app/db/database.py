@@ -3059,14 +3059,22 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         # the bulk of that table and are already coalesced by the replay reader;
         # for sessions idle past the window this merges each run's consecutive
         # delta rows into the exact row that coalescer builds, so replay output
-        # is byte-identical and nothing renderable is lost. Round-robin cursor
-        # inside, so a large install is covered across passes rather than in one
-        # long transaction. Shares this maintenance transaction's cursor.
+        # is byte-identical and nothing renderable is lost. The window is short
+        # (DELTA_COMPACTION_IDLE_HOURS) so recently used sessions stop paying a
+        # row per streaming flush on every open; active runs and the retained
+        # tail are still skipped. Round-robin cursor inside, so a large install
+        # is covered across passes rather than in one long transaction. Shares
+        # this maintenance transaction's cursor.
         try:
             with _savepoint(cursor, "sp_maint_compact_deltas"):
-                from app.db.session_events import compact_idle_session_deltas
+                from app.db.session_events import (
+                    DELTA_COMPACTION_IDLE_HOURS,
+                    compact_idle_session_deltas,
+                )
 
-                compacted = compact_idle_session_deltas(7, cursor=cursor)["rows"]
+                compacted = compact_idle_session_deltas(
+                    older_than_hours=DELTA_COMPACTION_IDLE_HOURS, cursor=cursor
+                )["rows"]
             results["compacted_session_event_deltas"] = compacted
         except Exception as e:
             results["compacted_session_event_deltas"] = f"error: {e}"

@@ -55,6 +55,19 @@ describe('owner runtime state', () => {
 		expect(deriveStatus({ remoteRuntimeState, streaming: true, backgroundWork: true,
 			parked: true, attention: { count: 1, kind: 'permission' }, isActive: true })).toBe(expected);
 	});
+	it('a send from this tab wins over a stale remote idle', () => {
+		// The owner republishes "working" only after it claims the turn; until
+		// then the card must not fall back to Idle/Done right after sending.
+		expect(deriveStatus({ remoteRuntimeState: 'idle', streaming: true, optimisticStreaming: true,
+			attention: null, isActive: true })).toBe('working');
+	});
+	it.each([
+		['working', 'working'], ['parked', 'parked'], ['permission', 'needs_permission'],
+		['question', 'has_question'], ['offline', 'offline'], ['unknown', 'unknown'],
+	] as const)('a send from this tab does not override remote %s', (remoteRuntimeState, expected) => {
+		expect(deriveStatus({ remoteRuntimeState, streaming: true, optimisticStreaming: true,
+			attention: null, isActive: true })).toBe(expected);
+	});
 	it('keeps git stage independent after a remote turn settles', () => {
 		expect(deriveStatus({ remoteRuntimeState: 'idle', streaming: true,
 			attention: null, isActive: true, prState: 'open' })).toBe('pr');
