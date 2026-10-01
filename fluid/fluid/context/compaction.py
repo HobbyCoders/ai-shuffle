@@ -48,6 +48,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from fluid.context.cache_signal import (
+    ZONE_OPPORTUNISTIC,
+    ZONE_PRICED,
+    CacheSignal,
+    Schedule,
+    Zones,
+    decide_schedule,
+)
 from fluid.context.trim import (
     ToolResultTrimmer,
     TrimConfig,
@@ -203,6 +211,17 @@ class CompactionConfig:
     # keep_recent_turns, so a run of wakes cannot age a real user turn out
     # of the protected set. Off restores the legacy count.
     wake_aware_turns: bool = True
+    # Cache-priced schedule (plan item 3, B4, B5; see fluid.context.cache_signal).
+    # It runs only when the engine passes a CacheSignal to ``apply`` and the
+    # window is known; with no signal the unpriced ladder runs unchanged.
+    # Below F = opportunistic_floor_window_ratio * window nothing is built.
+    # Between F and the trigger a batch is built only when the cache is cold
+    # and commits only when it is deep. Between the trigger and the hard
+    # ceiling a warm rewrite waits until the cached-price rent of deferring
+    # reaches its buy price. The hard zone and window protection commit
+    # regardless. Off ignores the signal.
+    cache_schedule: bool = True
+    opportunistic_floor_window_ratio: float = 0.45
 
 
 # TurnStarted sources that are wakes rather than a person's message. Their
@@ -586,6 +605,9 @@ class Compactor:
     _turn_live: int | None = None
     # Consecutive window-protection decisions that committed nothing.
     _window_misses: int = 0
+    # Rent the warm deferrals since the last commit have paid (plan item 3),
+    # in measured tokens. Process memory: a resumed engine is cold anyway.
+    _rent_paid: float = 0.0
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -720,6 +742,7 @@ class Compactor:
         output_reserve_tokens: int = 0,
         turn_boundary: bool = True,
         measured_prompt_tokens: int | None = None,
+        cache: CacheSignal | None = None,
     ) -> tuple[list[Message], list[Promotion]]:
         """Commit a batch only when its complete view saves enough.
 
@@ -743,6 +766,14 @@ class Compactor:
         each is divided by it, which puts it in chars/4 units, so a batch that
         is not needed on the measured prompt does not run as
         ``meaningful_reclaim`` either.
+
+        ``cache`` is the engine's view of the provider cache for this call.
+        With it, a known window and ``cache_schedule`` on, the decision is
+        priced (plan item 3, see :mod:`fluid.context.cache_signal`): below
+        the opportunistic floor nothing is built, a cold cache commits from
+        the floor up, and a warm one defers rewrites between the trigger and
+        the hard ceiling until break-even (``warm_defer``). Every such
+        decision logs the signal. ``cache=None`` runs the unpriced ladder.
         """
         try:
             return self._apply(
@@ -751,6 +782,7 @@ class Compactor:
                 output_reserve_tokens=output_reserve_tokens,
                 turn_boundary=turn_boundary,
                 measured_prompt_tokens=measured_prompt_tokens,
+                cache=cache,
             )
         finally:
             self._tail_from = None
@@ -765,6 +797,7 @@ class Compactor:
         output_reserve_tokens: int,
         turn_boundary: bool,
         measured_prompt_tokens: int | None,
+        cache: CacheSignal | None = None,
     ) -> tuple[list[Message], list[Promotion]]:
         before_view = self.view(nodes)
         before = overhead_tokens + estimate_tokens_of_messages(before_view)
@@ -816,6 +849,37 @@ class Compactor:
             # The prompt is past the configured window. Some providers accept
             # that silently, so the decision has to say so.
             decision_fields["over_window"] = True
+        zones = (
+            self._zones(context_window, output_reserve_tokens)
+            if cache is not None and self.config.enabled and self.config.cache_schedule
+            else None
+        )
+        schedule: Schedule | None = None
+        if cache is not None and zones is not None:
+            schedule = decide_schedule(
+                cache, zones, prompt=before * scale, scale=scale,
+                rent_paid=self._rent_paid,
+            )
+            decision_fields.update(
+                schedule=schedule.zone, cold_now=cache.cold_now,
+                cold_reason=cache.cold_reason, p_cold=round(cache.p_cold, 4),
+                floor_tokens=_in_estimate_units(zones.floor, scale),
+                cache_signal=cache.to_dict(),
+            )
+            trigger_est = _in_estimate_units(zones.trigger, scale)
+            if schedule.action == "skip" and not (
+                turn_boundary and before > self._image_threshold(trigger_est)
+            ):
+                # Below F, or warm between F and the trigger: build nothing,
+                # arm nothing, and drop rent paid toward an older candidate.
+                # An image rung that would fire still takes the ladder path.
+                self._optional_retry = None
+                self._rent_paid = 0.0
+                self.last_decision = {"reason": "below_threshold",
+                                      "before_tokens": before, "after_tokens": before,
+                                      "threshold_tokens": trigger_est,
+                                      **decision_fields}
+                return before_view, []
         retry = self._optional_retry
         if not mandatory and retry is not None and not turn_boundary:
             last_chars, growth = retry
@@ -832,8 +896,11 @@ class Compactor:
             # the watermark only gates calls over it, and it is spent the
             # first time a candidate over the trigger is built.
             last_chars, growth = shortfall_retry
+            # A cold cache makes the rewrite free of its re-billed tail, so
+            # the priced schedule lets a cold call through the hold.
+            cold = schedule is not None and cache is not None and cache.cold_now
             if (
-                not mandatory and not hard and not turn_boundary
+                not mandatory and not hard and not turn_boundary and not cold
                 and self._reclaimable_chars(nodes) < last_chars + growth
             ):
                 self.last_decision = {"reason": "awaiting_reclaimable_growth",
@@ -845,10 +912,18 @@ class Compactor:
         restore = self._tier_snapshot()
         self._candidate_threshold, self._candidate_below = None, False
         self._candidate_target = None
+        opportunistic = (
+            schedule is not None and schedule.action == "build"
+            and schedule.zone == ZONE_OPPORTUNISTIC
+        )
+        if opportunistic:
+            # Rent is paid toward a priced-band candidate; under the trigger
+            # there is none.
+            self._rent_paid = 0.0
         rendered, promotions = self._apply_candidate(
             nodes, overhead_tokens=overhead_tokens, context_window=context_window,
             output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
-            scale=scale,
+            scale=scale, force=opportunistic,
         )
         # Reachability: a hard-zone batch still over the trigger would be
         # followed by another one within a few calls, so it runs the guarded
@@ -901,7 +976,7 @@ class Compactor:
                 self.config.enabled
                 and self.config.below_threshold_skips_retry
                 and (below or after >= before)
-            )
+            ) or opportunistic
             if skip_arm:
                 self._optional_retry = None
             else:
@@ -915,6 +990,35 @@ class Compactor:
                                   "candidate_after_tokens": after,
                                   **threshold_fields, **decision_fields}
             return before_view, []
+        if schedule is not None and schedule.action == "build":
+            assert cache is not None and zones is not None
+            priced = decide_schedule(
+                cache, zones, prompt=before * scale, scale=scale,
+                candidate_after=after * scale, rent_paid=self._rent_paid,
+            )
+            if priced.zone == ZONE_PRICED:
+                threshold_fields.update(buy_price=priced.buy_price,
+                                        rent_per_call=priced.rent_per_call)
+            if priced.action != "commit":
+                # warm_defer: keep the cached prefix and pay one more call of
+                # rent. A cold opportunistic candidate that is not deep
+                # enough is dropped the same way and leaves no rent behind.
+                restore()
+                threshold_fields["rent_paid"] = round(self._rent_paid)
+                self._optional_retry = None
+                if priced.action == "defer":
+                    self._rent_paid += priced.rent_per_call
+                else:
+                    self._rent_paid = 0.0
+                self.last_decision = {"reason": priced.reason,
+                                      "before_tokens": before, "after_tokens": before,
+                                      "candidate_after_tokens": after,
+                                      **threshold_fields, **decision_fields}
+                return before_view, []
+            reason = priced.reason
+        if schedule is not None:
+            threshold_fields["rent_paid"] = round(self._rent_paid)
+        self._rent_paid = 0.0
         # Shortfall watermark (plan item 5, B2). The legacy commit cleared the
         # watermark, so a batch that could not reach its target was followed
         # by another shallow one as soon as the prompt crossed the trigger
@@ -960,9 +1064,14 @@ class Compactor:
         output_reserve_tokens: int = 0,
         turn_boundary: bool = True,
         scale: float = 1.0,
+        force: bool = False,
     ) -> tuple[list[Message], list[Promotion]]:
         """Render history; when the estimated total crosses the threshold,
         run the ladder as one amortized batch and return what it did.
+
+        ``force`` runs the size rungs under the threshold too. The priced
+        schedule sets it for a cold call between the opportunistic floor and
+        the trigger, where a rewrite costs no extra cache break.
 
         ``scale`` is the measured/estimated calibration from ``apply``; the
         threshold is divided by it so it compares against chars/4 totals.
@@ -994,7 +1103,7 @@ class Compactor:
         # pressure and for a turn boundary rather than rewriting the prefix
         # mid-turn at low occupancy.
         promotions: list[Promotion] = []
-        due = total > threshold
+        due = total > threshold or force
         if turn_boundary and total > self._image_threshold(threshold):
             promotions = self._consume_images(nodes)
             if promotions:
@@ -1005,7 +1114,7 @@ class Compactor:
         # it after them (the legacy path) let a due batch stop at the images:
         # the size trim then came a few calls later as a second rebuild, or a
         # small image reclaim fell under the 5% floor and nothing ran (B13).
-        if not (due if self.config.image_rung_in_batch else total > threshold):
+        if not (due if self.config.image_rung_in_batch else total > threshold or force):
             self._candidate_below = True
             return rendered, promotions
         # The rungs below stay available mid-turn on purpose: past the trigger
@@ -1111,6 +1220,46 @@ class Compactor:
         if context_window is None or ratio <= 0:
             return None
         return _in_estimate_units(int(context_window * ratio), scale)
+
+    def _zones(
+        self, context_window: int | None, output_reserve_tokens: int
+    ) -> Zones | None:
+        """The priced schedule's zones in measured tokens, or None when the
+        window is unknown (the schedule then leaves the ladder unpriced)."""
+        if context_window is None:
+            return None
+        limit = max(
+            1, context_window - self.config.headroom_tokens - output_reserve_tokens
+        )
+        trigger = self._threshold(
+            self.config.trigger_tokens, context_window, output_reserve_tokens
+        )
+        target = int(trigger * self.config.target_ratio)
+        if self.config.deep_target_window_ratio > 0:
+            target = min(
+                target, int(context_window * self.config.deep_target_window_ratio)
+            )
+        ratio = self.config.opportunistic_floor_window_ratio
+        floor = min(trigger, int(context_window * ratio)) if ratio > 0 else trigger
+        return Zones(
+            floor=floor, trigger=trigger,
+            hard=self._hard_ceiling(context_window, output_reserve_tokens),
+            target=target, limit=limit,
+        )
+
+    def schedule_event_fields(self) -> dict[str, Any]:
+        """The last decision's schedule fields for its ContextCompaction
+        events. Sizes are in the chars/4 units of ``before_tokens`` except
+        ``rent_paid`` and ``turn_live_tokens``, which are measured tokens."""
+        d = self.last_decision
+        return {
+            "schedule": str(d.get("schedule") or ""),
+            "cold_reason": str(d.get("cold_reason") or ""),
+            "threshold_tokens": int(d.get("threshold_tokens") or 0),
+            "target_tokens": int(d.get("target_tokens") or 0),
+            "rent_paid": int(d.get("rent_paid") or 0),
+            "turn_live_tokens": int(d.get("turn_live_tokens") or 0),
+        }
 
     def _hard_ceiling(
         self, context_window: int | None, output_reserve_tokens: int

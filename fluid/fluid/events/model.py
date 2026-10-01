@@ -361,6 +361,21 @@ class ContextCompaction(Event):
     # call is on the path). "" on provider-overflow rungs and older events.
     token_basis: str = ""
     measured_prompt_tokens: int = 0
+    # The cache-priced schedule (plan item 3). ``schedule`` is the zone the
+    # decision fell in ("priced", "opportunistic", "hard", "window", ...) or
+    # "" when no cache signal priced it; ``cold_reason`` says why the cache
+    # was presumed cold ("gap", "static_changed", "resumed") or "".
+    # ``threshold_tokens`` and ``target_tokens`` are the trigger and the
+    # batch target in the chars/4 units of ``before_tokens``; ``rent_paid``
+    # (warm-deferral rent at the commit) and ``turn_live_tokens`` (the
+    # in-flight turn's size) are measured tokens. All default to "not
+    # reported", which is what every older event replays as.
+    schedule: str = ""
+    cold_reason: str = ""
+    threshold_tokens: int = 0
+    target_tokens: int = 0
+    rent_paid: int = 0
+    turn_live_tokens: int = 0
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

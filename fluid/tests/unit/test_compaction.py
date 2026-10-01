@@ -1436,10 +1436,12 @@ _LEGACY_PROMOTION_FIELDS = (
 
 
 def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
-                  window: int | None = None, measured: bool = False) -> tuple[str, list]:
+                  window: int | None = None, measured: bool = False,
+                  **apply_kw) -> tuple[str, list]:
     """Replay the model calls of ``nodes`` through ``apply`` the way the engine
     does: one call per turn start (a boundary) and one after each tool result
-    (mid-turn). Returns a digest of every rendered view plus every promotion."""
+    (mid-turn). Returns a digest of every rendered view plus every promotion.
+    ``apply_kw`` goes to every ``apply`` call (the item-3 cache signal)."""
     import hashlib
     import json
 
@@ -1452,7 +1454,7 @@ def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
             continue
         is_start = not any(isinstance(b, ToolResultBlock) for b in node.message.content)
         prefix = nodes[:end]
-        kw: dict = {"overhead_tokens": 3_000, "turn_boundary": is_start}
+        kw: dict = {"overhead_tokens": 3_000, "turn_boundary": is_start, **apply_kw}
         if window is not None:
             kw.update(context_window=window, output_reserve_tokens=4_000)
         if measured:
@@ -1560,6 +1562,28 @@ def test_legacy_render_parity_snapshot() -> None:
         resumed = Compactor(config=make_config())
         resumed.rehydrate(promotions)
         assert resumed.view(nodes) == compactor.view(nodes), name
+
+
+def test_cache_none_and_unpriced_signals_keep_the_legacy_digests() -> None:
+    """Plan item 3: ``cache=None`` is today's path byte-for-byte. A cache
+    signal changes nothing with ``cache_schedule`` off, with no known window
+    (the ladder scenario), or under the trim-only contract."""
+    from dataclasses import replace
+
+    from fluid.context.cache_signal import CacheSignal
+
+    warm = CacheSignal(gap_s=5.0, reuse_floor=3_000)
+    for name, (make_nodes, make_config, kw) in _PARITY_SCENARIOS.items():
+        digest, _ = _drive_legacy(Compactor(config=make_config()), make_nodes(),
+                                  cache=None, **kw)
+        assert digest == _PARITY_DIGESTS[name], name
+        off = replace(make_config(), cache_schedule=False)
+        digest, _ = _drive_legacy(Compactor(config=off), make_nodes(), cache=warm, **kw)
+        assert digest == _PARITY_DIGESTS[name], name
+        if "window" not in kw:
+            digest, _ = _drive_legacy(Compactor(config=make_config()), make_nodes(),
+                                      cache=warm, **kw)
+            assert digest == _PARITY_DIGESTS[name], name
 
 
 async def test_provider_overflow_runs_the_unguarded_rungs_and_recovers(tmp_path) -> None:
