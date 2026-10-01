@@ -16,10 +16,13 @@ afterEach(() => {
 });
 
 describe('mobile menu positioning', () => {
-	it('pins Git action options, not the composer runner or branch menus', () => {
+	it('keeps the inline Git editor, Git progress, composer runner and branch menus in flow', () => {
 		document.documentElement.dataset.platform = 'mobile';
 		document.body.innerHTML = `
-			<div class="git-actions"><div class="options-dropdown" id="header"></div></div>
+			<div class="git-actions"><div class="git-panel">
+				<section class="options-dropdown" id="git-editor"></section>
+				<div class="git-progress" id="git-progress"></div>
+			</div></div>
 			<div class="execution-mode-bar sheet-mode">
 				<div class="mode-selector"><div class="mode-dropdown branch-dropdown" id="runner"></div></div>
 				<div class="branch-selector"><div class="branch-dropdown" id="worktree"></div></div>
@@ -28,8 +31,7 @@ describe('mobile menu positioning', () => {
 		`;
 		expect(fixedMenuSelectors.length).toBeGreaterThan(0);
 		const pinned = (id: string) => fixedMenuSelectors.some(selector => document.getElementById(id)!.matches(selector));
-		expect(pinned('header')).toBe(true);
-		for (const id of ['runner', 'worktree', 'local-branch']) expect(pinned(id)).toBe(false);
+		for (const id of ['git-editor', 'git-progress', 'runner', 'worktree', 'local-branch']) expect(pinned(id)).toBe(false);
 	});
 
 	it('does not apply the mobile header positioning to the desktop shell', () => {

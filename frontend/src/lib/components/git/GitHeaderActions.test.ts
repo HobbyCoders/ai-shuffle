@@ -360,9 +360,9 @@ describe('GitHeaderActions panel rows', () => {
 		expect(queryRow('Create PR')).toBeNull();
 		await fireEvent.click(button);
 		expect(handlers.onClickShipIt).toHaveBeenCalledOnce();
-		// Operation feedback stays in this workspace.
+		// Operation feedback stays in this workspace: the panel is still open, so
+		// the options chevron is reachable without reopening it.
 		expect(panel()).toBeTruthy();
-		await openPanel();
 		await fireEvent.click(row('Ship It options'));
 		expect(within(popover('shipit')).getAllByRole('listitem').map((e) => e.textContent)).toEqual(['Merge PR #42']);
 	});
@@ -917,14 +917,16 @@ describe('GitHeaderActions mobile sheet', () => {
 // ── Handler wiring ──────────────────────────────────────────────────────────
 
 describe('GitHeaderActions handler wiring', () => {
-	it('a Commit row click fires the handler with no option bag (defaults) and closes the panel', async () => {
+	it('a Commit row click fires the handler with no option bag (defaults) and keeps the panel open', async () => {
 		dirtyFeatureBranch();
 		const { handlers } = renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit'));
 		expect(handlers.onClickCommit).toHaveBeenCalledTimes(1);
 		expect(handlers.onClickCommit).toHaveBeenCalledWith();
-		expect(queryPanel()).toBeNull();
+		// Progress renders in the panel, so it stays open on the overview.
+		expect(panel()).toBeTruthy();
+		expect(panel().querySelector('.gp-rows')).toBeTruthy();
 	});
 
 	it('popover Commit primary fires the handler with an explicit bag', async () => {
@@ -939,7 +941,9 @@ describe('GitHeaderActions handler wiring', () => {
 			includeUnstaged: expect.any(Boolean),
 			nextStep: expect.any(String)
 		});
-		expect(queryPanel()).toBeNull();
+		// Submitting leaves the editor and returns to the panel overview.
+		expect(queryPopover('commit')).toBeNull();
+		expect(panel().querySelector('.gp-rows')).toBeTruthy();
 	});
 
 	it('the private-access row opens the access dialog', async () => {

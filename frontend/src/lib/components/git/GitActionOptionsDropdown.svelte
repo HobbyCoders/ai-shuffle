@@ -122,7 +122,6 @@
 	}
 	function submitShipIt() {
 		if (busy) return;
-		if (busy) return;
 		onShipIt?.({
 			mergeMethod: prefs.mergeMethod,
 			cleanup: prefs.cleanupAfterMerge,
