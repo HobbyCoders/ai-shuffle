@@ -2408,17 +2408,9 @@ class Compactor:
         compactor's, so decisions persisted before version 2 existed keep
         their version-1 text.
 
-        TODO(lane owning fluid/engine/native.py): the engine must persist and
-        replay the version, and both lines must land together.
-        ``_emit_compaction`` should set
-        ``render_version=self._compactor.render_version`` on the event, and
-        ``_rehydrate_compaction`` should pass ``render_version=e.render_version``
-        into each Promotion. Until then the engine's rehydrated promotions take
-        the Promotion default (the current version): sessions compacted after
-        this change resume byte-identical, and a session whose decisions were
-        persisted at version 1 re-renders them at version 2 once on its first
-        resume. Passing ``e.render_version`` without writing it on emit would
-        replay every new decision at version 1 instead.
+        The engine writes the compactor's version on every ContextCompaction
+        event and passes it back here on resume. Events written before the
+        field existed read as version 1, which is how they rendered.
         """
         for promo in promotions:
             version = min(promo.render_version, self.config.render_version)

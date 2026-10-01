@@ -832,6 +832,9 @@ async def test_long_turn_engine_persists_delivery_segments_and_replays(tmp_path)
     assert any(e.tier == 2 for e in promotions)
     assert all(e.before_tokens > e.after_tokens > 0 for e in promotions)
     assert all(e.first_changed_message is not None for e in promotions)
+    # Each decision records the renderer it was made under, so resume replays
+    # it at that version.
+    assert {e.render_version for e in promotions} == {loop._compactor.render_version}
     assert all(steer in _request_texts(r) for r in provider.requests[1:])
     assert all(repair_dangling_tool_calls(r.messages) is r.messages for r in provider.requests)
     await loop.aclose()
@@ -1735,6 +1738,19 @@ async def test_rehydrate_over_events_persisted_without_the_new_fields(tmp_path) 
     await fresh._rehydrate_compaction(sid)
     assert fresh._compactor.view(nodes) == live.view(nodes)
     await fresh.aclose()
+
+    # A build on the current renderer resumes the same rows at the version
+    # they were written under (1, since they carry no render_version), so an
+    # old session keeps its bytes after an upgrade.
+    from dataclasses import replace
+    current = replace(_parity_ladder(), render_version=CompactionConfig().render_version)
+    assert current.render_version > 1
+    upgraded = NativeLoop(provider=_ScriptedProvider([_text_script("done")]),
+                          store=JsonlStore(tmp_path), model="m", session_id=sid,
+                          compaction=current, registry=registry)
+    await upgraded._rehydrate_compaction(sid)
+    assert upgraded._compactor.view(nodes) == live.view(nodes)
+    await upgraded.aclose()
 
 
 # ── Plan item 5 (B2): deep target, hard zone, shortfall watermark ──────────
