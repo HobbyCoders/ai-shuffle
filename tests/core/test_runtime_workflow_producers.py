@@ -45,8 +45,8 @@ async def test_query_options_compile_from_actual_wired_surface(mock_db, tmp_path
     assert ("Use only the roster IDs exposed by the current provider" in compiled.text) is bound
     assert ("belong in Monitor" in compiled.text) is bound
     assert ("# Subagent delegation" in compiled.text) is bound
-    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE
-    assert (SUBAGENT_WORKTREE_GUIDANCE in compiled.text) is bound
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_SUMMARY
+    assert (SUBAGENT_WORKTREE_SUMMARY in compiled.text) is bound
     if not bound:
         assert "Task(mode" not in compiled.text
 

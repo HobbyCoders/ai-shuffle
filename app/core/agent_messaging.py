@@ -213,6 +213,11 @@ async def resume_unavailable(target, row):
     error = (str(outcome.get("error") or "") + " " + str(terminal.get("errors") or "")).casefold()
     if any(marker in error for marker in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
         return "the provider rejected this work on policy grounds; ask the user, do not replay it"
+    # An untouched dedicated checkout is reclaimed when its worker finishes;
+    # the resumed turn reuses that saved cwd, so bring it back first.
+    from app.core.worker_checkout import restore_reclaimed_worker_checkout
+    if not await asyncio.to_thread(restore_reclaimed_worker_checkout, target):
+        return "its dedicated checkout could not be restored; dispatch a new Task instead"
     return None
 
 
@@ -259,8 +264,10 @@ async def finish_message_resume(session_id, settled, outcome):
         latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
         if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
             return
+        settled_now = False
         if (not busy and not parked and (not latest or latest["id"] == settled["id"])
                 and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
+            settled_now = True
             task_registry.complete_task(owner, session_id, status, summary=summary)
             if (record and record.continuation_turn_id
                     and supervisor.get_worker(owner, session_id) is record):
@@ -272,3 +279,7 @@ async def finish_message_resume(session_id, settled, outcome):
         "status": status, "summary": summary,
         "agent_message_turn_id": settled["id"],
     })
+    if settled_now:
+        # Same rule as a first run: an untouched dedicated checkout is reclaimed.
+        from app.core.worker_checkout import reclaim_untouched_worker_checkout
+        await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)

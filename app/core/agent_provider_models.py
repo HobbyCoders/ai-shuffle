@@ -516,9 +516,7 @@ def build_task_contract(
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        "tool call. Coding workers in Git projects get an automatically "
-        "provisioned, session-bound checkout before launch; do not create "
-        "worktrees in the model's brief. "
+        "tool call. "
         f"{SWARM_ROUTING}\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
         f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
@@ -654,7 +652,7 @@ def parent_subagent_guidance(
     monitor_available: bool = True, browser_available: bool = True,
 ) -> str:
     """Describe only workflows exposed by this session's effective surface."""
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING
 
     parts = []
     if task_available:
@@ -670,12 +668,10 @@ def parent_subagent_guidance(
             "scope and expected result. Choose the role that matches the work: "
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
-            "Delegate only when the user authorizes subagents. Coding workers "
-            "in Git projects get an automatically provisioned, session-bound "
-            "checkout before launch; do not create worktrees in the model's "
-            "brief. The app forks the direct caller's committed HEAD and leaves "
-            "its bound checkout untouched.\n"
-            + SUBAGENT_WORKTREE_GUIDANCE + "\n"
+            "Delegate only when the user authorizes subagents. "
+            # The full checkout contract rides the Task/Swarm descriptions;
+            # repeating it here would resend it every turn.
+            + SUBAGENT_WORKTREE_SUMMARY + "\n"
             + (SWARM_ROUTING if swarm_available else
                "Use Task for independent or adaptive assignments; do not "
                "invent an unavailable workflow tool.")

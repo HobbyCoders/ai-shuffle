@@ -887,6 +887,11 @@ async def _dispatch_worker_with_retries(
         if kind is None:
             return _capacity_worded(outcome, used["rate"])
 
+        # The attempt never started, so its dedicated checkout (if any) holds
+        # no work; the retry provisions its own. Reclaim refuses anything dirty.
+        from app.core.worker_checkout import reclaim_untouched_worker_checkout
+        await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_id)
+
         delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
         used[kind] += 1
         if overall_deadline is not None and (

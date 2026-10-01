@@ -1830,6 +1830,10 @@ async def dispatch_worker(
         except Exception as exc:  # noqa: BLE001
             logger.exception("ProviderAgent: worker session creation failed")
             create_error = exc
+            if worker_checkout:
+                # Provisioned, but no session will ever run in it.
+                from app.core.worker_checkout import discard_unused_worker_checkout
+                discard_unused_worker_checkout(worker_checkout)
         return (
             parent_row, project_id, worktree_id, worktree_branch,
             worktree_path, provider_tag, create_error, selected_effort,
@@ -2045,6 +2049,9 @@ async def dispatch_worker(
     #: The registry ``summary`` for a CLEAN completion — the report's first
     #: line, so a listing says what came back rather than which model ran.
     completion_summary: Optional[str] = None
+    #: Background work the worker left running; a checkout still in use by it
+    #: is never reclaimed from under it.
+    outstanding: List[Dict[str, Any]] = []
     try:
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
@@ -2522,3 +2529,12 @@ async def dispatch_worker(
                 provider_agent_supervisor.unregister_worker(
                     parent_session_id, worker_session_id
                 )
+        # A dedicated checkout the worker finished without touching holds
+        # nothing to review: reclaim it rather than leak a worktree per
+        # research-only worker. Anything committed or changed is retained.
+        # A resumed worker re-materializes it from the recorded tip.
+        if worker_checkout is not None and not outstanding:
+            from app.core.worker_checkout import reclaim_untouched_worker_checkout
+            await emit_shielded(asyncio.to_thread(
+                reclaim_untouched_worker_checkout, worker_session_id,
+            ))

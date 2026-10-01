@@ -150,13 +150,18 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     assert "# Subagent delegation" in guidance
     assert "current provider" in guidance
     assert "Never invent a subagent ID, model, or provider" in guidance
-    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
+    from fluid.tools.fragments import (
+        SUBAGENT_WORKTREE_GUIDANCE, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING,
+    )
 
     assert SWARM_ROUTING in guidance
     assert SWARM_ROUTING in contract.description
-    assert SUBAGENT_WORKTREE_GUIDANCE in guidance
-    assert SUBAGENT_WORKTREE_GUIDANCE in contract.description
-    assert SUBAGENT_WORKTREE_GUIDANCE not in parent_subagent_guidance(task_available=False)
+    # The full checkout contract rides the tool description once; the system
+    # prompt carries only the summary.
+    assert SUBAGENT_WORKTREE_SUMMARY in guidance
+    assert SUBAGENT_WORKTREE_GUIDANCE not in guidance
+    assert contract.description.count(SUBAGENT_WORKTREE_GUIDANCE) == 1
+    assert SUBAGENT_WORKTREE_SUMMARY not in parent_subagent_guidance(task_available=False)
 
 
 def test_task_contract_includes_file_subagents_without_shadowing_db_agents(mock_db):

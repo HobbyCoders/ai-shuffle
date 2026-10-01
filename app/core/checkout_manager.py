@@ -1494,7 +1494,7 @@ def ensure_checkout(
             branch,
             base_branch=base_branch,
             create_new_branch=create_new_branch,
-            **({"provision_runtime": False} if not provision_runtime else {}),
+            provision_runtime=provision_runtime,
         )
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
