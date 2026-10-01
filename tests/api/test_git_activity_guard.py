@@ -64,6 +64,17 @@ def test_remote_same_branch_is_protected_without_local_cwd(target, monkeypatch):
     monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
     assert activity.busy_git_target_sessions('legacy', target[0]) == ['busy']
 
+def test_excluded_sessions_are_skipped_but_others_still_count(target, monkeypatch):
+    # A handoff accounts for its own reservations; an unknown-cwd remote session
+    # it excluded must not make the check fail closed.
+    here, _, sessions, _ = target
+    sessions[0]['branch'] = None
+    monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
+    assert activity.busy_git_target_sessions('legacy', here, exclude=('busy',)) == []
+    sessions.append({'id': 'second', 'project_id': 'legacy', 'branch': 'feature'})
+    monkeypatch.setattr(activity, '_live_session_ids', lambda: {'busy', 'second'})
+    assert activity.busy_git_target_sessions('legacy', here, exclude=('busy',)) == ['second']
+
 def test_activity_errors_fail_closed(target, monkeypatch):
     monkeypatch.setattr(activity, '_live_session_ids', Mock(side_effect=RuntimeError('DB offline')))
     assert activity.git_target_mutations_blocked('legacy', target[0]) is True

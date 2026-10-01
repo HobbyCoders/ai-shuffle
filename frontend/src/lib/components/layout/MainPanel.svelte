@@ -61,7 +61,7 @@
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import { shouldShowHeaderGitActions } from './git-header-visibility';
+	import { privateAccessTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -422,18 +422,16 @@
 	 */
 	// Deliberately NOT gated on GitHub auth (see the repo-load effect): the poll
 	// feeds the LOCAL git status, which works without `gh`.
-	const gitUiVisible = $derived(
-		!!activeTab &&
-			shouldShowHeaderGitActions({
-				viewType: $activeView?.type,
-				hasProject: !!activeProject,
-				githubAuthenticated: $githubAuthenticated,
-				githubAvailable: activeGithubAvailable,
-				worktreeDeleted: activeWorktreeDeleted,
-				isRemote: activeIsRemote,
-				sessionMode: activeTab.mode
-			})
-	);
+	const headerGitInput = $derived({
+		viewType: $activeView?.type,
+		hasProject: !!activeProject,
+		githubAuthenticated: $githubAuthenticated,
+		githubAvailable: activeGithubAvailable,
+		worktreeDeleted: activeWorktreeDeleted,
+		isRemote: activeIsRemote,
+		sessionMode: activeTab?.mode
+	});
+	const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));
 
 	function gitPollNow() {
 		// Skip polling while a commit/push/PR/pull operation is in progress
@@ -880,9 +878,11 @@
 {#snippet headerActions()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
 		{#key activeTab.sessionId}
-			<!-- Dialog only: the git panel's "Private access" row opens it, and the
-			     header button reads its pending count (chatAccessSummary). -->
-			<ChatAccess sessionId={activeTab.sessionId} trigger="none" />
+			<!-- With the git cluster shown, its panel's "Private access" row opens
+			     the dialog and its button reads the pending count
+			     (chatAccessSummary). Chat-lane and projectless sessions have no git
+			     cluster, so ChatAccess renders its own Access button there. -->
+			<ChatAccess sessionId={activeTab.sessionId} trigger={privateAccessTrigger(headerGitInput)} />
 			<SwarmDropdown
 				sessionId={activeTab.sessionId}
 				standalone

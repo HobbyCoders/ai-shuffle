@@ -118,6 +118,52 @@ describe('PrivateAccessRequest', () => {
 		expect(m.post.mock.calls[0][1]).toMatchObject({ saved_id: '', save_connection: false, connection: { kind: 'folder', label: 'Folder', path: '/home/me/notes', writable: true } });
 	});
 
+	it('collects an HTTPS service credential privately and only offers saved services', async () => {
+		let finish!: () => void;
+		m.post.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
+		const { onComplete } = mount({ request: { id: 'r/1', kind: 'service', purpose: 'Query the inventory API', expires_at: inAnHour() } });
+		// Saved SSH machines are not credentials for an API service.
+		expect(screen.queryByLabelText('Connection')).toBeNull();
+		expect(screen.getByText('API access')).toBeTruthy();
+		await fireEvent.input(field('Service address'), { target: { value: ' https://api.example.com/v1 ' } });
+		await fireEvent.input(field('Credential header'), { target: { value: 'X-API-Key' } });
+		await fireEvent.input(field('Scheme'), { target: { value: '' } });
+		await fireEvent.input(field('API key or token'), { target: { value: 'api-key-0123456789' } });
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow changes/ }));
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, {
+			connection: {
+				kind: 'service', label: 'API service', minutes: 60, url: 'https://api.example.com/v1',
+				auth_header: 'X-API-Key', auth_scheme: '', secret: 'api-key-0123456789', writable: true
+			},
+			saved_id: '', minutes: 60, save_connection: true
+		});
+		expect(field('API key or token').value).toBe('');
+		finish();
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
+	});
+
+	it('reuses a saved service named in the request without resending the credential', async () => {
+		const services = [
+			...saved,
+			{ id: 'grafana', label: 'Grafana', target: 'https://grafana.lan.example/api', fingerprint: '', kind: 'service', writable: false },
+			{ id: 'stock', label: 'Stock', target: 'https://stock.example.com', fingerprint: '', kind: 'service', writable: true }
+		];
+		const { onComplete } = mount({
+			request: { id: 'r/1', kind: 'service', purpose: 'Check stock.example.com levels', expires_at: inAnHour() },
+			savedConnections: services
+		});
+		const select = screen.getByLabelText('Connection') as HTMLSelectElement;
+		expect(select.value).toBe('stock');
+		expect([...select.options].map(o => o.value)).toEqual(['', 'grafana', 'stock']);
+		expect(screen.getByText('Allows changes after approval')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'stock', minutes: 60, save_connection: false });
+	});
+
 	it('declines through DELETE and shows a failure without completing', async () => {
 		m.delete.mockRejectedValueOnce({ detail: 'Request already answered' });
 		const { onComplete } = mount();

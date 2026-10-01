@@ -13,7 +13,7 @@
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number };
-	type Saved = {id: string; label: string; target: string; fingerprint: string};
+	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
 	async function removeSaved(id: string) {
@@ -208,6 +208,9 @@
 {#snippet serverIcon()}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path stroke-linecap="round" d="M7 7.5h.01M7 16.5h.01" /></svg>
 {/snippet}
+{#snippet serviceIcon()}
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.7 5.7L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.6a1 1 0 01.3-.7l6-6A6 6 0 1121 9z" /></svg>
+{/snippet}
 {#snippet folderIcon()}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /></svg>
 {/snippet}
@@ -241,22 +244,26 @@
 					<div class="pa-icon" aria-hidden="true">
 						{#if action.operation === 'command'}
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+						{:else if action.operation === 'http'}
+							{@render serviceIcon()}
 						{:else}
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11.8 15H9v-2.8l8.6-8.6z" /></svg>
 						{/if}
 					</div>
 					<div class="pa-title">
-						<h3><span>Approve this {action.operation === 'command' ? 'remote command' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
+						<h3><span>Approve this {action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
 						<p class="pa-subtitle">{grant ? `${grant.label} · ${grant.target}` : 'Temporary resource'}</p>
 					</div>
 				</header>
 				<div class="pa-body">
 					{#if action.operation === 'command'}
 						<pre class="pa-mono"><span class="prompt">$ </span>{action.arguments.command}</pre>
+					{:else if action.operation === 'http'}
+						<pre class="pa-mono"><span class="prompt">{action.arguments.method} </span>{action.arguments.path}{action.arguments.body ? `\n${action.arguments.content_type}\n\n${action.arguments.body}` : ''}</pre>
 					{:else}
 						<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
 					{/if}
-					<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : 'Writes this text once. Later writes ask again.'}</p>
+					<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
 				</div>
 				<div class="pa-section">
 					<div class="pa-actions">
@@ -281,11 +288,11 @@
 				</summary>
 				{#each data.grants as grant (grant.id)}
 					<div class="pa-row">
-						<span class="pa-icon row-icon">{#if grant.kind === 'machine'}{@render serverIcon()}{:else}{@render folderIcon()}{/if}</span>
+						<span class="pa-icon row-icon">{#if grant.kind === 'machine'}{@render serverIcon()}{:else if grant.kind === 'service'}{@render serviceIcon()}{:else}{@render folderIcon()}{/if}</span>
 						<div class="pa-row-main">
 							<strong>{grant.label}</strong>
 							<code>{grant.target}</code>
-							<small>{grant.kind === 'machine' ? 'Remote commands · session permission mode applies' : grant.writable ? 'Read/write · session permission mode applies' : 'Read only'} · until {new Date(grant.expires_at * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}{#if grant.kind === 'machine' && grant.fingerprint} · host key {grant.fingerprint.slice(0, 19)}…{/if}</small>
+							<small>{grant.kind === 'machine' ? 'Remote commands · session permission mode applies' : grant.kind === 'service' ? (grant.writable ? 'HTTPS API · changes follow session permission mode' : 'HTTPS API · GET and HEAD only') : grant.writable ? 'Read/write · session permission mode applies' : 'Read only'} · until {new Date(grant.expires_at * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}{#if grant.kind === 'machine' && grant.fingerprint} · host key {grant.fingerprint.slice(0, 19)}…{/if}</small>
 						</div>
 						<div class="pa-row-actions">
 							{#if confirmingRevoke === grant.id}
@@ -301,7 +308,7 @@
 					<p class="pa-group">Saved connections</p>
 					{#each data.saved_connections as saved (saved.id)}
 						<div class="pa-row">
-							<span class="pa-icon row-icon">{@render serverIcon()}</span>
+							<span class="pa-icon row-icon">{#if saved.kind === 'service'}{@render serviceIcon()}{:else}{@render serverIcon()}{/if}</span>
 							<div class="pa-row-main">
 								<strong>{saved.label}</strong>
 								<code>{saved.target}</code>
