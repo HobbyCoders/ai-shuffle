@@ -14,7 +14,8 @@ Threat model, and what the token is NOT:
   session id; it is never accepted for a session that does not exist, nor
   for one that runs as an API key (a grant is the owner, see
   :func:`_session_exists`). It
-  expires (``DEFAULT_TTL``), and nothing renews it silently.
+  expires (``DEFAULT_TTL`` at most, see :func:`session_token`), and nothing
+  renews it silently.
 * It is an HMAC over ``session_id.expires`` under a per-install key kept in
   the data dir (``preview-access.key``, created 0600). Any process sharing the
   data dir — the running worker, or an isolated ``AI_SHUFFLE_PREVIEW=1``
@@ -69,6 +70,15 @@ KEY_FILE = "preview-access.key"
 #: A long working session is still one session. Twenty-four hours covers one
 #: without outliving the day.
 DEFAULT_TTL = 24 * 3600
+#: The harness's URL lands in the cached prompt prefix (the "# Workspace
+#: facts" card), and every reconnect re-renders that card: an idle-evicted
+#: client coming back after a park, a worker restart. A token whose expiry
+#: is "now + TTL" differs on every render, so each reconnect changed the
+#: system prompt and threw away the provider's prompt cache. The harness
+#: therefore rounds the expiry DOWN to this window: every render inside one
+#: window yields the same bytes, and a token never outlives ``DEFAULT_TTL``
+#: (it lives between ``DEFAULT_TTL - STABLE_WINDOW`` and ``DEFAULT_TTL``).
+STABLE_WINDOW = 6 * 3600
 _VERSION = "v1"
 
 #: Unsafe-method requests under these prefixes are refused for a preview
@@ -168,8 +178,28 @@ def mint(session_id: str, ttl_seconds: int = DEFAULT_TTL, *, now: Optional[float
     if ttl_seconds <= 0 or ttl_seconds > 7 * 24 * 3600:
         raise ValueError("Preview access TTL must be within a week")
     expires = int((now if now is not None else time.time()) + ttl_seconds)
+    return _token(session_id, expires)
+
+
+def _token(session_id: str, expires: int) -> str:
     payload = f"{_VERSION}.{_b64(session_id)}.{expires}"
     return f"{payload}.{_sign(payload)}"
+
+
+def session_token(session_id: str, *, now: float | None = None) -> str:
+    """The session's prompt-stable token: the same string for every call
+    inside one :data:`STABLE_WINDOW`.
+
+    The signature is a pure function of ``(session_id, expires)`` under the
+    install key, so pinning ``expires`` to a window boundary is all it takes.
+    The boundary is rounded DOWN from ``now + DEFAULT_TTL``, so the token is
+    never valid for longer than :func:`mint`'s default would be.
+    """
+    if not session_id or not isinstance(session_id, str):
+        raise ValueError("A session id is required to mint preview access")
+    current = now if now is not None else time.time()
+    expires = (int(current) + DEFAULT_TTL) // STABLE_WINDOW * STABLE_WINDOW
+    return _token(session_id, expires)
 
 
 def _session_exists(session_id: str) -> bool:
@@ -306,8 +336,12 @@ def safe_next(value: Optional[str]) -> str:
 
 def preview_url(session_id: str, host: str, port: int, *, next_path: str = "/",
                 token: Optional[str] = None) -> str:
-    """The one URL the agent browser opens first: sets the cookie, redirects."""
-    token = token or mint(session_id)
+    """The one URL the agent browser opens first: sets the cookie, redirects.
+
+    Without an explicit ``token`` it carries :func:`session_token`, so the
+    URL (and the cached prompt card that quotes it) is byte-identical across
+    reconnects of the same session inside one :data:`STABLE_WINDOW`."""
+    token = token or session_token(session_id)
     host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
     return (
         f"http://{host_part}:{port}{REDIRECT_PATH}"
