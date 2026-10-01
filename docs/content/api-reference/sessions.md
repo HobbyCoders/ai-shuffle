@@ -417,13 +417,13 @@ Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for a
 
 ## Private Access
 
-When an agent asks for access to a folder on this worker or to a machine over SSH, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write the agent attempts needs a separate approval.
+When an agent asks for access to a folder on this worker, a machine over SSH, or an HTTPS API service, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write, command or state-changing API request the agent attempts needs a separate approval (unless the session is in Bypass).
 
 **Auth:** Owner only, over HTTPS or from the same machine. Refused (`403`) for agent previews.
 
 ### GET /api/v1/chat-access/{session_id}
 
-Returns `requests` (open asks: `id`, `kind` (`folder` or `machine`), `purpose`, `expires_at`), `grants` (`id`, `label`, `kind`, `target`, `expires_at`, `writable`, `fingerprint`), `actions` (writes waiting for approval: `id`, `grant_id`, `operation`, `arguments`, `expires_at`), `saved_connections`, `vault_available`, `folder_available` and `restart_revokes`.
+Returns `requests` (open asks: `id`, `kind` (`folder`, `machine` or `service`), `purpose`, `expires_at`), `grants` (`id`, `label`, `kind`, `target`, `expires_at`, `writable`, `fingerprint`), `actions` (actions waiting for approval: `id`, `grant_id`, `operation` (`write`, `command` or `http`), `arguments`, `expires_at`), `saved_connections` (`id`, `kind`, `label`, `target`, `fingerprint`; never a secret), `vault_available`, `folder_available` and `restart_revokes`.
 
 ### POST /api/v1/chat-access/{session_id}/requests/{request_id}
 
@@ -446,7 +446,7 @@ Grant a request, with a new connection or a saved one (`saved_id`), not both.
 }
 ```
 
-`connection.kind` must match the request. For `folder`, send `path` instead of the SSH fields. `label` is 1 to 80 characters; `minutes` is 1 to 480 (default 60); `fingerprint` (`SHA256:...`) is optional; without it the server's key is pinned on first connect. `password`, `private_key` and `passphrase` are optional secrets that are never returned. Returns `{"granted": true, "saved": false}`. Connection failures return `400` with a message; secrets are never echoed.
+`connection.kind` must match the request. For `folder`, send `path` instead of the SSH fields. For `service`, send `url` (an `https://` address, optionally with a path prefix), `secret` (the API key or token, 8 to 8,192 visible characters), `auth_header` (default `Authorization`), `auth_scheme` (default `Bearer`; empty sends the secret alone, for headers such as `X-API-Key`) and `writable` (allow POST, PUT, PATCH and DELETE). The worker completes a verified TLS handshake before granting; self-signed certificates are refused and no request or credential is sent at grant time. `label` is 1 to 80 characters; `minutes` is 1 to 480 (default 60); `fingerprint` (`SHA256:...`) is optional; without it the server's key is pinned on first connect. `password`, `private_key`, `passphrase` and `secret` are never returned. Returns `{"granted": true, "saved": false}`. Connection failures return `400` with a message; secrets are never echoed.
 
 ### DELETE /api/v1/chat-access/{session_id}/requests/{request_id}
 
@@ -458,7 +458,7 @@ End a grant now. Returns `{"revoked": true}`.
 
 ### POST /api/v1/chat-access/{session_id}/actions/{action_id}
 
-Approve or refuse one pending write. Body: exactly `{"allow": true}` or `{"allow": false}`. Returns `{"accepted": true}`.
+Approve or refuse one pending write, command or API request. Body: exactly `{"allow": true}` or `{"allow": false}`. Returns `{"accepted": true}`.
 
 ### DELETE /api/v1/chat-access/{session_id}/saved/{connection_id}
 
