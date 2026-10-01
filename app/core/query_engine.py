@@ -759,7 +759,10 @@ async def execute_query(
                     # Funnel through the unified notification system so the
                     # non-streaming /query and /conversation paths reach the
                     # bell + every device, matching the streaming paths.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -854,10 +857,17 @@ async def execute_query(
     }
 
 
+def _adapter_is_delegated(adapter: Any) -> bool:
+    """Whether ``adapter`` runs the delegated leg (the claude CLI)."""
+    return getattr(adapter, "provider_kind", None) == "delegated"
+
+
 async def _emit_api_error_notification(
     api_user_id: Optional[str],
     session_id: Optional[str],
     api_err: Any,
+    *,
+    delegated: bool = False,
 ) -> None:
     """Funnel a provider ``api_error`` through the unified notification system.
 
@@ -867,6 +877,10 @@ async def _emit_api_error_notification(
     "Fix with AI" button is rebuilt client-side (keyed on ``category`` —
     closures can't cross the wire), so we only ship a serializable action
     descriptor here. Never raises — must not break the streaming path.
+
+    ``delegated`` says the turn ran through the claude CLI. A 401 there means
+    the CLI's own sign-in is missing or expired, which only signing in again
+    fixes, so the notification says how instead of the generic HTTP text.
     """
     try:
         from app.services.notification_service import emit_notification
@@ -876,6 +890,24 @@ async def _emit_api_error_notification(
         except (TypeError, ValueError):
             status = 0
 
+        if status == 401 and delegated:
+            from app.core.claude_relogin_notice import LOGIN_COMMAND
+
+            await emit_notification(
+                api_user_id or "admin",
+                severity="error",
+                message=(
+                    "Claude Code refused the request (HTTP 401): its sign-in on this "
+                    "worker is missing or has expired. "
+                    f"Run `{LOGIN_COMMAND}` on the worker, or use Settings > "
+                    "Providers > Claude Code CLI to sign in again, then retry."
+                ),
+                category="api_error",
+                surface="notification",
+                session_id=session_id,
+                persist=True,
+            )
+            return
         if status == 429:
             # Rate-limit (429) notifications are owned by ``account_failover``,
             # which surfaces the "rate-limited — wait or sign into a different
@@ -1468,7 +1500,10 @@ async def stream_query(
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
                     # handler does not emit separately — the `notification` event does.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(state.adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -3581,7 +3616,10 @@ async def _stream_to_websocket_impl(
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
                     # handler does not emit separately — the `notification` event does.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(state.adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

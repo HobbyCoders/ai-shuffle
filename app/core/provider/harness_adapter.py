@@ -13,7 +13,8 @@ to openrouter, and anything else goes to anthropic.
 
 Both legs:
   * fluid session id = ``session_id or resume_session_id``. The delegated
-    ``--resume`` handle is the stored ``cli_session_id`` (``_resolve_cli_session_id``).
+    ``--resume`` handle is the stored ``cli_session_id`` (``_resolve_cli_session_id``),
+    re-seeded from fluid's path when the CLI could not load that history.
   * ``permission_mode`` sets the PermissionEngine policy (native turns ``auto``
     into ``default``; ``acceptEdits`` lets the app's approver allow only the edit
     tools, after the user's saved rules); ``effort`` (``_valid_effort``),
@@ -51,8 +52,10 @@ Delegated leg:
     ``_delegated_allowed`` plus ``_delegated_permission_grants``, which grants
     only the in-proc tools the native leg rates ``safe`` (none in plan mode).
   * prompts reach ``can_use_tool`` via ``_bridge_permission``; with no callback,
-    ``_answer_without_approver`` denies in ``default``/``plan`` and allows otherwise.
-    PreToolUse applies ``_delegated_tool_policy`` in every mode.
+    ``_answer_without_approver`` applies the saved rules, then denies in
+    ``default``/``plan`` and allows otherwise. PreToolUse applies
+    ``_delegated_tool_policy`` in every mode, plus saved Deny rules short of
+    Bypass when fluid awaits async policies (``_delegated_policy_with_saved_rules``).
 
 Ignored: ``tools``, ``task_budget``, ``session_store*``,
 ``enable_file_checkpointing``, ``stderr``, ``user``, and every ``extra_args`` key
@@ -64,6 +67,7 @@ plugin MCP servers are not wired into NativeLoop.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -86,6 +90,7 @@ from app.core.provider.fluid_credentials import (
     resolve_provider_credentials,
 )
 from app.core.provider.protocol import ProviderAdapter
+from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
@@ -528,10 +533,16 @@ class HarnessAdapter(ProviderAdapter):
                 disallowed_tools=delegated_blocked,
                 # The session's tool surface: the agent's ``allow`` list
                 # intersected with a file-agent worker's definition list (CE12).
-                # The CLI reads --allowed-tools as permission grants, so the
-                # surface wall is the complement in --disallowed-tools above.
-                # On the chat lane the CLI's Read is banned outright and reads
-                # go through the bundled attachment reader.
+                # DelegatedLoop uses it twice: it filters the bundled bridge's
+                # tools, and it goes out (with permission_grants below) as
+                # --allowed-tools, which the CLI reads as permission grants, so
+                # a tool on an allow-mode surface runs without a can_use_tool
+                # prompt. The wall for the CLI's own tools is therefore the
+                # complement in --disallowed-tools above, and saved Deny rules
+                # are enforced by tool_policy (PreToolUse; see
+                # _delegated_policy_with_saved_rules). On the chat
+                # lane the CLI's Read is banned outright and reads go through
+                # the bundled attachment reader.
                 allowed_tools=_delegated_allowed(options),
                 # The app's safe MCP tools run unprompted: the SDK permission
                 # allowlist's in-proc entries the native leg rates ``safe``,
@@ -543,7 +554,9 @@ class HarnessAdapter(ProviderAdapter):
                 # call the app would refuse is refused even in a mode where
                 # the CLI never asks can_use_tool (bypassPermissions).
                 hooks=self._hooks,
-                tool_policy=_delegated_tool_policy(options, permissions, delegated_blocked),
+                tool_policy=self._delegated_policy_with_saved_rules(
+                    _delegated_tool_policy(options, permissions, delegated_blocked)
+                ),
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -1137,7 +1150,7 @@ class HarnessAdapter(ProviderAdapter):
             opts.extra["turn_env"] = dict(turn_env)
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission). Without it, the delegated leg answers prompts
-        # from the permission mode (_answer_without_approver).
+        # from the saved rules and the permission mode (_answer_without_approver).
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
         self._sdk_options = sdk_options
         await self.connect(opts)
@@ -1801,6 +1814,153 @@ class HarnessAdapter(ProviderAdapter):
         seq = int(getattr(event, "seq", -1) or -1)
         return seq < 0 or seq > self._turn_floor
 
+    def _delegated_policy_with_saved_rules(self, inner: Any) -> Any:
+        """The delegated PreToolUse policy: ``inner``, then saved Deny rules.
+
+        The claude CLI approves some calls without raising ``can_use_tool``
+        (in-cwd edits under Accept Edits, classifier approvals under Auto,
+        every tool on an ``--allowed-tools`` grant), so neither the watched
+        approver nor ``_answer_without_approver`` sees them. PreToolUse sees
+        every call to the CLI's built-in tools (fluid skips it for the
+        bridge-served ``mcp__fluid_bundled__*`` app tools, which the bridge
+        checks against the permission engine and hooks instead), so a saved
+        Deny on a built-in is enforced here: ``inner``'s denial
+        (``_delegated_tool_policy``) wins, then unless the live mode is
+        Bypass a saved Deny denies with "Denied by saved rule". A failed
+        lookup denies too. A saved Allow grants nothing here; asks stay with
+        the CLI.
+
+        The lookup is a DB read, so it needs a fluid that awaits an async
+        policy (``DelegatedLoop.supports_async_tool_policy``). An older fluid
+        gets ``inner`` unchanged, so PreToolUse then enforces only the
+        blocklist, the surface and the permission engine's deny rules.
+        """
+        if not getattr(DelegatedLoop, "supports_async_tool_policy", False):
+            return inner
+
+        async def policy(name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+            denial = inner(name, tool_input) if inner is not None else None
+            if inspect.isawaitable(denial):
+                denial = await denial
+            if denial:
+                return denial
+            if self.permission_mode == "bypassPermissions":
+                return None
+            try:
+                saved = await self._saved_rule_decision(name, tool_input)
+            except Exception:  # noqa: BLE001 — fail closed: the call may be one the user saved as Deny
+                logger.warning(
+                    "[HarnessAdapter] saved-rule lookup failed for %s; denying it",
+                    name, exc_info=True,
+                )
+                return "Denied: the saved permission rules could not be read"
+            return SAVED_RULE_DENIAL if saved == "deny" else None
+
+        return policy
+
+    @staticmethod
+    def _fluid_path_prompts(path: List[Any]) -> tuple:
+        """``(typed user prompts oldest first, has a user/assistant pair)``.
+
+        A typed prompt is a user node with text and no tool result (tool echoes
+        are user nodes too). The pair is a typed prompt followed later by an
+        assistant node: the smallest history worth handing to the CLI.
+        """
+        from fluid.messages.content import Text as FluidText
+        from fluid.messages.content import ToolResultBlock as FluidToolResult
+
+        from app.core.provider.fluid_transcript import prompt_text
+
+        prompts: List[str] = []
+        has_pair = False
+        for node in path:
+            message = getattr(node, "message", None)
+            role = getattr(message, "role", None)
+            if role == "assistant" and prompts:
+                has_pair = True
+                continue
+            if role != "user":
+                continue
+            blocks = []
+            for block in getattr(message, "content", None) or []:
+                if isinstance(block, FluidToolResult):
+                    blocks.append({"type": "tool_result"})
+                elif isinstance(block, FluidText):
+                    blocks.append({"type": "text", "text": block.text})
+            text = prompt_text(blocks)
+            if text is not None:
+                prompts.append(text)
+        return prompts, has_pair
+
+    async def _cli_reseed_reason(
+        self,
+        fluid_session_id: str,
+        handle: Optional[str],
+        options: SessionOptions,
+    ) -> Optional[str]:
+        """Why the CLI must get a fresh copy of fluid's path, or None.
+
+        The delegated CLI only ever receives the new user frame; its history is
+        whatever ``--resume <handle>`` loads. That is wrong in three cases:
+        the session has history but no handle (it ran on another provider),
+        the CLI would not find the handle's transcript on this worker, or the
+        transcript does not end on fluid's latest prompts (turns ran on
+        another provider since; see ``fluid_transcript.cli_prompts_cover``).
+        A session without one user/assistant pair has nothing to hand over.
+        """
+        from app.core.provider import fluid_transcript
+
+        assert self._store is not None
+        path = await self._store.load_path(fluid_session_id)
+        fluid_prompts, has_pair = self._fluid_path_prompts(list(path or ()))
+        if not has_pair:
+            return None
+        if not handle:
+            return "the session has history but no Claude Code conversation"
+        root = fluid_transcript.cli_projects_root(options.env)
+        transcript = await asyncio.to_thread(
+            fluid_transcript.find_cli_transcript,
+            handle, root, options.cwd or os.getcwd(),
+        )
+        if transcript is None:
+            return (
+                f"Claude Code would not find transcript {handle}.jsonl under {root}"
+            )
+        cli_prompts, complete = await asyncio.to_thread(
+            fluid_transcript.cli_transcript_prompt_tail, transcript
+        )
+        if not fluid_transcript.cli_prompts_cover(
+            fluid_prompts, cli_prompts, complete=complete,
+        ):
+            return (
+                f"Claude Code transcript {handle}.jsonl does not end on the "
+                "session's latest prompts"
+            )
+        return None
+
+    async def _reseed_cli_session(
+        self, fluid_session_id: str, options: SessionOptions
+    ) -> Optional[str]:
+        """Write fluid's path as a new CLI transcript; the new handle or None."""
+        from app.core.provider import fluid_transcript
+
+        cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
+        result = await asyncio.to_thread(
+            fluid_transcript.reseed_delegated_cli_session,
+            fluid_session_id,
+            cwd,
+            fluid_transcript.cli_projects_root(options.env),
+            force=True,
+        )
+        if result.status != "reseeded" or not result.cli_session_id:
+            logger.warning(
+                "[HarnessAdapter] could not hand session %s's history to Claude "
+                "Code (re-seed %s: %s); keeping the stored handle",
+                fluid_session_id, result.status, result.error,
+            )
+            return None
+        return result.cli_session_id
+
     async def _resolve_cli_session_id(
         self, fluid_session_id: Optional[str], options: SessionOptions
     ) -> Optional[str]:
@@ -1811,11 +1971,19 @@ class HarnessAdapter(ProviderAdapter):
         ``init`` frame. DelegatedLoop persists that uuid onto the session meta,
         so a resumed session reads it back from here.
 
-        Returns None when there is nothing stored — a fresh CLI conversation is
-        the correct degraded behavior. Passing the fluid id through instead
-        (the old bug) makes the CLI reject the resume and the turn dies in ~1s.
+        The CLI gets its history only from that handle, so when the handle is
+        missing, not on this worker, or behind fluid's path (see
+        ``_cli_reseed_reason``) fluid's path is written out as a fresh CLI
+        transcript first and its handle returned. That is what keeps a switch
+        from another provider to Claude Code, or a move to another worker,
+        from starting the model on an empty conversation.
+
+        Returns None when there is nothing stored and nothing to hand over: a
+        fresh CLI conversation is then the correct behavior. Passing the fluid
+        id through instead (the old bug) makes the CLI reject the resume and
+        the turn dies in ~1s. A failed check or re-seed keeps the stored handle.
         """
-        if not options.resume_session_id or not fluid_session_id or self._store is None:
+        if not fluid_session_id or self._store is None:
             return None
         try:
             meta = await self._store.get_session(fluid_session_id)
@@ -1826,7 +1994,40 @@ class HarnessAdapter(ProviderAdapter):
                 fluid_session_id, exc_info=True,
             )
             return None
-        return getattr(meta, "cli_session_id", None) if meta is not None else None
+        if meta is None:
+            return None
+        handle = getattr(meta, "cli_session_id", None)
+        try:
+            reason = await self._cli_reseed_reason(fluid_session_id, handle, options)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] could not check session %s's Claude Code "
+                "transcript; resuming the stored handle", fluid_session_id,
+                exc_info=True,
+            )
+            return handle
+        if reason is None:
+            return handle
+        logger.info(
+            "[HarnessAdapter] re-seeding Claude Code for session %s: %s",
+            fluid_session_id, reason,
+        )
+        try:
+            reseeded = await self._reseed_cli_session(fluid_session_id, options)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] re-seeding Claude Code for session %s failed; "
+                "keeping the stored handle", fluid_session_id, exc_info=True,
+            )
+            return handle
+        if reseeded is None:
+            return handle
+        try:
+            # The store's cached meta, so it agrees with the row the re-seed wrote.
+            meta.cli_session_id = reseeded
+        except Exception:  # noqa: BLE001 — a frozen meta only misses the cache update
+            pass
+        return reseeded
 
     async def _anchor_replay_cursor(self, session_id: str) -> None:
         """Anchor this adapter's replay cursor at the durable head.
@@ -1916,22 +2117,73 @@ class HarnessAdapter(ProviderAdapter):
         """True when permission prompts reach an app approver (the WS path)."""
         return self._can_use_tool is not None
 
-    async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
-        """Decide a delegated prompt from the session's permission mode, by the
-        rule a watched session follows (``mode_approves_without_prompt``): Ask
-        denies with the reason, and so does every mode short of Bypass for the
-        computer-use access request; everything else is allowed."""
-        allow = mode_approves_without_prompt(
-            self.permission_mode, self._permission_tool_name(ev.name),
-        )
-        if not allow:
-            logger.info(
-                "[HarnessAdapter] denying %s: no interactive approver on this path",
-                ev.name,
+    async def _saved_rule_decision(
+        self, tool_name: str, tool_input: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """The saved rule's ``"allow"``/``"deny"`` for a call, or None.
+
+        ``tool_name`` is the name as the engine reports it; bundled CLI
+        aliases resolve to the registered name first. Session rules are keyed
+        by the app session id, the agent's by ``extra["profile_id"]``; an
+        adapter without either sees no rules. Runs in a thread (the app
+        session id fallback and the agent's rules are DB reads) and raises
+        when the lookup fails.
+        """
+        from app.core.provider.delegated_saved_rules import saved_rule_decision
+
+        name = self._permission_tool_name(tool_name)
+        extra = (self._options.extra or {}) if self._options is not None else {}
+
+        def _lookup() -> Optional[str]:
+            return saved_rule_decision(
+                self._resolve_app_session_id(), extra.get("profile_id"),
+                name, tool_input or {},
             )
+
+        return await asyncio.to_thread(_lookup)
+
+    async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Decide a delegated prompt with no approver, in the watched order.
+
+        Saved rules first (every mode short of Bypass): a saved Deny denies
+        with "Denied by saved rule", a saved Allow allows. Then the mode
+        (``mode_approves_without_prompt``): Ask denies with the reason, and so
+        does every mode short of Bypass for the computer-use access request;
+        everything else is allowed. A failed rule lookup denies, since the
+        claude CLI blocks until the prompt is answered and an allow could
+        run a call the user saved as Deny.
+        """
+        allow: Optional[bool] = None
+        message: Optional[str] = None
+        if self.permission_mode != "bypassPermissions":
+            try:
+                saved = await self._saved_rule_decision(ev.name, ev.input)
+            except Exception:  # noqa: BLE001 — fail closed, see the docstring
+                logger.warning(
+                    "[HarnessAdapter] saved-rule lookup failed for %s; denying it",
+                    ev.name, exc_info=True,
+                )
+                allow = False
+                message = (
+                    "Denied: the saved permission rules could not be read, and "
+                    "no approver is attached to this session"
+                )
+            else:
+                if saved == "deny":
+                    allow, message = False, SAVED_RULE_DENIAL
+                elif saved == "allow":
+                    allow = True
+        if allow is None:
+            allow = mode_approves_without_prompt(
+                self.permission_mode, self._permission_tool_name(ev.name),
+            )
+            if not allow:
+                message = _NO_APPROVER_DENIAL
+        if not allow:
+            logger.info("[HarnessAdapter] denying %s: %s", ev.name, message)
         try:
             await self.respond_to_permission(
-                ev.tool_use_id, allow, message=None if allow else _NO_APPROVER_DENIAL,
+                ev.tool_use_id, allow, message=None if allow else message,
             )
         except Exception:
             logger.warning(
@@ -1943,27 +2195,13 @@ class HarnessAdapter(ProviderAdapter):
         """Approve a native prompt the session's mode approves on its own —
         unless a saved Deny rule names the call. The same order the watched
         approver keeps: saved rules first, then the mode (Bypass never gets
-        here). Session rules are keyed by the app session id, the agent's by
-        ``extra["profile_id"]``; an adapter without either sees no rules."""
+        here). See ``_saved_rule_decision`` for the rule keys."""
         allow = True
         message: Optional[str] = None
         if self.permission_mode != "bypassPermissions":
-            from app.core.permission_handler import (
-                PermissionDecision,
-                permission_handler,
-            )
-
-            def _saved_denial() -> bool:
-                extra = (self._options.extra or {}) if self._options is not None else {}
-                rule = permission_handler.saved_rule(
-                    self._resolve_app_session_id(), extra.get("profile_id"),
-                    self._permission_tool_name(ev.name), ev.input or {},
-                )
-                return rule is not None and rule.decision == PermissionDecision.DENY
-
             try:
-                if await asyncio.to_thread(_saved_denial):
-                    allow, message = False, "Denied by saved rule"
+                if await self._saved_rule_decision(ev.name, ev.input) == "deny":
+                    allow, message = False, SAVED_RULE_DENIAL
             except Exception:  # noqa: BLE001 — a rule lookup failure must not turn into an allow-by-accident
                 logger.warning(
                     "[HarnessAdapter] saved-rule lookup failed for %s — asking the engine "
