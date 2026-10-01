@@ -51,6 +51,68 @@ describe("RefRegistry", () => {
     expect(r.registerSnapshot(["e9"])).toBe(2);
   });
 
+  it("keeps refs across a same-document navigation once the document is verified", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1", "e2"], false, "doc-A");
+    r.noteNavigation(); // history.replaceState / pushState / hash change
+    expect(r.needsVerification).toBe(true);
+    r.verifyDocument("doc-A", r.navigationMark);
+    expect(r.needsVerification).toBe(false);
+    expect(r.isKnown("e1")).toBe(true);
+    expect(r.isKnown("e2")).toBe(true);
+  });
+
+  it("drops every ref when the navigation committed a new document", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1", "e2"], false, "doc-A");
+    r.registerSnapshot(["e3"], true, "doc-A");
+    r.noteNavigation();
+    r.verifyDocument("doc-B", r.navigationMark);
+    expect(r.needsVerification).toBe(false);
+    expect(r.knownCount()).toBe(0);
+  });
+
+  it("treats an unreadable document identity as a new document", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1"], false, "doc-A");
+    r.noteNavigation();
+    r.verifyDocument(null, r.navigationMark);
+    expect(r.isKnown("e1")).toBe(false);
+  });
+
+  it("keeps navigations that arrive during verification pending", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1"], false, "doc-A");
+    r.noteNavigation();
+    const mark = r.navigationMark;
+    r.noteNavigation(); // lands while the identity lookup is in flight
+    r.verifyDocument("doc-A", mark);
+    expect(r.isKnown("e1")).toBe(true);
+    expect(r.needsVerification).toBe(true);
+    r.verifyDocument("doc-B", r.navigationMark);
+    expect(r.isKnown("e1")).toBe(false);
+  });
+
+  it("does nothing without a pending navigation", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1"], false, "doc-A");
+    r.verifyDocument("doc-B", r.navigationMark);
+    expect(r.isKnown("e1")).toBe(true);
+  });
+
+  it("a scoped snapshot of a different document drops the old full refs", () => {
+    const r = new RefRegistry();
+    r.registerSnapshot(["e1", "e2"], false, "doc-A");
+    r.registerSnapshot(["e7"], true, "doc-B");
+    expect(r.isKnown("e1")).toBe(false);
+    expect(r.isKnown("e7")).toBe(true);
+    // ...and a scoped re-read of the same document keeps them.
+    r.registerSnapshot(["e1", "e2"], false, "doc-B");
+    r.registerSnapshot(["e8"], true, "doc-B");
+    expect(r.isKnown("e1")).toBe(true);
+    expect(r.isKnown("e8")).toBe(true);
+  });
+
   it("reports unknown refs as not known", () => {
     const r = new RefRegistry();
     r.registerSnapshot(["e1"]);

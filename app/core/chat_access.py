@@ -1,9 +1,10 @@
 """Chat resource grants and one-shot approvals, owned by this worker process.
 
 Restart revokes everything, including credentials. No grants are replicated or
-inherited by forks. Only the authenticated access API can grant access. Writes
-and commands require one-shot approval unless the session is in Bypass; model
-tools cannot grant access or change the session's permission mode.
+inherited by forks. Only the authenticated access API can grant access. Writes,
+commands and state-changing API requests require one-shot approval unless the
+session is in Bypass; model tools cannot grant access or change the session's
+permission mode.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from typing import Literal
 import asyncssh
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
 
-from app.core import chat_files
+from app.core import chat_files, chat_services
 from app.core.chat_files import AccessDenied
 
 # Host-key types tried when pinning, most preferred first. RSA is one key
@@ -34,7 +35,7 @@ HOST_KEY_NAMES = {"ssh-ed25519": "ED25519", "ecdsa-sha2-nistp256": "ECDSA", "ecd
 
 class GrantInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["folder", "machine"]
+    kind: Literal["folder", "machine", "service"]
     label: str = Field(min_length=1, max_length=80)
     minutes: int = Field(default=60, ge=1, le=480)
     path: str = Field(default="", max_length=4096)
@@ -46,6 +47,14 @@ class GrantInput(BaseModel):
     password: SecretStr = Field(default_factory=lambda: SecretStr(""))
     private_key: SecretStr = Field(default_factory=lambda: SecretStr(""))
     passphrase: SecretStr = Field(default_factory=lambda: SecretStr(""))
+    # HTTPS API service: the credential is attached by the broker, never shown.
+    url: str = Field(default="", max_length=2048)
+    auth_header: str = Field(default="Authorization", max_length=64)
+    auth_scheme: str = Field(default="Bearer", max_length=32)
+    secret: SecretStr = Field(default_factory=lambda: SecretStr(""))
+
+
+SECRET_FIELDS = frozenset({"password", "private_key", "passphrase", "secret"})
 
 
 class GrantSubmission(BaseModel):
@@ -74,6 +83,9 @@ class Grant:
     host_key_alg: str = ""
     password: str = ""
     key: object = None
+    origin: chat_services.Origin | None = None
+    header: tuple[str, str] | None = None
+    secret: str = ""
     revoked: bool = False
     saved_id: str = ""
     timer: asyncio.TimerHandle | None = None
@@ -197,8 +209,8 @@ class Broker:
 
     async def request(self, session_id: str, kind: str, purpose: str):
         owner = await session_owner(session_id)
-        if kind not in {"machine", "folder"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
-            raise AccessDenied("Specify machine or folder and a short explanation of the requested access.")
+        if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
+            raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
         if kind == "folder" and not chat_files.available():
             raise AccessDenied("This worker cannot safely grant folders. Do not ask for a path or use a shell workaround.")
         if any(r.session_id == session_id for r in self.requests.values()):
@@ -361,6 +373,15 @@ class Broker:
                 if root == private or root in private.parents or private in root.parents:
                     raise AccessDenied("The worker's private data and credential storage cannot be granted.")
                 grant.root = chat_files.open_root(spec.path)
+            elif spec.kind == "service":
+                origin = chat_services.parse_origin(spec.url.strip())
+                header = chat_services.credential_header(
+                    spec.auth_header, spec.auth_scheme, spec.secret.get_secret_value())
+                # Verified TLS to the granted host before any credential is held.
+                await chat_services.verify_origin(origin)
+                grant.origin, grant.header = origin, header
+                grant.secret = spec.secret.get_secret_value()
+                grant.target = origin.url
             else:
                 address = ipaddress.ip_address(spec.host)
                 if address.is_unspecified or address.is_multicast or address.is_link_local:
@@ -411,6 +432,7 @@ class Broker:
             os.close(grant.root)
             grant.root = None
         grant.password, grant.key = "", None
+        grant.header, grant.secret = None, ""
         self._notify(session_id, grant.owner)
 
     async def get(self, session_id: str, grant_id: str) -> Grant:
@@ -514,6 +536,29 @@ class Broker:
             if not isinstance(command, str) or not command.strip() or len(command) > 16384 or "\x00" in command:
                 raise AccessDenied("Provide a command of at most 16,384 characters.")
             arguments = {"command": command}
+        elif operation == "http":
+            if grant.kind != "service" or grant.origin is None:
+                raise AccessDenied("This operation requires an HTTPS service grant.")
+            method = arguments.get("method")
+            method = method.upper() if isinstance(method, str) else ""
+            if method not in chat_services.READ_METHODS | chat_services.WRITE_METHODS:
+                raise AccessDenied("Use GET, HEAD, POST, PUT, PATCH or DELETE.")
+            path = arguments.get("path")
+            chat_services.request_url(grant.origin, path)
+            body = arguments.get("body") or ""
+            content_type = arguments.get("content_type") or ""
+            if not isinstance(body, str) or len(body.encode("utf-8")) > chat_files.LIMIT:
+                raise AccessDenied("Provide a UTF-8 request body of at most 64 KiB.")
+            if body and method in chat_services.READ_METHODS:
+                raise AccessDenied(f"{method} requests cannot carry a body.")
+            if not isinstance(content_type, str) or (
+                    content_type and not chat_services.CONTENT_TYPE.fullmatch(content_type)):
+                raise AccessDenied("Provide a content type such as application/json.")
+            if method in chat_services.WRITE_METHODS and not grant.writable:
+                raise AccessDenied("This service grant is read-only: only GET and HEAD are allowed.")
+            # The approval card shows exactly what is sent; the credential is never an argument.
+            arguments = {"method": method, "path": path, "body": body,
+                         "content_type": (content_type or "application/json") if body else ""}
         elif operation in ("list", "read", "write"):
             if grant.kind != "folder" or grant.root is None:
                 raise AccessDenied("This operation requires a folder grant.")
@@ -528,11 +573,17 @@ class Broker:
                     raise AccessDenied("Provide UTF-8 text of at most 64 KiB.")
         else:
             raise AccessDenied("Unknown operation.")
-        if operation in ("command", "write"):
+        if operation in ("command", "write") or (
+                operation == "http" and arguments["method"] in chat_services.WRITE_METHODS):
             await self.approve(grant, operation, arguments)
         await self.get(session_id, grant_id)
-        if operation == "command":
-            task = asyncio.create_task(self.remote_command(grant, arguments["command"]))
+        if operation in ("command", "http"):
+            if operation == "command":
+                work = self.remote_command(grant, arguments["command"])
+            else:
+                work = chat_services.perform(grant.origin, grant.header, grant.secret, arguments["method"],
+                                             arguments["path"], arguments["body"], arguments["content_type"])
+            task = asyncio.create_task(work)
             grant.tasks.add(task)
             try:
                 while not task.done():
