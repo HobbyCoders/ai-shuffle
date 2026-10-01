@@ -739,6 +739,9 @@ def _tools_section(p: PromptProfile) -> str | None:
 
         bullets.append(f"- {SWARM_ROUTING_SUMMARY}")
     if "Task" in t:
+        from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE
+
+        bullets.append(f"- {SUBAGENT_WORKTREE_GUIDANCE}")
         bullets.append(
             "- A subagent's report is a claim, not a verified fact. For "
             "external side effects it says it performed, verify the handle it "

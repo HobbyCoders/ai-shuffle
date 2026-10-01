@@ -131,8 +131,28 @@ def test_swarm_routing_is_gated_and_does_not_encourage_task_fanout():
                 assert "adaptive follow-up" in description
                 assert "never override a restriction on delegation" in description
                 assert "send several Task calls" not in description
+                assert "scope the entire requested job" in description
+                assert "not just a small initial slice" in description
+                assert "five agents" in description
+                assert "up to 64 tasks" in description
+                assert "max_parallel limits concurrent tasks" in description
+                assert "silently dropping scope" in description
             else:
                 assert "Swarm" not in prompt + description
+
+
+def test_checkout_guidance_requires_delegation_surface() -> None:
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE
+
+    for surface in (frozenset(), frozenset({"Read"}), frozenset({"Task"}),
+                    frozenset({"Task", "Swarm"})):
+        for code_mode in (False, True):
+            prompt = compose_base_prompt(PromptProfile(tools=surface, code_mode=code_mode))
+            assert (SUBAGENT_WORKTREE_GUIDANCE in prompt) is ("Task" in surface)
+    assert "not automatically main" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "dependency reports do not transfer code" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "remove provisioned worktrees by hand" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "unique branch for each coding worker" in SUBAGENT_WORKTREE_GUIDANCE
 
 
 def test_refined_full_surface_matches_module_constants() -> None:
@@ -170,6 +190,7 @@ def test_shared_fragments_appear_verbatim() -> None:
             ("Task", "Monitor"),
         ),
         "SWARM_ROUTING": (fr.SWARM_ROUTING, ("Task", "Swarm")),
+        "SUBAGENT_WORKTREE_GUIDANCE": (fr.SUBAGENT_WORKTREE_GUIDANCE, ("Task", "Swarm")),
         "WEB_UNTRUSTED": (fr.WEB_UNTRUSTED, ("WebFetch", "WebSearch")),
     }
     for label, (fragment, names) in carriers.items():
@@ -180,6 +201,7 @@ def test_shared_fragments_appear_verbatim() -> None:
 
     assert END_TURN_ON_BACKGROUND in DEFAULT_BASE_PROMPT
     assert fr.SWARM_ROUTING_SUMMARY in DEFAULT_BASE_PROMPT
+    assert fr.SUBAGENT_WORKTREE_GUIDANCE in DEFAULT_BASE_PROMPT
     # Bash and Monitor share one cwd parameter description.
     for name in ("Bash", "Monitor"):
         spec = registry.get(name)

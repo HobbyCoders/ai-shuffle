@@ -39,7 +39,7 @@ import inspect
 import re
 from typing import Any
 
-from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND, SWARM_ROUTING
+from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -62,7 +62,7 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "tools — it does not see this conversation and cannot ask you a "
         "follow-up question, so the prompt you send is the entire brief it "
         "will ever get.\n"
-        "\n"
+        "\n" + SUBAGENT_WORKTREE_GUIDANCE + "\n\n" +
         "Available agent types are listed under '# Available agent types' in "
         "your system prompt. Use only names listed there; when no such section "
         "exists, do not call Task.\n"

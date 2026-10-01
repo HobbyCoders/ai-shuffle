@@ -408,7 +408,7 @@ def build_task_contract(
     additional_targets: Sequence[SubagentTarget] = (),
 ) -> TaskContract:
     """Build the provider-scoped model-facing Task contract."""
-    from fluid.tools.fragments import SWARM_ROUTING
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     targets = list(available_subagents(caller_profile_id, provider_id))
 
@@ -516,7 +516,8 @@ def build_task_contract(
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        f"tool call. {SWARM_ROUTING}\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
+        f"tool call. {SWARM_ROUTING}\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
+        f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
     agent_property: dict[str, Any] = {
@@ -650,7 +651,7 @@ def parent_subagent_guidance(
     monitor_available: bool = True, browser_available: bool = True,
 ) -> str:
     """Describe only workflows exposed by this session's effective surface."""
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SWARM_ROUTING
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     parts = []
     if task_available:
@@ -667,6 +668,7 @@ def parent_subagent_guidance(
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
             "Delegate only when the user authorizes subagents.\n"
+            + SUBAGENT_WORKTREE_GUIDANCE + "\n"
             + (SWARM_ROUTING if swarm_available else
                "Use Task for independent or adaptive assignments; do not "
                "invent an unavailable workflow tool.")

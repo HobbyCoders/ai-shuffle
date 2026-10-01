@@ -45,6 +45,8 @@ async def test_query_options_compile_from_actual_wired_surface(mock_db, tmp_path
     assert ("Use only the roster IDs exposed by the current provider" in compiled.text) is bound
     assert ("belong in Monitor" in compiled.text) is bound
     assert ("# Subagent delegation" in compiled.text) is bound
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE
+    assert (SUBAGENT_WORKTREE_GUIDANCE in compiled.text) is bound
     if not bound:
         assert "Task(mode" not in compiled.text
 
@@ -64,6 +66,12 @@ def test_worker_context_survives_without_nested_task(tmp_path, monkeypatch):
     assert "Further delegation is unavailable" in compiled.text
     assert "Task roster" not in compiled.text
     assert "Top-level session orchestration is unavailable" in compiled.text
+    assert "default checkout may be inherited from the parent" in compiled.text
+    assert "require a dedicated worktree and branch" in compiled.text
+    assert "absolute edit paths" in compiled.text
+    assert "Dependency reports do not transfer code" in compiled.text
+    assert "return commit SHAs" in compiled.text
+    assert "bypass a checkout refusal" in compiled.text
 
 
 def test_delegated_preset_keeps_automatic_guidance_and_profile_text(tmp_path):
