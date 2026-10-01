@@ -318,8 +318,14 @@ def describe_checkout_mismatch(session_row: Dict[str, Any]) -> Optional[str]:
     try:
         checkout_manager._require_branch_binding(path, branch)
     except checkout_manager.WorktreeError:
+        if not checkout_manager._dir_is_worktree(path):
+            # A leftover folder with no .git of its own (e.g. a pruned
+            # worktree's remains) would report the ENCLOSING repo's branch,
+            # and "switch that folder back" would switch that other checkout.
+            # Keep the caller's missing-checkout wording for it.
+            return None
         actual = checkout_manager.git_service.get_current_branch(path)
-        if actual:
+        if actual and actual != branch:
             return (f"its folder {path} exists but is on branch '{actual}', "
                     f"not this session's branch '{branch}'")
         return (f"its folder {path} exists but is not a Git checkout of "

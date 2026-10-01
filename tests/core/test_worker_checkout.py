@@ -490,3 +490,23 @@ def test_start_retry_reclaims_the_failed_attempts_checkout(repo, worker_runtime,
     assert all(launch["head"] == tip for launch in worker_runtime)
     assert not git(parent, "branch", "--list", "task/first-try")
     assert not Path(worker_runtime[0]["overrides"]["cwd"]).exists()
+
+
+def test_mismatch_diagnosis_does_not_report_an_enclosing_repo_branch(repo):
+    # #1606: a leftover folder with no .git of its own (a pruned worktree's
+    # remains inside the main checkout) must not be reported as "on branch
+    # main" with advice to switch it back, which would switch the enclosing
+    # checkout. It keeps the missing-checkout wording instead.
+    row, parent, base, _ = repo
+    stale = base / ".fluid" / "worktrees" / "stale"
+    stale.mkdir(parents=True)
+    (stale / "leftover.txt").write_text("remains\n")
+    checkouts.upsert_checkout(row["project_v2_id"], settings.effective_instance_id,
+                              str(stale), branch="stale-branch")
+    database.create_session("stale", "coder", project_v2_id=row["project_v2_id"])
+    database.set_session_branch("stale", "stale-branch", row["project_v2_id"])
+    assert project_resolver.describe_checkout_mismatch(database.get_session("stale")) is None
+    assert git(base, "branch", "--show-current") == "main"
+    # The real wrong-branch case still names the folder's branch.
+    git(parent, "switch", "-c", "elsewhere")
+    assert "on branch 'elsewhere'" in project_resolver.describe_checkout_mismatch(row)
