@@ -21,7 +21,7 @@
 	 * the "Git unavailable" retry stay as direct header buttons: there is no
 	 * panel to open for them.
 	 */
-	import { onDestroy, onMount, untrack } from 'svelte';
+	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
@@ -395,6 +395,31 @@
 	const closeActionDropdown = (id: GitActionDropdownId) =>
 		openHeaderDropdown.update((cur) => (cur === id ? 'git-panel' : cur));
 
+	// Back or Escape: return to the overview and put focus back on the chevron
+	// that opened the editor. If the repo state changed meanwhile and that
+	// chevron is gone or disabled, use the first overview control, then Close.
+	// A submit has already switched to the overview via fire(), so it skips this.
+	async function leaveEditor(id: GitActionDropdownId) {
+		if ($openHeaderDropdown !== id) return;
+		closeActionDropdown(id);
+		await tick();
+		// Something else (an outside click, the panel closing) may have won meanwhile.
+		const view: string | null = $openHeaderDropdown;
+		if (view !== 'git-panel' || !panelRef) return;
+		const focusable = 'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)';
+		const candidates = [
+			panelRef.querySelector<HTMLElement>(`[data-editor="${id}"]:not(:disabled)`),
+			...Array.from(panelRef.querySelectorAll<HTMLElement>(focusable)).filter(
+				(el) => !el.matches('.sheet-handle') && !el.closest('.gp-head')
+			),
+			panelRef.querySelector<HTMLElement>('.gp-close')
+		];
+		for (const el of candidates) {
+			el?.focus({ preventScroll: true });
+			if (el && document.activeElement === el) return;
+		}
+	}
+
 	// Close the panel on outside click. This listener registers at mount, so it
 	// runs BEFORE a popover's own outside-click handler: a click outside the
 	// panel closes everything here, and the popover's later "return to panel"
@@ -505,7 +530,7 @@
 					<GitActionOptionsDropdown id={editorId} action={activeEditor} {currentBranch} {defaultBranch}
 						baseBranches={baseBranchNames} openPR={shownPr} {hasChanges} {isWorktreeMode}
 						unpushed={snapshot.status?.unpushed} busy={actionsBusy || (activeEditor === 'shipit' && mergeBlocked)}
-						onClose={() => closeActionDropdown(`git-${activeEditor}` as GitActionDropdownId)}
+						onClose={() => leaveEditor(`git-${activeEditor}` as GitActionDropdownId)}
 						onCommit={(o) => fire(onClickCommit, o)} onPush={(o) => fire(onClickPush, o)}
 						onPull={(o) => fire(onClickPull, o)} onCreatePR={(o) => fire(onClickCreatePR, o)}
 						onShipIt={(o) => fire(onClickShipIt, o)} />
@@ -538,6 +563,7 @@
 							class="split-chevron"
 							class:active={shipItOptsOpen}
 							onclick={() => toggleActionDropdown('git-shipit')}
+							data-editor="git-shipit"
 							disabled={actionsBusy}
 							aria-label="Ship It options"
 							aria-controls={editorId}
@@ -562,7 +588,7 @@
 							<GitCommitHorizontal size={14} strokeWidth={1.5} />
 							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub"><span class="count">{fileLabel(filesChanged)}</span></span></span>
 						</button>
-						<button class="row-opts" class:active={commitOptsOpen} onclick={() => toggleActionDropdown('git-commit')} disabled={actionsBusy}
+						<button class="row-opts" class:active={commitOptsOpen} onclick={() => toggleActionDropdown('git-commit')} data-editor="git-commit" disabled={actionsBusy}
 							aria-label="Commit options" aria-controls={editorId} aria-expanded={commitOptsOpen} title="Commit options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
@@ -585,7 +611,7 @@
 							<ArrowUpFromLine size={14} strokeWidth={1.5} />
 							<span class="row-text"><span class="row-title">Push</span><span class="row-sub"><span class="count">{commitLabel(commitsAheadUpstream)}</span></span></span>
 						</button>
-						<button class="row-opts" class:active={pushOptsOpen} onclick={() => toggleActionDropdown('git-push')} disabled={actionsBusy}
+						<button class="row-opts" class:active={pushOptsOpen} onclick={() => toggleActionDropdown('git-push')} data-editor="git-push" disabled={actionsBusy}
 							aria-label="Push options" aria-controls={editorId} aria-expanded={pushOptsOpen} title="Push options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
@@ -612,7 +638,7 @@
 							<ArrowDownToLine size={14} strokeWidth={1.5} />
 							<span class="row-text"><span class="row-title">{isDiverged ? 'Sync' : 'Pull'}</span><span class="row-sub"><span class="count warn">{commitsBehindUpstream} behind</span></span></span>
 						</button>
-						<button class="row-opts" class:active={pullOptsOpen} onclick={() => toggleActionDropdown('git-pull')} disabled={actionsBusy}
+						<button class="row-opts" class:active={pullOptsOpen} onclick={() => toggleActionDropdown('git-pull')} data-editor="git-pull" disabled={actionsBusy}
 							aria-label="Pull options" aria-controls={editorId} aria-expanded={pullOptsOpen} title="Pull options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
@@ -635,7 +661,7 @@
 							<GitPullRequest size={14} strokeWidth={1.5} />
 							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">into {defaultBranch}</span></span>
 						</button>
-						<button class="row-opts" class:active={prOptsOpen} onclick={() => toggleActionDropdown('git-pr')} disabled={actionsBusy}
+						<button class="row-opts" class:active={prOptsOpen} onclick={() => toggleActionDropdown('git-pr')} data-editor="git-pr" disabled={actionsBusy}
 							aria-label="Pull request options" aria-controls={editorId} aria-expanded={prOptsOpen} title="Pull request options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>

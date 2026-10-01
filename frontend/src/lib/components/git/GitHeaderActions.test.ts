@@ -11,7 +11,8 @@
  *    Push / Pull enable for the right repo state)
  *  - the panel opens from the button; Escape and outside-click close it; a
  *    row's chevron opens its popover; opening one popover closes another
- *    (shared single-open store) and closing a popover returns to the panel
+ *    (shared single-open store) and closing a popover returns to the panel,
+ *    with focus back on its chevron (or the first overview control, then Close)
  *  - persisted options (include-unstaged, next-step, pull strategy) write
  *    through gitActionPreferences; a per-invocation option (force push) does NOT persist
  *  - a row fires its handler with defaults (no option bag) and closes the
@@ -810,6 +811,66 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(queryPopover('commit')).toBeNull();
 		// The Ship It popover's step preview row "Push to remote" is unique to it.
 		expect(within(popover('shipit')).getByText('Push to remote')).toBeTruthy();
+	});
+
+	describe('focus on leaving an editor', () => {
+		const back = () => screen.getByRole('button', { name: 'Back to Git actions' });
+
+		it.each([
+			['Back', 'Commit options'],
+			['Back', 'Ship It options'],
+			['Escape', 'Commit options'],
+			['Escape', 'Ship It options']
+		] as const)('%s from the %s editor returns focus to its chevron', async (how, chevron) => {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row(chevron));
+			// Opening still focuses the text field (Commit) or Back (Ship It).
+			expect(document.activeElement).toBe(chevron === 'Commit options' ? within(panel()).getByRole('textbox') : back());
+			if (how === 'Back') await fireEvent.click(back());
+			else await fireEvent.keyDown(window, { key: 'Escape' });
+			await vi.waitFor(() => expect(document.activeElement).toBe(row(chevron)));
+			expect(panel()).toBeTruthy();
+		});
+
+		it('falls back to the first overview control when the chevron is gone', async () => {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			// The tree goes clean while the editor is open: the Commit row loses its chevron.
+			cleanAheadBranch();
+			await tick();
+			await fireEvent.click(back());
+			expect(queryRow('Commit options')).toBeNull();
+			await vi.waitFor(() => expect(document.activeElement).toBe(row('Ship It')));
+		});
+
+		it('skips a disabled chevron and lands on the first enabled overview control', async () => {
+			dirtyFeatureBranch();
+			const { rerender } = renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			await rerender({ isStreaming: true });
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(row('Commit options').disabled).toBe(true);
+			await vi.waitFor(() => expect(document.activeElement?.closest('.git-panel')).toBe(panel()));
+			// The chevron is disabled while streaming; Review all is the first enabled overview control.
+			expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Review all' }));
+		});
+
+		it('falls back to the Close button when no overview control is enabled', async () => {
+			dirtyFeatureBranch();
+			const { rerender } = renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			// Streaming disables every action, and without a review handler the
+			// file list is inert, so the overview has nothing focusable left.
+			await rerender({ isStreaming: true, onOpenDiffReview: undefined });
+			await fireEvent.click(back());
+			await vi.waitFor(() => expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Close Git panel' })));
+		});
 	});
 });
 

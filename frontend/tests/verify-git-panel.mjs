@@ -48,6 +48,12 @@ async function harness(viewport, { touch, shell }) {
 	const open = () => page.evaluate(() => window.gitPanelFixture.open);
 	const fx = (fn, arg) => page.evaluate(fn, arg).then(() => page.waitForTimeout(80));
 	const panelVisible = () => page.locator('.git-panel').isVisible();
+	// The focused control's accessible label, or where focus fell instead.
+	const focused = () => page.evaluate(() => {
+		const el = document.activeElement;
+		if (!el || el === document.body) return 'body';
+		return el.closest('.git-panel') ? (el.getAttribute('aria-label') || el.textContent.trim()) : `outside: ${el.tagName}`;
+	});
 	async function openPanel() {
 		if (!(await panelVisible())) await press(page.locator('.git-btn.trigger'));
 		check(await panelVisible(), 'trigger opens the panel');
@@ -123,12 +129,14 @@ async function harness(viewport, { touch, shell }) {
 			// out from under the window click listener and must not close the panel.
 			await press(button(BACK));
 			check((await open()) === 'git-panel' && (await panelVisible()), `${chevron}: Back returns to the overview without closing the panel`, await open());
+			check((await focused()) === chevron, `${chevron}: Back returns focus to the chevron`, await focused());
 
 			await press(button(chevron));
 			check((await open()) === id, `${chevron}: reopens from the overview`, await open());
 			await page.keyboard.press('Escape');
 			await page.waitForTimeout(80);
 			check((await open()) === 'git-panel', `${chevron}: Escape in the editor returns to the overview`, await open());
+			check((await focused()) === chevron, `${chevron}: Escape returns focus to the chevron`, await focused());
 			await page.keyboard.press('Escape');
 			await page.waitForTimeout(80);
 			check((await open()) === null && !(await panelVisible()), `${chevron}: Escape on the overview closes the panel`, await open());
@@ -140,6 +148,8 @@ async function harness(viewport, { touch, shell }) {
 			check(await button(BACK).isEnabled(), `${chevron}: Back stays enabled while busy`);
 			await press(button(BACK));
 			check((await open()) === 'git-panel', `${chevron}: Back works while busy`, await open());
+			const busyFocus = await focused();
+			check(busyFocus !== 'body' && busyFocus !== chevron && !busyFocus.startsWith('outside'), `${chevron}: Back while busy skips the disabled chevron and stays in the panel`, busyFocus);
 			await fx(() => window.gitPanelFixture.setStreaming(false));
 			await press(page.locator('.gp-close'));
 			check((await open()) === null, `${chevron}: close control closes the panel`, await open());
