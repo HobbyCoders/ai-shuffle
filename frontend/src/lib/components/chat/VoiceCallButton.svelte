@@ -7,7 +7,7 @@
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { isVoiceEnabled } from '$lib/api/voice';
 	import { startCallForSession, voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
-	import { hasStoppableWork } from './stoppable-work';
+	import { callBusyReason, explainBlockedCall, prefersTouch } from './call-gate';
 
 	interface Props {
 		disabled?: boolean;
@@ -31,29 +31,29 @@
 	const freshComposer = $derived(!$activeSession.sessionId);
 	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote));
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
-	// Calls start only on a ready or finished conversation. Busy is the Stop
-	// button's signal (streaming, running tasks, has_running_tasks, remote
-	// runtime) plus the sidebar's Parked marker and an unanswered prompt.
-	const working = $derived(hasStoppableWork($activeSession, sessionRow ?? undefined)
-		|| $activeSession.pendingPermissions.length > 0
-		|| $activeSession.pendingQuestions.length > 0);
-	const parked = $derived(!!sessionRow?.parked_task_kind);
+	// Calls start only on a ready or finished conversation (see callBusyReason).
 	const blockedReason = $derived(
 		freshComposer ? 'Send a message to start this conversation, then you can call it'
-		: working ? 'Calls can start once this session finishes working'
-		: parked ? 'Calls can start once this session’s background tasks finish'
-		: disabled ? (disabledReason || 'Unavailable right now')
-		: null
+		: callBusyReason($activeSession, sessionRow)
+			?? (disabled ? (disabledReason || 'Unavailable right now') : null)
 	);
+	// On a touch screen the tooltip never shows, so the blocked button stays
+	// tappable (aria-disabled) and a tap says why.
+	let touch = $state(false);
 
 	onMount(async () => {
+		touch = prefersTouch();
 		voiceEnabled = await isVoiceEnabled();
 	});
 
 	/** Re-open a call on the voice session already being viewed. */
 	async function resumeVoiceCall() {
 		const sessionId = $activeSession.sessionId;
-		if (startingVoice || !sessionId || blockedReason) return;
+		if (blockedReason) {
+			if (touch) explainBlockedCall(blockedReason);
+			return;
+		}
+		if (startingVoice || !sessionId) return;
 		startingVoice = true;
 		try {
 			await startCallForSession(sessionId, { attach: !legacyVoice });
@@ -69,7 +69,9 @@
 		class="voice-call-btn"
 		class:starting={startingVoice}
 		onclick={resumeVoiceCall}
-		disabled={!!blockedReason || startingVoice}
+		class:blocked={!!blockedReason}
+		disabled={(!!blockedReason && !touch) || startingVoice}
+		aria-disabled={blockedReason ? 'true' : undefined}
 		aria-label={START_LABEL}
 		title={blockedReason ?? START_LABEL}
 	>
@@ -95,15 +97,16 @@
 		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
-	.voice-call-btn:hover:not(:disabled) {
+	.voice-call-btn:hover:not(:disabled):not(.blocked) {
 		background: color-mix(in oklch, var(--primary) 14%, transparent);
 	}
 
-	.voice-call-btn:active:not(:disabled) {
+	.voice-call-btn:active:not(:disabled):not(.blocked) {
 		transform: scale(0.95);
 	}
 
-	.voice-call-btn:disabled {
+	.voice-call-btn:disabled,
+	.voice-call-btn.blocked {
 		opacity: 0.3;
 		cursor: not-allowed;
 	}

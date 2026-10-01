@@ -224,7 +224,76 @@ async function verifyTouchSizing(width, height, layout) {
 	await h.close();
 }
 
+// #1612: at 360px and narrower the code lane's placeholder is shortened so it
+// is never cut off with an ellipsis; wider phones and chat keep their wording.
+const LONG_PLACEHOLDER = 'Describe a task or ask a question';
+const SHORT_PLACEHOLDER = 'Ask or describe a task';
+async function verifyPlaceholder(width) {
+	const seen = new Set();
+	for (const mode of ['chat', 'code']) {
+		const h = await harness(width, 844);
+		// The lane store reads its stored mode before the fixture writes it, so
+		// the lane takes effect on the second load in a context.
+		await h.load({ layout: 'compact', mode });
+		await h.load({ layout: 'compact', mode });
+		const result = await h.page.evaluate(() => {
+			const line = document.querySelector('.chat-input-wrapper .ProseMirror p.is-editor-empty');
+			const before = getComputedStyle(line, '::before');
+			const text = before.content.replace(/^"|"$/g, '');
+			const probe = document.createElement('span');
+			probe.style.cssText = `position:absolute;visibility:hidden;white-space:nowrap;font:${before.font};letter-spacing:${before.letterSpacing}`;
+			probe.textContent = text;
+			document.body.append(probe);
+			const textWidth = probe.getBoundingClientRect().width;
+			probe.remove();
+			// The placeholder box is absolutely positioned across the line on mobile.
+			return { set: line.dataset.placeholder, text, textWidth, room: parseFloat(before.width) || line.clientWidth, overflow: before.textOverflow };
+		});
+		seen.add(result.set);
+		const label = `${width}px "${result.set}"`;
+		const expected = width <= 360 && result.set === LONG_PLACEHOLDER ? SHORT_PLACEHOLDER : result.set;
+		assert.equal(result.text, expected, `${label}: shown placeholder`);
+		if (width <= 360) assert.ok(result.textWidth <= result.room, `${label}: placeholder fits without an ellipsis: ${JSON.stringify(result)}`);
+		await h.page.screenshot({ path: `${artifacts}/${width}-${mode}-placeholder.png` });
+		console.log(`PASS ${label}: shows "${result.text}" (${Math.round(result.textWidth)} of ${result.room}px)`);
+		await h.close();
+	}
+	assert.ok(seen.has(LONG_PLACEHOLDER) && seen.has('Ask anything'), `both lane placeholders covered: ${[...seen]}`);
+}
+
+// #1611/#1616: on a fresh composer the call button shows but cannot start a
+// call. A tap on a phone says why, briefly, and nothing reaches the voice API.
+async function verifyCallButtonTap(width) {
+	const h = await harness(width, 844);
+	const { page } = h;
+	await h.load({ layout: 'compact', mode: 'chat', voice: 'on' });
+	await page.locator('.tiptap').tap();
+	await page.waitForTimeout(350);
+	const call = page.locator('.controls-dock .voice-call-btn');
+	await call.waitFor();
+	assert.equal(await call.getAttribute('aria-disabled'), 'true', 'fresh composer call button is unavailable');
+	// Playwright counts aria-disabled as disabled, so read the native property
+	// and tap with force (a real touch at the button, minus that wait).
+	assert.equal(await call.evaluate(button => button.disabled), false, 'touch keeps it tappable so it can explain');
+	const reason = await call.getAttribute('title');
+	assert.match(reason, /send a message/i);
+	await call.tap({ force: true });
+	const banner = page.locator('.banner-host');
+	await banner.waitFor();
+	assert.ok((await banner.innerText()).includes(reason), 'tap shows the tooltip reason');
+	await call.tap({ force: true });
+	assert.equal(await page.locator('.banner-host .banner').count(), 1, 'a repeat tap does not stack banners');
+	await page.screenshot({ path: `${artifacts}/${width}-call-explained.png` });
+	await banner.waitFor({ state: 'detached', timeout: 5000 });
+	const voiceCalls = await page.evaluate(() => window.fixtureRequests.filter(path => /\/voice\//.test(path)));
+	assert.deepEqual(voiceCalls, [], 'no call or voice session was requested');
+	console.log(`PASS ${width}px: fresh-composer call tap explains itself and auto-dismisses`);
+	await h.close();
+}
+
 try {
+	for (const width of [320, 360, 390]) await verifyPlaceholder(width);
+	await verifyCallButtonTap(320);
 	for (const width of [320, 390]) {
 		await verifyTouchSizing(width, 844, 'compact');
 		await verifyTouchSizing(width, 430, 'compact');

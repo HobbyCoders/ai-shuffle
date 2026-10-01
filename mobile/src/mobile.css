@@ -211,6 +211,16 @@ html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-e
 	text-overflow: ellipsis;
 }
 
+/* At 360px and narrower the code lane's placeholder no longer fits and would
+   end in an ellipsis, so it says the same thing in fewer words. It matches the
+   value ChatInput sets, which leaves chat's "Ask anything" and suggestion
+   ghost text alone. */
+@media (max-width: 360px) {
+	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
+		content: 'Ask or describe a task';
+	}
+}
+
 /* Expanded, the editor offers a comfortable target even before any text. */
 html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
 	min-height: 44px;

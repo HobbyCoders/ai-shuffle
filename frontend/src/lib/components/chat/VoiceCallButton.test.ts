@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import type { Writable } from 'svelte/store';
-const mocks = vi.hoisted(() => ({ isVoiceEnabled: vi.fn(), startCallForSession: vi.fn() }));
+const mocks = vi.hoisted(() => ({ isVoiceEnabled: vi.fn(), startCallForSession: vi.fn(), banner: vi.fn(() => 'banner-id'), dismissLive: vi.fn() }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { banner: mocks.banner, dismissLive: mocks.dismissLive } }));
 vi.mock('$lib/api/voice', () => ({ isVoiceEnabled: mocks.isVoiceEnabled }));
 vi.mock('$lib/stores/active-session', async () => ({ activeSession: (await import('svelte/store')).writable({}) }));
 vi.mock('$lib/stores/app-data.svelte', async () => ({ sessions: (await import('svelte/store')).writable([]) }));
@@ -15,7 +16,9 @@ const rows = sessions as unknown as Writable<Record<string, unknown>[]>;
 const ready: State = { sessionId: 'home', mode: 'code', isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] };
 const callButton = () => screen.findByRole('button', { name: 'Start a call in this conversation' });
 beforeEach(() => { vi.clearAllMocks(); mocks.isVoiceEnabled.mockResolvedValue(true); active.set(ready); rows.set([]); });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+/** A phone or tablet: no hover, so a tooltip never shows. */
+const touchScreen = () => vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
 describe('call action on a conversation', () => {
  it.each(['code', 'chat'])('offers explicit call attachment for %s without changing context', async mode => {
   active.set({ ...ready, mode }); render(VoiceCallButton);
@@ -83,5 +86,50 @@ describe('call start gate while the session is busy', () => {
   const button = await callButton() as HTMLButtonElement;
   expect(button.disabled).toBe(true);
   expect(button.title).toBe('Recording...');
+ });
+});
+describe('a blocked call button explains itself on touch screens', () => {
+ it.each([
+  ['a fresh composer', { sessionId: null, mode: 'chat' }, /send a message/i, []],
+  ['a working session', { isStreaming: true }, /finishes working/, []],
+  ['a parked session', {}, /background tasks finish/, [{ id: 'home', status: 'active', parked_task_kind: 'agent' }]],
+ ])('a tap on %s shows the tooltip reason as a brief banner', async (_label, state, reason, sessionRows) => {
+  touchScreen(); active.set({ ...ready, ...state }); rows.set(sessionRows); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  // Still tappable so the tap can explain, but announced as unavailable.
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  expect(button.getAttribute('aria-disabled')).toBe('true');
+  await fireEvent.click(button);
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+  expect(mocks.banner).toHaveBeenCalledTimes(1);
+  const [message, options] = mocks.banner.mock.calls[0] as unknown as [string, Record<string, unknown>];
+  expect(message).toBe(button.title);
+  expect(message).toMatch(reason);
+  expect(options).toMatchObject({ persist: false });
+  expect(options.duration_ms as number).toBeGreaterThan(0);
+ });
+ it('replaces the previous explanation instead of stacking banners', async () => {
+  touchScreen(); active.set({ ...ready, sessionId: null }); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  await fireEvent.click(button);
+  await fireEvent.click(button);
+  expect(mocks.banner).toHaveBeenCalledTimes(2);
+  expect(mocks.dismissLive).toHaveBeenCalledWith('banner-id');
+ });
+ it('starts the call normally on touch once the session is ready', async () => {
+  touchScreen(); render(VoiceCallButton);
+  const button = await callButton();
+  expect(button.getAttribute('aria-disabled')).toBeNull();
+  await fireEvent.click(button);
+  expect(mocks.banner).not.toHaveBeenCalled();
+  expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true });
+ });
+ it('keeps the native disabled button, and no banner, with a mouse', async () => {
+  active.set({ ...ready, isStreaming: true }); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  await fireEvent.click(button);
+  expect(mocks.banner).not.toHaveBeenCalled();
  });
 });

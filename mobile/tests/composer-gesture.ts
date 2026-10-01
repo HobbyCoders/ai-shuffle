@@ -18,10 +18,16 @@ const project = { id: 'composer-fixture', name: 'mobile-composer-repository-with
 // Install isolated transports before importing the real component/store graph.
 // No request reaches a backend, and every navigation starts with the same picks.
 localStorage.setItem('ai-shuffle.sessionMode', mode);
+// `voice=on` turns the voice surface on so the call button renders.
+const voice = params.get('voice') === 'on';
+const requests: string[] = [];
+(window as unknown as { fixtureRequests: string[] }).fixtureRequests = requests;
 window.fetch = async (input) => {
 	const path = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+	requests.push(path);
 	let data: unknown = [];
-	if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
+	if (voice && path.endsWith('/settings/voice')) data = { voice_mode_enabled: true };
+	else if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
 	else if (path === '/api/v1/projects') data = [project];
 	else if (path.endsWith('/git/status')) data = { is_git_repo: true, current_branch: branch, is_clean: true, default_branch: 'main' };
 	else if (path.endsWith('/git/branches')) data = { branches: [branch, 'main', 'feature/another-branch'].map(name => ({ name, is_current: name === branch, is_remote: false })) };
