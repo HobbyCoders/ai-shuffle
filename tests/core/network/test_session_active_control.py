@@ -74,6 +74,8 @@ async def test_remote_settlement_offline_does_not_modify_mirror(workers):
         with pytest.raises(HTTPException) as error:
             await settle("offline-settle", False)
         assert error.value.status_code == 503
+        # Name the worker to bring back, not the transport failure (#1621).
+        assert error.value.detail.startswith("A, the worker that runs this session, can't be reached")
         assert bool(database.get_session("offline-settle")["is_active"]) is True
 
 
@@ -117,6 +119,52 @@ async def test_unpublishable_edit_rolls_back_and_nonowner_refuses(workers, monke
         with pytest.raises(PermissionError, match="not ready"):
             await session_active.handle(body, b.device_id)
         assert bool(database.get_session("guard-active")["is_active"]) is True
+
+
+async def test_local_settle_commits_while_publishing_is_held(workers):
+    """#1621: a worker that restarts while its only peer is offline holds its
+    outbox until it can compare streams with that peer, which lasted ~7 hours
+    on the owner's server. Its own UI must still settle and reopen the
+    sessions it owns; the row is published once the hold lifts."""
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    _new_session(a, "held-settle", "On owner")
+    converge([a, b])
+    with a.active():
+        engine.hold_outbox(True)  # restarted; peer b unreachable
+        try:
+            for active in (False, True, False):
+                result = await settle("held-settle", active)
+                assert bool(result["is_active"]) is active
+                assert bool(database.get_session("held-settle")["is_active"]) is active
+            assert engine.scan_all() == 0  # still held: nothing is signed yet
+        finally:
+            engine.hold_outbox(False)
+        assert engine.scan_all() > 0
+    converge([a, b])
+    with b.active():
+        assert bool(database.get_session("held-settle")["is_active"]) is False
+
+
+async def test_local_settle_commits_while_joining_worker_bootstraps(workers, monkeypatch):
+    """#1621: during startup sync no envelope can be signed; local settles
+    must not fail with 409 for that reason, while a peer asking this worker
+    still gets a refusal it can show."""
+    from app.network import session_active
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    _new_session(a, "boot-settle", "Local")
+    with a.active():
+        monkeypatch.setattr(engine, "record", lambda *args, **kwargs: None)
+        row = await session_active.set_local("boot-settle", False)
+        assert bool(row["is_active"]) is False
+        assert bool(database.get_session("boot-settle")["is_active"]) is False
+        with pytest.raises(PermissionError, match="still syncing"):
+            await session_active.handle({"session_id": "boot-settle", "is_active": True}, "peer")
+        assert bool(database.get_session("boot-settle")["is_active"]) is False
 
 
 @pytest.mark.parametrize("active", [None, "false", 0, 1, []])
