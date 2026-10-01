@@ -14,7 +14,7 @@ Codex source says ChatGPT derives cache affinity from the Responses
 rows showed one route hash (`_routing_headers` 91fb81af8b63bf9d) across every
 session, and calls sent under 30 seconds apart often read nothing from cache
 even though the body bytes matched. Session token-hit rates were 7-43%, while
-Codex on the same account read 97% or more.
+Codex on the same account read 88-99% (97-99% typical).
 
 ## Switches
 
@@ -69,9 +69,7 @@ its first call, because the new arm sends new headers once. That is expected.
 6. Optional: `scripts/experiments/e1_cache_routing.py` compares arms A, B and C
    directly. It makes live billed calls, so run it only with the user present.
 
-Expected: HTTP with `session-id` should read at least 85-95% of the prompt
-from cache. The rest of the gap to Codex Desktop (88-99%) is its WebSocket
-transport with `previous_response_id` continuations, a possible follow-up.
+HTTP session affinity should allow reuse of an unchanged prompt prefix. WebSocket transport with previous_response_id continuations may improve reuse further; treat that as a separate follow-up.
 
 ## Follow-ups outside this change
 
@@ -84,5 +82,3 @@ transport with `previous_response_id` continuations, a possible follow-up.
   grew-only zero reads above about 5%.
 - The Responses Lite request shape and Codex body field order, behind a
   default-off flag, measured separately.
-- `docs/reviews/FLUID_V2_P0_2026-09-23.md` and `scripts/experiments/README.md`
-  still say arm A is the default.
