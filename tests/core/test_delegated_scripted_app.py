@@ -274,7 +274,11 @@ async def test_the_permission_mode_and_grants_decide_what_prompts(tmp_path, mode
     argv = start["argv"]
     assert argv[argv.index("--permission-mode") + 1] == mode
     grants = argv[argv.index("--allowed-tools") + 1].split(",")
-    assert grants == [BRIDGED_RECALL]  # Remember is a write tool: never granted
+    # Remember is a write tool: never granted. Of the CLI's own tools only
+    # read-only search and WebSearch are; never Edit, Write, Bash or Read.
+    assert grants[0] == BRIDGED_RECALL and BRIDGED_REMEMBER not in grants
+    assert {"Glob", "Grep", "WebSearch"} <= set(grants)
+    assert not {"Edit", "Write", "Bash", "PowerShell", "Read", "NotebookEdit"} & set(grants)
 
 
 # ─── Stop ───────────────────────────────────────────────────────────────────

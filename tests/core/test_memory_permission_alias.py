@@ -41,6 +41,8 @@ def test_warm_cli_cache_does_not_hide_allowed_bundled_memory(monkeypatch):
     options = SessionOptions(model="sonnet", tool_allowlist=["mcp__builtins__Remember"], disallowed_tools=[])
     banned = _delegated_disallowed(options)
     assert names[0] not in banned
-    assert names[1] in banned and names[2] in banned
+    # The bundle's tools are filtered by the bridge, and "other" is not a
+    # server of this session, so neither lengthens the CLI's argv.
+    assert names[1] not in banned and names[2] not in banned
     options.disallowed_tools = [names[0]]
     assert names[0] in _delegated_disallowed(options)

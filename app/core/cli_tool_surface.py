@@ -2,12 +2,13 @@
 
 Why this exists
 ---------------
-On the delegated leg the app hands the claude CLI ``--allowed-tools``, which the
-CLI reads as a PERMISSION grant, not a restriction: an unlisted tool is still on
-the model's surface and still callable (it just prompts). To make "Allow only
-selected" mean the same thing on both legs, the adapter must also pass
-``--disallowed-tools`` = every name in the CLI's OWN surface that the agent did
-not select. That requires knowing the CLI's surface at argv-build time.
+The claude CLI reads ``--allowed-tools`` as a PERMISSION grant, not a
+restriction, so the delegated leg puts only the tools that should run
+unprompted there (``harness_adapter._delegated_permission_grants``); every tool
+not walled stays on the model's surface. To make "Allow only selected" mean the
+same thing on both legs, the adapter passes ``--disallowed-tools`` = every name
+in the CLI's OWN surface that the agent did not select. That requires knowing
+the CLI's surface at argv-build time.
 
 Where the surface comes from
 ----------------------------
@@ -24,14 +25,22 @@ NOT acceptable — it would drop the CLI's session and re-prime its prompt cache
 So this module is a plain module-level cache with an explicit ingest point:
 
 * ``record_cli_tools(names)`` — called from the adapter's ``DelegatedSurface``
-  translation branch, i.e. once per CLI process start. Refreshes the cache in
-  place.
-* ``cached_cli_tools()`` — what the adapter reads at argv-build time.
+  translation branch, i.e. once per CLI process start. Adds the announced names
+  to the cache.
+* ``cached_cli_tools()`` — what the adapter reads at argv-build time: every name
+  seen so far plus ``KNOWN_CLI_TOOLS``.
 
-On a cold cache only ``--allowed-tools`` (a grant, not a wall) goes out for
-that connect, and the next observation fills the cache. The delegated PreToolUse
-hook (``harness_adapter._delegated_tool_policy``) still refuses tools outside the
-surface, so a cold cache weakens only the argv wall.
+The cache only grows. The CLI leaves ``--disallowed-tools`` entries out of its
+init list, so a chat session or a restricted session announces a narrow surface.
+Replacing the cache with that list made the next allow-mode session stop walling
+Bash, Write and PowerShell. A stale name in ``--disallowed-tools`` is harmless,
+so keeping every name ever seen costs nothing.
+
+``KNOWN_CLI_TOOLS`` seeds the cache with the CLI built-ins this app knows about,
+so the first session of a process is walled too. Before the seed, a cold cache
+sent only the grant for that connect. The delegated PreToolUse hook
+(``harness_adapter._delegated_tool_policy``) refuses tools outside the surface
+either way; the seed keeps the model from seeing tools it may not call.
 
 "none" mode does not need any of this: the Claude Code CLI glob-matches deny
 rules, so a single ``--disallowed-tools "*"`` denies every tool. Deny/ask/allow
@@ -53,35 +62,50 @@ from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Claude Code built-ins known to this app (CLI 2.1.285). A name missing from
+# a given CLI build is harmless on --disallowed-tools; a name missing HERE is
+# only walled once some session announces it.
+KNOWN_CLI_TOOLS: tuple = (
+    "Bash", "PowerShell", "Read", "Edit", "Write", "NotebookEdit", "Glob",
+    "Grep", "LSP", "WebSearch", "WebFetch", "Skill", "ToolSearch",
+    "AskUserQuestion", "RemoteTrigger", "PushNotification", "SendMessage",
+    "ListAgents", "EnterWorktree", "ExitWorktree", "DesignSync", "ReportFindings",
+)
+
 _LOCK = threading.Lock()
 _TOOLS: Optional[List[str]] = None
 
 
 def record_cli_tools(names: Optional[Iterable[str]]) -> None:
-    """Remember the tool list a claude CLI ``init`` frame announced.
+    """Add the tool list a claude CLI ``init`` frame announced to the cache.
 
-    Ignores empty/None input: a frame without a tool list tells us nothing, and
-    blanking a good cache would silently turn the surface wall back off.
+    The cache is a union: names are added, never removed, because the CLI omits
+    disallowed tools from its init list (see the module docstring). Empty or
+    None input is ignored.
     """
     global _TOOLS
     cleaned = [str(n).strip() for n in (names or ()) if str(n).strip()]
     if not cleaned:
         return
     with _LOCK:
-        changed = cleaned != _TOOLS
-        _TOOLS = cleaned
-    if changed:
-        logger.debug("recorded claude CLI tool surface: %d tool(s)", len(cleaned))
+        before = list(_TOOLS or ())
+        merged = list(dict.fromkeys([*before, *cleaned]))
+        _TOOLS = merged
+    if len(merged) != len(before):
+        logger.debug(
+            "recorded claude CLI tool surface: %d tool(s) known", len(merged)
+        )
 
 
-def cached_cli_tools() -> Optional[List[str]]:
-    """The last-seen CLI surface, or None when nothing has been observed yet."""
+def cached_cli_tools() -> List[str]:
+    """The observed CLI surface plus ``KNOWN_CLI_TOOLS``, observed names first."""
     with _LOCK:
-        return list(_TOOLS) if _TOOLS else None
+        observed = list(_TOOLS or ())
+    return list(dict.fromkeys([*observed, *KNOWN_CLI_TOOLS]))
 
 
 def reset_cli_tools() -> None:
-    """Forget the cached surface (tests)."""
+    """Forget the observed surface (tests). The static seed stays."""
     global _TOOLS
     with _LOCK:
         _TOOLS = None

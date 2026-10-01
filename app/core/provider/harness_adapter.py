@@ -49,8 +49,11 @@ Delegated leg:
     (``--settings``) and partial messages pass through. In-proc app tools reach
     the CLI through fluid's bundled bridge (``mcp__fluid_bundled__``).
   * ``--disallowed-tools`` = ``_delegated_disallowed``; ``--allowed-tools`` =
-    ``_delegated_allowed`` plus ``_delegated_permission_grants``, which grants
-    only the in-proc tools the native leg rates ``safe`` (none in plan mode).
+    ``_delegated_permission_grants`` only: the in-proc tools the native leg
+    rates ``safe`` plus the CLI's read-only search and web tools, never Bash,
+    Read or a file-writing tool (nothing in plan mode). ``_delegated_allowed``
+    is the session surface in the delegated leg's spellings; it filters the
+    bundled bridge and never reaches the CLI's argv.
   * prompts reach ``can_use_tool`` via ``_bridge_permission``; with no callback,
     ``_answer_without_approver`` applies the saved rules, then denies in
     ``default``/``plan`` and allows otherwise. PreToolUse applies
@@ -3656,10 +3659,12 @@ class HarnessAdapter(ProviderAdapter):
         registry = ToolRegistry(**_registry_bound_kwargs())
         # Constraint: native legs (anthropic / openai_responses / openrouter)
         # get fluid's builtin file/shell tools as first-class tools. Delegated
-        # sessions keep the CLI's copies except for search: Claude Code 2.1.285
-        # removes Glob/Grep from its POSIX surface independently of the
-        # bash-first steer. Supply bounded search over the existing MCP bridge
-        # rather than relying on undocumented CLI experiment switches.
+        # sessions keep the CLI's copies. Search is the exception where the CLI
+        # may lack it: builds of Claude Code 2.1.285 with embedded search tools
+        # drop Glob/Grep unless --allowed-tools names one of them (decoded from
+        # the binary, not live-verified). _delegated_permission_grants names
+        # both on the code lane; the bounded bundled copies stay as a fallback
+        # wherever _cli_ships_search_tools() cannot vouch for the CLI's own.
         builtins_registered = False
         if native:
             from fluid.tools.builtins import register_builtins
@@ -3708,7 +3713,7 @@ class HarnessAdapter(ProviderAdapter):
                     exc_info=True,
                 )
 
-        if not native and _session_mode(options) != "chat":
+        if _registers_bundled_search(options, native=native):
             from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
 
             for search_tool in (glob_tool, grep_tool):
@@ -3729,17 +3734,20 @@ class HarnessAdapter(ProviderAdapter):
         # loader for THIS registry) — the bridged mcp__builtins__ copies are
         # excluded so the model sees ONE of each. The delegated leg keeps the
         # MCP copies (the CLI can only receive external tools via
-        # --mcp-config, and its own native ToolSearch serves the CLI-side
-        # registry).
+        # --mcp-config) except ToolSearch: the CLI's own ToolSearch is the only
+        # one that can load the CLI's deferred schemas, while the app's copy
+        # only returns catalog names the CLI cannot call.
         #
         # Deferral is native-only too: fluid's ToolSearch is what makes a
         # deferred schema reachable, and the delegated leg's bundled socket
         # server must keep serving every spec to the CLI.
-        skipped_builtins = set(NATIVE_SHADOWED_BUILTINS)
+        skipped_builtins = set(
+            NATIVE_SHADOWED_BUILTINS if native else DELEGATED_SHADOWED_BUILTINS
+        )
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
-            skip_tools={"builtins": skipped_builtins} if native else None,
+            skip_tools={"builtins": skipped_builtins},
             defer_servers=DEFERRED_SDK_SERVERS if native else None,
         )
         if recorded:
@@ -3843,13 +3851,21 @@ def _resolve_claude_cmd() -> list:
 
 
 def _workflow_prompt_blocks(
-    options: SessionOptions, permitted: Optional[frozenset]
+    options: SessionOptions,
+    permitted: Optional[frozenset],
+    *,
+    swarm_available: Optional[bool] = None,
+    task_available: Optional[bool] = None,
+    monitor_available: Optional[bool] = None,
 ) -> List[str]:
     """App-owned additions, generated from the same final manifest as schemas.
 
     Profile strings are never searched, stripped or rewritten by this helper.
     Query options only stamps provenance; native compilation supplies the wired
     surface, while delegated compilation supplies its CLI permission surface.
+    ``permitted=None`` means every tool is available. The keyword overrides,
+    when given, replace that inference for one tool: the delegated leg has no
+    Swarm at all, and it decides Task and Monitor from what the bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -3858,7 +3874,13 @@ def _workflow_prompt_blocks(
     from app.core.task_dispatch import subagent_system_prompt
 
     leaves = None if permitted is None else {name.rsplit("__", 1)[-1] for name in permitted}
+    overrides = {
+        "Swarm": swarm_available, "Task": task_available, "Monitor": monitor_available,
+    }
+
     def available(name):
+        if overrides.get(name) is not None:
+            return bool(overrides[name])
         return leaves is None or name in leaves
 
     parent = parent_subagent_guidance(
@@ -4118,6 +4140,11 @@ def _valid_effort(value: Any) -> Optional[str]:
 # accounting. The bridged mcp__builtins__ copies (Monitor, TaskOutput,
 # TaskStop, ScheduleWakeup) stay; the app owns their wakes.
 # Worktree lifecycle belongs to the app, not agents; block CLI native copies too.
+# The CLI's RemoteTrigger drives claude.ai cloud routines, PushNotification
+# pushes to the Claude app, and ListAgents/SendMessage reach the user's other
+# local Claude Code sessions. None of that shows up in app history or cost
+# accounting, and the app serves its own RemoteTrigger, NotifyDevices,
+# ListAgents and SendMessage over the bridge, so the CLI copies are banned.
 DELEGATED_BANNED_TOOLS = frozenset({
     "EnterWorktree",
     "ExitWorktree",
@@ -4131,7 +4158,143 @@ DELEGATED_BANNED_TOOLS = frozenset({
     "Monitor",
     "TaskOutput",
     "TaskStop",
+    "RemoteTrigger",
+    "PushNotification",
+    "ListAgents",
+    "SendMessage",
 })
+
+# The app ``builtins`` server's tools that the delegated leg does not bridge
+# because the CLI's own tool of the same name does the job (see _build_registry).
+DELEGATED_SHADOWED_BUILTINS = frozenset({"ToolSearch"})
+
+# The CLI's own tools that run unprompted when on the code lane's surface:
+# read-only search. Web tools follow fluid's own risk rating (_web_grants).
+_DELEGATED_CODE_GRANTS = ("Glob", "Grep")
+
+
+def _cli_ships_search_tools() -> bool:
+    """Whether the delegated CLI is known to carry its own Glob and Grep.
+
+    True on Windows, where Claude Code 2.1.285 announces both (production
+    session 42595afe). Elsewhere a build with embedded search tools may drop
+    them, so the bundled copies are registered as a fallback. Tests patch this
+    helper rather than ``os.name``.
+    """
+    return os.name == "nt"
+
+
+def _registers_bundled_search(options: SessionOptions, *, native: bool) -> bool:
+    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call."""
+    return (
+        not native
+        and _session_mode(options) != "chat"
+        and not _cli_ships_search_tools()
+    )
+
+
+def _bridged_builtin_names(options: SessionOptions) -> frozenset:
+    """Bare names of the tools the app's ``builtins`` server serves.
+
+    The picker offers fluid's names (Task, Monitor, Remember, ...) and greys
+    the ``mcp__builtins__`` copies of ``NATIVE_SHADOWED_BUILTINS``, but the
+    delegated leg serves these features only as ``mcp__builtins__<name>``.
+    The recorded server's tools are read when present; the bridge's risk map
+    and shadow set cover a session whose server was not recorded.
+    """
+    from app.core.provider.fluid_tool_bridge import (
+        BUILTINS_RISK_MAP,
+        NATIVE_SHADOWED_BUILTINS,
+    )
+
+    names = set(NATIVE_SHADOWED_BUILTINS) | set(BUILTINS_RISK_MAP)
+    config = (options.mcp_servers or {}).get("builtins")
+    if isinstance(config, dict) and config.get("type") == "sdk":
+        try:
+            from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+
+            names.update(
+                str(getattr(tool, "name", "") or "")
+                for tool in recorded_sdk_server_tools(config) or ()
+            )
+        except Exception:  # noqa: BLE001 — the static names still apply
+            logger.debug("[HarnessAdapter] builtins server tools unreadable", exc_info=True)
+    names.discard("")
+    return frozenset(names)
+
+
+def _delegated_surface(options: SessionOptions) -> Optional[list]:
+    """The session surface in the delegated leg's spellings, or None.
+
+    None when ``_tool_allowlist`` is None (unrestricted). Otherwise the saved
+    list plus, per ``tool_access.expand_delegated_surface``: the
+    ``mcp__builtins__`` copy of every bare app builtin, the CLI's names for
+    picker tools (AskUser as AskUserQuestion, Bash as PowerShell, Edit as
+    NotebookEdit, Read or Grep as LSP) and the CLI's ToolSearch when a tool it
+    defers is permitted. The bridge filter, the ``--disallowed-tools`` wall,
+    the PreToolUse policy, the grants and the appended notes all read this, so
+    they agree on what the session may call.
+    """
+    surface = _tool_allowlist(options)
+    if surface is None:
+        return None
+    from app.core.tool_access import expand_delegated_surface
+
+    return expand_delegated_surface(
+        surface,
+        bridged_builtins=_bridged_builtin_names(options),
+        external_servers=_external_mcp_servers(options.mcp_servers),
+    )
+
+
+def _delegated_blocklist(options: SessionOptions) -> list:
+    """The agent's blocklist in the delegated leg's spellings.
+
+    ``tool_access.expand_delegated_blocklist``: blocking Bash also blocks
+    PowerShell, Edit also NotebookEdit, AskUser also AskUserQuestion, and a
+    bare app builtin such as Remember also its bridged
+    ``mcp__builtins__Remember``.
+    """
+    from app.core.tool_access import expand_delegated_blocklist
+
+    return expand_delegated_blocklist(
+        options.disallowed_tools or (),
+        bridged_builtins=_bridged_builtin_names(options),
+    )
+
+
+def _delegated_tool_predicate(options: SessionOptions):
+    """``(name) -> bool`` over ``_delegated_surface`` and the blocklist, or None.
+
+    The delegated counterpart of ``_tool_predicate``; None means unrestricted.
+    """
+    from app.core.tool_access import tool_permitted
+
+    surface = _delegated_surface(options)
+    blocked = _delegated_blocklist(options)
+    if not surface and not blocked:
+        return None
+    return lambda name: tool_permitted(name, surface, blocked)
+
+
+def _delegated_permitted_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:
+    """The registry names the delegated bridge serves here, or None if unrestricted.
+
+    The delegated counterpart of ``_permitted_tool_names``. It never falls
+    back to fluid's builtins: this leg does not run them.
+    """
+    permit = _delegated_tool_predicate(options)
+    if permit is None:
+        return None
+    try:
+        names = (
+            [spec.name for spec in registry.list_tools(loaded_only=False)]
+            if registry is not None else []
+        )
+    except Exception:  # noqa: BLE001 — an unreadable registry must not kill the turn
+        logger.warning("[HarnessAdapter] could not enumerate delegated tools", exc_info=True)
+        return None
+    return frozenset(name for name in names if permit(name))
 
 # The denial a delegated prompt gets on a path with no approver wired.
 _NO_APPROVER_DENIAL = (
@@ -4149,57 +4312,64 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     Four sources, unioned:
 
     1. ``DELEGATED_BANNED_TOOLS``, always.
-    2. ``options.disallowed_tools``: the agent's own blocklist. In ``none``
-       mode this is ``["*"]``; the CLI glob-matches deny rules, so one entry
-       denies every tool (verified against the CLI once bundled with
-       claude-agent-sdk 0.2.126; re-check on CLI upgrades, see
-       ``app.core.cli_tool_surface``).
+    2. ``options.disallowed_tools``: the agent's own blocklist, in the leg's
+       spellings (``_delegated_blocklist``: blocking Bash also blocks
+       PowerShell). In ``none`` mode this is ``["*"]``; the CLI glob-matches
+       deny rules, so one entry denies every tool (verified against the CLI
+       once bundled with claude-agent-sdk 0.2.126; re-check on CLI upgrades,
+       see ``app.core.cli_tool_surface``).
     3. The chat lane: the CLI's file, shell and delegation tools, so only the
        bundled attachment reader can read.
-    4. For ``allow`` mode only: the CLI's own surface MINUS the allowed set.
-       The CLI reads ``--allowed-tools`` as a permission GRANT, so without this
-       subtraction "allow only selected" would merely stop prompting for the
-       selected tools while leaving every other one callable.
+    4. For ``allow`` mode only: the CLI's own surface MINUS the allowed set
+       (``_delegated_surface``, so AskUserQuestion, PowerShell, LSP and the
+       bundled ``mcp__builtins__`` copies of ticked tools survive). The CLI
+       shows every tool it is not told to hide, so without this subtraction
+       "allow only selected" would leave every other tool on the model's
+       surface, to be refused only when called. Only CLI built-ins and this
+       session's external MCP tools are subtracted; the bridge already
+       filters the bundle's tools.
 
     Source 4 needs the CLI's surface, which the CLI announces only in its
     ``init`` frame (republished as ``DelegatedSurface``; ``_translate`` feeds
     it to the cache), i.e. after this connect already went out. Rather than
     reconnect, which would kill the CLI session and re-prime its prompt cache,
-    the subtraction reads the last-seen surface from that module-level cache;
-    on a cold cache it is skipped for that connect. PreToolUse's
-    ``_delegated_tool_policy`` still refuses any call outside the surface, so a
-    cold cache degrades the surface wall, never the gate.
+    the subtraction reads ``cli_tool_surface.cached_cli_tools()``: every name
+    any CLI of this process announced, plus a static seed of known CLI
+    built-ins, so even the first connect of a process walls them. A tool the
+    seed misses is walled from the next connect on. PreToolUse's
+    ``_delegated_tool_policy`` refuses any call outside the surface either way,
+    so a gap in the cache degrades the surface wall, never the gate.
     """
     from app.core.cli_tool_surface import cached_cli_tools
     from app.core.tool_access import tool_permitted
 
-    banned = set(DELEGATED_BANNED_TOOLS) | set(options.disallowed_tools or ())
+    banned = set(DELEGATED_BANNED_TOOLS) | set(_delegated_blocklist(options))
     if _session_mode(options) == "chat":
         # Withholding auto-approval is insufficient: the CLI also auto-approves
         # cwd reads. Only our bundled, handle-confined attachment reader is safe.
-        banned.update({"Read", "Bash", "Grep", "Glob", "Write", "Edit", "NotebookEdit",
-                       "Task", "Agent", "Skill", "ToolSearch"})
+        banned.update({"Read", "Bash", "PowerShell", "Grep", "Glob", "LSP", "Write",
+                       "Edit", "NotebookEdit", "Task", "Agent", "Skill", "ToolSearch"})
 
-    surface = _tool_allowlist(options)
+    surface = _delegated_surface(options)
     if surface:
-        known = cached_cli_tools()
-        if known:
-            def permitted_cli_name(name: str) -> bool:
-                if tool_permitted(name, surface, None):
-                    return True
-                # The warm CLI cache includes qualified names for our bundle.
-                # Compare the registered spelling too, or the second session
-                # would hide memory tools that the first session could use.
-                prefix = "mcp__fluid_bundled__"
-                return name.startswith(prefix) and tool_permitted(name[len(prefix):], surface, None)
+        # The cache is a union over every session of this process. Only names
+        # this CLI can show are walled: its built-ins and the tools of this
+        # session's external MCP servers. The bundle's own tools are left out
+        # because the bridge serves only the surface (``_delegated_allowed``),
+        # and other sessions' MCP servers are not connected here; walling
+        # either would only lengthen an argv that also carries the append
+        # (--strict-mcp-config keeps the CLI to the bundle and these servers).
+        external = _external_mcp_servers(options.mcp_servers)
 
-            banned.update(name for name in known if not permitted_cli_name(name))
-        else:
-            logger.debug(
-                "[HarnessAdapter] no cached claude CLI tool surface yet — "
-                "allow-mode restriction rides --allowed-tools + can_use_tool "
-                "for this connect"
-            )
+        def cli_can_show(name: str) -> bool:
+            if not name.startswith("mcp__"):
+                return True
+            return name[len("mcp__"):].partition("__")[0] in external
+
+        banned.update(
+            name for name in cached_cli_tools()
+            if cli_can_show(name) and not tool_permitted(name, surface, None)
+        )
     return sorted(banned)
 
 
@@ -4218,13 +4388,14 @@ def _delegated_tool_policy(
     permission engine. Asks are not its business: those stay with the CLI's
     own ``can_use_tool`` prompt. It exists because that prompt is never
     raised in bypass mode, and because ``--disallowed-tools`` misses a
-    surface the CLI tool cache did not know yet.
+    tool the CLI tool cache did not know yet. The surface is
+    ``_delegated_surface``: the CLI's names for the tools the user ticked.
     """
     from app.core.tool_access import matches_any, tool_permitted
     from fluid.permissions.engine import Verdict
     from fluid.permissions.rules import match_rule
 
-    surface = _tool_allowlist(options)
+    surface = _delegated_surface(options)
     rules = list(getattr(permissions, "rules", None) or ())
     cwd = options.cwd
 
@@ -4295,26 +4466,59 @@ def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
 
 
 def _delegated_allowed(options: SessionOptions) -> Optional[list]:
-    """``--allowed-tools`` for the delegated (claude CLI) leg.
+    """``DelegatedLoop.allowed_tools``: the bundled bridge's surface filter.
 
-    Chat disables the CLI builtin Read, including its cwd auto-approval path.
-    Its bundled attachment reader is safe to grant: confinement is enforced
-    inside the tool rather than by the CLI permission callback.
+    The session surface in the delegated leg's spellings
+    (``_delegated_surface``), registry names bare: the bridge matches a
+    pattern against the registry name and its ``mcp__fluid_bundled__`` form.
+    It never reaches the CLI's argv; ``--allowed-tools`` carries only
+    ``_delegated_permission_grants``, because the CLI reads a bare name there
+    as a blanket pre-approval.
+
+    Chat drops ``Read``: the CLI's own Read is banned on that lane and reads go
+    through the bundled attachment reader, which stays on the list.
     """
-    surface = _tool_allowlist(options)
+    surface = _delegated_surface(options)
     if surface is None or _session_mode(options) != "chat":
         return surface
-    granted = [name for name in surface if name != "Read"]
-    # An emptied grant must not degrade to "grant everything": ``_build_argv``
-    # omits the flag entirely for a falsy list, and on this leg the surface wall
-    # is ``--disallowed-tools``, which is built from the untouched surface.
-    return granted or None
+    # Returned even when empty: DelegatedLoop reads None as "serve every
+    # bridge tool", and [] as "serve none".
+    return [name for name in surface if name != "Read"]
+
+
+def _web_grants() -> tuple:
+    """The CLI web tools granted on either lane: those fluid rates ``safe``.
+
+    Mirrors the native leg, where fluid's PermissionEngine runs a ``safe``
+    tool unprompted: WebSearch is ``safe``; WebFetch is ``write`` (an outbound
+    request with a model-chosen URL can exfiltrate) and keeps prompting.
+    """
+    try:
+        from fluid.tools.builtins.web import FETCH_SPEC, SEARCH_SPEC
+    except ImportError:  # older vendored fluid: grant nothing rather than guess
+        return ()
+    return tuple(spec.name for spec in (SEARCH_SPEC, FETCH_SPEC) if spec.risk == "safe")
 
 
 def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
-    """The SDK permission allowlist's in-proc MCP entries, spelled for the CLI.
+    """``--allowed-tools`` for the delegated leg: tools that run unprompted.
 
-    Only tools the native leg classifies ``safe`` are granted: the risk comes
+    The CLI reads a bare name on ``--allowed-tools`` as a blanket
+    pre-approval, so this list is the whole grant; the session surface is
+    walled separately (``_delegated_disallowed``) and filters the bridge
+    (``_delegated_allowed``). Bash, PowerShell, Read, Edit, Write and
+    NotebookEdit are never granted, so Ask and Accept Edits prompt for them
+    as on the native leg. Plan mode grants nothing. Only tools on the
+    session's surface (``_delegated_tool_predicate``) are granted:
+
+    * the app's in-proc MCP tools the native leg rates ``safe`` (below);
+    * code lane: the CLI's Glob and Grep, the bundled fallback copies when
+      ``_build_registry`` registers them, and the web tools fluid rates
+      ``safe`` (``_web_grants``);
+    * chat lane: the same web tools (``_web_grants``) and the bundled
+      attachment reader, whose confinement is enforced inside the tool.
+
+    In-proc MCP tools: only tools the native leg classifies ``safe`` are granted: the risk comes
     from ``fluid_tool_bridge.SERVER_RISK_MAPS`` / ``SERVER_DEFAULT_RISK``, the
     same tables ``register_recorded_sdk_servers`` hands the PermissionEngine.
     ``write`` and ``destructive`` tools (createHook, addMcpServer,
@@ -4329,9 +4533,8 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     (the CLI glob-matches the tool part of an MCP allow rule; verified against
     claude 2.1.280) only when every tool the server serves is safe; otherwise
     it is expanded to its safe tools. External servers (the browser server,
-    user MCP servers) are never granted, and neither are bare CLI tool names,
-    so Ask mode still prompts for them. In ``allow`` mode only entries on the
-    surface are granted, as ``_delegated_allowed`` does.
+    user MCP servers) are never granted, so Ask mode still prompts for them.
+    In ``allow`` mode only entries on the surface are granted.
     """
     if (options.permission_mode or "default") == "plan":
         return None
@@ -4342,11 +4545,37 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.core.tool_access import tool_permitted
 
+    # DELEGATED_SHADOWED_BUILTINS (the app's ToolSearch) are rated here like
+    # any other builtin. _build_registry never registers them on this leg, so
+    # their grant names a tool the CLI is never offered and approves nothing.
     def _safe(server: str, tool: str) -> bool:
         risk_map = SERVER_RISK_MAPS.get(server) or {}
         return risk_map.get(tool, SERVER_DEFAULT_RISK.get(server, "write")) == "safe"
 
-    surface = _tool_allowlist(options)
+    permit = _delegated_tool_predicate(options)
+
+    def permitted(name: str) -> bool:
+        return permit is None or permit(name)
+
+    cli_grants: list = []
+    if _session_mode(options) == "chat":
+        from app.core.attachment_read import DELEGATED_READ
+
+        # WebFetch keeps prompting here too: chat is where uploaded documents
+        # are read, and an injected one could send data out through a fetch.
+        cli_grants.extend(name for name in _web_grants() if permitted(name))
+        if permitted(DELEGATED_READ):
+            cli_grants.append(_BUNDLED_CLI_PREFIX + DELEGATED_READ)
+    else:
+        cli_grants.extend(name for name in _DELEGATED_CODE_GRANTS if permitted(name))
+        if _registers_bundled_search(options, native=False):
+            cli_grants.extend(
+                _BUNDLED_CLI_PREFIX + name for name in _DELEGATED_CODE_GRANTS
+                if permitted(name)
+            )
+        cli_grants.extend(name for name in _web_grants() if permitted(name))
+
+    surface = _delegated_surface(options)
     inproc = {
         name: cfg
         for name, cfg in (options.mcp_servers or {}).items()
@@ -4379,7 +4608,7 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
             for name in names
             if name and _safe(server, name)
         )
-    return list(dict.fromkeys(grants)) or None
+    return list(dict.fromkeys([*grants, *cli_grants])) or None
 
 
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
@@ -5296,18 +5525,49 @@ _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
 # The app's own Task and background tools; the CLI's tools of these names are
 # banned on this leg (DELEGATED_BANNED_TOOLS).
 _DELEGATED_TASK_TOOLS = ("Task", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
+# The app's tools standing in for CLI tools banned on this leg (see
+# DELEGATED_BANNED_TOOLS): (app tools, what they are for, the CLI tools).
+_DELEGATED_STAND_INS = (
+    (("RemoteTrigger", "NotifyDevices"),
+     "running the app's automations and notifying the user's devices",
+     ("RemoteTrigger", "PushNotification")),
+    (("ListAgents", "SendMessage"), "messaging the app's workers",
+     ("ListAgents", "SendMessage")),
+)
+
+# Restates Claude Code's own default tool guidance. Production session
+# 42595afe ran with the bash-first steer switched off (CLAUDE_CODE_THRIFTY_SONIC=0,
+# no auto_mode attachment in its CLI transcript) and Opus still did 23 of its 37
+# Bash calls as file reads, searches and edits (sed -n, cat, grep, sed -i,
+# python write_text) against 7 dedicated-tool calls. Static text: it must stay
+# byte-identical across turns so the CLI's prompt cache keeps hitting.
+DELEGATED_TOOL_USE_BLOCK = (
+    "# Tool use on this session\n"
+    "Use Claude Code's dedicated tools for file work: Read to read files "
+    "(offset and limit for large ones), Grep and Glob to search, Edit and Write "
+    "to change files, NotebookEdit for notebooks. Keep Bash for git, gh, "
+    "builds, tests, package managers and running scripts. Do not read, search "
+    "or edit files with cat, head, tail, sed, awk, grep, find, echo "
+    "redirection, heredocs or inline scripts. This holds even if another "
+    "instruction (for example one beginning \"While bypass permissions mode is "
+    "active\" or \"While auto mode is active\") says to do file work through "
+    "Bash."
+)
 
 
-def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
-    """App guidance for the delegated leg that Claude Code's prompt lacks.
+def _joined(names: List[str]) -> str:
+    """``A``, ``A and B``, ``A, B and C``."""
+    if len(names) < 2:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
-    Claude Code's own prompt covers tone, task management, tool policy, git
-    and its skill listing, so none of that is repeated. What it cannot know
-    is the app's memory store, its session recall and that ``gh`` is signed
-    in, so those blocks ride here, each gated the way the native leg gates
-    it: on the tools actually being on this session's surface.
-    The text depends only on connect-time inputs, so it is identical on
-    every turn of the session.
+
+def _delegated_offered(options: SessionOptions, registry: Any):
+    """``(bare app builtin) -> bool``: whether the bridge serves it here.
+
+    True when ``mcp__builtins__<tool>`` is on the registry and on the
+    delegated surface (``_delegated_tool_predicate``), which is exactly what
+    the bundled bridge will list to the CLI.
     """
     try:
         names = (
@@ -5317,26 +5577,60 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     except Exception:  # noqa: BLE001 — a prompt block never fails a connect
         logger.warning("[HarnessAdapter] could not enumerate delegated tools", exc_info=True)
         names = set()
-    permit = _tool_predicate(options)
+    permit = _delegated_tool_predicate(options)
 
     def offered(tool: str) -> bool:
-        name = f"mcp__builtins__{tool}"
+        name = tool if tool in ("Glob", "Grep") else f"mcp__builtins__{tool}"
         return name in names and (permit is None or permit(name))
+
+    return offered
+
+
+def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
+    """App guidance for the delegated leg that Claude Code's prompt lacks.
+
+    Claude Code's own prompt covers tone, task management, git and its skill
+    listing, so none of that is repeated. What it cannot know is the app's
+    memory store, its session recall, which app tools replace CLI tools that
+    are banned here, and that ``gh`` is signed in, so those blocks ride here,
+    each gated the way the native leg gates it: on the tools actually being
+    on this session's surface.
+
+    Tool policy is the one exception: ``DELEGATED_TOOL_USE_BLOCK`` restates
+    Claude Code's preference for its dedicated file tools on code sessions
+    that have Bash, Read and Edit, because Opus kept doing file work through
+    Bash with the CLI's bash-first steer switched off (session 42595afe).
+
+    The text depends only on connect-time inputs, so it is identical on
+    every turn of the session.
+    """
+    offered = _delegated_offered(options, registry)
+    permit = _delegated_tool_predicate(options)
+
+    def permitted(name: str) -> bool:
+        return permit is None or permit(name)
 
     recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
     memory = all(offered(t) for t in ("Remember", "Recall"))
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
+    # Both Read and Edit: the block forbids file work through Bash, so a
+    # session without either would be left with no permitted way to do it.
+    if _session_mode(options) != "chat" and (
+        permitted("Bash") or permitted("PowerShell")
+    ) and permitted("Read") and permitted("Edit"):
+        blocks.append(DELEGATED_TOOL_USE_BLOCK)
     notes: List[str] = []
-    search = [tool for tool in ("Glob", "Grep") if tool in names and (
-        permit is None or permit(tool)
-    )]
+    # The bundled Glob/Grep are only registered where the CLI may lack its own
+    # (_registers_bundled_search), so the note exists only there.
+    search = [tool for tool in ("Glob", "Grep") if offered(tool)]
     if search:
+        own = _joined(search)
+        verb = "are" if len(search) > 1 else "is"
         notes.append(
-            "Use the app's bounded file-search tools instead of find/grep through "
-            "Bash: " + ", ".join(f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search)
-            + ". These remain available even when Claude Code omits its own "
-            "Glob/Grep tools."
+            f"Search files with {own} rather than find/grep through Bash. If "
+            f"Claude Code's own {own} {verb} not in your tool list, use "
+            + _joined([f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search]) + "."
         )
     if recall or memory:
         shown = [
@@ -5357,15 +5651,22 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
             "are not available here, and Bash cannot run a command in the "
             "background: hand long-running work to the app's Monitor or Task."
         )
+    for app_tools, purpose, cli_tools in _DELEGATED_STAND_INS:
+        shown = [t for t in app_tools if offered(t)]
+        if shown:
+            suffixes = _joined([f"__{t}" for t in shown])
+            notes.append(
+                f"For {purpose}, use the app's MCP tools whose names end in "
+                f"{suffixes}. Claude Code's own {_joined(list(cli_tools))} are "
+                "not available here."
+            )
     if notes:
         blocks.append("# App tools on this session\n" + "\n".join(notes))
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:
         blocks.append(_MEMORY_BLOCK_CORE)
-    if (options.extra or {}).get("github_connected") and (
-        permit is None or permit("Bash")
-    ):
+    if (options.extra or {}).get("github_connected") and permitted("Bash"):
         blocks.append(GITHUB_BLOCK)
     return blocks
 
@@ -5441,11 +5742,22 @@ def _delegated_append_text(
     ``VERIFICATION_BLOCK`` stays native-only: it points at the native
     leg's "# Workspace facts" card and browser tool names, neither of which
     this leg has.
+
+    Only tools this leg offers are described: the agents index and the Task
+    and Monitor routing need the bridged ``mcp__builtins__Task`` /
+    ``Monitor`` (``_delegated_offered``), and Swarm routing never appears
+    because the leg has no Swarm tool.
     """
-    agents_index, _ = _agent_context(options)
+    offered = _delegated_offered(options, registry)
+    task_offered = offered("Task")
+    agents_index = _agent_context(options)[0] if task_offered else None
     _, text = _with_agents_index(None, append_system or None, agents_index)
     parts = [text] if text else []
-    parts.extend(_workflow_prompt_blocks(options, _permitted_tool_names(options, registry)))
+    parts.extend(_workflow_prompt_blocks(
+        options, _delegated_permitted_names(options, registry),
+        swarm_available=False, task_available=task_offered,
+        monitor_available=offered("Monitor"),
+    ))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))
     parts.extend(_delegated_guidance_blocks(options, registry))

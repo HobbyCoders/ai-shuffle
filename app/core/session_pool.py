@@ -1903,8 +1903,9 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
         changed.append("add_dirs")
 
     # The session's sidepanel lane. The chat lane's read fence is built INTO the
-    # engine at connect time — a fluid permission rule on the native leg, a
-    # withheld ``--allowed-tools`` grant on the delegated one — so a client
+    # engine at connect time — a fluid permission rule on the native leg,
+    # ``--disallowed-tools`` bans plus the bundled attachment reader on the
+    # delegated one — so a client
     # connected for one lane cannot be reused for another. The cwd comparison
     # above almost always catches this on its own (a chat session runs in the
     # uploads folder), but the fence must not depend on "almost always".

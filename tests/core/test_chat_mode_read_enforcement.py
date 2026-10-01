@@ -27,6 +27,7 @@ from app.core.provider.harness_adapter import (
     _chat_mode_rules,
     _delegated_allowed,
     _delegated_disallowed,
+    _delegated_permission_grants,
     _session_mode,
     _tool_allowlist,
 )
@@ -286,10 +287,19 @@ async def test_uploaded_image_reaches_provider_with_bounded_pixels(workspace):
 
 def test_read_is_withheld_from_the_cli_grant_for_chat(workspace):
     """A bare name in ``--allowed-tools`` is a blanket pre-approval — the CLI
-    says so itself. Granting Read there would retire the fence."""
+    says so itself. Granting Read there would retire the fence. The grant
+    carries the bundled reader in the spelling the CLI calls it."""
     opts = _options("chat")
-    assert set(_delegated_allowed(opts)) == set(CHAT_MODE_TOOL_SURFACE) - {"Read"}
+    grants = _delegated_permission_grants(opts)
+    assert "Read" not in grants
+    assert "mcp__fluid_bundled__mcp__attachments__Read" in grants
+    assert "mcp__attachments__Read" not in grants  # the CLI never calls this name
+    assert "WebSearch" in grants
+    # WebFetch is 'write' in fluid and keeps prompting, as on the native leg.
+    assert not {"Glob", "Grep", "Bash", "Edit", "Write", "WebFetch"} & set(grants)
+    # The bridge filter keeps the registry spelling and drops the CLI's Read.
     assert "Read" not in _delegated_allowed(opts)
+    assert set(CHAT_MODE_TOOL_SURFACE) - {"Read"} <= set(_delegated_allowed(opts))
     assert "Read" in (_tool_allowlist(opts) or [])
 
 
@@ -307,15 +317,23 @@ def test_cli_builtin_read_is_removed_but_broker_stays_callable(workspace):
     assert "Bash" in banned and "Grep" in banned
 
 
-def test_code_sessions_keep_the_whole_grant(workspace):
+def test_code_sessions_serve_the_whole_surface_but_grant_no_read(workspace):
+    """Code sessions keep the whole surface on the bridge filter, but the CLI
+    grant never pre-approves Read, Bash or a file-writing tool."""
     opts = _options("code")
-    assert _delegated_allowed(opts) == _tool_allowlist(opts)
+    assert set(_tool_allowlist(opts)) <= set(_delegated_allowed(opts))
+    grants = _delegated_permission_grants(opts) or []
+    assert not {"Read", "Bash", "Edit", "Write", "NotebookEdit"} & set(grants)
 
 
 def test_read_only_surface_grants_only_the_broker(workspace):
     opts = _options("chat")
     opts.tool_allowlist = ["Read"]
-    assert _delegated_allowed(opts) == ["mcp__attachments__Read"]
+    assert "Read" not in _delegated_allowed(opts)
+    assert "mcp__attachments__Read" in _delegated_allowed(opts)
+    assert _delegated_permission_grants(opts) == [
+        "mcp__fluid_bundled__mcp__attachments__Read",
+    ]
 
 
 @pytest.mark.parametrize(
