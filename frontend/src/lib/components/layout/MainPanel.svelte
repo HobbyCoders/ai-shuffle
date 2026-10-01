@@ -7,6 +7,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack, type Snippet } from 'svelte';
+	import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { MediaQuery } from 'svelte/reactivity';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -48,9 +49,12 @@
 	import SessionSidePanel from './SessionSidePanel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
-	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
+	import AssistantHome from '$lib/components/assistant/AssistantHome.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
+	import SwarmDropdown from '$lib/components/chat/SwarmDropdown.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -114,6 +118,7 @@
 
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
+		'assistant': 'Assistant',
 		'settings': 'Settings',
 		'profile': 'Agents',
 		'project': 'Projects',
@@ -164,7 +169,9 @@
 		isBuildView ? 'build' : featurePanelKeyForView($activeView?.type)
 	);
 	/** True when the chat surface (not a feature panel) owns the canvas. */
-	const showChatSurface = $derived(featureKey === null);
+	const showAssistantSurface = $derived($activeView?.type === 'assistant');
+	const assistantAgentId = $derived(showAssistantSurface ? $activeView?.itemId ?? null : null);
+	const showChatSurface = $derived(featureKey === null && !showAssistantSurface);
 	let mountedPanels = $state<FeaturePanelKey[]>([]);
 
 	$effect(() => {
@@ -445,13 +452,15 @@
 		}
 	}
 
+	const gitMenuOpen = $derived($openHeaderDropdown?.startsWith('git-') ?? false);
+
 	function scheduleGitPoll() {
 		if (_gitPollTimer) clearTimeout(_gitPollTimer);
 		if (!_gitPollRunning || document.hidden) return;
 		_gitPollTimer = setTimeout(() => {
 			gitPollNow();
 			scheduleGitPoll();
-		}, gitPollIntervalMs(Date.now(), _gitLastActivity));
+		}, gitPollIntervalMs(Date.now(), _gitLastActivity, gitMenuOpen));
 	}
 
 	function startGitPoll() {
@@ -511,6 +520,17 @@
 			stopGitPoll();
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		};
+	});
+
+	// Inspecting the dropdown needs fresh owner activity, even if THIS chat
+	// is idle. Reschedule on open/close without tracking the whole git store.
+	$effect(() => {
+		const opened = gitMenuOpen;
+		untrack(() => {
+			if (!_gitPollRunning) return;
+			if (opened) gitPollNow();
+			scheduleGitPoll();
+		});
 	});
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.
@@ -840,7 +860,7 @@
 <!--
 	Header actions are declared once and rendered by whichever bar is on screen:
 	the desktop StudioTopBar, or the shell's own `header` snippet (the mobile
-	app's PageHeader). The git cluster is the existing GitHeaderActions
+	app's AppTopBar). The git cluster is the existing GitHeaderActions
 	instance with its existing handlers.
 -->
 {#snippet downloadAction()}
@@ -863,6 +883,15 @@
 			<!-- Dialog only: the git panel's "Private access" row opens it, and the
 			     header button reads its pending count (chatAccessSummary). -->
 			<ChatAccess sessionId={activeTab.sessionId} trigger="none" />
+			<SwarmDropdown
+				sessionId={activeTab.sessionId}
+				standalone
+				hydrateOnly={shouldShowHeaderGitActions({
+					viewType: $activeView?.type, hasProject: !!activeProject,
+					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
+					isRemote: activeIsRemote, sessionMode: activeTab.mode
+				}) && $gitStatus?.is_git_repo !== false && !$git.error}
+			/>
 		{/key}
 	{/if}
 	{#if activeTab && shouldShowHeaderGitActions({
@@ -876,6 +905,7 @@
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
+				sessionId={activeTab.sessionId}
 				isStreaming={$gitControlsStreaming}
 				error={$git.error}
 				operationInProgress={$gitOperationRunning}
@@ -894,14 +924,13 @@
 				onDownloadChat={header ? undefined : handleDownloadJsonl}
 				downloadingChat={downloadingJsonl}
 			/>
-			<GitProgressPopover />
 		</div>
 	{/if}
 {/snippet}
 
 <div class="main-panel">
 	{#if header}
-		<!-- The shell owns the header (mobile app: PageHeader with these actions). -->
+		<!-- The mobile shell owns the title bar and its separate left/right action row. -->
 		{@render header({
 			title: headerTitle,
 			isSessionView: $activeView?.type === 'session',
@@ -934,6 +963,9 @@
 	<div class="main-content">
 		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)}>
 		{#if $activeView}
+			{#if showAssistantSurface && $isAdmin}
+				<div class="assistant-surface">{#key `${$sessionOwnerBoundary}:${assistantAgentId ?? ''}`}<AssistantHome requestedAgentId={assistantAgentId} />{/key}</div>
+			{/if}
 			{#if showChatSurface}
 				<div class="chat-row">
 					<div class="chat-browser-underlay">
@@ -1040,6 +1072,7 @@
 {/if}
 
 <style>
+	.assistant-surface { height:100%; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	/* Keep composer popovers below the sibling side-panel overlay. */
 	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }

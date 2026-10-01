@@ -35,6 +35,10 @@ export function startLiveSync() {
  let retry: ReturnType<typeof setTimeout> | undefined;
  let heartbeat: ReturnType<typeof setInterval> | undefined;
  let generation = 0, attempts = 0;
+ // The server sends sync_ready on every /ws/global connection. Only a LATER one
+ // follows a gap in which broadcasts (a clear, a delete) may have been missed;
+ // the first one after start or an owner change has nothing to catch up on.
+ let syncedBefore = false;
  // Keep lifecycle/permission delivery live; defer presentation-only catalogue
  // reads until resume invalidates the full set once. In-flight dirty work stays
  // coalesced by loadSessions/resourceSync, not queued per background event.
@@ -64,6 +68,17 @@ export function startLiveSync() {
   preferenceSync.stop(reset); resourceSync.clear(); resetUserEventDedupe();
   if (reset) notify.resetLocal();
  }
+ function resyncFeedAfterGap() {
+  // Cached transcripts that carry a server log epoch are checked on resume (a
+  // rewritten log answers with a reset), so only unverifiable ones are dropped.
+  feedController.invalidateUnverified();
+  const selected = activeSession.current.sessionId;
+  if (!selected || !feedController.isFeeding(selected)) return;
+  // Resume at the cursor when the server can vouch for it; otherwise the only
+  // safe answer to a possibly missed clear is a full reload.
+  if (feedController.hasLogEpoch(selected)) feedController.revive(selected);
+  else feedController.restart(selected);
+ }
  function connect() {
   if (!owner) return;
   const epoch = generation;
@@ -78,9 +93,8 @@ export function startLiveSync() {
    if (data.type === 'sync_ready') {
     attempts = 0;
     void preferenceSync.reconnect();
-    feedController.invalidate();
-    const selected = activeSession.current.sessionId;
-    if (selected && feedController.isFeeding(selected)) feedController.restart(selected);
+    if (syncedBefore) resyncFeedAfterGap();
+    syncedBefore = true;
     resourceSync.invalidate();
    } else if (data.type === 'sync_reconcile') {
     void preferenceSync.reconnect();
@@ -121,6 +135,9 @@ export function startLiveSync() {
   // Retire old editors and restores before resetting adapters can notify them.
   if (bindSessionOwner(owner, next, cachedOwner)) activeSession.resetForAccountChange();
   const previous = owner; disconnect(!!previous); owner = next;
+  syncedBefore = false;
+  // Cached transcripts belong to the account that loaded them.
+  feedController.invalidate();
   if (!owner) return;
   preferenceSync.start(!!cachedOwner && cachedOwner !== owner, owner);
   try { localStorage.setItem('ai-shuffle-preferences-owner', owner); } catch { /* no cache */ }

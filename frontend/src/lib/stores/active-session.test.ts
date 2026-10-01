@@ -168,7 +168,7 @@ describe('live permission selection', () => {
 		expect(composerPreferences.current.permissionMode).toBe('default');
 	});
 
-	it.each(['code', 'voice', 'chat'] as const)('inherits the explicit selection in a fresh %s composer without changing another session', async (lane) => {
+	it.each(['code', 'chat'] as const)('inherits the explicit selection in a fresh %s composer without changing another session', async (lane) => {
 		appMode.set(lane, false);
 		activeSession.current.sessionId = null;
 		await activeSession.setPermissionModeOverride('bypassPermissions');

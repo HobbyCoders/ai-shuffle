@@ -85,7 +85,7 @@
 	background: color-mix(in oklch, var(--warning, var(--destructive)) 10%, transparent);
 }
 
-.pa-body { display: grid; gap: 0.75rem; padding: 0.875rem 1rem; }
+.pa-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; padding: 0.875rem 1rem; }
 
 .pa-section {
 	display: grid;
@@ -100,7 +100,7 @@
 
 .pa-field { display: grid; gap: 0.3rem; min-width: 0; }
 .pa-field > span { font-size: 0.75rem; font-weight: 500; color: var(--foreground); }
-.pa-field .card-form-input { box-sizing: border-box; min-height: 2.25rem; }
+.pa-field .card-form-input { box-sizing: border-box; min-width: 0; max-width: 100%; min-height: 2.25rem; }
 .pa-field select.card-form-input { appearance: auto; }
 .pa-field textarea.card-form-input { min-height: 5rem; resize: vertical; font-family: var(--card-font-mono); font-size: 0.75rem; }
 
@@ -147,6 +147,13 @@
 }
 
 .pa-note svg { flex-shrink: 0; width: 0.875rem; height: 0.875rem; margin-top: 0.05rem; }
+.pa-note > span, .pa-saved-detail { min-width: 0; overflow-wrap: anywhere; }
+.pa-saved-detail { display: grid; gap: 0.25rem; }
+.pa-saved-detail strong { font-family: var(--card-font-mono); font-size: 0.75rem; font-weight: 500; }
+.pa-fingerprint { min-width: 0; }
+.pa-fingerprint summary { cursor: pointer; font-size: 0.75rem; }
+.pa-fingerprint code { display: block; margin-top: 0.375rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+.pa-fingerprint summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 .pa-error {
 	margin: 0;
@@ -199,12 +206,8 @@
 .pa-option strong { font-size: 0.8125rem; font-weight: 500; }
 .pa-option small { grid-column: 2; font-size: 0.6875rem; line-height: 1.4; color: var(--muted-foreground); }
 
-.pa-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.pa-actions > button { flex: 1 1 0%; min-height: 44px; font-size: 0.875rem; }
-
-@media (min-width: 640px) {
-	.pa-actions > .card-btn-secondary { flex: 0 0 auto; }
-}
+.pa-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+.pa-actions > button { box-sizing: border-box; min-width: 0; min-height: 44px; padding: 0.5rem 0.75rem; font-size: 0.8125rem; line-height: 1.25; }
 
 .pa-row {
 	display: flex;
@@ -257,4 +260,23 @@
 .pa-summary .pa-icon svg { width: 0.875rem; height: 0.875rem; }
 .pa-summary .chev { margin-left: auto; width: 0.875rem; height: 0.875rem; color: var(--muted-foreground); transition: transform 0.2s ease; }
 details[open] > .pa-summary .chev { transform: rotate(90deg); }
-.pa-summary-lead { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.5rem; }
+.pa-summary-lead { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 0.375rem 0.5rem; }
+
+/* Keep the private forms readable without inheriting the large deck-card
+   spacing. Scoped to these two components, not the shared card system. */
+@media (max-width: 480px) {
+	.pa-head { gap: 0.5rem; padding: 0.625rem 0.75rem; align-items: flex-start; }
+	.pa-icon { width: 2rem; height: 2rem; border-radius: 0.625rem; }
+	.pa-title h3 { flex-wrap: wrap; gap: 0.25rem 0.375rem; }
+	.pa-title h3 > span:first-child { white-space: normal; }
+	.pa-timer { padding: 0.2rem 0.375rem; }
+	.pa-body, .pa-section { gap: 0.625rem; padding: 0.75rem; }
+	.pa-grid { grid-template-columns: minmax(0, 1fr); }
+	.pa-grid.host { grid-template-columns: minmax(0, 1fr) 5rem; }
+	.pa-field .card-form-input { min-height: 44px; font-size: 1rem; }
+	.pa-toggle { min-height: 44px; text-align: left; }
+	.pa-row, .pa-summary { gap: 0.5rem; padding: 0.625rem 0.75rem; }
+	.pa-row { align-items: flex-start; }
+	.pa-row .pa-row-actions { flex-direction: column; }
+	.pa-small-btn { min-height: 44px; }
+}

@@ -41,12 +41,13 @@ describe('computeGitControlsStreaming', () => {
 		expect(computeGitControlsStreaming(input())).toBe(false);
 	});
 
-	it('worktree mode ignores cross-session streaming in the same project', () => {
+	it('an identified worktree ignores another main checkout in the same project', () => {
 		// Independent working dir — another session streaming can't touch it.
 		expect(
 			computeGitControlsStreaming(
 				input({
 					activeIsWorktree: true,
+					activeWorktreeId: 'wt-active',
 					crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: null }]])
 				})
 			)
@@ -110,4 +111,36 @@ describe('computeGitControlsStreaming', () => {
 			)
 		).toBe(false);
 	});
+	it('blocks another session on the same worktree ID', () => {
+		expect(computeGitControlsStreaming(input({ activeIsWorktree: true, activeWorktreeId: 'wt-1',
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: 'wt-1' }]]) }))).toBe(true);
+	});
+	it('blocks the same logical branch with different legacy worktree IDs', () => {
+		expect(computeGitControlsStreaming(input({ activeIsWorktree: true, activeWorktreeId: 'wt-1', activeBranch: 'feature',
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: 'wt-2', worktreeBranch: 'feature' }]]) }))).toBe(true);
+	});
+	it('blocks the same v2 branch even without a legacy worktree row', () => {
+		expect(computeGitControlsStreaming(input({ activeIsWorktree: true, activeBranch: 'feature',
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: null, worktreeBranch: 'feature' }]]) }))).toBe(true);
+	});
+	it('blocks a branch session using the actual branch of the main checkout', () => {
+		expect(computeGitControlsStreaming(input({ activeBranch: 'feature',
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: null, worktreeBranch: 'feature' }]]) }))).toBe(true);
+	});
+	it('leaves a different identified branch usable', () => {
+		expect(computeGitControlsStreaming(input({ activeIsWorktree: true, activeWorktreeId: 'wt-1', activeBranch: 'feature',
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: 'wt-2', worktreeBranch: 'other-feature' }]]) }))).toBe(false);
+	});
+	it('honors fresh owner-side busy/background-work flags', () => {
+		expect(computeGitControlsStreaming(input({ targetMutationsBlocked: true }))).toBe(true);
+	});
+	it('recognizes a canonical project alias', () => {
+		expect(computeGitControlsStreaming(input({ activeProjectV2Id: 'pv2-1', activeBranch: 'feature',
+			crossDeviceStreaming: new Map([['other', { projectId: 'pv2-1', worktreeId: null, worktreeBranch: 'feature' }]]) }))).toBe(true);
+	});
+	it('does not assume an unidentified worktree is independent', () => {
+		expect(computeGitControlsStreaming(input({ activeIsWorktree: true,
+			crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: 'wt-other' }]]) }))).toBe(true);
+	});
+
 });

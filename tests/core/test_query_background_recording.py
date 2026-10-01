@@ -333,6 +333,58 @@ async def test_background_lane_books_each_run_once(mock_db):
     assert len(keys) == 2 and len(set(keys)) == 2 and all(keys)
 
 
+# ─── delegated sign-in notice ───────────────────────────────────────────────
+
+
+def _error_result(status: int) -> ResultMessage:
+    return ResultMessage(
+        subtype="error_during_execution", duration_ms=5, duration_api_ms=5,
+        is_error=True, num_turns=1, session_id="sdk-1", total_cost_usd=0.0,
+        usage={}, result="Invalid API key", api_error_status=status,
+    )
+
+
+@pytest.mark.parametrize("kind,notified", [("delegated", True), ("anthropic", False)])
+async def test_background_delegated_401_asks_for_a_claude_code_sign_in(mock_db, kind, notified):
+    """Nobody watches a background turn, so an expired Claude Code sign-in on
+    the delegated leg still gets the sign-in notice. Other legs keep the
+    silent background behaviour."""
+    sid = f"bg-401-{kind}"
+    sessions_db.create_session(sid, "default")
+    state = _fake_state(messages=[_error_result(401)])
+    state.adapter.provider_kind = kind
+    pool = StubPool(state)
+
+    with ExitStack() as stack:
+        _bg_patches(stack, pool)
+        notify = stack.enter_context(patch(
+            "app.core.query_engine._emit_api_error_notification", new=AsyncMock(),
+        ))
+        await _run(sid)
+
+    if notified:
+        notify.assert_awaited_once_with(None, sid, 401, delegated=True)
+    else:
+        notify.assert_not_awaited()
+
+
+async def test_background_delegated_429_leaves_the_notice_to_failover(mock_db):
+    sid = "bg-429-delegated"
+    sessions_db.create_session(sid, "default")
+    state = _fake_state(messages=[_error_result(429)])
+    state.adapter.provider_kind = "delegated"
+    pool = StubPool(state)
+
+    with ExitStack() as stack:
+        _bg_patches(stack, pool)
+        notify = stack.enter_context(patch(
+            "app.core.query_engine._emit_api_error_notification", new=AsyncMock(),
+        ))
+        await _run(sid)
+
+    notify.assert_not_awaited()
+
+
 # ─── subagent usage isolation ───────────────────────────────────────────────
 
 

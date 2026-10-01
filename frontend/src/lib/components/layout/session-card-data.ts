@@ -96,6 +96,8 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 /**
  * Resolve a card status from the signals the app already tracks:
  * - streaming (user-wide run map, or an optimistic local send)
+ * - optimisticStreaming (this tab just sent to the session and the server has
+ *   not confirmed the turn yet)
  * - parked (durable parked marker)
  * - backgroundWork (durable running-task summary)
  * - attention (backgroundPermissions map entry — the session is parked on one
@@ -112,6 +114,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 export function deriveStatus(input: {
 	remoteRuntimeState?: Session['remote_runtime_state'];
 	streaming: boolean;
+	optimisticStreaming?: boolean;
 	backgroundWork?: boolean;
 	parked?: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
@@ -130,8 +133,11 @@ export function deriveStatus(input: {
 			case 'offline': return 'offline';
 			case 'unknown': return 'unknown';
 			case 'idle':
+				// The owner's "idle" lags a send from here until it republishes,
+				// so this tab's own send wins over it. Stale user-wide map
+				// entries still do not.
 				return deriveStatus({ ...input, remoteRuntimeState: null,
-					streaming: false, backgroundWork: false, parked: false, attention: null });
+					streaming: !!input.optimisticStreaming, backgroundWork: false, parked: false, attention: null });
 		}
 	}
 	if (input.attention && input.attention.count > 0) {

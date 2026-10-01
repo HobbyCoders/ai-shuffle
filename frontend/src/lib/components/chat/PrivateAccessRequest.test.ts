@@ -41,12 +41,24 @@ describe('PrivateAccessRequest', () => {
 	it('offers the saved server named in the request and grants it without sending credentials', async () => {
 		const { onComplete } = mount();
 		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
-		expect(screen.getByText(/Uses the saved sign-in for/).textContent).toContain('ops@10.0.0.5:22');
+		expect(screen.getByText('ops@10.0.0.5:22')).toBeTruthy();
 		expect(screen.queryByText('Save this connection')).toBeNull();
 		await fireEvent.change(screen.getByLabelText('Access for'), { target: { value: '240' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'build', minutes: 240, save_connection: false });
+	});
+
+	it('keeps the full saved host key in an initially collapsed disclosure', async () => {
+		const fingerprint = `SHA256:${'a'.repeat(64)}`;
+		mount({ savedConnections: [{ ...saved[1], fingerprint }] });
+		const summary = screen.getByText('Host-key fingerprint');
+		const disclosure = summary.closest('details')!;
+		expect(disclosure.open).toBe(false);
+		expect(disclosure.querySelector('code')?.textContent).toBe(fingerprint);
+		await fireEvent.click(summary);
+		expect(disclosure.open).toBe(true);
+		expect(screen.getByText('ops@10.0.0.5:22')).toBeTruthy();
 	});
 
 	it('sends a new connection with save_connection and wipes the password from the form', async () => {

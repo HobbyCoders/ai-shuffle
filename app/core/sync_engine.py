@@ -668,13 +668,17 @@ class SyncEngine:
         self,
         session_id: str,
         queued_messages: list,
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        pending_peer_messages: Optional[list] = None,
     ):
-        """Broadcast updated queue state to all devices watching this session."""
+        """Broadcast snapshots without yielding before the connection enqueue."""
+        data = {"queued_messages": queued_messages}
+        if pending_peer_messages is not None:
+            data["pending_peer_messages"] = pending_peer_messages
         event = SyncEvent(
             event_type="queue_updated",
             session_id=session_id,
-            data={"queued_messages": queued_messages},
+            data=data,
             source_device_id=source_device_id
         )
         # Send to ALL devices (including source) so everyone is in sync
@@ -934,22 +938,38 @@ class SyncEngine:
             global_events.lifecycle(owner_id, message, user_type=audience)
         # Snapshot connections under lock, then release before fan-out
         async with self._user_lock:
-            user_devices = self._user_connections.get(user_id, {})
-            if not user_devices:
-                return
-            targets = [
-                (did, conn) for did, conn in user_devices.items()
-                if conn.device_id != source_device_id
-            ]
+            by_bucket = {
+                bucket: [
+                    (did, conn)
+                    for did, conn in self._user_connections[bucket].items()
+                    if conn.device_id != source_device_id
+                ]
+                for bucket in self._audience_buckets(user_id)
+            }
 
-        if not targets:
-            return
-
-        failed_devices = self._fan_out_to_user_devices(user_id, targets, message)
-        if failed_devices:
-            await self._prune_user_devices(user_id, failed_devices)
+        for bucket, targets in by_bucket.items():
+            if not targets:
+                continue
+            failed_devices = self._fan_out_to_user_devices(bucket, targets, message)
+            if failed_devices:
+                # Registration ids are only unique within a bucket, so prune
+                # each device from the bucket it was found in.
+                await self._prune_user_devices(bucket, failed_devices)
 
     # -- user fan-out helpers ------------------------------------------------
+
+    def _audience_buckets(self, user_id: str) -> List[str]:
+        """Registry buckets a user-level frame addressed to ``user_id`` reaches.
+
+        The owner is one person on several principals: the web app registers
+        as ``"admin"`` and each paired phone as ``"paired:<id>"``. Frames
+        addressed to either must reach all of them, or a turn sent from the
+        phone would light up only the phone. An API key stays in its own
+        bucket. Call under ``_user_lock``.
+        """
+        if _is_owner_user_id(user_id):
+            return [uid for uid in self._user_connections if _is_owner_user_id(uid)]
+        return [user_id] if user_id in self._user_connections else []
 
     def _fan_out_to_user_devices(
         self,

@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.db import network as store
 from app.db.base import get_db
@@ -28,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 HISTORY_DAYS = 30
 EVENT_BATCH = 400
+# Events published per transaction. Publishing holds the network_state row
+# lock (sequence allocation) until commit, and inbound applies wait on it.
+EVENT_CHUNK = 200
+# A scanner pass keeps publishing full batches of a backlog for at most this
+# long (or this many batches) instead of one batch per scan interval.
+EVENT_PASS_SECONDS = 1.0
+EVENT_PASS_BATCHES = 8
 # Peers refuse an envelope field over 4 MiB (``envelope._text``); the sealed
 # payload is base64 of nonce + ciphertext + tag, so bound the plaintext at
 # three quarters of that with room for the AEAD overhead.
@@ -44,10 +52,12 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
     ``sync_records`` for that row): the source of a shared-database cluster
     hands those over, and stops once the owner speaks.
     """
-    sql = "SELECT id FROM sessions WHERE (owner_device_id = %s OR (owner_device_id IS NULL AND instance_id = %s))"
+    sql = ("SELECT id, updated_at FROM sessions "
+           "WHERE (owner_device_id = %s OR (owner_device_id IS NULL AND instance_id = %s))")
     params: List[Any] = [device_id, _my_instance_id()]
     if include_held:
-        sql = ("SELECT s.id FROM sessions s LEFT JOIN sync_records r ON r.collection = 'sessions' AND r.record_id = s.id "
+        sql = ("SELECT s.id, s.updated_at FROM sessions s "
+               "LEFT JOIN sync_records r ON r.collection = 'sessions' AND r.record_id = s.id "
                "WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s) "
                "OR (s.owner_device_id IS NOT NULL AND s.owner_device_id <> %s AND s.instance_id IS NOT NULL "
                "AND (r.origin_device_id IS NULL OR r.origin_device_id = %s)))")
@@ -67,10 +77,13 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
         # client/server round trips for every already-published transcript.
         # Missing/zero cursors still visit the publisher so a cleared stream
         # can retract its old tail before publishing replacement events.
+        # Recently active sessions first: live work must not wait behind an
+        # old backlog.
         sql = (f"SELECT owned.id FROM ({sql}) owned "
                "LEFT JOIN network_catalog_cursors c ON c.session_id = owned.id "
                "WHERE c.published_seq IS NULL OR c.published_seq = 0 OR EXISTS ("
-               "SELECT 1 FROM session_events e WHERE e.session_id = owned.id AND e.seq > c.published_seq)")
+               "SELECT 1 FROM session_events e WHERE e.session_id = owned.id AND e.seq > c.published_seq) "
+               "ORDER BY owned.updated_at DESC, owned.id")
     cursor.execute(sql, tuple(params))
     return [r["id"] for r in cursor.fetchall()]
 
@@ -78,6 +91,16 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
 def _my_instance_id() -> str:
     from app.core.config import settings
     return settings.effective_instance_id
+
+
+def owned_session_ids(session_ids: Iterable[str], *, ctx: Optional[engine.NetworkContext] = None) -> List[str]:
+    """Those of ``session_ids`` this device owns and publishes."""
+    ctx = ctx or engine.context()
+    ids = sorted({sid for sid in session_ids if isinstance(sid, str) and sid})
+    if ctx is None or not ids:
+        return []
+    with get_db() as conn:
+        return _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
 
 
 def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
@@ -89,8 +112,8 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     an owned session (deleted, handed off, or never ours), the whole catalog
     is reconciled instead: a deletion can change other sessions' rows (their
     ``parent_session_id``), and prompt record ids do not name their session.
-    Transcripts always use the incremental all-session probe because event
-    appends have no post-commit hook of their own.
+    Transcripts always use the incremental all-session probe: it is cheap
+    when nothing is new, and it drains other sessions' backlog too.
     """
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
@@ -116,7 +139,12 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     published += publish_runtime(ctx, session_ids=ids)
     published += _publish_child_rows("session_tags", ctx, session_ids=ids)
     published += _publish_child_rows("pending_interactions", ctx, session_ids=ids)
-    published += publish_events(ctx=ctx, recent_only=True)
+    deadline = time.monotonic() + EVENT_PASS_SECONDS
+    for _ in range(EVENT_PASS_BATCHES):
+        count, exhausted = _publish_events(ctx=ctx, recent_only=True, limit=EVENT_BATCH)
+        published += count
+        if not exhausted or time.monotonic() >= deadline:
+            break
     if published:
         engine.kick()
     return published
@@ -218,20 +246,64 @@ def _publish_child_rows(collection: str, ctx: engine.NetworkContext, *,
 def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: bool = True,
                    session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> int:
     """Append new transcript events of owned sessions to the outbox, in seq order."""
+    return _publish_events(ctx=ctx, recent_only=recent_only, session_ids=session_ids, limit=limit)[0]
+
+
+def _publish_events(*, ctx: Optional[engine.NetworkContext], recent_only: bool,
+                    session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> Tuple[int, bool]:
+    """Publish up to ``limit`` events; returns (records published, budget used up).
+
+    Sessions share the budget: each round gives every session that still has
+    events an equal slice, so one long backlog cannot take a whole pass from
+    the sessions after it.
+    """
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
         # While the outbox is held (see ``engine.hold_outbox``) nothing may
         # move the per-session cursor past events that were not published.
-        return 0
+        return 0, False
     coll = policy.collection("session_events")
+    if session_ids is not None:
+        targets = list(dict.fromkeys(session_ids))
+    else:
+        with get_db() as conn:
+            targets = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=recent_only,
+                                         include_held=True, unpublished_only=True)
     count = 0
-    with get_db() as conn:
-        cursor = conn.cursor()
-        targets = session_ids if session_ids is not None else _owned_session_ids(
-            cursor, ctx.device_id, recent_only=recent_only, include_held=True, unpublished_only=True)
-        for session_id in targets:
-            if count >= limit:
+    remaining = max(0, limit)
+    active = targets
+    while remaining > 0 and active:
+        share = max(1, remaining // len(active))
+        more = []
+        for session_id in active:
+            if remaining <= 0:
                 break
+            published, used, has_more = _publish_session_events(ctx, coll, session_id, min(share, remaining))
+            count += published
+            remaining -= used
+            if has_more:
+                more.append(session_id)
+        active = more
+    if count:
+        engine.kick()
+    return count, remaining <= 0
+
+
+def _publish_session_events(ctx: engine.NetworkContext, coll: policy.Collection, session_id: str,
+                            budget: int) -> Tuple[int, int, bool]:
+    """Publish up to ``budget`` of one session's events, ``EVENT_CHUNK`` per commit.
+
+    Each commit keeps a restarted stream's retraction, the events and the
+    cursor together. Returns (records published, budget used, maybe more).
+    """
+    published = used = 0
+    while used < budget:
+        if engine.outbox_held():
+            return published, used, False
+        take = min(EVENT_CHUNK, budget - used)
+        count = 0
+        with get_db() as conn:
+            cursor = conn.cursor()
             published_seq = store.catalog_cursor(cursor, session_id)
             if published_seq == 0:
                 # A cleared transcript restarts at seq 1 (its cursor row is
@@ -240,7 +312,7 @@ def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: 
                 count += _retract_stale_events(cursor, session_id, ctx)
             cursor.execute(
                 "SELECT * FROM session_events WHERE session_id = %s AND seq > %s ORDER BY seq LIMIT %s",
-                (session_id, published_seq, max(1, limit - count)))
+                (session_id, published_seq, take))
             rows = [dict(r) for r in cursor.fetchall()]
             skipped = 0
             for row in rows:
@@ -260,9 +332,12 @@ def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: 
                 logger.warning("Skipped %d unpublishable transcript event(s) of session %s", skipped, session_id)
             if rows:
                 store.set_catalog_cursor(cursor, session_id, published_seq)
-    if count:
-        engine.kick()
-    return count
+        published += count
+        # Skipped events use budget too, so a run of them cannot stall a pass.
+        used += max(len(rows), count)
+        if len(rows) < take:
+            return published, used, False
+    return published, used, True
 
 
 def _retract_stale_events(cursor, session_id: str, ctx: engine.NetworkContext) -> int:
@@ -290,6 +365,7 @@ def hydrate(session_id: str) -> int:
         cursor = conn.cursor()
         if session_id not in _owned_session_ids(cursor, ctx.device_id, recent_only=False):
             return 0
+    # Committed EVENT_CHUNK events at a time, like the scanner's passes.
     return publish_events(ctx=ctx, session_ids=[session_id], limit=1_000_000)
 
 

@@ -19,6 +19,11 @@ describe('git poll cadence (F3)', () => {
 		expect(gitPollIntervalMs(NOW, NOW - 1_000)).toBe(GIT_POLL_ACTIVE_MS);
 	});
 
+	it('keeps an open menu responsive even after the activity window', () => {
+		expect(gitPollIntervalMs(NOW, NOW - 10 * GIT_IDLE_THRESHOLD_MS, true)).toBe(GIT_POLL_ACTIVE_MS);
+		expect(gitPollIntervalMs(NOW, NOW - 10 * GIT_IDLE_THRESHOLD_MS, false)).toBe(GIT_POLL_IDLE_MS);
+	});
+
 	it('falls back to a cheap idle cadence once activity stops', () => {
 		expect(isGitActive(NOW, NOW - GIT_IDLE_THRESHOLD_MS)).toBe(false);
 		expect(gitPollIntervalMs(NOW, NOW - GIT_IDLE_THRESHOLD_MS)).toBe(GIT_POLL_IDLE_MS);

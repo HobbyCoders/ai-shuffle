@@ -27,9 +27,9 @@ import {
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
-import type { QueuedMessage, Task } from '../../types';
+import type { ChatMessage, QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
-import { pendingQueue } from '../pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
@@ -128,6 +128,26 @@ let usageApplied = false;
 // confirms a live turn, so a fold that lands between the two can no longer flip
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
+
+// ─── Progressive paint during a long backfill ────────────────────────────────
+//
+// Hydration is atomic: nothing paints until `caught_up`. On a long log that is a
+// spinner for as long as the whole backfill takes to stream and reduce. A quick
+// load stays atomic, but once a backfill has been flowing for
+// PROGRESSIVE_PAINT_AFTER_MS the messages reduced so far are published at a
+// bounded cadence. Only `messages` is published: loading/restoring flags,
+// streaming state and tasks still wait for the real sentinel, and so does the
+// transcript cache (R1).
+export const PROGRESSIVE_PAINT_AFTER_MS = 1_500;
+export const PROGRESSIVE_PAINT_EVERY_MS = 1_000;
+export const PROGRESSIVE_PAINT_EVERY_EVENTS = 2_000;
+let backfillFirstFrameAt = 0;
+let lastInterimFoldAt = 0;
+let eventsSinceInterimFold = 0;
+// The array the last interim fold handed to activeSession. Everything in it came
+// from the reducer, so seedOptimistic only needs to look past it; rescanning it
+// would re-seed messages a replayed rewind has removed since that paint.
+let interimMessages: ChatMessage[] | null = null;
 
 // ─── Hydration floor ──────────────────────────────────────────────────────────
 //
@@ -300,6 +320,10 @@ interface CachedTranscript {
 	lastSeq: number;
 	/** Whether the feed had already published usage numbers (finding W7). */
 	usageApplied: boolean;
+	/** Server log epoch `lastSeq` belongs to, sent on resume so a rewritten log
+	 *  answers with `reset`. Null when the server reports none (older servers):
+	 *  such an entry cannot be verified on resume. */
+	epoch: string | null;
 	cachedAt: number;
 }
 
@@ -337,6 +361,7 @@ function captureTranscript(): void {
 		state: sealState(reducerState),
 		lastSeq: reducerState.lastSeq,
 		usageApplied,
+		epoch: feed?.epoch ?? null,
 		cachedAt: Date.now(),
 	});
 	while (transcriptCache.size > TRANSCRIPT_CACHE_MAX) {
@@ -367,7 +392,16 @@ function seedOptimistic(): void {
 	if (!deps) return;
 	const app = deps.getState();
 	if (app.sessionId !== currentSessionId) return;
-	for (const m of app.messages) {
+	const painted = interimMessages;
+	const from =
+		painted &&
+		painted.length > 0 &&
+		app.messages.length >= painted.length &&
+		app.messages[painted.length - 1] === painted[painted.length - 1]
+			? painted.length
+			: 0;
+	for (let i = from; i < app.messages.length; i++) {
+		const m = app.messages[i];
 		if (m.role !== 'user') continue;
 		const known = reducerState.messages.some(
 			(r) => r.id === m.id || (!!m.commandId && r.commandId === m.commandId)
@@ -488,15 +522,48 @@ function fold(hydrationComplete = false): void {
 	// can never claim ownership on the fed session's behalf.
 	if (reducerState.usage !== null) usageApplied = true;
 	if (hydrationComplete) transcriptPublished = true;
+	interimMessages = null;
 	deps.update((s) =>
 		s.sessionId === currentSessionId
 			? {
 					...s,
 					...patch,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
+					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 				}
 			: s
 	);
+}
+
+/**
+ * Publish the messages reduced so far while a long backfill is still batching
+ * (see PROGRESSIVE_PAINT_AFTER_MS). Called per backfilled event; a no-op until
+ * the backfill has run long enough, then at most once per interval.
+ */
+function maybeInterimFold(): void {
+	// Only while the user is still looking at the loading state. A cache resume or
+	// a floor-driven publish already shows a transcript; repainting it mid-backfill
+	// would visibly rebuild it (S1).
+	if (transcriptPublished) return;
+	const now = Date.now();
+	if (backfillFirstFrameAt === 0) {
+		backfillFirstFrameAt = now;
+		return;
+	}
+	eventsSinceInterimFold++;
+	if (now - backfillFirstFrameAt < PROGRESSIVE_PAINT_AFTER_MS) return;
+	if (
+		now - lastInterimFoldAt < PROGRESSIVE_PAINT_EVERY_MS &&
+		eventsSinceInterimFold < PROGRESSIVE_PAINT_EVERY_EVENTS
+	) {
+		return;
+	}
+	if (!deps || deps.getState().sessionId !== currentSessionId) return;
+	lastInterimFoldAt = now;
+	eventsSinceInterimFold = 0;
+	const messages = releaseMessages(reducerState);
+	interimMessages = messages;
+	deps.update((s) => (s.sessionId === currentSessionId ? { ...s, messages } : s));
 }
 
 // ─── Flush scheduling ─────────────────────────────────────────────────────────
@@ -659,6 +726,14 @@ export interface FeedController {
 	/** Drop one session's cached transcript (delete / fork / out-of-band
 	 *  rewrite), or the whole cache when called with no argument. */
 	invalidate: (sessionId?: string) => void;
+	/** Drop only cached transcripts without a server log epoch. Entries with one
+	 *  are checked by the server when they resume (a rewritten log answers with
+	 *  `reset`), so a missed out-of-band signal cannot leave them stale. */
+	invalidateUnverified: () => void;
+	/** Whether the feed for this session knows its server log epoch, so a
+	 *  `revive()` resume is checked against a rewritten log. False on servers
+	 *  that report none, and before the first `caught_up` of a fresh load. */
+	hasLogEpoch: (sessionId: string) => boolean;
 
 	// ── Field ownership (W7) ───────────────────────────────────────
 	/**
@@ -697,6 +772,10 @@ function resetFeedFlags(): void {
 	hydrationSlow = false;
 	usageApplied = false;
 	resumeFromSeq = 0;
+	backfillFirstFrameAt = 0;
+	lastInterimFoldAt = 0;
+	eventsSinceInterimFold = 0;
+	interimMessages = null;
 }
 
 /**
@@ -786,6 +865,7 @@ export const feedController: FeedController = {
 		pendingQueue.reset(sessionId);
 		feed = createSseFeed(sessionId, {
 			fromSeq: resumeFromSeq,
+			epoch: cached ? cached.epoch : null,
 			onOpen: () => {
 				if (generation !== feedGeneration) return;
 				swarms.refreshKnown(sessionId);
@@ -814,6 +894,17 @@ export const feedController: FeedController = {
 					// Hydration finished on a REAL sentinel — the only state exact
 					// enough to cache (invalidation rule R1).
 					captureTranscript();
+					return;
+				}
+				// The server rewrote this log since the epoch our resume cursor came
+				// from (cleared, restored, reseeded), so neither the cursor nor the
+				// state built on it means anything. Reload it from seq 0.
+				if (type === 'reset') {
+					console.info(
+						`[feedController] event log for ${sessionId} changed on the server; reloading it`
+					);
+					transcriptCache.delete(sessionId);
+					feedController.restart(sessionId);
 					return;
 				}
 				// Optional server preamble ("I am alive, backfill is coming"). The
@@ -898,10 +989,14 @@ export const feedController: FeedController = {
 				) {
 					deps?.resolveInteractionByRequestId(ev.request_id);
 				}
-				// During backfill (!caughtUp) accumulate silently — the single fold
-				// happens on `caught_up`. After catch-up, fold on the live cadence:
-				// throttled for streaming deltas, next-frame for everything else.
-				if (!caughtUp) return;
+				// During backfill (!caughtUp) accumulate — the complete fold happens
+				// on `caught_up`, with interim paints only for a long backfill. After
+				// catch-up, fold on the live cadence: throttled for streaming deltas,
+				// next-frame for everything else.
+				if (!caughtUp) {
+					maybeInterimFold();
+					return;
+				}
 				if (
 					ev.type === 'tool.use' &&
 					typeof ev.name === 'string' &&
@@ -996,6 +1091,16 @@ export const feedController: FeedController = {
 	invalidate(sessionId?: string) {
 		if (sessionId === undefined) transcriptCache.clear();
 		else transcriptCache.delete(sessionId);
+	},
+
+	invalidateUnverified() {
+		for (const [id, entry] of transcriptCache) {
+			if (!entry.epoch) transcriptCache.delete(id);
+		}
+	},
+
+	hasLogEpoch(sessionId: string) {
+		return feed !== null && currentSessionId === sessionId && !!feed.epoch;
 	},
 
 	hasAppliedUsage(sessionId: string) {

@@ -991,6 +991,16 @@ def set_session_run_binding(
         )
 
 
+def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:
+    """Pin call transport separately from the conversation's text model/provider."""
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET voice_config = {ph()} WHERE id = {ph()}",
+            (json.dumps(config), session_id),
+        )
+
+
 def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> None:
     """Apply a validated sparse voice PATCH: missing is unchanged, null clears.
 
@@ -1007,7 +1017,7 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET {assignments} WHERE id = {placeholder} AND mode = 'voice'",
+            f"UPDATE sessions SET {assignments} WHERE id = {placeholder}",
             [*changes.values(), session_id],
         )
 
@@ -2007,7 +2017,10 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
         # continuing the old counter instead would splice the NEXT
         # conversation's events onto the stale transcript of any tab that
         # missed that broadcast. Same treatment ``delete_session`` gives both
-        # tables via ``_SESSION_RUNTIME_TABLES``.
+        # tables via ``_SESSION_RUNTIME_TABLES``. Deleting every row also
+        # changes the log epoch (``session_events.get_log_epoch``, the id of the
+        # first row), which is how a tab resuming with ``from_seq`` + ``epoch``
+        # learns its cursor is stale and gets a ``reset`` instead of silence.
         cursor.execute(
             f"DELETE FROM session_events WHERE session_id = {_ph}",
             (session_id,),

@@ -1,5 +1,6 @@
-"""Optional account credits, using a local management key on the official API."""
+"""Account credits from the existing model key on OpenRouter's official API."""
 
+import hashlib
 import math
 import time
 
@@ -15,6 +16,14 @@ SNAPSHOT_PREFIX = "openrouter-account:"
 
 
 supported = usage_sources.is_official_openrouter_row
+
+
+def model_key_generation(row):
+    """Opaque identity for the existing inference credential; never a token."""
+    token = (row or {}).get("auth_token")
+    if not isinstance(token, str) or not token:
+        return None
+    return "model:" + hashlib.sha256(token.encode()).hexdigest()
 
 
 def normalize(body):
@@ -39,14 +48,26 @@ async def poll(row):
     provider_id = row["id"]
     setting = SETTING_PREFIX + provider_id
     snapshot = SNAPSHOT_PREFIX + provider_id
+    # Preserve an already-configured legacy credential, but never require one.
     generation = await run_sync(db.get_system_setting_revision, setting)
-    if not generation:
-        return
     denied = None
     try:
-        key = await run_sync(get_decrypted_api_key, setting)
-        if await run_sync(db.get_system_setting_revision, setting) != generation:
-            return
+        if generation:
+            key = await run_sync(get_decrypted_api_key, setting)
+            if await run_sync(db.get_system_setting_revision, setting) != generation:
+                return
+            source = "openrouter_management"
+        else:
+            from app.core.provider_usage import _decrypt_provider_auth_token
+
+            current = await run_sync(db.get_model_provider, provider_id, include_token=True)
+            if not current or not supported(current) or not current.get("enabled", True):
+                return
+            generation = model_key_generation(current)
+            if not generation:
+                return
+            key = _decrypt_provider_auth_token(current)
+            source = "openrouter_model_key"
         error = "missing_credentials"
         if key:
             headers = {"Authorization": f"Bearer {key}"}
@@ -67,7 +88,7 @@ async def poll(row):
                 credits = normalize(response.json())
                 if credits is not None:
                     await run_sync(db.upsert_provider_usage_snapshot, snapshot, "openrouter_account",
-                                   None, [], credits, {"source": "openrouter_management"},
+                                   None, [], credits, {"source": source},
                                    int(time.time() * 1000), expected_credential_generation=generation)
                     return
     except UsageDeferred:

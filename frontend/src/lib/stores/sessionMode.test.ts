@@ -13,6 +13,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const { register } = vi.hoisted(() => ({ register: vi.fn() }));
+vi.mock('$lib/services/preferences', () => ({ preferenceSync: { register, save: vi.fn() } }));
+
 async function freshStore() {
 	vi.resetModules();
 	return import('./sessionMode.svelte');
@@ -70,12 +73,30 @@ describe('appMode persistence', () => {
 
 	it('writes the pick to localStorage and reads it back on a fresh load', async () => {
 		const first = await freshStore();
-		first.appMode.set('voice');
-		expect(first.appMode.current).toBe('voice');
-		expect(localStorage.getItem('ai-shuffle.sessionMode')).toBe('voice');
+		first.appMode.set('chat');
+		expect(first.appMode.current).toBe('chat');
+		expect(localStorage.getItem('ai-shuffle.sessionMode')).toBe('chat');
 
 		const second = await freshStore();
-		expect(second.appMode.current).toBe('voice');
+		expect(second.appMode.current).toBe('chat');
+	});
+
+	it('reloads a persisted voice lane as chat — voice is a call, not a new conversation', async () => {
+		localStorage.setItem('ai-shuffle.sessionMode', 'voice');
+		const { appMode, newConversationMode } = await freshStore();
+		expect(appMode.current).toBe('chat');
+		expect(newConversationMode('voice')).toBe('chat');
+		expect(newConversationMode(null)).toBe('code');
+	});
+
+	it('applies a server-synced voice preference as chat', async () => {
+		register.mockClear();
+		const { appMode } = await freshStore();
+		const apply = register.mock.calls.find(([key]) => key === 'session_mode')?.[1].apply;
+		expect(apply).toBeTypeOf('function');
+		apply!('voice');
+		expect(appMode.current).toBe('chat');
+		expect(localStorage.getItem('ai-shuffle.sessionMode')).toBe('chat');
 	});
 
 	it('hydrates a garbage stored value as code without clearing it', async () => {

@@ -230,6 +230,12 @@ def context(*, refresh: bool = False) -> Optional[NetworkContext]:
     return load_context()
 
 
+def cached_context() -> Optional[NetworkContext]:
+    """The loaded context, never read from the database (hot-path hooks)."""
+    with _lock:
+        return _context
+
+
 def require_context() -> NetworkContext:
     ctx = context()
     if ctx is None:
@@ -1030,15 +1036,15 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         # A peer on an older build still publishes a collection this build
         # retired: consume the op (the watermark moves) but never store,
         # materialize or forward it.
-        store.observe_clock(cursor, env.clock)
+        _observe_clock(cursor, env.clock)
         return "applied"
     coll = policy.collection(env.collection) if env.collection in policy.COLLECTIONS else None
     if coll is None:
         # Unknown collection (newer peer): keep the op for forwarding, skip materialization.
         store.insert_op(cursor, env.to_dict(), store.LANE_SETTINGS)
-        store.observe_clock(cursor, env.clock)
+        _observe_clock(cursor, env.clock)
         return "applied"
-    store.observe_clock(cursor, env.clock)
+    _observe_clock(cursor, env.clock)
     try:
         from app.network.keyring import open_envelope
         plaintext, _decryption_key = open_envelope(ctx, env)
@@ -1265,38 +1271,163 @@ def _ensure_safe_write_key(ctx: NetworkContext) -> NetworkContext:
     return current
 
 
+# Envelopes applied per transaction. Small on purpose: the chunk observes the
+# Lamport clock on the network_state row, and a local write (``record``)
+# needs that row lock too.
+APPLY_CHUNK = 64
+
+# Set while a chunk applies: the highest clock seen, observed once at the end
+# of the chunk instead of one network_state update per envelope.
+_deferred_clock = threading.local()
+
+
+def _observe_clock(cursor, clock: int) -> None:
+    box = getattr(_deferred_clock, "box", None)
+    if box is not None:
+        box[0] = max(box[0], int(clock))
+        return
+    store.observe_clock(cursor, clock)
+
+
+def _count_outcome(result: ApplyResult, outcome: str) -> None:
+    if outcome == "applied":
+        result.applied += 1
+    elif outcome == "duplicate":
+        result.duplicate += 1
+    elif outcome == "pending":
+        result.pending += 1
+    elif outcome == "lost":
+        result.lost += 1
+    elif outcome == "rejected":
+        result.rejected += 1
+
+
+def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
+    into.applied += part.applied
+    into.duplicate += part.duplicate
+    into.pending += part.pending
+    into.rejected += part.rejected
+    into.retry += part.retry
+    into.lost += part.lost
+    into.own_ahead = max(into.own_ahead, part.own_ahead)
+    into.reasons.extend(part.reasons)
+    into.touched.extend(part.touched)
+
+
+class _ChunkAbandoned(Exception):
+    """Roll the chunk back and apply its envelopes one transaction each."""
+
+
+def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult) -> None:
+    """One envelope in its own transaction (the fallback for a chunk that failed)."""
+    try:
+        with get_db() as conn:
+            outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
+    except TransientApplyError as exc:
+        result.retry += 1
+        result.reasons.append(str(exc))
+        return
+    except ApplyError as exc:
+        result.rejected += 1
+        result.reasons.append(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001 - keep the loop alive; log once per op
+        logger.warning("Applying an operation failed: %s", exc, exc_info=True)
+        result.retry += 1
+        result.reasons.append("apply failed")
+        return
+    _count_outcome(result, outcome)
+
+
+def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult) -> bool:
+    """Apply envelopes in one transaction, each under its own savepoint.
+
+    A refused envelope rolls back to its savepoint and the rest of the chunk
+    goes on, as if each had its own transaction. Without savepoints (the
+    SQLite test shim, see ``_savepoint``) any refusal abandons the chunk.
+    Returns False when nothing was committed: the caller then applies the
+    chunk one envelope per transaction.
+    """
+    part = ApplyResult()
+    box = [0]
+    _deferred_clock.box = box
+    # Observe the chunk's highest clock FIRST. engine.record() locks
+    # network_state before the sync_records row, and so did the old
+    # per-envelope apply; taking the record locks for a whole chunk and
+    # touching network_state only at commit would invert that order and
+    # deadlock against a concurrent scanner publish of the same record.
+    # Observing a higher Lamport clock early is harmless.
+    seen = 0
+    for data in chunk:
+        try:
+            seen = max(seen, int(data.get("clock") or 0))
+        except (TypeError, ValueError):
+            continue
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            savepoints = type(cursor).__module__.startswith("psycopg2")
+            if seen:
+                store.observe_clock(cursor, seen)
+            for data in chunk:
+                if savepoints:
+                    cursor.execute("SAVEPOINT apply_envelope")
+                try:
+                    outcome = apply_envelope(cursor, data, ctx=ctx, result=part)
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    if not savepoints:
+                        raise _ChunkAbandoned() from exc
+                    cursor.execute("ROLLBACK TO SAVEPOINT apply_envelope")
+                    cursor.execute("RELEASE SAVEPOINT apply_envelope")
+                    if isinstance(exc, TransientApplyError):
+                        part.retry += 1
+                        part.reasons.append(str(exc))
+                    elif isinstance(exc, ApplyError):
+                        part.rejected += 1
+                        part.reasons.append(str(exc))
+                    else:
+                        logger.warning("Applying an operation failed: %s", exc, exc_info=True)
+                        part.retry += 1
+                        part.reasons.append("apply failed")
+                    continue
+                if savepoints:
+                    # A "rejected" outcome may have moved the watermark: keep it.
+                    cursor.execute("RELEASE SAVEPOINT apply_envelope")
+                _count_outcome(part, outcome)
+            _deferred_clock.box = None
+            if box[0] > seen:
+                # Only clocks found while draining pending ops exceed the
+                # chunk's own.
+                store.observe_clock(cursor, box[0])
+    except _ChunkAbandoned:
+        return False
+    except Exception:  # noqa: BLE001 - e.g. the commit failed; nothing of the chunk landed
+        logger.debug("Applying a chunk of %d operations failed; applying them one by one",
+                     len(chunk), exc_info=True)
+        return False
+    finally:
+        _deferred_clock.box = None
+    _merge_result(result, part)
+    return True
+
+
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 ctx: NetworkContext | None = None) -> ApplyResult:
-    """Apply a batch in one transaction per envelope so one bad op cannot poison the rest."""
+    """Apply a batch in chunks of ``APPLY_CHUNK`` envelopes per transaction.
+
+    One bad op cannot poison the rest: each envelope applies under its own
+    savepoint, and a chunk that cannot commit is applied again one
+    transaction per envelope.
+    """
     ctx = ctx or require_context()
     result = ApplyResult()
-    for data in envelopes:
-        try:
-            with get_db() as conn:
-                outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
-        except TransientApplyError as exc:
-            result.retry += 1
-            result.reasons.append(str(exc))
+    items = list(envelopes)
+    for start in range(0, len(items), APPLY_CHUNK):
+        chunk = items[start:start + APPLY_CHUNK]
+        if len(chunk) > 1 and _apply_chunk(chunk, ctx, result):
             continue
-        except ApplyError as exc:
-            result.rejected += 1
-            result.reasons.append(str(exc))
-            continue
-        except Exception as exc:  # noqa: BLE001 - keep the loop alive; log once per op
-            logger.warning("Applying an operation failed: %s", exc, exc_info=True)
-            result.retry += 1
-            result.reasons.append("apply failed")
-            continue
-        if outcome == "applied":
-            result.applied += 1
-        elif outcome == "duplicate":
-            result.duplicate += 1
-        elif outcome == "pending":
-            result.pending += 1
-        elif outcome == "lost":
-            result.lost += 1
-        elif outcome == "rejected":
-            result.rejected += 1
+        for data in chunk:
+            _apply_one(data, ctx, result)
     if result.own_ahead:
         restored_from_backup(result.own_ahead, ctx.identity.incarnation,
                              evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id)

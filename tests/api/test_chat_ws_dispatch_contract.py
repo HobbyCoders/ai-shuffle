@@ -220,8 +220,9 @@ async def _connect(env, *, api_user=None, device_id="dev-1"):
     )
     conn = _Conn(wire, task, box, env.sync)
     try:
-        # The connect snapshot is the first frame on every socket.
-        await conn.wait_for(lambda fs: len(fs) >= 1)
+        # The connect snapshots (streaming sessions, then pending prompts) are
+        # the first two frames on every socket.
+        await conn.wait_for(lambda fs: len(fs) >= 2)
         yield conn
     finally:
         if not task.done():
@@ -252,7 +253,7 @@ def _queue_frame(session_id, rows):
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": session_id,
-        "data": {"queued_messages": rows},
+        "data": {"queued_messages": rows, "pending_peer_messages": []},
     }
 
 
@@ -321,6 +322,10 @@ async def test_connect_sends_the_streaming_sessions_snapshot_first(ws_env):
             "session_ids": [],
         }
         assert first["_seq"] == 1
+        assert _strip(conn.raw[1]) == {
+            "type": "session_attention_snapshot",
+            "sessions": [],
+        }
     ws_env.sync.register_user_device.assert_awaited_once()
     ws_env.sync.unregister_user_device.assert_awaited_once()
 
@@ -410,8 +415,8 @@ async def test_rate_limited_frames_are_refused_without_dispatch(ws_env, monkeypa
     async with _connect(ws_env) as conn:
         for i in range(4):
             conn.wire.push({"type": "load_session", "session_id": f"s-{i}"})
-        await conn.wait_for(lambda fs: len(fs) >= 5)
-        replies = conn.frames()[1:]
+        await conn.wait_for(lambda fs: len(fs) >= 6)
+        replies = conn.frames()[2:]
         # Three dispatched, the fourth refused before it reached a handler.
         assert replies[:3] == [
             {"type": "session_not_found", "session_id": f"s-{i}"} for i in range(3)
@@ -428,8 +433,8 @@ async def test_rate_limit_error_frame_has_the_documented_shape(ws_env, monkeypat
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "close_session"})
         conn.wire.push({"type": "close_session"})
-        await conn.wait_for(lambda fs: len(fs) >= 3)
-        assert conn.frames()[1:] == [
+        await conn.wait_for(lambda fs: len(fs) >= 4)
+        assert conn.frames()[2:] == [
             {"type": "session_closed", "session_id": None},
             {"type": "error", "message": "Rate limited: too many messages. Please slow down."},
         ]
@@ -575,10 +580,10 @@ async def test_watch_session_sends_the_queue_as_the_documented_sync_frame(ws_env
         assert conn.handler.current_session_id == sid
 
 
-async def test_watch_session_with_an_empty_queue_sends_nothing(ws_env):
+async def test_watch_session_with_an_empty_queue_sends_complete_snapshot(ws_env):
     sid = _make_session("sess-w0")
     async with _connect(ws_env) as conn:
-        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == []
+        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == [_queue_frame(sid, [])]
         assert conn.handler.current_session_id == sid
     ws_env.sync.register_device.assert_awaited_once_with("dev-1", sid, conn.wire.ws)
 
@@ -1069,7 +1074,7 @@ async def test_remove_queued_message_removes_the_chip(ws_env):
         )
     assert replies == [_queue_frame(sid, [_queue_row(keep, sid, 0)])]
     assert turns_db.get_turn(drop["id"])["state"] == "aborted"
-    ws_env.sync.broadcast_queue_updated.assert_awaited_with(sid, [_queue_row(keep, sid, 0)])
+    ws_env.sync.broadcast_queue_updated.assert_awaited_with(sid, [_queue_row(keep, sid, 0)], pending_peer_messages=[])
 
 
 async def test_remove_queued_message_already_delivered_stays(ws_env, monkeypatch):

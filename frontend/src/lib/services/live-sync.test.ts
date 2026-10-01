@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn() }));
+const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn(),
+ feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn()} }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{current:{status:{preview_access:false}},subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
 vi.mock('./resource-sync', async (importOriginal) => {
@@ -13,7 +14,7 @@ vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,active
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
-vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:{invalidate:vi.fn()}}));
+vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:m.feed}));
 vi.mock('$lib/stores/theme.svelte',()=>({}));
 vi.mock('$lib/stores/timezonePreference.svelte',()=>({}));
 vi.mock('$lib/stores/chatPreferences.svelte',()=>({}));
@@ -52,7 +53,7 @@ class Socket {
 }
 let stop:()=>void;
 function account(username:string|null) {m.listener?.({loading:false,status:{authenticated:!!username,username,preference_identity:username ? {user_type:'admin',user_id:username} : null}});}
-beforeEach(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
+beforeEach(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});vi.useFakeTimers();vi.clearAllMocks();(activeSession.current as {sessionId:string|null}).sessionId=null;m.feed.isFeeding.mockReturnValue(false);m.feed.hasLogEpoch.mockReturnValue(false);Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
  it('delivers a scoped socket access change through the real resource subscriber to the approval card', async () => {
@@ -121,6 +122,38 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(m.reconnect).toHaveBeenCalledTimes(3);expect(m.invalidate).toHaveBeenCalledTimes(2);
   socket.emit({type:'preferences_changed',keys:['theme','theme',17]});expect(m.refresh).toHaveBeenCalledTimes(1);
   socket.emit({type:'resources_changed',resources:['notes',null]});expect(m.invalidate).toHaveBeenLastCalledWith(['notes']);
+ });
+ it('leaves the open transcript alone on the first sync_ready and resumes it at the cursor after a reconnect',async()=>{
+  (activeSession.current as {sessionId:string|null}).sessionId='s1';
+  m.feed.isFeeding.mockReturnValue(true);m.feed.hasLogEpoch.mockReturnValue(true);
+  stop=startLiveSync();account('alice');m.feed.invalidate.mockClear();
+  // The feed started its own load before this socket existed; nothing was missed.
+  Socket.all[0].emit({type:'sync_ready'});
+  expect(m.feed.restart).not.toHaveBeenCalled();expect(m.feed.revive).not.toHaveBeenCalled();
+  expect(m.feed.invalidate).not.toHaveBeenCalled();expect(m.feed.invalidateUnverified).not.toHaveBeenCalled();
+  // A reconnect follows a gap: resume at the cursor, the server checks the epoch.
+  Socket.all[0].close();await vi.advanceTimersByTimeAsync(1000);
+  Socket.all[1].emit({type:'sync_ready'});
+  expect(m.feed.revive).toHaveBeenCalledExactlyOnceWith('s1');
+  expect(m.feed.invalidateUnverified).toHaveBeenCalledOnce();
+  expect(m.feed.restart).not.toHaveBeenCalled();expect(m.feed.invalidate).not.toHaveBeenCalled();
+ });
+ it('reloads the open transcript after a reconnect when the server reports no log epoch',()=>{
+  (activeSession.current as {sessionId:string|null}).sessionId='s1';
+  m.feed.isFeeding.mockReturnValue(true);
+  stop=startLiveSync();account('alice');
+  Socket.all[0].emit({type:'sync_ready'});Socket.all[0].emit({type:'sync_ready'});
+  expect(m.feed.restart).toHaveBeenCalledExactlyOnceWith('s1');expect(m.feed.revive).not.toHaveBeenCalled();
+ });
+ it('drops cached transcripts on an owner change and treats the next sync_ready as the first',()=>{
+  (activeSession.current as {sessionId:string|null}).sessionId='s1';
+  m.feed.isFeeding.mockReturnValue(true);
+  stop=startLiveSync();account('alice');Socket.all[0].emit({type:'sync_ready'});
+  m.feed.invalidate.mockClear();
+  account('bob');
+  expect(m.feed.invalidate).toHaveBeenCalledOnce();
+  Socket.all[1].emit({type:'sync_ready'});
+  expect(m.feed.restart).not.toHaveBeenCalled();expect(m.feed.revive).not.toHaveBeenCalled();
  });
  it('ignores loading auth polls and isolates account changes; late messages cannot update the next user',()=>{
   localStorage.setItem('ai-shuffle-preferences-owner','admin:alice');stop=startLiveSync();account('bob');

@@ -1712,6 +1712,14 @@ async def dispatch_worker(
     # ``parent_session_id`` at depth 1; differs for a nested dispatch, where
     # ``parent_session_id`` is the ROOT (card routing only).
     owner_session_id = context_session_id or parent_session_id
+    if owner_session_id:
+        from app.db import turns as turns_db
+        def proactive_caller():
+            turn = turns_db.get_live_turn(owner_session_id) or turns_db.get_latest_turn(owner_session_id) or {}
+            return ((turn.get("payload") or {}).get("_assistant_proactive") is not None
+                    or (turn.get("overrides") or {}).get("_assistant_proactive") is not None)
+        if await run_sync(proactive_caller):
+            return WorkerOutcome(ok=False, session_id="", error="Background observation cannot delegate execution.")
     nested = bool(owner_session_id) and owner_session_id != parent_session_id
     first_frame_seconds, max_wall_seconds = await asyncio.to_thread(
         _worker_deadlines, background, first_frame_seconds, max_wall_seconds, provider_id
@@ -1798,6 +1806,10 @@ async def dispatch_worker(
                 # one-shot backfill.
                 is_worker=True,
             )
+            from app.core.assistant_service import home_for_session, link_job
+            home = home_for_session(context_session_id or parent_session_id)
+            if home:
+                link_job(home, worker_session_id)
             if branch:
                 database.set_session_branch(
                     worker_session_id, branch, project_v2_id

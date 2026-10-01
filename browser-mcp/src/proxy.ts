@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOL_DEFINITIONS } from "./tools/index.js";
+import { TOOL_CATALOG } from "./catalog.js";
 import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import { errorResult } from "./tools/result.js";
 
@@ -38,7 +38,7 @@ export async function forwardTool(name: string, args: Record<string, unknown>, e
 
 export async function startProxy(): Promise<void> {
   const server = new Server({ name: "browser", version: "0.1.0" }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_CATALOG.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) }));
   server.setRequestHandler(CallToolRequestSchema, request => forwardTool(request.params.name, request.params.arguments ?? {}));
   // EOF owns only this transport, never the app-owned runtime or its tabs.
   process.stdin.on("end", () => process.exit(0));

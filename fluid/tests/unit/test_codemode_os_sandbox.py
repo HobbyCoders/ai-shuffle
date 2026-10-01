@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import pwd
 import shutil
 import sys
 from pathlib import Path
@@ -28,6 +27,8 @@ from fluid.codemode import os_sandbox
 from fluid.codemode import subprocess_kernel as sk
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+
+pwd = pytest.importorskip("pwd")  # POSIX only; bwrap does not exist on Windows
 
 
 @pytest.fixture(autouse=True)

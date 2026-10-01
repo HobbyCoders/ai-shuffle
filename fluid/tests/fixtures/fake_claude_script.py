@@ -20,7 +20,8 @@ Script shape::
   {
     "version": "2.1.280 (Claude Code)",       # ``claude --version`` text
     "spawn_exit": {"code": 1, "stderr": "."}, # exit before any frame
-    "init": {"tools": [...], "model": "...", "session_id": "..."},
+    "init": {"tools": [...], "model": "...", "session_id": "...",
+             "claude_code_version": "...", "apiKeySource": "..."},
     "context_usage": "answer" | "error" | "mute",   # get_context_usage replies
     "controls": {"<subtype>": "error" | "mute" | {"late": s}},
                                               # how other control requests
@@ -36,6 +37,13 @@ Script shape::
   }                                           # with --resume
 
 A ``--resume <id>`` argument becomes the session id, as with the real CLI.
+Like CLI 2.1.285, ``set_permission_mode`` to ``bypassPermissions`` is refused
+(``bypass_not_launched``) unless the process was launched with
+``--permission-mode bypassPermissions`` or
+``--allow-dangerously-skip-permissions``.
+
+Stdin is read on a background thread into a queue, so a step with a timeout
+works on every platform (``select`` on a pipe fails on Windows).
 
 Steps (``op``):
 
@@ -73,8 +81,9 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-import select
+import queue
 import sys
+import threading
 import time
 
 TIMEOUT = object()
@@ -114,6 +123,23 @@ class Fake:
         self.allowed = [p for p in allowed.split(",") if p]
         self.sid = _flag("--resume") or (script.get("init") or {}).get("session_id", "cli-sess-1")
         self.msg_counter = 0
+        # The real CLI's isBypassPermissionsModeAvailable, fixed at launch.
+        self.bypass_available = (
+            self.mode == "bypassPermissions" or "--allow-dangerously-skip-permissions" in sys.argv
+        )
+        self.chunks: queue.Queue[bytes] = queue.Queue()
+        threading.Thread(target=self._pump_stdin, daemon=True).start()
+
+    def _pump_stdin(self) -> None:
+        """Move stdin into ``chunks``; an empty chunk marks EOF."""
+        while True:
+            try:
+                chunk = os.read(0, 1 << 16)
+            except OSError:
+                chunk = b""
+            self.chunks.put(chunk)
+            if not chunk:
+                return
 
     # ─── io ──────────────────────────────────────────────────────────────
 
@@ -139,10 +165,12 @@ class Fake:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return TIMEOUT
-                ready, _, _ = select.select([0], [], [], remaining)
-                if not ready:
+                try:
+                    chunk = self.chunks.get(timeout=remaining)
+                except queue.Empty:
                     return TIMEOUT
-            chunk = os.read(0, 1 << 16)
+            else:
+                chunk = self.chunks.get()
             if not chunk:
                 self.eof = True
             self.buf += chunk
@@ -187,6 +215,18 @@ class Fake:
             payload = {"commands": [], "output_style": "default"}
         elif subtype == "interrupt":
             self.interrupted = True
+        elif (
+            subtype == "set_permission_mode"
+            and req.get("mode") == "bypassPermissions"
+            and not self.bypass_available
+        ):
+            self.emit({"type": "control_response", "response": {
+                "subtype": "error", "request_id": rid,
+                "error": "bypass_not_launched: Cannot set permission mode to "
+                         "bypassPermissions because the session was not launched "
+                         "with --dangerously-skip-permissions",
+            }})
+            return
         elif subtype in ("set_permission_mode", "set_model"):
             how = (self.script.get("controls") or {}).get(subtype)
             if isinstance(how, dict):
@@ -397,6 +437,8 @@ class Fake:
             "tools": init.get("tools", ["Bash", "Read", "Edit", "mcp__fluid_bundled__Recall"]),
             "mcp_servers": init.get("mcp_servers", [{"name": "fluid_bundled", "status": "connected"}]),
             "permissionMode": self.mode, "cwd": os.getcwd(),
+            "claude_code_version": init.get("claude_code_version", "2.1.280"),
+            "apiKeySource": init.get("apiKeySource", "none"),
         })
         turns = self.script.get("turns") or []
         if _flag("--resume") is not None and "resume_turns" in self.script:

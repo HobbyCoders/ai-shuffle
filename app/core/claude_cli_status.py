@@ -13,6 +13,13 @@ garbage output all produce a status with ``error`` set instead of an exception.
 The result is cached briefly: a positive answer for a minute, a negative one
 for a few seconds so a login done in another terminal shows up quickly.
 ``invalidate()`` drops the cache after a login or logout the app ran itself.
+
+When a probe finds that the sign-in or the plan changed since the previous
+readable probe, ``get_status`` publishes a ``settings`` resource change. Every
+open client re-reads ``/api/models`` on that event, and the model picker lists
+Claude models only while the registry reports a Claude sign-in, so a sign-in
+done on one device (or in a terminal) shows up in every composer without a
+reload. The first probe of the process publishes nothing.
 """
 
 from __future__ import annotations
@@ -235,6 +242,24 @@ def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
 _lock = threading.Lock()
 _cached: Optional[ClaudeCliStatus] = None
 _cached_at = 0.0
+# ``(signed_in, plan)`` from the last probe that could read the sign-in. Kept
+# apart from the cache because ``invalidate()`` drops the cache on the very
+# login this is meant to notice.
+_last_account: Optional[tuple] = None
+
+
+def _announce_account_change() -> None:
+    """Tell open clients to re-read settings-derived state (the model registry)."""
+    from app.core.resource_sync import mutation
+
+    @mutation("settings", database=False)
+    def claude_account_changed() -> bool:
+        return True
+
+    try:
+        claude_account_changed()
+    except Exception:  # noqa: BLE001 — a lost refresh hint must not fail the probe
+        logger.warning("Could not announce the Claude Code sign-in change", exc_info=True)
 
 
 def get_status(force: bool = False, resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
@@ -243,7 +268,7 @@ def get_status(force: bool = False, resolver: Optional[Callable[[], str]] = None
     Blocking (spawns the CLI on a miss); async callers use ``get_status_async``.
     Concurrent callers share one probe.
     """
-    global _cached, _cached_at
+    global _cached, _cached_at, _last_account
     with _lock:
         now = time.monotonic()
         if not force and _cached is not None:
@@ -254,7 +279,20 @@ def get_status(force: bool = False, resolver: Optional[Callable[[], str]] = None
         _cached, _cached_at = result, time.monotonic()
         if result.error:
             logger.info("Claude Code CLI status: %s", result.error)
-        return result
+        changed = False
+        # A probe that could not read the sign-in says nothing about the
+        # account, so it neither counts as a change nor resets the baseline.
+        if result.signed_in is not None:
+            account = (bool(result.signed_in), result.plan)
+            changed = _last_account is not None and account != _last_account
+            _last_account = account
+    if changed:
+        logger.info(
+            "Claude Code CLI sign-in changed (signed in: %s, plan: %s)",
+            result.signed_in, result.plan,
+        )
+        _announce_account_change()
+    return result
 
 
 async def get_status_async(force: bool = False) -> ClaudeCliStatus:

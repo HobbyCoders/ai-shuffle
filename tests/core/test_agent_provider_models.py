@@ -124,7 +124,7 @@ def test_disabled_provider_has_no_roster(mock_db, monkeypatch):
     assert available_subagents("caller", "disabled-row") == ()
 
 
-def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
+def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db):
     from app.db import database
 
     database.create_profile("caller", "Caller", None, {"model": "opus"})
@@ -138,7 +138,11 @@ def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
     contract = build_task_contract("caller", None)
 
     assert "reviewer" in contract.input_schema["properties"]["agent"]["enum"]
-    assert "model" not in contract.input_schema["properties"]
+    # A native Claude caller picks among the Claude aliases per Task, the way
+    # a provider-row caller picks from its row's curated list.
+    assert contract.input_schema["properties"]["model"]["enum"] == [
+        "fable", "haiku", "opus", "sonnet",
+    ]
     assert "subagent" in contract.description.lower()
     assert "reviewer" in contract.description
     assert "sonnet" in contract.description
@@ -601,10 +605,10 @@ def test_background_doctrine_is_its_own_top_level_block(mock_db):
     assert "\n# Background work\n" in guidance
     background = guidance.split("# Background work", 1)[1]
     # It governs every producer, not just Task.
-    for producer in ("subagent", "Monitor", "Bash"):
+    for producer in ("subagent", "Monitor"):
         assert producer in background
     assert "end your turn" in background
-    assert "no `wait` polling" in background.lower()
+    assert "No sleep loops or status polling" in background
     # The Task block keeps its own contract and loses the doctrine.
     delegation = guidance.split("# Background work", 1)[0]
     assert "Never invent a subagent ID" in delegation
@@ -616,8 +620,8 @@ def test_monitor_is_named_as_the_trigger_for_long_commands(mock_db):
         "# Background work", 1
     )[1]
 
-    assert "outlast a Bash call" in background
-    assert "test suite" in background
+    assert "Long builds, installs, suites and CI waits belong in Monitor" in background
+    assert "end your turn" in background
 
 
 def test_ui_changes_are_verified_in_a_browser(mock_db):
@@ -626,6 +630,8 @@ def test_ui_changes_are_verified_in_a_browser(mock_db):
     assert "# Verifying a UI change" in guidance
     verification = guidance.split("# Verifying a UI change", 1)[1]
     assert "frontend/" in verification and ".svelte" in verification
-    assert "browser_resize" in verification and "ToolSearch" in verification
+    assert "affected viewport" in verification
+    assert "effective catalog" in verification
+    assert "not with unit tests alone" in verification
     # Two sentences, no more.
     assert verification.strip().count(". ") <= 2

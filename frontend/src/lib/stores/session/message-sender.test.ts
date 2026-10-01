@@ -55,6 +55,7 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		projectV2Id: null,
 		messages: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		isStreaming: false,
 		worktreeIntent: 'local',
 		worktreeId: null,

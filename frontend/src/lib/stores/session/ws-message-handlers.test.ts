@@ -133,6 +133,7 @@ function mockState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: '',
 		scrollTop: 0,
@@ -494,7 +495,7 @@ describe('ws-message-handlers', () => {
 			);
 		});
 
-		it('clears any stale attention dot for the finished session', () => {
+		it('clears a stale permission dot for the finished session', () => {
 			const state = mockState();
 			state.sessionId = 'session-active'; // a different session is active here
 			deps = createMockDeps({ getState: vi.fn(() => state) });
@@ -502,13 +503,30 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'done', session_id: 'session-bg' });
 
-			// A finished session can't be awaiting input. The done handler clears
-			// its attention dot defensively, in case the backend count=0 broadcast
-			// was missed — otherwise the dot (which now outranks the streaming dot)
-			// stays lit until the user opens the session.
+			// A finished turn can't still be waiting on a permission. The done
+			// handler clears that dot defensively, in case the backend count=0
+			// broadcast was missed — otherwise it stays lit until the user opens
+			// the session.
 			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			expect(fn).toBeDefined();
-			expect(fn(new Map([['session-bg', { count: 1, kind: 'question' as const }]])).has('session-bg')).toBe(false);
+			expect(fn(new Map([['session-bg', { count: 1, kind: 'permission' as const }]])).has('session-bg')).toBe(false);
+		});
+
+		it('keeps a question dot for the finished session', () => {
+			// Changed behavior: a posted question stays pending after the turn
+			// that asked it ends, so `done` must not erase "Has question". The
+			// server sends the durable count when the question is answered.
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'done', session_id: 'session-bg' });
+
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			const before = new Map([['session-bg', { count: 1, kind: 'question' as const }]]);
+			expect(fn(before).get('session-bg')).toEqual({ count: 1, kind: 'question' });
 		});
 
 		// Queue processing is now handled server-side — no frontend trigger to test
@@ -561,7 +579,7 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('stopped handler', () => {
-		it('clears any stale attention dot for the stopped session', () => {
+		it('clears a stale permission dot for the stopped session', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
@@ -569,11 +587,26 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'stopped', session_id: 'session-1' });
 
-			// Mirrors the done handler: a stopped/interrupted session can't be
-			// awaiting input, so any leftover attention dot is cleared.
+			// Mirrors the done handler: a stopped/interrupted turn can't be
+			// waiting on a permission, so a leftover permission dot is cleared.
 			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			expect(fn).toBeDefined();
 			expect(fn(new Map([['session-1', { count: 1, kind: 'permission' as const }]])).has('session-1')).toBe(false);
+		});
+
+		it('keeps a question dot for the stopped session', () => {
+			// Changed behavior: a posted question outlives a stop.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'interrupted', session_id: 'session-1' });
+
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			const before = new Map([['session-1', { count: 2, kind: 'question' as const }]]);
+			expect(fn(before).get('session-1')).toEqual({ count: 2, kind: 'question' });
 		});
 
 		it('does NOT clobber the active session when a BACKGROUND session stops', () => {
@@ -1698,6 +1731,36 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('session_attention_snapshot handler', () => {
+		it('replaces the attention map with the durable snapshot', () => {
+			handlers.handleMessage({
+				type: 'session_attention_snapshot',
+				sessions: [
+					{ session_id: 'session-q', count: 1, kind: 'question' },
+					{ session_id: 'session-p', count: 2, kind: 'permission' },
+					{ session_id: 'session-zero', count: 0, kind: 'question' },
+				],
+			});
+
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			// A dot missed while disconnected is dropped, not kept.
+			const stale = new Map([['session-stale', { count: 1, kind: 'permission' as const }]]);
+			const next = fn(stale);
+			expect([...next.keys()].sort()).toEqual(['session-p', 'session-q']);
+			expect(next.get('session-q')).toEqual({ count: 1, kind: 'question' });
+			expect(next.get('session-p')).toEqual({ count: 2, kind: 'permission' });
+		});
+
+		it('an empty snapshot clears every dot', () => {
+			handlers.handleMessage({ type: 'session_attention_snapshot', sessions: [] });
+
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			const stale = new Map([['session-stale', { count: 1, kind: 'question' as const }]]);
+			expect(fn(stale).size).toBe(0);
+		});
+	});
+
 	describe('user_streaming_sessions handler', () => {
 		it('should bulk-set streaming sessions', () => {
 			deps = createMockDeps();
@@ -2149,6 +2212,27 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 			getState: vi.fn(() => state),
 		});
 		handlers = createMessageHandlers(deps);
+	});
+
+	it('keeps attributed peer rows separate, replaces them on delivery, and ignores other sessions', () => {
+		const peerFrame = {
+			type: 'sync', event_type: 'queue_updated', session_id: 'session-1',
+			data: { queued_messages: [], pending_peer_messages: [{ id: 'peer-turn', content: 'coordinate',
+				sender_label: 'Reviewer', sender_session_id: 'sender', created_at: '2026-08-23T12:00:00.000Z' }] }
+		};
+		handlers.handleMessage(peerFrame);
+		handlers.handleMessage(peerFrame);
+		expect(state.pendingPeerMessages).toEqual([{ id: 'peer-turn', content: 'coordinate',
+			senderLabel: 'Reviewer', senderSessionId: 'sender', queuedAt: Date.parse('2026-08-23T12:00:00.000Z') }]);
+		expect(state.queuedMessages).toEqual([]);
+		expect(deps.wsSend).not.toHaveBeenCalled();
+		handlers.handleMessage({ ...peerFrame, session_id: 'other', data: { pending_peer_messages: [] } });
+		expect(state.pendingPeerMessages).toHaveLength(1);
+		state.messages = [{ id: 'delivered', role: 'user', content: 'wrapped peer content', turnId: 'peer-turn' }];
+		handlers.handleMessage(frame([]));
+		expect(state.pendingPeerMessages).toEqual([]);
+		handlers.handleMessage(peerFrame); // A stale pre-delivery snapshot must not resurrect it.
+		expect(state.pendingPeerMessages).toEqual([]);
 	});
 
 	it('renders the server snapshot', () => {

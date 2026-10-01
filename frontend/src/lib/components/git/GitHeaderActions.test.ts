@@ -11,17 +11,21 @@
  *    Push / Pull enable for the right repo state)
  *  - the panel opens from the button; Escape and outside-click close it; a
  *    row's chevron opens its popover; opening one popover closes another
- *    (shared single-open store) and closing a popover returns to the panel
+ *    (shared single-open store) and closing a popover returns to the panel,
+ *    with focus back on its chevron (or the first overview control, then Close)
  *  - persisted options (include-unstaged, next-step, pull strategy) write
  *    through gitActionPreferences; a per-invocation option (force push) does NOT persist
- *  - a row fires its handler with defaults (no option bag) and closes the
- *    panel; the popover primary fires with an explicit bag
+ *  - a row fires its handler with defaults (no option bag) and keeps the
+ *    panel on the overview; the editor submit fires with an explicit bag and
+ *    returns focus to its chevron
+ *  - the panel opens when an operation starts after mount, never on mount
+ *    for one already active (a pinned failure, a resumed Ship It)
  *  - everything disables under actionsBusy (isStreaming)
  *  - the private-access row reads chatAccessSummary and opens the dialog
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { flushSync, tick } from 'svelte';
 
 // jsdom lacks ResizeObserver; some lucide/layout paths probe for it.
 if (!('ResizeObserver' in globalThis)) {
@@ -70,15 +74,19 @@ const mocks = vi.hoisted(() => {
 			githubAvailable: true
 		}),
 		gitMode: store<string>('project'),
+		mobileShell: false,
 		githubRepoInfo: store<Record<string, unknown> | null>({ default_branch: 'main' }),
 		loadBranches: vi.fn(),
 		refreshDiffStats: vi.fn(),
 		refreshChangedFiles: vi.fn(),
 		retryLoad: vi.fn(),
 		startBackgroundRefresh: vi.fn(),
-		stopBackgroundRefresh: vi.fn()
+		stopBackgroundRefresh: vi.fn(),
+		gitOperationState: store({ active: false, status: 'idle', title: null as string | null, steps: [] as Record<string, unknown>[] })
 	};
 });
+
+vi.mock('$lib/utils/platform', () => ({ buildShell: () => mocks.mobileShell ? 'mobile' : 'desktop' }));
 
 vi.mock('$lib/stores/git.svelte', () => ({
 	git: {
@@ -91,6 +99,10 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	},
 	gitSnapshot: mocks.gitSnapshot,
 	gitMode: mocks.gitMode
+}));
+vi.mock('$lib/stores/gitOperations.svelte', () => ({
+ gitOperationState: mocks.gitOperationState,
+ gitOperations: { dismiss: () => mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] }) }
 }));
 vi.mock('$lib/stores/github.svelte', () => ({
 	githubRepoInfo: mocks.githubRepoInfo
@@ -212,8 +224,8 @@ const trigger = () => screen.getByRole('button', { name: /^Git actions:/ }) as H
 const panel = () => screen.getByRole('dialog', { name: 'Git actions' });
 const queryPanel = () => screen.queryByRole('dialog', { name: 'Git actions' });
 /** An action's option popover (GitActionOptionsDropdown labels itself "<action> options"). */
-const popover = (action: string) => screen.getByRole('dialog', { name: `${action} options` });
-const queryPopover = (action: string) => screen.queryByRole('dialog', { name: `${action} options` });
+const popover = (action: string) => screen.getByRole('region', { name: `${action} options` });
+const queryPopover = (action: string) => screen.queryByRole('region', { name: `${action} options` });
 const row = (name: string) => within(panel()).getByRole('button', { name }) as HTMLButtonElement;
 const queryRow = (name: string) => within(panel()).queryByRole('button', { name }) as HTMLButtonElement | null;
 
@@ -229,9 +241,11 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)))
 beforeEach(() => {
 	localStorage.clear();
 	gitActionPreferences.reset();
+	mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] });
 	openHeaderDropdown.set(null);
 	chatAccessSummary.set(null);
 	mocks.gitMode.set('project');
+	mocks.mobileShell = false;
 	vi.clearAllMocks();
 });
 
@@ -350,9 +364,9 @@ describe('GitHeaderActions panel rows', () => {
 		expect(queryRow('Create PR')).toBeNull();
 		await fireEvent.click(button);
 		expect(handlers.onClickShipIt).toHaveBeenCalledOnce();
-		// Firing an action closes the panel.
-		expect(queryPanel()).toBeNull();
-		await openPanel();
+		// Operation feedback stays in this workspace: the panel is still open, so
+		// the options chevron is reachable without reopening it.
+		expect(panel()).toBeTruthy();
 		await fireEvent.click(row('Ship It options'));
 		expect(within(popover('shipit')).getAllByRole('listitem').map((e) => e.textContent)).toEqual(['Merge PR #42']);
 	});
@@ -366,6 +380,32 @@ describe('GitHeaderActions panel rows', () => {
 		expect(submit.disabled).toBe(true);
 		await fireEvent.click(submit);
 		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
+		// Only the submit is blocked: the merge settings stay editable, and the
+		// message names the conflict rather than a running operation.
+		expect(within(popover('shipit')).getByRole('status').textContent).toContain('PR #42 has merge conflicts');
+		const rebase = within(popover('shipit')).getByRole('button', { name: 'Rebase' }) as HTMLButtonElement;
+		expect(rebase.matches(':disabled')).toBe(false);
+		await fireEvent.click(rebase);
+		expect(rebase.getAttribute('aria-pressed')).toBe('true');
+	});
+
+	it('blocks editor submits while the snapshot is still loading', async () => {
+		dirtyFeatureBranch();
+		const { handlers } = renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Ship It options'));
+		mocks.gitSnapshot.set({ ...mocks.gitSnapshot.value, hydrated: false });
+		await tick();
+		const submit = popover('shipit').querySelector('button.opt-submit') as HTMLButtonElement;
+		expect(submit.disabled).toBe(true);
+		expect(within(popover('shipit')).getByRole('status').textContent).toContain('Checking the latest Git state');
+		await fireEvent.click(submit);
+		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
+		mocks.gitSnapshot.set({ ...mocks.gitSnapshot.value, hydrated: true });
+		await tick();
+		expect(submit.disabled).toBe(false);
+		await fireEvent.click(submit);
+		expect(handlers.onClickShipIt).toHaveBeenCalledTimes(1);
 	});
 
 	it('hides merged work and restores actions as the same branch gets new work', async () => {
@@ -744,6 +784,25 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(queryPanel()).toBeNull();
 	});
 
+	it('keeps the panel open when a chevron or Back click detaches its own button', async () => {
+		// A real click gives Svelte a microtask checkpoint between listeners, so the
+		// overview (or editor) is already swapped out when the window listener runs.
+		const flush = () => flushSync();
+		document.addEventListener('click', flush);
+		try {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			expect(popover('commit')).toBeTruthy();
+			await fireEvent.click(within(panel()).getByRole('button', { name: 'Back to Git actions' }));
+			expect(queryPopover('commit')).toBeNull();
+			expect(panel()).toBeTruthy();
+		} finally {
+			document.removeEventListener('click', flush);
+		}
+	});
+
 	it('closes the popover AND the panel on a click outside both', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
@@ -756,13 +815,16 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(queryPanel()).toBeNull();
 	});
 
-	it('closes only the popover on a click inside the panel', async () => {
+	it('keeps the editor open on a click inside the panel; Back returns to overview', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit options'));
 		await nextFrame();
 		await fireEvent.click(within(panel()).getByText('1 file changed'));
+		expect(popover('commit')).toBeTruthy();
+		expect(screen.getAllByRole('dialog')).toHaveLength(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
 		expect(queryPopover('commit')).toBeNull();
 		expect(panel()).toBeTruthy();
 	});
@@ -772,25 +834,273 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit options'));
-		expect(within(popover('commit')).getByText('Commit options')).toBeTruthy();
+		expect(within(popover('commit')).getByText('Commit changes')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
 		await fireEvent.click(row('Ship It options'));
 		expect(queryPopover('commit')).toBeNull();
 		// The Ship It popover's step preview row "Push to remote" is unique to it.
 		expect(within(popover('shipit')).getByText('Push to remote')).toBeTruthy();
+	});
+
+	describe('focus on leaving an editor', () => {
+		const back = () => screen.getByRole('button', { name: 'Back to Git actions' });
+
+		it.each([
+			['Back', 'Commit options'],
+			['Back', 'Ship It options'],
+			['Escape', 'Commit options'],
+			['Escape', 'Ship It options']
+		] as const)('%s from the %s editor returns focus to its chevron', async (how, chevron) => {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row(chevron));
+			// Opening still focuses the text field (Commit) or Back (Ship It).
+			expect(document.activeElement).toBe(chevron === 'Commit options' ? within(panel()).getByRole('textbox') : back());
+			if (how === 'Back') await fireEvent.click(back());
+			else await fireEvent.keyDown(window, { key: 'Escape' });
+			await vi.waitFor(() => expect(document.activeElement).toBe(row(chevron)));
+			expect(panel()).toBeTruthy();
+		});
+
+		it('falls back to the first overview control when the chevron is gone', async () => {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			// The tree goes clean while the editor is open: the Commit row loses its chevron.
+			cleanAheadBranch();
+			await tick();
+			await fireEvent.click(back());
+			expect(queryRow('Commit options')).toBeNull();
+			await vi.waitFor(() => expect(document.activeElement).toBe(row('Ship It')));
+		});
+
+		it('skips a disabled chevron and lands on the first enabled overview control', async () => {
+			dirtyFeatureBranch();
+			const { rerender } = renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			await rerender({ isStreaming: true });
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(row('Commit options').disabled).toBe(true);
+			await vi.waitFor(() => expect(document.activeElement?.closest('.git-panel')).toBe(panel()));
+			// The chevron is disabled while streaming; Review all is the first enabled overview control.
+			expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Review all' }));
+		});
+
+		it('falls back to the Close button when no overview control is enabled', async () => {
+			dirtyFeatureBranch();
+			const { rerender } = renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			// Streaming disables every action, and without a review handler the
+			// file list is inert, so the overview has nothing focusable left.
+			await rerender({ isStreaming: true, onOpenDiffReview: undefined });
+			await fireEvent.click(back());
+			await vi.waitFor(() => expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Close Git panel' })));
+		});
+	});
+});
+
+	describe('single workspace', () => {
+		it.each([
+			['commit', dirtyFeatureBranch, 'Commit options'],
+			['push', cleanAheadBranch, 'Push options'],
+			['pull', behindBranch, 'Pull options'],
+			['pr', cleanAheadBranch, 'Pull request options'],
+			['shipit', dirtyFeatureBranch, 'Ship It options']
+		] as const)('renders %s as one in-panel region, never another dialog', async (action, setup, name) => {
+			setup();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row(name));
+			expect(screen.getAllByRole('dialog')).toHaveLength(1);
+			expect(popover(action).closest('.git-panel')).toBe(panel());
+			expect(panel().querySelector('.gp-rows')).toBeNull();
+			await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
+			expect(panel().querySelector('.gp-rows')).toBeTruthy();
+		});
+		it('keeps operation progress/errors in-panel and permits closing while work continues', async () => {
+			dirtyFeatureBranch();
+			renderHeader({ operationInProgress: true });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// An operation starting while the header is mounted opens the panel.
+			mocks.gitOperationState.set({ active: true, status: 'running', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'running' }] });
+			await tick();
+			expect(screen.getAllByRole('dialog')).toHaveLength(1);
+			expect(panel().querySelector('.git-progress')).toBeTruthy();
+			await fireEvent.click(screen.getByRole('button', { name: 'Close Git panel' }));
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set({ active: true, status: 'error', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'error', error: 'Fixture failure' }] });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			await openPanel();
+			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
+			await fireEvent.click(within(panel()).getByRole('button', { name: 'Dismiss' }));
+			expect(panel().querySelector('.git-progress')).toBeNull();
+		});
+	});
+
+	describe('opening for an operation', () => {
+		const failed = { active: true, status: 'error', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'error', error: 'Fixture failure' }] };
+		const running = { active: true, status: 'running', title: 'Pull', steps: [{ id: 'pull', label: 'Pull changes', status: 'running' }] };
+
+		it('does not open on mount for an operation that is already active (pinned failure, resumed run)', async () => {
+			dirtyFeatureBranch();
+			mocks.gitOperationState.set(failed);
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// Remounting (leaving and returning to the session) still leaves it closed.
+			cleanup();
+			mocks.mobileShell = true;
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			// The failure is still there when the user opens the panel.
+			await openPanel();
+			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
+		});
+
+		it('opens when an operation starts after mount, including after a dismissed failure', async () => {
+			dirtyFeatureBranch();
+			mocks.gitOperationState.set(failed);
+			renderHeader();
+			await tick();
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set(running);
+			await tick();
+			expect(panel().querySelector('.git-progress')).toBeTruthy();
+		});
+
+		it('stays open when the operation is started by a click outside the panel', async () => {
+			// A toast's "Pull first" starts the operation from outside the panel. A
+			// real click flushes Svelte between listeners, so the panel opens before
+			// the window click listener sees a click outside it.
+			const flush = () => flushSync();
+			document.addEventListener('click', flush);
+			const toastButton = document.createElement('button');
+			toastButton.textContent = 'Pull first';
+			toastButton.addEventListener('click', () => mocks.gitOperationState.set(running));
+			document.body.appendChild(toastButton);
+			try {
+				behindBranch();
+				renderHeader();
+				await tick();
+				await fireEvent.click(toastButton);
+				expect(panel().querySelector('.git-progress')).toBeTruthy();
+				// The exemption lasts only for that click; a later outside click closes.
+				await new Promise((r) => setTimeout(r, 0));
+				await fireEvent.click(document.body);
+				expect(queryPanel()).toBeNull();
+			} finally {
+				document.removeEventListener('click', flush);
+				toastButton.remove();
+			}
+		});
+	});
+
+describe('GitHeaderActions mobile sheet', () => {
+	beforeEach(() => {
+		vi.stubGlobal('PointerEvent', class extends MouseEvent {
+			pointerId: number;
+			isPrimary: boolean;
+			constructor(type: string, init: PointerEventInit = {}) {
+				super(type, init);
+				this.pointerId = init.pointerId ?? 1;
+				this.isPrimary = init.isPrimary ?? true;
+			}
+		});
+	});
+	afterEach(() => vi.unstubAllGlobals());
+
+	async function sheet() {
+		dirtyFeatureBranch();
+		mocks.mobileShell = true;
+		renderHeader();
+		await openPanel();
+		Object.defineProperty(panel(), 'offsetHeight', { value: 600 });
+		const handle = screen.getByRole('button', { name: 'Close Git panel (drag down or tap)' });
+		handle.setPointerCapture = vi.fn();
+		return handle;
+	}
+
+	it('always uses a bottom sheet in the mobile build, even at unfolded widths', () => {
+		mocks.mobileShell = true;
+		const { container } = renderHeader();
+		expect(container.querySelector('.git-actions.sheet-layout')).toBeTruthy();
+	});
+
+	it('uses a sheet for coarse-pointer web/tablet screens and responds to folding', async () => {
+		let change: () => void = () => {};
+		const media = { matches: true, addEventListener: vi.fn((_, fn) => { change = fn; }), removeEventListener: vi.fn() };
+		vi.stubGlobal('matchMedia', vi.fn(() => media));
+		const { container } = renderHeader();
+		expect(container.querySelector('.sheet-layout')).toBeTruthy();
+		media.matches = false;
+		change();
+		await tick();
+		expect(container.querySelector('.sheet-layout')).toBeNull();
+	});
+
+	it('tracks a touch drag and dismisses on a downward swipe, returning focus', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(handle, { pointerId: 7, clientY: 100, button: 0 });
+		expect(handle.setPointerCapture).toHaveBeenCalledWith(7);
+		await fireEvent.pointerMove(handle, { pointerId: 7, clientY: 240 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('140px');
+		await fireEvent.pointerUp(handle, { pointerId: 7, clientY: 240 });
+		expect(queryPanel()).toBeNull();
+		expect(document.activeElement).toBe(trigger());
+	});
+
+	it('snaps back after a short drag and suppresses the resulting click', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(handle, { clientY: 100 });
+		await fireEvent.pointerMove(handle, { clientY: 130 });
+		await fireEvent.pointerUp(handle, { clientY: 130 });
+		await fireEvent.click(handle, { detail: 1 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+		await fireEvent.click(handle, { detail: 0 });
+		expect(queryPanel()).toBeNull();
+	});
+
+	it('cancels a drag without dismissing and never drags from the panel content', async () => {
+		const handle = await sheet();
+		await fireEvent.pointerDown(panel(), { clientY: 100 });
+		await fireEvent.pointerMove(panel(), { clientY: 300 });
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+		await fireEvent.pointerDown(handle, { clientY: 100 });
+		await fireEvent.pointerMove(handle, { clientY: 300 });
+		await fireEvent.pointerCancel(handle);
+		expect(panel().style.getPropertyValue('--sheet-offset')).toBe('0px');
+	});
+
+	it('allows tapping/keyboard activation of the handle to close', async () => {
+		await sheet();
+		await fireEvent.click(screen.getByRole('button', { name: 'Close Git panel (drag down or tap)' }));
+		expect(queryPanel()).toBeNull();
 	});
 });
 
 // ── Handler wiring ──────────────────────────────────────────────────────────
 
 describe('GitHeaderActions handler wiring', () => {
-	it('a Commit row click fires the handler with no option bag (defaults) and closes the panel', async () => {
+	it('a Commit row click fires the handler with no option bag (defaults) and keeps the panel open', async () => {
 		dirtyFeatureBranch();
 		const { handlers } = renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit'));
 		expect(handlers.onClickCommit).toHaveBeenCalledTimes(1);
 		expect(handlers.onClickCommit).toHaveBeenCalledWith();
-		expect(queryPanel()).toBeNull();
+		// Progress renders in the panel, so it stays open on the overview.
+		expect(panel()).toBeTruthy();
+		expect(panel().querySelector('.gp-rows')).toBeTruthy();
 	});
 
 	it('popover Commit primary fires the handler with an explicit bag', async () => {
@@ -805,7 +1115,29 @@ describe('GitHeaderActions handler wiring', () => {
 			includeUnstaged: expect.any(Boolean),
 			nextStep: expect.any(String)
 		});
-		expect(queryPanel()).toBeNull();
+		// Submitting leaves the editor and returns to the panel overview.
+		expect(queryPopover('commit')).toBeNull();
+		expect(panel().querySelector('.gp-rows')).toBeTruthy();
+	});
+
+	it('returns focus to the Commit chevron after submitting from the editor', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: 'Commit' }));
+		await vi.waitFor(() => expect(document.activeElement).toBe(row('Commit options')));
+	});
+
+	it('falls back to the first enabled overview control when the submit makes the chevron busy', async () => {
+		dirtyFeatureBranch();
+		const handlers = baseHandlers();
+		const { rerender } = renderHeader({}, handlers);
+		handlers.onClickCommit.mockImplementation(() => { void rerender({ operationInProgress: true }); });
+		await openPanel();
+		await fireEvent.click(row('Commit options'));
+		await fireEvent.click(within(popover('commit')).getByRole('button', { name: 'Commit' }));
+		await vi.waitFor(() => expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Review all' })));
 	});
 
 	it('the private-access row opens the access dialog', async () => {

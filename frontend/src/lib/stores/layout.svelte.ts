@@ -14,6 +14,7 @@ import { createSubscribers } from './store-utils';
 // ============================================
 
 export type ViewType =
+	| 'assistant'
 	| 'session'
 	| 'board'
 	| 'build'

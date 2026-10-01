@@ -2,10 +2,9 @@
 	/**
 	 * PageHeader - thin header row over MainPanel in the mobile app.
 	 *
-	 * The chat name lives in the global app bar (AppTopBar), so this row only
-	 * carries actions: the meta actions (voice input, download) pinned at the
-	 * start and the git actions in a horizontal touch-scroll rail filling the
-	 * rest (chat mode omits the git cluster).
+	 * The chat name stays in AppTopBar above this row. Transcript download is
+	 * pinned left and the Git dropdown is pinned right. Neither action region
+	 * clips popovers; the mobile Git panel remains a bottom sheet at every width.
 	 *
 	 * The project/worktree context badge that used to render here now lives in the
 	 * ContextPillBar above the chat input, alongside the profile + branch pills.
@@ -20,7 +19,7 @@
 		hideGlobalStt?: boolean;
 		/** Pinned meta actions (e.g. download chat history). */
 		leftActions?: Snippet;
-		/** Scroll rail: git actions, diff stats, etc. */
+		/** Right-aligned Git dropdown and related actions. */
 		actions?: Snippet;
 	}
 
@@ -29,7 +28,7 @@
 	let showStt = $derived($hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
 </script>
 
-<header class="page-header">
+<header class="page-header" aria-label="Chat actions">
 	<div class="hdr-meta">
 		{#if showStt}
 			<button
@@ -60,13 +59,13 @@
 		position: relative;
 		display: flex;
 		align-items: center;
-		min-height: 44px;
+		min-height: 52px;
 		flex-shrink: 0;
 		padding: 0 8px;
 		gap: 8px;
 		background: var(--background);
 		border-bottom: 1px solid var(--border);
-		/* Only the git rail (.hdr-right) scrolls. */
+		/* Keep the Git sheet and its dialogs outside clipping containers. */
 		overflow: visible;
 	}
 
@@ -78,11 +77,7 @@
 		flex-shrink: 0;
 	}
 
-	/* Git actions: horizontal touch-scroll rail filling the remaining width.
-	   Editable-prompt popovers inside it switch to position:fixed on mobile,
-	   so this overflow doesn't clip them. flex-start (not flex-end) sends the
-	   overflow to the END, so the rail scrolls left→right and never slides
-	   under the pinned meta cluster. */
+	/* The remaining space separates the left download from the right Git button. */
 	.hdr-right {
 		display: flex;
 		align-items: center;
@@ -90,28 +85,31 @@
 		flex: 1 1 auto;
 		min-width: 0;
 		flex-wrap: nowrap;
-		justify-content: flex-start;
-		overflow-x: auto;
-		overflow-y: hidden;
-		-webkit-overflow-scrolling: touch;
-		scrollbar-width: none; /* Firefox */
-	}
-
-	.hdr-right::-webkit-scrollbar {
-		display: none;
+		justify-content: flex-end;
+		overflow: visible;
 	}
 
 	.hdr-right > :global(*) {
 		flex-shrink: 0;
 	}
 
+	/* Preserve matching touch targets after moving the actions out of AppTopBar. */
+	.page-header :global(.git-btn),
+	.page-header :global(.download-jsonl-btn) {
+		box-sizing: border-box;
+		min-width: 44px;
+		min-height: 44px;
+		height: 44px;
+	}
+	.page-header :global(.download-jsonl-btn) { width: 44px; }
+
 	/* Header action buttons (mic) */
 	.header-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 36px;
-		height: 36px;
+		width: 44px;
+		height: 44px;
 		flex-shrink: 0;
 		background: transparent;
 		border: none;

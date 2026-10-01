@@ -315,21 +315,6 @@ html:root[data-platform='mobile'] .panel {
 html:root[data-platform='mobile'] .file-actions { display: flex;
 }
 
-/* ── frontend/src/lib/components/git/GitActionOptionsDropdown.svelte ───────── */
-
-/* Mobile shell: escape the header's horizontal scroll rail (mirrors .branch-dropdown). */
-html:root[data-platform='mobile'] .options-dropdown {
-	position: fixed;
-	top: 100px;
-	left: 8px;
-	right: 8px;
-	bottom: auto;
-	min-width: 0;
-	max-width: none;
-	max-height: 70vh;
-	z-index: 200;
-}
-
 /* ── frontend/src/lib/components/git/GitHeaderActions.svelte ───────────────── */
 
 /* Mobile shell (Android WebView): the git cluster is one button that opens a
@@ -347,24 +332,16 @@ html:root[data-platform='mobile'] .git-btn {
 	font-size: 0.75rem;
 }
 
+/* Private access keeps touch-sized fields on the unfolded screen too. */
+html:root[data-platform='mobile'] .pa-field .card-form-input {
+	min-height: 44px;
+	font-size: 1rem;
+}
+html:root[data-platform='mobile'] .pa-toggle,
+html:root[data-platform='mobile'] .pa-small-btn { min-height: 44px; }
+
 html:root[data-platform='mobile'] .project-name {
 	max-width: 80px;
-}
-
-/* ── frontend/src/lib/components/git/GitProgressPopover.svelte ─────────────── */
-
-/* Mobile shell: escape the header's horizontal scroll rail by pinning as a
-   fixed panel just below the header (mirrors .branch-dropdown's escape hatch). */
-html:root[data-platform='mobile'] .git-progress {
-	position: fixed;
-	top: 100px;
-	left: 8px;
-	right: 8px;
-	bottom: auto;
-	min-width: 0;
-	max-width: none;
-	max-height: 60vh;
-	z-index: 200;
 }
 
 /* ── frontend/src/lib/components/layout/ChatView.svelte ────────────────────── */

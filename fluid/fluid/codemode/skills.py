@@ -1232,7 +1232,7 @@ class SkillStore:
             _scrub_legacy_previews(self.root / ".synthesis-log.jsonl")
 
 
-    def render_memory_section(self, project: str | None = None) -> str | None:
+    def render_memory_section(self, project: str | None = None, *, checkout: str | None = None) -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
@@ -1263,6 +1263,9 @@ class SkillStore:
         out_of_scope = 0
         over_budget = 0
         held = 0
+        other_checkout = 0
+        checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
+        normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
         entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -e.updated_at))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
@@ -1285,6 +1288,22 @@ class SkillStore:
                     f"{self.memories_path}.]"
                 ), False))
             else:
+                # Branch-prefixed setup receipts are volatile, not general
+                # project knowledge. Omit only session/tool receipts for a
+                # different checkout, never explicit user/profile facts. The
+                # entry stays in the store and remains available through Recall.
+                branch = re.match(r"^([\w.-]+/[\w./-]+)\b", entry.text)
+                if (
+                    normalized_checkout and branch
+                    and entry.provenance in {"session", "tool"}
+                    and not (entry.key or "").startswith("profile.")
+                    and re.search(r"(?:\.venv\b|node_modules\b|npm (?:ci|dependencies)|requirements-dev\b)", entry.text)
+                    and re.search(r"\b(?:has|created|installed|passed|succeeded|verified)\b", entry.text, re.I)
+                    and re.sub(r"[^A-Za-z0-9._-]+", "-", branch.group(1)).strip("-.").casefold()
+                    != normalized_checkout
+                ):
+                    other_checkout += 1
+                    continue
                 hint = (
                     " (harvested from tool output, unconfirmed — confirm "
                     "with Remember if still true)"
@@ -1325,6 +1344,11 @@ class SkillStore:
             else:
                 over_budget += 1
         footer = ""
+        if other_checkout:
+            footer += (
+                f"\n\n({other_checkout} setup receipts for other checkouts not shown; "
+                "Recall still finds them.)"
+            )
         if out_of_scope:
             footer += (
                 f"\n\n({out_of_scope} entr{'y' if out_of_scope == 1 else 'ies'} scoped to "

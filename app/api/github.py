@@ -8,6 +8,7 @@ through the gh CLI.
 import asyncio
 import logging
 import time
+from app.db.async_database import run_sync
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -397,6 +398,19 @@ async def create_pull_request(
     return pr_to_response(pr)
 
 
+async def require_idle_pull_branches(project_id: str, repo: str, number: int, working_dir=None, service=None):
+    from app.core.git_activity import project_has_active_git_sessions, require_idle_git_target
+    if not await run_sync(project_has_active_git_sessions, project_id, working_dir):
+        return
+    try:
+        pr = await asyncio.to_thread((service or github_service).get_pull, repo, number)
+    except Exception as exc:
+        raise HTTPException(503, "Cannot verify PR branch activity. No GitHub change was made.") from exc
+    if not pr:
+        raise HTTPException(404, "Pull request not found")
+    await run_sync(require_idle_git_target, project_id, working_dir, (pr.head_branch, pr.base_branch))
+
+
 @router.post("/pulls/{number}/merge")
 async def merge_pull_request(
     request: Request,
@@ -420,6 +434,7 @@ async def merge_pull_request(
     method = body.method if body else "merge"
 
     repo = await get_repo_for_project(request, project_id)
+    await require_idle_pull_branches(project_id, repo, number)
 
     try:
         t_gh_start = time.perf_counter()
@@ -481,6 +496,7 @@ async def close_pull_request(
     await check_github_auth()
 
     repo = await get_repo_for_project(request, project_id)
+    await require_idle_pull_branches(project_id, repo, number)
 
     try:
         success, error = await asyncio.to_thread(

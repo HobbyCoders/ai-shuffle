@@ -151,7 +151,10 @@ async def get_git_status(
     if repo is _CACHE_MISS:
         repo = await run_git(ensure_git_repository_record, project_id, working_dir)
 
+    from app.core.git_activity import git_target_mutations_blocked
+    blocked = await run_git(git_target_mutations_blocked, project_id, working_dir)
     return GitStatusResponse(
+        mutations_blocked=blocked,
         is_git_repo=status_data.get("is_git_repo", False),
         current_branch=status_data.get("current_branch"),
         is_detached=status_data.get("is_detached", False),

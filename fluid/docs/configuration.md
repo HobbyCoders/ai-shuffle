@@ -209,6 +209,32 @@ Knobs for tool-result trimming and the compaction ladder
 | `tool_result_stub_chars` | `50000` | Non-error tool results longer than this render as a stub immediately — a single monster result can never overflow the window before the batch trigger fires. Errors are never stubbed. |
 | `keep_recent_tool_results` | `5` | Most recent tool results that are never trimmed. |
 | `min_result_chars` | `2000` | Results shorter than this are left alone by the trimmer. |
+| `elide_old_args` | `false` | `true` renders the input of an old tool call whose result is already trimmed as a small JSON summary instead of the full arguments. |
+| `user_turn_text_cap` | `2000` | Characters of a real user's turn-start request a digest keeps (render version 2 and later). Wake and harness notices keep the shorter built-in cap. |
+| `below_threshold_skips_retry` | `true` | A decision below the trigger, or a batch that reclaimed nothing, does not arm the retry watermark, so the first call that really crosses the trigger compacts at once. `false` restores the old arming. |
+| `image_rung_in_batch` | `true` | Image consumption runs inside the size batch, so a due batch is not split into two rebuilds when images alone pull the prompt under the trigger. `false` restores the old early return. |
+| `deep_target_window_ratio` | `0.35` | With a known window, a full-ladder batch reclaims down to this fraction of the window, or to the `target_ratio` target when that is lower. `0` keeps the `target_ratio` target. |
+| `hard_window_ratio` | `0.75` | With `hard_margin_tokens`, sets the hard ceiling: the lower of this fraction of the window and the window-protection limit minus the margin. Above it a batch must land at or under the trigger. `0` turns the hard zone off. |
+| `hard_margin_tokens` | `32000` | Distance kept between the hard ceiling and the window-protection limit, sized for the largest single-call jump seen in production. |
+| `shortfall_watermark` | `true` | A batch that still leaves the prompt above its target makes later mid-turn calls wait until that much more is reclaimable, so one shallow batch is not followed by another a few calls later. The hard zone and window protection ignore it. |
+| `recency_tail_tokens` | `40000` | With a known window, the newest history up to this many tokens (or `recency_tail_window_ratio` of the window, whichever is smaller) stays verbatim. `0` restores the turn and result counts. |
+| `recency_tail_window_ratio` | `0.15` | Window fraction that caps the verbatim recency tail. |
+| `recency_tail_calls` | `2` | The newest model calls that always stay verbatim, whatever their size. |
+| `turn_budget_window_ratio` | `0.2` | When the turn in flight holds more than this fraction of the window and the prompt is past `turn_budget_floor_ratio`, the guarded rung trims that turn's results older than the recency tail. `0` turns the rung off. |
+| `turn_budget_floor_ratio` | `0.45` | Window fraction the prompt must reach before the turn-budget rung may run. |
+| `window_floor_waiver_ratio` | `0.9` | At or above this fraction of the window, a batch commits whenever it frees `window_floor_waiver_tokens` or more, instead of needing the usual 5% reclaim. `0` keeps the 5% floor everywhere. |
+| `window_floor_waiver_tokens` | `2000` | Smallest reclaim that commits near the window. |
+| `wake_aware_turns` | `true` | Turns started by an unpark, a wakeup or a peer message do not count toward `keep_recent_turns`, so a run of wakes cannot push a real user turn out of the protected set. |
+| `cache_schedule` | `true` | When the engine reports the cache state, rewrites are priced against it: below the opportunistic floor nothing is built, under the trigger a batch commits only on a cold cache, and over the trigger a warm rewrite waits until deferring costs as much as rebuilding. The hard zone and window protection always commit. |
+| `opportunistic_floor_window_ratio` | `0.45` | Window fraction below which the cache-priced schedule never builds a batch. |
+| `sweep_mode` | `"shadow"` | The turn-boundary sweep of old tool results and already-seen images. `"off"` plans nothing, `"shadow"` logs what it would reclaim without changing the prompt, `"on"` commits it. |
+| `sweep_keep_tokens` | `20000` | The newest results of earlier turns, up to this many tokens, that the sweep leaves alone. |
+| `sweep_pin_tokens` | `16000` | Results the model fetched with `HistoryExpand` in the turn that just ended stay pinned for the next turn, newest first, up to this many tokens. |
+| `sweep_min_reclaim_tokens` | `2000` | Smallest reclaim for which a sweep commits on its own on a cold cache. |
+| `render_version` | current (`2`) | Renderer version new compaction decisions use. Stored decisions keep the version they were made under, so changing this never re-renders an old session. `1` is the original renderer. |
+| `steer_receipt_chars` | `1000` | From render version 2, a harness notice at least this long renders, once compacted, as a short receipt with a `HistoryExpand` ref. User and peer messages stay verbatim. |
+| `steer_receipt_preview_chars` | `300` | Characters of the notice that the receipt quotes. |
+| `intent_pin_tokens` | `4000` | From render version 2, epoch stubs keep the folded turns' user requests verbatim up to this many tokens. |
 
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
@@ -325,15 +351,18 @@ host hands it an auth object; the CLI config path uses the API key.
 
 Because the child CLI resolves its own tool surface — from its settings files,
 its MCP config, and the tool flags Fluid passes it — the delegated engine does
-not know what that child can call until the CLI says so. It says so once, in the
-`init` frame it writes at process start. Fluid reads the announced `tools` and
-`mcp_servers` from that frame, keeps them on the loop as `cli_tools` and
-`cli_mcp_servers` (both `None` until an `init` frame carries a tool list), and
-publishes them on the event stream as a `DelegatedSurface` event with the same
-two tuples. It fires once per CLI process, not once per turn, and is purely
-informational: nothing in the turn depends on it, and it never reaches the
-model. Subscribers use it to show, log, or check the tools the child actually
-has.
+not know what that child can call until the CLI says so. It says so in the
+`init` frame it writes at the start of every turn. Fluid reads the announced
+`tools` and `mcp_servers` from that frame, keeps them on the loop as
+`cli_tools` and `cli_mcp_servers` (both `None` until an `init` frame carries a
+tool list), and publishes them on the event stream as a `DelegatedSurface`
+event with the same two tuples. The event also records what the CLI said about
+itself (`cli_version`, `permission_mode`, `model`, `api_key_source`), its own
+session id (`cli_session_id`), and the environment Fluid forced on it
+(`child_env_overrides`). It fires once per turn and is purely informational:
+nothing in the turn depends on it, and it never reaches the model. Subscribers
+use it to show, log, or check the tools the child actually has and which CLI
+build served the session.
 
 What the child CLI is given, and what it is not:
 
@@ -358,6 +387,26 @@ What the child CLI is given, and what it is not:
 - An `allow_always` answer to a permission prompt is remembered for the
   session (scoped the way the native engine scopes it), and the CLI's own
   `permission_suggestions` are echoed back so it stops asking too.
+- The system prompt text rides a file (`--append-system-prompt-file`, or
+  `--system-prompt-file` for a replacing prompt) in the session's temp
+  directory, not the command line, which Windows caps at 32,767 characters.
+  Only a CLI known to be older than 2.1.0 gets the text inline.
+- Every spawn passes `--allow-dangerously-skip-permissions`, so a session
+  started in another mode can switch to `bypassPermissions` later. It does not
+  turn Bypass on. The flag is left off when the CLI would run as root outside
+  a sandbox (POSIX uid 0 with neither `IS_SANDBOX=1` nor
+  `CLAUDE_CODE_BUBBLEWRAP` in the child env), because the CLI exits on it
+  there; such a session cannot switch to Bypass later.
+- The child always runs with `CLAUDE_CODE_THRIFTY_SONIC=0` (turns off the
+  CLI's "do your work through Bash" steer in bypass and auto modes) and
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, in its process env and again in
+  the `env` block of `--settings`, so neither the host env nor a user, project
+  or local settings file can change them. A managed policy settings file is
+  applied after `--settings` and still can. After each CLI process's first turn, Fluid checks the CLI's
+  transcript for a bash-first steer it attached anyway; a hit is logged as a
+  warning and stored as a `DelegatedDiagnostic` event.
+- A `tool_policy` that raises (or returns an awaitable that raises) denies the
+  call.
 
 A working OpenRouter setup, end to end:
 

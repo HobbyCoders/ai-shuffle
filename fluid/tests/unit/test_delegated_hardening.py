@@ -236,6 +236,93 @@ async def test_a_raising_guard_denies_the_cli_call_end_to_end(tmp_path) -> None:
     assert "timeout" not in hooks["PostToolUse"][0]
 
 
+# ─── The tool policy fails closed too ────────────────────────────────────────
+
+
+async def _pre_tool_use_answer(loop: DelegatedLoop) -> dict:
+    """The whole PreToolUse answer for a Bash call ({} = no opinion)."""
+    await loop._ensure_session()
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    await loop._answer_hook_request(HookCallbackRequest(
+        cli_request_id="cli_hook_1", callback_id="fluid_PreToolUse",
+        input={"hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": "curl -X POST x"}, "tool_use_id": "t1"},
+        tool_use_id="t1",
+    ))
+    (frame,) = written
+    assert frame["response"]["subtype"] == "success"
+    return frame["response"]["response"]
+
+
+def _raising_policy(name: str, tool_input: dict) -> str | None:
+    raise RuntimeError("policy crashed")
+
+
+async def test_a_raising_tool_policy_denies_the_call_in_bypass_mode(tmp_path, caplog) -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="m", permission_mode="bypassPermissions",
+        tool_policy=_raising_policy, ctx=ToolCtx(cwd=str(tmp_path)),
+    )
+    caplog.set_level(logging.ERROR, logger="fluid.engine.delegated")
+    answer = await _pre_tool_use_answer(loop)
+    output = answer["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "RuntimeError" in output["permissionDecisionReason"]
+    assert any(r.levelno == logging.ERROR and "tool policy failed" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_a_raising_tool_policy_beats_a_hooks_allow(tmp_path) -> None:
+    bus = HookBus()
+
+    async def approve(_event: str, _payload: dict) -> HookDecision:
+        return HookDecision(permission_decision="allow", note="looks fine")
+
+    bus.on(PRE_TOOL_USE, approve)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="m", hooks=bus, tool_policy=_raising_policy,
+        ctx=ToolCtx(cwd=str(tmp_path)),
+    )
+    output = (await _pre_tool_use_answer(loop))["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "RuntimeError" in output["permissionDecisionReason"]
+
+
+async def test_an_async_tool_policy_is_awaited(tmp_path) -> None:
+    assert DelegatedLoop.supports_async_tool_policy is True
+
+    async def refuse(name: str, tool_input: dict) -> str | None:
+        await asyncio.sleep(0)
+        return "no"
+
+    async def allow(name: str, tool_input: dict) -> str | None:
+        await asyncio.sleep(0)
+        return None
+
+    async def crash(name: str, tool_input: dict) -> str | None:
+        await asyncio.sleep(0)
+        raise ValueError("rule store down")
+
+    def loop_with(policy) -> DelegatedLoop:
+        return DelegatedLoop(
+            store=MemoryStore(), model="m", permission_mode="bypassPermissions",
+            tool_policy=policy, ctx=ToolCtx(cwd=str(tmp_path)),
+        )
+
+    refused = (await _pre_tool_use_answer(loop_with(refuse)))["hookSpecificOutput"]
+    assert refused == {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                       "permissionDecisionReason": "no"}
+    assert await _pre_tool_use_answer(loop_with(allow)) == {}
+    crashed = (await _pre_tool_use_answer(loop_with(crash)))["hookSpecificOutput"]
+    assert crashed["permissionDecision"] == "deny"
+    assert "ValueError" in crashed["permissionDecisionReason"]
+
+
 # ─── CLI version log ─────────────────────────────────────────────────────────
 
 

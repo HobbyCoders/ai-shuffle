@@ -11,25 +11,39 @@ httpx streaming POST, same shape as ``AnthropicClient``. Two auth modes:
     header attached. Point ``base_url`` at the Codex backend
     (``https://chatgpt.com/backend-api/codex/responses``) for subscription auth.
 
-Routing identity on the Codex backend is an experiment (E1), chosen with
-``FLUID_RESPONSES_ROUTING_ARM`` or the ``routing_arm`` argument:
+Routing identity on the Codex backend is chosen with
+``FLUID_RESPONSES_ROUTING_ARM`` or the ``routing_arm`` argument. When neither
+names an arm, the default depends on the endpoint: ``B`` on the Codex backend,
+``A`` everywhere else.
 
-  * ``A`` (default): the body's ``prompt_cache_key`` only; requests are exactly
-    what this client sent before the experiment existed.
-  * ``B``: A plus the Codex identity headers. ``session-id`` is the
-    ``prompt_cache_key`` (the fluid session id unless the host overrides it),
-    ``thread-id`` is the loop's session id for its role, and
-    ``x-client-request-id`` repeats ``thread-id``, as Codex sends it (its
-    request id is the thread id). For the main role all three equal the
-    ``prompt_cache_key``.
+  * ``A`` (default off the Codex backend): the body's ``prompt_cache_key``
+    only. Setting ``FLUID_RESPONSES_ROUTING_ARM=A`` on the Codex backend
+    restores the wire this client sent before arm B became the default, byte
+    for byte.
+  * ``B`` (default on the Codex backend): A plus the Codex identity headers.
+    ``session-id`` is the ``prompt_cache_key`` (the fluid session id unless
+    the host overrides it), ``thread-id`` is the loop's session id for its
+    role, and ``x-client-request-id`` repeats ``thread-id``, as Codex sends it
+    (its request id is the thread id). For the main role all three equal the
+    ``prompt_cache_key``. It is the default because the Codex source says
+    ChatGPT derives cache affinity from the Responses ``session-id`` header,
+    and production sessions under arm A all shared one route hash and read
+    nothing from cache on most calls sent under 30 seconds apart.
   * ``C``: B plus ``x-codex-turn-state``: the token the first response of a
     turn returns is replayed on every later request of that turn, retries
     included, and dropped when the turn changes. It lives in the request's
-    ``WireState`` (one per loop and role), never on this client.
+    ``WireState`` (one per loop and role), never on this client. It is the
+    next arm to measure live.
   * ``D``: B plus a prewarm at turn start. The documented prewarm,
     ``response.create`` with ``generate: false``, exists only in the Responses
     WebSocket mode; this client speaks HTTP SSE, so the hook logs and sends
     nothing.
+
+``FLUID_RESPONSES_ROUTING_HINT`` (off by default; ``1``, ``true`` or ``yes``
+turns it on) adds ``x-codex-routing-hint: model=<slug>[;tier=<tier>]`` under
+arms B-D on the Codex backend, as Codex's ``build_routing_hint_header`` does.
+Nothing ties it to the observed misses; it exists for a later A/B. See
+``fluid/docs/openai-cache.md`` for the live check.
 """
 
 from __future__ import annotations
@@ -86,6 +100,9 @@ CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 ROUTING_ARM_ENV = "FLUID_RESPONSES_ROUTING_ARM"
 ROUTING_ARMS = frozenset("ABCD")
+ROUTING_HINT_ENV = "FLUID_RESPONSES_ROUTING_HINT"
+ROUTING_HINT_HEADER = "x-codex-routing-hint"
+_TRUTHY = frozenset(("1", "true", "yes"))
 TURN_STATE_HEADER = "x-codex-turn-state"
 # Response headers that carry usage-limit and quota state: the Codex
 # backend's x-codex-* family (plan, primary/secondary window use and reset,
@@ -96,15 +113,22 @@ _QUOTA_HEADER_PREFIXES = ("x-codex-", "x-ratelimit-")
 log = logging.getLogger(__name__)
 
 
-def resolve_routing_arm(value: str | None) -> str:
-    """The routing arm named by ``value``; ``A`` when unset or unknown."""
-    arm = (value or "A").strip().upper()
+def resolve_routing_arm(value: str | None, default: str = "A") -> str:
+    """The routing arm named by ``value``; ``default`` when unset or unknown."""
+    arm = (value or "").strip().upper()
+    if not arm:
+        return default
     if arm not in ROUTING_ARMS:
         log.warning(
-            "%s=%r is not one of A, B, C, D; using A", ROUTING_ARM_ENV, value
+            "%s=%r is not one of A, B, C, D; using %s", ROUTING_ARM_ENV, value, default
         )
-        return "A"
+        return default
     return arm
+
+
+def _is_codex_url(base_url: str | None) -> bool:
+    """True for the ChatGPT/Codex responses URL (see ``_is_codex_backend``)."""
+    return base_url == CODEX_RESPONSES_URL or "chatgpt.com" in (base_url or "")
 
 
 @runtime_checkable
@@ -139,11 +163,16 @@ class OpenAIResponsesClient:
         routing_arm: str | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        # Read once: one client sends one arm for its whole life.
-        self._routing_arm = resolve_routing_arm(
-            routing_arm if routing_arm is not None else os.environ.get(ROUTING_ARM_ENV)
-        )
         self._base_url = base_url
+        # Read once: one client sends one arm for its whole life. The default
+        # depends on the endpoint (see the module docstring).
+        self._routing_arm = resolve_routing_arm(
+            routing_arm if routing_arm is not None else os.environ.get(ROUTING_ARM_ENV),
+            "B" if _is_codex_url(base_url) else "A",
+        )
+        self._routing_hint = (
+            os.environ.get(ROUTING_HINT_ENV, "").strip().lower() in _TRUTHY
+        )
         self._auth = auth
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
@@ -185,10 +214,26 @@ class OpenAIResponsesClient:
         ``originator``) must not leak to other Responses endpoints such as
         ``api.x.ai``.
         """
-        return (
-            self._base_url == CODEX_RESPONSES_URL
-            or "chatgpt.com" in (self._base_url or "")
-        )
+        return _is_codex_url(self._base_url)
+
+    @property
+    def routing_arm(self) -> str:
+        """The routing arm this client sends (A-D), for the engine's probe."""
+        return self._routing_arm
+
+    def _routing_hint_headers(self, model: str | None, tier: object) -> dict[str, str]:
+        """``x-codex-routing-hint`` when the hint is on (arms B-D, Codex only)."""
+        if (
+            not self._routing_hint
+            or not model
+            or self._routing_arm == "A"
+            or not self._is_codex_backend()
+        ):
+            return {}
+        hint = f"model={model}"
+        if isinstance(tier, str) and tier:
+            hint += f";tier={tier}"
+        return {ROUTING_HINT_HEADER: hint}
 
     def routing_headers(self, request: ProviderRequest | None = None) -> dict[str, str]:
         """The headers that pick the backend route, without credentials.
@@ -197,7 +242,8 @@ class OpenAIResponsesClient:
         cache lives on a route, so a header change can cost the cache even
         when the body is byte-identical. ``_headers`` sends all of these.
         Under arms B-D, ``request`` adds the session-stable identity headers
-        (``session-id``, ``thread-id``). ``x-client-request-id`` repeats
+        (``session-id``, ``thread-id``) and, when ``FLUID_RESPONSES_ROUTING_HINT``
+        is on, ``x-codex-routing-hint``. ``x-client-request-id`` repeats
         ``thread-id``, so hashing it adds nothing, and ``x-codex-turn-state``
         stays out because it changes on every turn by design: hashing it
         would read every turn start as a routing change.
@@ -211,6 +257,9 @@ class OpenAIResponsesClient:
             headers["originator"] = "codex_cli_rs"
         if request is not None and self._routing_arm != "A" and self._is_codex_backend():
             headers.update(self._session_headers(request.extra, request.wire_state))
+            headers.update(self._routing_hint_headers(
+                request.model, request.extra.get("service_tier"),
+            ))
         return headers
 
     async def _headers(
@@ -218,6 +267,7 @@ class OpenAIResponsesClient:
         body: dict | None = None,
         wire: WireState | None = None,
         request_id: str | None = None,
+        model: str | None = None,
     ) -> dict[str, str]:
         headers = {
             "content-type": "application/json",
@@ -232,6 +282,11 @@ class OpenAIResponsesClient:
         headers.update(self.routing_headers())
         if self._routing_arm != "A" and self._is_codex_backend():
             headers.update(self._identity_headers(body or {}, wire, request_id))
+            # The same hint routing_headers(request) reports: the body's
+            # service_tier is the request's extra passed through.
+            headers.update(self._routing_hint_headers(
+                model, (body or {}).get("service_tier"),
+            ))
         return headers
 
     def _identity_headers(
@@ -374,7 +429,7 @@ class OpenAIResponsesClient:
                     self.name, self._base_url, request.model, attempt + 1
                 )
                 try:
-                    headers = await self._headers(body, wire, request_id)
+                    headers = await self._headers(body, wire, request_id, request.model)
                     trace_request("openai_responses", body)
                     first_byte = self._first_byte_timeout
                     sent_at = time.monotonic()

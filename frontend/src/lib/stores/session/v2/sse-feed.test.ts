@@ -368,3 +368,132 @@ describe('createSseFeed revive()', () => {
 		expect(urls).toHaveLength(1);
 	});
 });
+
+// ─── Log epoch (resume verification) ─────────────────────────────────────────
+
+describe('createSseFeed log epoch', () => {
+	function streamThenPending(chunks: string[]): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		let i = 0;
+		return new ReadableStream({
+			pull(controller) {
+				if (i < chunks.length) {
+					controller.enqueue(enc.encode(chunks[i++]));
+					return;
+				}
+				return new Promise<void>(() => {});
+			},
+		});
+	}
+
+	const tick = async (n = 30) => {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	};
+
+	/** Serve `bodies[n]` to the n-th request (parking once they run out). */
+	function serve(bodies: string[][]) {
+		const urls: string[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) => {
+				urls.push(url);
+				return { ok: true, status: 200, body: streamThenPending(bodies[urls.length - 1] ?? []) };
+			})
+		);
+		return urls;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('learns the epoch from caught_up and sends it when resuming', async () => {
+		const urls = serve([
+			['id: 1\ndata: {"seq":1}\n\n', 'event: caught_up\ndata: {"seq":1,"epoch":"ep-1"}\n\n'],
+		]);
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+		await tick();
+		expect(urls[0]).toContain('from_seq=0');
+		expect(urls[0]).not.toContain('epoch=');
+		expect(feed.epoch).toBe('ep-1');
+		expect(events.at(-1)).toMatchObject({ type: 'caught_up', epoch: 'ep-1' });
+
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=1&epoch=ep-1');
+		feed.stop();
+	});
+
+	it('sends a seeded epoch with a seeded resume cursor', async () => {
+		const urls = serve([]);
+		const feed = createSseFeed('sess-1', { onEvent: () => {}, fromSeq: 5, epoch: 'ep 0' });
+		await tick();
+		expect(urls[0]).toContain('from_seq=5&epoch=ep%200');
+		expect(feed.epoch).toBe('ep 0');
+		feed.stop();
+	});
+
+	it('forgets the epoch when caught_up carries none (older server)', async () => {
+		const urls = serve([['id: 6\ndata: {"seq":6}\n\n', 'event: caught_up\ndata: {"seq":6}\n\n']]);
+		const feed = createSseFeed('sess-1', { onEvent: () => {}, fromSeq: 5, epoch: 'ep-0' });
+		await tick();
+		expect(feed.epoch).toBeNull();
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=6');
+		expect(urls[1]).not.toContain('epoch=');
+		feed.stop();
+	});
+
+	it('a reset answering our epoch is delivered and restarts the cursor for the new log', async () => {
+		const urls = serve([
+			[
+				'event: reset\ndata: {"reason":"epoch","epoch":"ep-2"}\n\n',
+				'id: 1\ndata: {"seq":1}\n\n',
+			],
+		]);
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e), fromSeq: 40, epoch: 'ep-1' });
+		await tick();
+		expect(events[0]).toMatchObject({ type: 'reset', epoch: 'ep-2' });
+		expect(feed.lastSeq).toBe(1);
+		expect(feed.epoch).toBe('ep-2');
+
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=1&epoch=ep-2');
+		feed.stop();
+	});
+
+	it('adopts the first row of a log that was empty at caught_up as its epoch', async () => {
+		// The server reports "0" for a log with no rows. The first row to arrive
+		// afterwards is the lowest-seq row of the new log, so its id is the epoch; a
+		// resume sending "0" would otherwise be reset as if the log were cleared.
+		const urls = serve([
+			[
+				'event: caught_up\ndata: {"seq":0,"epoch":"0"}\n\n',
+				'id: 1\ndata: {"seq":1,"id":"row-1","type":"message.user"}\n\n',
+				'id: 2\ndata: {"seq":2,"id":"row-2","type":"message.assistant"}\n\n',
+			],
+		]);
+		const feed = createSseFeed('sess-1', { onEvent: () => {} });
+		await tick();
+		expect(feed.epoch).toBe('row-1');
+
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=2&epoch=row-1');
+		feed.stop();
+	});
+
+	it('ignores a reset on a request that sent no epoch', async () => {
+		serve([['event: reset\ndata: {"reason":"epoch","epoch":"ep-2"}\n\n', 'id: 1\ndata: {"seq":1}\n\n']]);
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+		await tick();
+		expect(events.map((e) => e.type ?? e.seq)).toEqual([1]);
+		expect(feed.epoch).toBeNull();
+		feed.stop();
+	});
+});

@@ -20,6 +20,8 @@ class ScanClock:
         monkeypatch.setattr(transport, "_dirty_collections", set())
         monkeypatch.setattr(transport, "_dirty_sessions", set())
         monkeypatch.setattr(transport, "_full_scan_requested", False)
+        monkeypatch.setattr(transport, "_owner_candidates", set())
+        monkeypatch.setattr(transport, "_owner_collections", set())
         monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: self.now))
         monkeypatch.setattr(transport, "_loop", SimpleNamespace(
             call_soon_threadsafe=lambda callback: callback()))

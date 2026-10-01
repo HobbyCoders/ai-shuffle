@@ -76,6 +76,15 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
             "SessionRuntime: streaming_status notify failed for %s",
             session_id, exc_info=True,
         )
+    # Peers read this session's runtime summary (Working/Idle) from the
+    # network; a claim or release must reach them without the scanner's
+    # idle backoff. Post-commit, cheap, never raises.
+    try:
+        from app.db.session_events import notify_session_write
+
+        notify_session_write(session_id, "session_runtime")
+    except Exception:
+        logger.debug("SessionRuntime: network wake failed for %s", session_id, exc_info=True)
 
 # How long a runtime-driven interrupt waits for the turn to settle before it
 # escalates (mirrors chat_ws_handler._INTERRUPT_DRAIN_TIMEOUT_SECONDS). Tests
@@ -123,10 +132,9 @@ def live_turn_ids() -> Set[str]:
     return {runtime.turn_id for runtime in _live_runtimes.values()}
 
 
-# Queue sources a steer may pull from — the two that render as the user's own
-# pending messages. Mirrors ``chat_ws_handler._V2_QUEUE_SOURCES``; an internal
-# turn (unpark, failover, automation) is never someone talking mid-turn.
-_STEERABLE_SOURCES = ("user", "queue")
+# Peer traffic shares the safe-boundary queue, never the user's authority or
+# editable queue view. Internal wake/automation turns are not interjections.
+_STEERABLE_SOURCES = ("user", "queue", "agent_message")
 
 # Override keys that BIND a turn's run and cannot change once it started. A
 # queued message asking for a different one of these is a request the live turn
@@ -534,10 +542,11 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
     set, so Send-later chips clear the moment the drained turn starts
     (the SSE self-heal remains the fallback). Best-effort."""
     try:
-        from app.api.chat_ws_handler import _v2_queue_view  # lazy: no core→api at module load
+        from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view  # lazy: no core→api at module load
         from app.core.sync_engine import sync_engine
         queue = await asyncio.to_thread(_v2_queue_view, session_id)
-        await sync_engine.broadcast_queue_updated(session_id, queue)
+        peers = await asyncio.to_thread(_v2_peer_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peers)
     except Exception:  # noqa: BLE001
         logger.warning(
             "SessionRuntime: queue_updated broadcast failed for %s",
@@ -659,6 +668,8 @@ class SessionRuntime:
         # (otherwise turns.error stays NULL — stop_reason='error' with nothing
         # behind it, and the provider's own error body only in the event log).
         self._terminal_error: Optional[str] = None
+        # A pre-spawn checkout refusal cannot authorize adopting its other HEAD.
+        self._resync_branch = True
         # In-flight pump task — interrupt() escalation cancels it: the pump
         # holds the reader token, so nothing else can read until it is gone.
         self._pump_task: Optional[asyncio.Task] = None
@@ -1206,6 +1217,14 @@ class SessionRuntime:
 
         prompt = self.turn.get("prompt") or ""
         turn_overrides = dict(self.turn.get("overrides") or {})
+        proactive = (self.turn.get("payload") or {}).get("_assistant_proactive")
+        override_proactive = turn_overrides.get("_assistant_proactive")
+        if proactive is not None or override_proactive is not None:
+            if proactive != override_proactive:
+                raise ValueError("Proactive turn provenance differs between payload and overrides")
+            from app.core.assistant_service import assert_proactive_allowed
+            await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
+            turn_overrides["_assistant_proactive"] = proactive
         completion_frames = list(
             ((self.turn.get("payload") or {}).get("pending_frames") or [])
         )
@@ -1379,6 +1398,8 @@ class SessionRuntime:
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
                     if etype == "error":
+                        if event.get("code") == "checkout_unavailable":
+                            self._resync_branch = False
                         message = event.get("message")
                         self._terminal_error = (
                             str(message) if message else None
@@ -1603,7 +1624,17 @@ class SessionRuntime:
                 break
             self._steer_attempted.add(row_id)
             try:
-                await adapter.steer(prompt, id=row_id)
+                if row.get("source") == "agent_message":
+                    payload = row.get("payload") or {}
+                    from app.core import session_orchestration
+                    sender = await asyncio.to_thread(session_orchestration._caller, payload["orchestration_sender"])
+                    await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    await adapter.steer_peer(
+                        payload["peer_message_content"],
+                        sender=payload["orchestration_sender"], id=row_id,
+                    )
+                else:
+                    await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
@@ -1837,7 +1868,18 @@ class SessionRuntime:
         * a different profile — a message addressed to another agent.
         """
         payload = row.get("payload") or {}
+        if row.get("source") == "agent_message":
+            # Only an attributed, scope-checked producer may use the peer channel.
+            # Recheck revocation/ownership/Stop before handing it to the engine.
+            if not payload.get("orchestration_sender") or not payload.get("peer_message_content"):
+                return False
+            # The asynchronous sweep revalidates scope immediately before
+            # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids"):
+            return False
+        # Never steer external observation into a foreground/broad-permission
+        # turn (or vice versa). Admission is part of the execution identity.
+        if payload.get("_assistant_proactive") != (self.turn.get("payload") or {}).get("_assistant_proactive"):
             return False
         if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
             return False
@@ -1935,6 +1977,8 @@ class SessionRuntime:
                 content,
                 profile_id=profile_id,
                 command_id=row.get("command_id"),
+                **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                   if row.get("source") == "agent_message" else {}),
             )
             if not recorded:
                 return
@@ -1946,7 +1990,10 @@ class SessionRuntime:
                 # asked for BEFORE this moment, ``_finalize`` puts the
                 # message back on the queue rather than leaving it in the
                 # transcript with no answer under it.
-                self._steer_absorbed[row_id] = (time.perf_counter(), row)
+                if row.get("source") != "agent_message":
+                    # Peer consumption is delivery, not an obligation to answer.
+                    # Do not replay it after a later Stop/provider failure.
+                    self._steer_absorbed[row_id] = (time.perf_counter(), row)
         if absorbed:
             # The rows left the queue — clear their pending bubbles everywhere.
             await _broadcast_queue_after_start(self.session_id)
@@ -2176,7 +2223,10 @@ class SessionRuntime:
         try:
             from app.core.turn_finalize import persist_turn_end_state
 
-            await persist_turn_end_state(sid)
+            if self._resync_branch:
+                await persist_turn_end_state(sid)
+            else:
+                await persist_turn_end_state(sid, resync_branch=False)
         except Exception:
             logger.debug("SessionRuntime: persist_turn_end_state failed for %s", sid, exc_info=True)
 

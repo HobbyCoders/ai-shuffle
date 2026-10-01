@@ -140,8 +140,9 @@ async def test_caught_up_sentinel_after_backfill(mock_db, gw, monkeypatch):
     assert [f.get("event") for f in raw] == [
         "turn.started", "turn.completed", "caught_up",
     ]
-    # Sentinel carries the backfill cursor and no id line.
-    assert raw[2]["data"] == {"seq": 2}
+    # Sentinel carries the backfill cursor and the log epoch (the id of the
+    # log's first row), and no id line.
+    assert raw[2]["data"] == {"seq": 2, "epoch": raw[0]["data"]["id"]}
     assert "id" not in raw[2]
 
 
@@ -181,7 +182,7 @@ async def test_caught_up_emitted_on_empty_backfill(mock_db, gw, monkeypatch):
         await agen.aclose()
 
     assert raw[0]["event"] == "caught_up"
-    assert raw[0]["data"] == {"seq": 1}
+    assert raw[0]["data"] == {"seq": 1, "epoch": se.get_log_epoch("sess-cu3")}
 
 
 async def test_replay_after_clear_is_empty(mock_db, gw, monkeypatch):
@@ -215,7 +216,7 @@ async def test_replay_after_clear_is_empty(mock_db, gw, monkeypatch):
     # rows replayed, and the legacy backfill (which a truly empty log triggers)
     # finds nothing either because the clear also dropped session_messages.
     assert raw[0]["event"] == "caught_up"
-    assert raw[0]["data"] == {"seq": 0}
+    assert raw[0]["data"] == {"seq": 0, "epoch": se.EMPTY_LOG_EPOCH}
 
 
 async def test_close_unsubscribes(mock_db, gw):

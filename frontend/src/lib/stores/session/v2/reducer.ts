@@ -140,6 +140,18 @@ export interface V2SessionState {
 	 *  "there are no retry cards" — O(N) per event, O(N²) over a replay. Set on
 	 *  append, recomputed on rewind. */
 	hasRetryCards: boolean;
+	/** One-sided hint: false guarantees no LIVE retry card (one `markRetryAnswered`
+	 *  would retire) is in `messages`; true means there may be one. Raised wherever
+	 *  a card can become live (append, in-place attempt update, resume arming) and
+	 *  lowered by the `markRetryAnswered` pass, which retires every live card. Lets
+	 *  the per-delta answer check skip its transcript scan once a retry sequence is
+	 *  over, instead of paying it for the rest of the session. */
+	mayHaveLiveRetry: boolean;
+	/** Same one-sided hint for subagent cards in 'running' status: raised on
+	 *  append / reopen / park revert, lowered by `settleStaleBackgroundWork`, which
+	 *  settles every running card. Keeps turn.completed from mapping the whole
+	 *  transcript when no background card is running. */
+	mayHaveRunningSubagents: boolean;
 	/** Ids of subagent cards that the LAST `turn.completed` speculatively settled
 	 *  to 'completed' via `settleStaleBackgroundWork`. If a `turn.parked` follows
 	 *  (background work genuinely remains — the park gate ran AFTER turn.completed),
@@ -173,6 +185,8 @@ export function initialState(): V2SessionState {
 		messageOriginSeq: own(new Map<string, number>()),
 		taskOriginSeq: {},
 		hasRetryCards: false,
+		mayHaveLiveRetry: false,
+		mayHaveRunningSubagents: false,
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
 	};
@@ -313,7 +327,8 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 	// leaking across turns.
 	let cardsTouched = false;
 	const settledCardIds: string[] = [];
-	const messages = state.messages.map((m) => {
+	// No running card can exist while the hint is down; skip the O(N) map.
+	const messages = !state.mayHaveRunningSubagents ? state.messages : state.messages.map((m) => {
 		if (m.type === 'subagent' && m.agentStatus === 'running') {
 			cardsTouched = true;
 			settledCardIds.push(m.id);
@@ -348,13 +363,21 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 		// stale settle from an earlier turn can never be revived by a later park.
 		if (
 			state.speculativelySettledCardIds.length === 0 &&
-			state.speculativelySettledTaskIds.length === 0
+			state.speculativelySettledTaskIds.length === 0 &&
+			!state.mayHaveRunningSubagents
 		)
 			return state; // preserve identity (true no-op)
-		return { ...state, speculativelySettledCardIds: [], speculativelySettledTaskIds: [] };
+		return {
+			...state,
+			mayHaveRunningSubagents: false,
+			speculativelySettledCardIds: [],
+			speculativelySettledTaskIds: [],
+		};
 	}
 	return {
 		...state,
+		// Every running card was settled above.
+		mayHaveRunningSubagents: false,
 		messages: cardsTouched ? messages : state.messages,
 		activeTaskSummaries: summariesTouched ? activeTaskSummaries : state.activeTaskSummaries,
 		speculativelySettledCardIds: settledCardIds,
@@ -431,8 +454,12 @@ function markRetryAnswered(messages: ChatMessage[], present = true): ChatMessage
 
 /** markRetryAnswered lifted to the state, keeping identity when nothing moved. */
 function withRetryAnswered(state: V2SessionState): V2SessionState {
+	if (!state.mayHaveLiveRetry) return state;
 	const messages = markRetryAnswered(state.messages, state.hasRetryCards);
-	return messages === state.messages ? state : { ...state, messages };
+	// The pass retires every live card, so none remain whether or not it moved.
+	return messages === state.messages
+		? { ...state, mayHaveLiveRetry: false }
+		: { ...state, messages, mayHaveLiveRetry: false };
 }
 
 /**
@@ -554,8 +581,12 @@ function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2
 		: own(new Map(state.messageOriginSeq));
 	messageOriginSeq.set(msg.id, seq);
 	const next = { ...state, messages, messageOriginSeq };
-	if (!next.hasRetryCards && msg.systemSubtype === 'provider_retry') {
+	if (msg.systemSubtype === 'provider_retry') {
 		next.hasRetryCards = true;
+		next.mayHaveLiveRetry = true;
+	}
+	if (msg.type === 'subagent' && msg.agentStatus === 'running') {
+		next.mayHaveRunningSubagents = true;
 	}
 	return next;
 }
@@ -851,15 +882,19 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const arming = (d: Record<string, unknown> | undefined) =>
 				!!d?.exhausted && !d.recovered && !d.superseded && !d.resuming;
 			let messages = state.messages;
-			if (messages.some((m) => arming(retryCardData(m)))) {
+			let mayHaveLiveRetry = state.mayHaveLiveRetry;
+			if (state.hasRetryCards && messages.some((m) => arming(retryCardData(m)))) {
 				messages = messages.map((m) => {
 					const d = retryCardData(m);
 					return arming(d) ? { ...m, systemData: { ...d, resuming: true } } : m;
 				});
+				// A resuming card is live until a reply retires it.
+				mayHaveLiveRetry = true;
 			}
 			return {
 				...state,
 				messages,
+				mayHaveLiveRetry,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -909,6 +944,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					...next,
 					messages,
 					activeTaskSummaries,
+					mayHaveRunningSubagents: next.mayHaveRunningSubagents || cardIds.length > 0,
 					speculativelySettledCardIds: [],
 					speculativelySettledTaskIds: [],
 				};
@@ -939,7 +975,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			);
 			// A retry card left mid-count is finished business now — the turn
 			// succeeded despite the empty responses. See settleRetryCards.
-			const retrySettled = settleRetryCards(drained.messages);
+			const retrySettled = settleRetryCards(drained.messages, drained.hasRetryCards);
 			const completed =
 				retrySettled === drained.messages ? drained : { ...drained, messages: retrySettled };
 			// SDK 0.2.126: a turn that stopped because it hit the configured
@@ -1248,6 +1284,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				timestamp: stamp || undefined,
 				...(turnId ? { turnId } : {}),
+				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
+				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
+				...(typeof event.checkpoint_backed === 'boolean' ? { checkpointBacked: event.checkpoint_backed } : {}),
 				...(commandId ? { commandId } : {}),
 				...(senderProfileId ? { profileId: senderProfileId } : {}),
 			});
@@ -1710,6 +1749,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			return {
 				...state,
 				messages: replaceById(state.messages, card.id, { agentChildren: children, ...reopen }),
+				mayHaveRunningSubagents: state.mayHaveRunningSubagents || card.agentStatus === 'completed',
 			};
 		}
 
@@ -1930,7 +1970,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						...(data ? { systemData: data } : {}),
 						timestamp: stampTs(event, createdAt) || undefined,
 					};
-					return { ...state, messages };
+					// The replaced card is unfinished, so it is live again.
+					return { ...state, messages, mayHaveLiveRetry: true };
 				}
 			}
 			const msg: ChatMessage = {
@@ -1988,14 +2029,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const openTextId = state.openTextId && liveIds.has(state.openTextId) ? state.openTextId : null;
 			const openThinkingId =
 				state.openThinkingId && liveIds.has(state.openThinkingId) ? state.openThinkingId : null;
+			const hasRetryCards =
+				state.hasRetryCards && keptMessages.some((m) => m.systemSubtype === 'provider_retry');
 			return {
 				...state,
 				messages: keptMessages,
 				messageOriginSeq,
 				taskOriginSeq,
-				hasRetryCards:
-					state.hasRetryCards &&
-					keptMessages.some((m) => m.systemSubtype === 'provider_retry'),
+				hasRetryCards,
+				mayHaveLiveRetry: state.mayHaveLiveRetry && hasRetryCards,
 				activeTaskSummaries,
 				openTextId,
 				openThinkingId,

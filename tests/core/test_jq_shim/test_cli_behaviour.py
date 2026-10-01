@@ -251,3 +251,41 @@ class TestMainInProcess:
         monkeypatch.setattr(cli.module, "output_result", boom)
         code, _, err = cli(".", stdin="1")
         assert code == 5 and "nested too deeply" in err
+
+
+class TestConsoleEncoding:
+    """The UTF-8 stream setup runs only when the shim is the program.
+
+    It used to run at import time and replace sys.stdout/sys.stderr; under
+    pytest on Windows that dropped a wrapper over the capture file and closed
+    it when the wrapper was collected, so collecting this directory died with
+    "I/O operation on closed file".
+    """
+
+    def test_import_leaves_streams_alone(self):
+        import importlib
+
+        from app.core.jq_shim import __main__ as cli_module
+
+        streams = (sys.stdin, sys.stdout, sys.stderr)
+        importlib.reload(cli_module)
+        assert (sys.stdin, sys.stdout, sys.stderr) == streams
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="pipes default to cp1252 only on Windows")
+    def test_non_ascii_json_round_trips_through_pipes(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        env["JQ_SHIM_NO_FALLBACK"] = "1"
+        env.pop("PYTHONUTF8", None)
+        env.pop("PYTHONIOENCODING", None)
+        text = "héllo 🙂 ü"
+        for cmd in (
+            [sys.executable, "-m", "app.core.jq_shim", "-r", ".a"],
+            [sys.executable, "-x", str(SHIM_BIN / "jq.bat"), "-r", ".a"],
+        ):
+            result = subprocess.run(
+                cmd, input=json.dumps({"a": text}).encode("utf-8"), capture_output=True,
+                cwd=str(PROJECT_ROOT), env=env, timeout=60,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == text.encode("utf-8")

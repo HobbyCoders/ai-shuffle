@@ -30,11 +30,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
-
-# Fix Windows console encoding
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 '''
 
 
@@ -70,7 +65,7 @@ def body(path: Path) -> str:
 parts = [HEADER.rstrip("\n")]
 for name in ("parser.py", "evaluator.py", "__main__.py"):
     parts.append("\n\n# " + "=" * 77 + f"\n# {name}\n# " + "=" * 77 + "\n\n" + body(PKG / name))
-parts.append('\n\nif __name__ == "__main__":\n    sys.exit(main())\n')
+parts.append('\n\nif __name__ == "__main__":\n    _configure_console_encoding()\n    sys.exit(main())\n')
 python = "\n".join(parts)
 python = python.replace("\n\n\n\n", "\n\n\n")
 compile(python, "embedded", "exec")

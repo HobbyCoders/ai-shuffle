@@ -24,7 +24,7 @@ import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registr
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
 
 describe('ControlsDock dynamic effort', () => {
- it.each(['desktop', 'mobile'])('preserves fast mode when switching to Astra and lets it toggle both ways on %s', async (surface) => {
+ it.each(['desktop', 'mobile'].flatMap(surface => ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(model => [surface, model])))('preserves fast mode on %s when switching to %s and toggles both ways', async (surface, model) => {
   mocks.get.mockResolvedValue(payload);
   await hydrateModelRegistry();
   activeSession.newChat();
@@ -33,11 +33,11 @@ describe('ControlsDock dynamic effort', () => {
   activeSession.setFastMode(true);
   const { container } = renderDock();
   await tick();
-  activeSession.setModelOverride('prov:codex:gpt-6-astra');
+  activeSession.setModelOverride(`prov:codex:${model}`);
   await tick();
   expect(get(activeSession).fastMode).toBe(true);
   if (surface === 'desktop') {
-   await fireEvent.click(screen.getByRole('button', { name: 'Effort: High' }));
+   await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
   } else {
    await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
   }

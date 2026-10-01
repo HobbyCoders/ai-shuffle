@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import List, Optional
 
 from app.core.config import settings
@@ -70,6 +72,7 @@ def initialize() -> Optional[engine.NetworkContext]:
     except Exception:  # noqa: BLE001
         logger.warning("Could not redact stored sync conflicts", exc_info=True)
     _install_resource_hook()
+    _install_session_write_hook()
     return ctx
 
 
@@ -176,6 +179,25 @@ def _install_resource_hook() -> None:
     resource_sync._network_hooked = True
 
 
+def _install_session_write_hook() -> None:
+    """Committed event appends, prompt and run changes wake the scanner."""
+    from app.db import session_events
+    session_events.set_session_write_hook(_on_session_write)
+
+
+def _on_session_write(session_id: str, collection: str) -> None:
+    """Runs on the writer's thread or the event loop: no database reads here.
+
+    The scanner drops sessions this device does not own (``owned_only``), so
+    a write to a mirror never widens a pass to the whole catalog.
+    """
+    ctx = engine.cached_context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return
+    from app.network import transport
+    transport.request_scan([collection], session_ids=[session_id], owned_only=True)
+
+
 # A connector start already past its eligibility check when a fence lands is
 # still CONNECTING: it is not registered yet, and it registers (and runs) once
 # its connect() returns. The fenced reconcile keeps sweeping this long for such
@@ -252,10 +274,62 @@ def _adopt_presence_endpoints(device_ids) -> None:
             store.touch_member(device_id, endpoints=endpoints)
 
 
+# A mirrored transcript streams in many small batches. Each "sessions"
+# invalidation makes every connected UI page the session list again, so a
+# batch of events alone invalidates at most this often (the open transcript
+# follows through the event gateway, not through this signal).
+EVENTS_ONLY_INVALIDATION_SECONDS = 2.0
+_events_only_lock = threading.Lock()
+_events_only_last = float("-inf")
+_events_only_trailing = False
+
+
+def _emit_resource(resource: str) -> None:
+    from app.core.global_events import global_events
+    try:
+        # Remote applies bypass the local mutation decorators. Account and
+        # paired browsers need the same content-free refetch signal.
+        for kind in ("admin", "api_user", "account", "paired"):
+            global_events.resources_changed(resource, user_type=kind)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emit_trailing_sessions() -> None:
+    global _events_only_last, _events_only_trailing
+    with _events_only_lock:
+        _events_only_trailing = False
+        _events_only_last = time.monotonic()
+    _emit_resource("sessions")
+
+
+def _sessions_changed_by_events() -> None:
+    """Coalesce events-only invalidations; the last one in a burst still lands."""
+    global _events_only_last, _events_only_trailing
+    from app.core.global_events import global_events
+    with _events_only_lock:
+        wait = _events_only_last + EVENTS_ONLY_INVALIDATION_SECONDS - time.monotonic()
+        if wait <= 0:
+            _events_only_last = time.monotonic()
+        elif _events_only_trailing:
+            return
+        else:
+            _events_only_trailing = True
+    if wait <= 0:
+        _emit_resource("sessions")
+        return
+    loop = getattr(global_events, "_loop", None)
+    try:
+        loop.call_soon_threadsafe(loop.call_later, wait, _emit_trailing_sessions)
+    except Exception:  # noqa: BLE001 - no loop to defer on: do not drop the change
+        _emit_trailing_sessions()
+
+
 def _on_applied(touched) -> None:
     """Remote records landed: tell connected UIs so they refresh, and materialize side effects."""
     from app.core.global_events import global_events
     resources = set()
+    session_sources = set()
     if any(collection == "membership" for collection, _record, _op in touched):
         loop = getattr(global_events, "_loop", None)
         if loop and not loop.is_closed():
@@ -299,16 +373,16 @@ def _on_applied(touched) -> None:
                 mirror_policy()
         if coll is not None and coll.resource:
             resources.add(coll.resource)
+            if coll.resource == "sessions":
+                session_sources.add(collection)
         if collection in ("membership", "presence"):
             resources.update(("network", "sessions"))
+            session_sources.add(collection)
+    if session_sources == {"session_events"}:
+        resources.discard("sessions")
+        _sessions_changed_by_events()
     for resource in resources:
-        try:
-            # Remote applies bypass the local mutation decorators. Account and
-            # paired browsers need the same content-free refetch signal.
-            for kind in ("admin", "api_user", "account", "paired"):
-                global_events.resources_changed(resource, user_type=kind)
-        except Exception:  # noqa: BLE001
-            pass
+        _emit_resource(resource)
 
 
 async def start() -> List[asyncio.Task]:

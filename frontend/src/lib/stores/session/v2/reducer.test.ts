@@ -38,6 +38,26 @@ function fold(events: WireEvent[]) {
 
 
 
+describe('user rewind capability', () => {
+	it('retains the checkpoint identity and explicit capability during replay', () => {
+		const state = fold([
+			ev('message.user', { content: 'legacy', uuid: 'u1' }),
+			ev('message.user', { content: 'steer', checkpoint_backed: false }),
+			ev('message.user', { content: 'standalone', uuid: 'u2', checkpoint_backed: true })
+		]);
+		expect(state.messages.map((m) => [m.jsonlUuid, m.checkpointBacked])).toEqual([
+			['u1', undefined], [undefined, false], ['u2', true]
+		]);
+	});
+	it('replaces an optimistic steer with the durable non-checkpoint capability', () => {
+		let state = initialState();
+		state = { ...state, messages: [{ id: 'optimistic', role: 'user', content: 'steer', commandId: 'cmd' }] };
+		state = reduce(state, ev('message.user', { content: 'steer', command_id: 'cmd', checkpoint_backed: false }));
+		expect(state.messages).toHaveLength(1);
+		expect(state.messages[0]).toMatchObject({ id: 'optimistic', checkpointBacked: false });
+	});
+});
+
 describe('streaming tail lookup', () => {
 	it.each(['assistant.text_delta', 'assistant.thinking_delta'])('does not scan historical IDs for %s', (type) => {
 		let state = initialState();

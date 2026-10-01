@@ -84,10 +84,10 @@ describe('reset timestamps', () => {
 		expect(formatCountdown(reset, Date.now())).toBe('3h 0m');
 		vi.setSystemTime(Date.UTC(2026, 8, 25, 15, 0, 1));
 		expect(formatCountdown(reset, Date.now())).toBe('');
-		// Rolled over: the window reads as a fresh quota until the next report.
-		expect(reportedRemainingPct(win(3, reset), Date.now())).toBe(100);
-		expect(remainingFromUsedPct(win(97, reset), Date.now())).toBe(100);
-		expect(effectivePct(win(97, reset), Date.now())).toBe(0);
+		// A reset is not an observation: keep last-reported headroom.
+		expect(reportedRemainingPct(win(3, reset), Date.now())).toBe(3);
+		expect(remainingFromUsedPct(win(97, reset), Date.now())).toBe(3);
+		expect(effectivePct(win(97, reset), Date.now())).toBe(97);
 	});
 });
 

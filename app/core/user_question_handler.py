@@ -145,6 +145,102 @@ def _question_ttl_seconds() -> int:
     return int(getattr(settings, "user_question_timeout_seconds", 3600))
 
 
+# ---------------------------------------------------------------------------
+# Durable "awaiting input" state for the sidebar
+#
+# The sidebar's Needs permission / Has question label is fed by
+# ``session_attention`` frames. Those frames must carry the durable count of
+# pending ``pending_interactions`` rows, not a per-turn in-memory counter: a
+# posted (nonblocking) question outlives the turn that asked it, and a page
+# load or reconnect has no other way to learn it exists.
+# ---------------------------------------------------------------------------
+
+_PENDING_ROW_SQL = (
+    "pi.state='pending' AND (pi.expires_at IS NULL OR pi.expires_at >= NOW())"
+)
+
+
+def _fold_attention(counts: Dict[str, int]) -> tuple:
+    """(count, kind) from per-kind counts; a permission outranks a question."""
+    total = sum(counts.values())
+    kind = "permission" if counts.get("permission") else QUESTION_KIND
+    return total, kind
+
+
+def get_session_attention(session_id: str) -> Optional[tuple]:
+    """``(owner_user_id, count, kind)`` for one session, or None if it is gone.
+
+    ``owner_user_id`` is the id user-level frames for this session are
+    addressed to: ``"admin"`` for the owner (which sync_engine also fans to
+    the owner's paired devices) or the API user's id.
+    """
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT api_user_id FROM sessions WHERE id=%s", (session_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            "SELECT pi.kind AS kind, COUNT(*) AS n FROM pending_interactions pi "
+            f"WHERE pi.session_id=%s AND {_PENDING_ROW_SQL} GROUP BY pi.kind",
+            (session_id,),
+        )
+        counts = {r["kind"]: int(r["n"]) for r in cursor.fetchall() or []}
+    count, kind = _fold_attention(counts)
+    return (row["api_user_id"] or "admin", count, kind)
+
+
+def get_user_attention_snapshot(user_id: str) -> List[Dict[str, Any]]:
+    """Every session of this user with pending prompts: session_id, count, kind.
+
+    Ownership matches ``streaming_status.get_user_streaming_sessions``: the
+    owner (``"admin"`` or a paired device) sees sessions whose ``api_user_id``
+    is NULL, an API key sees its own. Fails open (empty list) on a DB error.
+    """
+    from app.db.base import get_db
+
+    owner = user_id == "admin" or user_id.startswith("paired:")
+    sql = (
+        "SELECT pi.session_id AS session_id, pi.kind AS kind, COUNT(*) AS n "
+        "FROM pending_interactions pi JOIN sessions s ON s.id = pi.session_id "
+        f"WHERE {_PENDING_ROW_SQL} AND "
+        + ("s.api_user_id IS NULL" if owner else "s.api_user_id = %s")
+        + " GROUP BY pi.session_id, pi.kind"
+    )
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, () if owner else (user_id,))
+            rows = cursor.fetchall() or []
+    except Exception:
+        logger.warning("Attention snapshot failed for %s", user_id, exc_info=True)
+        return []
+    per_session: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        per_session.setdefault(r["session_id"], {})[r["kind"]] = int(r["n"])
+    snapshot = []
+    for sid, counts in per_session.items():
+        count, kind = _fold_attention(counts)
+        snapshot.append({"session_id": sid, "count": count, "kind": kind})
+    return snapshot
+
+
+async def publish_session_attention(session_id: str) -> None:
+    """Fan a session's durable pending-prompt count to its owner. Never raises."""
+    try:
+        info = await asyncio.to_thread(get_session_attention, session_id)
+        if info is None:
+            return
+        user_id, count, kind = info
+        from app.core.sync_engine import sync_engine
+
+        await sync_engine.broadcast_session_attention(user_id, session_id, count, kind=kind)
+    except Exception:  # noqa: BLE001 — the indicator must never break a prompt
+        logger.debug("session_attention publish failed for %s", session_id, exc_info=True)
+
+
 class UserQuestionHandler:
     """Handles user questions from Claude with a queue system."""
 
@@ -321,6 +417,9 @@ class UserQuestionHandler:
             pass
 
         if nonblocking:
+            # Nothing in the turn counts a posted question, so publish the
+            # durable count or no other device ever shows "Has question".
+            await publish_session_attention(session_id)
             return {"status": "posted", "request_id": request_id}
 
         result_row = await interaction_wait.await_interaction(
@@ -397,6 +496,7 @@ class UserQuestionHandler:
                 "interaction.expired emit failed after question timeout",
                 exc_info=True,
             )
+        await publish_session_attention(session_id)
 
     @staticmethod
     async def _notify_question_expired(
@@ -472,6 +572,7 @@ class UserQuestionHandler:
                 await interaction_events.emit_interaction_expired(
                     session_id, row["id"], request_id, reason="cancelled",
                 )
+                await publish_session_attention(session_id)
             return cancelled
 
         # Only the questions this request actually posted can become user input.
@@ -518,6 +619,7 @@ class UserQuestionHandler:
         await interaction_events.emit_interaction_answered(
             session_id, row["id"], request_id, envelope,
         )
+        await publish_session_attention(session_id)
         return True
 
     async def _respond_v2(
@@ -562,6 +664,7 @@ class UserQuestionHandler:
             await interaction_events.emit_interaction_answered(
                 session_id, row["id"], request_id, envelope,
             )
+            await publish_session_attention(session_id)
         return answered
 
     async def respond(
@@ -633,6 +736,7 @@ class UserQuestionHandler:
                 await interaction_events.emit_interaction_expired(
                     session_id, cancelled_interaction_id, rid, "cancelled",
                 )
+            await publish_session_attention(session_id)
 
 
 # Global singleton instance

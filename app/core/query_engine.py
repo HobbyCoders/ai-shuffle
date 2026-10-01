@@ -759,7 +759,10 @@ async def execute_query(
                     # Funnel through the unified notification system so the
                     # non-streaming /query and /conversation paths reach the
                     # bell + every device, matching the streaming paths.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -854,10 +857,17 @@ async def execute_query(
     }
 
 
+def _adapter_is_delegated(adapter: Any) -> bool:
+    """Whether ``adapter`` runs the delegated leg (the claude CLI)."""
+    return getattr(adapter, "provider_kind", None) == "delegated"
+
+
 async def _emit_api_error_notification(
     api_user_id: Optional[str],
     session_id: Optional[str],
     api_err: Any,
+    *,
+    delegated: bool = False,
 ) -> None:
     """Funnel a provider ``api_error`` through the unified notification system.
 
@@ -867,6 +877,10 @@ async def _emit_api_error_notification(
     "Fix with AI" button is rebuilt client-side (keyed on ``category`` —
     closures can't cross the wire), so we only ship a serializable action
     descriptor here. Never raises — must not break the streaming path.
+
+    ``delegated`` says the turn ran through the claude CLI. A 401 there means
+    the CLI's own sign-in is missing or expired, which only signing in again
+    fixes, so the notification says how instead of the generic HTTP text.
     """
     try:
         from app.services.notification_service import emit_notification
@@ -876,6 +890,24 @@ async def _emit_api_error_notification(
         except (TypeError, ValueError):
             status = 0
 
+        if status == 401 and delegated:
+            from app.core.claude_relogin_notice import LOGIN_COMMAND
+
+            await emit_notification(
+                api_user_id or "admin",
+                severity="error",
+                message=(
+                    "Claude Code refused the request (HTTP 401): its sign-in on this "
+                    "worker is missing or has expired. "
+                    f"Run `{LOGIN_COMMAND}` on the worker, or use Settings > "
+                    "Providers > Claude Code CLI to sign in again, then retry."
+                ),
+                category="api_error",
+                surface="notification",
+                session_id=session_id,
+                persist=True,
+            )
+            return
         if status == 429:
             # Rate-limit (429) notifications are owned by ``account_failover``,
             # which surfaces the "rate-limited — wait or sign into a different
@@ -1039,7 +1071,10 @@ async def stream_query(
         # exist (e.g. a project path from another install) — surface a clear
         # error instead of an opaque subprocess spawn failure.
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
-        yield {"type": "error", "message": str(e)}
+        yield {
+            "type": "error", "message": str(e),
+            **({"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
+        }
         return
 
     # Credential gate (see _stream_to_websocket_impl).
@@ -1465,7 +1500,10 @@ async def stream_query(
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
                     # handler does not emit separately — the `notification` event does.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(state.adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -1708,6 +1746,9 @@ async def _stream_to_websocket_impl(
     # divergence, not a redundancy.
     session_mode = session_mode_of(session)
     _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode)
+    from app.core.session_modes import narrow_tool_access_for_proactive
+    assistant_proactive = (overrides or {}).get("_assistant_proactive")
+    _tool_access = narrow_tool_access_for_proactive(_tool_access, assistant_proactive)
     allowed_tools = list(_tool_access.allowed or [])
     disallowed_tools = list(_tool_access.disallowed or [])
 
@@ -1749,7 +1790,10 @@ async def _stream_to_websocket_impl(
         # install): refuse to run in the main checkout / with an invalid cwd.
         # Surface a clear error to the user instead.
         logger.error(f"[WS] Cannot build session options for {session_id}: {e}")
-        yield {"type": "error", "message": str(e)}
+        yield {
+            "type": "error", "message": str(e),
+            **({"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
+        }
         return
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:
@@ -2076,19 +2120,48 @@ async def _stream_to_websocket_impl(
                     If each prompt independently broadcast 0 on resolve, the first to
                     finish would clear the indicator while its siblings were still
                     pending. Counting up on enter and down on exit keeps the dot lit
-                    until the LAST prompt resolves. The read-modify-write is safe
-                    without a lock: it runs to completion before the first await, and
-                    the event loop is single-threaded."""
+                    until the LAST prompt resolves. The counter update itself needs
+                    no lock (no await before it, single-threaded loop), but the
+                    durable read below does await, so the read and the broadcast
+                    run under a FIFO lock and re-read the counter: the last bump
+                    broadcasts last, with the newest in-memory and durable state,
+                    instead of a stale non-zero count landing after a zero."""
                     if not _user_id:
                         return
-                    n = max(0, (callback_refs.get("attention_count") or 0) + delta)
-                    callback_refs["attention_count"] = n
-                    try:
-                        await sync_engine.broadcast_session_attention(
-                            _user_id, _sid, n, kind=kind
-                        )
-                    except Exception:
-                        logger.debug("[WS] session_attention broadcast failed", exc_info=True)
+                    callback_refs["attention_count"] = max(
+                        0, (callback_refs.get("attention_count") or 0) + delta
+                    )
+                    lock = callback_refs.get("attention_lock")
+                    if lock is None:
+                        lock = callback_refs["attention_lock"] = asyncio.Lock()
+                    async with lock:
+                        # Posted questions outlive this turn's counter, so never
+                        # report fewer than the durable pending rows: without this,
+                        # resolving a permission broadcast 0 and erased "Has
+                        # question" while its row was still pending.
+                        try:
+                            from app.core.user_question_handler import get_session_attention
+
+                            durable = await asyncio.to_thread(get_session_attention, _sid)
+                        except Exception:
+                            durable = None
+                            logger.debug("[WS] durable attention read failed", exc_info=True)
+                        n = callback_refs.get("attention_count") or 0
+                        try:
+                            count, out_kind = n, kind
+                            if durable is not None:
+                                _owner, d_count, d_kind = durable
+                                if d_count > count:
+                                    count = d_count
+                                if delta < 0 or d_kind == "permission":
+                                    # The prompt just resolved (or a permission is
+                                    # open): label by what is still pending.
+                                    out_kind = d_kind if d_count else kind
+                            await sync_engine.broadcast_session_attention(
+                                _user_id, _sid, count, kind=out_kind
+                            )
+                        except Exception:
+                            logger.debug("[WS] session_attention broadcast failed", exc_info=True)
 
                 async def _request_permission(**kwargs):
                     """Show a permission prompt, wrapped with the awaiting-input
@@ -3575,7 +3648,10 @@ async def _stream_to_websocket_impl(
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
                     # handler does not emit separately — the `notification` event does.
-                    await _emit_api_error_notification(api_user_id, session_id, api_err)
+                    await _emit_api_error_notification(
+                        api_user_id, session_id, api_err,
+                        delegated=_adapter_is_delegated(state.adapter),
+                    )
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

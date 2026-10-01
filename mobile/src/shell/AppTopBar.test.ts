@@ -28,6 +28,17 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 	return { projects: writable([]) };
 });
 
+vi.mock('$lib/stores/hotkeyPreferences.svelte', async () => {
+	const { writable } = await import('svelte/store');
+	return { hotkeyPreferences: writable({ globalSttEnabled: false }) };
+});
+vi.mock('$lib/services/globalStt', async () => {
+	const { writable } = await import('svelte/store');
+	return { globalSttState: writable({ isRecording: false }), triggerToggle: vi.fn() };
+});
+
+import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
+import { triggerToggle } from '$lib/services/globalStt';
 import AppTopBar from './AppTopBar.svelte';
 import * as layoutStore from '$lib/stores/layout.svelte';
 import * as sessionStore from '$lib/stores/active-session';
@@ -38,6 +49,7 @@ const activeView = layoutStore.activeView as unknown as Writable<{ type: string 
 const activeSession = sessionStore.activeSession as unknown as Writable<Record<string, unknown>>;
 const unreadCount = notificationStore.unreadCount as unknown as Writable<number>;
 const projects = appData.projects as unknown as Writable<{ id: string; name: string }[]>;
+const hotkeys = hotkeyPreferences as unknown as Writable<{ globalSttEnabled: boolean }>;
 
 function renderBar(extra: Record<string, unknown> = {}) {
 	const props = {
@@ -57,9 +69,36 @@ beforeEach(() => {
 	activeSession.set({ sessionId: null, title: '', messages: [], project: null });
 	unreadCount.set(0);
 	projects.set([]);
+	hotkeys.set({ globalSttEnabled: false });
+	vi.mocked(triggerToggle).mockClear();
 });
 
 afterEach(() => cleanup());
+
+describe('AppTopBar actions', () => {
+	it('names the integrated Assistant home without becoming a new session mode', () => {
+		activeView.set({ type: 'assistant' });
+		renderBar();
+		expect(screen.getByText('Assistant')).toBeTruthy();
+		expect(screen.queryByTestId('breadcrumbs')).toBeNull();
+	});
+
+	it('keeps chat action controls out of the title bar', () => {
+		activeView.set({ type: 'session' });
+		const { container } = renderBar();
+		expect(container.querySelector('.tb-actions')?.textContent).toBe('');
+		expect(container.querySelector('.page-header')).toBeNull();
+	});
+
+	it('retains global voice input in the single bar except when the chat owns it', async () => {
+		hotkeys.set({ globalSttEnabled: true });
+		const view = renderBar();
+		await fireEvent.click(screen.getByRole('button', { name: 'Start voice input' }));
+		expect(triggerToggle).toHaveBeenCalledTimes(1);
+		await view.rerender({ hideGlobalStt: true });
+		expect(screen.queryByRole('button', { name: 'Start voice input' })).toBeNull();
+	});
+});
 
 describe('AppTopBar title', () => {
 	it('falls back to the app name with no view and maps feature views to page titles', async () => {

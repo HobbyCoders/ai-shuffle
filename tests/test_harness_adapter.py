@@ -1835,9 +1835,25 @@ async def test_native_leg_registry_has_fluid_builtins():
     assert _FLUID_BUILTINS <= _names(registry)
 
 
+@pytest.fixture
+def cli_lacks_search(monkeypatch):
+    """A CLI build that may drop its own Glob/Grep: the bundled copies register."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: False)
+
+
+@pytest.fixture
+def cli_ships_search(monkeypatch):
+    """A CLI known to carry its own Glob/Grep (Windows)."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
+
+
 @pytest.mark.asyncio
-async def test_delegated_leg_registry_has_search_without_duplicate_file_tools():
-    """Search must not depend on the CLI's changing built-in tool surface."""
+async def test_delegated_leg_registry_has_search_without_duplicate_file_tools(cli_lacks_search):
+    """Where the CLI may lack its own search, the bundled copies fill in."""
     adapter = HarnessAdapter()
     options = SessionOptions(
         model="fable", extra={"fluid_inproc_servers": [_FakeInprocServer()]}
@@ -1855,7 +1871,40 @@ async def test_delegated_leg_registry_has_search_without_duplicate_file_tools():
 
 
 @pytest.mark.asyncio
-async def test_delegated_search_bridge_executes_and_preserves_restrictions(tmp_path):
+async def test_delegated_leg_skips_bundled_search_where_the_cli_ships_its_own(cli_ships_search):
+    """On Windows the CLI announces its own Glob and Grep: no duplicates, and
+    no note steering the model to the bundled copies."""
+    from app.core.provider.harness_adapter import (
+        _delegated_guidance_blocks,
+        _delegated_permission_grants,
+    )
+
+    adapter = HarnessAdapter()
+    options = SessionOptions(model="fable")
+    registry = await adapter._build_registry(options, native=False)
+    assert registry is None or not ({"Glob", "Grep"} & _names(registry))
+    text = "\n".join(_delegated_guidance_blocks(options, registry))
+    assert "mcp__fluid_bundled__Glob" not in text
+    assert "mcp__fluid_bundled__Grep" not in text
+    grants = _delegated_permission_grants(options)
+    assert "Glob" in grants and "Grep" in grants
+    assert "mcp__fluid_bundled__Glob" not in grants
+
+
+@pytest.mark.asyncio
+async def test_delegated_bundled_search_is_granted_where_registered(cli_lacks_search):
+    from app.core.provider.harness_adapter import _delegated_permission_grants
+
+    grants = _delegated_permission_grants(SessionOptions(model="fable"))
+    assert {"Glob", "Grep", "mcp__fluid_bundled__Glob", "mcp__fluid_bundled__Grep"} <= set(grants)
+    chat = SessionOptions(model="fable", extra={"session_mode": "chat"})
+    assert not {"Glob", "Grep", "mcp__fluid_bundled__Glob", "mcp__fluid_bundled__Grep"} & set(
+        _delegated_permission_grants(chat) or ()
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_search_bridge_executes_and_preserves_restrictions(tmp_path, cli_lacks_search):
     from fluid.engine.delegated import DelegatedLoop
     from fluid.store.base import MemoryStore
     from fluid.tools.mcp.bundled_server import _answer
@@ -1908,7 +1957,7 @@ async def test_delegated_search_bridge_executes_and_preserves_restrictions(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_delegated_chat_does_not_gain_filesystem_search():
+async def test_delegated_chat_does_not_gain_filesystem_search(cli_lacks_search):
     adapter = HarnessAdapter()
     registry = await adapter._build_registry(
         SessionOptions(model="fable", extra={"session_mode": "chat"}), native=False,
@@ -1917,17 +1966,123 @@ async def test_delegated_chat_does_not_gain_filesystem_search():
 
 
 @pytest.mark.asyncio
-async def test_delegated_search_guidance_names_only_permitted_bridge_tools():
+async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_lacks_search):
     from app.core.provider.harness_adapter import _delegated_guidance_blocks
 
     adapter = HarnessAdapter()
     options = SessionOptions(model="fable")
     registry = await adapter._build_registry(options, native=False)
     text = "\n".join(_delegated_guidance_blocks(options, registry))
-    assert "mcp__fluid_bundled__Glob" in text
-    assert "mcp__fluid_bundled__Grep" in text
+    assert (
+        "Search files with Glob and Grep rather than find/grep through Bash. If "
+        "Claude Code's own Glob and Grep are not in your tool list, use "
+        "mcp__fluid_bundled__Glob and mcp__fluid_bundled__Grep."
+    ) in text
     options.tool_allowlist = ["Read"]
     assert not _delegated_guidance_blocks(options, registry)
+
+
+# ─── Delegated tool-use guidance (Bash-first behaviour, session 42595afe) ────
+
+
+def test_delegated_code_session_carries_the_tool_use_block():
+    from app.core.provider.harness_adapter import (
+        DELEGATED_TOOL_USE_BLOCK,
+        _delegated_guidance_blocks,
+    )
+
+    unrestricted = SessionOptions(model="opus")
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(unrestricted, None)
+    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(picked, None)
+    assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK
+
+
+def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
+    from app.core.provider.harness_adapter import (
+        DELEGATED_TOOL_USE_BLOCK,
+        DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
+        _delegated_guidance_blocks,
+    )
+
+    # Bash is the only permitted way to search here, so the block must not
+    # forbid grep and find through it.
+    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
+    blocks = _delegated_guidance_blocks(picked, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in blocks
+    assert DELEGATED_TOOL_USE_BLOCK_NO_SEARCH in blocks
+    assert "grep" not in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+    assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+    globbed = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Glob"])
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(globbed, None)
+
+
+def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
+    from app.core.provider.harness_adapter import (
+        DELEGATED_TOOL_USE_BLOCK,
+        _delegated_guidance_blocks,
+    )
+
+    chat = SessionOptions(model="opus", extra={"session_mode": "chat"})
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(chat, None)
+    no_file_tools = SessionOptions(model="opus", tool_allowlist=["Bash", "Grep", "Glob"])
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_file_tools, None)
+    no_shell = SessionOptions(model="opus", tool_allowlist=["Read", "Edit"])
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_shell, None)
+    # Without Edit the block would forbid the only permitted way to edit.
+    read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(read_only, None)
+    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
+    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(shell_and_files, None)
+    blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
+    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(blocked, None)
+
+
+@pytest.mark.asyncio
+async def test_delegated_append_with_the_tool_use_block_is_byte_identical(cli_ships_search):
+    from app.core.provider.harness_adapter import (
+        DELEGATED_TOOL_USE_BLOCK,
+        _delegated_append_text,
+    )
+
+    options = SessionOptions(model="opus")
+    registry = await HarnessAdapter()._build_registry(options, native=False)
+    first = _delegated_append_text("APPEND", options, registry)
+    second = _delegated_append_text("APPEND", options, registry)
+    assert first == second
+    assert first.count(DELEGATED_TOOL_USE_BLOCK) == 1
+
+
+def test_delegated_append_never_routes_to_swarm():
+    """The delegated leg has no Swarm tool, so its append must not route to one."""
+    from app.core.provider.harness_adapter import _delegated_append_text
+
+    options = SessionOptions(
+        model="opus",
+        extra={"automatic_workflows": True, "fluid_registry": _registry_with_bridged_task()},
+    )
+    text = _delegated_append_text("APPEND", options, _registry_with_bridged_task())
+    assert "Swarm" not in text
+
+
+def test_delegated_append_drops_the_agents_index_without_task(monkeypatch):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(
+        ha, "_agent_context",
+        lambda options, **kw: ("# Available agent types\n- Helper: Helps out", []),
+    )
+    registry = _registry_with_bridged_task()
+    offered = SessionOptions(model="opus")
+    assert "# Available agent types" in ha._delegated_append_text("APPEND", offered, registry)
+    banned = SessionOptions(model="opus", disallowed_tools=["mcp__builtins__Task", "Task"])
+    assert "# Available agent types" not in ha._delegated_append_text("APPEND", banned, registry)
+    unselected = SessionOptions(model="opus", tool_allowlist=["Read", "Bash"])
+    assert "# Available agent types" not in ha._delegated_append_text(
+        "APPEND", unselected, registry
+    )
+    picked = SessionOptions(model="opus", tool_allowlist=["Read", "Task"])
+    assert "# Available agent types" in ha._delegated_append_text("APPEND", picked, registry)
 
 
 @pytest.mark.asyncio
@@ -2296,8 +2451,8 @@ async def test_code_mode_rewrites_the_compiled_prompt(monkeypatch, agent_workspa
 
     # LAST — the operating rule for every instruction above it, immediately
     # followed by the "# Tools" catalog it points at.
-    assert ha.CODE_MODE_SECTION in system
-    assert system.index(ha.CODE_MODE_SECTION) < system.index(_TOOLS_HEADING)
+    assert "# Code mode\n" in system
+    assert system.index("# Code mode\n") < system.index(_TOOLS_HEADING)
     # Skills: header rewritten, index body untouched.
     assert "from tools.Skill import Skill" in system
     assert "- demo: Demo skill" in system
@@ -2319,7 +2474,7 @@ async def test_code_mode_section_is_priced_as_a_section(monkeypatch, agent_works
 
     captured = await _connect_code_mode(monkeypatch, agent_workspace)
     compiled = captured["system_sections"]
-    assert [s for s in compiled.sections if s.text == ha.CODE_MODE_SECTION]
+    assert len([s for s in compiled.sections if s.text.startswith("# Code mode\n")]) == 1
     assert sum(s.text.startswith("# Code mode") for s in compiled.sections) == 1
     # The two views never drift: joined sections ARE the prompt.
     assert compiled.text == captured["system"]
@@ -3424,6 +3579,9 @@ def _map_frames(frames: list[dict]) -> list:
     out: list = []
     for frame in frames:
         out.extend(mapper.feed(frame).events)
+    # No result frame ends these streams; release the call the mapper holds
+    # for its final counts, as DelegatedLoop does at end of stream.
+    out.extend(mapper.flush_usage())
     return out
 
 
@@ -5336,8 +5494,9 @@ async def test_native_loop_gets_the_profile_blocklist(recording_adapter):
 async def test_delegated_leg_forwards_the_allowlist_and_keeps_its_bans(
     recording_adapter,
 ):
-    """The CLI leg passes the same list as ``--allowed-tools`` while the A6 ban
-    set (Task/Agent/wake family) stays in ``disallowed_tools``."""
+    """The CLI leg's bridge surface is the list in the CLI's spellings (Read
+    also permits the CLI's LSP, which needs ToolSearch), while the A6 ban set
+    (Task/Agent/wake family) stays in ``disallowed_tools``."""
     adapter, made = recording_adapter
     await adapter.connect(
         SessionOptions(
@@ -5346,7 +5505,8 @@ async def test_delegated_leg_forwards_the_allowlist_and_keeps_its_bans(
             disallowed_tools=["Write"],
         )
     )
-    assert made["delegated"]["allowed_tools"] == ["Read"]
+    assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "ToolSearch"]
+    assert "Read" not in (made["delegated"]["permission_grants"] or [])
     assert "Task" in made["delegated"]["disallowed_tools"]
     assert "Write" in made["delegated"]["disallowed_tools"]
 
@@ -5380,7 +5540,7 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
         aih_session_id="app-sess",
     )
     await adapter.connect_with_sdk_options(sdk_options)
-    assert made["delegated"]["allowed_tools"] == ["Read"]
+    assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "ToolSearch"]
     assert adapter._options.tool_allowlist == ["Read"]
     assert adapter._options.allowed_tools == ["mcp__builtins__Task", "mcp__ai-tools"]
     assert made["delegated"]["permission_grants"] is None
@@ -5513,15 +5673,15 @@ async def test_delegated_allow_mode_subtracts_the_cached_cli_surface(
     denied = made["delegated"]["disallowed_tools"]
     assert "Bash" in denied and "Write" in denied
     assert "Read" not in denied and "Glob" not in denied
-    assert made["delegated"]["allowed_tools"] == ["Read", "Glob"]
+    assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "Glob", "ToolSearch"]
 
 
 @pytest.mark.asyncio
-async def test_delegated_allow_mode_degrades_without_a_cached_surface(
+async def test_delegated_allow_mode_walls_the_seeded_surface_on_a_cold_cache(
     recording_adapter,
 ):
-    """Cold cache: only the grant goes out (plus the A6 bans). A documented
-    degradation — the app's can_use_tool callback still gates every call."""
+    """Cold cache: the static seed of known CLI built-ins still walls every
+    tool off the surface, so the first session of a process is restricted."""
     from app.core import cli_tool_surface
     from app.core.provider.harness_adapter import DELEGATED_BANNED_TOOLS
 
@@ -5530,8 +5690,11 @@ async def test_delegated_allow_mode_degrades_without_a_cached_surface(
     await adapter.connect(
         SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read"])
     )
-    assert made["delegated"]["disallowed_tools"] == sorted(DELEGATED_BANNED_TOOLS)
-    assert made["delegated"]["allowed_tools"] == ["Read"]
+    denied = made["delegated"]["disallowed_tools"]
+    assert set(DELEGATED_BANNED_TOOLS) <= set(denied)
+    assert {"Bash", "PowerShell", "Write", "Edit", "Glob", "Grep", "WebFetch"} <= set(denied)
+    assert "Read" not in denied and "LSP" not in denied and "ToolSearch" not in denied
+    assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "ToolSearch"]
 
 
 def test_cached_cli_surface_ignores_an_empty_frame():
@@ -5540,12 +5703,48 @@ def test_cached_cli_surface_ignores_an_empty_frame():
     from app.core import cli_tool_surface
 
     cli_tool_surface.reset_cli_tools()
-    cli_tool_surface.record_cli_tools(["Read"])
+    cli_tool_surface.record_cli_tools(["FutureTool"])
     cli_tool_surface.record_cli_tools([])
     cli_tool_surface.record_cli_tools(None)
-    assert cli_tool_surface.cached_cli_tools() == ["Read"]
+    assert cli_tool_surface.cached_cli_tools() == [
+        "FutureTool", *cli_tool_surface.KNOWN_CLI_TOOLS,
+    ]
     cli_tool_surface.reset_cli_tools()
-    assert cli_tool_surface.cached_cli_tools() is None
+    assert cli_tool_surface.cached_cli_tools() == list(cli_tool_surface.KNOWN_CLI_TOOLS)
+
+
+def test_cached_cli_surface_never_shrinks():
+    """The CLI leaves disallowed tools out of its init list, so a chat or
+    restricted session announces a narrow surface. Recording it must not drop
+    the names a code session announced, or the next allow-mode session would
+    stop walling Bash, Write and PowerShell."""
+    from app.core import cli_tool_surface
+    from app.core.provider.harness_adapter import _delegated_disallowed
+
+    code = ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "FutureTool"]
+    chat = ["WebSearch", "WebFetch", "mcp__fluid_bundled__mcp__attachments__Read"]
+    cli_tool_surface.reset_cli_tools()
+    try:
+        cli_tool_surface.record_cli_tools(code)
+        cli_tool_surface.record_cli_tools(chat)
+        cached = cli_tool_surface.cached_cli_tools()
+        assert set(code) | set(chat) <= set(cached)
+        denied = _delegated_disallowed(
+            SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read"])
+        )
+    finally:
+        cli_tool_surface.reset_cli_tools()
+    assert {"Bash", "Write", "PowerShell", "FutureTool"} <= set(denied)
+
+
+def test_cold_cache_chat_bans_every_cli_shell_and_file_tool():
+    from app.core import cli_tool_surface
+    from app.core.provider.harness_adapter import _delegated_disallowed
+
+    cli_tool_surface.reset_cli_tools()
+    options = SessionOptions(model="claude-sonnet-4-5", extra={"session_mode": "chat"})
+    denied = set(_delegated_disallowed(options))
+    assert {"PowerShell", "LSP", "Bash", "Read", "Write", "Edit", "NotebookEdit"} <= denied
 
 
 @pytest.mark.asyncio
@@ -5567,7 +5766,8 @@ async def test_delegated_surface_event_feeds_the_cache_and_shows_nothing():
     cli_tool_surface.reset_cli_tools()
     try:
         got = await _collect(_adapter_with(FakeEngine(events)))
-        assert cli_tool_surface.cached_cli_tools() == [
+        # Observed names come first, ahead of the static seed.
+        assert cli_tool_surface.cached_cli_tools()[:4] == [
             "Read", "Bash", "Write", "Glob",
         ]
     finally:
@@ -5589,13 +5789,19 @@ async def test_delegated_surface_warms_the_allow_mode_subtraction(recording_adap
     every announced tool the agent did not select."""
     from app.core import cli_tool_surface
 
+    options = SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read", "Glob"])
     cli_tool_surface.reset_cli_tools()
     try:
+        # 0. Cold: a tool outside the static seed is not walled yet.
+        adapter, made = recording_adapter
+        await adapter.connect(options)
+        assert "FutureTool" not in made["delegated"]["disallowed_tools"]
+
         # 1. The CLI's init frame arrives on a live delegated leg.
         await _collect(_adapter_with(FakeEngine([
             lm.TurnStarted(session_id=SID, model="m", provider="fake"),
             lm.DelegatedSurface(
-                session_id=SID, tools=("Read", "Bash", "Write", "Glob"),
+                session_id=SID, tools=("Read", "Bash", "Write", "Glob", "FutureTool"),
             ),
             lm.TurnComplete(
                 session_id=SID, stop_reason="end_turn", num_model_calls=1,
@@ -5603,17 +5809,14 @@ async def test_delegated_surface_warms_the_allow_mode_subtraction(recording_adap
         ])))
 
         # 2. A later connect builds argv against the now-warm cache.
-        adapter, made = recording_adapter
-        await adapter.connect(
-            SessionOptions(model="claude-sonnet-4-5", tool_allowlist=["Read", "Glob"])
-        )
+        await HarnessAdapter().connect(options)
     finally:
         cli_tool_surface.reset_cli_tools()
 
     denied = made["delegated"]["disallowed_tools"]
-    assert "Bash" in denied and "Write" in denied
+    assert "Bash" in denied and "Write" in denied and "FutureTool" in denied
     assert "Read" not in denied and "Glob" not in denied
-    assert made["delegated"]["allowed_tools"] == ["Read", "Glob"]
+    assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "Glob", "ToolSearch"]
 
 
 def test_profile_surface_and_dispatch_surface_intersect(mock_db):
@@ -6042,10 +6245,28 @@ async def test_native_file_agents_reach_dispatch_but_plugins_stay_inert(monkeypa
 # the Task tool at all. The block now rides whichever prompt part the CLI reads.
 
 
-def _delegated_agents_options(cwd, declared=None):
-    from fluid.tools.registry import ToolRegistry
+def _registry_with_bridged_task():
+    """A delegated registry carrying the app's bridged Task, as production has.
 
-    extra = {"fluid_registry": ToolRegistry()}
+    The delegated append advertises agents only when the bridge serves
+    ``mcp__builtins__Task``.
+    """
+    from fluid.tools.registry import ToolRegistry, ToolSpec
+
+    async def _unused(inp, ctx):  # pragma: no cover — never dispatched here
+        return ""
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="mcp__builtins__Task", description="Dispatch an agent.",
+                 input_schema={"type": "object"}, risk="write"),
+        _unused,
+    )
+    return registry
+
+
+def _delegated_agents_options(cwd, declared=None):
+    extra = {"fluid_registry": _registry_with_bridged_task()}
     if declared is not None:
         extra["declared_agents"] = declared
     return SessionOptions(
@@ -6775,6 +6996,39 @@ def test_safety_block_reaches_every_native_prompt(model):
     assert "third" in block and "parties" in block
 
 
+@pytest.mark.parametrize("model", ("gpt-6-astra", "claude-sonnet-4-5"))
+def test_context_note_reaches_every_native_prompt(model):
+    """Plan item 13: the app replaces fluid's base prompt, and with it fluid's
+    "## Context" section, so the compiled native prompt restates it: old
+    results and turns may be placeholders or digests, HistoryExpand recovers
+    the original and HistorySearch finds text, and the latest user message
+    outranks any digest."""
+    import app.core.provider.harness_adapter as ha
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(model=model)
+    )
+
+    assert compiled.text.count(ha.CONTEXT_BLOCK) == 1
+    assert "placeholders or digests" in compiled.text
+    assert "HistoryExpand(node) returns that node's original text verbatim" in compiled.text
+    assert "HistorySearch finds earlier text" in compiled.text
+    assert "The latest user message outranks any digest." in compiled.text
+    assert compiled.text.index(ha.SAFETY_BLOCK) < compiled.text.index(ha.CONTEXT_BLOCK)
+
+
+def test_context_note_without_recall_tools_names_no_tool():
+    """A surface without HistoryExpand/HistorySearch still learns about
+    placeholders and digests, but is not told to call tools it lacks."""
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._context_section(frozenset({"Read", "Bash"})) == ha.CONTEXT_BLOCK_NO_RECALL
+    assert ha._context_section(frozenset({"HistoryExpand", "HistorySearch"})) == ha.CONTEXT_BLOCK
+    assert ha._context_section(None) == ha.CONTEXT_BLOCK
+    assert "History" not in ha.CONTEXT_BLOCK_NO_RECALL
+    assert "outranks any digest" in ha.CONTEXT_BLOCK_NO_RECALL
+
+
 def test_safety_block_keeps_the_prefix_stable_across_turns():
     """Cache-neutral: the same session compiles to the same bytes on every
     turn, and the block sits ahead of the model-family guidance."""
@@ -6910,29 +7164,19 @@ def test_guidance_degrades_to_nothing_without_the_fluid_symbol(monkeypatch):
 
 
 def test_code_mode_section_carries_the_four_contracts():
-    """The four model-side contracts the audit sized as highest leverage."""
+    """Budget output and batch independent work, not unseen decisions."""
     import app.core.provider.harness_adapter as ha
 
     text = ha._code_mode_section()
-
-    # (a) bind-then-slice, with the recovery seams named.
-    assert "forfeits its ResultRef" in text
-    assert "_refs" in text
-    # (b) park after delegating.
-    assert 'Task(mode="background")' in text and "never poll" in text
-    # (c) one cell carries the whole step.
-    assert "Never spend a cell on a single Read" in text
-    assert "sleep-poll" in text
-    # ... and the two batching rules the round-3 audit added beside it: a known
-    # recipe is one step, and a bound result is located in-cell, not paged out
-    # across cells.
-    assert "is ONE step" in text and "same file or working tree" in text
-    assert "do not print it in slices across cells" in text
-    assert "txt.find('needle')" in text
-    # (d) recall budget.
+    assert "_refs" in text and "stated stdout cap" in text and "16,384 characters" in text
+    assert "Further windows in a later cell are allowed" in text
+    assert 'Task(mode="background")' in text and "Never poll" in text
+    assert "single-call cell is appropriate" in text
+    assert "independent calls, not decisions" in text
+    assert "safety/validation barriers abort" in text
+    assert "Never spend a cell on a single Read" not in text
+    assert "read every search hit" in text and "do not read every" in text
     assert "limit<=5" in text and "two unproductive queries" in text
-    # The code-mode rule still ends the block (it is last for a reason).
-    assert text.rstrip().endswith("those go to Remember.")
 
 
 # ── native recoverable context policy ─────────────────────────────────────
@@ -7283,9 +7527,10 @@ def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
     assert "delete_skill(name=...)" in text
     # 8b: the try/except sentence that contradicted run_python is gone.
     assert "Wrap calls that may fail in try/except" not in text
-    assert "returns a falsy MissingFile instead of raising" in text
+    assert "a falsy MissingFile instead of raising" in text
     assert "Grep of a path you guessed" not in text
-    assert "other tool errors come back as results and do not abort" in text
+    assert "Recoverable failures return inspectable error text" in text
+    assert "safety/validation barriers abort" in text
 
 
 def test_save_skill_and_delete_skill_are_documented_in_the_catalog():

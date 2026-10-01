@@ -61,7 +61,7 @@ import type { ContextWindowChoice } from '$lib/constants/model-context';
 // Shared types
 import type {
 	ChatMessage, MessageType,
-	QueuedMessage, ExecutionMode, DeviceIntent, Task
+	QueuedMessage, PendingPeerMessage, ExecutionMode, DeviceIntent, Task
 } from './types';
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
@@ -70,9 +70,8 @@ import type {
 export interface StreamingSessionInfo {
 	projectId: string | null;
 	worktreeId: string | null;
-	/** The session's logical branch (legacy worktree_branch or the v2
-	 *  sessions.branch). A streaming session with a branch runs in its OWN
-	 *  checkout, so it must not lock main-checkout git controls. */
+	/** Logical checkout branch. Another session on this SAME branch must
+	 *  share the Git safety lock, even with different/absent legacy IDs. */
 	worktreeBranch?: string | null;
 }
 
@@ -203,6 +202,7 @@ export interface ActiveSessionState {
 	deferredPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	queuedMessages: QueuedMessage[];
+	pendingPeerMessages: PendingPeerMessage[];
 	/**
 	 * Currently-running background tasks (sub-agents + shell subprocesses) for
 	 * the active session. Default `[]`. Written by the poller's onPollApplied
@@ -361,6 +361,7 @@ function defaultState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: '',
 		scrollTop: 0,

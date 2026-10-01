@@ -1,20 +1,8 @@
 <script lang="ts">
-	/**
-	 * GitActionOptionsDropdown — one compact popover shell for every git-action
-	 * split button (Commit / Push / Pull / Create PR / Ship It).
-	 *
-	 * The chevron on each split button toggles this panel; the main button always
-	 * fires the action directly with saved defaults and never opens the panel.
-	 * Styled after GitHeaderActions' .branch-dropdown, including the mobile
-	 * position:fixed escape hatch so it isn't clipped by the header's horizontal
-	 * scroll rail.
-	 *
-	 * Persisted options (include-unstaged, next-step, pull strategy, auto-stash,
-	 * merge method, cleanup) read/write through gitActionPreferences and stick
-	 * across invocations. Per-invocation options (commit message override, force
-	 * push, PR title/description/base/draft) live only in local state and reset
-	 * every time the panel opens (the parent remounts it on open).
+	/** In-panel Git action editor. One parent owns scrolling and dismissal.
+	 * Saved preferences persist; message/force/PR overrides reset on mount.
 	 */
+	import { ArrowLeft } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import {
 		computeShipItSteps,
@@ -28,6 +16,7 @@
 
 	interface Props {
 		action: GitActionKind;
+		id?: string;
 		currentBranch: string | null;
 		defaultBranch: string;
 		/** Local branch names offered as PR base targets. */
@@ -37,7 +26,11 @@
 		unpushed?: number | null;
 		/** Worktree sessions delete a worktree on cleanup; plain repos delete a branch. */
 		isWorktreeMode?: boolean;
+		/** Disables the whole editor (an operation or stream is running). */
 		busy?: boolean;
+		/** Why submitting is blocked right now (merge conflicts, state still
+		 *  loading). Only the submit button disables; options stay editable. */
+		submitBlocked?: string | null;
 		onClose: () => void;
 		onCommit?: (o: CommitOptions) => void;
 		onPush?: (o: PushOptions) => void;
@@ -48,6 +41,7 @@
 
 	let {
 		action,
+		id,
 		currentBranch,
 		defaultBranch,
 		baseBranches = [],
@@ -56,6 +50,7 @@
 		unpushed = null,
 		isWorktreeMode = false,
 		busy = false,
+		submitBlocked = null,
 		onClose,
 		onCommit,
 		onPush,
@@ -80,34 +75,32 @@
 		if (prBase === '') prBase = defaultBranch;
 	});
 
-	let panelRef = $state<HTMLDivElement | null>(null);
-
-	// Register outside-click / Escape closing on the next frame so the click that
-	// opened this panel (on the chevron, which sits outside the panel) doesn't
-	// immediately close it again. Bubble phase (not capture) means the chevron's
-	// own onclick runs first when it's used to close — so a close-then-reopen
-	// double toggle can't happen.
+	let panelRef = $state<HTMLElement | null>(null);
+	const titles = { commit: 'Commit changes', push: 'Push to remote', pull: 'Pull changes', pr: 'Create a pull request', shipit: 'Ship It' };
+	const descriptions = {
+		commit: 'Review your message and choose what happens after committing.',
+		push: 'Send this branch’s commits to its remote.',
+		pull: 'Choose how remote changes are brought into this branch.',
+		pr: 'Describe the change and choose its target branch.',
+		shipit: 'Review the pipeline and its merge and cleanup settings.'
+	};
+	// Only the parent workspace owns outside-click dismissal. Escape backs out
+	// of this editor without closing the Git panel beneath it.
 	$effect(() => {
-		let raf = requestAnimationFrame(() => {
-			window.addEventListener('click', onDocClick);
-		});
 		window.addEventListener('keydown', onKeydown);
-		return () => {
-			cancelAnimationFrame(raf);
-			window.removeEventListener('click', onDocClick);
-			window.removeEventListener('keydown', onKeydown);
-		};
+		// Editors without a text field focus Back; the chevron that opened them is gone.
+		(panelRef?.querySelector<HTMLElement>('textarea, input, select') ?? panelRef?.querySelector<HTMLElement>('.opt-back'))?.focus({ preventScroll: true });
+		return () => window.removeEventListener('keydown', onKeydown);
 	});
-
-	function onDocClick(e: MouseEvent) {
-		if (panelRef && !panelRef.contains(e.target as Node)) onClose();
-	}
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
 	}
 
+	const cannotSubmit = $derived(busy || !!submitBlocked);
+
 	// ── Submit handlers (build the option bag, fire, close) ─────────────────────
 	function submitCommit() {
+		if (cannotSubmit) return;
 		onCommit?.({
 			message: commitMessage.trim() || undefined,
 			includeUnstaged: prefs.includeUnstaged,
@@ -116,14 +109,17 @@
 		onClose();
 	}
 	function submitPush() {
+		if (cannotSubmit) return;
 		onPush?.({ force: forcePush });
 		onClose();
 	}
 	function submitPull() {
+		if (cannotSubmit) return;
 		onPull?.({ strategy: prefs.pullStrategy, autoStash: prefs.autoStash });
 		onClose();
 	}
 	function submitCreatePR() {
+		if (cannotSubmit) return;
 		onCreatePR?.({
 			title: prTitle.trim() || undefined,
 			body: prBody.trim() || undefined,
@@ -133,7 +129,7 @@
 		onClose();
 	}
 	function submitShipIt() {
-		if (busy) return;
+		if (cannotSubmit) return;
 		onShipIt?.({
 			mergeMethod: prefs.mergeMethod,
 			cleanup: prefs.cleanupAfterMerge,
@@ -190,9 +186,15 @@
 	</button>
 {/snippet}
 
-<div class="options-dropdown" bind:this={panelRef} role="dialog" aria-label="{action} options">
+<section class="options-dropdown" {id} bind:this={panelRef} aria-label="{action} options">
+	<div class="opt-heading">
+		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ArrowLeft size={16} /> Back</button>
+		<div><h3>{titles[action]}</h3><p>{descriptions[action]}</p></div>
+	</div>
+	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>
+	{:else if submitBlocked}<p class="opt-blocked" role="status">{submitBlocked}</p>{/if}
+	<fieldset class="opt-fields" disabled={busy}>
 	{#if action === 'commit'}
-		<div class="opt-title">Commit options</div>
 		<label class="opt-field">
 			<span class="opt-label">Message</span>
 			<textarea
@@ -229,10 +231,9 @@
 			{/each}
 		</fieldset>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitCommit}>Commit</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitCommit}>Commit</button>
 
 	{:else if action === 'push'}
-		<div class="opt-title">Push options</div>
 		<p class="opt-readonly">Pushing <strong>{currentBranch ?? 'current branch'}</strong> to remote.</p>
 
 		<button
@@ -249,12 +250,11 @@
 			<span class="opt-switch danger" class:on={forcePush}></span>
 		</button>
 
-		<button type="button" class="opt-submit" class:danger={forcePush} disabled={busy} onclick={submitPush}>
+		<button type="button" class="opt-submit" class:danger={forcePush} disabled={cannotSubmit} onclick={submitPush}>
 			{forcePush ? 'Force push' : 'Push'}
 		</button>
 
 	{:else if action === 'pull'}
-		<div class="opt-title">Pull options</div>
 		<fieldset class="opt-radio-group">
 			<legend class="opt-label">Strategy</legend>
 			{#each [{ v: 'rebase', l: 'Rebase' }, { v: 'merge', l: 'Merge' }] as opt (opt.v)}
@@ -281,10 +281,9 @@
 			<span class="opt-switch" class:on={prefs.autoStash}></span>
 		</button>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitPull}>Pull</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitPull}>Pull</button>
 
 	{:else if action === 'pr'}
-		<div class="opt-title">Pull request options</div>
 		<label class="opt-field">
 			<span class="opt-label">Title</span>
 			<input class="opt-input" type="text" bind:value={prTitle} placeholder="AI-generated if empty" />
@@ -313,10 +312,9 @@
 			<span class="opt-switch" class:on={prDraft}></span>
 		</button>
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitCreatePR}>Create PR</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitCreatePR}>Create PR</button>
 
 	{:else if action === 'shipit'}
-		<div class="opt-title">Ship It</div>
 		<ol class="opt-steps">
 			{#each shipSteps as step (step.id)}
 				<li class="opt-step">{step.label}</li>
@@ -326,44 +324,28 @@
 		{@render mergeMethodFieldset()}
 		{@render cleanupToggle()}
 
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitShipIt}>Ship It</button>
+		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitShipIt}>Ship It</button>
 	{/if}
-</div>
+	</fieldset>
+</section>
 
 <style>
-	/* Panel — mirrors GitHeaderActions' .branch-dropdown. */
-	.options-dropdown {
-		position: absolute;
-		top: calc(100% + 4px);
-		right: 0;
-		min-width: 240px;
-		max-width: 300px;
-		max-height: 70vh;
-		overflow-y: auto;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
-		padding: 10px;
-		z-index: 200;
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		animation: opt-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
-
-	@keyframes opt-in {
-		from { opacity: 0; transform: translateY(-4px); }
-		to { opacity: 1; transform: translateY(0); }
-	}
-
-	.opt-title {
-		font-size: 0.6875rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-	}
+	/* A detail view in the parent's flow: one surface and one scroll owner. */
+	.options-dropdown { min-width: 0; padding: 16px; }
+	.opt-heading { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+	.opt-heading > div { min-width: 0; }
+	.opt-heading h3 { margin: 0 0 4px; font-size: .875rem; font-weight: 650; color: var(--foreground); }
+	.opt-heading p { margin: 0; font-size: .75rem; line-height: 1.5; color: var(--muted-foreground); }
+	.opt-back { display: inline-flex; align-items: center; gap: 5px; min-height: 36px; flex: none; padding: 0 9px; border: 1px solid var(--border); border-radius: .5rem; background: transparent; color: var(--foreground); font: inherit; font-size: .75rem; cursor: pointer; }
+	.opt-back:hover { background: var(--hover-overlay); }
+	.opt-back:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.opt-fields { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 14px; }
+	.opt-fields:disabled { opacity: .6; }
+	.opt-blocked { margin: 0 0 14px; padding: 10px; border: 1px solid var(--border); border-radius: .5rem; color: var(--muted-foreground); font-size: .75rem; line-height: 1.5; }
+	:global(.sheet-layout) .opt-back,
+	:global(.sheet-layout) .opt-radio { min-height: 44px; }
+	:global(.sheet-layout) .opt-input,
+	:global(.sheet-layout) .opt-textarea { font-size: 16px; }
 
 	.opt-field {
 		display: flex;
@@ -381,7 +363,9 @@
 	.opt-textarea,
 	.opt-select {
 		width: 100%;
-		padding: 6px 8px;
+		min-height: 40px;
+		box-sizing: border-box;
+		padding: 10px 12px;
 		background: var(--input);
 		border: 1px solid var(--border);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
@@ -394,8 +378,8 @@
 
 	.opt-textarea {
 		resize: vertical;
-		min-height: 40px;
-		line-height: 1.4;
+		min-height: 88px;
+		line-height: 1.5;
 	}
 
 	.opt-input:focus,
@@ -439,7 +423,8 @@
 		justify-content: space-between;
 		gap: 10px;
 		width: 100%;
-		padding: 6px 4px;
+		min-height: 44px;
+		padding: 10px 8px;
 		background: transparent;
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
@@ -582,8 +567,8 @@
 
 	/* Primary submit */
 	.opt-submit {
-		height: 30px;
-		margin-top: 2px;
+		min-height: 44px;
+		margin-top: 4px;
 		background: var(--primary);
 		border: 1px solid var(--primary);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
@@ -614,7 +599,6 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.options-dropdown { animation: none; }
 		.opt-switch, .opt-switch::after, .opt-radio-dot { transition: none; }
 	}
 </style>

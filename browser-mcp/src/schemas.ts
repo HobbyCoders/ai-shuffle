@@ -39,7 +39,12 @@ export const ACT_KINDS = [
   "drag",
 ] as const;
 
-export const statusSchema: JsonSchema = { type: "object", properties: {}, additionalProperties: false };
+export const statusSchema: JsonSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    upload_paths: { type: "array", items: { type: "string" }, description: "Optional non-uploading eligibility check in the browser runtime: 1–10 absolute file paths, each at most 4096 characters. Does not create a page or attach files." },
+  },
+};
 export const waitSchema: JsonSchema = {
   type: "object", additionalProperties: false, required: ["condition"],
   properties: {

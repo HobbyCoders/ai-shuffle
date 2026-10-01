@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from fluid.context.steer_render import CURRENT_RENDER_VERSION
+
 # Provider kinds the engine factory knows how to build.
 PROVIDER_KINDS = ("anthropic", "openai_responses", "openrouter", "local", "delegated_claude")
 APPROVAL_POLICIES = ("never_ask", "on_write", "always_ask")
@@ -304,6 +306,36 @@ class ContextConfig:
     # Tier-1 (tool-result trim) knobs.
     keep_recent_tool_results: int = 5
     min_result_chars: int = 2_000
+    # Render the input of an old call whose result is trimmed as a small JSON
+    # summary (CompactionConfig.elide_old_args). Off by default.
+    elide_old_args: bool = False
+    # Ladder, schedule, sweep and render knobs. Same names and defaults as
+    # CompactionConfig; docs/configuration.md describes each one.
+    user_turn_text_cap: int = 2_000
+    below_threshold_skips_retry: bool = True
+    image_rung_in_batch: bool = True
+    deep_target_window_ratio: float = 0.35
+    hard_window_ratio: float = 0.75
+    hard_margin_tokens: int = 32_000
+    shortfall_watermark: bool = True
+    recency_tail_tokens: int = 40_000
+    recency_tail_window_ratio: float = 0.15
+    recency_tail_calls: int = 2
+    turn_budget_window_ratio: float = 0.2
+    turn_budget_floor_ratio: float = 0.45
+    window_floor_waiver_ratio: float = 0.9
+    window_floor_waiver_tokens: int = 2_000
+    wake_aware_turns: bool = True
+    cache_schedule: bool = True
+    opportunistic_floor_window_ratio: float = 0.45
+    sweep_mode: str = "shadow"
+    sweep_keep_tokens: int = 20_000
+    sweep_pin_tokens: int = 16_000
+    sweep_min_reclaim_tokens: int = 2_000
+    render_version: int = CURRENT_RENDER_VERSION
+    steer_receipt_chars: int = 1_000
+    steer_receipt_preview_chars: int = 300
+    intent_pin_tokens: int = 4_000
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ContextConfig:
@@ -322,6 +354,32 @@ class ContextConfig:
             tool_result_stub_chars=int(d.get("tool_result_stub_chars", 50_000)),
             keep_recent_tool_results=int(d.get("keep_recent_tool_results", 5)),
             min_result_chars=int(d.get("min_result_chars", 2_000)),
+            elide_old_args=bool(d.get("elide_old_args", False)),
+            user_turn_text_cap=int(d.get("user_turn_text_cap", 2_000)),
+            below_threshold_skips_retry=bool(d.get("below_threshold_skips_retry", True)),
+            image_rung_in_batch=bool(d.get("image_rung_in_batch", True)),
+            deep_target_window_ratio=float(d.get("deep_target_window_ratio", 0.35)),
+            hard_window_ratio=float(d.get("hard_window_ratio", 0.75)),
+            hard_margin_tokens=int(d.get("hard_margin_tokens", 32_000)),
+            shortfall_watermark=bool(d.get("shortfall_watermark", True)),
+            recency_tail_tokens=int(d.get("recency_tail_tokens", 40_000)),
+            recency_tail_window_ratio=float(d.get("recency_tail_window_ratio", 0.15)),
+            recency_tail_calls=int(d.get("recency_tail_calls", 2)),
+            turn_budget_window_ratio=float(d.get("turn_budget_window_ratio", 0.2)),
+            turn_budget_floor_ratio=float(d.get("turn_budget_floor_ratio", 0.45)),
+            window_floor_waiver_ratio=float(d.get("window_floor_waiver_ratio", 0.9)),
+            window_floor_waiver_tokens=int(d.get("window_floor_waiver_tokens", 2_000)),
+            wake_aware_turns=bool(d.get("wake_aware_turns", True)),
+            cache_schedule=bool(d.get("cache_schedule", True)),
+            opportunistic_floor_window_ratio=float(d.get("opportunistic_floor_window_ratio", 0.45)),
+            sweep_mode=str(d.get("sweep_mode", "shadow")),
+            sweep_keep_tokens=int(d.get("sweep_keep_tokens", 20_000)),
+            sweep_pin_tokens=int(d.get("sweep_pin_tokens", 16_000)),
+            sweep_min_reclaim_tokens=int(d.get("sweep_min_reclaim_tokens", 2_000)),
+            render_version=int(d.get("render_version", CURRENT_RENDER_VERSION)),
+            steer_receipt_chars=int(d.get("steer_receipt_chars", 1_000)),
+            steer_receipt_preview_chars=int(d.get("steer_receipt_preview_chars", 300)),
+            intent_pin_tokens=int(d.get("intent_pin_tokens", 4_000)),
         )
 
 
@@ -549,6 +607,32 @@ class HarnessConfig:
                 "tool_result_stub_chars": self.context.tool_result_stub_chars,
                 "keep_recent_tool_results": self.context.keep_recent_tool_results,
                 "min_result_chars": self.context.min_result_chars,
+                "elide_old_args": self.context.elide_old_args,
+                "user_turn_text_cap": self.context.user_turn_text_cap,
+                "below_threshold_skips_retry": self.context.below_threshold_skips_retry,
+                "image_rung_in_batch": self.context.image_rung_in_batch,
+                "deep_target_window_ratio": self.context.deep_target_window_ratio,
+                "hard_window_ratio": self.context.hard_window_ratio,
+                "hard_margin_tokens": self.context.hard_margin_tokens,
+                "shortfall_watermark": self.context.shortfall_watermark,
+                "recency_tail_tokens": self.context.recency_tail_tokens,
+                "recency_tail_window_ratio": self.context.recency_tail_window_ratio,
+                "recency_tail_calls": self.context.recency_tail_calls,
+                "turn_budget_window_ratio": self.context.turn_budget_window_ratio,
+                "turn_budget_floor_ratio": self.context.turn_budget_floor_ratio,
+                "window_floor_waiver_ratio": self.context.window_floor_waiver_ratio,
+                "window_floor_waiver_tokens": self.context.window_floor_waiver_tokens,
+                "wake_aware_turns": self.context.wake_aware_turns,
+                "cache_schedule": self.context.cache_schedule,
+                "opportunistic_floor_window_ratio": self.context.opportunistic_floor_window_ratio,
+                "sweep_mode": self.context.sweep_mode,
+                "sweep_keep_tokens": self.context.sweep_keep_tokens,
+                "sweep_pin_tokens": self.context.sweep_pin_tokens,
+                "sweep_min_reclaim_tokens": self.context.sweep_min_reclaim_tokens,
+                "render_version": self.context.render_version,
+                "steer_receipt_chars": self.context.steer_receipt_chars,
+                "steer_receipt_preview_chars": self.context.steer_receipt_preview_chars,
+                "intent_pin_tokens": self.context.intent_pin_tokens,
             },
             "hooks": [h.to_dict() for h in self.hooks],
             "providers": {

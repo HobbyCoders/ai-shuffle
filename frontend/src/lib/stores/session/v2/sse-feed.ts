@@ -41,6 +41,11 @@ export interface SseFeedOptions {
 	onError?: (err: unknown) => void;
 	/** Seed cursor. The first request uses `from_seq`; reconnects use lastSeq (server filter is exclusive). */
 	fromSeq?: number;
+	/** Log epoch the seed cursor belongs to (from an earlier `caught_up`). Sent
+	 *  with any resume (`from_seq > 0`) so the server can answer a rewritten log
+	 *  with a `reset` frame instead of serving events past a cursor that no longer
+	 *  means anything. */
+	epoch?: string | null;
 }
 
 export interface SseFeed {
@@ -48,6 +53,9 @@ export interface SseFeed {
 	readonly running: boolean;
 	/** Highest frame `id:` (seq) seen so far. */
 	readonly lastSeq: number;
+	/** Log epoch from the latest `caught_up` (or `reset`), or the seed; null when
+	 *  the server has not reported one (older servers never do). */
+	readonly epoch: string | null;
 	/**
 	 * Abort a possibly-half-open reader and reconnect immediately at the cursor
 	 * (`from_seq=lastSeq` — gap-free and duplicate-free). Same operation the
@@ -61,6 +69,9 @@ export interface SseFeed {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+/** What the server reports as the epoch of a log with no rows yet. */
+const EMPTY_LOG_EPOCH = '0';
 
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 15_000;
@@ -183,6 +194,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	// server filter is exclusive (`seq > from_seq`), so `lastSeq` yields the
 	// next unseen event with no gap and no duplicate.
 	let nextFrom = lastSeq;
+	let epoch: string | null = typeof options.epoch === 'string' && options.epoch ? options.epoch : null;
 	let backoff = BACKOFF_MIN_MS;
 	let controller: AbortController | null = null;
 	// Ownership token for one concrete fetch/reader attempt. revive()/stop()
@@ -321,7 +333,12 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		const ownsAttempt = () =>
 			running && connectionAttempt === attempt && controller === ac;
 		const from = nextFrom;
-		const url = `${apiBase()}/sessions/${encodeURIComponent(sessionId)}/events?from_seq=${from}`;
+		// A resume names the log it came from; a full load (from_seq=0) has no
+		// cursor to check, so it never sends one.
+		const sentEpoch = from > 0 ? epoch : null;
+		const url =
+			`${apiBase()}/sessions/${encodeURIComponent(sessionId)}/events?from_seq=${from}` +
+			(sentEpoch ? `&epoch=${encodeURIComponent(sentEpoch)}` : '');
 
 		try {
 			const res = await fetch(url, withAuth({
@@ -394,6 +411,25 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 							if (payload.type === undefined && frame.event) {
 								payload.type = frame.event;
 							}
+							if (payload.type === 'caught_up') {
+								// Absent on older servers: resumes then go unchecked.
+								epoch = typeof payload.epoch === 'string' && payload.epoch ? payload.epoch : null;
+							} else if (epoch === EMPTY_LOG_EPOCH && !Number.isNaN(frame.id) && typeof payload.id === 'string' && payload.id) {
+								// The log was empty at caught_up, so this first row is the new
+								// log's lowest-seq row and its id IS the epoch (see the server's
+								// get_log_epoch). Adopting it keeps the next resume from being
+								// reset as if the log had been cleared.
+								epoch = payload.id;
+							} else if (payload.type === 'reset') {
+								// A reset only answers the epoch this request sent; one without
+								// it has nothing to invalidate.
+								if (!sentEpoch) continue;
+								// The server continues with a full load of the new log, so
+								// the old cursor is meaningless from here on.
+								lastSeq = 0;
+								nextFrom = 0;
+								epoch = typeof payload.epoch === 'string' && payload.epoch ? payload.epoch : null;
+							}
 							options.onEvent(payload);
 						} catch (e) {
 							options.onError?.(e);
@@ -426,6 +462,9 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		},
 		get lastSeq() {
 			return lastSeq;
+		},
+		get epoch() {
+			return epoch;
 		},
 		revive() {
 			reviveNow();

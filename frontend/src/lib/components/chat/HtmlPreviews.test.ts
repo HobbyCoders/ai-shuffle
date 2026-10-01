@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import HtmlPreviews from './HtmlPreviews.svelte';
 import { registerShortcut } from '$lib/services/keyboard';
 import { loadHtmlPreview } from '$lib/utils/htmlPreview';
+import { writable } from 'svelte/store';
+import { tick } from 'svelte';
+import PreviewSession from './test-fixtures/PreviewSession.svelte';
 
 vi.mock('$lib/utils/htmlPreview', async (original) => ({
 	...(await original<typeof import('$lib/utils/htmlPreview')>()),
@@ -21,6 +24,31 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('HTML preview cards', () => {
+	it('keeps the loaded frame when scrolling or composing updates the session store', async () => {
+		load.mockResolvedValue('<h1>Stable preview</h1>');
+		const session = writable({ sessionId: 'preview-chat', inputText: '', scrollTop: 0 });
+		const view = render(PreviewSession, { content, session });
+		await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull());
+		const frame = view.container.querySelector('iframe')!;
+		const signal = load.mock.calls[0][1];
+
+		for (const update of [{ scrollTop: 300 }, { inputText: 'Hello' }, { scrollTop: 600 }]) {
+			session.update((state) => ({ ...state, ...update }));
+			await tick();
+			expect(view.container.querySelector('iframe')).toBe(frame);
+			expect(load).toHaveBeenCalledTimes(1);
+			expect(signal.aborted).toBe(false);
+		}
+
+		// Real ownership changes must still cancel the old request and reload.
+		session.update((state) => ({ ...state, sessionId: 'other-chat' }));
+		await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+		expect(signal.aborted).toBe(true);
+		expect(load).toHaveBeenLastCalledWith(
+			'/api/files/by-path?path=%2Fwork%2Fdemo.html', expect.any(AbortSignal), 'other-chat'
+		);
+	});
+
 	it('passes chat ownership to the source loader', async () => {
 		load.mockResolvedValue('<h1>Remote</h1>');
 		render(HtmlPreviews, { content, sessionId: 'remote-chat' });

@@ -391,7 +391,7 @@ async def test_headless_error_result_is_recorded_as_aborted_and_notifies():
     assert out["metadata"]["errors"] == ["overloaded"]
     assert out["metadata"]["api_error_status"] == 529
     live.assert_awaited_once()
-    notify.assert_awaited_once_with(None, SID, 529)
+    notify.assert_awaited_once_with(None, SID, 529, delegated=False)
     assert not b.run_sync_named("add_session_message")
     [adhoc] = b.run_sync_named("record_adhoc_turn")
     assert adhoc[1] == (SID, "api_query")

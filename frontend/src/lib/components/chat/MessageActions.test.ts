@@ -13,6 +13,16 @@ const rewindButton = () => screen.queryByTitle('Rewind to before this message');
 const dialog = () => screen.queryByRole('dialog');
 
 describe('MessageActions gating', () => {
+	it('disables rewind for a steer with an explanation while preserving copy', async () => {
+		render(MessageActions, { ...base, rewindEligible: false, messageUuid: 'not-a-checkpoint' });
+		const button = screen.getByTitle('Mid-turn messages have no independent rewind checkpoint') as HTMLButtonElement;
+		expect(button.disabled).toBe(true);
+		expect(screen.getByTitle('Copy')).toBeTruthy();
+		await fireEvent.click(button);
+		expect(dialog()).toBeNull();
+		expect(rewind).not.toHaveBeenCalled();
+	});
+
 	it('offers rewind only on a settled user message in a session, and read only when allowed and settled', async () => {
 		const view = render(MessageActions, base);
 		expect(rewindButton()).toBeTruthy();

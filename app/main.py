@@ -24,7 +24,7 @@ from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
 from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
-from app.api import voice_context
+from app.api import voice_context, assistant
 from app.api import tools as tools_api
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
@@ -161,18 +161,19 @@ async def lifespan(app: FastAPI):
     # pytest collection with the real settings singleton) must never create the
     # log dir or truncate a previous crash's fatal.log. Additive only — does not
     # touch the ring buffer (app/api/logs.py) or the error_log DB handler.
-    # Then the startup banner (pid/version/instance_id) so restart boundaries —
+    # Then the startup banner (pid/version/revision/instance_id) so restart boundaries —
     # and the LAST line before a crash — are obvious on disk, and the asyncio
     # loop exception handler now that a running loop exists.
     from app.core.file_logging import (
         setup_file_logging, log_startup_banner, install_asyncio_exception_handler,
+        source_revision,
     )
     setup_file_logging()
     log_startup_banner()
     install_asyncio_exception_handler()
 
     logger.info("=" * 60)
-    logger.info(f"Starting AI Shuffle v{settings.version}")
+    logger.info(f"Starting AI Shuffle v{settings.version} (revision {source_revision()})")
     logger.info("=" * 60)
 
     # Before any child is spawned: same-uid children must not be able to read
@@ -533,6 +534,7 @@ from app.api import owner_login
 app.include_router(owner_login.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)
+app.include_router(assistant.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 from app.api import chat_access

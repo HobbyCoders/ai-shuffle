@@ -1178,7 +1178,10 @@ class TestJsonlRewind:
         res = jsonl_rewind_service.truncate_to_checkpoint(SID, "zzz", WD)
         assert (res.success, res.message) == (False, message)
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="root ignores permission bits; Windows has no POSIX mode bits",
+    )
     def test_rewind_in_read_only_dir_fails_cleanly(self, projects):
         path = write_raw(projects, RAW_VARIANTS["clean"])
         before = path.read_bytes()
@@ -1438,14 +1441,14 @@ class TestErrorPaths:
         messages, _ = parse()
         assert [m["uuid"] for m in messages] == RAW_EXPECTED[variant]
 
-    def test_non_utf8_byte_does_not_drop_the_rest_of_the_file(self, projects):
-        """Regression: a strict decoder raised out of the read loop and the
-        whole (small) transcript came back empty."""
-        write_raw(projects, NON_UTF8_FILE)
+    def test_non_utf8_record_is_reported_without_dropping_surrounding_messages(self, projects, caplog):
+        """Strict decoding is record-local; corrupted text is not silently repaired."""
+        path = write_raw(projects, NON_UTF8_FILE)
         messages, _ = parse()
         assert [(m["uuid"], m["content"]) for m in messages] == [
-            ("v1", "first"), ("v2", "second"), ("v-bad", "caf� cr�me"), ("v3", "third"),
+            ("v1", "first"), ("v2", "second"), ("v3", "third"),
         ]
+        assert f"Skipping undecodable line 3 in {path}" in caplog.text
 
     def test_non_object_lines_are_skipped_not_fatal(self, projects):
         """Regression: ``null`` / ``42`` lines reached the transform, which
@@ -1467,7 +1470,10 @@ class TestErrorPaths:
         jp.invalidate_parse_cache(SID)  # what a transcript change triggers
         assert len(jp.parse_session_history(SID, WD)[0]) == 3
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="root ignores permission bits; Windows has no POSIX mode bits",
+    )
     def test_unreadable_file_degrades_to_empty(self, projects):
         path = write_raw(projects, RAW_VARIANTS["clean"])
         path.chmod(0)

@@ -6,7 +6,8 @@ import { preferenceSync } from '$lib/services/preferences';
  * - 'code'  — the full agentic workspace (projects, agents, branches, worktrees)
  * - 'chat'  — a lightweight web-only assistant: model + effort, attachments,
  *             transcription, usage. No repository, no tools beyond web search/fetch.
- * - 'voice' — realtime calls only; new sessions are started from a dedicated hero.
+ * - 'voice' — historical realtime-call sessions only. Voice is now a call on
+ *             the current conversation, so a new conversation never starts in it.
  *
  * This store answers two questions at once: which sessions the sidepanel lists,
  * and which surface a *new* session is created into. Both need the same value,
@@ -47,10 +48,17 @@ export function normalizeSessionMode(value: unknown): SessionMode {
 		: DEFAULT_SESSION_MODE;
 }
 
+/** The lane a NEW conversation may start in. A stored 'voice' preference is a
+ *  leftover from the voice lane; calls now attach to chats, so it reads as chat. */
+export function newConversationMode(value: unknown): SessionMode {
+	const mode = normalizeSessionMode(value);
+	return mode === 'voice' ? 'chat' : mode;
+}
+
 function getStoredMode(): SessionMode {
 	if (!browser) return DEFAULT_SESSION_MODE;
 	try {
-		return normalizeSessionMode(localStorage.getItem(STORAGE_KEY));
+		return newConversationMode(localStorage.getItem(STORAGE_KEY));
 	} catch {
 		// Private-mode / blocked storage: the mode is a preference, not state we
 		// can't run without.
@@ -107,5 +115,5 @@ export const appMode = {
 export const sessionMode = createDerived(() => _mode);
 preferenceSync.register('session_mode', {
  read: () => _defaultMode,
- apply(value) { _defaultMode = normalizeSessionMode(value); if (followingDefault || value === undefined) _mode = _defaultMode; if (browser) localStorage.setItem(STORAGE_KEY, _defaultMode); _notifySubscribers(); }
+ apply(value) { _defaultMode = newConversationMode(value); if (followingDefault || value === undefined) _mode = _defaultMode; if (browser) localStorage.setItem(STORAGE_KEY, _defaultMode); _notifySubscribers(); }
 });

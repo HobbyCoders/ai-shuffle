@@ -12,7 +12,7 @@ vi.mock('$lib/services/preferences', () => ({ preferenceSync: { save, refresh: v
 import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 
-let onClose: ReturnType<typeof vi.fn>;
+let onClose: ReturnType<typeof vi.fn<() => void>>;
 beforeEach(() => {
 	gitActionPreferences.reset();
 	vi.clearAllMocks();
@@ -31,7 +31,7 @@ describe('commit options', () => {
 	it('sends the trimmed message with the saved defaults and closes', async () => {
 		const onCommit = vi.fn();
 		mount('commit', { onCommit });
-		expect(screen.getByRole('dialog', { name: 'commit options' })).toBeTruthy();
+		expect(screen.getByRole('region', { name: 'commit options' })).toBeTruthy();
 		await fireEvent.input(screen.getByLabelText('Message'), { target: { value: '  fix login  ' } });
 		await fireEvent.click(submit('Commit'));
 		expect(onCommit).toHaveBeenCalledWith({ message: 'fix login', includeUnstaged: true, nextStep: 'push' });
@@ -122,21 +122,43 @@ describe('ship it options', () => {
 		await fireEvent.click(submit('Ship It'));
 		expect(onShipIt).not.toHaveBeenCalled();
 	});
+
+	it('blocks only the submit when submitting is blocked, keeping the settings editable', async () => {
+		const onShipIt = vi.fn();
+		mount('shipit', { onShipIt, openPR: { number: 12 }, submitBlocked: 'PR #12 has merge conflicts.' });
+		expect(screen.getByRole('status').textContent).toBe('PR #12 has merge conflicts.');
+		expect(screen.queryByText(/Return to Git to check its status/)).toBeNull();
+		expect(submit('Ship It').disabled).toBe(true);
+		await fireEvent.click(submit('Ship It'));
+		expect(onShipIt).not.toHaveBeenCalled();
+		const rebase = screen.getByRole('button', { name: 'Rebase' }) as HTMLButtonElement;
+		expect(rebase.matches(':disabled')).toBe(false);
+		await fireEvent.click(rebase);
+		const cleanupSwitch = screen.getByRole('switch', { name: 'Delete branch after merge' }) as HTMLButtonElement;
+		expect(cleanupSwitch.matches(':disabled')).toBe(false);
+		await fireEvent.click(cleanupSwitch);
+		expect(gitActionPreferences.current).toMatchObject({ mergeMethod: 'rebase', cleanupAfterMerge: false });
+	});
 });
 
-describe('closing', () => {
-	it('closes on Escape and on a click outside, but not on a click inside', async () => {
-		vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+describe('inline workspace navigation', () => {
+	it('has no nested dialog or outside-click handler; Back and Escape leave the editor', async () => {
 		mount('push', { onPush: vi.fn() });
-		// The opening click is ignored until the next frame.
+		expect(screen.queryByRole('dialog')).toBeNull();
 		await fireEvent.click(document.body);
 		expect(onClose).not.toHaveBeenCalled();
-		vi.advanceTimersToNextFrame();
-		await fireEvent.click(screen.getByText('Push options'));
-		expect(onClose).not.toHaveBeenCalled();
-		await fireEvent.click(document.body);
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
 		expect(onClose).toHaveBeenCalledOnce();
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(onClose).toHaveBeenCalledTimes(2);
+	});
+	it('locks the whole editor if its worktree becomes busy, while Back stays available', async () => {
+		const onCommit = vi.fn();
+		const view = mount('commit', { onCommit });
+		await view.rerender({ action: 'commit', currentBranch: 'feat/login', defaultBranch: 'main', hasChanges: true, onClose, onCommit, busy: true });
+		expect((screen.getByLabelText('Message') as HTMLTextAreaElement).matches(':disabled')).toBe(true);
+		await fireEvent.click(submit('Commit'));
+		expect(onCommit).not.toHaveBeenCalled();
+		expect((screen.getByRole('button', { name: 'Back to Git actions' }) as HTMLButtonElement).disabled).toBe(false);
 	});
 });

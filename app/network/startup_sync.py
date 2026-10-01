@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import httpx
 
@@ -14,6 +15,10 @@ logger = logging.getLogger(__name__)
 STARTUP_TIMEOUT = 60.0
 ACCOUNT_TIMEOUT = 15.0
 PEER_TIMEOUT = 30.0
+# A peer that does not accept a connection within this long is treated as
+# offline for the launch; each dead address used to cost a full request
+# timeout. The background sync keeps its own timeouts.
+CONNECT_TIMEOUT = 3.0
 _task: asyncio.Task | None = None
 _last_result: dict | None = None
 
@@ -49,6 +54,7 @@ async def _bounded_sync() -> dict:
 
 async def _sync() -> dict:
     account_incomplete = False
+    started = time.monotonic()
     # Account admission may switch a standalone worker to the account's network.
     # Do this before looking at peers, but do not let an account outage skip LAN.
     try:
@@ -70,6 +76,8 @@ async def _sync() -> dict:
             account_incomplete = bool(hub._state.get("last_error"))
     except TimeoutError:
         account_incomplete = True
+    logger.info("Startup sync: account phase took %.1fs%s", time.monotonic() - started,
+                " (incomplete)" if account_incomplete else "")
     enrollment.resume_enrollment()
     if enrollment._task is not None and not enrollment._task.done():
         # The durable enrollment task owns its resume record; never cancel it.
@@ -86,25 +94,48 @@ async def _sync() -> dict:
         return {"status": "partial" if account_incomplete else "synced", "peers": 0}
     async with httpx.AsyncClient(follow_redirects=False) as client:
         async def catch_up(link):
+            peer_started = time.monotonic()
+            outcome = "failed"
             try:
+                if not link.endpoints or link.backoff_until > time.monotonic():
+                    # The background sync just failed to reach it and is
+                    # backing off: do not hold the launch for it again.
+                    outcome = "skipped (backing off)"
+                    return False
                 async with asyncio.timeout(PEER_TIMEOUT):
                     await link.sync_once(client, ctx, catch_up=True)
                     transport.note_contact(link.device_id)
                     await run_sync(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True, error=None)
+                outcome = "synced"
                 return True
-            except (TimeoutError, httpx.HTTPError, transport.PeerError):
+            except (TimeoutError, httpx.HTTPError, transport.PeerError) as exc:
+                outcome = f"unreachable ({type(exc).__name__})"
                 return False
             except Exception:
                 logger.exception("Startup sync with peer %s failed", link.device_id)
                 return False
-        results = await asyncio.gather(*(catch_up(link) for link in links))
+            finally:
+                logger.info("Startup sync: peer %s %s in %.1fs", link.device_id, outcome,
+                            time.monotonic() - peer_started)
+        peers_started = time.monotonic()
+        # The context variable is copied into each gathered task only.
+        token = transport.connect_timeout.set(CONNECT_TIMEOUT)
+        try:
+            results = await asyncio.gather(*(catch_up(link) for link in links))
+        finally:
+            transport.connect_timeout.reset(token)
     reached = sum(results)
+    logger.info("Startup sync: peer phase took %.1fs (%d of %d reached)",
+                time.monotonic() - peers_started, reached, len(links))
     # Records can reference note attachments and other managed files. Do not
     # declare the first render current while their bytes are still missing.
+    blobs_started = time.monotonic()
     while await run_sync(store.missing_blobs, 1):
         if not await blobs.fetch_missing(limit=16):
+            logger.info("Startup sync: file phase gave up after %.1fs", time.monotonic() - blobs_started)
             return {"status": "partial", "peers": reached,
                     "reason": "Some files are not available yet. Sync will retry in the background."}
+    logger.info("Startup sync: file phase took %.1fs", time.monotonic() - blobs_started)
     if reached == len(links) and not account_incomplete:
         return {"status": "synced", "peers": reached}
     return {"status": "partial" if reached else "offline", "peers": reached,

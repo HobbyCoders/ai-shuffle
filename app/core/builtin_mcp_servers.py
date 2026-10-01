@@ -9,14 +9,19 @@ stale ``disabledMcpServers`` entries for it are stripped on read.
 
 Currently this provides a single built-in:
 
-- ``browser`` — AI Shuffle's own browser-automation tool suite. This IS a normal
-  spawned STDIO MCP server: the harness launches ``node /opt/browser-mcp/dist/index.js``
-  once per session and tears it down on exit (session isolation + cleanup for free).
-  It exposes tools named ``mcp__browser__<tool>`` (``browser_navigate``,
+- ``browser`` — AI Shuffle's own browser-automation tool suite. Its spawnable
+  STDIO config remains compatible with delegated CLIs and external clients.
+  Native sessions load the build's metadata-only catalog and register gated
+  in-process RPC forwarders instead of spawning a discovery/proxy Node process
+  per agent (see ``native_browser_proxy``). Missing catalogs fall back to STDIO.
+  Delegated sessions use the lightweight STDIO proxy. Both paths preserve tools
+  named ``mcp__browser__<tool>`` (``browser_navigate``,
   ``browser_snapshot``, ``browser_act``, ``browser_screenshot``, ...).
 
 Architecture (the decision record):
-  Each spawned server is a thin CDP client built on ``playwright-core``. It calls
+  Session-facing proxies forward through the token-authenticated browser RPC
+  route. The app demand-starts a session-isolated runtime actor on actual browser
+  use; that actor is the CDP client built on ``playwright-core``. It calls
   ``connectOverCDP('http://127.0.0.1:9221')`` to attach to the *existing supervised
   Chromium* (port from ``CHROME_CDP_PORT``, default 9221) and drives a single
   ``Page`` in the persistent default context. That persistent context preserves the

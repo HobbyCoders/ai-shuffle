@@ -1006,6 +1006,7 @@ async def test_steered_user_message_lands_at_the_stream_position(mock_db):
     steered = rows[-1]
     assert steered["payload"]["content"] == "also check staging"
     assert steered["payload"]["profile_id"] == "coder"
+    assert steered["payload"]["checkpoint_backed"] is False
     assert steered["turn_id"] == rec.turn_id
     assert steered["command_id"] == "queued-row-cmd"
     await rec.close()

@@ -596,7 +596,28 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
     ``watermarks`` is ``{origin_device_id: {incarnation: last_seq}}``. Origins
     the caller has never seen come back from seq 1. Results are ordered per
     origin by (incarnation, seq) so the receiver can apply them in order.
+
+    The budget is shared fairly: every lagging stream first gets an equal
+    slice, then the leftovers go to streams that still have more. Handing the
+    whole budget to the first stream let one stream the receiver cannot apply
+    yet (a child whose parent comes from another origin) be resent forever
+    while the parent's stream never got a turn. Each stream's slice is still
+    a contiguous prefix past the caller's watermark.
     """
+    def _fetch(cursor, origin: str, incarnation: int, after: int, head: int, count: int) -> List[dict]:
+        # A concurrent append belongs to the next exchange, not beyond
+        # the frontier advertised with this batch.
+        params: List[Any] = [origin, incarnation, after, head]
+        sql = ("SELECT seq, envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s "
+               "AND seq > %s AND seq <= %s")
+        if lane:
+            sql += " AND lane = %s"
+            params.append(lane)
+        sql += " ORDER BY seq LIMIT %s"
+        params.append(count)
+        cursor.execute(sql, tuple(params))
+        return [dict(r) for r in cursor.fetchall()]
+
     def _query(cursor):
         if _heads is None:
             streams = sorted((r["origin_device_id"], int(r["incarnation"]), int(r["s"]))
@@ -604,28 +625,35 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
         else:
             streams = sorted((origin, int(inc), int(head))
                              for origin, incarnations in _heads.items() for inc, head in incarnations.items())
-        out: List[dict] = []
+        lagging = []
         for origin, incarnation, head in streams:
             if origin == exclude_origin:
                 continue
             last = int((watermarks.get(origin) or {}).get(str(incarnation), (watermarks.get(origin) or {}).get(incarnation, 0)) or 0)
-            if last >= head:
+            if last < head:
+                lagging.append((origin, incarnation, last, head))
+        if not lagging or limit <= 0:
+            return []
+        share = max(1, limit // len(lagging))
+        remaining = limit
+        picked: List[List[dict]] = []
+        for origin, incarnation, last, head in lagging:
+            if remaining <= 0:
+                picked.append([])
                 continue
-            budget = limit - len(out)
-            if budget <= 0:
+            rows = _fetch(cursor, origin, incarnation, last, head, min(remaining, share))
+            remaining -= len(rows)
+            picked.append(rows)
+        for index, (origin, incarnation, last, head) in enumerate(lagging):
+            if remaining <= 0:
                 break
-            # A concurrent append belongs to the next exchange, not beyond
-            # the frontier advertised with this batch.
-            params: List[Any] = [origin, incarnation, last, head]
-            sql = "SELECT envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq > %s AND seq <= %s"
-            if lane:
-                sql += " AND lane = %s"
-                params.append(lane)
-            sql += " ORDER BY seq LIMIT %s"
-            params.append(budget)
-            cursor.execute(sql, tuple(params))
-            out.extend(_load(r["envelope"], {}) for r in cursor.fetchall())
-        return out
+            rows = picked[index]
+            if len(rows) < share:
+                continue  # this stream had no more to give
+            more = _fetch(cursor, origin, incarnation, int(rows[-1]["seq"]), head, remaining)
+            remaining -= len(more)
+            rows.extend(more)
+        return [_load(r["envelope"], {}) for rows in picked for r in rows]
     if _conn is not None:
         return _query(_conn.cursor())
     with get_db() as conn:

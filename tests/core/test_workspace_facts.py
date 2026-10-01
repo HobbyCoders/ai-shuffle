@@ -20,6 +20,9 @@ def _fresh_pytest_probe(monkeypatch):
     """Each test pins the interpreter answer explicitly; never probe PATH."""
     monkeypatch.setattr(env, "_PYTEST_PROBE", {})
     monkeypatch.setattr(env, "_interpreter_has_pytest", lambda exe: False)
+    import shutil
+    original = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "pytest" else original(name))
 
 
 def _shuffle_checkout(tmp_path, *, node_modules=False, vite_ts=False):
@@ -31,6 +34,7 @@ def _shuffle_checkout(tmp_path, *, node_modules=False, vite_ts=False):
     (root / "tests" / "pg_shim.py").write_text("# shim")
     (root / "frontend").mkdir()
     (root / "frontend" / "package.json").write_text("{}")
+    (root / "frontend" / "package-lock.json").write_text("{}")
     (root / "frontend" / "vite.config.js").write_text("export default {}")
     if vite_ts:
         (root / "frontend" / "vite.config.ts").write_text("export default {}")
@@ -69,7 +73,7 @@ def test_card_drops_facts_that_are_not_true(tmp_path, monkeypatch):
     card = env.workspace_facts_card(str(root), browser_host=None, app_port=8000)
     assert "node_modules installed in frontend" in card
     assert "MISSING" not in card
-    assert "no interpreter with pytest" in card
+    assert "no interpreter or executable with pytest was verified" in card
     assert "no vite.config.ts" not in card
     assert "preview-access" not in card  # no URL was minted
     assert "LAN address" in card  # browser rule still stated without a host

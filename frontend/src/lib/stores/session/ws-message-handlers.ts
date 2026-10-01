@@ -21,7 +21,7 @@ import { startFixChat } from '$lib/services/fix-with-ai';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 
@@ -273,6 +273,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		});
 	}
 
+	/** Clear a finished turn's permission dot but keep a question's: a posted
+	 *  question stays pending after the turn that asked it ends, and the server
+	 *  sends its durable count whenever that changes. */
+	function clearTurnAttention(sessionId: string | null | undefined): void {
+		if (!sessionId) return;
+		backgroundPermissions.update(map => {
+			const prev = map.get(sessionId);
+			if (!prev || prev.kind === 'question') return map;
+			const next = new Map(map);
+			next.delete(sessionId);
+			return next;
+		});
+	}
+
 	function bumpNeedsAttention(sessionId: string | undefined, kind: SessionAttention['kind']): void {
 		if (!sessionId) return;
 		backgroundPermissions.update(map => {
@@ -327,11 +341,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// It can arrive after a successor's user_streaming_changed(true) on the
 		// other socket. Only the durable run-status channel may clear that map.
 
-		// A finished session can't be awaiting input. Clear any attention dot here
-		// too, in case the backend's count=0 broadcast was missed (dead socket).
-		// Without this the dot is sticky until the user opens the session, and the
-		// attention dot now takes precedence over the streaming dot in the board.
-		setNeedsAttention(doneSessionId, 0);
+		// A finished turn can't still be waiting on a permission. Clear that dot
+		// here too, in case the backend's count=0 broadcast was missed (dead
+		// socket); otherwise it sticks until the user opens the session. A
+		// question dot stays: a posted question outlives the turn that asked it.
+		clearTurnAttention(doneSessionId);
 
 		// A completed turn only moves the row's last-activity time (and with it
 		// its place in the sidebar order) — patch that in rather than re-paging
@@ -366,9 +380,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// As with done, a late stop/interrupt acknowledgement must not clear a
 		// newer run's user-wide streaming state.
 
-		// A stopped/interrupted session can't be awaiting input — clear any stale
-		// attention dot (mirrors handleDone; guards against a missed count=0).
-		setNeedsAttention(stoppedSessionId, 0);
+		// A stopped/interrupted turn can't be waiting on a permission — clear a
+		// stale permission dot (mirrors handleDone; guards against a missed
+		// count=0). A posted question is still pending, so its dot stays.
+		clearTurnAttention(stoppedSessionId);
 	}
 
 	// ── Main dispatch ────────────────────────────────────────────────
@@ -434,7 +449,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				for (const removeId of pendingQueue.drainRemovalRequests()) {
 					wsSend({ type: 'remove_queued_message', message_id: removeId, session_id: sid });
 				}
-				update(s => ({ ...s, queuedMessages: reconciled }));
+				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
+					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;
+				}>;
+				const peerRows = peers.map(m => ({
+					id: m.id, content: m.content, senderLabel: m.sender_label,
+					senderSessionId: m.sender_session_id || undefined,
+					queuedAt: new Date(m.created_at).getTime()
+				}));
+				update(s => ({
+					...s, queuedMessages: reconciled,
+					pendingPeerMessages: reconcilePendingPeerMessages(peerRows, s.messages)
+				}));
 			}
 
 			// session_updated carries metadata changes (e.g. a backfilled title
@@ -631,6 +657,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				return newMap;
 			});
+			return;
+		}
+
+		// Durable pending prompts, sent on every chat WS connect. It REPLACES the
+		// map: live session_attention frames missed while disconnected would
+		// otherwise leave stale dots, and a fresh page load has no other source.
+		if (msgType === 'session_attention_snapshot') {
+			const sessions = data.sessions as Array<{ session_id?: string; count?: number; kind?: string }> | undefined;
+			const next = new Map<string, SessionAttention>();
+			for (const s of sessions ?? []) {
+				if (!s.session_id || !s.count || s.count <= 0) continue;
+				next.set(s.session_id, { count: s.count, kind: s.kind === 'question' ? 'question' : 'permission' });
+			}
+			backgroundPermissions.update(() => next);
 			return;
 		}
 

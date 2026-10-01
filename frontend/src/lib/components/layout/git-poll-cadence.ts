@@ -41,8 +41,8 @@ export function isGitActive(
 }
 
 /** Interval until the next poll tick. */
-export function gitPollIntervalMs(now: number, lastActivity: number): number {
-	return isGitActive(now, lastActivity) ? GIT_POLL_ACTIVE_MS : GIT_POLL_IDLE_MS;
+export function gitPollIntervalMs(now: number, lastActivity: number, menuOpen = false): number {
+	return menuOpen || isGitActive(now, lastActivity) ? GIT_POLL_ACTIVE_MS : GIT_POLL_IDLE_MS;
 }
 
 /**

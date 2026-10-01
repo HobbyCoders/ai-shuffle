@@ -17,8 +17,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
-import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -470,13 +468,16 @@ async def test_chat_completions_tool_loop_through_the_app(monkeypatch, tmp_path,
 # ─── the same scenario on both legs ─────────────────────────────────────────
 
 
-def _install_fake_cli(monkeypatch, tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    shim = bin_dir / "claude"
-    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" "$@"\n', encoding="utf-8")
-    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+def _install_fake_cli(monkeypatch) -> None:
+    """Make the scripted fake CLI the ``claude`` the adapter runs.
+
+    The resolver is patched instead of putting a shim on PATH: on Windows
+    ``shutil.which`` skips a file without a PATHEXT extension, and the search
+    then reached the machine's real ``claude.exe``.
+    """
+    command = [sys.executable, str(FAKE_CLI)]
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda **_: list(command))
+    assert ha._resolve_claude_cmd() == command, "the adapter must run the scripted fake"
 
 
 @pytest.mark.asyncio
@@ -497,7 +498,7 @@ async def test_an_approved_write_has_the_same_shape_on_both_legs(
         native = await run.turn("write it")
 
     # Delegated: the fake CLI asks for the same Write and reports it ran.
-    _install_fake_cli(monkeypatch, tmp_path)
+    _install_fake_cli(monkeypatch)
     script = tmp_path / "script.json"
     script.write_text(json.dumps({"turns": [[
         {"op": "tool_use", "id": "toolu_w1", "name": "Write", "input": args},

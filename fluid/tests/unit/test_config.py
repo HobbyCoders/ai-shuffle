@@ -170,6 +170,32 @@ def _non_default_config_dict() -> dict:
             "tool_result_stub_chars": 8,
             "keep_recent_tool_results": 9,
             "min_result_chars": 10,
+            "elide_old_args": True,
+            "user_turn_text_cap": 11,
+            "below_threshold_skips_retry": False,
+            "image_rung_in_batch": False,
+            "deep_target_window_ratio": 0.4,
+            "hard_window_ratio": 0.5,
+            "hard_margin_tokens": 12,
+            "shortfall_watermark": False,
+            "recency_tail_tokens": 13,
+            "recency_tail_window_ratio": 0.25,
+            "recency_tail_calls": 14,
+            "turn_budget_window_ratio": 0.6,
+            "turn_budget_floor_ratio": 0.7,
+            "window_floor_waiver_ratio": 0.8,
+            "window_floor_waiver_tokens": 15,
+            "wake_aware_turns": False,
+            "cache_schedule": False,
+            "opportunistic_floor_window_ratio": 0.55,
+            "sweep_mode": "on",
+            "sweep_keep_tokens": 16,
+            "sweep_pin_tokens": 17,
+            "sweep_min_reclaim_tokens": 18,
+            "render_version": 1,
+            "steer_receipt_chars": 19,
+            "steer_receipt_preview_chars": 20,
+            "intent_pin_tokens": 21,
         },
         "hooks": [{"event": "PreToolUse", "command": "echo", "matcher": "Bash", "timeout": 5.0}],
         "cwd": "/w",
@@ -538,3 +564,34 @@ def test_cli_host_hands_the_parent_learner_to_children() -> None:
     assert host._learner() is marker
     host.engine = SimpleNamespace()
     assert host._learner() is None
+
+
+def test_context_config_mirrors_compaction_defaults() -> None:
+    from dataclasses import fields
+
+    from fluid.config.model import ContextConfig
+    from fluid.context.compaction import CompactionConfig
+
+    mirrored = {f.name for f in fields(ContextConfig)} & {f.name for f in fields(CompactionConfig)}
+    ctx, comp = ContextConfig(), CompactionConfig()
+    for name in mirrored:
+        assert getattr(ctx, name) == getattr(comp, name), name
+
+
+def test_loader_passes_every_context_knob_to_the_compactor(tmp_path) -> None:
+    from dataclasses import fields
+    from types import SimpleNamespace
+
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
+    from fluid.context.compaction import CompactionConfig
+    from fluid.store.base import MemoryStore
+
+    context = dict(_non_default_config_dict()["context"], enabled=True, trim_only=False)
+    config = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path), "context": context})
+    )
+    engine = build_engine(config, MemoryStore(), provider=SimpleNamespace())
+    built = engine._compactor.config
+    shared = {f.name for f in fields(type(config.context))} & {f.name for f in fields(CompactionConfig)}
+    for name in shared - {"enabled"}:
+        assert getattr(built, name) == getattr(config.context, name), name

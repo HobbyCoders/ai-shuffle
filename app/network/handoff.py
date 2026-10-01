@@ -116,7 +116,12 @@ def finish(sid, target, payload):
     if project:
         cwd = project_resolver.resolve_existing_cwd(session)
         branch = project_resolver._effective_branch(session)
-        if (not cwd or (branch and branch != payload.get("branch"))
+        if not cwd:
+            raise ValueError(
+                "The owning worker's checkout is unavailable or on a different branch; "
+                "ownership was not moved."
+            )
+        if ((branch and branch != payload.get("branch"))
                 or checkout_transfer.fingerprint(cwd) != payload.get("fingerprint")):
             raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
         checkout_transfer._branch(cwd, payload["branch"])
@@ -214,8 +219,10 @@ def install_history(sid, data, cwd):
 def _accept_owner(sid, device_id, branch=None):
     with get_db() as conn:
         cur = conn.cursor()
+        # instance_id moves too (as adopt/unpin do): left on the previous
+        # worker's id, the session listed as remote with an unknown state here.
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
-                    (device_id, device_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
+                    (device_id, settings.effective_instance_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
         if branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
 

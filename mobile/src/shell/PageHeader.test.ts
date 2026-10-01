@@ -73,7 +73,7 @@ describe('PageHeader voice input', () => {
 });
 
 describe('PageHeader action slots', () => {
-	it('renders the pinned meta actions and the scroll rail actions in their own regions', () => {
+	it('renders download in the left region and Git in the right region', () => {
 		const { container } = render(PageHeader, {
 			props: { leftActions: button('Download chat'), actions: button('Commit') }
 		});

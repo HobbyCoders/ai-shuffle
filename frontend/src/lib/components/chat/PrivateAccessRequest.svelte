@@ -98,10 +98,19 @@
 			{/if}
 
 			{#if saved}
-				<p class="pa-note">
+				<div class="pa-note">
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.6-4.6A12 12 0 0112 3a12 12 0 01-8.6 3.4A12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.2-2.4-.4-3.6z" /></svg>
-					<span>Uses the saved sign-in for <strong>{saved.target}</strong>. Host key {saved.fingerprint}.</span>
-				</p>
+					<div class="pa-saved-detail">
+						<span>Uses the saved sign-in for</span>
+						<strong>{saved.target}</strong>
+						{#if saved.fingerprint}
+							<details class="pa-fingerprint">
+								<summary>Host-key fingerprint</summary>
+								<code>{saved.fingerprint}</code>
+							</details>
+						{/if}
+					</div>
+				</div>
 			{:else if machine}
 				<div class="pa-grid host">
 					<label class="pa-field"><span>Server IP address</span><input class="card-form-input" required inputmode="decimal" spellcheck="false" bind:value={host} /></label>
@@ -165,6 +174,5 @@
 </section>
 
 <style>
-	.pa-card { max-height: calc(100dvh - 230px); overflow: auto; overscroll-behavior: contain; }
 	form { display: contents; }
 </style>
