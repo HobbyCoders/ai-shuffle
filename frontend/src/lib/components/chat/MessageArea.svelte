@@ -662,7 +662,7 @@
 	}
 
 	function handleTurnIntersect(entries: IntersectionObserverEntry[]) {
-		const inside = new Set<string>();
+		const reported = new Set<string>();
 		for (const entry of entries) {
 			const id = (entry.target as HTMLElement).dataset.userTurnId;
 			if (!id) continue;
@@ -673,9 +673,9 @@
 				turnVisibility.get(id)
 			);
 			if (next) turnVisibility.set(id, next);
-			if (next === 'inside') inside.add(id);
+			reported.add(id);
 		}
-		settleSkippedTurns(turnNavigationIds, turnVisibility, inside);
+		settleSkippedTurns(turnNavigationIds, turnVisibility, reported);
 		updateCurrentTurnIndex();
 	}
 

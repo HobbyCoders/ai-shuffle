@@ -168,9 +168,9 @@ describe('turn visibility → rail index', () => {
 describe('settleSkippedTurns', () => {
 	const ids = ['a', 'b', 'c', 'd', 'e'];
 
-	function settle(states: Record<string, TurnVisibility>, inside: string[]) {
+	function settle(states: Record<string, TurnVisibility>, reported: string[]) {
 		const map = new Map(Object.entries(states));
-		settleSkippedTurns(ids, map, new Set(inside));
+		settleSkippedTurns(ids, map, new Set(reported));
 		return Object.fromEntries(map);
 	}
 
@@ -190,6 +190,13 @@ describe('settleSkippedTurns', () => {
 	it('changes nothing without a turn reported inside the band', () => {
 		const states: Record<string, TurnVisibility> = { a: 'above', b: 'below', c: 'below' };
 		expect(settle(states, [])).toEqual(states);
+	});
+
+	it('only trusts a reported turn whose final state in the batch is inside', () => {
+		// c was reported inside then above in the same batch (last entry wins);
+		// a was inside before this batch and was not reported.
+		const states: Record<string, TurnVisibility> = { a: 'inside', b: 'below', c: 'above', d: 'above' };
+		expect(settle(states, ['c'])).toEqual(states);
 	});
 
 	it('leaves unobserved turns and turns between inside ones alone', () => {

@@ -183,17 +183,20 @@ export function classifyTurnEntry(
  * pins the rail to the wrong turn. An anchor just reported inside the band is
  * real geometry and anchors are in document order, so earlier turns cannot be
  * below the band and later turns cannot be above it. No layout is read.
+ * `reportedIds` are the anchors in this observer batch; only those whose
+ * resulting state is 'inside' count, because one batch can carry several
+ * entries for the same anchor and the last one wins.
  */
 export function settleSkippedTurns(
 	turnIds: readonly string[],
 	states: Map<string, TurnVisibility>,
-	insideIds: ReadonlySet<string>
+	reportedIds: ReadonlySet<string>
 ): void {
-	if (insideIds.size === 0) return;
+	if (reportedIds.size === 0) return;
 	let first = -1;
 	let last = -1;
 	turnIds.forEach((id, index) => {
-		if (!insideIds.has(id)) return;
+		if (!reportedIds.has(id) || states.get(id) !== 'inside') return;
 		if (first < 0) first = index;
 		last = index;
 	});
