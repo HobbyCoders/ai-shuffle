@@ -15,7 +15,10 @@ import { createRequire } from 'node:module';
 const require = createRequire(new URL('../../browser-mcp/package.json', import.meta.url));
 const { chromium } = require('playwright-core');
 const browser = await chromium.launch({
-	executablePath: process.env.CHROMIUM_PATH || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : '/usr/bin/chromium'),
+	executablePath: process.env.CHROMIUM_PATH || {
+		win32: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+		darwin: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+	}[process.platform] || '/usr/bin/chromium',
 	headless: true,
 	args: ['--no-sandbox', '--disable-gpu'],
 });
@@ -113,9 +116,40 @@ async function harness(viewport, { touch, shell }) {
 		}
 	}
 
+	// A row click runs the handler with no option bag; an editor submit passes
+	// the explicit bag. Both leave the panel on the overview.
+	async function handlerChecks() {
+		const SUBMITS = [
+			{ row: 'Commit', chevron: 'Commit options', name: 'commit', keys: ['includeUnstaged', 'message', 'nextStep'] },
+			{ row: 'Ship It', chevron: 'Ship It options', name: 'shipit', keys: ['cleanup', 'includeUnstaged', 'mergeMethod'] },
+		];
+		await fx(() => window.gitPanelFixture.scenario('dirty'));
+		for (const { row, chevron, name: handler, keys } of SUBMITS) {
+			const takeCalls = () => page.evaluate(() => window.gitPanelFixture.calls.splice(0).map((c) => ({
+				name: c.name, argc: c.argc, keys: c.options && typeof c.options === 'object' ? Object.keys(c.options).sort() : null,
+			})));
+			await takeCalls();
+			await openPanel();
+			await press(page.locator('.gp-pipe, .gp-rows').getByRole('button', { name: row, exact: true }));
+			const rowCalls = await takeCalls();
+			check(rowCalls.length === 1 && rowCalls[0].name === handler && rowCalls[0].argc === 0, `${row} row click runs the handler with no option bag`, rowCalls);
+			check((await open()) === 'git-panel' && (await page.locator('.gp-rows').isVisible()), `${row} row click leaves the panel on the overview`, await open());
+
+			await press(button(chevron));
+			await press(page.locator('.options-dropdown .opt-submit'));
+			const submitCalls = await takeCalls();
+			check(submitCalls.length === 1 && submitCalls[0].name === handler && submitCalls[0].argc === 1, `${row} editor submit runs the handler once with an option bag`, submitCalls);
+			check(JSON.stringify(submitCalls[0]?.keys) === JSON.stringify(keys), `${row} editor submit passes the explicit options`, submitCalls[0]?.keys);
+			check((await open()) === 'git-panel' && (await page.locator('.gp-rows').isVisible()), `${row} editor submit returns to the overview`, await open());
+			check((await focused()) === chevron, `${row} editor submit returns focus to the chevron`, await focused());
+			await press(page.locator('.gp-close'));
+		}
+	}
+
 	async function panelChecks() {
 		const sheet = (await page.locator('.git-actions.sheet-layout').count()) === 1;
 		check(sheet === touch, touch ? 'touch viewport uses the bottom sheet' : 'desktop viewport uses the anchored panel');
+		if (!touch) await handlerChecks();
 		for (const editor of EDITORS) {
 			const { chevron, id } = editor;
 			await fx((s) => window.gitPanelFixture.scenario(s), editor.scenario);
@@ -194,6 +228,14 @@ async function harness(viewport, { touch, shell }) {
 		await press(page.locator('.gp-dismiss'));
 		check((await open()) === 'git-panel' && (await panelVisible()), 'Dismiss on a failed operation keeps the panel open', await open());
 		check((await page.locator('.git-progress').count()) === 0, 'Dismiss removes the progress box');
+		await fx(() => window.gitPanelFixture.endOp());
+
+		// An operation started by a click outside the panel (a toast action) opens
+		// the panel during that click; the same click must not close it again.
+		await press(page.locator('.gp-close'));
+		check((await open()) === null, 'close control closes the panel before the toast check', await open());
+		await press(page.locator('#fx-toast'));
+		check((await open()) === 'git-panel' && (await panelVisible()) && (await page.locator('.git-progress').isVisible()), 'an operation started from outside the panel keeps it open with progress', await open());
 		await fx(() => window.gitPanelFixture.endOp());
 
 		check(!(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)), 'no horizontal page overflow');

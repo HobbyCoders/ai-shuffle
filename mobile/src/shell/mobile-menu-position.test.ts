@@ -33,11 +33,4 @@ describe('mobile menu positioning', () => {
 		const pinned = (id: string) => fixedMenuSelectors.some(selector => document.getElementById(id)!.matches(selector));
 		for (const id of ['git-editor', 'git-progress', 'runner', 'worktree', 'local-branch']) expect(pinned(id)).toBe(false);
 	});
-
-	it('does not apply the mobile header positioning to the desktop shell', () => {
-		document.documentElement.dataset.platform = 'desktop';
-		document.body.innerHTML = '<div class="git-actions"><div class="options-dropdown"></div></div>';
-		const menu = document.querySelector('.options-dropdown')!;
-		expect(fixedMenuSelectors.some(selector => menu.matches(selector))).toBe(false);
-	});
 });

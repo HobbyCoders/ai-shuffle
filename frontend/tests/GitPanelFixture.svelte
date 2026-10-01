@@ -10,9 +10,10 @@
 
 	let isStreaming = $state(false);
 	let operationInProgress = $state(false);
-	const calls: { name: string; options?: unknown; open: string | null }[] = [];
-	const record = (name: string) => (options?: unknown) => {
-		calls.push({ name, options, open: get(openHeaderDropdown) });
+	// argc tells a bare row click (no option bag) from an editor submit.
+	const calls: { name: string; argc: number; options?: unknown; open: string | null }[] = [];
+	const record = (name: string) => (...args: unknown[]) => {
+		calls.push({ name, argc: args.length, options: args[0], open: get(openHeaderDropdown) });
 	};
 
 	const branch = 'feature/inline-git-editors-with-a-long-name';
@@ -110,6 +111,8 @@
 </header>
 <main class="fx-main">
 	<p id="fx-outside">Outside content</p>
+	<!-- Stands in for a toast action ("Pull first") that starts an operation from outside the panel. -->
+	<button id="fx-toast" type="button" onclick={() => startOp('running')}>Pull first</button>
 	{#each Array(30) as _, i (i)}<p>Chat message filler line {i}</p>{/each}
 </main>
 
