@@ -224,6 +224,52 @@ describe('SystemMessage — provider_retry', () => {
 		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
 	});
 
+	it('says when the reconnect lowered the effort', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 2,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						lowered_effort: 'high'
+					}
+				})
+			}
+		});
+
+		expect(container.textContent).toContain(
+			'Reconnecting with lower effort after the provider cut a long response'
+		);
+		expect(container.textContent).toContain('high');
+	});
+
+	it('collapses the dropped attempt once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						settled: true,
+						superseded: { text: 'Partial answer', tools: ['Bash'] }
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Response interrupted — retried')).toBeTruthy();
+		const details = container.querySelector('details');
+		expect(details).not.toBeNull();
+		expect(details?.open).toBe(false);
+		expect(container.textContent).toContain('Partial answer');
+		expect(container.textContent).toContain('Not run: Bash');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
 	it('hides a reconnect once the reply arrived', () => {
 		const { container } = render(SystemMessage, {
 			props: {

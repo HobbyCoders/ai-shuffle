@@ -1,6 +1,10 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
-	import { isLiveConnectionDropRetry, isTransientProviderRetry } from '$lib/utils/provider-retry';
+	import {
+		isLiveConnectionDropRetry,
+		isTransientProviderRetry,
+		supersededAttempt
+	} from '$lib/utils/provider-retry';
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { parseSwarm } from '$lib/utils/swarm';
@@ -694,8 +698,11 @@
 				const retryModel = typeof data.model === 'string' ? data.model : '';
 				if (isLiveConnectionDropRetry(message)) {
 					// The provider dropped the connection mid-reply and the engine
-					// re-sent the request. Shown only until the reply arrives.
-					let resent = `Provider connection dropped. Request re-sent (attempt ${data.attempt ?? '?'} of ${maxAttempts})`;
+					// re-sent the request. Shown as live work until the reply arrives.
+					const lowered = typeof data.lowered_effort === 'string' ? data.lowered_effort : '';
+					let resent = lowered
+						? `Reconnecting with lower effort after the provider cut a long response (${lowered}, attempt ${data.attempt ?? '?'} of ${maxAttempts})`
+						: `Provider connection dropped. Request re-sent (attempt ${data.attempt ?? '?'} of ${maxAttempts})`;
 					if (retryModel) resent += ` · ${retryModel}`;
 					return {
 						title: 'Reconnecting',
@@ -703,6 +710,20 @@
 						badge: 'retry',
 						badgeColor: 'amber',
 						compact: true
+					};
+				}
+				const superseded = supersededAttempt(message);
+				if (superseded && !data.exhausted) {
+					// The reply arrived. What the dropped attempt had streamed is
+					// kept here, collapsed, instead of above the new reply.
+					const toolNote = superseded.tools.length
+						? `Not run: ${superseded.tools.join(', ')}`
+						: '';
+					return {
+						title: 'Response interrupted — retried',
+						content: superseded.text ? 'partial reply hidden' : toolNote,
+						collapsible: true,
+						rawOutput: [superseded.text, toolNote].filter(Boolean).join('\n\n') || undefined
 					};
 				}
 				if (data.exhausted) {
