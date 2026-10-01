@@ -201,5 +201,10 @@ async def test_concurrent_calls_keep_their_own_ids() -> None:
 def test_tool_use_id_from_meta(meta: Any, expected: Any) -> None:
     assert _tool_use_id_from_meta(meta) == expected
     if meta is not None:
-        model = t.RequestParams.Meta.model_validate(meta)
-        assert _tool_use_id_from_meta(model) == expected
+        # Through the request model, so the test holds on every mcp release:
+        # 1.x parses ``_meta`` into ``RequestParams.Meta`` (extra fields
+        # allowed), 2.x keeps it as a mapping. The helper accepts both.
+        params = t.CallToolRequestParams.model_validate(
+            {"name": "x", "arguments": {}, "_meta": meta}
+        )
+        assert _tool_use_id_from_meta(params.meta) == expected
