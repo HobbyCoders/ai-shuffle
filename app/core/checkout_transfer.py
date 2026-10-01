@@ -114,6 +114,19 @@ def export_checkout(cwd, branch, expected_remote=None):
     return dict(protocol="git-origin-v1", branch=branch, head=head, fingerprint=head, remote=remote)
 
 
+def receiving_checkout(base, destination, branch):
+    """The checkout an import of ``branch`` would change (read-only).
+
+    A registered checkout of the branch, including the project's base
+    checkout, is reused; otherwise ``destination`` would be created.
+    """
+    for entry in git(base, "worktree", "list", "--porcelain").decode().split("\n\n"):
+        lines = entry.splitlines()
+        if "branch refs/heads/" + branch in lines:
+            return Path(next(line.removeprefix("worktree ") for line in lines if line.startswith("worktree ")))
+    return Path(destination)
+
+
 def import_checkout(base, destination, state):
     """Fetch using local configuration; preserve dirty or divergent branches."""
     if state.get("protocol") != "git-origin-v1":
@@ -127,13 +140,7 @@ def import_checkout(base, destination, state):
     git(base, "fetch", "--no-tags", "origin", "refs/heads/" + branch + ":refs/remotes/origin/" + branch)
     if git(base, "rev-parse", "FETCH_HEAD").decode().strip() != head:
         raise ValueError("The remote branch changed during resume. Retry from the owning worker.")
-    # Reuse a registered branch checkout, including the project's base checkout.
-    dest = Path(destination)
-    for entry in git(base, "worktree", "list", "--porcelain").decode().split("\n\n"):
-        lines = entry.splitlines()
-        if "branch refs/heads/" + branch in lines:
-            dest = Path(next(line.removeprefix("worktree ") for line in lines if line.startswith("worktree ")))
-            break
+    dest = receiving_checkout(base, destination, branch)
     if dest.exists() or dest.is_symlink():
         known = [line.removeprefix("worktree ") for line in git(base, "worktree", "list", "--porcelain").decode().splitlines() if line.startswith("worktree ")]
         if not any(Path(p).resolve() == dest.resolve() for p in known) or dest.is_symlink():
