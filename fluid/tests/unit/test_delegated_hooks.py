@@ -7,6 +7,7 @@ HookBus event the native loop emits at the same point.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,111 @@ async def test_post_tool_use_failure_forwards_as_an_error_result(tmp_path) -> No
     event, payload = rec.seen[0]
     assert event == POST_TOOL_USE
     assert payload["is_error"] is True and payload["output"] == "no match"
+
+
+def _peer_ready(loop: DelegatedLoop, *, main_ids=("t1",)) -> StreamJsonMapper:
+    """Put one admitted peer in front of the running turn's next boundary and
+    return that turn's mapper (the reader's, which alone may deliver it)."""
+    from fluid.events.ops import AgentMessage
+
+    loop._peer_admission_open = True
+    loop._pending_peers = [AgentMessage(sender="reviewer", text="hold the merge", id="p1", wake=False)]
+    loop._turn_peer_ids = {"p1"}
+    mapper = StreamJsonMapper(
+        session_id=loop.session_id, turn_id="turn_1", model="claude-fake", user_node_id="n0",
+    )
+    mapper.main_tool_use_ids.update(main_ids)
+    return mapper
+
+
+async def _fire_at_boundary(loop, written, event, data, mapper) -> dict:
+    await loop._answer_hook_request(HookCallbackRequest(
+        cli_request_id="cli_hook_9", callback_id=f"fluid_{event}",
+        input={"hook_event_name": event, "session_id": "cli-sess",
+               "transcript_path": "/t/cli.jsonl", "cwd": ".", **data},
+        tool_use_id=data.get("tool_use_id"),
+    ), mapper=mapper)
+    response = written[-1]["response"]
+    assert response["subtype"] == "success", response
+    return response["response"]
+
+
+def _receipts(loop: DelegatedLoop) -> list:
+    from fluid.events.model import SteerDelivered
+
+    return [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+async def test_peer_rides_a_main_thread_tool_boundary_beside_hook_context(tmp_path, event) -> None:
+    from fluid.context.peer import format_peer_message
+
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context="lint is red")})
+    loop, written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+    output = await _fire_at_boundary(loop, written, event, {
+        "tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1", "error": "x",
+    }, mapper)
+    peer = format_peer_message("reviewer", "hold the merge").strip()
+    assert output["hookSpecificOutput"]["additionalContext"] == f"lint is red\n\n{peer}"
+    assert loop._pending_peers == []
+    [receipt] = _receipts(loop)
+    assert receipt.steers == [{"id": "p1", "text": "hold the merge", "from": "reviewer"}]
+    assert receipt.turn_id == "turn_1"
+
+
+@pytest.mark.parametrize("case", [
+    "no-mapper", "subagent-id", "subagent-agent-id", "admission-closed",
+    "interrupted", "hook-stop", "pre-tool-use", "over-budget",
+])
+async def test_peer_never_rides_an_unsafe_boundary(tmp_path, monkeypatch, case) -> None:
+    """Each answer here either cannot reach the running query's next model
+    call or is not a tool-result boundary: it carries nothing, receipts
+    nothing, and the peer keeps waiting."""
+    answers = {}
+    if case == "hook-stop":
+        answers[POST_TOOL_USE] = HookDecision(stop=True, note="halt")
+    rec = _Recorder(answers)
+    loop, written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+    event, data = "PostToolUse", {"tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1"}
+    if case == "no-mapper":
+        mapper = None  # the between-turn drain / initialize read
+    elif case == "subagent-id":
+        data["tool_use_id"] = "t_sub"
+    elif case == "subagent-agent-id":
+        data["agent_id"] = "agent_1"
+    elif case == "admission-closed":
+        loop._peer_admission_open = False  # the result was read
+    elif case == "interrupted":
+        loop._interrupted.set()
+    elif case == "pre-tool-use":
+        event = "PreToolUse"
+    elif case == "over-budget":
+        monkeypatch.setattr("fluid.engine.delegated.PEER_BOUNDARY_HOOK_BUDGET", -1.0)
+    output = await _fire_at_boundary(loop, written, event, data, mapper)
+    assert "hold the merge" not in json.dumps(output)
+    assert _receipts(loop) == []
+    assert [op.id for op in loop._pending_peers] == ["p1"]
+
+
+async def test_peer_whose_boundary_answer_cannot_be_written_is_not_receipted(tmp_path) -> None:
+    rec = _Recorder()
+    loop, _written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+
+    async def broken(frame: dict) -> None:
+        raise OSError("stdin closed")
+
+    loop._write_frame = broken  # type: ignore[method-assign]
+    await loop._answer_hook_request(HookCallbackRequest(
+        cli_request_id="cli_hook_9", callback_id="fluid_PostToolUse",
+        input={"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {},
+               "tool_use_id": "t1"},
+        tool_use_id="t1",
+    ), mapper=mapper)
+    assert _receipts(loop) == []
+    assert loop._pending_peers == [] and "p1" not in loop._turn_peer_ids
 
 
 async def test_user_prompt_submit_forwards_as_turn_start(tmp_path) -> None:
