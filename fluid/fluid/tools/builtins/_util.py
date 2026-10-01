@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
 import os
 import re
+import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -204,13 +207,19 @@ def _rg_listing(rg: str, root: Path, state: WalkState) -> Iterator[str] | None:
         )
     except OSError:
         return None
-    return _rg_stream(proc, root, state)
+    return _rg_stream(proc, root, state, _LinkProbe(root))
 
 
-def _rg_stream(proc: subprocess.Popen[bytes], root: Path, state: WalkState) -> Iterator[str]:
+def _rg_stream(
+    proc: subprocess.Popen[bytes], root: Path, state: WalkState, links: _LinkProbe
+) -> Iterator[str]:
     timer = None
     if state.deadline is not None:
-        timer = threading.Timer(max(0.0, state.deadline - time.monotonic()), proc.kill)
+        def _expire() -> None:
+            proc.kill()
+            links.close()
+
+        timer = threading.Timer(max(0.0, state.deadline - time.monotonic()), _expire)
         timer.daemon = True
         timer.start()
     assert proc.stdout is not None
@@ -234,14 +243,175 @@ def _rg_stream(proc: subprocess.Popen[bytes], root: Path, state: WalkState) -> I
             return
         # rg: 0 = files listed, 1 = none, >=2 = an error.
         if proc.wait() >= 2 and listed == 0:
+            links.close()
             yield from _walk_rel(root, state)
+            return
+        yield from links.files(state)
     finally:
         if timer is not None:
             timer.cancel()
+        links.close()
         if proc.poll() is None:
             proc.kill()
         proc.stdout.close()
         proc.wait()
+
+
+# ── symlinked files ──────────────────────────────────────────────────────────
+#
+# ``rg --files`` without ``--follow`` lists no symlinks at all, and following
+# them is not an option (one link out of the tree would make every Glob walk
+# that tree). The walk lists a symlink as a file whenever it does not resolve
+# to a directory, so a symlinked CLAUDE.md or a dangling link shows up there.
+# These helpers find exactly those entries, without entering linked
+# directories: in a git work tree from the index and the untracked listing
+# (git does not follow links either), anywhere else from a scandir pass that
+# looks only at entry types.
+
+_GIT_CMDS = (
+    # Tracked entries with their modes; 120000 is a symlink.
+    ("ls-files", "--stage", "-z", "--recurse-submodules"),
+    # Untracked and ignored entries. --directory folds a wholly untracked
+    # directory (an ignored build tree, a nested repository) into one
+    # "dir/" line, which is scanned below unless it is pruned.
+    ("ls-files", "--others", "--directory", "-z"),
+)
+
+
+class _LinkProbe:
+    """Finds the symlinked files under ``root`` that ``rg --files`` leaves out.
+
+    The git listings start when the probe is made, so they run while rg does.
+    Anything that keeps git from answering (not a work tree, no git, a
+    "dubious ownership" refusal) falls back to the scandir pass, which is
+    exact but walks every directory.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.procs: list[subprocess.Popen[bytes]] = []
+        git = shutil.which("git")
+        if git is None:
+            return
+        try:
+            for cmd in _GIT_CMDS:
+                self.procs.append(subprocess.Popen(
+                    # A repository's fsmonitor setting names a program to run;
+                    # listing files is no reason to run it.
+                    [git, "-c", "core.fsmonitor=false", *cmd],
+                    cwd=str(root), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                ))
+        except OSError:
+            self.close()
+            self.procs = []
+
+    def close(self) -> None:
+        for proc in self.procs:
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+
+    def _git_output(self) -> list[bytes] | None:
+        if len(self.procs) != len(_GIT_CMDS):
+            return None
+        outputs = []
+        for proc in self.procs:
+            out, _ = proc.communicate()
+            if proc.returncode != 0:
+                return None
+            outputs.append(out)
+        return outputs
+
+    def files(self, state: WalkState) -> Iterator[str]:
+        outputs = self._git_output()
+        if outputs is None:
+            yield from _scan_links(self.root, "", state)
+            return
+        staged, others = outputs
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for entry in staged.split(b"\0"):
+            meta, sep, name = entry.partition(b"\t")
+            if sep and meta.startswith(b"120000 "):
+                candidates.append(os.fsdecode(name))
+        dirs: list[str] = []
+        for entry in others.split(b"\0"):
+            if not entry:
+                continue
+            rel = os.fsdecode(entry)
+            if rel.endswith("/") or rel in ("", "."):
+                folded = rel.rstrip("/")
+                dirs.append("" if folded in ("", ".") else folded.removeprefix("./"))
+            else:
+                candidates.append(rel)
+        for rel in candidates:
+            if rel in seen or _pruned(rel.split("/")[:-1]):
+                continue
+            seen.add(rel)
+            if _is_listed_link(os.path.join(self.root, rel)):
+                if state.expired:
+                    state.deadline_hit = True
+                    return
+                state.files_seen += 1
+                yield rel
+        for rel_dir in dirs:
+            if rel_dir and _pruned(rel_dir.split("/")):
+                continue
+            for rel in _scan_links(self.root, rel_dir, state):
+                if rel not in seen:
+                    seen.add(rel)
+                    yield rel
+            if state.deadline_hit:
+                return
+
+
+def _pruned(dir_parts: list[str]) -> bool:
+    return any(part in PRUNE_DIRS for part in dir_parts)
+
+
+def _is_listed_link(path: str) -> bool:
+    """A symlink the walk would list as a file: one not resolving to a directory."""
+    try:
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            return False
+    except OSError:
+        return False
+    return not os.path.isdir(path)
+
+
+def _scan_links(root: Path, start: str, state: WalkState) -> Iterator[str]:
+    """Symlinked files under ``root/start``, found by entry type alone.
+
+    Prunes like the walk and never enters a symlinked directory or a
+    junction. Counts what it yields in ``state.files_seen``.
+    """
+    stack = [start]
+    while stack:
+        if state.expired:
+            state.deadline_hit = True
+            return
+        rel_dir = stack.pop()
+        try:
+            entries = os.scandir(os.path.join(root, rel_dir) if rel_dir else root)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                try:
+                    if entry.is_symlink():
+                        if not entry.is_dir():
+                            state.files_seen += 1
+                            yield rel
+                    elif (
+                        entry.is_dir(follow_symlinks=False)
+                        and not entry.is_junction()
+                        and entry.name not in PRUNE_DIRS
+                    ):
+                        stack.append(rel)
+                except OSError:
+                    continue
 
 
 def is_binary(path: Path) -> bool:

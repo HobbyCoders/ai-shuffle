@@ -193,13 +193,25 @@ class _ListingProc:
         self.killed = True
 
 
+def _rg_only(proc: _ListingProc):
+    """A Popen stand-in: ``proc`` for rg, and no git (the link probe then
+    falls back to its scandir pass over the real tmp tree)."""
+
+    def fake_popen(args, **kwargs):
+        if "--files" not in args:
+            raise OSError("no git here")
+        return proc
+
+    return fake_popen
+
+
 def test_rg_listing_error_with_nothing_listed_falls_back_to_the_walk(
     tmp_path, monkeypatch
 ) -> None:
     _write(tmp_path, "src/a.py")
     _write(tmp_path, "b.py")
     monkeypatch.setattr(
-        _util.subprocess, "Popen", lambda *a, **k: _ListingProc(b"", 2)
+        _util.subprocess, "Popen", _rg_only(_ListingProc(b"", 2))
     )
     assert sorted(list_rel_files(tmp_path, WalkState(), "rg")) == ["b.py", "src/a.py"]
 
@@ -212,14 +224,14 @@ def test_rg_listing_error_after_partial_output_keeps_the_partial(
     _write(tmp_path, "src/a.py")
     _write(tmp_path, "b.py")
     monkeypatch.setattr(
-        _util.subprocess, "Popen", lambda *a, **k: _ListingProc(b"b.py\0", 2)
+        _util.subprocess, "Popen", _rg_only(_ListingProc(b"b.py\0", 2))
     )
     assert list(list_rel_files(tmp_path, WalkState(), "rg")) == ["b.py"]
 
 
 def test_rg_listing_decodes_null_separated_posix_paths(tmp_path, monkeypatch) -> None:
     out = "src/a b.py\0./x.py\0ünï/ç.py\0".encode()
-    monkeypatch.setattr(_util.subprocess, "Popen", lambda *a, **k: _ListingProc(out, 0))
+    monkeypatch.setattr(_util.subprocess, "Popen", _rg_only(_ListingProc(out, 0)))
     assert list(list_rel_files(tmp_path, WalkState(), "rg")) == [
         "src/a b.py", "x.py", "ünï/ç.py",
     ]
@@ -229,6 +241,8 @@ def test_rg_listing_args_prune_like_the_walk(tmp_path, monkeypatch) -> None:
     seen: dict = {}
 
     def fake_popen(args, **kwargs):
+        if "--files" not in args:
+            raise OSError("no git here")
         seen["args"], seen["kwargs"] = args, kwargs
         return _ListingProc(b"", 1)
 
@@ -241,6 +255,89 @@ def test_rg_listing_args_prune_like_the_walk(tmp_path, monkeypatch) -> None:
     excluded = {args[i + 1] for i, a in enumerate(args) if a == "--glob"}
     assert excluded == {f"!{name}/" for name in _util.PRUNE_DIRS}
     assert rg_prune_globs() == [a for a in args if a == "--glob" or a in excluded]
+
+
+# ── symlinked files ──────────────────────────────────────────────────────────
+
+
+def _symlink(link: Path, target: Path | str, *, is_dir: bool = False) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, link, target_is_directory=is_dir)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create symlinks here: {exc}")
+
+
+def _link_tree(root: Path) -> None:
+    """Symlinks of every kind the walk and rg treat differently."""
+    _parity_tree(root)
+    _symlink(root / "CLAUDE.md", "README.md")              # the case that matters
+    _symlink(root / "src" / "alias.py", root / "src" / "a.py")
+    _symlink(root / "dangling.py", root / "missing.py")    # the walk lists it
+    _symlink(root / "linked_dir", root / "docs", is_dir=True)  # never entered
+    _symlink(root / "node_modules" / "pkg" / "l.js", root / "app.py")  # pruned
+    _symlink(root / "untracked" / "deep" / "u.md", root / "README.md")
+    _symlink(root / "generated" / "ignored.py", root / "app.py")  # gitignored dir
+
+
+def _git(root: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", *args], cwd=root, check=True,
+        capture_output=True,
+    )
+
+
+@needs_rg
+@pytest.mark.parametrize("in_git", [False, True], ids=["plain-dir", "git-repo"])
+@pytest.mark.parametrize("pattern", ["*", "*.md", "src/*.py", "**/*.py"])
+def test_glob_engines_agree_on_symlinked_files(tmp_path, pattern, in_git) -> None:
+    """rg --files lists no symlinks; the probe adds the ones the walk lists
+    (any link not resolving to a directory) without entering linked dirs."""
+    _link_tree(tmp_path)
+    if in_git:
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        shutil.rmtree(tmp_path / ".git")  # the parity tree's stand-in
+        _git(tmp_path, "init", "-q")
+        # Tracked: CLAUDE.md and src/alias.py. Left untracked: dangling.py,
+        # the untracked/ tree and the gitignored generated/ tree.
+        _git(tmp_path, "add", "CLAUDE.md", "src/alias.py", "src/a.py", "README.md")
+    via_rg = glob_mod._glob(pattern, tmp_path, glob_mod.MAX_LIMIT, rg=RG).text
+    via_walk = glob_mod._glob(pattern, tmp_path, glob_mod.MAX_LIMIT, rg=None).text
+    assert via_rg == via_walk
+    if pattern == "*":
+        listed = via_rg.splitlines()[1:]
+        assert {"CLAUDE.md", "src/alias.py", "dangling.py", "untracked/deep/u.md",
+                "generated/ignored.py"} <= set(listed)
+        assert not any(line.startswith(("linked_dir", "node_modules")) for line in listed)
+
+
+@needs_rg
+def test_glob_engines_agree_inside_a_git_repo(tmp_path) -> None:
+    """The probe's git path (index plus untracked listing, folded directories
+    scanned) adds nothing the walk would not list, links or no links."""
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    _parity_tree(tmp_path)
+    shutil.rmtree(tmp_path / ".git")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "app.py", "src", "docs/guide.md")
+    for pattern in ("*", "**/*.py", ".*"):
+        via_rg = glob_mod._glob(pattern, tmp_path, glob_mod.MAX_LIMIT, rg=RG).text
+        via_walk = glob_mod._glob(pattern, tmp_path, glob_mod.MAX_LIMIT, rg=None).text
+        assert via_rg == via_walk
+
+
+@needs_rg
+def test_symlink_probe_without_git_uses_the_scandir_pass(tmp_path, monkeypatch) -> None:
+    _link_tree(tmp_path)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        _util.shutil, "which", lambda name: None if name == "git" else real_which(name)
+    )
+    assert sorted(list_rel_files(tmp_path, WalkState(), RG)) == _walk_rels(tmp_path)
 
 
 # ── Grep ─────────────────────────────────────────────────────────────────────
