@@ -1,12 +1,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), mobile: false }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), hydrate: vi.fn(), mobile: false }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get, post: mocks.post },
 	getErrorMessage: (cause: { detail?: string; message?: string }, fallback: string) => cause?.detail ?? cause?.message ?? fallback
 }));
 vi.mock('$lib/stores/platform.svelte', () => ({ platform: { get isMobile() { return mocks.mobile; } } }));
+vi.mock('$lib/constants/models.svelte', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/constants/models.svelte')>()),
+	hydrateModelRegistry: mocks.hydrate
+}));
 import ClaudeCliPanel from './ClaudeCliPanel.svelte';
 
 const login = (overrides = {}) => ({
@@ -107,4 +111,26 @@ it('reports a missing CLI and offers the API key', async () => {
 	expect(screen.getByText('Claude Code CLI not found.')).toBeTruthy();
 	await fireEvent.click(screen.getByRole('button', { name: 'Use an API key' }));
 	expect(onUseApiKey).toHaveBeenCalled();
+});
+
+it('re-reads the model registry when Check again finds a new sign-in', async () => {
+	// The composer lists Claude models only once the registry reports a Claude
+	// sign-in, so a sign-in must refresh it without a page reload.
+	mocks.get.mockResolvedValueOnce(status())
+		.mockResolvedValue(status({ signed_in: true, auth_method: 'claude.ai', email: 'me@example.com', plan: 'max' }));
+	mocks.hydrate.mockResolvedValue(true);
+	render(ClaudeCliPanel, { isAdmin: false });
+	expect((await screen.findByTestId('claude-cli-state')).textContent?.trim()).toBe('Not signed in');
+	expect(mocks.hydrate).not.toHaveBeenCalled();
+	await fireEvent.click(screen.getByRole('button', { name: /Check again/ }));
+	await waitFor(() => expect(screen.getByTestId('claude-cli-state').textContent?.trim()).toBe('Signed in'));
+	expect(mocks.hydrate).toHaveBeenCalledTimes(1);
+});
+
+it('leaves the model registry alone when nothing about the account changed', async () => {
+	mocks.get.mockResolvedValue(status({ signed_in: true, auth_method: 'claude.ai', email: 'me@example.com', plan: 'max' }));
+	render(ClaudeCliPanel, { isAdmin: false });
+	await fireEvent.click(await screen.findByRole('button', { name: /Check again/ }));
+	await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('/auth/claude/cli?refresh=true', { cache: 'no-store' }));
+	expect(mocks.hydrate).not.toHaveBeenCalled();
 });

@@ -539,6 +539,11 @@ def build_task_contract(
     }
     # The enum is a union for mixed-provider rosters. Dispatch revalidates the
     # selected ID against the chosen target's effective provider, not this union.
+    # A target with no provider runs on native Claude (the Claude Code CLI on a
+    # subscription, or the Anthropic API with a key). Its list is the Claude
+    # model registry's aliases, so a Claude caller can send one Task to haiku
+    # and another to opus, the way a provider-row caller picks from its row.
+    from app.core.model_registry import model_values
     from app.core.provider_agent import curated_model_ids
 
     model_ids: set[str] = set()
@@ -551,15 +556,18 @@ def build_task_contract(
             row = _load_provider_row(target_provider)
             if row and row.get("enabled"):
                 model_ids.update(curated_model_ids(row))
+        else:
+            model_ids.update(model_values())
     if model_ids:
         properties["model"] = {
             "type": "string",
             "enum": sorted(model_ids),
             "description": (
                 "Optional model ID from the user's configured model list on the "
-                "selected target's provider. Omit to use the roster's default "
-                "model. This cannot switch providers; on mixed rosters an ID "
-                "must belong to the chosen target's provider."
+                "selected target's provider; a target on native Claude takes "
+                "one of the Claude models in this list. Omit to use the "
+                "roster's default model. This cannot switch providers; on mixed "
+                "rosters an ID must belong to the chosen target's provider."
             ),
         }
     if offer_mode:
