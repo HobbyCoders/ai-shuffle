@@ -549,6 +549,11 @@ Export a session.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `format` | string | "markdown", "json", or "jsonl" (default: markdown) |
+| `share_safe` | boolean | Filter recognized credentials from the export only (default: false). Does not change stored history. |
+
+**Private backup:** The chat header's **Download private backup (.jsonl)** preserves raw history for backup/re-import. It may contain secrets; keep it private. Existing requests without `share_safe=true` retain their original behavior.
+
+**Sharing:** Choose **Export for sharing (.md)** to remove recognized secrets from a separate Markdown download. Review all content before posting: this is defense in depth, not arbitrary-secret detection, and is not a raw backup. Sharing files end in `-share-safe.md` (or `.json`/`.jsonl` for those API formats). Responses include `X-Transcript-Privacy: share-safe` or `private-raw`. Malformed raw JSONL returns `422` for sharing exports, never an unfiltered fallback.
 
 ```bash
 # Export as Markdown (default)
@@ -561,7 +566,12 @@ curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=json" \
   -H "Authorization: Bearer aih_your_key" \
   -o session.json
 
-# Export the raw Claude session history (JSONL)
+# Export for sharing (recognized credentials filtered; review before posting)
+curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=markdown&share_safe=true" \
+  -H "Authorization: Bearer aih_your_key" \
+  -o session-share-safe.md
+
+# Private raw backup (JSONL); may contain secrets, do not share
 curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=jsonl" \
   -H "Authorization: Bearer aih_your_key" \
   -o session.jsonl

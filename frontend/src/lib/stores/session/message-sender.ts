@@ -20,6 +20,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
+import { composerPreferences } from '../composer-preferences';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -560,6 +561,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const projectV2Id = _state.projectV2Id;
 			const queryProfileId = _state.profile;
 			const branchName = _state.worktreeBranch;
+			const consumeBranchChoice = composerPreferences.captureNewBranchChoice(
+				{ projectId, projectV2Id }, branchName, _state.worktreeCreateNewBranch);
 			const remoteOnly = !projectId && !!projectV2Id;
 			const overridesSnapshot = buildOverrides();
 
@@ -586,6 +589,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// queue) and the uploads travel as DB blobs.
 					target_instance_id: _state.deviceIntent?.id || undefined,
 				});
+
+				// A successful row consumes the one-time account default, even after
+				// navigation, but never a newer choice or a different owner's pick.
+				if (response.session_id) consumeBranchChoice();
 
 				// The pick is spent once the session row carries the ownership —
 				// only on the compose that spent it (see autoCreateWorktree).
