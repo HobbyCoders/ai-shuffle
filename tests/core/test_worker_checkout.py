@@ -125,8 +125,14 @@ def test_deny_mode_with_stale_allowlist_is_not_read_only(repo):
 def test_wrong_parent_branch_refuses_without_repair(repo):
     row, parent, *_ = repo
     git(parent, "switch", "-c", "wrong-branch")
-    with pytest.raises(worker_checkout.WorkerCheckoutError, match="branch binding mismatches"):
+    with pytest.raises(worker_checkout.WorkerCheckoutError) as refused:
         worker_checkout.prepare_worker_checkout(row, "writer", "coder")
+    # #1606: the folder exists, so the refusal names its actual branch rather
+    # than reporting the checkout as missing.
+    message = str(refused.value)
+    assert "on branch 'wrong-branch', not this session's branch 'parent-branch'" in message
+    assert str(parent) in message
+    assert "no longer exists" not in message and "unavailable" not in message
     assert git(parent, "branch", "--show-current") == "wrong-branch"
     assert not git(parent, "branch", "--list", "task/writer")
 
@@ -367,6 +373,24 @@ def test_checkout_failure_prevents_session_creation_and_provider_submit(repo, wo
     assert "refusing shared-checkout fallback" in outcome.error
     assert not worker_runtime
     assert database.get_session("failed-spawn") is None
+
+
+def test_parent_on_wrong_branch_refusal_names_the_branch_and_is_not_retried(repo, worker_runtime):
+    # #1606: the caller's registered folder was switched to another branch.
+    # The guard must still refuse, and say so, instead of "no longer exists".
+    from app.core import task_dispatch
+
+    row, parent, *_ = repo
+    git(parent, "switch", "-c", "fix/other-work")
+    outcome = dispatch(worker="wrong-branch-spawn")
+    assert not outcome.ok
+    assert "on branch 'fix/other-work', not this session's branch 'parent-branch'" in outcome.error
+    assert "no longer exists" not in outcome.error
+    assert not worker_runtime
+    assert database.get_session("wrong-branch-spawn") is None
+    assert git(parent, "branch", "--show-current") == "fix/other-work"
+    used = {"start": 0, "rate": 0}
+    assert task_dispatch._retry_kind("error", outcome.error, 0, used, start_max=2, rate_max=2) is None
 
 
 def test_session_insert_failure_reclaims_the_provisioned_checkout(repo, worker_runtime, monkeypatch):

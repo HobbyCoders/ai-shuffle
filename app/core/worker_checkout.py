@@ -122,10 +122,19 @@ def _caller_checkout(parent_row, expected: Optional[str]) -> Optional[str]:
             candidate = None
     if candidate and not git_service.is_git_repo(candidate):
         return None
-    if candidate or expected:
+    mismatch = project_resolver.describe_checkout_mismatch(row) if candidate else None
+    if mismatch:
+        # Name the real cause: the folder is there, on another branch.
         raise WorkerCheckoutError(
-            "The caller's checkout is unavailable or its branch binding "
-            "mismatches; refusing to launch in another checkout."
+            f"The calling session's checkout is on the wrong branch: {mismatch}. "
+            "Switch that folder back to its branch (keep the other work on its "
+            "own branch or checkout), then retry. No workers were launched."
+        )
+    if candidate or expected:
+        branch = f" for branch '{expected}'" if expected else ""
+        raise WorkerCheckoutError(
+            f"The calling session's checkout{branch} is unavailable on this "
+            "device; refusing to launch workers in another checkout."
         )
     return None
 

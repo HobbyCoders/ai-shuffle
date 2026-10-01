@@ -685,6 +685,8 @@ _PERMANENT_START_FAILURES = (
     "no credentials configured",
     "needs to be reconnected",
     "no longer exists",
+    # A checkout folder on the wrong branch reads the same on every attempt.
+    "refusing to run on the wrong branch",
     "is disabled",
     "did not finish within the",
     "server is at capacity",

@@ -1289,8 +1289,11 @@ async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_con
     # A changes its own HEAD mid-turn; a subsequent spawn is refused instead of
     # running the next task under A's stale metadata. B remains untouched.
     _git(first.worktree_path, "checkout", "-b", "fix/unrecorded-switch")
-    with pytest.raises(query_options.WorktreeUnavailableError):
+    with pytest.raises(query_options.WorktreeUnavailableError) as refused:
         query_options.build_options_from_profile(query_profile(), session_id=first.session_id)
+    # #1606: the folder is still there, so the refusal names its actual branch.
+    assert f"on branch 'fix/unrecorded-switch', not this session's branch '{first.branch_name}'" in str(refused.value)
+    assert "no longer exists" not in str(refused.value)
     assert database.get_session(first.session_id)["branch"] == first.branch_name
     assert checkout_manager.git_service.get_current_branch(second.worktree_path) == second.branch_name
 
