@@ -6775,6 +6775,39 @@ def test_safety_block_reaches_every_native_prompt(model):
     assert "third" in block and "parties" in block
 
 
+@pytest.mark.parametrize("model", ("gpt-6-astra", "claude-sonnet-4-5"))
+def test_context_note_reaches_every_native_prompt(model):
+    """Plan item 13: the app replaces fluid's base prompt, and with it fluid's
+    "## Context" section, so the compiled native prompt restates it: old
+    results and turns may be placeholders or digests, HistoryExpand recovers
+    the original and HistorySearch finds text, and the latest user message
+    outranks any digest."""
+    import app.core.provider.harness_adapter as ha
+
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "base", None, _native_opts(model=model)
+    )
+
+    assert compiled.text.count(ha.CONTEXT_BLOCK) == 1
+    assert "placeholders or digests" in compiled.text
+    assert "HistoryExpand(node) returns that node's original text verbatim" in compiled.text
+    assert "HistorySearch finds earlier text" in compiled.text
+    assert "The latest user message outranks any digest." in compiled.text
+    assert compiled.text.index(ha.SAFETY_BLOCK) < compiled.text.index(ha.CONTEXT_BLOCK)
+
+
+def test_context_note_without_recall_tools_names_no_tool():
+    """A surface without HistoryExpand/HistorySearch still learns about
+    placeholders and digests, but is not told to call tools it lacks."""
+    import app.core.provider.harness_adapter as ha
+
+    assert ha._context_section(frozenset({"Read", "Bash"})) == ha.CONTEXT_BLOCK_NO_RECALL
+    assert ha._context_section(frozenset({"HistoryExpand", "HistorySearch"})) == ha.CONTEXT_BLOCK
+    assert ha._context_section(None) == ha.CONTEXT_BLOCK
+    assert "History" not in ha.CONTEXT_BLOCK_NO_RECALL
+    assert "outranks any digest" in ha.CONTEXT_BLOCK_NO_RECALL
+
+
 def test_safety_block_keeps_the_prefix_stable_across_turns():
     """Cache-neutral: the same session compiles to the same bytes on every
     turn, and the block sits ahead of the model-family guidance."""
