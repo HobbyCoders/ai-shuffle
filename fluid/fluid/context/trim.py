@@ -34,6 +34,7 @@ import ast
 import json
 import re
 from collections.abc import Iterable
+from functools import lru_cache
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -272,14 +273,23 @@ def cell_calls(code: str) -> list[CellCall]:
     A cell that does not parse still names its calls, from the ``tools.X(``
     and known bare-name spellings, without argument hints.
     """
+    return list(_cell_calls(code))
+
+
+# Digests and epoch stubs re-render on every request, and an epoch can fold
+# hundreds of cells; parsing each one again every time costs whole seconds in
+# a long session. The result is a pure function of the code text, so it is
+# cached.
+@lru_cache(maxsize=4096)
+def _cell_calls(code: str) -> tuple[CellCall, ...]:
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         names = _TOOLS_ATTR_CALL_RE.findall(code) + [
             n for n in _BARE_CALL_RE.findall(code) if n in _KNOWN_TOOLS
         ]
-        return [CellCall(name=n.split("__")[-1], args="…")
-                for n in dict.fromkeys(names)]
+        return tuple(CellCall(name=n.split("__")[-1], args="…")
+                     for n in dict.fromkeys(names))
     aliases: dict[str, str] = {}
     modules = {"tools"}
     for node in ast.walk(tree):
@@ -323,7 +333,7 @@ def cell_calls(code: str) -> list[CellCall]:
             CellCall(name=name, args=_clip_one_line(args, CELL_ARG_CAP),
                      literals=tuple(literals)),
         ))
-    return [call for _, _, call in sorted(found, key=lambda f: (f[0], f[1]))]
+    return tuple(call for _, _, call in sorted(found, key=lambda f: (f[0], f[1])))
 
 
 def loaded_by(name: str, values: dict[str, Any]) -> list[str]:
@@ -354,6 +364,7 @@ def describe_loaded(loads: Iterable[tuple[str, str]]) -> str:
     )
 
 
+@lru_cache(maxsize=4096)
 def summarize_cell(code: str) -> str:
     """One line saying what a run_python cell did, for digests and
     placeholders. Pure: the same code always gives the same line."""
