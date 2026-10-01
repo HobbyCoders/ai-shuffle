@@ -1483,7 +1483,10 @@ _ITEM2_OFF = {"recency_tail_tokens": 0,
               "turn_budget_window_ratio": 0.0,
               "window_floor_waiver_ratio": 0.0,
               "wake_aware_turns": False}
-_LEGACY_FLAGS = {"below_threshold_skips_retry": False,
+# render_version 1 is the origin/main renderer; version 2 (steer receipts,
+# intent pins, cell summaries) changes digest and epoch bytes by design.
+_LEGACY_FLAGS = {"render_version": 1,
+                 "below_threshold_skips_retry": False,
                  "image_rung_in_batch": False,
                  "deep_target_window_ratio": 0.0,
                  "hard_window_ratio": 0.0,
@@ -1526,7 +1529,7 @@ _PARITY_SCENARIOS = {
     # The trim-only contract host apps rely on.
     "trim_only": (
         _parity_session,
-        lambda: CompactionConfig(enabled=False, trim=TrimConfig(
+        lambda: CompactionConfig(enabled=False, render_version=1, trim=TrimConfig(
             enabled=True, trigger_tokens=12_000, keep_recent_tool_results=3,
             min_result_chars=500)),
         {},

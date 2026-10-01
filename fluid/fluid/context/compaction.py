@@ -1760,7 +1760,9 @@ class Compactor:
             swept.reverse()
             if not swept and not images:
                 return SweepPlan(pinned=tuple(pins), pinned_chars=pinned_chars)
-            self.trimmer.mark_trimmed(swept)
+            self.trimmer.mark_trimmed(
+                swept, render_version=self.trimmer.render_version
+            )
             rendered = self._render(nodes)
         finally:
             restore()
@@ -1848,7 +1850,9 @@ class Compactor:
         pairs = [p for p in plan.pairs if p not in trimmer._trimmed]
         if pairs:
             before = estimate_tokens_of_messages(self._render(nodes))
-            trimmer.mark_trimmed(pairs)
+            # A live decision renders at this process's version, the same
+            # version rehydrate gives it once the event carries the field.
+            trimmer.mark_trimmed(pairs, render_version=trimmer.render_version)
             promotions.append(Promotion(
                 tier=1, reason="sweep", trimmed=tuple(pairs),
                 reclaimed_chars=max(

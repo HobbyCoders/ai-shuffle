@@ -283,7 +283,9 @@ def test_flaky_cache_behaves_like_the_unpriced_ladder() -> None:
     # commits the same batches on the same calls as the ladder without a
     # signal. At p_cold 0.85, R sits within a few hundred tokens of the rent
     # on a crossing just over the trigger, so a batch can wait one more call
-    # (the report's example, P = 160k, fires at once); never longer.
+    # (the report's example, P = 160k, fires at once); never longer. A batch
+    # that waits shifts every later crossing with it, so the bound is checked
+    # per crossing: at most one warm deferral before each commit.
     overhead = 30_000
     legacy = _batches(overhead, None)
     assert len(legacy) == 3
@@ -291,7 +293,18 @@ def test_flaky_cache_behaves_like_the_unpriced_ladder() -> None:
     assert flaky == legacy
     nearly = _batches(overhead, CacheSignal(p_cold=0.85, reuse_floor=overhead, **_WARM))
     assert len(nearly) == len(legacy)
-    assert all(0 <= b[0] - a[0] <= 1 for a, b in zip(legacy, nearly))
+    assert all(0 <= b[0] - a[0] for a, b in zip(legacy, nearly))
+    c = Compactor(config=CompactionConfig())
+    signal = CacheSignal(p_cold=0.85, reuse_floor=overhead, **_WARM)
+    deferrals = 0
+    for turns in range(1, 90):
+        _, promotions = _apply(c, _history(turns), overhead=overhead, cache=signal,
+                               boundary=True)
+        if promotions:
+            assert deferrals <= 1, turns
+            deferrals = 0
+        elif c.last_decision.get("reason") == "warm_defer":
+            deferrals += 1
 
 
 def test_no_signal_unknown_window_and_switch_off_run_unpriced() -> None:
