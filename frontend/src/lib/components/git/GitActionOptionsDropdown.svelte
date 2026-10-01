@@ -83,7 +83,8 @@
 	// of this editor without closing the Git panel beneath it.
 	$effect(() => {
 		window.addEventListener('keydown', onKeydown);
-		panelRef?.querySelector<HTMLElement>('textarea, input, select')?.focus({ preventScroll: true });
+		// Editors without a text field focus Back; the chevron that opened them is gone.
+		(panelRef?.querySelector<HTMLElement>('textarea, input, select') ?? panelRef?.querySelector<HTMLElement>('.opt-back'))?.focus({ preventScroll: true });
 		return () => window.removeEventListener('keydown', onKeydown);
 	});
 	function onKeydown(e: KeyboardEvent) {
@@ -333,7 +334,8 @@
 	.opt-fields { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 14px; }
 	.opt-fields:disabled { opacity: .6; }
 	.opt-blocked { margin: 0 0 14px; padding: 10px; border: 1px solid var(--border); border-radius: .5rem; color: var(--muted-foreground); font-size: .75rem; line-height: 1.5; }
-	:global(.sheet-layout) .opt-back { min-height: 44px; }
+	:global(.sheet-layout) .opt-back,
+	:global(.sheet-layout) .opt-radio { min-height: 44px; }
 	:global(.sheet-layout) .opt-input,
 	:global(.sheet-layout) .opt-textarea { font-size: 16px; }
 

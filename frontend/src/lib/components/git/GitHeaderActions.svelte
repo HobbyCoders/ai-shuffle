@@ -401,8 +401,11 @@
 	// update then finds nothing open and leaves it closed.
 	function handleClickOutside(e: MouseEvent) {
 		if (!panelOpen) return;
-		const target = e.target as Node;
-		if (panelRef?.contains(target) || triggerRef?.contains(target)) return;
+		// Use the path captured at dispatch. A real click lets Svelte flush between
+		// listeners, so a chevron, Back or Dismiss button can already be detached
+		// from the panel by the time this window listener runs.
+		const path = e.composedPath();
+		if ((panelRef && path.includes(panelRef)) || (triggerRef && path.includes(triggerRef))) return;
 		closePanel();
 	}
 
@@ -1458,7 +1461,8 @@
 	}
 
 	.sheet-layout .gp-head {
-		padding: 10px 16px 12px;
+		/* Right inset clears the 44px close control (8px offset + 8px gap). */
+		padding: 10px 60px 12px 16px;
 	}
 
 	.sheet-layout .gp-branch {

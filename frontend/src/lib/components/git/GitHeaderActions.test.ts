@@ -21,7 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { flushSync, tick } from 'svelte';
 
 // jsdom lacks ResizeObserver; some lucide/layout paths probe for it.
 if (!('ResizeObserver' in globalThis)) {
@@ -752,6 +752,25 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(panel()).toBeTruthy();
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(queryPanel()).toBeNull();
+	});
+
+	it('keeps the panel open when a chevron or Back click detaches its own button', async () => {
+		// A real click gives Svelte a microtask checkpoint between listeners, so the
+		// overview (or editor) is already swapped out when the window listener runs.
+		const flush = () => flushSync();
+		document.addEventListener('click', flush);
+		try {
+			dirtyFeatureBranch();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row('Commit options'));
+			expect(popover('commit')).toBeTruthy();
+			await fireEvent.click(within(panel()).getByRole('button', { name: 'Back to Git actions' }));
+			expect(queryPopover('commit')).toBeNull();
+			expect(panel()).toBeTruthy();
+		} finally {
+			document.removeEventListener('click', flush);
+		}
 	});
 
 	it('closes the popover AND the panel on a click outside both', async () => {
