@@ -1036,6 +1036,41 @@ describe('feedController optimistic seeding (worktree double-load fix)', () => {
 		expect(msgs.some((m) => m.id === 'opt-1')).toBe(true);
 		expect(deps.state.isStreaming).toBe(true);
 	});
+
+	it('#1282: seeding before each streamed delta does not rescan history per user row', () => {
+		const TURNS = 300;
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (let i = 0; i < TURNS; i++) {
+			hoisted.onEvent!(userMessage(`u-${i}`, `turn-${i}`, `question ${i}`));
+			hoisted.onEvent!(textDelta(`a-${i}`, `answer ${i}`));
+			hoisted.onEvent!({ type: 'turn.completed', id: `c-${i}`, seq: 0, session_id: 's1', turn_id: `turn-${i}` });
+		}
+		hoisted.onEvent!(caughtUp(0));
+		const published = deps.state.messages as Array<{ role: string }>;
+		expect(published.filter((m) => m.role === 'user')).toHaveLength(TURNS);
+
+		// A live reply: every delta re-runs optimistic seeding before it is reduced.
+		// It used to scan the whole reducer transcript once per historic user row
+		// (O(user rows x messages) per SSE event). Count full-history scans.
+		const some = vi.spyOn(Array.prototype, 'some');
+		const historyScans = () => some.mock.contexts.filter((ctx) => Array.isArray(ctx) && ctx.length >= TURNS).length;
+		try {
+			hoisted.onEvent!(userMessage('u-live', 'turn-live', 'live question'));
+			for (let i = 0; i < 20; i++) {
+				hoisted.onEvent!(textDelta(`live-${i}`, 'x'));
+				vi.advanceTimersByTime(STREAM_FOLD_MS);
+			}
+			expect(historyScans()).toBeLessThan(21);
+		} finally {
+			some.mockRestore();
+		}
+		const messages = deps.state.messages as Array<{ id: string; role: string; content: string }>;
+		// Semantics unchanged: no historic prompt was re-seeded as a duplicate.
+		expect(messages.filter((m) => m.role === 'user')).toHaveLength(TURNS + 1);
+		expect(messages.at(-1)?.content).toBe('x'.repeat(20));
+	});
 });
 
 // ─── revive() — heal a possibly-half-open feed on an out-of-band signal ──────

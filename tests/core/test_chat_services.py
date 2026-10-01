@@ -729,7 +729,7 @@ async def test_owner_api_grants_service_without_echoing_the_secret(
     from app.api import chat_access as api
 
     monkeypatch.setattr(api, "broker", broker)
-    monkeypatch.setattr(api, "checked", AsyncMock())
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value=None))
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"

@@ -64,6 +64,12 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             for that request, as when a PermissionRequest hook
                             in the CLI's own settings answered first; the call
                             then runs and the turn finishes.
+  w  peer tool boundary:    a Bash tool_use parked on ``can_use_tool``; then a
+                            subagent's PostToolUse hook_callback and the main
+                            call's PostToolUse (PostToolUseFailure when
+                            denied), each blocking on its answer; the final
+                            text is JSON of the ``additionalContext`` each
+                            answer carried ({"sub": ..., "main": ...}).
 
 Every scenario answers an ``initialize`` control_request with success and
 remembers the hook callback ids it registered (``HOOK_CALLBACKS``).
@@ -363,6 +369,61 @@ def turn_hooked_tool(sid: str) -> None:
     emit(result_frame(sid))
 
 
+def post_tool_use_hook(sid: str, tid: str, args: dict, *, failed: bool, agent_id: str | None = None) -> str:
+    """Ask the harness's PostToolUse(Failure) callback and block on its answer,
+    as the real CLI does before it goes on; return its ``additionalContext``."""
+    event = "PostToolUseFailure" if failed else "PostToolUse"
+    callback_id = HOOK_CALLBACKS.get(event)
+    if callback_id is None:
+        return ""
+    data = {
+        "hook_event_name": event, "session_id": sid,
+        "transcript_path": "/tmp/fake-transcript.jsonl", "cwd": ".",
+        "tool_name": "Bash", "tool_input": args, "tool_use_id": tid,
+    }
+    data.update({"error": "denied"} if failed else {"tool_response": {"stdout": "ok"}})
+    if agent_id is not None:
+        data["agent_id"] = agent_id
+    emit({"type": "control_request", "request_id": f"cli_hook_{tid}", "request": {
+        "subtype": "hook_callback", "callback_id": callback_id,
+        "input": data, "tool_use_id": tid,
+    }})
+    resp = wait_for("control_response") or {}
+    output = (resp.get("response") or {}).get("response") or {}
+    return str((output.get("hookSpecificOutput") or {}).get("additionalContext") or "")
+
+
+def turn_peer_boundary(sid: str) -> None:
+    """A Bash call parked on ``can_use_tool``, then a subagent's PostToolUse
+    and the main call's PostToolUse(Failure); the final text reports, as JSON,
+    the ``additionalContext`` each hook answer carried (what the model saw)."""
+    tid = "toolu_peer_1"
+    args = {"command": "make test"}
+    emit(assistant_frame(
+        sid, [{"type": "tool_use", "id": tid, "name": "Bash", "input": args}], "tool_use",
+    ))
+    emit({"type": "control_request", "request_id": "cli_req_peer_1", "request": {
+        "subtype": "can_use_tool", "tool_name": "Bash", "input": args, "tool_use_id": tid,
+    }})
+    resp = wait_for("control_response") or {}
+    allowed = (resp.get("response") or {}).get("response", {}).get("behavior") == "allow"
+    sub = "toolu_sub_1"
+    sub_frame = assistant_frame(
+        sid, [{"type": "tool_use", "id": sub, "name": "Bash", "input": args}], "tool_use",
+    )
+    sub_frame["parent_tool_use_id"] = tid
+    emit(sub_frame)
+    seen = {"sub": post_tool_use_hook(sid, sub, args, failed=False, agent_id="agent_sub_1")}
+    seen["main"] = post_tool_use_hook(sid, tid, args, failed=not allowed)
+    emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": tid,
+        "content": [{"type": "text", "text": "ok" if allowed else "denied"}],
+        "is_error": not allowed,
+    }]}})
+    emit(assistant_frame(sid, [{"type": "text", "text": json.dumps(seen)}], "end_turn"))
+    emit(result_frame(sid))
+
+
 def turn_withdrawn_permission(sid: str) -> None:
     """The CLI stops waiting on its own prompt and carries on streaming."""
     tid = "toolu_withdrawn_1"
@@ -538,6 +599,8 @@ def main() -> int:
             turn_hooked_tool(session_id)
         elif scenario == "v":
             turn_withdrawn_permission(session_id)
+        elif scenario == "w":
+            turn_peer_boundary(session_id)
         elif scenario == "e":
             turn_simple(session_id)
             if not wake_emitted:

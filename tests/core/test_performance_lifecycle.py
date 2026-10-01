@@ -86,6 +86,77 @@ async def test_empty_access_snapshot_authorizes_once(monkeypatch):
     get_owner.assert_awaited_once_with("session-7")
 
 
+@pytest.mark.asyncio
+async def test_empty_access_endpoint_reads_session_once_and_caches_empty_catalog(monkeypatch):
+    """The panel's snapshot request authorizes the session row once and does
+    no repeated vault-catalog query while the owner has nothing saved."""
+    from contextlib import contextmanager
+
+    from cryptography.fernet import Fernet
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api import chat_access as api
+    from app.core import chat_access, chat_vault, encryption
+    from app.db import database
+    from app.network import control
+    chat_vault._invalidate_catalog()
+    monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    session_reads, catalog_reads = [], []
+    def get_session(session_id):
+        session_reads.append(session_id)
+        return {"id": session_id, "mode": "chat", "instance_id": "worker"}
+    monkeypatch.setattr(database, "get_session", get_session)
+    class Cursor:
+        def execute(self, sql, params):
+            catalog_reads.append(params)
+        def fetchall(self):
+            return []
+    @contextmanager
+    def db():
+        yield SimpleNamespace(cursor=Cursor)
+    monkeypatch.setattr(chat_vault.database, "get_db", db)
+    monkeypatch.setattr(api, "broker", chat_access.Broker())
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    try:
+        async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
+            for _ in range(10):
+                response = await client.get("/api/v1/chat-access/session-7")
+                assert response.status_code == 200, response.text
+                assert response.json()["saved_connections"] == []
+    finally:
+        chat_vault._invalidate_catalog()
+    assert session_reads == ["session-7"] * 10
+    assert len(catalog_reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_access_endpoint_still_refuses_unsupported_session_from_loaded_row(monkeypatch):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api import chat_access as api
+    from app.core import chat_access, chat_vault
+    from app.db import database
+    from app.network import control
+    catalog = []
+    monkeypatch.setattr(chat_vault, "catalog", lambda *args, **kwargs: catalog.append(args) or [])
+    monkeypatch.setattr(control, "owner_of", lambda row: row.get("owner_device_id"))
+    rows = {"unknown-mode": {"mode": "unexpected"}, "mirrored": {"mode": "chat", "owner_device_id": "peer"}}
+    monkeypatch.setattr(database, "get_session", lambda session_id: rows[session_id])
+    monkeypatch.setattr(api, "broker", chat_access.Broker())
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
+        for session_id in rows:
+            assert (await client.get(f"/api/v1/chat-access/{session_id}")).status_code == 409
+    assert catalog == []
+
+
 
 
 @pytest.mark.asyncio
