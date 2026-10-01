@@ -3424,6 +3424,9 @@ def _map_frames(frames: list[dict]) -> list:
     out: list = []
     for frame in frames:
         out.extend(mapper.feed(frame).events)
+    # No result frame ends these streams; release the call the mapper holds
+    # for its final counts, as DelegatedLoop does at end of stream.
+    out.extend(mapper.flush_usage())
     return out
 
 
