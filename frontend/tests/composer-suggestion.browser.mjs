@@ -38,43 +38,57 @@ try {
 		);
 		console.log(JSON.stringify(results));
 		const editor = page.locator('[contenteditable="true"]');
-		for (const key of ['Tab', 'Enter']) {
-			await page.evaluate(async () => {
+		const literal = await page.evaluate(() => window.suggestionFixture.literal);
+		const reoffer = () =>
+			page.evaluate(async () => {
 				await window.suggestionFixture.clear();
 				await window.suggestionFixture.offer();
 			});
-			await editor.focus();
-			await page.keyboard.press(key);
-			assert.equal(
-				await editor.textContent(),
-				await page.evaluate(() => window.suggestionFixture.literal)
-			);
-			assert.equal(await page.evaluate(() => window.suggestionFixture.sends), 0);
+		const ghost = page.locator('[data-testid="composer-suggestion"]');
+		// #1402: the suggestion is inline only; no separate action row.
+		await reoffer();
+		await ghost.waitFor();
+		for (const name of [/use reply/i, /dismiss/i]) {
+			assert.equal(await page.getByRole('button', { name }).count(), 0);
 		}
-		await page.evaluate(async () => {
-			await window.suggestionFixture.clear();
-			await window.suggestionFixture.offer();
-		});
-		const useReply = page.getByRole('button', { name: 'Use reply', exact: true });
-		if (width === 390) await useReply.tap();
-		else await useReply.click();
-		assert.equal(await editor.textContent(), await page.evaluate(() => window.suggestionFixture.literal));
+		await editor.focus();
+		await page.keyboard.press('Tab');
+		assert.equal(await editor.textContent(), literal);
 		assert.equal(await page.evaluate(() => window.suggestionFixture.sends), 0);
-		await page.evaluate(async () => {
-			await window.suggestionFixture.clear();
-			await window.suggestionFixture.offer();
-		});
+		await reoffer();
+		await ghost.waitFor();
+		await editor.focus();
+		await page.keyboard.press('Enter');
+		assert.notEqual(await editor.textContent(), literal);
+		assert.equal(await page.evaluate(() => window.suggestionFixture.sends), 0);
+		await reoffer();
+		await ghost.waitFor();
+		const box = await editor.boundingBox();
+		if (width === 390) {
+			// Touch users accept with a double tap; a single tap only focuses.
+			const at = [box.x + box.width / 2, box.y + box.height / 2];
+			await page.touchscreen.tap(...at);
+			assert.equal(await editor.textContent(), '');
+			await page.touchscreen.tap(...at);
+		} else {
+			await editor.dblclick();
+		}
+		await page.waitForFunction(
+			text => document.querySelector('[contenteditable="true"]').textContent === text,
+			literal
+		);
+		assert.equal(await page.evaluate(() => window.suggestionFixture.sends), 0);
+		await reoffer();
+		await ghost.waitFor();
 		await editor.focus();
 		await page.keyboard.type('My own reply');
 		assert.equal(await page.locator('[data-testid="composer-suggestion"]').count(), 0);
 		assert.equal(await editor.textContent(), 'My own reply');
-		await page.evaluate(async () => {
-			await window.suggestionFixture.clear();
-			await window.suggestionFixture.offer();
-		});
+		await reoffer();
+		await ghost.waitFor();
 		await page.screenshot({ path: `${output}/composer-${width}x${height}.png` });
 		console.log(
-			`Native Tab/Enter and typing passed; screenshot: ${output}/composer-${width}x${height}.png`
+			`Inline-only, Tab, double ${width === 390 ? 'tap' : 'click'} and typing passed; screenshot: ${output}/composer-${width}x${height}.png`
 		);
 		await page.close();
 	}

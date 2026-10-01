@@ -233,3 +233,122 @@ async def test_full_native_loop_calls_image_provider_and_records_its_usage_once(
             assert complete.usage["output_tokens"] == 7
         finally:
             await engine.aclose()
+
+
+def _loop_response(item):
+    events = [("response.output_item.done", {"item": item}),
+              ("response.completed", {"response": {"status": "completed", "usage": {"input_tokens": 2, "output_tokens": 1}}})]
+    return httpx.Response(200, content="".join(f"event: {k}\ndata: {json.dumps(v)}\n\n" for k, v in events).encode())
+
+
+def _native_image_call():
+    return {"id": "fc1", "type": "function_call", "call_id": "call1", "name": SPEC.name,
+            "arguments": json.dumps({"prompt": "Draw a tree"})}
+
+
+def _is_native_image_request(body):
+    return any(t.get("type") == "image_generation" for t in body.get("tools", []))
+
+
+async def _run_native_loop(tmp_path, transport, *, during_turn=None):
+    from fluid.events.model import Usage
+    from fluid.events.ops import UserTurn
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.registry import ToolRegistry
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        registry = ToolRegistry()
+        engine = NativeLoop(provider=OpenAIResponsesClient(api_key="test-only", http_client=http,
+                                                           retry=RetryPolicy(base_delay=0)),
+                            model="configured", store=MemoryStore(), registry=registry,
+                            permissions=PermissionEngine(approval_policy="never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
+        registry.register_builtin(SPEC, make_handler(lambda: engine, lambda: "app-session"))
+        try:
+            await engine.submit(UserTurn(content="Draw a tree with the native image tool."))
+            if during_turn is not None:
+                await during_turn(engine)
+            await asyncio.wait_for(engine.wait_turn(), 5)
+            events = list(engine.bus.log(engine.session_id))
+        finally:
+            await engine.aclose()
+    results = [e for e in events if isinstance(e, ToolResult)]
+    auxiliary = [e for e in events if isinstance(e, Usage) and e.raw.get("auxiliary_source") == "native_image_generation"]
+    return results, auxiliary
+
+
+async def test_interrupt_during_native_generation_closes_the_provider_stream_through_the_loop(tmp_path):
+    """Stop while the native image request is still generating, not after it finished."""
+    from fluid.events.ops import Interrupt
+
+    generating, closed = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class GeneratingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            events = [("response.created", {"response": {"id": "resp_img"}}),
+                      ("response.image_generation_call.in_progress", {"item_id": "ig_1", "output_index": 0}),
+                      ("response.image_generation_call.generating", {"item_id": "ig_1", "output_index": 0})]
+            for kind, body in events:
+                yield f"event: {kind}\ndata: {json.dumps(body)}\n\n".encode()
+            generating.set()
+            await asyncio.Event().wait()  # the provider has not produced the image yet
+
+        async def aclose(self):
+            closed.set()
+
+    def transport(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if _is_native_image_request(body):
+            return httpx.Response(200, stream=GeneratingStream(), headers={"content-type": "text/event-stream"})
+        if len(calls) == 1:
+            return _loop_response(_native_image_call())
+        return _loop_response({"id": "text1", "type": "message", "content": [{"type": "output_text", "text": "Done."}]})
+
+    async def stop_while_generating(engine):
+        await asyncio.wait_for(generating.wait(), 5)
+        await engine.submit(Interrupt())
+
+    results, auxiliary = await _run_native_loop(tmp_path, transport, during_turn=stop_while_generating)
+    assert closed.is_set()
+    # One orchestrator call and exactly one native request: the interrupted image
+    # request is neither replayed nor followed by another model response.
+    assert len(calls) == 2
+    assert sum(map(_is_native_image_request, calls)) == 1
+    assert len(results) == 1 and results[0].is_error and not results[0].images
+    assert "interrupted" in results[0].output
+    assert not (tmp_path / "generated-images").exists()
+    assert auxiliary == []  # the provider reported no usage before Stop
+
+
+# 400: a definitive rejection. 503: ambiguous, so it may already have produced a
+# billed image and must not be replayed even though ordinary requests retry it.
+@pytest.mark.parametrize("status", [400, 503])
+async def test_provider_rejection_through_the_loop_is_reported_once_without_fallback(tmp_path, status):
+    calls = []
+
+    def transport(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if _is_native_image_request(body):
+            return httpx.Response(status, json={"error": {"code": "image_generation_unsupported",
+                                                          "message": "account detail must-not-leak"}})
+        if len(calls) == 1:
+            return _loop_response(_native_image_call())
+        return _loop_response({"id": "text1", "type": "message",
+                               "content": [{"type": "output_text", "text": "Native images are unavailable here."}]})
+
+    results, auxiliary = await _run_native_loop(tmp_path, transport)
+    native = [c for c in calls if _is_native_image_request(c)]
+    assert len(native) == 1 and native[0]["model"] == "configured"
+    assert len(calls) == 3  # the model receives the rejection and answers; nothing is retried
+    assert len(results) == 1 and results[0].is_error and not results[0].images
+    assert f"HTTP {status}, code image_generation_unsupported" in results[0].output
+    assert "No other provider was used" in results[0].output
+    assert "fal.ai availability is independent" in results[0].output
+    assert "must-not-leak" not in results[0].output
+    # The rejection reaches the next model call without the provider's message body.
+    follow_up = json.dumps(calls[2]["input"])
+    assert "image_generation_unsupported" in follow_up and "must-not-leak" not in follow_up
+    assert not (tmp_path / "generated-images").exists()
+    assert auxiliary == []

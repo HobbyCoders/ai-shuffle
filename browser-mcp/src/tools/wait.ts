@@ -25,7 +25,7 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
     session.agentAdmission?.(); // a pending takeover interrupts a long wait, not the queue
     const check = async () => {
       if (input.condition === "url") return input.match === "exact" ? page.url() === input.url : page.url().includes(input.url!);
-      const locator = input.ref ? session.resolveRef(input.ref) : input.selector ? page.locator(input.selector).first() : page.getByText(input.text!, { exact: input.match === "exact" }).first();
+      const locator = input.ref ? await session.resolveRef(input.ref) : input.selector ? page.locator(input.selector).first() : page.getByText(input.text!, { exact: input.match === "exact" }).first();
       if (state === "attached" || state === "detached") return (await locator.count() > 0) === (state === "attached");
       return (await locator.isVisible()) === (state === "visible");
     };

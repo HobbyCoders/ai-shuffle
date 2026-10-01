@@ -146,7 +146,7 @@ export async function runUpload(session: Session, input: UploadInput): Promise<M
 
   let locator;
   try {
-    locator = session.resolveRef(input.ref);
+    locator = await session.resolveRef(input.ref);
   } catch (err) {
     if (err instanceof StaleRefError) return errorResult(err.message);
     throw err;

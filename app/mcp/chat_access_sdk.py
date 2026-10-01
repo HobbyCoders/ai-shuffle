@@ -7,7 +7,8 @@ from app.core.chat_access import AccessDenied, broker
 from app.mcp.sdk_compat import patch_sdk_server
 
 logger = logging.getLogger(__name__)
-NAMES = ("RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand")
+NAMES = ("RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand",
+         "ChatHttpRequest")
 TOOL_NAMES = [f"mcp__chat-access__{name}" for name in NAMES]
 CHAT_GUIDANCE = """You are a general-purpose assistant, not a repository development agent. Do not
 create worktrees, develop project code, commit changes, or open pull requests.
@@ -15,20 +16,27 @@ For repository development, ask the user to switch to Code mode.
 """
 GUIDANCE = """# Private resource access
 Use ChatResources to inspect existing opaque access handles. With no suitable
-handle, call RequestChatAccess with machine or folder and a short explanation.
-It displays a private input card in the conversation. Never ask the user to post
-addresses, passwords, private keys, or other connection details as chat text.
-The card sends those inputs directly to the worker; you receive only a temporary
-handle, resource kind, permissions and expiry. Never try to reveal private inputs.
-Grants expire and are lost on restart. This tool currently supports SSH machines
-and Linux folders, not arbitrary API keys; do not collect a secret without a tool
-which can consume it privately.
+handle, call RequestChatAccess with machine, folder or service and a short
+explanation. It displays a private input card in the conversation. Never ask the
+user to post addresses, passwords, private keys, API keys, tokens or other
+connection details as chat text. The card sends those inputs directly to the
+worker; you receive only a temporary handle, resource kind, permissions and
+expiry. Never try to reveal private inputs.
+Grants expire and are lost on restart. Supported resources are SSH machines,
+Linux folders and HTTPS API services. A service grant holds one API key or token
+which ChatHttpRequest attaches for you; you never see it, and responses are
+redacted. Do not collect any other secret, because no tool can consume it
+privately.
 Folder grants provide bounded text read/list/write operations, not Bash. Machine
 grants allow commands on that verified SSH target as the approved account; they
-do not grant local worker shell access. Machine administration is broad and can
+do not grant local worker shell access. Service grants allow HTTPS requests to
+paths under the granted address with that credential's authority; read-only
+service grants allow GET and HEAD only. Redirects are returned, never followed.
+Machine administration is broad and can
 modify code or use the target's network; do not describe it as a sandbox there.
 Initial access always requires user approval in the private access card. Once
-granted, file writes and remote commands run without another confirmation only
+granted, file writes, remote commands and API requests other than GET/HEAD run
+without another confirmation only
 while the session is in bypass permission mode; other modes require a separate,
 one-shot decision in the card. Scope, expiry and revocation apply in every mode.
 In voice conversations, ask the user to enter details and approve access in the
@@ -61,7 +69,7 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine or Linux folder. Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
+    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
     async def request(args):
         return await invoke("request", args)
 
@@ -85,5 +93,9 @@ def create_chat_access_server(session_id: str):
     async def command(args):
         return await invoke("command", args)
 
-    tools = [request, resources, listing, read, write, command]
+    @tool("ChatHttpRequest", "Send one HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Methods other than GET/HEAD need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted.", {"grant_id": str, "method": str, "path": str, "body": str, "content_type": str})
+    async def http(args):
+        return await invoke("http", args)
+
+    tools = [request, resources, listing, read, write, command, http]
     return patch_sdk_server(create_tool_server(name="chat-access", version="1.0.0", tools=tools), tools)

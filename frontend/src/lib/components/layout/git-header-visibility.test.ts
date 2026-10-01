@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	shouldShowHeaderGitActions,
 	shouldShowGithubGitActions,
+	privateAccessTrigger,
 	type HeaderGitActionsInput
 } from './git-header-visibility';
 
@@ -108,5 +109,19 @@ describe('shouldShowGithubGitActions', () => {
 		expect(
 			shouldShowGithubGitActions(base({ sessionMode: 'voice', githubAvailable: true }))
 		).toBe(true);
+	});
+});
+
+describe('privateAccessTrigger', () => {
+	it('gives Chat-lane and projectless sessions their own Access button', () => {
+		// Their header has no git cluster, so no "Private access" row exists.
+		expect(privateAccessTrigger(base({ sessionMode: 'chat' }))).toBe('button');
+		expect(privateAccessTrigger(base({ hasProject: false }))).toBe('button');
+		expect(privateAccessTrigger(base({ worktreeDeleted: true }))).toBe('button');
+	});
+
+	it('uses the git panel row when the git cluster is shown', () => {
+		expect(privateAccessTrigger(base({ sessionMode: 'code' }))).toBe('none');
+		expect(privateAccessTrigger(base({ sessionMode: 'voice' }))).toBe('none');
 	});
 });

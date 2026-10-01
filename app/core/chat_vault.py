@@ -1,4 +1,4 @@
-"""Opt-in SSH connections using the existing credential-key custody and rotation.
+"""Opt-in SSH and HTTPS-service connections using the existing credential-key custody and rotation.
 
 Only encrypted envelopes enter system_settings. The namespace is worker-local
 and excluded from network replication. There is no model-facing decrypt API.
@@ -16,6 +16,18 @@ from app.core import encryption
 from app.core.config import settings
 from app.core.chat_files import AccessDenied
 from app.db import database
+
+# Folder grants are path-only and per-session; only credentials are worth saving.
+SAVABLE_KINDS = ("machine", "service")
+
+
+def describe(spec) -> dict:
+    """Catalogue fields shown to the owner. Never includes a secret."""
+    if spec.kind == "service":
+        return {"kind": "service", "label": spec.label, "target": spec.url,
+                "fingerprint": "", "writable": spec.writable}
+    return {"kind": "machine", "label": spec.label, "target": f"{spec.username}@{spec.host}:{spec.port}",
+            "fingerprint": spec.fingerprint}
 
 
 def prefix(owner: tuple) -> str:
@@ -38,7 +50,7 @@ def unpack(owner: tuple, connection_id: str, ciphertext: str):
             raise ValueError("binding")
         from app.core.chat_access import GrantInput
         spec = GrantInput.model_validate(data["connection"])
-        if spec.kind != "machine":
+        if spec.kind not in SAVABLE_KINDS:
             raise ValueError("kind")
         return spec
     except Exception:
@@ -82,9 +94,7 @@ def catalog(owner: tuple, *, cache_empty: bool = False) -> list[dict]:
     for row in rows:
         connection_id = row["key"].rsplit(":", 1)[-1]
         spec = unpack(owner, connection_id, row["value"])
-        result.append({"id": connection_id, "label": spec.label,
-                       "target": f"{spec.username}@{spec.host}:{spec.port}",
-                       "fingerprint": spec.fingerprint})
+        result.append({"id": connection_id, **describe(spec)})
     return result
 
 
@@ -96,17 +106,17 @@ def load(owner: tuple, connection_id: str):
 
 
 def save(owner: tuple, spec) -> str:
-    if not encryption.is_encryption_ready() or spec.kind != "machine":
-        raise AccessDenied("Secure SSH connection storage is unavailable.")
+    if not encryption.is_encryption_ready() or spec.kind not in SAVABLE_KINDS:
+        raise AccessDenied("Secure connection storage is unavailable.")
     existing = catalog(owner)
     if len(existing) >= 50:
         raise AccessDenied("Remove an unused saved connection before saving another.")
     if any(item["label"].casefold() == spec.label.casefold() for item in existing):
         raise AccessDenied("That connection name is already saved. Choose a different name.")
     connection_id = uuid.uuid4().hex
-    payload = spec.model_dump(exclude={"password", "private_key", "passphrase"})
-    payload.update({name: getattr(spec, name).get_secret_value()
-                    for name in ("password", "private_key", "passphrase")})
+    from app.core.chat_access import SECRET_FIELDS
+    payload = spec.model_dump(exclude=set(SECRET_FIELDS))
+    payload.update({name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS})
     binding = key(owner, connection_id)
     ciphertext = encryption.encrypt_value(json.dumps({"binding": binding, "connection": payload}))
     if not encryption.is_encrypted(ciphertext):
