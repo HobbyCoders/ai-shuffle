@@ -418,6 +418,22 @@ class TestPollCodexProvider:
         upsert.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [httpx.ReadTimeout("slow"), TimeoutError()])
+    async def test_timeout_is_recorded_without_erasing_the_reading(self, monitor, error):
+        upsert = MagicMock()
+        failure = MagicMock()
+        t1, t2, t3 = _token_patches()
+        with t1, t2, t3, patch(
+            "app.core.provider_usage._codex_usage_get", new=AsyncMock(side_effect=error)
+        ), patch("app.db.database.get_provider_usage_raw", return_value=None), patch(
+            "app.db.database.record_provider_usage_failure", failure
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_codex_provider(_CODEX_ROW)  # must not raise
+
+        upsert.assert_not_called()
+        failure.assert_called_once_with("prov-codex-1", "chatgpt", "timeout")
+
+    @pytest.mark.asyncio
     async def test_500_records_a_failure_and_does_not_upsert(self, monitor):
         upsert = MagicMock()
         failure = MagicMock()

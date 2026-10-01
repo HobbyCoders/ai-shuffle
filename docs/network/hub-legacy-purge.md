@@ -12,6 +12,19 @@ holds. Empty the bucket first, then deploy the migration. 0017 is already on
 `main`, so any run of the *Deploy account hub* workflow applies it. Do not
 dispatch that workflow until step 4 confirms the bucket is empty.
 
+Until 0017 runs, an account that still has `network_objects` rows cannot
+finish self-service deletion. A Worker still running the older code with
+the deletion guard refuses it before revoking anything. The current Worker,
+if it ever runs against the old tables (for example after a manual
+`wrangler deploy` without the migration), revokes the account's access at
+once, but the foreign key from
+`network_objects` to `networks` aborts the final purge: the account, its
+network and its object rows stay and the deletion page reports *pending*.
+Either way the bucket's only key index stays intact. After step 5 the hourly
+sweep finishes any pending deletion on its own. The inventory in step 1 lists
+the accounts this affects. `android/hub/test/account-deletion.test.ts` pins
+this behaviour.
+
 Every command below runs from an empty scratch directory, so Wrangler looks
 the database up by name instead of using the placeholder `database_id` in
 `android/hub/wrangler.toml`. Set `CLOUDFLARE_API_TOKEN` and

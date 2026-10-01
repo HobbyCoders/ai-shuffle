@@ -38,6 +38,10 @@ describe('streaming model reuse', () => {
 		const after = build(next, options);
 		expect(reads).toBe(0);
 		expect(after.items[0]).toBe(before.items[0]);
+		// MessageArea's per-row deriveds rely on these keeping identity (#1282):
+		// a new array would re-evaluate every user row on each streaming fold.
+		expect(after.promptOccurrence).toBe(before.promptOccurrence);
+		expect(after.rewindEligible).toBe(before.rewindEligible);
 		expect(after).toEqual(buildTranscriptModel(next, options));
 	});
 	it('invalidates the fast path on options, session, Swarm and metadata changes', () => {

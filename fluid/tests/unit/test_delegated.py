@@ -50,6 +50,7 @@ from fluid.events import (
 )
 from fluid.events.model import event_from_dict, event_to_dict
 from fluid.events.ops import Interrupt, SetPermissionMode, Steer
+from fluid.hooks.bus import HookBus
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -161,7 +162,7 @@ def _cmd() -> list[str]:
 
 
 def _make_loop(scenario: str, *, store=None, session_id=None, cli_session_id=None,
-               partial=False, extra_env=None) -> DelegatedLoop:
+               partial=False, extra_env=None, hooks=None) -> DelegatedLoop:
     env = {"FAKE_CLAUDE_SCENARIO": scenario}
     if extra_env:
         env.update(extra_env)
@@ -173,6 +174,7 @@ def _make_loop(scenario: str, *, store=None, session_id=None, cli_session_id=Non
         cli_session_id=cli_session_id,
         partial=partial,
         env=env,
+        hooks=hooks,
     )
 
 
@@ -547,8 +549,9 @@ async def test_peer_is_refused_with_actual_cli_result_unread() -> None:
         await loop.aclose()
 
 
+@pytest.mark.parametrize("hooked", [False, True], ids=["no-hooks", "hooks"])
 @pytest.mark.parametrize("scenario,terminal_type", [("a", TurnComplete), ("n", ErrorEvent), ("b", Interrupted)])
-async def test_late_peer_is_refused_before_terminal_store_barrier(scenario, terminal_type) -> None:
+async def test_late_peer_is_refused_before_terminal_store_barrier(scenario, terminal_type, hooked) -> None:
     from fluid.events.ops import AgentMessage
 
     published, release = asyncio.Event(), asyncio.Event()
@@ -562,7 +565,7 @@ async def test_late_peer_is_refused_before_terminal_store_barrier(scenario, term
 
     store = TerminalGateStore()
     sid = (await store.create_session()).session_id
-    loop = _make_loop(scenario, store=store, session_id=sid)
+    loop = _make_loop(scenario, store=store, session_id=sid, hooks=HookBus() if hooked else None)
     frames = _spy_on_frames(loop)
     results = []
     write_frame = loop._write_frame
@@ -618,6 +621,167 @@ async def test_late_peer_is_refused_before_terminal_store_barrier(scenario, term
         await loop.aclose()
         if watcher is not None:
             watcher.cancel()
+
+
+async def _run_peer_boundary_turn(on_prompt) -> tuple[DelegatedLoop, list[dict], list, dict]:
+    """Drive scenario (w) with hooks registered; ``on_prompt(loop, event)``
+    runs while the main Bash call is parked on its permission prompt.
+
+    Returns the loop (closed), the stdin frames it wrote, the event log, and
+    what the fake CLI reported each PostToolUse answer carried."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("w", store=store, session_id=sid, hooks=HookBus())
+    frames = _spy_on_frames(loop)
+
+    async def respond() -> None:
+        async for event in loop.bus.subscribe(sid):
+            if isinstance(event, PermissionRequest):
+                await on_prompt(loop, event)
+                return
+
+    watcher = asyncio.create_task(respond())
+    try:
+        await loop.submit(UserTurn(content="run the tests"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, 10)
+        # Anything the CLI emitted on its own after the result would show here.
+        await loop._discard_stale_stdout()
+        events = loop.bus.log(sid)
+        texts = [e.text for e in events if isinstance(e, TextDelta)]
+        seen = json.loads(texts[-1])
+        return loop, frames, events, seen
+    finally:
+        watcher.cancel()
+        await loop.aclose()
+
+
+async def test_peer_joins_the_active_delegated_query_at_its_next_tool_boundary() -> None:
+    """A peer admitted mid-turn rides the next main-thread PostToolUse answer:
+    attributed, exactly once, receipted before the original turn completes,
+    with no stdin frame and no extra CLI cycle."""
+    from fluid.context.peer import PEER_OPEN_PREFIX
+    from fluid.context.steering import STEER_OPEN
+    from fluid.events.ops import AgentMessage
+
+    async def on_prompt(loop, event):
+        await loop.submit(AgentMessage(sender="reviewer", text="Coordinate edits", id="peer-1", wake=False))
+        # A host retry of the same id while it waits is not a second message.
+        await loop.submit(AgentMessage(sender="reviewer", text="Coordinate edits", id="peer-1", wake=False))
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+
+    loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    assert len(receipts) == 1
+    assert receipts[0].steers == [{"id": "peer-1", "text": "Coordinate edits", "from": "reviewer"}]
+    complete = next(e for e in events if isinstance(e, TurnComplete))
+    assert receipts[0].seq < complete.seq  # delivered inside the original turn
+    assert receipts[0].turn_id == complete.turn_id
+    # The model saw it once, attributed to the peer, never in the user's marker.
+    assert seen["main"].count("Coordinate edits") == 1
+    assert f"{PEER_OPEN_PREFIX} from='reviewer'" in seen["main"]
+    assert STEER_OPEN not in seen["main"]
+    # A subagent's tool boundary inside the same turn never carries it.
+    assert seen["sub"] == ""
+    # The original user frame is the only one: no extra CLI cycle, one turn.
+    assert len(_user_frames(frames)) == 1
+    assert len([e for e in events if isinstance(e, TurnStarted)]) == 1
+    # After the turn there is nothing to steer into: the host keeps it queued.
+    with pytest.raises(RuntimeError, match="peer.*queue"):
+        await loop.submit(AgentMessage(sender="reviewer", text="late", id="peer-2", wake=False))
+
+
+async def test_peer_pending_when_stop_lands_is_never_delivered_or_receipted() -> None:
+    from fluid.events.ops import AgentMessage
+
+    async def on_prompt(loop, event):
+        await loop.submit(AgentMessage(sender="reviewer", text="before stop", id="peer-1", wake=False))
+        await loop.submit(Interrupt())
+        with pytest.raises(RuntimeError, match="peer.*queue"):
+            await loop.submit(AgentMessage(sender="reviewer", text="after stop", id="peer-2", wake=False))
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="deny"))
+
+    _loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    # The CLI still asked at the (failed) tool boundary; the answer carried nothing.
+    assert seen == {"sub": "", "main": ""}
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+    assert any(isinstance(e, Interrupted) for e in events)
+    assert len(_user_frames(frames)) == 1
+    assert len([e for e in events if isinstance(e, TurnStarted)]) == 1
+
+
+async def test_cancelled_pending_peer_is_withdrawn_before_its_boundary() -> None:
+    """Revocation before the boundary: cancel_steer recalls the waiting peer
+    (True), it never reaches the CLI, and nothing is receipted."""
+    from fluid.events.ops import AgentMessage
+
+    answers: dict[str, bool] = {}
+
+    async def on_prompt(loop, event):
+        await loop.submit(AgentMessage(sender="reviewer", text="revoked", id="peer-1", wake=False))
+        answers["pending"] = await loop.cancel_steer("peer-1")
+        answers["again"] = await loop.cancel_steer("peer-1")
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+
+    _loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    assert answers == {"pending": True, "again": False}
+    assert seen == {"sub": "", "main": ""}
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+    assert len(_user_frames(frames)) == 1
+
+
+async def test_peer_admitted_while_cli_result_is_unread_is_dropped_without_a_cycle() -> None:
+    """With hooks registered, a peer can be accepted while the CLI's result
+    sits unread: no tool boundary follows, so it is dropped at the result with
+    no receipt, no stdin frame and no follow-up CLI cycle."""
+    from fluid.events.ops import AgentMessage
+
+    held, release = asyncio.Event(), asyncio.Event()
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("a", store=store, session_id=sid, hooks=HookBus())
+    frames = _spy_on_frames(loop)
+    results, readers = [], set()
+    write = loop._write_frame
+
+    async def install_actual_result_gate(frame):
+        reader = loop._proc.stdout
+        if reader not in readers:
+            readers.add(reader)
+            readline = reader.readline
+
+            async def gated_readline():
+                line = await readline()
+                if line and json.loads(line).get("type") == "result":
+                    results.append(json.loads(line))
+                    if len(results) == 1:
+                        held.set()
+                        await release.wait()
+                return line
+            reader.readline = gated_readline
+        await write(frame)
+
+    loop._write_frame = install_actual_result_gate
+    try:
+        await loop.submit(UserTurn(content="first admitted host turn"))
+        await asyncio.wait_for(held.wait(), 10)
+        assert loop._peer_boundary_available()
+        await loop.submit(AgentMessage(sender="reviewer", text="unread-result peer", id="unread-peer", wake=False))
+        release.set()
+        await loop.wait_turn()
+        await loop._discard_stale_stdout()
+        assert loop._pending_peers == []
+        assert len(_user_frames(frames)) == len(results) == 1
+        assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 1
+        assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
+        # The same id is admissible again on a later turn (the host's retry).
+        assert "unread-peer" not in loop._turn_peer_ids
+    finally:
+        release.set()
+        await loop.aclose()
 
 
 async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:

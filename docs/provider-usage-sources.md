@@ -130,7 +130,8 @@ capability is cached per credential revision:
   key is re-encrypted on every save; OAuth tokens change on refresh or sign-in.
   The next poll probes again.
 - 404, 429, 5xx and timeouts are not negative-cached. They back off
-  exponentially to one hour and honor `Retry-After`.
+  exponentially to one hour and honor `Retry-After`. A timeout is recorded
+  on the row as `timeout`, next to its last successful reading.
 
 A refusal is remembered for as long as the credential revision lasts, not for a
 fixed time. A timed expiry would re-probe a revoked key several times an hour.
