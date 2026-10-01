@@ -87,3 +87,13 @@ it('says what Confirm and Dismiss do next to held turns', async () => {
 	const held = await screen.findByTestId('loop-guard-held');
 	expect(held.textContent).toContain('Confirm starts the turn now; it still counts toward the hour. Dismiss drops it.');
 });
+
+it('leaves out the Confirm/Dismiss hint for viewers without the buttons', async () => {
+	mocks.get.mockResolvedValue(status({
+		held: [{ id: 'h1', session_id: 's1', turn_id: 't1', source: 'wakeup', prompt: 'check CI', reason: 'x', held_at: 0 }]
+	}));
+	render(LoopGuardPanel, { isAdmin: false });
+	const held = await screen.findByTestId('loop-guard-held');
+	expect(held.textContent).not.toContain('Confirm starts the turn now');
+	expect(held.querySelector('button')).toBeNull();
+});

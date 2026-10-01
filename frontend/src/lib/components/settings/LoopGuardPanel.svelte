@@ -178,7 +178,7 @@
 		{#if status.held.length}
 			<div class="held" data-testid="loop-guard-held">
 				<h4 class="pad">Waiting for confirmation</h4>
-				<p class="hint pad">Confirm starts the turn now; it still counts toward the hour. Dismiss drops it.</p>
+				{#if isAdmin}<p class="hint pad">Confirm starts the turn now; it still counts toward the hour. Dismiss drops it.</p>{/if}
 				{#each status.held as item (item.id)}
 					<div class="held-item">
 						<div class="held-text">
