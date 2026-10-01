@@ -49,7 +49,6 @@
 	import SessionSidePanel from './SessionSidePanel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
-	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import SwarmDropdown from '$lib/components/chat/SwarmDropdown.svelte';
@@ -919,7 +918,6 @@
 				onDownloadChat={header ? undefined : handleDownloadJsonl}
 				downloadingChat={downloadingJsonl}
 			/>
-			<GitProgressPopover />
 		</div>
 	{/if}
 {/snippet}

@@ -7,24 +7,26 @@
 	 * changes, commits to push, an open PR, or "up to date" — see
 	 * computeHeaderSummary). It opens a panel that tells the whole story in
 	 * order: the branch against its base, the Ship It pipeline with the next
-	 * step lit, each git action as a row with its options popover, the changed
+	 * step lit, each git action as a row with an in-panel editor, the changed
 	 * files, and the chat's private access.
 	 *
 	 * Each mutating action (Commit / Push / Pull / Create PR / Ship It) keeps
 	 * its split shape inside the panel: the row runs the action immediately
 	 * with saved defaults, and its chevron opens a compact
-	 * GitActionOptionsDropdown for per-invocation overrides. Firing an action
-	 * closes the panel so the progress popover has the header to itself.
+	 * GitActionOptionsDropdown for per-invocation overrides. Editors and operation
+	 * progress share the same surface, with Back returning to the overview.
 	 *
 	 * On narrow screens (the mobile shell, or a narrow web window) the panel
 	 * becomes a bottom sheet behind a scrim. Init Repo (non-repo projects) and
 	 * the "Git unavailable" retry stay as direct header buttons: there is no
 	 * panel to open for them.
 	 */
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
+	import GitProgressPopover from './GitProgressPopover.svelte';
+	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download, X } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
@@ -128,6 +130,10 @@
 	const GIT_ACTION_IDS = new Set<string>(['git-commit', 'git-push', 'git-pull', 'git-pr', 'git-shipit']);
 	const isPanelId = (id: string | null) => id === 'git-panel' || GIT_ACTION_IDS.has(id ?? '');
 	const panelOpen = $derived(isPanelId($openHeaderDropdown));
+	const editorId = $props.id();
+	const activeEditor = $derived($openHeaderDropdown === 'git-commit' ? 'commit' : $openHeaderDropdown === 'git-push' ? 'push' : $openHeaderDropdown === 'git-pull' ? 'pull' : $openHeaderDropdown === 'git-pr' ? 'pr' : $openHeaderDropdown === 'git-shipit' ? 'shipit' : null);
+	const progressActive = $derived($gitOperationState.active);
+	$effect(() => { if (progressActive) untrack(() => openDropdown('git-panel')); });
 	const commitOptsOpen = $derived($openHeaderDropdown === 'git-commit');
 	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
 	const pullOptsOpen = $derived($openHeaderDropdown === 'git-pull');
@@ -364,15 +370,17 @@
 		cancelSheetDrag();
 		openHeaderDropdown.update((cur) => (isPanelId(cur) ? null : cur));
 	}
-	/** Run an action from the panel: the panel gets out of the way first so the
-	 *  progress popover has the header to itself. */
+	/** Run an action in this workspace; progress remains inside its surface. */
 	function fire<T>(fn: ((opts?: T) => void) | undefined, opts?: T) {
-		closePanel();
+		if (actionsBusy) return;
+		openDropdown('git-panel');
 		// A bare row click passes NO argument (the handler falls back to saved
 		// defaults); only the popover passes an explicit bag.
 		if (opts === undefined) fn?.();
 		else fn?.(opts);
 	}
+
+	function leaveForReview(fn: (() => void) | undefined) { closePanel(); fn?.(); }
 
 	// Chevron handler for a git-action row: toggle its option popover.
 	// The shared store guarantees single-open, so this also closes any sibling
@@ -468,6 +476,7 @@
 				onclick={activateSheetHandle}
 			><span></span></button>
 			<div class="gp-head">
+				<button class="gp-close" onclick={closePanel} aria-label="Close Git panel"><X size={16} /></button>
 				<div class="gp-branch" title={currentBranch ?? ''}>
 					<GitBranch size={13} strokeWidth={1.6} />
 					<span class="gp-branch-name">
@@ -488,6 +497,18 @@
 				</div>
 			</div>
 
+			{#if activeEditor}
+				{#key activeEditor}
+					<GitActionOptionsDropdown id={editorId} action={activeEditor} {currentBranch} {defaultBranch}
+						baseBranches={baseBranchNames} openPR={shownPr} {hasChanges} {isWorktreeMode}
+						unpushed={snapshot.status?.unpushed} busy={actionsBusy || (activeEditor === 'shipit' && mergeBlocked)}
+						onClose={() => closeActionDropdown(`git-${activeEditor}` as GitActionDropdownId)}
+						onCommit={(o) => fire(onClickCommit, o)} onPush={(o) => fire(onClickPush, o)}
+						onPull={(o) => fire(onClickPull, o)} onCreatePR={(o) => fire(onClickCreatePR, o)}
+						onShipIt={(o) => fire(onClickShipIt, o)} />
+				{/key}
+			{:else}
+				<GitProgressPopover />
 			<!-- Ship It pipeline: one-click commit → push → PR → merge → cleanup -->
 			<div class="gp-pipe" class:blocked={showShipIt && mergeBlocked}>
 				{#if showShipIt && mergeBlocked}<TriangleAlert size={15} strokeWidth={1.6} />{:else}<Rocket size={15} strokeWidth={1.6} />{/if}
@@ -516,27 +537,12 @@
 							onclick={() => toggleActionDropdown('git-shipit')}
 							disabled={actionsBusy}
 							aria-label="Ship It options"
-							aria-haspopup="dialog"
+							aria-controls={editorId}
 							aria-expanded={shipItOptsOpen}
 							title="Ship It options"
 						>
 							<ChevronDown size={11} strokeWidth={1.5} />
 						</button>
-						{#if shipItOptsOpen}
-							<GitActionOptionsDropdown
-								action="shipit"
-								{currentBranch}
-								{defaultBranch}
-								baseBranches={baseBranchNames}
-								openPR={shownPr}
-								{hasChanges}
-								{isWorktreeMode}
-								busy={primaryDisabled || mergeBlocked}
-								unpushed={snapshot.status?.unpushed}
-								onClose={() => closeActionDropdown('git-shipit')}
-								onShipIt={(o) => fire(onClickShipIt, o)}
-							/>
-						{/if}
 					</div>
 				{:else}
 					<span class="ship-off">{githubAvailable ? 'Nothing to ship' : 'Needs GitHub'}</span>
@@ -554,14 +560,9 @@
 							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub"><span class="count">{fileLabel(filesChanged)}</span></span></span>
 						</button>
 						<button class="row-opts" class:active={commitOptsOpen} onclick={() => toggleActionDropdown('git-commit')} disabled={actionsBusy}
-							aria-label="Commit options" aria-haspopup="dialog" aria-expanded={commitOptsOpen} title="Commit options">
+							aria-label="Commit options" aria-controls={editorId} aria-expanded={commitOptsOpen} title="Commit options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
-						{#if commitOptsOpen}
-							<GitActionOptionsDropdown action="commit" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
-								{hasChanges} {isWorktreeMode} busy={actionsBusy}
-								onClose={() => closeActionDropdown('git-commit')} onCommit={(o) => fire(onClickCommit, o)} />
-						{/if}
 					</div>
 				{:else}
 					<div class="row-group off">
@@ -582,14 +583,9 @@
 							<span class="row-text"><span class="row-title">Push</span><span class="row-sub"><span class="count">{commitLabel(commitsAheadUpstream)}</span></span></span>
 						</button>
 						<button class="row-opts" class:active={pushOptsOpen} onclick={() => toggleActionDropdown('git-push')} disabled={actionsBusy}
-							aria-label="Push options" aria-haspopup="dialog" aria-expanded={pushOptsOpen} title="Push options">
+							aria-label="Push options" aria-controls={editorId} aria-expanded={pushOptsOpen} title="Push options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
-						{#if pushOptsOpen}
-							<GitActionOptionsDropdown action="push" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
-								{hasChanges} {isWorktreeMode} busy={actionsBusy}
-								onClose={() => closeActionDropdown('git-push')} onPush={(o) => fire(onClickPush, o)} />
-						{/if}
 					</div>
 				{:else}
 					<div class="row-group off">
@@ -614,14 +610,9 @@
 							<span class="row-text"><span class="row-title">{isDiverged ? 'Sync' : 'Pull'}</span><span class="row-sub"><span class="count warn">{commitsBehindUpstream} behind</span></span></span>
 						</button>
 						<button class="row-opts" class:active={pullOptsOpen} onclick={() => toggleActionDropdown('git-pull')} disabled={actionsBusy}
-							aria-label="Pull options" aria-haspopup="dialog" aria-expanded={pullOptsOpen} title="Pull options">
+							aria-label="Pull options" aria-controls={editorId} aria-expanded={pullOptsOpen} title="Pull options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
-						{#if pullOptsOpen}
-							<GitActionOptionsDropdown action="pull" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
-								{hasChanges} {isWorktreeMode} busy={actionsBusy}
-								onClose={() => closeActionDropdown('git-pull')} onPull={(o) => fire(onClickPull, o)} />
-						{/if}
 					</div>
 				{:else}
 					<div class="row-group off">
@@ -642,14 +633,9 @@
 							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">into {defaultBranch}</span></span>
 						</button>
 						<button class="row-opts" class:active={prOptsOpen} onclick={() => toggleActionDropdown('git-pr')} disabled={actionsBusy}
-							aria-label="Pull request options" aria-haspopup="dialog" aria-expanded={prOptsOpen} title="Pull request options">
+							aria-label="Pull request options" aria-controls={editorId} aria-expanded={prOptsOpen} title="Pull request options">
 							<ChevronDown size={12} strokeWidth={1.5} />
 						</button>
-						{#if prOptsOpen}
-							<GitActionOptionsDropdown action="pr" {currentBranch} {defaultBranch} baseBranches={baseBranchNames} openPR={shownPr}
-								{hasChanges} {isWorktreeMode} busy={actionsBusy}
-								onClose={() => closeActionDropdown('git-pr')} onCreatePR={(o) => fire(onClickCreatePR, o)} />
-						{/if}
 					</div>
 				{:else if shownPr}
 					<div class="row-group">
@@ -674,12 +660,12 @@
 				<div class="gp-files-head">
 					<span>{hasChanges ? `Changed files · ${filesChanged}` : 'Changed files'}</span>
 					{#if hasChanges && onOpenDiffReview}
-						<button class="gp-review" onclick={() => fire(onOpenDiffReview)}>Review all</button>
+						<button class="gp-review" onclick={() => leaveForReview(onOpenDiffReview)}>Review all</button>
 					{/if}
 				</div>
 				{#if hasChanges && changedFiles.length > 0}
 					{#each changedFiles.slice(0, MAX_FILES) as f (f.file)}
-						<button class="file" onclick={() => fire(onOpenDiffReview)} disabled={!onOpenDiffReview} title={f.file}>
+						<button class="file" onclick={() => leaveForReview(onOpenDiffReview)} disabled={!onOpenDiffReview} title={f.file}>
 							<span class="file-path">{f.file}</span>
 							<span class="file-counts">
 								{#if f.additions > 0}<span class="additions">+{f.additions}</span>{/if}
@@ -689,7 +675,7 @@
 						</button>
 					{/each}
 					{#if changedFiles.length > MAX_FILES}
-						<button class="file more" onclick={() => fire(onOpenDiffReview)} disabled={!onOpenDiffReview}>
+						<button class="file more" onclick={() => leaveForReview(onOpenDiffReview)} disabled={!onOpenDiffReview}>
 							<span class="file-path">{changedFiles.length - MAX_FILES} more…</span>
 						</button>
 					{/if}
@@ -725,13 +711,14 @@
 					{/if}
 					{#if onDownloadChat}
 						<div class="row-group narrow-only">
-							<button class="row" aria-label="Download chat history" disabled={downloadingChat} onclick={() => fire(onDownloadChat)}>
+							<button class="row" aria-label="Download chat history" disabled={downloadingChat} onclick={() => leaveForReview(onDownloadChat)}>
 								<Download size={14} strokeWidth={1.5} />
 								<span class="row-text"><span class="row-title">Download chat history</span><span class="row-sub">.jsonl</span></span>
 							</button>
 						</div>
 					{/if}
 				</div>
+			{/if}
 			{/if}
 		</div>
 	{/if}
@@ -928,8 +915,16 @@
 		display: none;
 	}
 
+	.gp-close { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: .5rem; background: transparent; color: var(--muted-foreground); cursor: pointer; }
+	.gp-close:hover { background: var(--hover-overlay); color: var(--foreground); }
+	.gp-close:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.sheet-layout .gp-close { width: 44px; height: 44px; }
 	.gp-head {
-		padding: 12px 14px 10px;
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		background: var(--popover, var(--card));
+		padding: 12px 54px 10px 14px;
 		border-bottom: 1px solid var(--border);
 		display: grid;
 		gap: 6px;

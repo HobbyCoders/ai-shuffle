@@ -77,7 +77,8 @@ const mocks = vi.hoisted(() => {
 		refreshChangedFiles: vi.fn(),
 		retryLoad: vi.fn(),
 		startBackgroundRefresh: vi.fn(),
-		stopBackgroundRefresh: vi.fn()
+		stopBackgroundRefresh: vi.fn(),
+		gitOperationState: store({ active: false, status: 'idle', title: null as string | null, steps: [] as Record<string, unknown>[] })
 	};
 });
 
@@ -94,6 +95,10 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	},
 	gitSnapshot: mocks.gitSnapshot,
 	gitMode: mocks.gitMode
+}));
+vi.mock('$lib/stores/gitOperations.svelte', () => ({
+ gitOperationState: mocks.gitOperationState,
+ gitOperations: { dismiss: () => mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] }) }
 }));
 vi.mock('$lib/stores/github.svelte', () => ({
 	githubRepoInfo: mocks.githubRepoInfo
@@ -215,8 +220,8 @@ const trigger = () => screen.getByRole('button', { name: /^Git actions:/ }) as H
 const panel = () => screen.getByRole('dialog', { name: 'Git actions' });
 const queryPanel = () => screen.queryByRole('dialog', { name: 'Git actions' });
 /** An action's option popover (GitActionOptionsDropdown labels itself "<action> options"). */
-const popover = (action: string) => screen.getByRole('dialog', { name: `${action} options` });
-const queryPopover = (action: string) => screen.queryByRole('dialog', { name: `${action} options` });
+const popover = (action: string) => screen.getByRole('region', { name: `${action} options` });
+const queryPopover = (action: string) => screen.queryByRole('region', { name: `${action} options` });
 const row = (name: string) => within(panel()).getByRole('button', { name }) as HTMLButtonElement;
 const queryRow = (name: string) => within(panel()).queryByRole('button', { name }) as HTMLButtonElement | null;
 
@@ -232,6 +237,7 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)))
 beforeEach(() => {
 	localStorage.clear();
 	gitActionPreferences.reset();
+	mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] });
 	openHeaderDropdown.set(null);
 	chatAccessSummary.set(null);
 	mocks.gitMode.set('project');
@@ -354,8 +360,8 @@ describe('GitHeaderActions panel rows', () => {
 		expect(queryRow('Create PR')).toBeNull();
 		await fireEvent.click(button);
 		expect(handlers.onClickShipIt).toHaveBeenCalledOnce();
-		// Firing an action closes the panel.
-		expect(queryPanel()).toBeNull();
+		// Operation feedback stays in this workspace.
+		expect(panel()).toBeTruthy();
 		await openPanel();
 		await fireEvent.click(row('Ship It options'));
 		expect(within(popover('shipit')).getAllByRole('listitem').map((e) => e.textContent)).toEqual(['Merge PR #42']);
@@ -760,13 +766,16 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		expect(queryPanel()).toBeNull();
 	});
 
-	it('closes only the popover on a click inside the panel', async () => {
+	it('keeps the editor open on a click inside the panel; Back returns to overview', async () => {
 		dirtyFeatureBranch();
 		renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit options'));
 		await nextFrame();
 		await fireEvent.click(within(panel()).getByText('1 file changed'));
+		expect(popover('commit')).toBeTruthy();
+		expect(screen.getAllByRole('dialog')).toHaveLength(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
 		expect(queryPopover('commit')).toBeNull();
 		expect(panel()).toBeTruthy();
 	});
@@ -776,13 +785,51 @@ describe('GitHeaderActions panel and popover open/close', () => {
 		renderHeader();
 		await openPanel();
 		await fireEvent.click(row('Commit options'));
-		expect(within(popover('commit')).getByText('Commit options')).toBeTruthy();
+		expect(within(popover('commit')).getByText('Commit changes')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
 		await fireEvent.click(row('Ship It options'));
 		expect(queryPopover('commit')).toBeNull();
 		// The Ship It popover's step preview row "Push to remote" is unique to it.
 		expect(within(popover('shipit')).getByText('Push to remote')).toBeTruthy();
 	});
 });
+
+	describe('single workspace', () => {
+		it.each([
+			['commit', dirtyFeatureBranch, 'Commit options'],
+			['push', cleanAheadBranch, 'Push options'],
+			['pull', behindBranch, 'Pull options'],
+			['pr', cleanAheadBranch, 'Pull request options'],
+			['shipit', dirtyFeatureBranch, 'Ship It options']
+		] as const)('renders %s as one in-panel region, never another dialog', async (action, setup, name) => {
+			setup();
+			renderHeader();
+			await openPanel();
+			await fireEvent.click(row(name));
+			expect(screen.getAllByRole('dialog')).toHaveLength(1);
+			expect(popover(action).closest('.git-panel')).toBe(panel());
+			expect(panel().querySelector('.gp-rows')).toBeNull();
+			await fireEvent.click(screen.getByRole('button', { name: 'Back to Git actions' }));
+			expect(panel().querySelector('.gp-rows')).toBeTruthy();
+		});
+		it('keeps operation progress/errors in-panel and permits closing while work continues', async () => {
+			dirtyFeatureBranch();
+			mocks.gitOperationState.set({ active: true, status: 'running', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'running' }] });
+			renderHeader({ operationInProgress: true });
+			await tick();
+			expect(screen.getAllByRole('dialog')).toHaveLength(1);
+			expect(panel().querySelector('.git-progress')).toBeTruthy();
+			await fireEvent.click(screen.getByRole('button', { name: 'Close Git panel' }));
+			expect(queryPanel()).toBeNull();
+			mocks.gitOperationState.set({ active: true, status: 'error', title: 'Commit', steps: [{ id: 'commit', label: 'Commit changes', status: 'error', error: 'Fixture failure' }] });
+			await tick();
+			expect(queryPanel()).toBeNull();
+			await openPanel();
+			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
+			await fireEvent.click(within(panel()).getByRole('button', { name: 'Dismiss' }));
+			expect(panel().querySelector('.git-progress')).toBeNull();
+		});
+	});
 
 describe('GitHeaderActions mobile sheet', () => {
 	beforeEach(() => {

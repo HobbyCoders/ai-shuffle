@@ -82,31 +82,11 @@
 {/if}
 
 <style>
-	/* Panel — mirrors GitHeaderActions' .branch-dropdown. */
-	.git-progress {
-		position: absolute;
-		top: calc(100% + 4px);
-		right: 0;
-		min-width: 240px;
-		max-width: 340px;
-		max-height: 60vh;
-		overflow-y: auto;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
-		padding: 10px 12px;
-		z-index: 200;
-		animation: gp-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
+	/* In-flow operation feedback, never another positioned overlay. */
+	.git-progress { margin: 12px 14px; padding: 12px; border: 1px solid var(--border); border-radius: .625rem; background: color-mix(in oklch, var(--muted) 30%, transparent); }
 
 	.git-progress.error {
 		border-color: color-mix(in oklch, var(--destructive) 55%, var(--border));
-	}
-
-	@keyframes gp-in {
-		from { opacity: 0; transform: translateY(-4px); }
-		to { opacity: 1; transform: translateY(0); }
 	}
 
 	.gp-header {
@@ -194,7 +174,7 @@
 	}
 
 	.gp-dismiss {
-		height: 24px;
+		min-height: 36px;
 		padding: 0 10px;
 		background: transparent;
 		border: 1px solid var(--border);
@@ -212,6 +192,8 @@
 	}
 
 	/* Icon colors */
+	:global(.sheet-layout) .gp-dismiss { min-height: 44px; }
+
 	.git-progress :global(.running) { color: var(--primary); }
 	.git-progress :global(.done) { color: var(--success); }
 	.git-progress :global(.errored) { color: var(--destructive); }
