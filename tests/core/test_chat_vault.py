@@ -162,3 +162,29 @@ def test_duplicate_names_never_overwrite_credentials(vault):
         chat_vault.save(owner, replacement)
     assert len(vault) == 1
     assert chat_vault.load(owner, first).label == "Unraid"
+
+
+def test_service_credentials_are_encrypted_and_never_catalogued(vault):
+    owner = ("local", "worker", None)
+    service = GrantInput(kind="service", label="Inventory API", url="https://api.example.com/v1",
+                         auth_header="X-API-Key", auth_scheme="", secret="vault-only-api-key", writable=True)
+    connection_id = chat_vault.save(owner, service)
+    ciphertext = next(iter(vault.values()))
+    assert all(value not in ciphertext for value in ("vault-only-api-key", "api.example.com", "X-API-Key"))
+    loaded = chat_vault.load(owner, connection_id)
+    assert loaded.secret.get_secret_value() == "vault-only-api-key"
+    assert (loaded.url, loaded.auth_header, loaded.auth_scheme, loaded.writable) == (
+        "https://api.example.com/v1", "X-API-Key", "", True)
+    catalogue = chat_vault.catalog(owner)
+    assert catalogue == [{"id": connection_id, "kind": "service", "label": "Inventory API",
+                          "target": "https://api.example.com/v1", "fingerprint": "", "writable": True}]
+    assert "vault-only-api-key" not in json.dumps(catalogue)
+    machine = chat_vault.save(owner, spec())
+    assert {item["kind"] for item in chat_vault.catalog(owner)} == {"machine", "service"}
+    assert chat_vault.load(owner, machine).kind == "machine"
+
+
+def test_folder_grants_are_never_saved(vault):
+    with pytest.raises(AccessDenied):
+        chat_vault.save(("local", "worker", None), GrantInput(kind="folder", label="Docs", path="/srv/docs"))
+    assert not vault

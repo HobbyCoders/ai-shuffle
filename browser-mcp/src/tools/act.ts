@@ -8,7 +8,7 @@
  */
 
 import type { Locator, Page } from "playwright-core";
-import { StaleRefError, type Session } from "../session.js";
+import { StaleRefError, raceWithTimeout, type Session } from "../session.js";
 import { jsonResult, errorResult, text, type McpToolResult } from "./result.js";
 import { ACT_KINDS } from "../schemas.js";
 import { runScreenshot } from "./screenshot.js";
@@ -37,14 +37,64 @@ export function typeTimeoutMs(value: string): number {
   return REF_ACTION_TIMEOUT_MS + value.length * TYPE_MS_PER_CHAR;
 }
 
+/** Budget for asking whether a ref still resolves after its action failed. */
+const REF_PROBE_TIMEOUT_MS = 1000;
+
 /**
- * Does a Playwright error message indicate the ref locator failed to resolve to
- * an actionable element (element detached after the ref was handed out)? Such
- * failures surface as an actionability timeout naming the `aria-ref=` selector.
- * Coordinate (page.mouse) gestures do no actionability wait, so they never hang.
+ * Could this Playwright error mean the ref no longer resolves (element detached
+ * after the ref was handed out)? Such failures surface as an actionability
+ * timeout naming the `aria-ref=` selector. So do failures on a ref that DOES
+ * still resolve (covered, animating, not editable…), which is why a match is
+ * only a reason to probe the ref, not a verdict. Coordinate (page.mouse)
+ * gestures do no actionability wait, so they never hang.
  */
 function isRefResolutionFailure(message: string): boolean {
   return /Timeout \d+ms exceeded/i.test(message) || message.includes("aria-ref=");
+}
+
+/**
+ * Does the ref's locator still match a connected element? Playwright's
+ * aria-ref engine answers from the latest snapshot and requires the element to
+ * be attached, and `count()` does not wait. Any failure (the document went away
+ * mid-probe, a closed page) counts as "no".
+ */
+async function refStillResolves(locator: Locator): Promise<boolean> {
+  try {
+    return (await raceWithTimeout(locator.count(), REF_PROBE_TIMEOUT_MS, "ref probe timed out")) > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Playwright colours its call log with ANSI escapes.
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+/** Call-log lines that name why an action could not proceed. */
+const BLOCKER_RE = /intercepts pointer events|element is not |element is outside of the viewport|not attached|is disabled/i;
+const MAX_REASON_CHARS = 240;
+
+/**
+ * Condense a Playwright failure on a ref that still resolves into one line: the
+ * last call-log line naming the blocker (e.g. "<div></div> intercepts pointer
+ * events", "element is not stable"), else the error's headline.
+ */
+export function actionFailureReason(message: string): string {
+  const lines = message.replace(ANSI_RE, "").split("\n").map((line) => line.trim().replace(/^-\s*/, ""));
+  let reason = "";
+  for (const line of lines) if (BLOCKER_RE.test(line)) reason = line;
+  if (!reason) reason = lines[0] ?? "";
+  // Drop Playwright's "locator.click: Error: " framing.
+  reason = reason.replace(/^locator\.\w+:\s*/, "").replace(/^Error:\s*/, "").trim();
+  if (!reason) reason = "the element did not become actionable";
+  return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1)}…` : reason;
+}
+
+/** Error for an action that failed on a ref whose element is still current. */
+export function notActionableMessage(ref: string, kind: string, reason: string): string {
+  return (
+    `not_actionable: ${ref} is still valid (its element is on the page), but ${kind} could not complete: ${reason}. ` +
+    "Do not re-snapshot for this; wait for or remove the blocker (overlay, animation, hidden or disabled state) and retry, " +
+    "or act by coordinate from a fresh browser_screenshot."
+  );
 }
 
 export interface ActInput {
@@ -107,12 +157,24 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     }
   }
 
+  // Resolve the ref up front: one we never handed out (or one from a document
+  // that has since been replaced) is rejected before any page work.
+  let locator: Locator | null = null;
+  if (input.ref !== undefined) {
+    try {
+      locator = await session.resolveRef(input.ref);
+    } catch (err) {
+      if (err instanceof StaleRefError) return errorResult(err.message);
+      throw err;
+    }
+  }
+
   // Install the mutation watcher before acting so synchronous DOM changes made
   // during the action are captured, not just async settling.
   await session.beginWatch();
 
   try {
-    await performAction(session, page, input);
+    await performAction(session, page, input, locator);
   } catch (err) {
     // Action never settled: tear the mutation watcher down here so its
     // MutationObserver + window[WATCH_KEY] accumulator don't leak.
@@ -121,12 +183,14 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     const msg = err instanceof Error ? err.message : String(err);
     // Already a clean stale_ref (e.g. a ref we never handed out) — surface it.
     if (msg.startsWith("stale_ref")) return errorResult(msg);
-    // A ref that resolved to a locator but whose element has since detached
-    // times out in the actionability wait. Remap that (and any aria-ref
-    // resolution failure) to the same stale_ref contract so the model knows to
-    // re-snapshot rather than seeing a raw Playwright timeout.
-    if (input.ref !== undefined && isRefResolutionFailure(msg)) {
-      return errorResult(new StaleRefError(input.ref).message);
+    // A ref whose element has since detached times out in the actionability
+    // wait. So does one whose element is still there but covered, animating or
+    // otherwise not actionable — and calling THAT stale_ref sends the model to
+    // re-snapshot, get the same ref back, and fail again. Ask the ref engine:
+    // only a ref that no longer resolves is stale.
+    if (input.ref !== undefined && locator && isRefResolutionFailure(msg)) {
+      if (!(await refStillResolves(locator))) return errorResult(new StaleRefError(input.ref).message);
+      return errorResult(notActionableMessage(input.ref, input.kind, actionFailureReason(msg)));
     }
     return errorResult(msg);
   }
@@ -151,9 +215,8 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   return jsonResult(body);
 }
 
-async function performAction(session: Session, page: Page, input: ActInput): Promise<void> {
+async function performAction(session: Session, page: Page, input: ActInput, locator: Locator | null): Promise<void> {
   const kind = input.kind;
-  const locator: Locator | null = input.ref ? session.resolveRef(input.ref) : null;
   // Coordinate targets are given in the last screenshot's pixel space; map them
   // into viewport CSS pixels (scrolling into view if needed) for page.mouse.
   const point = input.coordinate

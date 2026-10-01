@@ -56,6 +56,8 @@ export const BRING_TO_FRONT_TIMEOUT_MS = 3000;
 export const APPLIED_VIEWPORT_TIMEOUT_MS = 3000;
 /** Ceiling for asking a page whether it painted anything. */
 export const PAGE_CONTENT_TIMEOUT_MS = 3000;
+/** Ceiling for reading the current document's identity (CDP loaderId). */
+export const DOCUMENT_ID_TIMEOUT_MS = 2000;
 
 /** One recorded response, reduced to what a failure diagnosis needs. */
 export interface NetworkSummary {
@@ -319,7 +321,7 @@ export class Session {
 
     page.on("framenavigated", frame => {
       if (frame === page.mainFrame()) {
-        if (this.currentId === id) this.notifyNavigation();
+        if (this.currentId === id) this.noteMainFrameNavigation();
         else this.onWorkspaceChange?.();
       }
     });
@@ -384,9 +386,47 @@ export class Session {
     this.onWorkspaceChange?.();
   }
 
+  /**
+   * The current page's main frame navigated. Playwright fires `framenavigated`
+   * for same-document navigations too (history.pushState/replaceState, hash
+   * changes), which keep every element and Playwright's ref map alive — an SPA
+   * that rewrites its URL between a snapshot and the act must not turn a
+   * freshly emitted ref into stale_ref. So only mark the refs unverified here;
+   * {@link resolveRef} drops them if the document actually changed.
+   */
+  private noteMainFrameNavigation(): void {
+    this.refs.noteNavigation();
+    this.invalidateScreenshot();
+    this.onWorkspaceChange?.();
+  }
+
+  /**
+   * Identity of the current page's document: the main frame's CDP loaderId,
+   * which a new document always changes and a same-document navigation never
+   * does. Null when it cannot be read (callers treat that as "changed").
+   */
+  private async currentDocumentId(): Promise<string | null> {
+    try {
+      const cdp = await this.currentCDP();
+      const tree = await raceWithTimeout(cdp.send("Page.getFrameTree"), DOCUMENT_ID_TIMEOUT_MS, "frame tree timed out");
+      const loaderId = tree.frameTree.frame.loaderId;
+      return typeof loaderId === "string" && loaderId !== "" ? loaderId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Settle any unverified main-frame navigation against the live document. */
+  private async verifyRefsDocument(): Promise<void> {
+    if (!this.refs.needsVerification) return;
+    const mark = this.refs.navigationMark;
+    this.refs.verifyDocument(await this.currentDocumentId(), mark);
+  }
+
   /** Resolve a ref to a Locator, rejecting refs we never handed out. */
-  resolveRef(ref: string): Locator {
+  async resolveRef(ref: string): Promise<Locator> {
     if (!isRefToken(ref)) throw new StaleRefError(ref);
+    await this.verifyRefsDocument();
     if (!this.refs.isKnown(ref)) throw new StaleRefError(ref);
     const page = this.requirePage();
     return page.locator(RefRegistry.selectorFor(ref));
@@ -402,9 +442,11 @@ export class Session {
     const page = this.requirePage();
     const { scopeRef, ...renderOpts } = opts;
 
-    const scope: Locator = scopeRef
-      ? this.resolveRef(scopeRef)
-      : page.locator("body");
+    const body = page.locator("body");
+    const scope: Locator = scopeRef ? await this.resolveRef(scopeRef) : body;
+    // Read before the snapshot: a document that changes underneath it then
+    // fails verification instead of vouching for refs it never produced.
+    const documentId = await this.currentDocumentId();
 
     let rawYaml: string;
     try {
@@ -413,13 +455,28 @@ export class Session {
       if (scopeRef) throw new StaleRefError(scopeRef);
       throw err;
     }
+    // Playwright resolves `aria-ref=` only against the most recent ai snapshot
+    // taken in the frame, so a scoped snapshot would otherwise leave every ref
+    // outside the subtree unresolvable even though the registry (and the
+    // documented contract) keeps the latest full snapshot's refs valid. Re-take
+    // the page-wide snapshot (output discarded; refs are cached per element, so
+    // they do not change) to restore the full map. If that fails, only the
+    // scoped refs are resolvable, so register them as the full set.
+    let restored = true;
+    if (scopeRef) {
+      try {
+        await body.ariaSnapshot({ mode: "ai", boxes: true, timeout: 5000 });
+      } catch {
+        restored = false;
+      }
+    }
 
     // Only a snapshot that shows a textbox value can carry a password.
     if (/^\s*- textbox\b.*: \S/m.test(rawYaml)) {
       rawYaml = maskSecretValues(rawYaml, await passwordValues(page));
     }
     const rendered = renderSnapshot(rawYaml, renderOpts);
-    const snapshot_id = this.refs.registerSnapshot(rendered.refs, Boolean(scopeRef));
+    const snapshot_id = this.refs.registerSnapshot(rendered.refs, Boolean(scopeRef) && restored, documentId);
     return {
       text: rendered.text,
       snapshot_id,

@@ -489,7 +489,7 @@ async def test_api_approval_produces_execution_and_validation_hides_secrets(brok
         endpoint = f"/api/v1/chat-access/chat/requests/{request_id}"
         bad = await client.post(endpoint, json={"password": "MUST-NOT-ECHO"})
         assert bad.status_code == 422 and "MUST-NOT-ECHO" not in bad.text
-        body = {**spec.model_dump(exclude={"password", "private_key", "passphrase"}), "password": "test-only-password"}
+        body = {**spec.model_dump(exclude=set(chat_access.SECRET_FIELDS)), "password": "test-only-password"}
         response = await client.post(endpoint, json={"connection": body})
         assert response.status_code == 200, response.text
         handle = await requested
