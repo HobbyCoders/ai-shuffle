@@ -400,13 +400,25 @@ function seedOptimistic(): void {
 		app.messages[painted.length - 1] === painted[painted.length - 1]
 			? painted.length
 			: 0;
+	// Runs before EVERY reduced SSE event, so it must not be O(user rows x
+	// reducer rows): index the reducer's ids/command ids once per call (#1282).
+	let knownIds: Set<string> | null = null;
+	let knownCommandIds: Set<string> | null = null;
 	for (let i = from; i < app.messages.length; i++) {
 		const m = app.messages[i];
 		if (m.role !== 'user') continue;
-		const known = reducerState.messages.some(
-			(r) => r.id === m.id || (!!m.commandId && r.commandId === m.commandId)
-		);
+		if (!knownIds || !knownCommandIds) {
+			knownIds = new Set();
+			knownCommandIds = new Set();
+			for (const r of reducerState.messages) {
+				knownIds.add(r.id);
+				if (r.commandId) knownCommandIds.add(r.commandId);
+			}
+		}
+		const known = knownIds.has(m.id) || (!!m.commandId && knownCommandIds.has(m.commandId));
 		if (!known) {
+			knownIds.add(m.id);
+			if (m.commandId) knownCommandIds.add(m.commandId);
 			reducerState = {
 				...reducerState,
 				messages: [...reducerState.messages, { ...m }],

@@ -14,6 +14,7 @@
 	 * - This prevents scroll jumping when switching between cards
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
+	import { derived as derivedStore } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { swarms } from '$lib/stores/swarms';
 	import type { SwarmSnapshot } from '$lib/utils/swarm';
@@ -275,6 +276,15 @@
 		}
 	}
 
+	// Row props read this, never the store directly (#1282). Every streaming fold
+	// publishes a new `$activeSession` object; a row prop written as
+	// `$activeSession.sessionId` re-runs that prop's consumers in EVERY mounted row
+	// on every fold (each AssistantMessage re-routes its rendered HTML, each user
+	// row re-evaluates its actions). A store derived from it emits only when the id
+	// itself changes, so a fold does not even mark the rows for a recheck.
+	const activeSessionIdStore = derivedStore(activeSession, ($session) => $session.sessionId);
+	const activeSessionId = $derived($activeSessionIdStore);
+
 	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
@@ -374,7 +384,7 @@
 	// walks the array); this is the O(1) read. It used to be an O(N) scan run
 	// per rendered user row per streaming fold — see work-log.ts.
 	function userPromptOccurrence(messageIndex: number): number {
-		return transcript.promptOccurrence[messageIndex] ?? 0;
+		return promptOccurrence[messageIndex] ?? 0;
 	}
 
 	const latestTurnUnsettled = $derived(
@@ -459,6 +469,12 @@
 	});
 
 	const displayItems: DisplayItem[] = $derived(transcript.items);
+	// Per-row reads go through these rather than `transcript` (#1282). The
+	// streaming fast path in createTranscriptModelBuilder keeps both arrays by
+	// identity while only the tail text grows, so these deriveds do not notify and
+	// historic user rows are not re-evaluated on every streaming fold.
+	const promptOccurrence = $derived(transcript.promptOccurrence);
+	const rewindEligible = $derived(transcript.rewindEligible);
 
 	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
 	// ChatView already suppresses its own hero while history loads, but the
@@ -1949,10 +1965,10 @@
 		<UserMessage
 			content={message.content}
 			timestamp={message.timestamp}
-			sessionId={$activeSession.sessionId}
+			sessionId={activeSessionId}
 			messageUuid={message.jsonlUuid}
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
-			rewindEligible={transcript.rewindEligible[messageIndex]}
+			rewindEligible={rewindEligible[messageIndex]}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>
@@ -1979,7 +1995,7 @@
 				{gallerySources}
 				timestamp={message.timestamp}
 				messageUuid={message.jsonlUuid}
-				sessionId={$activeSession.sessionId}
+				sessionId={activeSessionId}
 				streaming={isStreamAnchor}
 				{hasPartialMessages}
 				{fileCheckpointingEnabled}
@@ -2052,7 +2068,7 @@
 			result={message.toolResult}
 			status={message.toolStatus || 'running'}
 			streaming={message.streaming}
-			sessionId={$activeSession.sessionId}
+			sessionId={activeSessionId}
 			serverSide={message.serverSide ?? message.server_side ?? false}
 			screenshot={message.toolScreenshot}
 		/>
