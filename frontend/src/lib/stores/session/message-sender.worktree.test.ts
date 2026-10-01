@@ -96,6 +96,73 @@ describe('remembered permission on worktree creation', () => {
 	});
 });
 
+describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
+	const choice = { kind: 'branch' as const, projectId: 'proj-1', projectV2Id: null,
+		branch: 'feat/picked', baseBranch: 'develop', createNew: true };
+	const created = { session_id: 'wt-1', branch_name: 'feat/picked', base_branch: 'develop', worktree_path: '/w', status: 'ok' };
+
+	beforeEach(() => {
+		composerPreferences.set('checkout', choice);
+		composerPreferences.set('project', { projectId: 'proj-1', projectV2Id: null });
+		composerPreferences.set('model', 'preserved-model');
+	});
+
+	it.each([false, true])('consumes the choice only after successful creation (remote=%s)', async (remote) => {
+		if (remote) composerPreferences.set('checkout', { ...choice, projectId: '', projectV2Id: 'shared-repo' });
+		let finish!: (value: typeof created) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, state } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true,
+			...(remote ? { project: '', projectV2Id: 'shared-repo' } : {}) });
+		const pending = sender.createWorktree();
+		expect(composerPreferences.current.checkout?.branch).toBe(choice.branch);
+		finish(created);
+		await pending;
+		expect(composerPreferences.current.checkout).toBeNull();
+		expect(composerPreferences.current.model).toBe('preserved-model');
+		expect(composerPreferences.current.project).toEqual({ projectId: 'proj-1', projectV2Id: null });
+		expect(state()).toMatchObject({ sessionId: 'wt-1', worktreeBranch: choice.branch });
+	});
+
+	it('keeps the choice and draft when creation fails', async () => {
+		post.mockRejectedValueOnce({ status: 409, detail: "Branch 'feat/picked' already exists" });
+		const { sender, state } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true });
+		await sender.createWorktree();
+		expect(composerPreferences.current.checkout).toEqual(choice);
+		expect(state()).toMatchObject({ sessionId: null, worktreeBranch: choice.branch });
+	});
+
+	it('does not clear a later composer selection when the first request completes', async () => {
+		let finish!: (value: typeof created) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, internal } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true });
+		const pending = sender.createWorktree();
+		internal.worktreeCreationGeneration++;
+		const next = { ...choice, branch: 'feat/next-task' };
+		composerPreferences.set('checkout', next);
+		finish(created);
+		await pending;
+		expect(composerPreferences.current.checkout).toEqual(next);
+	});
+
+	it('consumes an unchanged choice even if the user navigated away', async () => {
+		let finish!: (value: typeof created) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, internal } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true });
+		const pending = sender.createWorktree();
+		internal.worktreeCreationGeneration++;
+		finish(created);
+		await pending;
+		expect(composerPreferences.current.checkout).toBeNull();
+	});
+
+	it('does not consume a choice when creating on an existing branch', async () => {
+		post.mockResolvedValueOnce(created);
+		const { sender } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: false });
+		await sender.createWorktree();
+		expect(composerPreferences.current.checkout).toEqual(choice);
+	});
+});
+
 describe('autoCreateWorktree', () => {
 	it('commits the new session in one step and opens its feed when the backend started the turn', async () => {
 		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
