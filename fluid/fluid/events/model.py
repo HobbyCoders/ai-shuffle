@@ -479,6 +479,9 @@ class ProviderRetry(Event):
     # stream mid-response and the same request is being re-sent. None for the
     # other retry kinds (empty or truncated responses, runaway arguments).
     cause: str | None = None
+    # Set when this retry goes out with reasoning effort lowered one step (the
+    # provider cut two long responses in a row): the effort the retry uses.
+    lowered_effort: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

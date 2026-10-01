@@ -26,9 +26,11 @@ call's arguments were still arriving is the same retry under its own label
 
 A connection the provider drops mid-response is re-sent with the same history
 (up to ``TRANSPORT_DROP_MAX_RETRIES`` times, with a ProviderRetry event whose
-``cause`` is ``"connection_dropped"``) when the partial response closed no tool
-call: tools run only after a call completes, so nothing in it ran. A drop
-after a tool call closed is not re-sent.
+``cause`` is ``"connection_dropped"``). Tools are dispatched only after a call
+completes, so no tool call in the dropped response ran, even one whose
+arguments had finished streaming; such a call gets a "not executed" ToolResult
+event and is not stored. When a long call is cut twice (the upstream caps one
+response at about 900 s), the last retry lowers reasoning effort one step.
 
 A call that fails after content streamed, and is not re-sent, keeps that
 content: the visible text and the tool calls that closed are stored as an
@@ -588,18 +590,25 @@ EMPTY_COMPLETION_MAX_RETRIES = 10
 TRUNCATED_STREAM_MAX_RETRIES = 3
 
 # A provider connection that drops mid-response (the peer closes the stream
-# before its terminal event) is re-sent when nothing in the dropped response
-# can have run. Tools only run after a call completes, so a response that
-# closed no tool call left no side effect behind and was never stored: the
+# before its terminal event) is re-sent. Nothing in the dropped response can
+# have run: tools are dispatched only after a call completes (see the tool
+# loop below _stream_once), so even a tool call whose arguments had finished
+# streaming was never executed. The dropped response is never stored, and the
 # same request goes out again with the same history. Production drops on the
 # ChatGPT/Codex backend are one-offs (an upstream close mid tool arguments or
 # mid reasoning), so two attempts ride them out.
 TRANSPORT_DROP_MAX_RETRIES = 2
-# A call that had already streamed this long when it dropped gets one retry
-# only. The ChatGPT/Codex backend has closed response streams at about 900 s
-# (the engine's own stream deadline is 900 s too), and a request that ran into
-# that cap once may well run into it again.
+# A call that had streamed this long when it dropped probably ran into the
+# upstream cap on one response: the ChatGPT/Codex backend has closed streams
+# at about 900 s. The first such drop is re-sent at the same effort; when the
+# re-sent call is cut the same way, the last attempt lowers reasoning effort
+# one step (_LOWER_EFFORT) so the reply can fit under the cap. A request whose
+# effort cannot be lowered is not sent a third time.
 TRANSPORT_DROP_LONG_CALL_S = 600.0
+_LOWER_EFFORT = {
+    "ultra": "max", "max": "xhigh", "xhigh": "high", "high": "medium",
+    "medium": "low",
+}
 
 _EMPTY_STREAM_MARKER = "terminal usage chunk"
 
@@ -661,30 +670,33 @@ def _is_empty_completion(result: _CallResult) -> bool:
     return _measured_prompt_tokens(result.usage) == 0
 
 
-def _transport_drop_retry_budget(result: _CallResult) -> int:
-    """How many times this failed call may be re-sent as-is (0: never).
+def _is_replayable_drop(result: _CallResult) -> bool:
+    """Was this call cut by a dropped connection, and may it be re-sent?
 
-    Only a connection the provider dropped after the stream had started, with
-    no tool call closed in the partial response: those calls were never
-    dispatched or shown as made, and the request itself is idempotent. A drop
-    before anything arrived was already retried by the provider client; a
-    client that marks the request unsafe to replay (native image generation)
-    is respected.
+    Only a connection the provider dropped after the stream had started. The
+    tool calls in the partial response, finished or not, were never
+    dispatched, and the request itself is idempotent. A drop before anything
+    arrived was already retried by the provider client; a client that marks
+    the request unsafe to replay (native image generation) is respected.
     """
     evidence = result.usage.get("transport_failure")
-    if (
-        result.stop_reason != "error"
-        or result.interrupted
-        or not isinstance(evidence, dict)
-        or evidence.get("chunks_delivered") is not True
-        or result.tool_uses
-        or not result.replay_safe
-    ):
-        return 0
-    elapsed = evidence.get("elapsed_seconds")
-    if isinstance(elapsed, (int, float)) and elapsed >= TRANSPORT_DROP_LONG_CALL_S:
-        return 1
-    return TRANSPORT_DROP_MAX_RETRIES
+    return (
+        result.stop_reason == "error"
+        and not result.interrupted
+        and isinstance(evidence, dict)
+        and evidence.get("chunks_delivered") is True
+        and result.replay_safe
+    )
+
+
+def _is_long_drop(result: _CallResult) -> bool:
+    """Did the dropped call run long enough to have hit an upstream cap?"""
+    evidence = result.usage.get("transport_failure")
+    elapsed = evidence.get("elapsed_seconds") if isinstance(evidence, dict) else None
+    return (
+        isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+        and elapsed >= TRANSPORT_DROP_LONG_CALL_S
+    )
 
 
 def _plain_text(blocks: list[Any]) -> str:
@@ -696,6 +708,13 @@ def _plain_text(blocks: list[Any]) -> str:
 # failed before it finished (see the error path in _agent_loop).
 _FAILED_CALL_TOOL_TEXT = (
     "Tool not executed: the model's response failed before it finished."
+)
+
+# The ToolResult a finished-streaming tool call gets when its response's
+# connection dropped and the request was re-sent instead (see _agent_loop).
+_DROPPED_CALL_TOOL_TEXT = (
+    "Tool not executed: the provider connection dropped before the response "
+    "finished, and the request was sent again."
 )
 
 
@@ -3119,6 +3138,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         stop_hook_continuations = 0
         arg_stream_retries = 0  # runaway tool-argument streams, retried once
         drop_retries = 0  # CONSECUTIVE re-sends after a dropped connection
+        last_drop_long = False  # the previous drop in this run hit the long-call mark
+        drop_retry_effort: str | None = None  # lowered effort for the next call only
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
@@ -3174,8 +3195,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._turn_model_calls = num_calls
             call_model = self.model
             result = await self._stream_once(
-                sid, turn_id, history, sticky=call_was_sticky
+                sid, turn_id, history, sticky=call_was_sticky,
+                effort=drop_retry_effort,
             )
+            # A lowered effort applies to the one re-sent call only.
+            drop_retry_effort = None
             empty = _is_empty_completion(result)
             truncated = empty and result.cut_in_tool_args
             if not empty:
@@ -3351,11 +3375,24 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
             if result.stop_reason != "error":
                 drop_retries = 0
+                last_drop_long = False
             if result.stop_reason == "error":
-                drop_budget = _transport_drop_retry_budget(result)
-                replay_drop = (
-                    drop_retries < drop_budget and not self._interrupted.is_set()
-                )
+                replay_drop = False
+                long_drop = False
+                lowered_effort: str | None = None
+                if (
+                    _is_replayable_drop(result)
+                    and drop_retries < TRANSPORT_DROP_MAX_RETRIES
+                    and not self._interrupted.is_set()
+                ):
+                    long_drop = _is_long_drop(result)
+                    if long_drop and last_drop_long:
+                        # Cut twice at the upstream cap: one last try with
+                        # less reasoning, or none when it cannot go lower.
+                        lowered_effort = _LOWER_EFFORT.get(self._effective_effort(sid) or "")
+                        replay_drop = lowered_effort is not None
+                    else:
+                        replay_drop = True
                 # A failed HTTP request can still be billable. Record and
                 # publish it before deciding whether the context-overflow path
                 # is eligible for another escalation retry.
@@ -3378,33 +3415,49 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 await self._alert_unexplained_cache_misses(sid, turn_id, usage_raw)
                 if replay_drop:
-                    # The provider dropped the connection mid-response and no
-                    # tool call in that response closed, so none ran and none
-                    # was shown as made. Nothing is stored: the same history
-                    # goes out again, and the partial output the user saw
-                    # stays in the live stream only.
+                    # The provider dropped the connection mid-response. Tools
+                    # run only after a call completes, so no tool call in that
+                    # response ran, finished streaming or not. Nothing is
+                    # stored: the same history goes out again.
                     drop_retries += 1
+                    last_drop_long = long_drop
+                    drop_retry_effort = lowered_effort
                     delay = _empty_retry_delay(drop_retries)
                     evidence = result.usage.get("transport_failure") or {}
                     log.warning(
                         "Provider connection dropped mid-response (session %s, "
                         "turn %s, %s after %ss, %s lines); re-sending the same "
-                        "request in %.0fs (attempt %d of %d)",
+                        "request in %.0fs (attempt %d of %d%s)",
                         sid, turn_id, evidence.get("exception_type"),
                         evidence.get("elapsed_seconds"),
                         evidence.get("lines_received"), delay,
-                        drop_retries, drop_budget,
+                        drop_retries, TRANSPORT_DROP_MAX_RETRIES,
+                        f", effort lowered to {lowered_effort}" if lowered_effort else "",
                     )
                     await self._emit(ProviderRetry(
                         session_id=sid, turn_id=turn_id,
-                        attempt=drop_retries, max_attempts=drop_budget,
+                        attempt=drop_retries, max_attempts=TRANSPORT_DROP_MAX_RETRIES,
                         reason=(
+                            "provider cut a long response twice; reconnecting "
+                            f"with lower effort ({lowered_effort})"
+                            if lowered_effort else
                             "provider connection dropped before the response "
                             "finished; reconnecting"
                         ),
                         delay_seconds=delay, model=self.model,
                         cause="connection_dropped",
+                        lowered_effort=lowered_effort,
                     ))
+                    # Tool calls that finished streaming were published as
+                    # ToolUse events. Close each one for live hosts; the call
+                    # is not stored and the re-sent request may make it again
+                    # under a new id.
+                    for tu in result.tool_uses:
+                        await self._emit(ToolResult(
+                            session_id=sid, turn_id=turn_id,
+                            tool_use_id=tu["tool_use_id"], name=tu["name"],
+                            output=_DROPPED_CALL_TOOL_TEXT, is_error=True,
+                        ))
                     try:
                         await asyncio.wait_for(self._interrupted.wait(), timeout=delay)
                     except TimeoutError:
@@ -4000,6 +4053,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         required = getattr(spec, "requires_extra", ()) or ()
         return all(key in self.ctx.extra for key in required)
 
+    def _effective_effort(self, sid: str | None) -> str | None:
+        """The reasoning effort a call would be sent with, when it is named."""
+        if self.effort:
+            return self.effort
+        thinking = self._session_thinking.get(sid) if sid else None
+        effort = thinking.get("effort") if isinstance(thinking, dict) else None
+        return effort if isinstance(effort, str) else None
+
     def _build_request(
         self, history: list[Message], *, sticky: bool = True,
         turn_id: str | None = None,
@@ -4374,11 +4435,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 log.debug("CacheMiss hook failed", exc_info=True)
 
     async def _stream_once(
-        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
+        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True,
+        effort: str | None = None,
     ) -> _CallResult:
         self._stream_usage: dict[str, Any] = {}
         try:
-            return await self._stream_once_inner(sid, turn_id, history, sticky=sticky)
+            return await self._stream_once_inner(
+                sid, turn_id, history, sticky=sticky, effort=effort
+            )
         except asyncio.CancelledError:
             # Only provider-observed counts: cancellation is not evidence of
             # unreported generation. Fold this logical call exactly once.
@@ -4401,11 +4465,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._stream_usage = {}
 
     async def _stream_once_inner(
-        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
+        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True,
+        effort: str | None = None,
     ) -> _CallResult:
         request = self._build_request(
             history, sticky=sticky, turn_id=turn_id
         )
+        if effort is not None:
+            request = replace(request, effort=effort)
         self._fingerprint_request(request)
 
         blocks: dict[int, dict[str, Any]] = {}

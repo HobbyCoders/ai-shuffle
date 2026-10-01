@@ -809,6 +809,36 @@ async def test_a_socket_dropped_mid_tool_arguments_is_resent(server, kind):
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "second try"
 
 
+@pytest.mark.parametrize("kind", ["anthropic", "responses"])
+async def test_a_socket_dropped_after_a_tool_call_closed_is_resent_without_running_it(server, kind):
+    """The tool call's arguments finished streaming, then the connection
+    dropped before the response ended. Tools run only after a response
+    completes, so the call never ran: the request is re-sent and the call is
+    closed as not executed."""
+    if kind == "anthropic":
+        cut = [Messages.start(), *Messages.tool_block(0, "call_1", "Echo", {"text": "x"})]
+    else:
+        cut = [Responses.created(),
+               *Responses.function_call("fc_0", "call_1", "Echo", {"text": "x"})]
+    server.script(Reply(frames=[*cut, CUT], framing="chunked"),
+                  text_reply(kind, "second try"))
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+        stored = await run.stored()
+    finally:
+        await run.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    assert run.ran == []
+    [use] = _of(events, ToolUse)
+    [result] = _of(events, ToolResult)
+    assert result.tool_use_id == use.tool_use_id == "call_1"
+    assert result.is_error and "not executed" in result.output
+    assert len(server.requests) == 2
+    assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "second try"
+
+
 async def test_a_stream_that_stalls_after_content_times_out_instead_of_hanging(server):
     stall = [
         Messages.start(),

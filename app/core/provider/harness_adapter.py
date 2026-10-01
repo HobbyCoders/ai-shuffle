@@ -3113,6 +3113,9 @@ class HarnessAdapter(ProviderAdapter):
             cause = getattr(event, "cause", None)
             if cause:
                 data["cause"] = cause
+            lowered = getattr(event, "lowered_effort", None)
+            if lowered:
+                data["lowered_effort"] = lowered
             return [SystemMessage(subtype="provider_retry", data=data)]
 
         if cls == "ProviderAlive":

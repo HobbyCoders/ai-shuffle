@@ -313,13 +313,21 @@ async def test_connection_drop_retry_carries_its_cause_to_the_ui():
             reason="provider connection dropped before the response finished; reconnecting",
             delay_seconds=1.0, model="gpt-6.1-sol", cause="connection_dropped",
         ),
-        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=2),
+        lm.ProviderRetry(
+            session_id=SID, attempt=2, max_attempts=2,
+            reason="provider cut a long response twice; reconnecting with lower effort (high)",
+            delay_seconds=2.0, model="gpt-6.1-sol", cause="connection_dropped",
+            lowered_effort="high",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=3),
     ]
     got = await _collect(_adapter_with(FakeEngine(events)))
-    [note] = [e for e in got if isinstance(e, SystemMessage)
-              and e.subtype == "provider_retry"]
-    assert note.data["cause"] == "connection_dropped"
-    assert note.data["attempt"] == 1 and note.data["max_attempts"] == 2
+    first, second = [e for e in got if isinstance(e, SystemMessage)
+                     and e.subtype == "provider_retry"]
+    assert first.data["cause"] == "connection_dropped"
+    assert first.data["attempt"] == 1 and first.data["max_attempts"] == 2
+    assert "lowered_effort" not in first.data
+    assert second.data["lowered_effort"] == "high"
 
 
 @pytest.mark.asyncio
