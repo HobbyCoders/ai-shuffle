@@ -21,13 +21,6 @@ import shutil
 import subprocess
 from typing import List, Optional, Any
 
-# Fix Windows console encoding - Windows uses cp1252 by default which
-# can't handle Unicode characters like emojis in JSON data
-if sys.platform == "win32":
-    # Reconfigure stdout/stderr to use UTF-8
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-
 from .parser import parse_jq_expression, ParseError
 from .evaluator import evaluate, validate, is_stream, EvaluationError, EMPTY
 
@@ -96,6 +89,34 @@ def _parse_json_values(text: str) -> List[Any]:
         values.append(obj)
         idx = end
     return values
+
+
+def _configure_console_encoding() -> None:
+    """
+    Make stdin/stdout/stderr UTF-8 on Windows, where pipes default to cp1252
+    and so mangle the emojis and other non-ASCII text found in JSON data.
+
+    Only the program entry point calls this. Doing it at import time replaced
+    the streams of whatever imported the module: under pytest that dropped a
+    wrapper over the capture file and closed it when the wrapper was garbage
+    collected, killing collection.
+    """
+    if sys.platform != "win32":
+        return
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except (ValueError, OSError):
+                pass
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            setattr(sys, name, io.TextIOWrapper(buffer, encoding="utf-8", errors="replace"))
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -333,4 +354,5 @@ def output_result(result: Any, opts: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    _configure_console_encoding()
     sys.exit(main())
