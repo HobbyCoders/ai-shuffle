@@ -2747,13 +2747,27 @@ def _backfill_sessions_work_ms(cursor) -> Optional[int]:
                 "GROUP BY t.id"
             )
             last_event = {r["turn_id"]: r["last_at"] for r in cursor.fetchall()}
-        cursor.execute(
-            "SELECT id, session_id, started_at, ended_at, stop_reason FROM turns "
-            "WHERE started_at IS NOT NULL AND ended_at IS NOT NULL"
-        )
+        # A turn reaped after its runner died (a worker down for an hour reaps
+        # at boot) was stamped ended_at at the reap; its run's lease expiry
+        # bounds when it last worked.
+        if table_exists(cursor, "runs"):
+            cursor.execute(
+                "SELECT t.id, t.session_id, t.started_at, t.ended_at, t.stop_reason, "
+                "r.lease_expires_at FROM turns t LEFT JOIN runs r ON r.id = t.run_id "
+                "WHERE t.started_at IS NOT NULL AND t.ended_at IS NOT NULL"
+            )
+        else:
+            cursor.execute(
+                "SELECT id, session_id, started_at, ended_at, stop_reason, "
+                "NULL AS lease_expires_at FROM turns "
+                "WHERE started_at IS NOT NULL AND ended_at IS NOT NULL"
+            )
         spans: dict = {}
         for row in cursor.fetchall():
             start, end = _to_utc(row["started_at"]), _to_utc(row["ended_at"])
+            lease_end = _to_utc(row["lease_expires_at"])
+            if end is not None and lease_end is not None and lease_end < end:
+                end = lease_end
             if row["stop_reason"] == "parked_settled":
                 event_end = _to_utc(last_event.get(row["id"]))
                 end = min(end, event_end) if (end and event_end) else None

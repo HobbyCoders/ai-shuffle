@@ -158,6 +158,44 @@ def test_reap_banks_aborted_work_and_clears_requeued_start(mock_db):
     assert _work(requeued_sid) == (0, None)
 
 
+def _expire_lease(run_id: str, seconds_ago: int) -> None:
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE runs SET lease_expires_at = NOW() - make_interval(secs => %s) WHERE id = %s",
+            (seconds_ago, run_id),
+        )
+
+
+def test_reap_ends_dead_runner_work_at_its_lease_expiry(mock_db):
+    """A worker down for 30 minutes reaps its wake turn at boot: the downtime
+    after the lease lapsed is not working time."""
+    sid = _mk("wt-reap-lease")
+    run = runs.claim_run(sid, "runner", 60)
+    wake = turns.enqueue_turn(sid, "unpark")
+    turns.start_turn(wake["id"], run_id=run["id"])
+    _backdate_start(wake["id"], 40 * 60)
+    _expire_lease(run["id"], 30 * 60)
+
+    turns.reap_expired()
+    banked, started = _work(sid)
+    assert started is None
+    assert 9 * 60_000 <= banked <= 11 * 60_000
+
+
+def test_orphan_stop_ends_dead_runner_work_at_its_lease_expiry(mock_db):
+    sid = _mk("wt-orphan-lease")
+    run = runs.claim_run(sid, "runner", 60)
+    turn = turns.enqueue_turn(sid, "user", prompt="p")
+    turns.start_turn(turn["id"], run_id=run["id"])
+    _backdate_start(turn["id"], 70 * 60)
+    _expire_lease(run["id"], 60 * 60)
+
+    assert [r["id"] for r in turns.stop_orphaned_turns(sid)] == [turn["id"]]
+    assert 9 * 60_000 <= _work(sid)[0] <= 11 * 60_000
+
+
 def test_stopped_orphan_turn_is_banked(mock_db):
     sid = _mk("wt-orphan")
     turn = _run(sid, seconds=25)
@@ -288,13 +326,24 @@ def test_backfill_sums_merges_and_skips_parked_wait(mock_db):
     # bf-c already banked under the new code: left alone.
     conn.execute("UPDATE sessions SET work_ms = 5000 WHERE id = 'bf-c'")
     _seed_turn(conn, "c1", "bf-c", "2026-09-01 10:00:00", "2026-09-01 10:10:00")
+    # bf-d: a turn reaped an hour after its runner's lease lapsed counts only
+    # up to the lease expiry.
+    _mk("bf-d")
+    conn.execute(
+        "INSERT INTO runs (id, session_id, runner_id, fence_token, state, lease_expires_at) "
+        "VALUES ('run-d', 'bf-d', 'r', 1, 'expired', '2026-09-01 10:02:00')"
+    )
+    _seed_turn(conn, "d1", "bf-d", "2026-09-01 10:00:00", "2026-09-01 11:00:00", "lease_expired",
+               state="aborted")
+    conn.execute("UPDATE turns SET run_id = 'run-d' WHERE id = 'd1'")
     conn.commit()
 
     from app.db.base import get_db
 
     with get_db() as db:
         updated = database._backfill_sessions_work_ms(db.cursor())
-    assert updated == 2
+    assert updated == 3
+    assert _work("bf-d")[0] == 120_000
     assert _work("bf-a")[0] == 150_000  # 10:00:00-10:01:30 merged + 60 s
     assert _work("bf-b")[0] == 300_000
     assert _work("bf-c")[0] == 5_000

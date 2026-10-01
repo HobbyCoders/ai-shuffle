@@ -138,6 +138,30 @@ def _record_session_work(session_id: Optional[str], banked_ms: int = 0) -> None:
         logger.warning("Session work-time update failed for %s", session_id, exc_info=True)
 
 
+def _dead_runner_interval_ms(row: Dict[str, Any]) -> int:
+    """Interval of a turn whose runner died, ended at its run's lease expiry.
+
+    The reap and the orphan Stop stamp ``ended_at=NOW()``, which can be long
+    after the runner stopped (a worker that was down for an hour reaps at
+    boot). The run's ``lease_expires_at`` bounds when it last worked. Runs
+    after the transition commits, like the session write; never raises.
+    """
+    end = _to_utc(row.get("ended_at"))
+    run_id = row.get("run_id")
+    if run_id:
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT lease_expires_at FROM runs WHERE id=%s", (run_id,))
+                run = cursor.fetchone()
+            lease_end = _to_utc(run["lease_expires_at"]) if run else None
+            if lease_end is not None and (end is None or lease_end < end):
+                end = lease_end
+        except Exception:  # noqa: BLE001 — display bookkeeping only
+            logger.debug("Run lease lookup failed for %s", run_id, exc_info=True)
+    return interval_ms(row.get("started_at"), end)
+
+
 def _bank_ended(row: Optional[Dict[str, Any]]) -> None:
     """Bank a turn row that just left the live slot (settled, parked, aborted)."""
     if row is None:
@@ -396,7 +420,7 @@ def stop_orphaned_turns(
         cursor.execute(sql + " RETURNING *", tuple(params))
         stopped = _rows(cursor.fetchall())
     for row in stopped:
-        _bank_ended(row)
+        _record_session_work(row.get("session_id"), _dead_runner_interval_ms(row))
     return stopped
 
 
@@ -903,7 +927,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                     "WHERE id=%s AND state IN ('running','interrupting','draining')",
                     (turn["id"],),
                 )
-                banked.append((turn["session_id"], 0))
+                banked.append((turn["session_id"], None))
             else:
                 cursor.execute(
                     "UPDATE turns SET state='aborted', stop_reason='lease_expired', "
@@ -915,8 +939,11 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                 ended = cursor.fetchone()
                 banked.append((
                     turn["session_id"],
-                    interval_ms(ended["started_at"], ended["ended_at"]) if ended else 0,
+                    {"started_at": ended["started_at"], "ended_at": ended["ended_at"],
+                     "run_id": turn.get("run_id")} if ended else None,
                 ))
-    for session_id, ms in banked:
-        _record_session_work(session_id, ms)
+    for session_id, ended_row in banked:
+        _record_session_work(
+            session_id, _dead_runner_interval_ms(ended_row) if ended_row else 0
+        )
     return dead
