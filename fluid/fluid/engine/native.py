@@ -1843,6 +1843,124 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         return measured
 
+    def _cache_signal(
+        self, sid: str, *, overhead_tokens: int, turn_start: str | None
+    ) -> Any:
+        """The provider-cache view the compactor prices this call with.
+
+        Plan item 3 (see fluid.context.cache_signal). ``gap_s`` is the time
+        since this engine's previous request for the session.
+        ``static_changed`` compares a hash of the system prompt and tool
+        schemas with the one sent last. ``resumed`` marks this engine's first
+        call for the session and the first call of an unparked turn
+        (``turn_start`` names the turn's start node on its first call).
+        ``p_cold`` folds each measured call's hit rate into an EWMA, seeded
+        from the last persisted calls by ``_rehydrate_last_call_usage``. The
+        cached price ratio comes from pricing, 0.1 when pricing has no
+        cached rate. Returns None, and the ladder runs unpriced, when the
+        compactor has no schedule to price or the signal cannot be built.
+        """
+        config = self._compactor.config
+        if not (config.enabled and config.cache_schedule):
+            return None
+        import hashlib
+
+        from fluid.context.cache_signal import (
+            DEFAULT_CACHE_PRICE_RATIO,
+            CacheSignal,
+            update_p_cold,
+        )
+        from fluid.providers.pricing import resolve_price
+
+        try:
+            states: dict[str, dict[str, Any]] = getattr(self, "_cache_signal_states", {})
+            self._cache_signal_states = states
+            state = states.get(sid)
+            resumed = state is None
+            if state is None:
+                seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})
+                seed = seeds.pop(sid, None)
+                recorded = self._last_call_usage.get(sid)
+                state = states[sid] = {
+                    "requested_at": None, "static": None, "p_cold": seed,
+                    # A seeded EWMA already holds the newest persisted call.
+                    "folded": (
+                        recorded[0] if recorded is not None and seed is not None
+                        else None
+                    ),
+                }
+            recorded = self._last_call_usage.get(sid)
+            if recorded is not None and recorded[0] != state["folded"]:
+                node_id, usage = recorded
+                total = _measured_prompt_tokens(usage)
+                if total > 0:
+                    hit = int(usage.get("cache_read_input_tokens", 0) or 0) / total
+                    state["p_cold"] = update_p_cold(state["p_cold"], hit)
+                state["folded"] = node_id
+            now = time.time()
+            previous = state["requested_at"]
+            gap = None if previous is None else max(0.0, now - previous)
+            state["requested_at"] = now
+            static = hashlib.sha256(json.dumps(
+                [self.system, self._tools_api()], sort_keys=True, default=str,
+            ).encode()).hexdigest()
+            static_changed = state["static"] is not None and static != state["static"]
+            state["static"] = static
+            ratio = DEFAULT_CACHE_PRICE_RATIO
+            price = resolve_price(self.model, resolver=self._pricing_resolver)
+            if price is not None and price.input and price.cached_input is not None:
+                ratio = min(1.0, max(0.0, price.cached_input / price.input))
+            unparked: set[str] = getattr(self, "_unpark_turn_starts", set())
+            return CacheSignal(
+                gap_s=gap,
+                static_changed=static_changed,
+                resumed=resumed or (turn_start is not None and turn_start in unparked),
+                p_cold=state["p_cold"] or 0.0,
+                reuse_floor=overhead_tokens,
+                cache_price_ratio=ratio,
+            )
+        except Exception:  # noqa: BLE001 - an unpriced ladder is the fallback
+            log.debug("cache signal for the compactor failed", exc_info=True)
+            return None
+
+    async def _note_wake_turn_starts(self, sid: str) -> None:
+        """Tell the compactor which turn starts were wakes.
+
+        SessionNode has no source, so wake-aware turn counting reads it from
+        the persisted TurnStarted events: the first event that names a node
+        decides, so a resumed turn that re-reports an old node cannot relabel
+        it. Called at each turn's first model call; the first call reads the
+        whole log (which is what a resumed engine needs) and later ones read
+        only past the newest seq seen. A store that cannot replay leaves the
+        set as it is, and every unnamed turn counts as a real user turn,
+        which is the legacy count.
+        """
+        from fluid.context.compaction import WAKE_TURN_SOURCES
+
+        # Scan state is created on first use: the newest seq read and every
+        # node a TurnStarted has already named.
+        cursor: int = getattr(self, "_wake_scan_seq", 0)
+        seen: set[str] = getattr(self, "_wake_scan_nodes", set())
+        try:
+            async for event in iter_events(self.store, sid, cursor):
+                cursor = max(cursor, event.seq)
+                if not isinstance(event, TurnStarted) or not event.node_id:
+                    continue
+                if event.node_id in seen:
+                    continue
+                seen.add(event.node_id)
+                if event.source == "unpark":
+                    # The cache signal treats an unparked turn as resumed.
+                    unparked: set[str] = getattr(self, "_unpark_turn_starts", set())
+                    unparked.add(event.node_id)
+                    self._unpark_turn_starts = unparked
+                if event.source in WAKE_TURN_SOURCES:
+                    self._compactor.wake_turn_starts.add(event.node_id)
+        except Exception:  # noqa: BLE001 - counting falls back to legacy
+            return
+        self._wake_scan_seq = cursor
+        self._wake_scan_nodes = seen
+
     async def _rehydrate_last_call_usage(
         self, sid: str, nodes: list[SessionNode]
     ) -> tuple[str, dict[str, Any]] | None:
@@ -1863,6 +1981,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                       if isinstance(event, Usage)]
         except Exception:
             return None
+        self._seed_p_cold(sid, events)
         on_path = {n.node_id for n in nodes}
         for event in reversed(events):
             if not isinstance(event, Usage) or event.node_id not in on_path:
@@ -1878,6 +1997,33 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._last_call_model[sid] = model if isinstance(model, str) else None
                 return self._last_call_usage[sid]
         return None
+
+    def _seed_p_cold(self, sid: str, events: list[Any]) -> None:
+        """Seed the cache signal's miss EWMA from the newest persisted calls.
+
+        A resumed engine would otherwise start from "never missed". Reads
+        the last ``P_COLD_SEED_CALLS`` measured Usage events, oldest first,
+        whatever path they were on: the miss rate describes the provider
+        route, not the branch.
+        """
+        from fluid.context.cache_signal import P_COLD_SEED_CALLS, p_cold_from_hit_rates
+
+        rates: list[float] = []
+        for event in events:
+            if not isinstance(event, Usage):
+                continue
+            total = _measured_prompt_tokens({
+                "input_tokens": event.input_tokens,
+                "cache_read_input_tokens": event.cache_read_tokens,
+                "cache_creation_input_tokens": event.cache_creation_tokens,
+            })
+            if total > 0:
+                rates.append(int(event.cache_read_tokens or 0) / total)
+        seed = p_cold_from_hit_rates(rates[-P_COLD_SEED_CALLS:])
+        if seed is not None:
+            seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})
+            seeds[sid] = seed
+            self._p_cold_seed = seeds
 
     def _deferred_tools_api(self) -> list[dict[str, Any]]:
         """Schemas of known-but-unloaded tools — the ToolSearch catalog.
@@ -2670,7 +2816,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
 
     async def _emit_compaction(
-        self, sid: str, turn_id: str, promo: Promotion
+        self, sid: str, turn_id: str, promo: Promotion,
+        schedule: dict[str, Any] | None = None,
     ) -> None:
         await self._emit(ContextCompaction(
             session_id=sid, turn_id=turn_id,
@@ -2683,6 +2830,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
             measured_prompt_tokens=promo.measured_prompt_tokens,
+            **(schedule or {}),
         ))
 
     def _context_overhead_tokens(self) -> int:
@@ -2754,9 +2902,15 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
+            if num_calls == 0:
+                await self._note_wake_turn_starts(sid)
+            overhead_tokens = self._context_overhead_tokens()
+            # Measured first: on a resumed engine it rehydrates the last
+            # call's usage, which also seeds the cache signal's miss rate.
+            measured_prompt = await self._measured_window_prompt(sid, nodes)
             rendered, promotions = self._compactor.apply(
                 nodes,
-                overhead_tokens=self._context_overhead_tokens(),
+                overhead_tokens=overhead_tokens,
                 context_window=self.context_window,
                 output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
                 # Only the FIRST call of a turn may rewrite already-sent
@@ -2766,7 +2920,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 turn_boundary=num_calls == 0,
                 # Window protection sizes the prompt on what the provider
                 # billed last call, not on the chars/4 estimate alone.
-                measured_prompt_tokens=await self._measured_window_prompt(sid, nodes),
+                measured_prompt_tokens=measured_prompt,
+                # The provider cache as this call will find it, so a rewrite
+                # on a warm cache is priced instead of taken at the trigger.
+                cache=self._cache_signal(
+                    sid, overhead_tokens=overhead_tokens,
+                    turn_start=user_node.node_id if num_calls == 0 else None,
+                ),
             )
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
@@ -2778,8 +2938,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if promotions:
                 self._history_rewrites.extend(describe_promotions(promotions))
                 await self._emit_pre_compact(sid, turn_id, promotions)
+            schedule_fields = self._compactor.schedule_event_fields()
             for promo in promotions:
-                await self._emit_compaction(sid, turn_id, promo)
+                await self._emit_compaction(sid, turn_id, promo, schedule_fields)
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
             call_was_sticky = not self._sticky_poisoned and (

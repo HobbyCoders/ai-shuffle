@@ -519,15 +519,29 @@ class ToolResultTrimmer:
         return out
 
     def _eligible(
-        self, nodes: list[SessionNode], *, keep_recent: int | None = None
+        self,
+        nodes: list[SessionNode],
+        *,
+        keep_recent: int | None = None,
+        protected_from: int | None = None,
     ) -> list[tuple[str, str]]:
         """(node_id, tool_use_id) of every trimmable result, oldest first.
 
         ``keep_recent`` overrides the config's recency guard for one call;
         overflow recovery passes 0 because the result that no longer fits is
         usually the newest one.
+
+        ``protected_from`` is the index in ``nodes`` where the compactor's
+        token-budgeted recency tail starts. When given (and ``keep_recent``
+        is not), it replaces ``keep_recent_tool_results``: every result
+        before that index is in reach, every result from it on is kept.
+        Without it the count-based guard still applies, which is what an
+        unknown window and the trim-only contract get.
         """
         found: list[tuple[str, str, int, bool]] = []
+        if protected_from is not None and keep_recent is None:
+            nodes = nodes[:max(0, protected_from)]
+            keep_recent = 0
         for node in nodes:
             if node.message.role != "user":
                 continue
@@ -563,15 +577,22 @@ class ToolResultTrimmer:
         ]
 
     def trim_batch(
-        self, nodes: list[SessionNode], *, keep_recent: int | None = None
+        self,
+        nodes: list[SessionNode],
+        *,
+        keep_recent: int | None = None,
+        protected_from: int | None = None,
     ) -> list[tuple[str, str]]:
         """Trim every eligible result NOW, ignoring the trigger. Returns the
         newly trimmed ``(node_id, tool_use_id)`` pairs (empty when nothing was
-        eligible) so the caller can persist the decision. ``keep_recent``
-        overrides the recency guard for this batch only."""
+        eligible) so the caller can persist the decision. ``keep_recent`` and
+        ``protected_from`` override the recency guard for this batch only
+        (see ``_eligible``)."""
         if not self.config.enabled:
             return []
-        newly = self._eligible(nodes, keep_recent=keep_recent)
+        newly = self._eligible(
+            nodes, keep_recent=keep_recent, protected_from=protected_from
+        )
         self._trimmed.update(newly)
         return newly
 
