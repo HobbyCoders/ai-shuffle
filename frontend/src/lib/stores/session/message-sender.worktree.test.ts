@@ -9,6 +9,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { composerPreferences } from '../composer-preferences';
+import { bindSessionOwner } from '../session-owner';
 
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -160,6 +161,33 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 		const { sender } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: false });
 		await sender.createWorktree();
 		expect(composerPreferences.current.checkout).toEqual(choice);
+	});
+
+	it('retains the choice when a response has no created session', async () => {
+		post.mockResolvedValueOnce({ ...created, session_id: null });
+		const { sender } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true });
+		await sender.createWorktree();
+		expect(composerPreferences.current.checkout).toEqual(choice);
+	});
+
+	it('fences the POST completion at an account boundary even without a checkout edit', async () => {
+		let finish!: (value: typeof created) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true });
+		const pending = sender.createWorktree();
+		bindSessionOwner('owner-a', 'owner-b');
+		// No checkout revision change: exercise the real owner epoch fence alone.
+		finish(created);
+		await pending;
+		expect(composerPreferences.current.checkout).toEqual(choice);
+	});
+
+	it('does not consume a remembered choice when an automatic name happens to match', async () => {
+		composerPreferences.set('checkout', { ...choice, branch: 'feat/auto-name' });
+		post.mockResolvedValueOnce({ ...created, branch_name: 'feat/auto-name', query_started: true });
+		const { sender } = setup();
+		await sender.autoCreateWorktree('hello');
+		expect(composerPreferences.current.checkout).toEqual({ ...choice, branch: 'feat/auto-name' });
 	});
 });
 
