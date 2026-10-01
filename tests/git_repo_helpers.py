@@ -169,5 +169,5 @@ def non_utf8_name_supported(directory: Path) -> bool:
             pass
         os.remove(probe)
         return True
-    except OSError:
+    except (OSError, UnicodeError):
         return False
