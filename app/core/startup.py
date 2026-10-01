@@ -393,9 +393,48 @@ async def start_services() -> None:
     register_terminal_notification_callback()
 
 
+def report_nested_projects() -> int:
+    """Warn about each project whose folder sits inside another Git repository.
+
+    Create and update refuse such folders; projects added before that rule are
+    reported here and never changed. Returns how many were found.
+    """
+    from pathlib import Path
+    from app.core.project_utils import enclosing_repo_root, get_project_working_dir
+
+    nested = 0
+    for project in database.get_all_projects():
+        try:
+            path = get_project_working_dir(project)
+            root = enclosing_repo_root(path) if Path(path).is_dir() else None
+        except Exception:  # noqa: BLE001 — one bad row must not stop the report
+            logger.debug("Nested-project check failed for %s", project.get("id"), exc_info=True)
+            continue
+        if root:
+            nested += 1
+            logger.warning(
+                "Project %s (%s) is inside the Git repository at %s. Projects must be a "
+                "repository root; add %s as a project instead. The existing project was not changed.",
+                project.get("id"), path, root, root,
+            )
+    return nested
+
+
 def start_background_tasks() -> List[asyncio.Task]:
     """Phase 6: Start periodic background tasks. Returns tasks for shutdown cancellation."""
     tasks = []
+
+    async def _report_nested_projects_once():
+        """One pass after start-up, off the loop: Git runs once per project."""
+        try:
+            await asyncio.sleep(20)
+            await asyncio.to_thread(report_nested_projects)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Nested-project report failed: {e}")
+
+    tasks.append(asyncio.create_task(_report_nested_projects_once()))
 
     async def _periodic_session_cleanup():
         """Background task: purge expired sessions every hour."""
