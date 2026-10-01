@@ -248,6 +248,56 @@ async def get_deployment_info(token: str = Depends(require_auth)):
     return info
 
 
+# Shared-database counts that mean some runner is (or may be) doing session
+# work. Stale live turns are left out: their lease lapsed, nothing writes them.
+_SHARED_ACTIVITY_KEYS = (
+    "local_active_runs", "other_active_runs", "local_live_turns", "other_live_turns",
+    "local_running_background_tasks", "other_running_background_tasks",
+    "unattributed_running_background_tasks",
+)
+_CROSS_WORKER_KEYS = (
+    "other_active_runs", "other_live_turns", "other_running_background_tasks",
+    "unattributed_running_background_tasks",
+)
+
+
+def whole_stack_activity_scope(metrics: dict, shared: dict) -> dict:
+    """Label a whole-stack snapshot with the session activity behind it.
+
+    ``activity_label`` is ``active`` when this worker streams or drives a
+    browser, or when any runner sharing the database holds a live lease or a
+    running background task; ``no_known_session_activity`` only when every
+    one of those signals was read and is zero; ``unknown`` when the shared
+    database could not be read, since a sibling or cluster worker may then be
+    busy unseen. The label is a point-in-time snapshot: callers measuring an
+    interval sample it at both ends. It covers session work, not unrelated
+    processes on the machine, and never carries session or worker identities.
+    """
+    local_streaming = metrics.get("pool_streaming", 0) or 0
+    local_browser = metrics.get("browser_active_calls", 0) or 0
+    local_active = bool(local_streaming or local_browser)
+    known = "unavailable" not in shared
+    shared_active = known and any(shared.get(key, 0) for key in _SHARED_ACTIVITY_KEYS)
+    if local_active or shared_active:
+        label = "active"
+    elif known:
+        label = "no_known_session_activity"
+    else:
+        label = "unknown"
+    return {
+        "worker": "local",
+        "cross_worker_activity_known": known,
+        "cross_worker_activity": (any(shared.get(key, 0) for key in _CROSS_WORKER_KEYS)
+                                  if known else None),
+        "activity_label": label,
+        "whole_stack_idle_classified": label == "no_known_session_activity",
+        "local_concurrent_activity": local_active,
+        "local_streaming_sessions": local_streaming,
+        "local_browser_viewers": metrics.get("browser_viewers", 0),
+        "shared_database": shared,
+    }
+
+
 @router.get("/api/v1/diagnostics")
 async def get_diagnostics(request: Request, token: str = Depends(require_auth), whole_stack: bool = False):
     """
@@ -272,17 +322,12 @@ async def get_diagnostics(request: Request, token: str = Depends(require_auth), 
             metrics["inference_journal"] = await run_sync(journal_diagnostics)
         except Exception as exc:
             metrics["inference_journal"] = {"unavailable": type(exc).__name__}
-        # A desktop ancestor can include sibling workers. Local activity is
-        # useful context but cannot certify that the whole installation is idle.
-        metrics["activity_scope"] = {
-            "worker": "local", "cross_worker_activity_known": False,
-            "whole_stack_idle_classified": False,
-            "local_concurrent_activity": bool(
-                metrics.get("pool_streaming", 0) or metrics.get("browser_active_calls", 0)
-            ),
-            "local_streaming_sessions": metrics.get("pool_streaming", 0),
-            "local_browser_viewers": metrics.get("browser_viewers", 0),
-        }
+        from app.db import runs as runs_db
+        try:
+            shared = await run_sync(runs_db.activity_summary, settings.effective_instance_id)
+        except Exception as exc:
+            shared = {"unavailable": type(exc).__name__}
+        metrics["activity_scope"] = whole_stack_activity_scope(metrics, shared)
     warnings = _check_warnings(metrics)
 
     return {

@@ -75,7 +75,8 @@ def journal_diagnostics() -> dict:
     import stat
     import time
     from fluid.codemode.skills import (
-        JOURNAL_MAX_BYTES, LEARNER_SILENCE_ALARM_SECONDS, journal_metrics, learner_silence_seconds,
+        JOURNAL_LOSS_EVENTS, JOURNAL_LOSS_FILE, JOURNAL_MAX_BYTES, LEARNER_SILENCE_ALARM_SECONDS,
+        journal_metrics, learner_silence_seconds, read_journal_loss,
     )
 
     started = time.perf_counter()
@@ -113,6 +114,26 @@ def journal_diagnostics() -> dict:
         "learner_silent_stores": 0,
         "learner_silence_alarm_seconds": LEARNER_SILENCE_ALARM_SECONDS,
     }
+    # Persisted per-store loss records (journal_loss.json): counts and times
+    # only, surviving restarts and shared by every worker over the store.
+    history = {
+        "scope": "persisted_per_store", "stores_with_history": 0,
+        **{name: 0 for name in JOURNAL_LOSS_EVENTS},
+        "first_at": None, "last_at": None, "last_quota_at": None,
+    }
+    result["loss_history"] = history
+
+    def fold_history(directory):
+        record = read_journal_loss(directory / JOURNAL_LOSS_FILE)
+        if not record:
+            return
+        history["stores_with_history"] += 1
+        for name in JOURNAL_LOSS_EVENTS:
+            history[name] += record[name]
+        for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
+            if name in record:
+                current = history[name]
+                history[name] = record[name] if current is None else pick(current, record[name])
 
     def read_regular(path, limit):
         # Never follow links or block on FIFOs/devices placed in a store. The
@@ -135,6 +156,7 @@ def journal_diagnostics() -> dict:
         try:
             if directory.is_symlink():
                 raise ValueError("Linked store")
+            fold_history(directory)
             budget = max(0, JOURNAL_DIAGNOSTIC_BYTES - result["bytes_scanned"])
             data, size, stable = read_regular(directory / "journal.jsonl", min(JOURNAL_MAX_BYTES, budget))
         except FileNotFoundError:
@@ -171,6 +193,12 @@ def journal_diagnostics() -> dict:
         result["pending_entries_known"] += entries - consumed
     result["coverage_complete"] = not result["discovery_incomplete"] and result["journals_incomplete"] == 0
     result["process_events"] = journal_metrics()
+    now = time.time()
+    last_quota = history["last_quota_at"]
+    history["last_quota_age_seconds"] = None if last_quota is None else max(0.0, now - last_quota)
+    # Records are written at most once per warning window, so they can trail
+    # the newest loss; "recent" therefore uses an hour, not the 60s window.
+    history["saturation_observed_last_hour"] = last_quota is not None and now - last_quota < 3600
     result["collection_ms"] = (time.perf_counter() - started) * 1000
     return result
 

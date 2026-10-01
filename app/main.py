@@ -350,6 +350,13 @@ async def lifespan(app: FastAPI):
         logger.exception("sync_engine.shutdown failed")
     if runner_approved:
         await shutdown_services()
+    # Journal losses buffered since the last rate-limited warning would die
+    # with the process; write them to each store's journal_loss.json.
+    try:
+        from fluid.codemode.skills import flush_journal_loss
+        await run_sync(flush_journal_loss)
+    except Exception:
+        logger.exception("Inference journal loss flush failed")
     try:
         from app.core.error_log_handler import uninstall_error_log_handler
         uninstall_error_log_handler()

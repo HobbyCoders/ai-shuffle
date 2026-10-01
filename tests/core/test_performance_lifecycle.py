@@ -219,6 +219,13 @@ async def test_whole_stack_diagnostics_is_opt_in_and_runs_off_loop(monkeypatch):
         journal_calls.append(True)
         return {"scope": "configured_worker_stores"}
     monkeypatch.setattr(fluid_memory, "journal_diagnostics", journal)
+    from app.db import runs as runs_db
+    activity_calls = []
+    def activity(local_runner_id):
+        assert threading.get_ident() != main_thread
+        activity_calls.append(local_runner_id)
+        return {"scope": "shared_database", "other_active_runs": 1}
+    monkeypatch.setattr(runs_db, "activity_summary", activity)
     app = FastAPI()
     app.include_router(system.router)
     from fastapi import Request
@@ -229,14 +236,44 @@ async def test_whole_stack_diagnostics_is_opt_in_and_runs_off_loop(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         plain = await client.get("/api/v1/diagnostics")
         assert plain.status_code == 200 and "whole_stack" not in plain.json()["metrics"]
-        assert not calls and not journal_calls
+        assert not calls and not journal_calls and not activity_calls
         assert "inference_journal" not in plain.json()["metrics"]
         explicit = await client.get("/api/v1/diagnostics?whole_stack=true")
         assert explicit.status_code == 200
         assert explicit.json()["metrics"]["whole_stack"]["scope"] == "desktop_tree"
         assert calls == [True] and journal_calls == [True]
         assert explicit.json()["metrics"]["inference_journal"]["scope"] == "configured_worker_stores"
-        assert explicit.json()["metrics"]["activity_scope"]["whole_stack_idle_classified"] is False
+        scope = explicit.json()["metrics"]["activity_scope"]
+        assert len(activity_calls) == 1
+        # A sibling worker's leased run makes the snapshot active, never idle.
+        assert scope["cross_worker_activity_known"] is True
+        assert scope["cross_worker_activity"] is True
+        assert scope["activity_label"] == "active"
+        assert scope["whole_stack_idle_classified"] is False
+
+
+@pytest.mark.parametrize(
+    ("local", "shared", "label", "cross"),
+    [
+        ({}, {"unavailable": "OperationalError"}, "unknown", None),
+        ({"pool_streaming": 1}, {"unavailable": "OperationalError"}, "active", None),
+        ({}, {"scope": "shared_database", "other_active_runs": 0, "stale_live_turns": 3},
+         "no_known_session_activity", False),
+        ({}, {"scope": "shared_database", "local_live_turns": 1}, "active", False),
+        ({"browser_active_calls": 1}, {"scope": "shared_database"}, "active", False),
+        ({}, {"scope": "shared_database", "other_live_turns": 1}, "active", True),
+        # Background tasks have no lease: counted as activity even unattributed.
+        ({}, {"scope": "shared_database", "unattributed_running_background_tasks": 1}, "active", True),
+    ],
+)
+def test_whole_stack_activity_label_is_only_idle_when_every_signal_was_read(local, shared, label, cross):
+    from app.api.system import whole_stack_activity_scope
+    scope = whole_stack_activity_scope(local, shared)
+    assert scope["activity_label"] == label
+    assert scope["cross_worker_activity"] is cross
+    assert scope["cross_worker_activity_known"] is ("unavailable" not in shared)
+    assert scope["whole_stack_idle_classified"] is (label == "no_known_session_activity")
+    assert scope["shared_database"] is shared
 
 
 def test_journal_coverage_drives_append_cursor_reap_without_exposing_contents(tmp_path, monkeypatch):
@@ -372,3 +409,124 @@ def test_journal_diagnostics_counts_silent_learners_without_naming_them(tmp_path
     local.note_learner_pass(True, now=time.time())
     assert fluid_memory.journal_diagnostics()["learner_silent_stores"] == 0
     assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.fixture
+def fresh_loss_buffer(monkeypatch):
+    from collections import OrderedDict
+
+    from fluid.codemode import skills
+    monkeypatch.setattr(skills, "_JOURNAL_UNPERSISTED", OrderedDict())
+    monkeypatch.setattr(skills, "_JOURNAL_BACKOFF", OrderedDict())
+    return skills
+
+
+def test_saturated_journal_loss_history_survives_restart_rate_limited(
+        tmp_path, monkeypatch, fresh_loss_buffer):
+    import json
+    from collections import OrderedDict
+
+    from app.core import fluid_memory
+    skills = fresh_loss_buffer
+    root = tmp_path / "skills"
+    monkeypatch.setattr(fluid_memory, "skills_root", lambda: root)
+    store = skills.SkillStore(root)
+    monkeypatch.setattr(skills, "JOURNAL_MAX_BYTES", 1)
+    monkeypatch.setattr(store, "reap_journal", lambda: 0)
+    clock = SimpleNamespace(now=1_000.0)
+    monkeypatch.setattr(skills, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: clock.now))
+    writes = []
+    real_write = skills.atomic_write_text
+    monkeypatch.setattr(skills, "atomic_write_text", lambda p, t: (writes.append(p.name), real_write(p, t)))
+    for _ in range(120):
+        store.journal_append({"kind": "inference", "content": "never-collect-this-transcript"})
+    # The first skip opens the warning window and is recorded at once; the
+    # rest stay buffered instead of rewriting the record per dropped entry.
+    assert writes == ["journal_loss.json"]
+    assert skills.journal_metrics()["loss_history_pending"] == 119
+    clock.now += 61
+    store.journal_append({"kind": "inference", "content": "x"})
+    assert writes == ["journal_loss.json"] * 2
+    with pytest.raises(OSError, match="quota"):
+        store.journal_append({"kind": "remember", "content": "explicit"})
+    assert skills.journal_metrics()["loss_history_pending"] == 0
+
+    # A new process starts with empty counters; the store still knows.
+    monkeypatch.setattr(skills, "_JOURNAL_UNPERSISTED", OrderedDict())
+    result = fluid_memory.journal_diagnostics()
+    history = result["loss_history"]
+    assert history["stores_with_history"] == 1
+    assert history["skipped_quota"] == 121
+    assert history["explicit_quota_failures"] == 1
+    assert history["first_at"] == 1_000.0 and history["last_quota_at"] == 1_061.0
+    import time as real_time
+    monkeypatch.setattr(real_time, "time", lambda: 1_121.0)  # the diagnostics' wall clock
+    assert fluid_memory.journal_diagnostics()["loss_history"]["saturation_observed_last_hour"] is True
+    monkeypatch.setattr(real_time, "time", lambda: 4_721.0)
+    later = fluid_memory.journal_diagnostics()["loss_history"]
+    monkeypatch.undo()
+    assert later["saturation_observed_last_hour"] is False
+    assert later["last_quota_age_seconds"] == 3660.0
+    rendered = json.dumps(result)
+    assert "never-collect-this-transcript" not in rendered and str(root) not in rendered
+    record = json.loads((root / "journal_loss.json").read_text(encoding="utf-8"))
+    assert set(record) == {
+        "schema", "skipped_quota", "skipped_busy", "explicit_quota_failures",
+        "explicit_busy_failures", "dropped_unsynthesized", "first_at", "last_at", "last_quota_at",
+    }
+
+
+def test_journal_loss_stays_buffered_while_record_is_busy_then_flushes(tmp_path, fresh_loss_buffer):
+    from fluid._filelock import file_lock
+    skills = fresh_loss_buffer
+    store = skills.SkillStore(tmp_path / "skills")
+    record = store.root / "journal_loss.json"
+    with file_lock(record.with_name(record.name + ".lock")) as held:
+        assert held
+        store._journal_skip("journal is busy")
+        assert not record.exists()
+        assert skills.journal_metrics()["loss_history_pending"] == 1
+    store._journal_skip("journal is busy")  # inside the window: buffered only
+    assert not record.exists()
+    assert skills.flush_journal_loss() == 0
+    assert skills.read_journal_loss(record)["skipped_busy"] == 2
+    assert skills.journal_metrics()["loss_history_pending"] == 0
+
+
+def test_journal_loss_record_rejects_corrupt_special_and_oversized_files(tmp_path, fresh_loss_buffer):
+    import os
+    skills = fresh_loss_buffer
+    store = skills.SkillStore(tmp_path / "skills")
+    record = store.root / "journal_loss.json"
+    record.write_text('{"skipped_quota": "lots", "first_at": NaN, "last_at": -4, "extra": "x"}')
+    assert skills.read_journal_loss(record) == {
+        "schema": 1, "skipped_quota": 0, "skipped_busy": 0, "explicit_quota_failures": 0,
+        "explicit_busy_failures": 0, "dropped_unsynthesized": 0,
+    }
+    record.write_text("[1]")
+    assert skills.read_journal_loss(record) is None
+    record.write_text(" " * (skills.JOURNAL_LOSS_MAX_BYTES + 1) + "{}")
+    assert skills.read_journal_loss(record) is None
+    record.unlink()
+    target = tmp_path / "elsewhere.json"
+    target.write_text('{"skipped_quota": 5}')
+    record.symlink_to(target)
+    assert skills.read_journal_loss(record) is None
+    record.unlink()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(record)
+        assert skills.read_journal_loss(record) is None  # never blocks on a FIFO
+        store._journal_skip("journal byte quota reached")
+        assert skills.read_journal_loss(record)["skipped_quota"] == 1
+    assert target.read_text() == '{"skipped_quota": 5}'
+
+
+def test_journal_loss_buffer_is_bounded(tmp_path, monkeypatch, fresh_loss_buffer):
+    skills = fresh_loss_buffer
+    monkeypatch.setattr(skills, "_JOURNAL_LOSS_LIMIT", 2)
+    before = skills.journal_metrics()["loss_history_unpersisted"]
+    for name in ("a", "b", "c"):
+        skills._journal_event("skipped_busy", 3, journal=str(tmp_path / name / "journal.jsonl"))
+    assert len(skills._JOURNAL_UNPERSISTED) == 2
+    assert skills.journal_metrics()["loss_history_unpersisted"] - before == 3
+    assert skills.journal_metrics()["loss_history_pending"] == 6

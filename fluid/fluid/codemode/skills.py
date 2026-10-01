@@ -25,6 +25,10 @@ Alongside the skills the store keeps:
   recalled into the file's ``archived`` list instead of growing without
   bound; the ``Recall`` builtin searches live and archived entries and feeds
   the usage counters that drive that eviction.
+- ``journal_loss.json`` — fixed-shape counts and times of journal entries
+  that were not recorded or were dropped unsynthesized (quota, busy lock,
+  backlog overflow), so coverage loss outlives the process that saw it.
+  Never content. Rewritten at most once per warning window per process.
 
 Every one of those files is BOUNDED and the harness owns the cleanup. The
 model has no reaping control at all. Reaping is deterministic, best-effort (a
@@ -66,8 +70,10 @@ import ast
 import json
 import keyword
 import logging
+import math
 import os
 import re
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -82,12 +88,15 @@ from fluid.codemode.os_sandbox import REQUIRED_REFUSAL_MARK
 _log = logging.getLogger(__name__)
 
 # Aggregate counters only: no store paths, identities or journal contents. They
-# describe this Python process since import, not durable or cross-worker totals.
+# describe this Python process since import; the durable per-store history of
+# losses is journal_loss.json (see "persisted journal loss history" below).
 _JOURNAL_METRICS_LOCK = threading.Lock()
 _JOURNAL_METRICS = {
     "appended_entries": 0, "reaped_entries": 0, "dropped_unsynthesized": 0,
     "skipped_busy": 0, "skipped_quota": 0,
     "explicit_busy_failures": 0, "explicit_quota_failures": 0,
+    # Losses whose buffer was evicted before reaching journal_loss.json.
+    "loss_history_unpersisted": 0,
 }
 _JOURNAL_SATURATED_AT: float | None = None
 
@@ -112,12 +121,130 @@ def _journal_window_count(path: str, kind: str, interval: float) -> int:
         return emit
 
 
-def _journal_event(event: str, count: int = 1) -> None:
+def _journal_event(event: str, count: int = 1, journal: str | None = None) -> None:
     global _JOURNAL_SATURATED_AT
     with _JOURNAL_METRICS_LOCK:
         _JOURNAL_METRICS[event] += count
         if event in ("skipped_quota", "explicit_quota_failures"):
             _JOURNAL_SATURATED_AT = time.monotonic()
+        if journal is not None and event in JOURNAL_LOSS_EVENTS:
+            _note_unpersisted_loss(journal, event, count)
+
+
+# ─── persisted journal loss history ──────────────────────────────────────────
+#
+# The counters above die with the process. Each store also keeps a small
+# fixed-shape record of the entries it lost (counts and wall-clock times only,
+# never content) in ``journal_loss.json`` beside the journal, so coverage loss
+# survives restarts and is visible to every worker reading the store. Losses
+# are buffered in memory and written when the journal's rate-limited warning
+# fires, on an explicit-entry failure, and at shutdown, so a saturated journal
+# costs at most one small write per warning window.
+
+JOURNAL_LOSS_FILE = "journal_loss.json"
+JOURNAL_LOSS_EVENTS = (
+    "skipped_quota", "skipped_busy", "explicit_quota_failures", "explicit_busy_failures",
+    "dropped_unsynthesized",
+)
+_JOURNAL_LOSS_LIMIT = 512
+# journal backoff key -> {event: count, "first_at", "last_at", "last_quota_at"}
+_JOURNAL_UNPERSISTED: OrderedDict[str, dict] = OrderedDict()
+
+
+def _note_unpersisted_loss(journal: str, event: str, count: int) -> None:
+    # Called with _JOURNAL_METRICS_LOCK held.
+    now = time.time()
+    pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {"first_at": now}
+    pending[event] = pending.get(event, 0) + count
+    pending["last_at"] = now
+    if event in ("skipped_quota", "explicit_quota_failures"):
+        pending["last_quota_at"] = now
+    _JOURNAL_UNPERSISTED[journal] = pending
+    while len(_JOURNAL_UNPERSISTED) > _JOURNAL_LOSS_LIMIT:
+        _, evicted = _JOURNAL_UNPERSISTED.popitem(last=False)
+        _JOURNAL_METRICS["loss_history_unpersisted"] += sum(
+            evicted.get(name, 0) for name in JOURNAL_LOSS_EVENTS
+        )
+
+
+JOURNAL_LOSS_MAX_BYTES = 4096
+
+
+def read_journal_loss(path: Path) -> dict | None:
+    """The loss record at ``path`` with only its known, well-typed fields, or
+    None when it is missing, unreadable, linked, not a regular file or not a
+    JSON object. Never follows links or blocks on a FIFO placed there."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            raw = stream.read(JOURNAL_LOSS_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > JOURNAL_LOSS_MAX_BYTES:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return _merge_loss(doc, {})
+
+
+def _merge_loss(record: dict, pending: dict) -> dict:
+    merged = {}
+    for name in JOURNAL_LOSS_EVENTS:
+        value = record.get(name, 0)
+        base = value if type(value) is int and value >= 0 else 0
+        merged[name] = base + pending.get(name, 0)
+    for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
+        values = [
+            v for v in (record.get(name), pending.get(name))
+            if type(v) in (int, float) and math.isfinite(v) and v >= 0
+        ]
+        if values:
+            merged[name] = float(pick(values))
+    merged["schema"] = 1
+    return merged
+
+
+def _persist_journal_loss(journal: str) -> bool:
+    """Fold this process's buffered losses for ``journal`` into its store's
+    record. A busy or failed write keeps them buffered for the next try."""
+    with _JOURNAL_METRICS_LOCK:
+        pending = _JOURNAL_UNPERSISTED.pop(journal, None)
+    if not pending:
+        return True
+    path = Path(journal).with_name(JOURNAL_LOSS_FILE)
+    written = False
+    with suppress(OSError), file_lock(path.with_name(path.name + ".lock")) as held:
+        if held:
+            record = read_journal_loss(path)
+            # Missing, linked, special or corrupt: restart from this batch.
+            # The record holds counts only, so nothing else is lost.
+            atomic_write_text(path, json.dumps(_merge_loss(record or {}, pending), sort_keys=True))
+            written = True
+    if not written:
+        with _JOURNAL_METRICS_LOCK:
+            current = _JOURNAL_UNPERSISTED.pop(journal, None) or {}
+            restored = _merge_loss(pending, current)
+            restored.pop("schema", None)
+            _JOURNAL_UNPERSISTED[journal] = restored
+    return written
+
+
+def flush_journal_loss() -> int:
+    """Write every buffered loss record (shutdown). Returns how many
+    journals still hold unwritten losses."""
+    with _JOURNAL_METRICS_LOCK:
+        journals = list(_JOURNAL_UNPERSISTED)
+    return sum(not _persist_journal_loss(journal) for journal in journals)
 
 
 def journal_metrics() -> dict:
@@ -129,6 +256,11 @@ def journal_metrics() -> dict:
             "last_saturation_age_seconds": age,
             "saturation_observed_last_60s": age is not None and age < 60,
             "chat_history_loss_measured": False,
+            # Losses counted above but not yet in any journal_loss.json.
+            "loss_history_pending": sum(
+                pending.get(name, 0)
+                for pending in _JOURNAL_UNPERSISTED.values() for name in JOURNAL_LOSS_EVENTS
+            ),
         }
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
@@ -805,10 +937,18 @@ class SkillStore:
             return -1
 
     def _journal_skip(self, reason: str) -> None:
-        _journal_event("skipped_quota" if reason == "journal byte quota reached" else "skipped_busy")
+        event = "skipped_quota" if reason == "journal byte quota reached" else "skipped_busy"
+        _journal_event(event, journal=self._journal_backoff_key)
         count = _journal_window_count(self._journal_backoff_key, reason, 60)
         if count:
             _log.warning("Inference event skipped: %s (%d skipped since last warning)", reason, count)
+            # Same window as the warning: at most one small write per minute.
+            _persist_journal_loss(self._journal_backoff_key)
+
+    def _journal_explicit_failure(self, event: str) -> None:
+        # Rare and reported to the caller, so record it durably right away.
+        _journal_event(event, journal=self._journal_backoff_key)
+        _persist_journal_loss(self._journal_backoff_key)
 
     def journal_append(self, entry: dict) -> None:
         """Append one journal line.
@@ -841,14 +981,14 @@ class SkillStore:
         with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT) as held:
             if not held:
                 if explicit:
-                    _journal_event("explicit_busy_failures")
+                    self._journal_explicit_failure("explicit_busy_failures")
                     raise OSError("journal is busy; the entry was not recorded")
                 self._journal_skip("journal is busy")
                 return
             before = self._journal_size()
             if max(0, before) + line_bytes > JOURNAL_MAX_BYTES:
                 if explicit:
-                    _journal_event("explicit_quota_failures")
+                    self._journal_explicit_failure("explicit_quota_failures")
                     raise OSError(
                         "journal byte quota reached and nothing consumed is "
                         "left to reap; the entry was not recorded"
@@ -972,7 +1112,10 @@ class SkillStore:
             self._journal_bytes = self._journal_size()
             _journal_event("reaped_entries", drop)
             if backlog:
-                _journal_event("dropped_unsynthesized", len(backlog))
+                _journal_event(
+                    "dropped_unsynthesized", len(backlog), journal=self._journal_backoff_key,
+                )
+                _persist_journal_loss(self._journal_backoff_key)
                 _log.warning(
                     "Memory journal backlog overflow: dropped %d unsynthesized "
                     "entries (oldest first) from %s; synthesis has not been "

@@ -140,6 +140,32 @@ class TestDiagnostics:
         assert m["inference_journal"] == {"unavailable": "OSError"}
         assert m["activity_scope"]["local_concurrent_activity"] is True
         assert m["activity_scope"]["local_streaming_sessions"] == 2
+        assert m["activity_scope"]["activity_label"] == "active"
+
+    def test_whole_stack_sees_a_sibling_runner_through_the_shared_database(self, owner, monkeypatch):
+        from app.core import fluid_memory, process_metrics, resource_monitor
+        from app.db import runs
+
+        async def metrics():
+            return {"pool_streaming": 0, "browser_active_calls": 0, "browser_viewers": 0}
+
+        monkeypatch.setattr(resource_monitor, "_collect_metrics", metrics)
+        monkeypatch.setattr(resource_monitor, "_check_warnings", lambda m: [])
+        monkeypatch.setattr(process_metrics, "collect_process_metrics", lambda enabled: {})
+        monkeypatch.setattr(fluid_memory, "journal_diagnostics", dict)
+        scope = owner.get("/api/v1/diagnostics", params={"whole_stack": "true"}).json()["metrics"]["activity_scope"]
+        assert scope["activity_label"] == "no_known_session_activity"
+        assert scope["whole_stack_idle_classified"] is True
+
+        runs.claim_run("sibling-session", "another-install", 60)
+        scope = owner.get("/api/v1/diagnostics", params={"whole_stack": "true"}).json()["metrics"]["activity_scope"]
+        # This worker is quiet, but the installation is not idle.
+        assert scope["local_concurrent_activity"] is False
+        assert scope["cross_worker_activity"] is True
+        assert scope["activity_label"] == "active"
+        assert scope["whole_stack_idle_classified"] is False
+        assert scope["shared_database"]["other_active_runners"] == 1
+        assert "another-install" not in str(scope) and "sibling-session" not in str(scope)
 
     def test_api_key_gets_the_local_snapshot(self, owner, monkeypatch):
         from app.core import resource_monitor
