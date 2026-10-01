@@ -195,6 +195,77 @@ describe('remembered new-chat worker', () => {
 	});
 });
 
+describe('back-to-back worktree sessions keep independent checkout identity (#1528)', () => {
+	// A first worktree send is still being created (multi-second branch naming +
+	// POST) when the user starts the next chat. The in-flight creation owns its
+	// branch; the next compose must not inherit it, or the second task is bound
+	// to the first task's branch and checkout.
+	const inFlight = () => fullState({
+		sessionId: null,
+		title: 'New Chat',
+		draft: '',
+		messages: [{ id: 'user-1', role: 'user', content: 'Fix desktop update feedback' }],
+		worktreeIntent: 'worktree',
+		worktreeBranch: 'fix/desktop-update-feedback-and-fresh-ui',
+		worktreeBaseBranch: 'develop',
+		worktreeCreateNewBranch: true,
+		isCreatingWorktree: true,
+	});
+
+	it('a new chat started mid-creation does not stage the first task\'s branch', () => {
+		const { switcher, getState, ephemeralStore } = makeSwitcher(inFlight());
+		try {
+			switcher.newChat();
+			expect(getState().sessionId).toBeNull();
+			expect(getState().worktreeBranch).toBe('');
+			expect(getState().worktreeCreateNewBranch).toBe(false);
+			expect(getState().worktreeId).toBeNull();
+			expect(getState().selectedWorktreeBranch).toBeNull();
+			expect(getState().isCreatingWorktree).toBe(false);
+			expect(getState().messages).toEqual([]);
+			expect(ephemeralStore.get('__new_chat__')?.worktreeBranch).toBe('');
+		} finally {
+			switcher.destroy();
+		}
+	});
+
+	it('switching away mid-creation and back to New Chat does not stage it either', async () => {
+		const { switcher, getState, ephemeralStore } = makeSwitcher(inFlight());
+		try {
+			await switcher.switchSession('session-B');
+			expect(ephemeralStore.get('__new_chat__')?.worktreeBranch).toBe('');
+			expect(ephemeralStore.get('__new_chat__')?.worktreeCreateNewBranch).toBe(false);
+			switcher.newChat();
+			expect(getState().worktreeBranch).toBe('');
+			expect(getState().worktreeCreateNewBranch).toBe(false);
+		} finally {
+			switcher.destroy();
+		}
+	});
+
+	it('keeps text typed into the next compose while the first creation runs', () => {
+		const { switcher, getState } = makeSwitcher({ ...inFlight(), draft: 'Live session effort and Fast mode' });
+		try {
+			switcher.newChat();
+			expect(getState().draft).toBe('Live session effort and Fast mode');
+			expect(getState().worktreeBranch).toBe('');
+		} finally {
+			switcher.destroy();
+		}
+	});
+
+	it('still restores a staged branch on an idle (unsent) compose', () => {
+		const { switcher, getState } = makeSwitcher({ ...inFlight(), isCreatingWorktree: false, messages: [] });
+		try {
+			switcher.newChat();
+			expect(getState().worktreeBranch).toBe('fix/desktop-update-feedback-and-fresh-ui');
+			expect(getState().worktreeCreateNewBranch).toBe(true);
+		} finally {
+			switcher.destroy();
+		}
+	});
+});
+
 describe('session navigation closes header dropdowns', () => {
 	it('clears peer pending state on switch and on new chat instead of sharing it across sessions', async () => {
 		const { switcher, getState } = makeSwitcher({ ...fullState(), pendingPeerMessages: [

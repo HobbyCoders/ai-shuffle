@@ -54,8 +54,10 @@ def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/featu
 
     resolve_pv2 = MagicMock(return_value=pv2)
     ensure_checkout = MagicMock(return_value=checkout_path)
+    branch_exists = MagicMock(return_value=False)
     monkeypatch.setattr(project_resolver, "resolve_project_v2", resolve_pv2)
     monkeypatch.setattr(checkout_manager, "ensure_checkout", ensure_checkout)
+    monkeypatch.setattr(checkout_manager, "local_branch_exists", branch_exists)
 
     create_session = MagicMock()
     set_session_branch = MagicMock()
@@ -84,6 +86,7 @@ def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/featu
         "pv2": pv2,
         "resolve_pv2": resolve_pv2,
         "ensure_checkout": ensure_checkout,
+        "branch_exists": branch_exists,
         "create_session": create_session,
         "set_session_branch": set_session_branch,
         "submit": submit,
@@ -235,6 +238,42 @@ async def test_ensure_checkout_receives_base_and_create_new_kwargs(monkeypatch):
     kw = m["ensure_checkout"].call_args.kwargs
     assert kw["base_branch"] == "develop"
     assert kw["create_new_branch"] is True
+
+
+async def test_new_branch_that_already_exists_is_refused_before_any_write(monkeypatch):
+    """#1528: "create new branch" for a branch that already exists must not
+    resolve to that branch's existing checkout (another session's working
+    tree). 409 with the stable phrase the composer keys on; nothing created."""
+    m = _wire_v2(monkeypatch)
+    m["branch_exists"].return_value = True
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(create_new_branch=True),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    assert ei.value.detail.startswith("Branch 'feature/x' already exists")
+    m["branch_exists"].assert_called_once_with(m["pv2"], "feature/x")
+    m["ensure_checkout"].assert_not_called()
+    m["create_session"].assert_not_called()
+    m["set_session_branch"].assert_not_called()
+
+
+async def test_existing_branch_intent_skips_the_new_branch_check(monkeypatch):
+    """Selecting an existing branch deliberately shares its checkout."""
+    m = _wire_v2(monkeypatch)
+    m["branch_exists"].return_value = True
+
+    await worktree_api._create_v2_branch_session(
+        body=_body(create_new_branch=False),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    m["branch_exists"].assert_not_called()
+    assert m["ensure_checkout"].call_args.kwargs["create_new_branch"] is False
+    m["create_session"].assert_called_once()
 
 
 async def test_response_base_branch_honest_for_new_branch(monkeypatch):

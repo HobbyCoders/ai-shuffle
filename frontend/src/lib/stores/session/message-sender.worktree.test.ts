@@ -25,6 +25,7 @@ vi.mock('./v2/feed-controller', () => ({
 }));
 
 import { feedController } from './v2/feed-controller';
+import { generateBranchName } from '$lib/api/git';
 
 function setup(overrides: Partial<ActiveSessionState> = {}) {
 	let state = {
@@ -167,5 +168,114 @@ describe('autoCreateWorktree', () => {
 		expect(post).not.toHaveBeenCalled();
 		expect(state().worktreeError).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
 		expect(state().messages).toEqual([]);
+	});
+});
+
+describe('back-to-back worktree creation keeps each session independent (#1528)', () => {
+	const exists = (branch: string) => ({
+		status: 409,
+		detail: `Branch '${branch}' already exists, so it can't be created as a new branch for this session. Select it as an existing branch, or choose a different name.`,
+	});
+
+	it('mints a distinct branch when the generated name already exists, instead of sharing its checkout', async () => {
+		post.mockRejectedValueOnce(exists('feat/auto-name'));
+		post.mockImplementationOnce(async (_url: string, body: { branch_name: string }) => ({
+			session_id: 'wt-2', branch_name: body.branch_name, base_branch: 'develop', worktree_path: '/w2', status: 'ok', query_started: true,
+		}));
+		const { sender, state } = setup();
+
+		await sender.autoCreateWorktree('Live session effort and Fast mode');
+
+		expect(post).toHaveBeenCalledTimes(2);
+		const first = post.mock.calls[0][1] as { branch_name: string };
+		const second = post.mock.calls[1][1] as { branch_name: string; create_new_branch: boolean; prompt: string };
+		expect(first.branch_name).toBe('feat/auto-name');
+		expect(second.branch_name).toMatch(/^feat\/auto-name-[a-z0-9]{4}$/);
+		expect(second.create_new_branch).toBe(true);
+		expect(second.prompt).toBe('Live session effort and Fast mode');
+		expect(state()).toMatchObject({
+			sessionId: 'wt-2', worktreeBranch: second.branch_name, selectedWorktreeBranch: second.branch_name, worktreeError: null,
+		});
+	});
+
+	it('a branch name generated after navigation is never staged on the next compose', async () => {
+		let resolveName!: (v: { branch_name: string }) => void;
+		vi.mocked(generateBranchName).mockReturnValueOnce(new Promise((r) => { resolveName = r; }) as never);
+		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'fix/desktop-update', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		const { sender, internal, state, deps } = setup();
+
+		const pending = sender.autoCreateWorktree('Fix desktop update feedback');
+		await vi.waitFor(() => expect(generateBranchName).toHaveBeenCalled());
+		// The user starts the next task before the first one's name arrives.
+		internal.worktreeCreationGeneration++;
+		deps.update((s) => ({ ...s, messages: [], isCreatingWorktree: false, worktreeBranch: '', worktreeCreateNewBranch: false }));
+		resolveName({ branch_name: 'fix/desktop-update' });
+		await pending;
+
+		// The first task still gets its own branch and session...
+		expect(post).toHaveBeenCalledExactlyOnceWith('/sessions/with-worktree', expect.objectContaining({
+			branch_name: 'fix/desktop-update', prompt: 'Fix desktop update feedback',
+		}), { keepalive: true });
+		// ...and the next compose inherits neither the name nor the session.
+		expect(state()).toMatchObject({ sessionId: null, worktreeBranch: '', worktreeCreateNewBranch: false });
+	});
+
+	it('does not retry other conflicts', async () => {
+		post.mockRejectedValueOnce({ status: 409, detail: "This project isn't checked out on this device yet." });
+		const { sender, state } = setup();
+		await sender.autoCreateWorktree('task');
+		expect(post).toHaveBeenCalledOnce();
+		expect(state().sessionId).toBeNull();
+		expect(state().worktreeError).toContain("isn't checked out");
+	});
+
+	it('explains an explicit new branch that already exists, without retrying', async () => {
+		post.mockRejectedValueOnce(exists('fix/desktop-update-feedback-and-fresh-ui'));
+		const { sender, state } = setup({ worktreeBranch: 'fix/desktop-update-feedback-and-fresh-ui', worktreeCreateNewBranch: true });
+		await sender.createWorktree('Live session effort and Fast mode');
+		expect(post).toHaveBeenCalledOnce();
+		expect(state().sessionId).toBeNull();
+		expect(state().worktreeError).toBe(
+			"Branch 'fix/desktop-update-feedback-and-fresh-ui' already exists. Select it as an existing branch, or choose a different name.",
+		);
+	});
+
+	it.each(['createWorktree', 'autoCreateWorktree'] as const)(
+		'%s finishing after navigation leaves the next compose\'s device pick alone',
+		async (entry) => {
+			let resolvePost!: (v: unknown) => void;
+			post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
+			const { sender, internal, state, deps } = setup({
+				worktreeBranch: entry === 'createWorktree' ? 'fix/first-task' : '',
+				deviceIntent: { id: 'runner-a', name: 'A' },
+			} as Partial<ActiveSessionState>);
+
+			const pending = sender[entry]('first task');
+			await vi.waitFor(() => expect(post).toHaveBeenCalled());
+			// Next compose: the user navigated and picked another device for task two.
+			internal.worktreeCreationGeneration++;
+			deps.update((s) => ({ ...s, deviceIntent: { id: 'runner-b', name: 'B' }, worktreeBranch: '' }));
+			resolvePost({ session_id: 'wt-1', branch_name: 'fix/first-task', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+			await pending;
+
+			expect(state().deviceIntent).toEqual({ id: 'runner-b', name: 'B' });
+			expect(state().sessionId).toBeNull();
+			expect(state().worktreeBranch).toBe('');
+		},
+	);
+
+	it('carries effort/Fast overrides when navigation happens during the WS connect wait', async () => {
+		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'fix/first-task', base_branch: 'develop', worktree_path: '/w', status: 'ok' });
+		const { sender, internal, wsConn } = setup({ worktreeBranch: 'fix/first-task', effortLevelOverride: 'high', fastMode: true } as Partial<ActiveSessionState>);
+		let connected = false;
+		wsConn.isConnected.mockImplementation(() => connected);
+		wsConn.connect.mockImplementation(() => { internal.worktreeCreationGeneration++; connected = true; });
+
+		await sender.createWorktree('first task');
+
+		expect(wsConn.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+			type: 'query', session_id: 'wt-1', prompt: 'first task',
+			overrides: expect.objectContaining({ effort: 'high', fast: true }),
+		}));
 	});
 });
