@@ -110,3 +110,71 @@ def get_active_run(session_id: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
     return dict(row) if row else None
+
+
+_LIVE_TURN_STATES = "('running','interrupting','draining')"
+
+
+def activity_summary(local_runner_id: str) -> Dict[str, Any]:
+    """Content-free, point-in-time view of session work across every runner
+    that shares this database (this worker and other registered installs).
+
+    Only counts leave this function: no session, runner or instance id.
+
+    * A run counts while its lease is unexpired; the runner's heartbeat
+      renewing that lease is its proof of life.
+    * A live turn counts when it belongs to such a run, attributed by the
+      run's runner. A live turn without one is ``stale_live_turns``: its
+      runner stopped renewing and nothing is writing for it.
+    * Running background tasks carry no lease, so they are counted even when
+      their worker may be gone. A caller deciding "idle" must treat them as
+      activity: a wrong "active" is safe, a wrong "idle" is not.
+    """
+    summary: Dict[str, Any] = {
+        "scope": "shared_database",
+        "local_active_runs": 0, "other_active_runs": 0, "other_active_runners": 0,
+        "local_live_turns": 0, "other_live_turns": 0, "stale_live_turns": 0,
+        "local_running_background_tasks": 0, "other_running_background_tasks": 0,
+        "unattributed_running_background_tasks": 0,
+    }
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Active runs and live turns are each covered by a partial unique
+        # index, so these stay cheap however long the history grows.
+        cursor.execute(
+            "SELECT runner_id, COUNT(*) AS n FROM runs "
+            "WHERE state='active' AND lease_expires_at >= NOW() GROUP BY runner_id"
+        )
+        for row in cursor.fetchall():
+            if row["runner_id"] == local_runner_id:
+                summary["local_active_runs"] += int(row["n"])
+            else:
+                summary["other_active_runs"] += int(row["n"])
+                summary["other_active_runners"] += 1
+        cursor.execute(
+            "SELECT r.runner_id AS runner_id, COUNT(*) AS n FROM turns t "
+            "JOIN runs r ON r.id = t.run_id "
+            f"WHERE t.state IN {_LIVE_TURN_STATES} AND r.state='active' "
+            "AND r.lease_expires_at >= NOW() GROUP BY r.runner_id"
+        )
+        leased = 0
+        for row in cursor.fetchall():
+            leased += int(row["n"])
+            local = row["runner_id"] == local_runner_id
+            summary["local_live_turns" if local else "other_live_turns"] += int(row["n"])
+        cursor.execute(f"SELECT COUNT(*) AS n FROM turns WHERE state IN {_LIVE_TURN_STATES}")
+        row = cursor.fetchone()
+        summary["stale_live_turns"] = max(0, int(row["n"] if row else 0) - leased)
+        cursor.execute(
+            "SELECT instance_id, COUNT(*) AS n FROM background_tasks "
+            "WHERE status='running' GROUP BY instance_id"
+        )
+        for row in cursor.fetchall():
+            if not row["instance_id"]:
+                key = "unattributed_running_background_tasks"
+            elif row["instance_id"] == local_runner_id:
+                key = "local_running_background_tasks"
+            else:
+                key = "other_running_background_tasks"
+            summary[key] += int(row["n"])
+    return summary

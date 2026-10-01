@@ -202,7 +202,7 @@ jobs:
           python -m pytest tests/db/test_usage_budget_postgres.py tests/db/test_openrouter_usage_postgres.py \
             tests/db/test_dedupe_cancelled_usage_postgres.py tests/db/test_turn_usage_settlement_postgres.py \
             tests/db/test_fluid_delegated_batching_postgres.py tests/db/test_fluid_native_batching_postgres.py \
-            tests/db/test_universal_search_pg.py \
+            tests/db/test_universal_search_pg.py tests/db/test_runs_activity_postgres.py \
             tests/core/test_pg_session_store.py tests/core/test_pg_session_store_rewind.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
