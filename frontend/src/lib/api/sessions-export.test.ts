@@ -13,10 +13,13 @@ const createURL = vi.fn(() => 'blob:test-export');
 const revokeURL = vi.fn();
 const downloaded: string[] = [];
 
-function fileResponse(filename?: string) {
+function fileResponse(filename?: string, privacy?: string) {
+	const headers = new Headers(filename ? { 'Content-Disposition': `attachment; filename="${filename}"` } : {});
+	if (privacy) headers.set('X-Transcript-Privacy', privacy);
 	return {
 		ok: true,
-		headers: new Headers(filename ? { 'Content-Disposition': `attachment; filename="${filename}"` } : {}),
+		status: 200,
+		headers,
 		blob: vi.fn(async () => new Blob(['harmless fixture']))
 	};
 }
@@ -47,7 +50,7 @@ describe('sharing-safe session download boundary', () => {
 	});
 
 	it('opts into filtering and a distinct Markdown fallback filename', async () => {
-		fetchMock.mockResolvedValueOnce(fileResponse());
+		fetchMock.mockResolvedValueOnce(fileResponse(undefined, 'share-safe'));
 		await exportSession('session-test', 'markdown', { shareSafe: true });
 		expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/sessions/session-test/export?format=markdown&share_safe=true', { method: 'GET' });
 		expect(downloaded).toEqual(['session-export-share-safe.md']);
@@ -56,9 +59,21 @@ describe('sharing-safe session download boundary', () => {
 	});
 
 	it('uses the server-provided filename on a sharing-safe response', async () => {
-		fetchMock.mockResolvedValueOnce(fileResponse('chat-share-safe.md'));
+		fetchMock.mockResolvedValueOnce(fileResponse('chat-share-safe.md', 'share-safe'));
 		await exportSession('session-test', 'markdown', { shareSafe: true });
 		expect(downloaded).toEqual(['chat-share-safe.md']);
+	});
+
+	it.each([undefined, 'private-raw', 'unexpected'])('rejects successful but unconfirmed sharing responses (%s)', async privacy => {
+		const response = fileResponse('raw-chat.md', privacy);
+		fetchMock.mockResolvedValueOnce(response);
+		await expect(exportSession('session-test', 'markdown', { shareSafe: true })).rejects.toMatchObject({
+			detail: 'Server did not confirm a sharing-safe export. Nothing was downloaded.'
+		});
+		expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/sessions/session-test/export?format=markdown&share_safe=true', { method: 'GET' });
+		expect(response.blob).not.toHaveBeenCalled();
+		expect(createURL).not.toHaveBeenCalled();
+		expect(downloaded).toEqual([]);
 	});
 
 	it('propagates a rejected sharing export without retrying or downloading raw history', async () => {

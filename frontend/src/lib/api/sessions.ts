@@ -227,7 +227,16 @@ export async function exportSession(
 	const ext = format === 'json' ? 'json' : format === 'jsonl' ? 'jsonl' : 'md';
 	const fallback = options.shareSafe ? `session-export-share-safe.${ext}` : `session-export.${ext}`;
 	const sharingQuery = options.shareSafe ? '&share_safe=true' : '';
-	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}${sharingQuery}`, fallback);
+	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}${sharingQuery}`, fallback,
+		options.shareSafe ? (response) => {
+			// Older workers may ignore the query and return a private raw export.
+			if (response.headers.get('X-Transcript-Privacy') !== 'share-safe') {
+				throw {
+					detail: 'Server did not confirm a sharing-safe export. Nothing was downloaded.',
+					status: response.status
+				};
+			}
+		} : undefined);
 }
 
 /**
