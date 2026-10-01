@@ -1320,6 +1320,38 @@ def register_unregistered_worktrees(
     return adopted
 
 
+def local_branch_exists(
+    project_v2_row: dict[str, Any] | None,
+    branch: str,
+    runner_id: str | None = None,
+) -> bool:
+    """Whether ``branch`` already exists as a local ref in this runner's clone.
+
+    New-session intake calls this before minting a "new" branch. When the branch
+    already exists, :func:`ensure_checkout` would otherwise hand back whatever
+    checkout that branch already has — typically another session's working tree
+    (#1528). ``False`` when there is no base checkout here; materialization then
+    reports that itself.
+    """
+    branch = (branch or "").strip()
+    if not project_v2_row or not branch:
+        return False
+    project_id = project_v2_row.get("id")
+    if not project_id:
+        return False
+    if runner_id is None:
+        runner_id = settings.effective_instance_id
+    base_path = _ensure_base_checkout(project_id, runner_id, project_v2_row)
+    if not base_path:
+        return False
+    result = git_service._run_git(
+        base_path,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        timeout=10,
+    )
+    return result.returncode == 0
+
+
 def ensure_checkout(
     project_v2_row: Optional[Dict[str, Any]],
     branch: Optional[str] = None,
