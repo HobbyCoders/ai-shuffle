@@ -1468,3 +1468,142 @@ async def test_concurrent_new_branch_intake_for_one_name_binds_exactly_one_sessi
     assert refused[0].status_code == 409
     assert database.get_session(ok[0].session_id)["branch"] == branch
     assert checkout_manager.git_service.get_current_branch(ok[0].worktree_path) == branch
+
+
+# ---------------------------------------------------------------------------
+# Remote-target intake: the target's ensure_worktree op (#1528)
+# ---------------------------------------------------------------------------
+
+def _run_ensure_op(project, monkeypatch, branch, *, session_id=None, op_id=None,
+                   create_new_branch=True):
+    """Queue, claim and run one ensure_worktree op on RUNNER exactly as the
+    target's claim loop does; return the settled op row. Re-using ``op_id``
+    re-runs that same row (a re-delivered op)."""
+    import asyncio
+
+    from app.core import git_ops_runner
+    from app.core.config import settings
+    from app.db import git_ops as git_ops_db
+    from app.db.base import get_db
+
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: RUNNER))
+    params = {"branch": branch, "base_branch": "HEAD", "create_new_branch": create_new_branch}
+    if session_id is not None:
+        params["session_id"] = session_id
+    op = git_ops_db.insert_op(
+        RUNNER, "ensure_worktree", project_v2_id=project["id"], params=params, op_id=op_id,
+    )
+    if op["status"] != "queued":
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE git_ops SET status = 'queued' WHERE id = %s", (op["id"],)
+            )
+    claimed = git_ops_db.claim_op(op["id"], RUNNER)
+    assert claimed is not None
+    asyncio.run(git_ops_runner.run_op(claimed))
+    return git_ops_db.get_op(op["id"])
+
+
+def _branch_rows(project, branch):
+    return [r for r in checkouts_db.list_checkouts(project["id"]) if r.get("branch") == branch]
+
+
+def test_remote_new_branch_op_refuses_a_branch_another_session_minted(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """#1528 on the remote path: the target must not bind a second session's
+    "create new branch" op to the checkout the first session already works in.
+    The op settles as an error carrying the composer's stable phrase; the first
+    checkout's HEAD, uncommitted work and checkouts rows are untouched."""
+    branch = "fix/desktop-update-feedback-and-fresh-ui"
+    first = _run_ensure_op(project, monkeypatch, branch, session_id="session-1")
+    assert first["status"] == "done", first
+    first_path = Path(first["result"]["path"])
+    sentinel = first_path / "uncommitted.txt"
+    sentinel.write_text("first task's work", encoding="utf-8")
+    checkouts_before = checkouts_db.list_checkouts(project["id"])
+
+    second = _run_ensure_op(project, monkeypatch, branch, session_id="session-2")
+
+    assert second["status"] == "error"
+    assert second["result"]["error"].startswith(f"Branch '{branch}' already exists")
+    assert checkouts_db.list_checkouts(project["id"]) == checkouts_before
+    assert checkout_manager.git_service.get_current_branch(str(first_path)) == branch
+    assert sentinel.read_text(encoding="utf-8") == "first task's work"
+    assert checkout_manager.new_branch_owner(project, branch, RUNNER) == "session-1"
+
+
+def test_remote_new_branch_op_refuses_a_branch_that_already_existed(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """A pre-existing branch no op minted (the user's own, or one minted by
+    local intake) is refused just as local intake refuses it."""
+    _git(base_checkout, "branch", "feat/already-here")
+
+    op = _run_ensure_op(project, monkeypatch, "feat/already-here", session_id="session-1")
+
+    assert op["status"] == "error"
+    assert op["result"]["error"].startswith("Branch 'feat/already-here' already exists")
+    assert _branch_rows(project, "feat/already-here") == []
+    assert checkout_manager.new_branch_owner(project, "feat/already-here", RUNNER) is None
+
+
+@pytest.mark.parametrize("identity", ["session", "op"])
+def test_remote_new_branch_op_retry_for_the_same_request_still_succeeds(
+    project, base_checkout, workspace_root, monkeypatch, identity
+):
+    """Retry idempotency: the SAME session's op (or, with no session id, the
+    same op row re-run) finds the branch it already minted and resolves to the
+    same checkout instead of being refused."""
+    branch = "feat/live-session-effort-fast-mode"
+    kwargs = {"session_id": "session-1"} if identity == "session" else {"op_id": "gitop-retried"}
+    first = _run_ensure_op(project, monkeypatch, branch, **kwargs)
+    retry = _run_ensure_op(project, monkeypatch, branch, **kwargs)
+
+    assert first["status"] == "done", first
+    assert retry["status"] == "done", retry
+    assert retry["result"]["path"] == first["result"]["path"]
+    assert checkout_manager.git_service.get_current_branch(retry["result"]["path"]) == branch
+    assert len(_branch_rows(project, branch)) == 1
+
+
+def test_remote_new_branch_op_retry_after_a_crash_mid_mint_still_succeeds(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """The owner is recorded BEFORE the branch is created: an op that minted
+    the branch but never settled cleanly can be retried by the same session,
+    while a different session is still refused."""
+    branch = "feat/crashed-mid-mint"
+    real_ensure = checkout_manager.ensure_checkout
+
+    def mint_then_crash(*args, **kwargs):
+        real_ensure(*args, **kwargs)
+        raise RuntimeError("worker died after git worktree add")
+
+    monkeypatch.setattr(checkout_manager, "ensure_checkout", mint_then_crash)
+    crashed = _run_ensure_op(project, monkeypatch, branch, session_id="session-1")
+    assert crashed["status"] == "error"
+    monkeypatch.setattr(checkout_manager, "ensure_checkout", real_ensure)
+
+    other = _run_ensure_op(project, monkeypatch, branch, session_id="session-2")
+    retry = _run_ensure_op(project, monkeypatch, branch, session_id="session-1")
+
+    assert other["status"] == "error"
+    assert other["result"]["error"].startswith(f"Branch '{branch}' already exists")
+    assert retry["status"] == "done", retry
+    assert checkout_manager.git_service.get_current_branch(retry["result"]["path"]) == branch
+
+
+def test_remote_existing_branch_op_still_shares_the_checkout(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    """An EXISTING-branch op is not subject to the new-branch refusal."""
+    branch = "fix/shared"
+    first = _run_ensure_op(project, monkeypatch, branch, session_id="session-1")
+    second = _run_ensure_op(
+        project, monkeypatch, branch, session_id="session-2", create_new_branch=False
+    )
+
+    assert first["status"] == "done", first
+    assert second["status"] == "done", second
+    assert second["result"]["path"] == first["result"]["path"]

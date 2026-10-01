@@ -252,6 +252,7 @@ async def test_remote_create_pins_session_queues_op_and_does_no_local_work(proje
     assert queued[0]["project_v2_id"] == project["pv2"]["id"]
     assert queued[0]["params"] == {
         "branch": "feat/x", "base_branch": "main", "create_new_branch": True,
+        "session_id": resp.session_id,
     }
 
     # No local disk work, and no path is invented for the response.
@@ -561,3 +562,85 @@ async def test_target_equal_to_self_takes_the_ordinary_local_path(project):
     assert resp.worktree_path == str(project["path"])
     assert _row(resp.session_id)["instance_id"] == ME
     assert git_ops_db.list_queued_for_runner(ME) == []
+
+
+# ═══ "create new branch" must be new (#1528) ═════════════════════════════════
+
+
+async def test_remote_new_branch_already_claimed_on_target_is_refused(project):
+    """A back-to-back compose that still carries the previous task's NEW branch
+    for the same target must not create a second session on that branch (it
+    would be bound to the first session's checkout there). Same 409 and stable
+    phrase as local intake; nothing written, no second op queued."""
+    from fastapi import HTTPException
+
+    _give_peer_a_base_checkout(project)
+    with _Patches():
+        first = await _create(project, _body())
+        with pytest.raises(HTTPException) as exc:
+            await _create(project, _body(prompt="a different task"))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail.startswith("Branch 'feat/x' already exists")
+    assert [s["id"] for s in database.get_sessions()] == [first.session_id]
+    queued = git_ops_db.list_queued_for_runner(PEER)
+    assert [op["params"]["session_id"] for op in queued] == [first.session_id]
+
+
+async def test_remote_existing_branch_intent_still_shares_the_branch(project):
+    """Selecting the branch as EXISTING deliberately shares it — unchanged."""
+    _give_peer_a_base_checkout(project)
+    with _Patches():
+        first = await _create(project, _body())
+        second = await _create(project, _body(create_new_branch=False))
+
+    assert second.session_id != first.session_id
+    assert _row(second.session_id)["branch"] == "feat/x"
+    queued = git_ops_db.list_queued_for_runner(PEER)
+    assert len(queued) == 2
+    # Only a NEW-branch op carries the session id: an existing-branch op never
+    # reads it, and an older worker would refuse the unknown param.
+    by_session = {op["params"].get("session_id"): op for op in queued}
+    assert set(by_session) == {first.session_id, None}
+    assert by_session[None]["params"] == {
+        "branch": "feat/x", "base_branch": "main", "create_new_branch": False,
+    }
+
+
+async def test_concurrent_remote_new_branch_creates_bind_exactly_one_session(project):
+    """Two rapid remote creations of the SAME new name: one session owns it,
+    the other is refused — never two sessions queued to mint one branch."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    _give_peer_a_base_checkout(project)
+    in_create = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _gated_run_sync(fn, *a, **k):
+        # Hold the first session-row write open so the second request arrives
+        # between its claim check and its write.
+        if getattr(fn, "__name__", "") == "_create" and not in_create.is_set():
+            in_create.set()
+            await release.wait()
+        return fn(*a, **k)
+
+    with _Patches(), patch.object(
+        swt, "run_sync", new=AsyncMock(side_effect=_gated_run_sync)
+    ):
+        first = asyncio.create_task(_create(project, _body()))
+        await asyncio.wait_for(in_create.wait(), timeout=10)
+        second = asyncio.create_task(_create(project, _body()))
+        await asyncio.sleep(0.05)
+        release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(first, second, return_exceptions=True), timeout=30
+        )
+
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, HTTPException)]
+    assert len(ok) == 1 and len(refused) == 1, results
+    assert refused[0].status_code == 409
+    assert [s["id"] for s in database.get_sessions()] == [ok[0].session_id]
+    assert len(git_ops_db.list_queued_for_runner(PEER)) == 1

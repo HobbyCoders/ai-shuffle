@@ -6,6 +6,7 @@ included in the main sessions router for backward compatibility.
 """
 
 import asyncio
+import contextlib
 import shutil
 import uuid
 import weakref
@@ -47,6 +48,10 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "hidden",
 }
 
+# What a worker's ``git-op`` handler answers for a param it does not know
+# (app/network/git.py ``handle_op``). Older workers send it for ``session_id``.
+_UNSUPPORTED_GIT_OP_PARAMS = "Unsupported Git operation parameters"
+
 
 # One lock per (project_v2, branch) being minted by new-session intake. Weak
 # values: an entry lives only while a request holds or awaits it.
@@ -65,16 +70,10 @@ def _new_branch_intake_lock(project_v2_id: str, branch: str) -> asyncio.Lock:
 
 
 def new_branch_exists_detail(branch: str) -> str:
-    """409 detail for a "create new branch" request naming an existing branch.
+    """409 detail for a "create new branch" request naming an existing branch."""
+    from app.core.checkout_manager import new_branch_exists_detail as detail
 
-    The composer keys its auto-name retry on the leading
-    ``Branch '<name>' already exists`` phrase; keep it stable.
-    """
-    return (
-        f"Branch '{branch}' already exists, so it can't be created as a new "
-        f"branch for this session. Select it as an existing branch, or choose "
-        f"a different name."
-    )
+    return detail(branch)
 
 
 def _merge_session_create_overrides(
@@ -283,6 +282,14 @@ async def _preflight_remote_target(
         )
 
 
+def _remote_branch_claimed(project_v2_id: str, branch: str, target: str) -> bool:
+    """Whether a session here is already bound to ``branch`` on ``target``."""
+    return any(
+        target in (row.get("instance_id"), row.get("owner_device_id"))
+        for row in database.list_sessions_for_v2_branch(project_v2_id, branch)
+    )
+
+
 async def _create_remote_branch_session(
     body: CreateWorktreeSessionRequest,
     project: Optional[dict],
@@ -317,51 +324,71 @@ async def _create_remote_branch_session(
     profile_id = _resolve_default_profile_id(project, body.profile_id)
     prompt = (body.prompt or "").strip()
 
-    # Blobs are carried BY A TURN, so they are only lifted when this
-    # request also supplies the first prompt. The promptless compose flow
-    # (createWorktree, which POSTs first and sends the message over the WS
-    # afterwards) carries its paths on that follow-up query instead — lifting
-    # them here would orphan them with no turn to attach them to.
-    upload_blob_ids: List[str] = []
-    if body.pending_upload_paths and prompt:
-        try:
-            upload_blob_ids = await run_sync(
-                upload_transfer.lift_paths_to_blobs,
-                body.pending_upload_paths,
-                project,
-                session_id,
-                pv2["id"],
-            )
-        except Exception as e:  # noqa: BLE001 — refuse, never half-create
+    # A "new" branch must really be new (#1528), as on local intake. This
+    # install cannot see the target's refs (the target's ensure_worktree op is
+    # the authority and refuses there), but a session it already created on
+    # the same target for this branch proves the name is taken: refuse now,
+    # with the composer's stable 409, before anything is written. The lock
+    # makes two concurrent creations of one name resolve to one owner.
+    intake_lock = (
+        _new_branch_intake_lock(pv2["id"], branch_name)
+        if body.create_new_branch
+        else contextlib.nullcontext()
+    )
+    async with intake_lock:
+        if body.create_new_branch and await run_sync(
+            _remote_branch_claimed, pv2["id"], branch_name, target_instance_id
+        ):
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Couldn't send your attachments to the other device: {e}"
-                ),
-            ) from e
+                status_code=status.HTTP_409_CONFLICT,
+                detail=new_branch_exists_detail(branch_name),
+            )
 
-    # 3. Create the session OWNED BY + PINNED TO the target and bind it to
-    #    the branch, exactly as the local path does.
-    def _create() -> None:
-        create_kwargs = {
-            "session_id": session_id,
-            "profile_id": profile_id,
-            "project_id": body.project_id or None,
-            "project_v2_id": pv2["id"],
-            # The owner receives this row before first-message persistence below.
-            # Give it the title now so its catalog cannot overwrite ours with "".
-            "title": derive_session_title(prompt or ""),
-            "api_user_id": api_user_id,
-            "is_active": True,
-            "target_instance_id": target_instance_id,
-        }
-        create_kwargs = _merge_session_create_overrides(
-            create_kwargs, session_create_overrides
-        )
-        database.create_session(**create_kwargs)
-        database.set_session_branch(session_id, branch_name, pv2["id"])
+        # Blobs are carried BY A TURN, so they are only lifted when this
+        # request also supplies the first prompt. The promptless compose flow
+        # (createWorktree, which POSTs first and sends the message over the WS
+        # afterwards) carries its paths on that follow-up query instead — lifting
+        # them here would orphan them with no turn to attach them to.
+        upload_blob_ids: List[str] = []
+        if body.pending_upload_paths and prompt:
+            try:
+                upload_blob_ids = await run_sync(
+                    upload_transfer.lift_paths_to_blobs,
+                    body.pending_upload_paths,
+                    project,
+                    session_id,
+                    pv2["id"],
+                )
+            except Exception as e:  # noqa: BLE001 — refuse, never half-create
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Couldn't send your attachments to the other device: {e}"
+                    ),
+                ) from e
 
-    await run_sync(_create)
+        # 3. Create the session OWNED BY + PINNED TO the target and bind it to
+        #    the branch, exactly as the local path does.
+        def _create() -> None:
+            create_kwargs = {
+                "session_id": session_id,
+                "profile_id": profile_id,
+                "project_id": body.project_id or None,
+                "project_v2_id": pv2["id"],
+                # The owner receives this row before first-message persistence below.
+                # Give it the title now so its catalog cannot overwrite ours with "".
+                "title": derive_session_title(prompt or ""),
+                "api_user_id": api_user_id,
+                "is_active": True,
+                "target_instance_id": target_instance_id,
+            }
+            create_kwargs = _merge_session_create_overrides(
+                create_kwargs, session_create_overrides
+            )
+            database.create_session(**create_kwargs)
+            database.set_session_branch(session_id, branch_name, pv2["id"])
+
+        await run_sync(_create)
     # Keep the submitted text even if the owner takes longer than the request
     # timeout. A timeout does not mean the remote session was never created.
     _broadcast_session_created(session_id)
@@ -390,16 +417,45 @@ async def _create_remote_branch_session(
     # 4. Queue the checkout work for the target. This row carries
     #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
     #    so the intent has to travel durably or the session can never spawn.
-    await network_git.enqueue(
-        target_instance_id,
-        "ensure_worktree",
-        project_v2_id=pv2["id"],
-        params={
-            "branch": branch_name,
-            "base_branch": body.base_branch,
-            "create_new_branch": bool(body.create_new_branch),
-        },
-    )
+    op_params = {
+        "branch": branch_name,
+        "base_branch": body.base_branch,
+        "create_new_branch": bool(body.create_new_branch),
+    }
+    if body.create_new_branch:
+        # Request identity for the target's new-branch refusal (#1528): a
+        # retried op for THIS session may find the branch it already
+        # minted; any other session asking to "create" it is refused. Only
+        # sent for a new branch: an existing-branch op never reads it.
+        op_params["session_id"] = session_id
+    try:
+        await network_git.enqueue(
+            target_instance_id,
+            "ensure_worktree",
+            project_v2_id=pv2["id"],
+            params=op_params,
+        )
+    except control.ControlRefused as exc:
+        # A worker from before #1528's remote refusal rejects the unknown
+        # ``session_id`` param before inserting anything, and it has no
+        # new-branch refusal to feed. Re-send the params it understands so a
+        # mixed-version cluster keeps creating sessions.
+        if "session_id" not in op_params or (
+            _UNSUPPORTED_GIT_OP_PARAMS not in str(exc)
+        ):
+            raise
+        logger.warning(
+            "Worker %s does not accept ensure_worktree session_id; re-sending "
+            "without it (update the worker for its new-branch refusal)",
+            target_instance_id,
+        )
+        op_params.pop("session_id")
+        await network_git.enqueue(
+            target_instance_id,
+            "ensure_worktree",
+            project_v2_id=pv2["id"],
+            params=op_params,
+        )
 
     query_started = False
     if prompt:

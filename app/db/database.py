@@ -3226,6 +3226,7 @@ from app.db.sessions import (  # noqa: F401
     update_session_pr_state,
     list_sessions_by_pr_number,
     list_sessions_for_branch,
+    list_sessions_for_v2_branch,
     session_has_forks,
     get_session_messages,
     add_session_message,

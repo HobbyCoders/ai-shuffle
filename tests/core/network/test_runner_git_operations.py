@@ -287,3 +287,81 @@ def test_remote_worktree_target_queues_only_on_the_target_owner(
     assert len(queued) == 1
     assert queued[0]["op"] == "ensure_worktree"
     assert queued[0]["params"]["branch"] == "feature/network-owner"
+    # The request identity crosses the owner boundary so the target's
+    # new-branch refusal can tell a retry of THIS session from another (#1528).
+    assert queued[0]["params"]["session_id"] == response.session_id
+
+
+def test_remote_worktree_target_still_works_with_a_worker_without_session_id(
+    workers, monkeypatch, tmp_path
+):
+    """Mixed versions: a worker from before the remote new-branch refusal
+    rejects the unknown ``session_id`` param. Creation must still queue the
+    checkout work there (without it), exactly as before that param existed."""
+    from datetime import datetime
+
+    from app.network import git as network_git
+
+    a, b = _join_with_distinct_legacy_ids(workers, monkeypatch)
+    a_project = _seed_project(a, tmp_path)
+    _seed_project(b, tmp_path)
+    _serve_peer(monkeypatch, b)
+
+    get_session = database.get_session
+
+    def get_session_with_dates(*args, **kwargs):
+        row = get_session(*args, **kwargs)
+        if row is not None:
+            row = dict(row)
+            for key in ("created_at", "updated_at"):
+                if isinstance(row.get(key), str):
+                    row[key] = datetime.fromisoformat(row[key])
+        return row
+
+    monkeypatch.setattr(database, "get_session", get_session_with_dates)
+
+    # The older worker's validation: only these params; anything else is
+    # refused before a row is written.
+    real_handle_op = network_git.handle_op
+    seen_params = []
+
+    async def older_worker_handle_op(body, from_device):
+        params = body.get("params") or {}
+        seen_params.append(dict(params))
+        if set(params) - {"branch", "base_branch", "create_new_branch"}:
+            raise ValueError("Unsupported Git operation parameters")
+        return await real_handle_op(body, from_device)
+
+    monkeypatch.setattr(network_git, "handle_op", older_worker_handle_op)
+
+    body = CreateWorktreeSessionRequest(
+        project_id=PROJECT_ID,
+        branch_name="feature/older-worker",
+        base_branch="main",
+        create_new_branch=True,
+        target_instance_id=b.device_id,
+    )
+    with patch.object(sessions_worktree, "_broadcast_session_created"), a.active():
+        store.touch_member(b.device_id, endpoints=["http://peer.local:8000"])
+        transport.note_contact(b.device_id)
+        response = asyncio.run(
+            sessions_worktree._create_remote_branch_session(
+                body,
+                a_project["legacy"],
+                None,
+                a_project["pv2"],
+                b.device_id,
+            )
+        )
+    assert response.worktree_path is None
+    # The first attempt carried the id and was refused; the re-send did not.
+    assert [("session_id" in p) for p in seen_params] == [True, False]
+
+    with b.active():
+        queued = git_ops_db.list_queued_for_runner(LEGACY_B)
+    assert len(queued) == 1
+    assert queued[0]["params"] == {
+        "branch": "feature/older-worker",
+        "base_branch": "main",
+        "create_new_branch": True,
+    }

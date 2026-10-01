@@ -33,7 +33,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
+import weakref
 from typing import Any, Dict, Optional
 
 from app.core.config import settings
@@ -58,6 +60,28 @@ RETENTION_DAYS = 7
 # ---------------------------------------------------------------------------
 # Executors
 # ---------------------------------------------------------------------------
+
+class NewBranchExistsError(RuntimeError):
+    """A "create new branch" op named a branch another request already owns."""
+
+
+# Serializes the exists-check + mint for one (project, branch) on this install:
+# the claim loop and spawn-path inline claims run ops on different threads.
+# Weak values: an entry lives only while an op holds or awaits it.
+_NEW_BRANCH_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
+_NEW_BRANCH_LOCKS_GUARD = threading.Lock()
+
+
+def _new_branch_lock(project_v2_id: str | None, branch: str | None) -> threading.Lock:
+    key = (project_v2_id or "", branch or "")
+    with _NEW_BRANCH_LOCKS_GUARD:
+        lock = _NEW_BRANCH_LOCKS.get(key)
+        if lock is None:
+            lock = _NEW_BRANCH_LOCKS[key] = threading.Lock()
+        return lock
+
 
 def _record_checkout_state(
     project_v2_id: str, path: str, branch: Optional[str]
@@ -126,12 +150,35 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
             f"ensure_worktree: unknown project_v2 {project_v2_id!r}"
         )
 
-    path = checkout_manager.ensure_checkout(
-        project,
-        branch,
-        base_branch=params.get("base_branch"),
-        create_new_branch=bool(params.get("create_new_branch")),
-    )
+    if params.get("create_new_branch"):
+        # A "new" branch must really be new (#1528), exactly like local intake:
+        # minting a name that already exists here would bind this session to
+        # whatever checkout that branch already has — another session's tree.
+        # The one exception is the SAME request retried (this session, or this
+        # op when no session id was sent): it minted the branch already and
+        # must still succeed, as ``ensure_checkout`` alone always did.
+        owner = str(params.get("session_id") or op_row["id"])
+        with _new_branch_lock(project_v2_id, branch):
+            if checkout_manager.local_branch_exists(
+                project, branch
+            ) and checkout_manager.new_branch_owner(project, branch) != owner:
+                raise NewBranchExistsError(
+                    checkout_manager.new_branch_exists_detail(branch)
+                )
+            checkout_manager.record_new_branch_owner(project, branch, owner)
+            path = checkout_manager.ensure_checkout(
+                project,
+                branch,
+                base_branch=params.get("base_branch"),
+                create_new_branch=True,
+            )
+    else:
+        path = checkout_manager.ensure_checkout(
+            project,
+            branch,
+            base_branch=params.get("base_branch"),
+            create_new_branch=False,
+        )
     if not path:
         raise RuntimeError(
             f"Branch '{branch}' could not be materialized on this device "

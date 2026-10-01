@@ -113,9 +113,12 @@ async def handle_op(body: dict, from_device: str) -> dict:
     if not project_id or not await run_sync(checkouts.has_active_base_checkout, project_id, settings.effective_instance_id):
         raise ValueError("Project has no active base checkout on this worker")
     params = body.get("params") or {}
-    allowed = {"branch", "base_branch", "create_new_branch"} if operation == "ensure_worktree" else set()
+    allowed = {"branch", "base_branch", "create_new_branch", "session_id"} if operation == "ensure_worktree" else set()
     if not isinstance(params, dict) or set(params) - allowed:
         raise ValueError("Unsupported Git operation parameters")
+    session_id = params.get("session_id")
+    if session_id is not None and not (isinstance(session_id, str) and 0 < len(session_id) <= 80):
+        raise ValueError("Invalid Git operation session ID")
     request_id = str(body.get("request_id") or "")
     if not request_id.startswith("gitop-") or len(request_id) > 80:
         raise ValueError("Invalid Git operation request ID")
