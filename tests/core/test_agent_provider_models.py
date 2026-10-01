@@ -192,6 +192,36 @@ def test_task_contract_includes_file_subagents_without_shadowing_db_agents(mock_
     assert [target.id for target in contract.targets].count("reviewer") == 1
 
 
+def test_task_contract_states_the_configured_worker_limits(mock_db, monkeypatch):
+    """The owner asked for the real limits, not only the abstract wording, so
+    a model cannot mistake the nesting depth for a Swarm size cap."""
+    from app.core import config as cfg
+    from app.db import database
+
+    database.create_profile("caller", "Caller", None, {"model": "opus"})
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+    monkeypatch.setattr(cfg.settings, "task_tool_max_workers", 37)
+    monkeypatch.setattr(cfg.settings, "subagent_max_concurrent_per_session", 23)
+    monkeypatch.setattr(cfg.settings, "task_tool_max_depth", 4)
+    monkeypatch.setattr(cfg.settings, "task_worker_max_per_provider", 0)
+
+    description = build_task_contract("caller", None).description
+
+    assert "at most 37 live workers per root session tree" in description
+    assert "at most 23 concurrent workers per parent session" in description
+    assert "nesting depth of 4 levels" in description
+    # A disabled per-provider limit is not invented.
+    assert "per provider" not in description
+    # Built from configuration only, so the prefix is byte-stable across turns.
+    assert build_task_contract("caller", None).description == description
+
+    monkeypatch.setattr(cfg.settings, "subagent_max_concurrent_per_session", 0)
+    monkeypatch.setattr(cfg.settings, "task_worker_max_per_provider", 6)
+    description = build_task_contract("caller", None).description
+    assert "no separate per-parent concurrency limit" in description
+    assert "at most 6 concurrent workers per provider" in description
+
+
 def test_contract_documents_the_sync_result_shape(mock_db):
     """R4(a): every audited delegating session burned turns rediscovering this
     by KeyError, so the contract states it up front."""

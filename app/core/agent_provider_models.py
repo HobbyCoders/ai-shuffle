@@ -395,6 +395,47 @@ def resolve_subagent(
     )
 
 
+def host_worker_limits_text() -> str:
+    """The configured worker limits, stated with their actual values.
+
+    SWARM_ROUTING says only that the host caps live workers and nesting depth,
+    which left models guessing the numbers (and reading the depth default as a
+    five-agent Swarm cap). The values come from settings, not runtime state, so
+    the Task description stays byte-identical across turns until the
+    configuration changes. Each read mirrors how task_dispatch interprets the
+    setting: 0 falls back to the default for depth and the root budget, and
+    disables the per-parent and per-provider limits.
+    """
+    try:
+        from app.core.config import settings
+
+        max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
+        max_workers = int(getattr(settings, "task_tool_max_workers", 64) or 64)
+        per_parent = int(getattr(settings, "subagent_max_concurrent_per_session", 0) or 0)
+        per_provider = int(getattr(settings, "task_worker_max_per_provider", 0) or 0)
+    except Exception:  # noqa: BLE001 — a missing setting must not break the contract
+        logger.debug("Could not read worker limits for the Task contract", exc_info=True)
+        return ""
+
+    parts = [
+        f"at most {max_workers} live workers per root session tree, nested "
+        "workers included",
+        (
+            f"at most {per_parent} concurrent workers per parent session"
+            if per_parent > 0
+            else "no separate per-parent concurrency limit"
+        ),
+        f"nesting depth of {max_depth} levels of agent-invokes-agent",
+    ]
+    if per_provider > 0:
+        parts.append(f"at most {per_provider} concurrent workers per provider")
+    return (
+        "Configured worker limits on this host: " + "; ".join(parts) + ". "
+        "These cap concurrency and delegation depth, not the number of tasks "
+        "a Swarm may declare (up to 64)."
+    )
+
+
 @dataclass(frozen=True)
 class TaskContract:
     description: str
@@ -511,13 +552,15 @@ def build_task_contract(
         "worker_session_id/task_id and the completion is announced later."
     )
 
+    limits = host_worker_limits_text()
     description = (
         "Delegate a self-contained task to one configured subagent. The "
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
         "tool call. "
-        f"{SWARM_ROUTING}\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
+        f"{SWARM_ROUTING}" + (f" {limits}" if limits else "")
+        + f"\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
         f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
