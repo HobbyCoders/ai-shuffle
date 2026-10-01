@@ -148,7 +148,10 @@ def test_flag_off_view_is_byte_identical() -> None:
         if node.message.role == "assistant":
             assert message is node.message
     explicit = Compactor(config=_trim_only(elide_old_args=False))
-    explicit.trimmer.mark_trimmed(off.trimmer._trimmed)
+    # mark_trimmed is the resume API and defaults to render version 1; these
+    # trims were live, so they replay at the trimmer's own version.
+    explicit.trimmer.mark_trimmed(off.trimmer._trimmed,
+                                  render_version=explicit.trimmer.render_version)
     assert _dump(explicit.view(nodes)) == _dump(view)
 
 
