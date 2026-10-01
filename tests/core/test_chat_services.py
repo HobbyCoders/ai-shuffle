@@ -227,6 +227,7 @@ async def pending(broker):
         "https://-bad-.com",
         "ftp://example.com",
         "https://example.com/a/../b",
+        "https://example.com/a/..;/b",
         "https://example.com/a%2Fb",
         "https:\\\\example.com",
         "",
@@ -268,6 +269,13 @@ def test_origin_normalises_host_port_and_prefix():
         "/a/./b",
         "/%00",
         "",
+        # Path parameters: servlet containers strip ";..." and then resolve dots.
+        "/..;/admin",
+        "/x/..;jsessionid=1/..;/admin",
+        "/%2e%2e;/admin",
+        "/..%3b/admin",
+        "/.;/x",
+        "/;x/admin",
     ],
 )
 def test_request_paths_cannot_leave_the_granted_prefix(path):

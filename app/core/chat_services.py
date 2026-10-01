@@ -90,9 +90,12 @@ def _segments(path: str) -> list[str]:
     segments = path.split("/")
     for segment in segments:
         decoded = unquote(segment)
+        # Servlet containers (Tomcat, Jetty, Spring) drop ";params" before
+        # normalising, so "..;x" climbs out of the prefix like "..".
+        bare = decoded.split(";", 1)[0]
         if (
             not segment
-            or decoded in (".", "..")
+            or bare in ("", ".", "..")
             or "/" in decoded
             or "\\" in decoded
             or "\x00" in decoded
