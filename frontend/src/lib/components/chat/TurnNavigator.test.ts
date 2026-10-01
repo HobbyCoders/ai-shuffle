@@ -50,6 +50,37 @@ describe('TurnNavigator', () => {
 		expect(document.activeElement).toBe(tickNamed(1));
 	});
 
+	it('puts one tick in the Tab order: the focused tick, else the current turn', async () => {
+		const many = Array.from({ length: 300 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
+		const view = render(TurnNavigator, { props: { items: many, currentIndex: 120, onSelect: vi.fn() } });
+		const tabStops = () => screen.getAllByRole('button').filter((tick) => tick.tabIndex === 0);
+		const tickNamed = (n: number) => screen.getByRole('button', { name: `User message ${n} of 300: Prompt ${n - 1}` });
+		expect(tabStops()).toEqual([tickNamed(121)]);
+		await fireEvent.focus(tickNamed(10));
+		expect(tabStops()).toEqual([tickNamed(10)]);
+		await fireEvent.blur(tickNamed(10));
+		await view.rerender({ items: many, currentIndex: 299, onSelect: vi.fn() });
+		expect(tabStops()).toEqual([tickNamed(300)]);
+	});
+
+	it('drops focus after a touch tap so the tapped tick does not stay lit', async () => {
+		const onSelect = vi.fn();
+		render(TurnNavigator, { props: { items, currentIndex: 0, onSelect } });
+		const tapped = screen.getByRole('button', { name: 'User message 2 of 3: Fix the transcript' });
+		tapped.focus();
+		await fireEvent.pointerDown(tapped, { pointerType: 'touch' });
+		await fireEvent.click(tapped);
+		expect(onSelect).toHaveBeenLastCalledWith(1);
+		expect(document.activeElement).not.toBe(tapped);
+		expect(tapped.classList.contains('is-hovered')).toBe(false);
+
+		const clicked = screen.getByRole('button', { name: 'User message 3 of 3: Run verification' });
+		clicked.focus();
+		await fireEvent.pointerDown(clicked, { pointerType: 'mouse' });
+		await fireEvent.click(clicked);
+		expect(document.activeElement).toBe(clicked);
+	});
+
 	it('scrolls only the rail to keep the current turn in view, without undoing browsing', async () => {
 		const many = Array.from({ length: 80 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
 		const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect: vi.fn() } });

@@ -52,6 +52,7 @@ const railState = (page) =>
 		return {
 			count: ticks.length,
 			buttons: nav.querySelectorAll('button').length,
+			tabStops: ticks.filter((tick) => tick.tabIndex >= 0).length,
 			display: getComputedStyle(nav).display,
 			rail: { top: railBox.top, bottom: railBox.bottom, right: nav.getBoundingClientRect().right },
 			viewport: { width: innerWidth, height: innerHeight },
@@ -93,6 +94,7 @@ async function run(viewport, touch, turns) {
 	assert.equal(state.display, 'flex', `${label}: rail hidden`);
 	assert.equal(state.count, turns, `${label}: tick count`);
 	assert.equal(state.buttons, turns, `${label}: extra controls`);
+	assert.equal(state.tabStops, 1, `${label}: ${state.tabStops} Tab stops in the rail`);
 	assert.ok(state.minTickHeight >= (touch ? 16 : 10) - 0.5, `${label}: ticks shrank to ${state.minTickHeight}px`);
 	assert.ok(state.rail.top >= 0 && state.rail.bottom <= state.viewport.height, `${label}: rail off-screen`);
 	assert.ok(state.rail.right <= state.textLeft + 0.5, `${label}: rail ${state.rail.right} overlaps text ${state.textLeft}`);
@@ -193,6 +195,14 @@ async function run(viewport, touch, turns) {
 		state = await railState(page);
 		assert.equal(state.current, middle, `${label}: middle tick did not become current`);
 		assert.ok(state.visible.includes(middle), `${label}: middle tick left the view`);
+		if (touch) {
+			// A tap must not leave the tick focused/lit once the reader scrolls on.
+			const lit = await page.evaluate(() => {
+				const el = document.activeElement;
+				return !!el?.closest('.turn-rail') || !!document.querySelector('.turn-rail .is-hovered');
+			});
+			assert.equal(lit, false, `${label}: tapped tick stayed focused`);
+		}
 		await settle();
 		assert.equal((await railState(page)).current, middle, `${label}: highlight drifted after the jump landed`);
 	}

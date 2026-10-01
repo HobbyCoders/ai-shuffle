@@ -16,6 +16,11 @@
 	let { items, currentIndex, onSelect }: Props = $props();
 	let focused = $state(false);
 	let hoveredIndex = $state<number | null>(null);
+	// Roving tab stop: one tick is in the Tab order (the focused one, else the
+	// current turn) so a long history is not hundreds of Tab presses to cross.
+	// Arrows, Home and End move between ticks.
+	let focusedTick = $state<number | null>(null);
+	let lastPointerType = '';
 	// The preview lives outside the scrolling rail so the rail's overflow
 	// cannot clip it; it keeps the last item while it fades out.
 	let previewIndex = $state(0);
@@ -121,6 +126,7 @@
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
 	onmouseleave={() => (hoveredIndex = null)}
+	onpointerdown={(event) => (lastPointerType = event.pointerType)}
 >
 	<div
 		bind:this={rail}
@@ -138,11 +144,21 @@
 				style="--proximity: {hoveredIndex === null ? 0 : Math.max(0, 1 - Math.abs(index - hoveredIndex) / 3)}"
 				aria-label="User message {index + 1} of {items.length}: {item.label}"
 				aria-current={index === resolvedIndex ? 'true' : undefined}
-				onclick={() => onSelect(index)}
+				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
+				onclick={(event) => {
+					onSelect(index);
+					// A tap focuses the tick, which would keep it lit as if it were
+					// the current turn after the reader scrolls on.
+					if (lastPointerType === 'touch') event.currentTarget.blur();
+				}}
 				onkeydown={(event) => onKeydown(event, index)}
 				onmouseenter={() => showPreview(index)}
-				onfocus={() => showPreview(index)}
+				onfocus={() => {
+					focusedTick = index;
+					showPreview(index);
+				}}
 				onblur={() => {
+					if (focusedTick === index) focusedTick = null;
 					if (hoveredIndex === index) hoveredIndex = null;
 				}}
 			>
@@ -163,7 +179,7 @@
 <style>
 	.turn-nav {
 		position: absolute;
-		left: 2px;
+		left: 0;
 		top: 50%;
 		z-index: 12;
 		display: flex;
@@ -182,7 +198,9 @@
 		gap: clamp(3px, calc(42vh / var(--count, 4) - 2px), 9px);
 		max-height: 56vh;
 		min-height: 0;
-		padding: 10px 12px 10px 0;
+		/* The 2px left pad (the nav sits at left: 0) keeps the focus ring
+		   clear of the rail's horizontal clip. */
+		padding: 10px 12px 10px 2px;
 		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
@@ -266,7 +284,7 @@
 
 	.preview {
 		position: absolute;
-		left: 38px;
+		left: 40px;
 		width: min(320px, calc(100vw - 96px));
 		padding: 10px 12px;
 		border: 1px solid color-mix(in oklch, var(--border) 88%, transparent);
@@ -330,6 +348,13 @@
 		.bar {
 			width: 12px;
 		}
+
+		/* A smaller stretch so the hovered or focused bar fits the narrow rail. */
+		.tick:hover .bar,
+		.tick.is-hovered .bar,
+		.tick:focus-visible .bar {
+			transform: translateX(0) scaleX(1.6);
+		}
 	}
 
 	/* No hover on touch: a tap navigates, so a preview or ripple would only
@@ -343,6 +368,18 @@
 		.tick:hover .bar,
 		.tick.is-hovered .bar {
 			transform: none;
+		}
+
+		/* Touch browsers keep :hover on the last tapped tick. Without this it
+		   stays lit and dims the rest, so it reads as the current turn after
+		   the reader scrolls away from it. */
+		.turn-nav:hover .tick:not(:hover):not(.is-current) .bar {
+			opacity: 1;
+		}
+
+		.tick:hover:not(.is-current) .bar {
+			height: 2px;
+			background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
 		}
 	}
 
