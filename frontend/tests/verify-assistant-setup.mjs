@@ -1,0 +1,160 @@
+// Real-browser check of the minimal Assistant setup (issue #1608): name,
+// avatar and agent only, with the background-research explanation where the
+// introduction and limit forms used to be. A fake /api/v1/assistant backend
+// lives in this script, so nothing reaches a server or a model provider.
+//
+// Run from frontend/ while the fixture is serving:
+//   npx vite dev --config tests/vite.assistant-setup.config.js --host 127.0.0.1 --port 5741 --strictPort
+//   node tests/verify-assistant-setup.mjs
+// Needs browser-mcp's playwright-core (npm ci --ignore-scripts --prefix ../browser-mcp)
+// and a Chrome/Chromium binary (CHROMIUM_PATH). ASSISTANT_FIXTURE_URL overrides
+// the URL and SCREENSHOT_DIR saves a screenshot per viewport.
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(new URL('../../browser-mcp/package.json', import.meta.url));
+const { chromium } = require('playwright-core');
+const browser = await chromium.launch({
+	executablePath: process.env.CHROMIUM_PATH || {
+		win32: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+		darwin: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+	}[process.platform] || '/usr/bin/chromium',
+	headless: true,
+	args: ['--no-sandbox', '--disable-gpu'],
+});
+const url = process.env.ASSISTANT_FIXTURE_URL || 'http://127.0.0.1:5741/tests/assistant-setup.html';
+const LIMITS = { max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5 };
+let passed = 0;
+
+function fakeBackend() {
+	const identities = [
+		{ id: 'researcher', name: 'Researcher', avatar_id: 'robot', dedicated: false },
+		{ id: 'reviewer', name: 'Reviewer', avatar_id: 'pixel', dedicated: false },
+	];
+	const state = {
+		...LIMITS, configured: false, agent_id: null, home_session_id: null, enabled: false, paused: false,
+		status: 'unconfigured', agent: null, assistant_name: null, avatar_id: 'robot', avatar_presets: [],
+		introduction: {}, proactive_guard_ready: true, cost_accounting: 'reported_after_run_not_hard_cap',
+		usage: { runs_today: 0, reported_cost_today: 0, in_flight_runs: 0 },
+	};
+	const patches = [];
+	function configure(patch) {
+		patches.push(patch);
+		let id = patch.agent_id;
+		if (patch.create_agent) {
+			const existing = identities.find((a) => a.dedicated);
+			id = existing?.id ?? 'assistant';
+			if (!existing) identities.push({ id, name: 'Assistant', avatar_id: 'robot', dedicated: true });
+		}
+		if (id) state.agent_id = id;
+		const agent = identities.find((a) => a.id === state.agent_id);
+		if (patch.assistant_name) agent.name = patch.assistant_name;
+		if (patch.avatar_id) agent.avatar_id = patch.avatar_id;
+		for (const key of ['enabled', 'paused']) if (key in patch) state[key] = patch[key];
+		Object.assign(state, {
+			configured: true, agent: { ...agent }, assistant_name: agent.name, avatar_id: agent.avatar_id,
+			status: state.enabled ? (state.paused ? 'paused' : 'ready') : 'disabled',
+		});
+	}
+	async function handle(route) {
+		const request = route.request();
+		const path = new URL(request.url()).pathname.replace('/api/v1', '');
+		const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+		if (path === '/assistant' && request.method() === 'GET') return json(state);
+		if (path === '/assistant' && request.method() === 'PATCH') { configure(request.postDataJSON()); return json(state); }
+		if (path === '/assistant/agents') return json(identities);
+		if (path === '/assistant/sources' || path === '/assistant/activity') return json([]);
+		return json({ detail: `unexpected ${request.method()} ${path}` }, 404);
+	}
+	return { handle, patches, state };
+}
+
+async function run(viewport) {
+	const name = `${viewport.width}x${viewport.height}`;
+	const touch = viewport.width < 768;
+	const context = await browser.newContext({ viewport, isMobile: touch, hasTouch: touch, deviceScaleFactor: 1, serviceWorkers: 'block' });
+	const backend = fakeBackend();
+	await context.route((u) => u.pathname.startsWith('/api/'), backend.handle);
+	const page = await context.newPage();
+	const errors = [];
+	page.on('pageerror', (e) => errors.push(e.message));
+	page.on('response', (r) => { if (r.status() >= 400) errors.push(`${r.status()} ${r.url()}`); });
+	const check = (condition, label, detail) => {
+		assert.ok(condition, `[${name}] ${label}${detail === undefined ? '' : `: ${JSON.stringify(detail)}`}`);
+		passed++;
+	};
+	const press = async (locator) => { await (touch ? locator.tap() : locator.click()); await page.waitForTimeout(80); };
+	const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+	// The app shell scrolls inside the viewport, so a full-page shot needs a tall one.
+	const shoot = async (label) => {
+		if (!process.env.SCREENSHOT_DIR) return;
+		await page.setViewportSize({ width: viewport.width, height: 2600 });
+		await page.waitForTimeout(400);
+		await page.screenshot({ path: join(process.env.SCREENSHOT_DIR, `assistant-${label}-${name}.png`) });
+		await page.setViewportSize(viewport);
+	};
+
+	await page.goto(url);
+	const nameInput = page.getByRole('textbox', { name: 'Assistant name' });
+	await nameInput.waitFor();
+	check(await nameInput.inputValue() === 'Assistant', 'name defaults to Assistant');
+	check(await page.getByRole('radio', { name: /A dedicated assistant agent/ }).isChecked(), 'dedicated agent is the default');
+	check(await page.getByRole('combobox', { name: 'Assistant agent' }).count() === 0, 'agent picker hidden until asked for');
+	const avatars = page.getByRole('button', { name: / avatar$/ });
+	check(await avatars.count() === 16, '16 avatar presets', await avatars.count());
+	const pressed = page.locator('.avatar-picker button[aria-pressed="true"]');
+	check(await pressed.count() === 1, 'one preset avatar preselected');
+	const boxes = await avatars.evaluateAll((els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), w: r.width, h: r.height })));
+	const rows = [...new Set(boxes.map((b) => b.y))];
+	check(rows.length === 4 && boxes.slice(0, 4).every((b) => b.y === boxes[0].y), 'avatars form a 4x4 grid', rows);
+	check(boxes.every((b) => b.w >= 44 && b.h >= 44), 'avatar targets at least 44px', boxes[0]);
+	check(await page.getByRole('textbox', { name: 'What should I call you?' }).count() === 0, 'no introduction form');
+	check(await page.getByRole('spinbutton').count() === 0, 'no limit fields');
+	const explanation = page.getByText(/can’t send, change or delete anything/);
+	check(await explanation.isVisible(), 'background research explained');
+	check((await explanation.textContent()).includes('at most 12 passes'), 'explanation uses the server limits');
+	check(await page.getByRole('checkbox', { name: /Enable background research/ }).isChecked() === false, 'research stays off by default');
+	check(await overflow() <= 0, 'no horizontal overflow on setup', await overflow());
+	await shoot('setup');
+
+	// "One of my agents" stays available and does not lose the drafted identity.
+	await press(page.getByRole('radio', { name: /One of my agents/ }));
+	const picker = page.getByRole('combobox', { name: 'Assistant agent' });
+	check(await picker.isVisible(), 'agent picker shown for one of my agents');
+	await picker.selectOption('reviewer');
+	await page.waitForTimeout(80);
+	check(await nameInput.inputValue() === 'Reviewer', 'picking an agent shows its name');
+	await press(page.getByRole('radio', { name: /A dedicated assistant agent/ }));
+	check(await picker.count() === 0, 'agent picker hidden again');
+	check(await nameInput.inputValue() === 'Assistant', 'dedicated choice restores the default name');
+
+	await nameInput.fill('Juniper');
+	await press(page.getByRole('button', { name: 'fox avatar' }));
+	check(await page.getByRole('button', { name: 'fox avatar' }).getAttribute('aria-pressed') === 'true', 'avatar choice registers');
+	await press(page.getByRole('button', { name: 'Create assistant' }));
+	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
+	check(backend.patches.length === 1, 'one save request', backend.patches);
+	assert.deepEqual(backend.patches[0], { create_agent: true, assistant_name: 'Juniper', avatar_id: 'fox', enabled: false, paused: true }, `[${name}] save payload`);
+	passed++;
+	check(await page.getByRole('heading', { level: 1 }).textContent() === 'Juniper', 'home shows the new name');
+	check(await page.getByText(/Assistant created/).isVisible(), 'creation confirmed');
+	check(await overflow() <= 0, 'no horizontal overflow on home', await overflow());
+	await shoot('home');
+
+	// Editing reopens on the dedicated agent rather than offering a second one.
+	await press(page.getByRole('button', { name: 'Edit assistant' }));
+	check(await page.getByRole('radio', { name: /A dedicated assistant agent/ }).isChecked(), 'edit keeps the dedicated agent');
+	check(await page.getByText(/Uses Juniper, the agent setup made earlier/).isVisible(), 'edit names the existing dedicated agent');
+	await press(page.getByRole('button', { name: 'Save assistant' }));
+	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
+	check(backend.patches[1].agent_id === 'assistant' && !('create_agent' in backend.patches[1]), 'second save reuses the agent', backend.patches[1]);
+	check(errors.length === 0, 'no page errors or failed requests', errors);
+	await context.close();
+}
+
+try {
+	for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) await run(viewport);
+	console.log(`assistant setup: ${passed} checks passed`);
+} finally {
+	await browser.close();
+}
