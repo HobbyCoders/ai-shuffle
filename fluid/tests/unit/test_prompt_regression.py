@@ -136,6 +136,7 @@ def test_swarm_routing_is_gated_and_does_not_encourage_task_fanout():
                 assert "five agents" in description
                 assert "up to 64 tasks" in description
                 assert "max_parallel limits concurrent tasks" in description
+                assert "depth limits delegation chains, not how many tasks" in description
                 assert "silently dropping scope" in description
             else:
                 assert "Swarm" not in prompt + description
