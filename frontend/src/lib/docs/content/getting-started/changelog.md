@@ -10,11 +10,26 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 0.8.22
 
-- Keep large worker-history syncs from blocking new sessions and other network requests.
-- Save your first message before contacting another worker, so a timeout does not leave an empty local session. Failed requests show the saved session instead of a generic server error.
-- Fix Android account sign-in links reaching a 404 page. This also requires deploying the account-service route update.
-- Verify staged installer updates before activation and explain when a stored update needs a newer container image.
-- Improve oversized-image recovery, rewind matching, permission persistence, and private-access confirmations.
+- Add the persistent assistant: one long-running assistant that stays available across your sessions.
+- Long conversations compact less often and keep more of their prompt cache, which lowers cost on Codex models.
+- Delegated Claude Code sessions behave more like Claude Code itself, and search tools are no longer missing from them.
+- Move local sessions to another worker again; project sessions carry their Git state and context with them.
+- Change permissions, effort and Fast mode while a session is running. Fast mode and context controls now work for newer GPT-6 models.
+- The chat header's Git controls are folded into one Changes button and panel. Mobile action rows are reorganized, and busy Git worktrees are protected from cleanup.
+- Sign in to other workers with your account, without approving each one on your phone. Android account sign-in links no longer reach a 404 page.
+- See remaining provider usage without setting up an extra billing key. Claude subscription usage refreshes correctly again.
+- Stop stays visible while a session runs, also when you have a draft, and works for sessions on another worker.
+- Suggested replies fill in only on Tab or a double-click or double-tap.
+- Pending messages from other sessions show who sent them.
+- Rewind is disabled for mid-turn messages that have no checkpoint.
+- Fix sidebar status drift, missing PR status, slow history replay and slow cross-worker sync. Large history syncs no longer block new sessions.
+- Your first message is saved before another worker is contacted, so a timeout no longer leaves an empty session.
+- Imported Claude Code sessions keep their original dates.
+- Fix the Android multi-file picker, the mobile swipe gesture and mobile Git controls.
+- Fix live preview reloading while you scroll or type, and lower the built-in browser's memory use.
+- Desktop update checks are more reliable, the bell respects each worker's update scope, and the UI no longer shows stale cached pages after an update.
+- Installer updates are verified before activation, and the app explains when a stored update needs a newer container image.
+- Improve oversized-image recovery, rewind matching, permission persistence and private-access confirmations.
 
 ## 0.8.21
 
