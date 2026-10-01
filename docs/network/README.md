@@ -121,6 +121,16 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    reinstalls to match one, so publishing on a version difference made two
    workers on different versions overwrite the row on every scan and send
    each other a new operation forever.
+9. **Assistant.** The owner has one assistant across workers. Its
+   configuration and the id of its one home conversation travel as the
+   `assistant` collection (`assistant_account`, a single row). The worker that
+   owns the home session runs it and is the only one that runs background
+   research; the others open the home as a remote session and turn research off
+   in their own runner row. When two workers each hold a home, the older
+   session wins everywhere (ties go to the lower session id) and the other is
+   kept as an ordinary conversation. Research runs, events and source
+   watermarks stay on the worker that runs research. See
+   `app/core/assistant_service.py`.
 
 ## Trust
 
