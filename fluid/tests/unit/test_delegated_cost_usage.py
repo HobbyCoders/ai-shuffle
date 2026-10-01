@@ -254,3 +254,89 @@ async def test_a_failure_without_a_status_keeps_none(tmp_path) -> None:
     assert isinstance(error, ErrorEvent)
     assert error.status is None
     assert error.provider_message == "tool crashed"
+
+
+# ─── A read cut short still books the call it was holding ─────────────────
+
+
+def _held_reader(tail: Callable[[], Awaitable[bytes]]):
+    """A loop whose reader maps one assistant frame (its call's Usage held
+    for the final counts), then gets ``tail()`` as the next stdout line."""
+    from types import SimpleNamespace
+
+    from fluid.engine.delegated_proto import StreamJsonMapper
+    from fluid.events import Usage
+    from fluid.messages import Message, Text
+    from fluid.store.base import SessionNode
+
+    store = MemoryStore()
+    loop = DelegatedLoop(store=store, model="claude-fake", claude_cmd=[sys.executable, str(FAKE)])
+    loop._proc = SimpleNamespace(stdout=object())
+    emitted: list = []
+
+    async def emit(event: Any) -> Any:
+        emitted.append(event)
+        return event
+
+    async def no_snapshot(*_: Any, **__: Any) -> None:
+        return None
+
+    frame = {"type": "assistant", "session_id": "cli", "message": {
+        "id": "msg_1", "role": "assistant", "model": PRICED_MODEL,
+        "content": [{"type": "text", "text": "Working"}], "usage": USAGE,
+    }}
+    lines = [json.dumps(frame).encode()]
+
+    async def next_line() -> bytes:
+        if lines:
+            return lines.pop(0)
+        return await tail()
+
+    loop._emit = emit  # type: ignore[method-assign]
+    loop._ask_usage_snapshot = no_snapshot  # type: ignore[method-assign]
+    loop._next_stdout_line = next_line  # type: ignore[method-assign]
+
+    async def read() -> str | None:
+        sid = (await store.create_session()).session_id
+        user = SessionNode(node_id="n0", parent_id=None,
+                           message=Message(role="user", content=[Text("hi")]))
+        await store.append(sid, user)
+        mapper = StreamJsonMapper(session_id=sid, turn_id="t1", model="claude-fake",
+                                  user_node_id="n0")
+        return await loop._read_until_result(sid, "t1", mapper, user)
+
+    def usages() -> list:
+        return [e for e in emitted if isinstance(e, Usage) and not e.context_usage]
+
+    return read, usages
+
+
+async def test_a_reader_that_raises_still_books_the_held_call() -> None:
+    async def boom() -> bytes:
+        raise RuntimeError("pipe broke")
+
+    read, usages = _held_reader(boom)
+    with pytest.raises(RuntimeError):
+        await read()
+    [usage] = usages()
+    assert usage.input_tokens == USAGE["input_tokens"]
+    assert usage.cache_read_tokens == USAGE["cache_read_input_tokens"]
+
+
+async def test_a_cancelled_reader_still_books_the_held_call() -> None:
+    reached = asyncio.Event()
+
+    async def hang() -> bytes:
+        reached.set()
+        await asyncio.Event().wait()
+        return b""
+
+    read, usages = _held_reader(hang)
+    task = asyncio.create_task(read())
+    await asyncio.wait_for(reached.wait(), TURN_BUDGET)
+    assert usages() == []  # still held for its final counts
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [usage] = usages()
+    assert usage.cache_creation_tokens == USAGE["cache_creation_input_tokens"]

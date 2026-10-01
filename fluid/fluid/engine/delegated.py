@@ -1510,22 +1510,53 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """Map frames until the turn's result. None on a completed turn (its
         TurnComplete or Interrupted already emitted); otherwise the failure,
         with no terminal event emitted yet, for the caller to report or
-        retry."""
-        assert self._proc is not None and self._proc.stdout is not None
-        parent = user_node
-        last_assistant: Message | None = None
+        retry.
+
+        A read that ends early (the stream closed, the reader cancelled, or
+        an exception) first emits the call whose Usage the mapper still
+        holds for its final counts, and any snapshot waiting on it: the
+        kill-path booking and the error roll-up sum those per-call records,
+        and that call's input and cache tokens are most of its cost.
+        """
         # Context snapshots (by model_call_index) whose call's own Usage is
         # still held by the mapper; each is emitted right after that Usage.
         held_snapshots: dict[int, Usage] = {}
+        try:
+            return await self._map_until_result(
+                sid, turn_id, mapper, user_node, held_snapshots,
+            )
+        except BaseException:
+            try:
+                await self._release_held_usage(mapper, held_snapshots)
+            except Exception:
+                logger.debug("could not record the held model call's usage", exc_info=True)
+            raise
+
+    async def _release_held_usage(
+        self, mapper: StreamJsonMapper, held_snapshots: dict[int, Usage],
+    ) -> None:
+        """Emit the call the mapper still holds, then its waiting snapshots."""
+        for event in mapper.flush_usage():
+            await self._emit(event)
+        snapshots = list(held_snapshots.values())
+        held_snapshots.clear()
+        for snapshot in snapshots:
+            await self._emit(snapshot)
+
+    async def _map_until_result(
+        self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
+        held_snapshots: dict[int, Usage],
+    ) -> str | None:
+        """The frame loop of ``_read_until_result``."""
+        assert self._proc is not None and self._proc.stdout is not None
+        parent = user_node
+        last_assistant: Message | None = None
         while True:
             line = await self._next_stdout_line()
             if not line:
                 # A model call whose Usage was held for its final counts is
                 # still a call the turn paid for: record it before failing.
-                for event in mapper.flush_usage():
-                    await self._emit(event)
-                for snapshot in held_snapshots.values():
-                    await self._emit(snapshot)
+                await self._release_held_usage(mapper, held_snapshots)
                 return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
             if not text:
