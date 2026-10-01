@@ -1039,9 +1039,11 @@ def generate_turn_environment_note(
 # after session: node_modules missing in a fresh worktree, which interpreter
 # has pytest, that the agent browser lives on another host, that the app's own
 # UI rejects proxied requests, that frontend/vite.config.ts does not exist.
-# This card states the ones that are TRUE for this worker, probed once per
-# process, rendered once per session, and never varying between turns (it sits
-# in the cached prompt prefix).
+# This card states the ones that are TRUE for this worker when the session
+# starts. The native harness renders it on the session's first connect and
+# persists the text on the session row; reconnects reuse those bytes instead
+# of probing again (it sits in the cached prompt prefix, and the session's own
+# setup work must not move it — see HarnessAdapter._build_workspace_card).
 
 WORKSPACE_FACTS_HEADER = "# Workspace facts"
 #: Hard ceiling on the card, in characters (~600 tokens).
@@ -1223,10 +1225,11 @@ def workspace_facts_card(
     app_port: Optional[int] = None,
     preview_url: Optional[str] = None,
 ) -> str:
-    """The first-turn bootstrap card. Deterministic for a given worker and
-    session: every probe here is either filesystem state at render time or a
-    per-process cached answer, so re-rendering inside one session produces the
-    same bytes. Never raises."""
+    """The first-turn bootstrap card. Deterministic for given filesystem
+    state: every probe here is either filesystem state at render time or a
+    per-process cached answer. Filesystem state changes as the session works
+    (``npm ci`` fills node_modules), so callers render this once per session
+    and reuse the text rather than calling it again. Never raises."""
     cwd = Path(working_dir or ".")
     lines: list = []
     try:

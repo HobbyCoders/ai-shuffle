@@ -264,6 +264,13 @@ def create_postgres_schema(cursor) -> None:
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.
             owner_device_id TEXT,
+            -- The native leg's "# Workspace facts" card as rendered on the
+            -- session's first connect: {"v", "card", "cwd",
+            -- "preview_expires_at", "captured_at"}. Every later connect
+            -- (cold-evicted park, worker restart, a worker on the same
+            -- database) reuses these exact bytes so the cached system prefix
+            -- does not move. NULL until the first native connect.
+            workspace_facts JSONB,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
