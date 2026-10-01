@@ -510,6 +510,26 @@ def _is_context_overflow(message: str, status: int | None = None) -> bool:
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
+# Markers of a request rejected for an image in its payload rather than for its
+# size: "The image you provided requires 38025 patches after processing,
+# exceeding the limit of 30000", or an undecodable image source.
+_PAYLOAD_IMAGE_MARKERS = ("image", "patches")
+
+
+def _is_payload_rejection(message: str, status: int | None = None) -> bool:
+    """Did the provider reject an image in the payload, not the prompt size?
+
+    A 400 or ``invalid_request_error`` that names an image. The size ladder
+    cannot help with it; consuming images the model already saw can, once.
+    """
+    if _is_context_overflow(message, status):
+        return False
+    lowered = (message or "").lower()
+    if status != 400 and "invalid_request_error" not in lowered:
+        return False
+    return any(marker in lowered for marker in _PAYLOAD_IMAGE_MARKERS)
+
+
 # The token counters a provider's usage report carries. A call whose usage
 # holds none of them was never reported on (as opposed to reported as zero).
 _USAGE_TOKEN_KEYS = (
@@ -3007,6 +3027,29 @@ class NativeLoop(BackgroundLifecycleMixin):
                         delay_seconds=0.0, model=self.model,
                     ))
                     continue
+                if (
+                    overflow_retries < 3
+                    and _is_payload_rejection(
+                        result.error_message or "", result.error_status
+                    )
+                ):
+                    # The provider rejected an image in the payload, not the
+                    # prompt's size. Only the image rung applies: consume the
+                    # images a completed call already saw and retry. The rung
+                    # is idempotent, so a repeat rejection finds nothing new
+                    # and the error surfaces below.
+                    consumed = self._compactor.consume_images_after_rejection(
+                        nodes, overhead_tokens=self._context_overhead_tokens(),
+                    )
+                    if consumed:
+                        overflow_retries += 1
+                        self._history_rewrites.extend(
+                            describe_promotions(consumed)
+                        )
+                        await self._emit_pre_compact(sid, turn_id, consumed)
+                        for promo in consumed:
+                            await self._emit_compaction(sid, turn_id, promo)
+                        continue
                 if (
                     overflow_retries < 3
                     and _is_context_overflow(

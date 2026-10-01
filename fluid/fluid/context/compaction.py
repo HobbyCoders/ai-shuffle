@@ -680,8 +680,50 @@ def render_epoch_stub(
     return Message(role="user", content=[Text(text), *deliveries])
 
 
+# Lines of a harness task notification that identify the task rather than
+# say what happened: tag-only lines, the identity fields, and the untrusted-data
+# fence note. A preview made of them tells the model nothing it can act on.
+_NOTIFICATION_ID_TAGS = frozenset({
+    "kind", "task-id", "tool-use-id", "output-file",
+    "usage", "subagent_tokens", "tool_uses", "duration_ms",
+})
+_TAG_ONLY_LINE_RE = re.compile(r"^(?:</?[\w-]+(?:\s[^<>]*)?>\s*)+$")
+_ID_FIELD_LINE_RE = re.compile(r"^<([\w-]+)>[^<>]*</\1>$")
+_FENCE_NOTE_HEAD = "The content below was retrieved from an external source."
+
+
+def _intake_preview(text: str, config: CompactionConfig) -> str:
+    """The first ``intake_preview_chars`` of an oversized user text.
+
+    At render version 2 a harness task notification skips its header lines,
+    so the preview shows the summary and result instead of the task id and
+    output path. Every other text, and every text at version 1, previews from
+    its first char.
+    """
+    cap = config.intake_preview_chars
+    if config.render_version < 2 or "<task-notification>" not in text:
+        return text[:cap]
+    kept: list[str] = []
+    size = 0
+    for line in text.splitlines():
+        bare = line.strip()
+        field = _ID_FIELD_LINE_RE.match(bare)
+        if (
+            not bare
+            or _TAG_ONLY_LINE_RE.match(bare)
+            or (field and field.group(1) in _NOTIFICATION_ID_TAGS)
+            or bare.startswith(_FENCE_NOTE_HEAD)
+        ):
+            continue
+        kept.append(bare)
+        size += len(bare) + 1
+        if size >= cap:
+            break
+    return "\n".join(kept)[:cap]
+
+
 def _intake_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
-    preview = text[: config.intake_preview_chars]
+    preview = _intake_preview(text, config)
     route = (
         f'read the rest with HistoryExpand("{node_id}", offset=N)'
         if config.recall_tools
@@ -721,6 +763,11 @@ class Compactor:
     # Render version per promoted span key; a key made by this process
     # renders at config.render_version.
     _span_versions: dict = field(default_factory=dict)
+    # Span keys rehydrated from persisted decisions, in replay order. Live
+    # promotion retires the decisions a new span contains (segment
+    # retirement, epoch folds). That needs node order, which rehydrate does
+    # not have, so the pops are replayed the first time a path is seen.
+    _replayed_spans: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -1160,6 +1207,38 @@ class Compactor:
             )
         ]
 
+    def consume_images_after_rejection(
+        self, nodes: list[SessionNode], *, overhead_tokens: int = 0
+    ) -> list[Promotion]:
+        """Recovery for a request the provider rejected for its payload.
+
+        A non-size ``invalid_request_error`` about an image (a decoded image
+        over the provider's patch limit, say) is not an overflow, so the size
+        ladder does not apply. The one thing compaction can do is the image
+        rung: consume every image a completed model call already saw, with no
+        pressure trigger and no turn boundary, as ``escalate`` runs it. The
+        rung is idempotent, so a second rejection finds nothing new and the
+        engine surfaces the error instead of retrying.
+        """
+        if not self.active:
+            return []
+        before = self._estimate(nodes, overhead_tokens)
+        newly = self.trimmer.consume_images(nodes)
+        if not newly:
+            return []
+        after = self._estimate(nodes, overhead_tokens)
+        return [
+            Promotion(
+                tier=1,
+                reason="image_consumed",
+                trimmed=tuple(newly),
+                reclaimed_chars=_chars_of(nodes, newly),
+                before_tokens=before,
+                after_tokens=after,
+                decision_reason="provider_payload_rejection",
+            )
+        ]
+
     def _apply_trim_only(
         self,
         nodes: list[SessionNode],
@@ -1380,6 +1459,45 @@ class Compactor:
                 continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
                 self._mark_span(start, end, kind, render_version=version)
+                self._replayed_spans.append((start, end))
+
+    def _settle_replay(self, nodes: list[SessionNode]) -> None:
+        """Replay the retirement and fold pops of rehydrated decisions.
+
+        A live span promotion drops every decision it contains: a whole-turn
+        digest retires that turn's segment digests, and an epoch fold retires
+        the digests it folds. Rehydrate marks each persisted span without
+        node order, so those contained decisions would linger, and ``stats()``
+        would count them as resident. Walking the replay order with the path
+        in hand removes each decision a later one contains, which leaves the
+        state the live process had. The rendered view does not change,
+        because the renderer already skips anything inside a promoted span.
+        """
+        if not self._replayed_spans:
+            return
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        order = [
+            key for key in dict.fromkeys(self._replayed_spans)
+            if key in self._digested and key[0] in index and key[1] in index
+        ]
+        self._replayed_spans = []
+        for pos, (start, end) in enumerate(order):
+            lo, hi = index[start], index[end]
+            for older in order[:pos]:
+                if older not in self._digested:
+                    continue
+                if lo <= index[older[0]] and index[older[1]] <= hi:
+                    self._retire(older)
+
+    def _retire(self, key: tuple[str, str]) -> None:
+        """Drop one promoted span, leaving any newer span with its start."""
+        start, end = key
+        self._digested.pop(key, None)
+        self._span_versions.pop(key, None)
+        if self._digest_by_start.get(start) == end:
+            self._digest_by_start.pop(start)
+        if self._epoch_by_start.get(start) == end:
+            self._epoch_by_start.pop(start)
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -1494,7 +1612,13 @@ class Compactor:
     ) -> list[tuple[str, str]]:
         """Fold the oldest run(s) of resident span digests into epoch stubs
         whenever more than max_resident_span_digests are resident (force →
-        fold everything foldable regardless of the residency cap)."""
+        fold everything foldable regardless of the residency cap).
+
+        A run never crosses a live gap. When a gap cuts off the oldest
+        digests, the fold slides past them to the next contiguous run instead
+        of stopping for good; the digests before the gap stay resident.
+        """
+        self._settle_replay(nodes)
         index = {n.node_id: i for i, n in enumerate(nodes)}
         resident = sorted(
             (
@@ -1511,14 +1635,24 @@ class Compactor:
         )
         folded: list[tuple[str, str]] = []
         fold_n = self.config.epoch_fold_spans
+        count = len(resident)  # digests still resident, skipped ones included
         while (
-            len(resident) > (0 if force else self.config.max_resident_span_digests)
+            count > (0 if force else self.config.max_resident_span_digests)
             and len(resident) >= (1 if force else fold_n)
         ):
             chunk = resident[:fold_n]
-            if any(index[a[2]] + 1 != b[0] for a, b in zip(chunk, chunk[1:])):
-                break  # A live gap must never be swallowed by an epoch range.
+            gap = next(
+                (k for k, (a, b) in enumerate(zip(chunk, chunk[1:]))
+                 if index[a[2]] + 1 != b[0]),
+                None,
+            )
+            if gap is not None:
+                # A live gap must never be swallowed by an epoch range. Leave
+                # the digests before it resident and try the run after it.
+                resident = resident[gap + 1:]
+                continue
             resident = resident[fold_n:]
+            count -= len(chunk)
             start = chunk[0][1]
             end = chunk[-1][2]
             for _pos, s, e in chunk:  # spans leave the digest tier
@@ -1533,6 +1667,7 @@ class Compactor:
     # ── Stats (for the context-usage breakdown) ──────────────────────────
 
     def stats(self, nodes: list[SessionNode]) -> dict[str, int]:
+        self._settle_replay(nodes)
         index = {n.node_id: i for i, n in enumerate(nodes)}
         digests = sum(
             1

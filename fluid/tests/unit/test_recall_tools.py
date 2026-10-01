@@ -5,7 +5,12 @@ findable and re-readable verbatim — and recall output is an ordinary tool
 result, so tier 1 trims it later (recall cannot leak context)."""
 
 from fluid.context.compaction import CompactionConfig, Compactor
-from fluid.context.recall import HistoryRecall, expand_ref, search_path
+from fluid.context.recall import (
+    HistoryRecall,
+    calling_node_ids,
+    expand_ref,
+    search_path,
+)
 from fluid.context.trim import TrimConfig
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import MemoryStore, SessionNode
@@ -139,6 +144,38 @@ async def test_search_handler_roundtrip() -> None:
     ctx = await _seeded_ctx()
     out = await search_handler({"query": "crimson"}, ctx)
     assert not out.is_error and "node_" in out.text and "HistoryExpand" in out.text
+
+
+async def test_search_never_returns_the_calling_cell() -> None:
+    """The in-flight call spells out the query, so it used to be the top hit."""
+    for block, stamped in (
+        # A direct call: the engine stamps its id on the ctx.
+        (ToolUseBlock(id="hs1", name="HistorySearch", input={"query": "crimson-42"}), "hs1"),
+        # A code cell: the ctx carries the inner call's id, not the cell's.
+        (ToolUseBlock(id="cell1", name="run_python", input={
+            "code": 'print(tools.HistorySearch(query="crimson-42"))'}), "call_inner"),
+    ):
+        ctx = await _seeded_ctx()
+        recall = ctx.extra["history_recall"]
+        path = await recall.load_path()
+        await recall.store.append(recall.session_id, SessionNode(
+            node_id="node_ee99", parent_id=path[-1].node_id,
+            message=Message(role="assistant", content=[Text("searching crimson-42"), block]),
+        ))
+        ctx.extra["tool_use_id"] = stamped
+        out = await search_handler({"query": "crimson-42"}, ctx)
+        assert not out.is_error
+        assert "node_ee99" not in out.text
+        assert "node_aa11" in out.text and "node_cc33" in out.text
+    # Once answered, an old search call is ordinary history again.
+    nodes = _nodes() + [
+        _node("node_ee99", "assistant", [ToolUseBlock(
+            id="hs1", name="HistorySearch", input={"query": "crimson-42"})]),
+        _node("node_ff00", "user", [ToolResultBlock(tool_use_id="hs1", content=[Text("2 matches")])]),
+        _node("node_ff11", "assistant", [Text("ok")]),
+    ]
+    assert calling_node_ids(nodes) == set()
+    assert "node_ee99" in {h.node_id for h in search_path(nodes, "crimson-42")}
 
 
 async def test_handlers_error_cleanly_without_store() -> None:

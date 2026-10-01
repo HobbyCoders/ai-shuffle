@@ -191,23 +191,61 @@ class Hit:
     matches: int
 
 
+def calling_node_ids(
+    nodes: list[SessionNode], tool_use_id: str | None = None
+) -> set[str]:
+    """The nodes that hold the call being answered right now.
+
+    That is the newest assistant node when one of its tool calls has no
+    result on the path yet (the in-flight call or code cell), plus the node
+    holding ``tool_use_id`` when one is given. A search must not return them:
+    the calling cell spells out the query, so it would rank as its own best
+    hit.
+    """
+    answered = {
+        block.tool_use_id
+        for node in nodes if node.message.role == "user"
+        for block in node.message.content if isinstance(block, ToolResultBlock)
+    }
+    out: set[str] = set()
+    newest = next(
+        (n for n in reversed(nodes) if n.message.role == "assistant"), None
+    )
+    for node in nodes:
+        if node.message.role != "assistant":
+            continue
+        for block in node.message.content:
+            if not isinstance(block, ToolUseBlock):
+                continue
+            if block.id == tool_use_id or (
+                node is newest and block.id not in answered
+            ):
+                out.add(node.node_id)
+                break
+    return out
+
+
 def search_path(
     nodes: list[SessionNode],
     query: str,
     *,
     max_results: int = DEFAULT_SEARCH_RESULTS,
+    exclude: set[str] | frozenset[str] = frozenset(),
 ) -> list[Hit]:
     """Case-insensitive keyword search over every node on the path.
 
     Scores by matched-term count then total occurrences; one hit per node with
     a snippet around the first match. Searches the STORED nodes — content that
-    compaction evicted from the rendered view is still found here.
+    compaction evicted from the rendered view is still found here. Node ids in
+    ``exclude`` are skipped (the caller's own in-flight node).
     """
     terms = [t for t in query.lower().split() if t]
     if not terms:
         return []
     scored: list[tuple[int, int, int, Hit]] = []
     for pos, node in enumerate(nodes):
+        if node.node_id in exclude:
+            continue
         text = _render_node(node)
         lowered = text.lower()
         matched = [t for t in terms if t in lowered]
