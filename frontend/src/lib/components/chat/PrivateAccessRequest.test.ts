@@ -135,7 +135,7 @@ describe('PrivateAccessRequest', () => {
 		expect(m.post).toHaveBeenCalledWith(endpoint, {
 			connection: {
 				kind: 'service', label: 'API service', minutes: 60, url: 'https://api.example.com/v1',
-				auth_header: 'X-API-Key', auth_scheme: '', secret: 'api-key-0123456789', writable: true
+				auth_header: 'X-API-Key', auth_scheme: '', secret: 'api-key-0123456789', writable: true, fingerprint: ''
 			},
 			saved_id: '', minutes: 60, save_connection: true
 		});
@@ -143,6 +143,27 @@ describe('PrivateAccessRequest', () => {
 		finish();
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
+	});
+
+	it('requires an explicit certificate fingerprint and saves it with a private service', async () => {
+		const { onComplete } = mount({ request: { id: 'r/1', kind: 'service', purpose: 'Check home server', expires_at: inAnHour() } });
+		expect(screen.queryByLabelText('Certificate SHA-256 fingerprint')).toBeNull();
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Trust a specific certificate/ }));
+		const pinField = field('Certificate SHA-256 fingerprint');
+		expect(pinField.required).toBe(true);
+		await fireEvent.input(pinField, { target: { value: 'not-a-fingerprint' } });
+		expect(pinField.checkValidity()).toBe(false);
+		const pin = 'AB'.repeat(32);
+		await fireEvent.input(pinField, { target: { value: pin } });
+		expect(pinField.checkValidity()).toBe(true);
+		await fireEvent.input(field('Service address'), { target: { value: 'https://home.example/api' } });
+		await fireEvent.input(field('API key or token'), { target: { value: 'test-only-api-token' } });
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post.mock.calls[0][1].connection.fingerprint).toBe(pin);
+		expect(m.post.mock.calls[0][1].save_connection).toBe(true);
+		expect(field('API key or token').value).toBe('');
 	});
 
 	it('reuses a saved service named in the request without resending the credential', async () => {

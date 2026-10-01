@@ -95,10 +95,17 @@ What deletion removes, as the page and the in-app screen say: the profile and
 sign-in identity (the hosted sign-in provider's user is deleted too), trusted
 devices, pairing codes, worker registrations, hosted network membership,
 recovery information, sync records, and the remote-access tunnels and DNS
-records for the account's workers. What stays: anything on the user's own
-workers and devices, and anything their AI providers hold. A hashed deletion
-receipt is kept for 24 hours to stop old sign-in tokens being replayed;
-rate-limit records expire on their own.
+records for the account's workers. When the license-service binding is
+configured, deletion also cancels account-linked subscriptions and revokes
+linked licenses (`license/src/account-erasure.ts`); this is not cancellation
+of every subscription a user may hold. What stays: anything on the user's own
+workers and devices, and anything their AI providers hold. Accounting/license
+records and a trial-email hash also remain in the license service; Stripe has
+its own retention. Their retention needs separate public disclosure and owner
+review, not the 24-hour deletion-receipt limit. The hashed deletion receipt
+is kept for 24 hours to stop old sign-in tokens being replayed; rate-limit
+records expire on their own. Signed-in deletion and deployed service bindings
+remain unverified; the signed-out page and Clerk sign-in loaded in the review.
 
 In Play Console, App content > **Data safety** > Data deletion:
 
@@ -110,40 +117,81 @@ In Play Console, App content > **Data safety** > Data deletion:
 
 Before submitting, open the URL in a private browser window on a desktop and
 check that it loads, signs in, and shows the steps without the app installed.
-The page's support link is `support@hobbycoders.com` (report 03, SEC-20);
-check that address receives mail (Email Routing, `android/site/README.md`)
-before submitting. Tests in `android/hub` and `android/site` fail if a
-personal Gmail address reaches their files or responses.
+The page's support link is `support@hobbycoders.com` (report 03, SEC-20).
+The owner requires a dedicated mailbox, not forwarding. It is not ready:
+provider/plan selection, private mailbox creation, DNS approval/configuration
+and an actual delivery/receipt check are pending. No purchase, signup or DNS
+change is authorized. Tests in `android/hub` and `android/site` check the
+support address in source/responses, not mailbox delivery.
 
-## Data safety form (draft answers for the owner to confirm)
+## Data safety form (factual draft; Console answers pending)
 
-This is a starting point from reading the code on 2026-09-23, not legal
-advice. Re-check it against the privacy policy rewrite (website item W8).
+Updated from the 2026-10-01 source-path reviews, not legal advice or a signed
+Play APK/device test. Reconcile the privacy policy (website item W8) and the
+actual release before the owner chooses Console answers. Submission is on
+hold; this document is not authorization to publish or promote a build.
 
-Data is encrypted in transit: **Yes** (HTTPS to the hub; HTTPS or the managed
-tunnel to workers). Independent security review: No.
+[Google's Data safety guidance](https://support.google.com/googleplay/android-developer/answer/10787469?hl=en)
+(fetched 2026-10-01) includes off-device transmission, including through
+app-controlled WebViews. A user-owned worker is off-device. Ephemeral means
+memory-only retention for the real-time request; even qualifying ephemeral
+processing belongs in the form response. Do not mark stored chats/files as
+ephemeral or assume a sharing exception from worker ownership or user consent.
 
-| Data type | Collected | Shared | Why, and notes |
-| --- | --- | --- | --- |
-| Personal info > Name / User IDs | Yes, required for an account (the app works without one) | No | Account management. The hub stores a username and the sign-in provider's subject ID; the hosted sign-in provider (Clerk) processes the email and name on HobbyCoders' behalf. |
-| Personal info > Email address | Yes, by the sign-in provider | No | Account management; not stored in the hub database. |
-| Device or other IDs | Yes | No | Account management and security: a random install ID and the device model name identify each trusted device. |
-| Messages / other user-generated content | Yes, optional | No | App functionality. Prompts, replies and files go to the user's own worker. Over remote access they pass through the Cloudflare tunnel on HobbyCoders' account in transit only; nothing is stored by HobbyCoders. Mark as processed ephemerally. |
-| Audio > Voice or sound recordings | Yes, optional | No, transfer is user-initiated | Voice chat in the chat page streams microphone audio to the user's own worker, which relays it to the AI provider the user configured there. |
-| Location > Approximate / Precise | Yes, optional | No | Only when the user turns on phone tools and approves an agent's request; sent to the user's own worker. |
-| App activity, web history, contacts, photos, files on the phone, financial or health data | No | No | |
-| Crash logs and diagnostics | No | No | The app has no analytics or crash-reporting SDK. |
+**Pending owner/actual-release checks:** all-data encryption in transit
+(including configured worker/provider routes), sharing exceptions and provider
+retention, independent security review, financial-data classifications and
+target audience. Do not preselect Yes for transit, No for sharing, or 18+.
+
+| Data type to review | Confirmed source behavior / classification still needed |
+| --- | --- |
+| Personal info > Name / User IDs / Email address | Account management: the hub stores a username and sign-in subject ID; Clerk processes email/name. Confirm release scope and sharing classification. |
+| Device or other IDs | Install ID and device model identify trusted devices for account management/security. Sharing classification pending. |
+| Messages / other user-generated content | Optional prompts, replies and available voice transcripts produce durable worker `session_events` rows. Provider processing is possible; this is not blanket ephemeral processing. PersonaPlex persists assistant text but does not supply user transcription. |
+| Photos / videos / audio / files and documents | Optional explicit picker accepts `*/*` (up to 32 selections), not automatic whole-library upload. Selected files go to worker workspace/project/session staging and remain on disk; cross-worker transfers can create durable upload blobs. Confirm the actual release's categories. |
+| Audio > Voice or sound recordings | GPT Live/PersonaPlex PCM routes through the paired worker to OpenAI/fal.ai. Batch dictation goes to worker STT; fal STT first uploads bytes to fal storage. Streaming review found no durable raw-PCM write in that route, not a global retention guarantee. Provider retention and temporary buffering remain unresolved. |
+| Location > Approximate / Precise | Optional phone tools send approved location requests to the worker; confirm release scope, retention and sharing. |
+| App activity / other screen content | Approved Accessibility reads return app/package and screen text/descriptions/references to the worker and AI. Review applicable categories; filtering sensitive screens is not proof that every sensitive screen is detected. |
+| Web history / contacts / financial / health data | No blanket No: review selected content, screen access, account/license/billing paths and actual release scope before classification. |
+| Crash logs and diagnostics | Lack of an analytics/crash SDK alone does not settle all diagnostics collection; confirm the release inventory and routing. |
+
+Voice routing evidence: `frontend/src/lib/services/voiceCall.ts` selects the
+worker stream for GPT Live/PersonaPlex; `app/core/voice_stream.py` relays it.
+A reachable legacy OpenAI Realtime SDP/WebRTC path exists, but Android's
+`ChatActivity.kt` HTTP interception appears to block its non-worker handshake.
+No automatic relay fallback was found. Device behavior is untested: do not
+claim either universal relay or successful direct Android-to-OpenAI voice.
+Persistence/upload producers: `app/core/turn_recorder.py`,
+`app/db/session_events.py`, `app/api/sessions_uploads.py` and
+`app/core/upload_transfer.py` (paths from the repository root).
 
 Other App content declarations this app needs:
 
-- **Accessibility API:** the optional app-control service
-  (`ShuffleAccessibilityService`) needs the Accessibility declaration and a
-  short video of the consent flow.
-- **Foreground service:** none. Voice chat runs inside the chat page while
-  the app is open and declares no foreground service.
-- **Camera:** QR pairing only.
-- **Privacy policy URL:** `https://hobbycoders.com/privacy`.
-- **Target audience:** 18+; not designed for children.
+- **Accessibility API — keep the feature, hold submission:** the reviewed
+  `ShuffleAccessibilityService` requires fresh on-device approval for each
+  cross-app read/action, but AI proposal/target planning is not a static
+  human-defined script. [Current official guidance](https://support.google.com/googleplay/android-developer/answer/10964491?hl=en)
+  (fetched 2026-10-01) prohibits autonomous initiation/planning/execution and
+  permits deterministic rule-based scripts. It does not establish that
+  per-action approval makes this AI-directed flow eligible. Owner review and
+  policy clarification are needed before any eligibility attestation. Do not
+  remove the feature or declare `isAccessibilityTool` to claim a disability-tool
+  exception; the general-assistant use does not establish that status.
+  Before submission, establish a separate normal-use in-app disclosure of
+  accessed data, use and onward worker/AI-provider processing, with affirmative
+  consent; settings wording/service metadata alone is insufficient. Complete
+  the Console declaration and demonstration video showing disclosure, consent,
+  service enablement, an approved read/action and denial. No compliant
+  disclosure/video or policy approval has been established by this review.
+- **Foreground service:** the existing draft says voice declares none;
+  reconcile with the signed release manifest. Cross-app Accessibility polling
+  can operate while another allowed app is foreground, not only while Shuffle
+  is focused.
+- **Camera:** verify QR-pairing and other enabled camera paths in the release.
+- **Privacy policy URL:** `https://hobbycoders.com/privacy`; reconcile voice,
+  uploads, transcript persistence, provider processing and retained deletion
+  records before submission.
+- **Target audience:** pending explicit owner choice and actual-release review.
 
 ## Store listing
 
@@ -161,7 +209,9 @@ resource in the app names a vendor.
 
 ## Before promoting to production
 
-1. Data safety form and the other declarations above submitted and approved.
+1. Resolve the pending Data safety, audience, mailbox and Accessibility
+   eligibility/disclosure/video gates above before submission; only after
+   owner review may declarations be submitted and approval checked.
 2. Deletion URL checked from a browser without the app.
 3. Privacy policy covers the hub, hosted sign-in and the Cloudflare tunnel
    path (website item W8).
