@@ -483,8 +483,8 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
-            # shutil.which stats the filesystem. A missing CLI raises
-            # ClaudeCliMissingError here, before any engine is built.
+            # Resolving the CLI stats PATH entries on disk. A missing CLI
+            # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
             self._engine = DelegatedLoop(
@@ -3829,7 +3829,14 @@ def _is_vendored_cli(path: str) -> bool:
     return bool(parts & {"site-packages", "dist-packages"})
 
 
-def _resolve_claude_cmd() -> list:
+# Batch shims (npm writes ``claude.cmd``) run through cmd.exe, which ends an
+# argument at the first newline and refuses command lines over 8,191 chars.
+_CLAUDE_BATCH_SHIMS = ("claude.cmd", "claude.bat")
+# Shim paths already warned about, so a worker logs the advice once per path.
+_WARNED_CLAUDE_SHIMS: set = set()
+
+
+def _resolve_claude_cmd(*, windows: Optional[bool] = None) -> list:
     """Command for the delegated ``claude`` CLI: the one on PATH, nothing else.
 
     The CLI must be the stock binary from Anthropic's installer, found on PATH.
@@ -3838,15 +3845,50 @@ def _resolve_claude_cmd() -> list:
     package dir is skipped for the same reason. A missing CLI raises
     :class:`ClaudeCliMissingError`, whose message tells the user how to
     install it.
-    """
-    import shutil
 
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        found = shutil.which("claude", path=entry)
-        if found and not _is_vendored_cli(found):
-            return [found]
+    PATH entries are searched in order. On Windows every entry is checked for
+    ``claude.exe`` before any entry is checked for a ``claude.cmd`` /
+    ``claude.bat`` shim, whatever the PATHEXT or PATH order says: npm's folder
+    under ``%APPDATA%`` often precedes ``~/.local/bin``, and the native binary
+    must still win. A shim runs only when no ``claude.exe`` is on PATH at all,
+    and the first time one is chosen a WARNING recommends the native installer
+    (cmd.exe cuts a multi-line argument at its first newline). Elsewhere only
+    an executable extension-less ``claude`` counts. ``windows`` overrides the platform check
+    so tests can cover both branches on any OS; nothing here runs the binary.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    binaries = ("claude.exe",) if windows else ("claude",)
+    shims = _CLAUDE_BATCH_SHIMS if windows else ()
+
+    def _usable(path: str) -> bool:
+        if not os.path.isfile(path) or _is_vendored_cli(path):
+            return False
+        return windows or os.access(path, os.X_OK)
+
+    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if e]
+    # Two passes: a native binary anywhere on PATH beats a shim anywhere.
+    for entry in entries:
+        for name in binaries:
+            found = os.path.join(entry, name)
+            if _usable(found):
+                return [found]
+    for entry in entries:
+        for name in shims:
+            found = os.path.join(entry, name)
+            if _usable(found):
+                if found not in _WARNED_CLAUDE_SHIMS:
+                    _WARNED_CLAUDE_SHIMS.add(found)
+                    logger.warning(
+                        "Using the Claude Code CLI through the batch shim %s "
+                        "because no claude.exe is on PATH. cmd.exe shims cut "
+                        "arguments at the first newline and reject long "
+                        "command lines; install the native CLI "
+                        "(https://claude.ai/install.ps1) and put its folder "
+                        "on PATH.",
+                        found,
+                    )
+                return [found]
     raise ClaudeCliMissingError()
 
 

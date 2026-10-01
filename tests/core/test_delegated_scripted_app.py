@@ -1,7 +1,7 @@
 """The delegated (Claude subscription) leg end to end, through the app adapter.
 
 A scripted fake ``claude`` (``fluid/tests/fixtures/fake_claude_script.py``) is
-installed as ``claude`` on PATH, so the real CLI discovery, the real
+what the adapter's CLI resolver returns, so the real
 ``HarnessAdapter`` → ``DelegatedLoop`` → stream-json pipe and the adapter's
 translation into the app's provider events all run. Each test asserts on what
 the app sees (tool calls, results, the permission callback, the terminal
@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,16 +52,24 @@ def _isolated_home(monkeypatch, tmp_path):
     monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
 
 
+def _use_fake_cli(monkeypatch) -> list:
+    """Make the scripted fake the ``claude`` the adapter runs.
+
+    The adapter's resolver is patched to run the fake with this interpreter
+    rather than relying on a shim on PATH: on Windows ``shutil.which`` skips a
+    file without a PATHEXT extension, so a shim was passed over and the search
+    reached the machine's real ``claude.exe``, which billed the subscription.
+    PATH discovery itself is covered by ``test_claude_cmd_resolution.py``.
+    """
+    command = [sys.executable, str(FAKE)]
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda **_: list(command))
+    assert ha._resolve_claude_cmd() == command, "the adapter must run the scripted fake"
+    return command
+
+
 @pytest.fixture(autouse=True)
-def _claude_on_path(monkeypatch, tmp_path):
-    """Install the scripted fake as the ``claude`` the adapter discovers."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    shim = bin_dir / "claude"
-    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n', encoding="utf-8")
-    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    return shim
+def _claude_on_path(monkeypatch):
+    return _use_fake_cli(monkeypatch)
 
 
 class PermissionResultAllow:  # the app's callback results, matched by class name
