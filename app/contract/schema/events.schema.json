@@ -804,6 +804,18 @@
           "default": null,
           "title": "Profile Id"
         },
+        "queued_turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Queued Turn Id"
+        },
         "run_id": {
           "anyOf": [
             {

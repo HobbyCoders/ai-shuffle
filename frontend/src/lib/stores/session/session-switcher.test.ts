@@ -106,6 +106,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: 'draft from session A',
 		scrollTop: 250,
@@ -195,6 +196,16 @@ describe('remembered new-chat worker', () => {
 });
 
 describe('session navigation closes header dropdowns', () => {
+	it('clears peer pending state on switch and on new chat instead of sharing it across sessions', async () => {
+		const { switcher, getState } = makeSwitcher({ ...fullState(), pendingPeerMessages: [
+			{ id: 'peer-old', content: 'coordinate', senderLabel: 'Reviewer', queuedAt: 1 }
+		] });
+		await switcher.switchSession('session-B', 'proj-A');
+		expect(getState().pendingPeerMessages).toEqual([]);
+		switcher.newChat();
+		expect(getState().pendingPeerMessages).toEqual([]);
+	});
+
 	const dropdowns = [
 		'profile', 'branch', 'workspace-folders', 'sheet-workspace-folders',
 		'sheet-profile', 'sheet-branch', 'runner', 'notifications', 'session-title',

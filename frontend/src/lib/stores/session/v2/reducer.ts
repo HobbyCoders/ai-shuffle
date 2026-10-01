@@ -1248,6 +1248,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				timestamp: stamp || undefined,
 				...(turnId ? { turnId } : {}),
+				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
 				...(typeof event.checkpoint_backed === 'boolean' ? { checkpointBacked: event.checkpoint_backed } : {}),
 				...(commandId ? { commandId } : {}),

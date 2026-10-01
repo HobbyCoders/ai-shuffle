@@ -123,9 +123,8 @@ def live_turn_ids() -> Set[str]:
     return {runtime.turn_id for runtime in _live_runtimes.values()}
 
 
-# User pending messages and explicitly attributed peer messages may join a
-# running turn. Peer receipts remain system events, not user interjections;
-# other internal turns (unpark, failover, automation) never steer this way.
+# Peer traffic shares the safe-boundary queue, never the user's authority or
+# editable queue view. Internal wake/automation turns are not interjections.
 _STEERABLE_SOURCES = ("user", "queue", "agent_message")
 
 # Override keys that BIND a turn's run and cannot change once it started. A
@@ -534,10 +533,11 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
     set, so Send-later chips clear the moment the drained turn starts
     (the SSE self-heal remains the fallback). Best-effort."""
     try:
-        from app.api.chat_ws_handler import _v2_queue_view  # lazy: no core→api at module load
+        from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view  # lazy: no core→api at module load
         from app.core.sync_engine import sync_engine
         queue = await asyncio.to_thread(_v2_queue_view, session_id)
-        await sync_engine.broadcast_queue_updated(session_id, queue)
+        peers = await asyncio.to_thread(_v2_peer_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peers)
     except Exception:  # noqa: BLE001
         logger.warning(
             "SessionRuntime: queue_updated broadcast failed for %s",
@@ -1616,7 +1616,14 @@ class SessionRuntime:
             self._steer_attempted.add(row_id)
             try:
                 if row.get("source") == "agent_message":
-                    await adapter.steer(prompt, id=row_id, origin="system")
+                    payload = row.get("payload") or {}
+                    from app.core import session_orchestration
+                    sender = await asyncio.to_thread(session_orchestration._caller, payload["orchestration_sender"])
+                    await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    await adapter.steer_peer(
+                        payload["peer_message_content"],
+                        sender=payload["orchestration_sender"], id=row_id,
+                    )
                 else:
                     await adapter.steer(prompt, id=row_id)
             except NotImplementedError:
@@ -1852,6 +1859,13 @@ class SessionRuntime:
         * a different profile — a message addressed to another agent.
         """
         payload = row.get("payload") or {}
+        if row.get("source") == "agent_message":
+            # Only an attributed, scope-checked producer may use the peer channel.
+            # Recheck revocation/ownership/Stop before handing it to the engine.
+            if not payload.get("orchestration_sender") or not payload.get("peer_message_content"):
+                return False
+            # The asynchronous sweep revalidates scope immediately before
+            # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids"):
             return False
         # Never steer external observation into a foreground/broad-permission
@@ -1950,21 +1964,16 @@ class SessionRuntime:
                 continue
             content = row.get("prompt") or steer.get("text") or ""
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
-            if row.get("source") == "agent_message":
-                await recorder.on_event({
-                    "type": "system", "subtype": "agent_message",
-                    "data": {"sender": (row.get("payload") or {}).get("orchestration_sender"),
-                             "content": content, "delivery": "delivered"},
-                })
-            else:
-                recorded = await recorder.record_steered_user_message(
-                    content,
-                    profile_id=profile_id,
-                    command_id=row.get("command_id"),
-                )
-                if not recorded:
-                    return
-                await self._persist_user_message(content, profile_id=profile_id)
+            recorded = await recorder.record_steered_user_message(
+                content,
+                profile_id=profile_id,
+                command_id=row.get("command_id"),
+                **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                   if row.get("source") == "agent_message" else {}),
+            )
+            if not recorded:
+                return
+            await self._persist_user_message(content, profile_id=profile_id)
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row
@@ -1972,7 +1981,10 @@ class SessionRuntime:
                 # asked for BEFORE this moment, ``_finalize`` puts the
                 # message back on the queue rather than leaving it in the
                 # transcript with no answer under it.
-                self._steer_absorbed[row_id] = (time.perf_counter(), row)
+                if row.get("source") != "agent_message":
+                    # Peer consumption is delivery, not an obligation to answer.
+                    # Do not replay it after a later Stop/provider failure.
+                    self._steer_absorbed[row_id] = (time.perf_counter(), row)
         if absorbed:
             # The rows left the queue — clear their pending bubbles everywhere.
             await _broadcast_queue_after_start(self.session_id)

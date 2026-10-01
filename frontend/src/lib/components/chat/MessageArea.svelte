@@ -88,6 +88,7 @@
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
+	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import ActiveTasks from './ActiveTasks.svelte';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
@@ -471,7 +472,8 @@
 	const transcriptRender = $derived(
 		classifyTranscriptRender({
 			sessionId: $activeSession.sessionId,
-			messageCount: $activeSession.messages.length,
+			// An empty recipient can still have a peer waiting for its first turn.
+			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
 			isLoadingSession: $activeSession.isLoadingSession
 		})
@@ -1506,13 +1508,14 @@
 	// Prompts sent but not yet handed to the model — rendered as bubbles below the
 	// transcript (see PendingMessages).
 	const pendingMessages = $derived($activeSession.queuedMessages ?? []);
+	const pendingPeerMessages = $derived($activeSession.pendingPeerMessages ?? []);
 
 	// Keep a freshly-sent pending bubble in view. The content effect below tracks
 	// `messages` only, so appending to `queuedMessages` grows the column without
 	// scheduling any scroll. Mirrors the gap-indicator effect: respect the current
 	// turn anchor when one is live, and never yank a user who scrolled up to read.
 	$effect(() => {
-		if (pendingMessages.length === 0 || !containerRef || !isMounted) return;
+		if (pendingMessages.length + pendingPeerMessages.length === 0 || !containerRef || !isMounted) return;
 		if (!shouldAutoScroll) return;
 		if (currentTurnAnchorId) {
 			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
@@ -1855,6 +1858,9 @@
 				{/if}
 			</div>
 			{/each}
+
+			<!-- Peer messages stay attributed and read-only, outside user queue controls. -->
+			<PendingPeerMessages messages={pendingPeerMessages} />
 
 			<!-- Prompts already sent but not yet delivered to the model. They sit
 			     below the transcript, above the activity indicator, until the

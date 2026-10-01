@@ -929,3 +929,114 @@ async def test_legacy_same_turn_steer_does_not_shift_normal_checkpoint(mock_db, 
     # Normal legacy events sharing the backfill sentinel are not inferred steers.
     se.append_events(SID, [_user_ev("backfilled"), _user_ev("backfilled")])
     assert all(_is_prompt_event(row) for row in _load_message_events(SID)[-2:])
+
+@pytest.mark.parametrize("target_index", [0, 1])
+@pytest.mark.parametrize("include_response", [None, True, False])
+async def test_real_standalone_peer_rewind_native_and_logical_boundaries(
+    mock_db, monkeypatch, tmp_path, target_index, include_response,
+):
+    import asyncio
+    from app.core import session_orchestration, turn_scheduler
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from app.core.provider.fluid_transcript import fluid_live_messages, get_fluid_checkpoints
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import database, sessions, turns
+    from fluid.engine.native import NativeLoop
+    from fluid.events.ops import UserTurn
+    from fluid.events import TextDelta, TurnComplete
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    sid, caller, sdk, profile = "standalone-peer", "standalone-sender", "ses_standalone_peer", "peer-test"
+    database.create_profile(profile, "Peer test", None, {}, if_absent=True)
+    for session in (sid, caller):
+        sessions.create_session(session, profile, is_active=True, model="test-model", permission_mode="default")
+    database.update_session(sid, sdk_session_id=sdk, v2_stream=True)
+    origin = turns.enqueue_turn(caller, "user", prompt="Coordinate the next turn", profile_id=profile)
+    assert turns.start_turn(origin["id"])
+    assert turns.settle_turn(origin["id"], "completed")
+    monkeypatch.setattr(turn_scheduler, "kick", lambda session: None)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda session: None)
+
+    class Provider:
+        name = "openai_responses"
+        caps = ProviderCaps()
+        calls = 0
+        async def stream(self, request):
+            self.calls += 1
+            yield StreamChunk("message_start", {})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": f"Reply {self.calls}"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"})
+            yield StreamChunk("message_stop", {})
+
+    store = PgFluidStore()
+    loop = NativeLoop(provider=Provider(), store=store, session_id=sdk, model="test-model",
+                      registry=ToolRegistry(), permissions=PermissionEngine("never_ask"),
+                      ctx=ToolCtx(cwd=str(tmp_path)), setting_sources=[])
+    prompts, row_ids, cursor = [], [], 0
+
+    async def run(row):
+        nonlocal cursor
+        assert turns.start_turn(row["id"])
+        recorder = TurnRecorder(sid, row["command_id"], row["id"], None, "test")
+        recorder.turn_id = row["id"]
+        await recorder.start(row["prompt"], profile_id=profile, source=row["source"])
+        database.add_session_message(sid, "user", row["prompt"])
+        await loop.submit(UserTurn(content=row["prompt"]))
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        events = await store.events_since(sdk, cursor)
+        for event in events:
+            if isinstance(event, TextDelta):
+                await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": event.text})
+            elif isinstance(event, TurnComplete):
+                await recorder.on_event({"type": "done", "metadata": {"stop_reason": event.stop_reason}})
+        cursor = events[-1].seq
+        await recorder.close()
+        assert turns.settle_turn(row["id"], "completed")
+        prompts.append(row["prompt"])
+        row_ids.append(row["id"])
+
+    try:
+        await run(turns.enqueue_turn(sid, "user", prompt="First normal A", profile_id=profile))
+        outcome = await session_orchestration.make_handler(lambda: caller)(
+            "message", {"session_id": sid, "message": "Standalone peer Q", "request_id": "standalone-q"}, ToolCtx())
+        assert not outcome.is_error, outcome.text
+        peer = turns.get_turn(json.loads(outcome.text)["turn_id"])
+        assert peer["source"] == "agent_message" and peer["state"] == "queued"
+        await run(peer)
+        await run(turns.enqueue_turn(sid, "user", prompt="Next normal C", profile_id=profile))
+    finally:
+        await loop.aclose()
+
+    users = [row for row in se.get_events(sid) if row["event_type"] == "message.user"]
+    checkpoints = [cp for cp in get_fluid_checkpoints(sdk) if cp.role == "user"]
+    assert [row["turn_id"] for row in users] == row_ids
+    assert [cp.full_message for cp in checkpoints] == prompts
+    assert users[1]["payload"].get("checkpoint_backed") is not False  # Real standalone SDK boundary.
+    assert _resolve_checkpoint_uuid_from_content(sdk, str(tmp_path), prompts[1], 0) == (checkpoints[1].uuid, None)
+    request_fields = {"target_uuid": checkpoints[target_index].uuid}
+    if include_response is not None:
+        request_fields["include_response"] = include_response
+    request = RewindRequestV2(**request_fields)
+    retained = target_index + (1 if request.include_response else 0)
+    cut = users[retained]["seq"]
+    assert _resolve_rewind_from_seq(sid, sdk, str(tmp_path), request.target_uuid,
+                                    request.include_response, "user") == (cut, None)
+    monkeypatch.setattr(cmd, "get_working_dir_for_project", lambda *a, **kw: str(tmp_path))
+    class Pool:
+        def contains(self, session):
+            return False
+    monkeypatch.setattr(cmd, "get_session_pool", lambda: Pool())
+    result = await execute_rewind(sid, request)
+    assert result.success and result.chat_rewound
+    assert se.get_events(sid)[-1]["payload"]["from_seq"] == cut
+    native, _ = fluid_live_messages(sdk, str(tmp_path))
+    replay = _load_message_events(sid)
+    assert [m["content"] for m in native if m["role"] == "user"] == prompts[:retained]
+    assert [r["payload"]["content"] for r in replay if r["event_type"] == "message.user"] == prompts[:retained]
+    assert [m["content"] for m in native if m["role"] == "assistant"] == [f"Reply {i+1}" for i in range(retained)]
+    kept = [row for row in se.get_events(sid) if row["seq"] < cut]
+    assert "".join(row["payload"]["text"] for row in kept if row["event_type"] == "assistant.text_delta") == "".join(f"Reply {i+1}" for i in range(retained))

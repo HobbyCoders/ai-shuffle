@@ -61,7 +61,7 @@ import type { ContextWindowChoice } from '$lib/constants/model-context';
 // Shared types
 import type {
 	ChatMessage, MessageType,
-	QueuedMessage, ExecutionMode, DeviceIntent, Task
+	QueuedMessage, PendingPeerMessage, ExecutionMode, DeviceIntent, Task
 } from './types';
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
@@ -203,6 +203,7 @@ export interface ActiveSessionState {
 	deferredPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	queuedMessages: QueuedMessage[];
+	pendingPeerMessages: PendingPeerMessage[];
 	/**
 	 * Currently-running background tasks (sub-agents + shell subprocesses) for
 	 * the active session. Default `[]`. Written by the poller's onPollApplied
@@ -361,6 +362,7 @@ function defaultState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: '',
 		scrollTop: 0,
