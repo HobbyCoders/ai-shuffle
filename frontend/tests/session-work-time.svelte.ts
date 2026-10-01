@@ -86,6 +86,28 @@ Object.assign(window, {
 		timer(id: string) {
 			return document.querySelector(`[data-row="${id}"] .timer`)?.textContent ?? null;
 		},
+		title(id: string) {
+			return document.querySelector(`[data-row="${id}"] .timer`)?.getAttribute('title') ?? null;
+		},
+		isLive(id: string) {
+			return !!document.querySelector(`[data-row="${id}"] .timer`)?.classList.contains('live');
+		},
+		/** A prompt blocks the turn: the server banks the run so far and pauses. */
+		async prompt(id: string, bankedMs: number) {
+			props.rows.find((r) => r.session.id === id)!.status = 'needs_permission';
+			handlers({
+				type: 'user_session_updated',
+				session_id: id,
+				updates: { work_ms: bankedMs, work_started_at: null }
+			});
+			await tick();
+		},
+		/** The answer resumes the live interval from now. */
+		async answer(id: string) {
+			handlers({ type: 'user_session_updated', session_id: id, updates: { work_started_at: iso(0) } });
+			props.rows.find((r) => r.session.id === id)!.status = 'working';
+			await tick();
+		},
 		/** The server's push when a turn takes the live slot. */
 		async start(id: string, msAgo = 0) {
 			handlers({ type: 'user_session_updated', session_id: id, updates: { work_started_at: iso(msAgo) } });

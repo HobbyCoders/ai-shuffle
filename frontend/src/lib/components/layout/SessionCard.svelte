@@ -15,7 +15,7 @@
 	 *   L3  device icon · branch
 	 *
 	 * Settled row (compact, two lines):
-	 *   L1  glyph · title · age
+	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
@@ -111,16 +111,19 @@
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
+	// Only a turn holding the live slot ticks; a parked turn's interval has
+	// ended, so its timer takes the plain style, not the live accent.
+	const turnLive = $derived(isTurnLiveStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
-	// Active cards (and any row with a turn in flight) show the session's total
-	// working time, which survives Done/Parked; settled rows keep their age.
-	const showsWorkTime = $derived(!compact || live);
-	const timer = $derived(
-		showsWorkTime
-			? formatElapsed(sessionWorkMs(session, now, isTurnLiveStatus(status), lastActivity))
-			: formatAge(Math.max(0, now - lastActivity))
-	);
-	const timerTitle = $derived(showsWorkTime ? 'Total working time' : 'Last activity');
+	// Every row shows the session's total working time, which survives
+	// Done/Parked and settling. A settled row that is idle keeps its age in
+	// the hover title, where it used to be the visible value.
+	const timer = $derived(formatElapsed(sessionWorkMs(session, now, turnLive, lastActivity)));
+	const timerTitle = $derived.by(() => {
+		if (!compact || live) return 'Total working time';
+		const age = formatAge(Math.max(0, now - lastActivity));
+		return `Total working time · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
+	});
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
@@ -538,7 +541,7 @@
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
-				<span class="timer" class:live title={timerTitle}>{timer}</span>
+				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
 			</span>
 
 			{#if !compact}

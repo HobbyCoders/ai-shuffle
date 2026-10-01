@@ -28,13 +28,36 @@ def _work(session_id: str) -> tuple[int, object]:
 
 
 def _backdate_start(turn_id: str, seconds: int) -> None:
-    """Pretend the running turn started ``seconds`` ago."""
+    """Pretend the running turn started ``seconds`` ago.
+
+    The session's counted-segment start moves with it, as ``start_turn``
+    would have set it had the turn really started then.
+    """
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET started_at = NOW() - make_interval(secs => %s) WHERE id = %s",
+            (seconds, turn_id),
+        )
+        cursor.execute(
+            "UPDATE sessions SET work_started_at = "
+            "(SELECT started_at FROM turns WHERE id = %s) "
+            "WHERE id = (SELECT session_id FROM turns WHERE id = %s)",
+            (turn_id, turn_id),
+        )
+
+
+def _backdate_segment(session_id: str, seconds: int) -> None:
+    """Pretend the session's current counted segment opened ``seconds`` ago."""
     from app.db.base import get_db
 
     with get_db() as conn:
         conn.cursor().execute(
-            "UPDATE turns SET started_at = NOW() - make_interval(secs => %s) WHERE id = %s",
-            (seconds, turn_id),
+            "UPDATE sessions SET work_started_at = NOW() - make_interval(secs => %s) "
+            "WHERE id = %s",
+            (seconds, session_id),
         )
 
 
@@ -75,8 +98,7 @@ def test_new_session_starts_at_zero(mock_db):
 def test_running_turn_sets_live_start_and_settle_banks_it(mock_db):
     sid = _mk("wt-settle")
     turn = _run(sid, seconds=90)
-    # start_turn records the live start; the backdate above moved the turn's
-    # own start, so the session mirrors the turn row on the next transition.
+    # start_turn records the live start.
     assert _work(sid)[1] is not None
 
     settled = turns.settle_turn(turn["id"], "completed")
@@ -212,6 +234,127 @@ def test_adhoc_turn_is_banked(mock_db):
     assert live is None
     assert banked == turns.interval_ms(row["started_at"], row["ended_at"])
     assert banked >= 44_000
+
+
+# ---------------------------------------------------------------------------
+# Time blocked on the user (owner decision 2026-10-01)
+# ---------------------------------------------------------------------------
+
+def test_time_blocked_on_a_prompt_is_not_working_time(mock_db):
+    """Run 60 s, block on a prompt, answer, run 20 s more: the total is the
+    two working segments, not the turn's whole wall-clock span."""
+    sid = _mk("wt-prompt")
+    turn = _run(sid, seconds=600)  # the turn started 10 minutes ago
+    _backdate_segment(sid, 60)  # ...but its current segment opened 60 s ago
+
+    assert turns.pause_session_work(sid) is True
+    banked, started = _work(sid)
+    assert started is None  # the clock is stopped while the prompt is open
+    assert 59_000 <= banked <= 62_000
+    # A second prompt opening while paused changes nothing.
+    assert turns.pause_session_work(sid) is False
+    assert _work(sid)[0] == banked
+
+    assert turns.resume_session_work(sid) is True
+    assert _work(sid)[1] is not None
+    assert turns.resume_session_work(sid) is False  # already counting
+    _backdate_segment(sid, 20)
+
+    turns.settle_turn(turn["id"], "completed")
+    total, started = _work(sid)
+    assert started is None
+    # 60 s + 20 s, nowhere near the 10-minute span of the turn.
+    assert banked + 19_000 <= total <= banked + 22_000
+
+
+def test_turn_ending_while_blocked_banks_nothing_more(mock_db):
+    sid = _mk("wt-prompt-stop")
+    turn = _run(sid, seconds=30)
+    assert turns.pause_session_work(sid) is True
+    banked = _work(sid)[0]
+    assert 29_000 <= banked <= 32_000
+
+    # The user stops the turn while the prompt is still open.
+    turns.settle_turn(turn["id"], "aborted", "user_stop")
+    assert _work(sid) == (banked, None)
+    # The prompt's waiter unwinds afterwards: no live turn, so no resume.
+    assert turns.resume_session_work(sid) is False
+    assert _work(sid) == (banked, None)
+
+
+def test_segment_start_is_clamped_to_the_turn_start(mock_db):
+    """A stale segment start older than the turn never banks the gap."""
+    sid = _mk("wt-clamp")
+    turn = _run(sid)
+    _backdate_segment(sid, 3_600)  # left behind by a missed write
+    settled = turns.settle_turn(turn["id"], "completed")
+    assert _work(sid)[0] == turns.interval_ms(settled["started_at"], settled["ended_at"])
+    assert _work(sid)[0] < 5_000
+
+
+def test_pause_without_a_live_turn_clears_a_stale_start(mock_db):
+    sid = _mk("wt-stale")
+    _backdate_segment(sid, 120)
+    assert turns.pause_session_work(sid) is True
+    assert _work(sid) == (0, None)
+    assert turns.pause_session_work("no-such-session") is False
+    assert turns.resume_session_work("no-such-session") is False
+
+
+@pytest.mark.asyncio
+async def test_await_interaction_pauses_until_the_last_prompt_resolves(mock_db, monkeypatch):
+    """The runner blocking on the user stops the clock; it restarts only when
+    the last concurrent prompt resolves, and each change is pushed."""
+    import asyncio
+
+    from app.core import interaction_wait, session_runtime
+    from app.db import interactions
+
+    monkeypatch.setattr(interaction_wait, "_ensure_listener", lambda: None)
+    pushes: list = []
+
+    async def fake_push(session_id):
+        pushes.append(_work(session_id))
+
+    monkeypatch.setattr(session_runtime, "_broadcast_work_time", fake_push)
+
+    sid = _mk("wt-await")
+    turn = _run(sid, seconds=45)
+    first = interactions.create_interaction(sid, "permission", {"request_id": "r1"}, 600)
+    second = interactions.create_interaction(sid, "question", {"request_id": "r2"}, 600)
+
+    wait_one = asyncio.create_task(
+        interaction_wait.await_interaction(first["id"], sid, 30, poll_seconds=0.05)
+    )
+    wait_two = asyncio.create_task(
+        interaction_wait.await_interaction(second["id"], sid, 30, poll_seconds=0.05)
+    )
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if _work(sid)[1] is None and interaction_wait._blocked.get(sid) == 2:
+            break
+    paused_total, started = _work(sid)
+    assert started is None
+    assert 44_000 <= paused_total <= 48_000
+
+    interactions.answer_interaction(first["id"], {"decision": "allow"})
+    assert (await asyncio.wait_for(wait_one, 5))["state"] == "answered"
+    assert _work(sid) == (paused_total, None)  # the question still blocks
+
+    interactions.cancel_interaction(second["id"])
+    assert (await asyncio.wait_for(wait_two, 5))["state"] == "cancelled"
+    assert _work(sid)[0] == paused_total
+    assert _work(sid)[1] is not None  # counting again
+
+    for _ in range(100):
+        if len(pushes) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert [p[1] is None for p in pushes] == [True, False]
+
+    turns.settle_turn(turn["id"], "completed")
+    assert paused_total <= _work(sid)[0] <= paused_total + 3_000
+    assert interaction_wait._blocked == {}
 
 
 def test_work_update_failure_never_breaks_the_transition(mock_db, monkeypatch):

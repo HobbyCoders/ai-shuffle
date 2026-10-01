@@ -311,8 +311,34 @@ describe('SessionCard actions', () => {
 			{ timestamp: Date.parse('2026-08-20T12:03:00Z'), compact: true, status: 'idle' }
 		);
 
-		expect(container.querySelector('.timer')?.textContent).toBe('3m');
-		expect(container.querySelector('.timer')?.getAttribute('title')).toBe('Last activity');
+		expect(container.querySelector('.timer')?.getAttribute('title')).toBe(
+			'Total working time · last activity 3m ago'
+		);
+	});
+
+	// Owner decision 2026-10-01: settled rows show the cumulative total too,
+	// with the idle age kept in the hover title.
+	it('shows the working total on an idle settled row, with its age in the title', () => {
+		const { container } = renderCard(
+			{ is_active: false, work_ms: 754_000, work_started_at: null },
+			{ timestamp: Date.parse('2026-08-20T09:06:00Z'), compact: true, status: 'idle' }
+		);
+
+		const timer = container.querySelector('.timer');
+		expect(timer?.textContent).toBe('12m 34s');
+		expect(timer?.getAttribute('title')).toBe('Total working time · last activity 3h ago');
+		expect(timer?.classList.contains('live')).toBe(false);
+	});
+
+	it('gives a parked card the plain timer style, not the live accent', () => {
+		const parked = renderCard({ work_ms: 90_000, work_started_at: null }, { status: 'parked' });
+		expect(parked.container.querySelector('.timer')?.classList.contains('live')).toBe(false);
+
+		const working = renderCard(
+			{ work_ms: 0, work_started_at: '2026-08-20T12:05:00Z' },
+			{ status: 'working' }
+		);
+		expect(working.container.querySelector('.timer')?.classList.contains('live')).toBe(true);
 	});
 
 	// ── #1619: total working time, not time since the last activity ─────

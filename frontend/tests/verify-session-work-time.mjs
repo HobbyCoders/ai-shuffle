@@ -60,9 +60,15 @@ try {
 
 		// Done card: the banked total, not the 2h since its last activity.
 		assert.equal(await timer('a'), '12m 34s');
-		// Parked card keeps its total; settled row keeps its age.
+		// Parked card keeps its total, in the plain (not live) style. The idle
+		// settled row shows its total too, with its age in the hover title.
 		assert.equal(await timer('b'), '1h 30m');
-		assert.equal(await timer('c'), '2h');
+		assert.equal(await page.evaluate(() => window.workFixture.isLive('b')), false);
+		assert.equal(await timer('c'), '42s');
+		assert.equal(
+			await page.evaluate(() => window.workFixture.title('c')),
+			'Total working time · last activity 2h ago'
+		);
 		await page.screenshot({ path: `${output}/${width}-settled.png` });
 
 		// A new turn starts 5 s ago: the card resumes from the banked total and ticks.
@@ -74,6 +80,24 @@ try {
 		const ticked = seconds(await timer('a'));
 		assert.ok(ticked >= first + 2, `ticked ${first} -> ${ticked}`);
 		await page.screenshot({ path: `${output}/${width}-working.png` });
+
+		assert.equal(await page.evaluate(() => window.workFixture.isLive('a')), true);
+
+		// A permission prompt blocks the turn: the server banks the run so far and
+		// clears the live start, so the total freezes until the answer.
+		const beforePrompt = seconds(await timer('a'));
+		await page.evaluate((ms) => window.workFixture.prompt('a', ms), beforePrompt * 1000);
+		const blocked = await timer('a');
+		await page.waitForTimeout(1_600);
+		assert.equal(await timer('a'), blocked, 'blocked-on-user total must not tick');
+		// The answer resumes the clock from the frozen total.
+		await page.evaluate(() => window.workFixture.answer('a'));
+		await page.waitForTimeout(2_100);
+		const resumed = seconds(await timer('a'));
+		assert.ok(
+			resumed >= beforePrompt + 1 && resumed <= beforePrompt + 4,
+			`resumed ${beforePrompt} -> ${resumed}`
+		);
 
 		// The turn parks: the banking push lands, and the total stops growing.
 		await page.evaluate(() => window.workFixture.finish('a', 'parked', 754_000 + 9_000));

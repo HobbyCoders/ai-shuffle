@@ -89,6 +89,15 @@ def _rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # so a failure there can never roll back or deadlock the transition; a crash
 # between the two loses one interval, nothing more. A requeued crash turn banks
 # nothing (its partial run is discarded along with its started_at).
+#
+# Time a live turn spends blocked on the USER (a permission prompt or an
+# AskUser question) is not working time either (owner decision, 2026-10-01).
+# ``work_started_at`` is therefore the start of the turn's current COUNTED
+# segment, not of the turn: ``pause_session_work`` banks the segment and
+# clears it when the runner starts waiting on an answer, and
+# ``resume_session_work`` opens a new one when the answer arrives. A turn
+# that ends banks from that segment start (clamped to its own start), so the
+# pre-prompt part, banked at pause time, is never counted twice.
 
 def _to_utc(value: Any) -> Optional[datetime]:
     """A DB timestamp (aware/naive datetime or text) as an aware UTC datetime."""
@@ -114,12 +123,18 @@ def interval_ms(started_at: Any, ended_at: Any) -> int:
     return int((end - start).total_seconds() * 1000)
 
 
+_LIVE_TURN_START_SQL = (
+    "(SELECT MAX(t.started_at) FROM turns t "
+    " WHERE t.session_id = %s AND t.state IN ('running','interrupting','draining'))"
+)
+
+
 def _record_session_work(session_id: Optional[str], banked_ms: int = 0) -> None:
     """Bank ``banked_ms`` onto the session and re-derive its live-turn start.
 
-    ``work_started_at`` is always re-read from the turn holding the session's
-    live slot, so a missed write self-corrects on the next transition. Never
-    raises: the working-time display must never break a turn transition.
+    ``work_started_at`` is re-read from the turn holding the session's live
+    slot, so a missed write self-corrects on the next start. Never raises:
+    the working-time display must never break a turn transition.
     """
     if not session_id:
         return
@@ -128,9 +143,7 @@ def _record_session_work(session_id: Optional[str], banked_ms: int = 0) -> None:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE sessions SET work_ms = COALESCE(work_ms, 0) + %s, "
-                "work_started_at = (SELECT MAX(t.started_at) FROM turns t "
-                "  WHERE t.session_id = %s "
-                "  AND t.state IN ('running','interrupting','draining')) "
+                f"work_started_at = {_LIVE_TURN_START_SQL} "
                 "WHERE id = %s",
                 (max(0, int(banked_ms)), session_id, session_id),
             )
@@ -138,8 +151,108 @@ def _record_session_work(session_id: Optional[str], banked_ms: int = 0) -> None:
         logger.warning("Session work-time update failed for %s", session_id, exc_info=True)
 
 
-def _dead_runner_interval_ms(row: Dict[str, Any]) -> int:
-    """Interval of a turn whose runner died, ended at its run's lease expiry.
+def _bank_live_segment(session_id: Optional[str], turn_started_at: Any, end: Any) -> None:
+    """Bank the counted segment of a turn that just left the live slot.
+
+    The segment runs from the session's ``work_started_at`` (the turn's start,
+    or the answer that last resumed it, clamped to the turn's own start) to
+    ``end``. A NULL segment start means the turn ended while blocked on the
+    user: everything before the prompt was banked at pause time, so nothing
+    more is added. Never raises.
+    """
+    if not session_id:
+        return
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT work_started_at FROM sessions WHERE id = %s FOR UPDATE",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+            segment_start = _to_utc(row["work_started_at"])
+            banked = 0
+            if segment_start is not None:
+                turn_start = _to_utc(turn_started_at)
+                if turn_start is not None and turn_start > segment_start:
+                    segment_start = turn_start
+                banked = interval_ms(segment_start, end)
+            cursor.execute(
+                "UPDATE sessions SET work_ms = COALESCE(work_ms, 0) + %s, "
+                f"work_started_at = {_LIVE_TURN_START_SQL} "
+                "WHERE id = %s",
+                (banked, session_id, session_id),
+            )
+    except Exception:  # noqa: BLE001 — display bookkeeping only
+        logger.warning("Session work-time update failed for %s", session_id, exc_info=True)
+
+
+def pause_session_work(session_id: Optional[str]) -> bool:
+    """Stop counting while a live turn blocks on the user.
+
+    Banks the open segment up to now and clears ``work_started_at``. Returns
+    True when the row changed (a segment was open). Never raises.
+    """
+    if not session_id:
+        return False
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT work_started_at, NOW() AS db_now, "
+                f"{_LIVE_TURN_START_SQL} AS live_started "
+                "FROM sessions WHERE id = %s FOR UPDATE",
+                (session_id, session_id),
+            )
+            row = cursor.fetchone()
+            if row is None or row["work_started_at"] is None:
+                return False
+            segment_start = _to_utc(row["work_started_at"])
+            live_start = _to_utc(row["live_started"])
+            banked = 0
+            # No live turn means a stale start: clear it and bank nothing.
+            if segment_start is not None and live_start is not None:
+                banked = interval_ms(max(segment_start, live_start), row["db_now"])
+            cursor.execute(
+                "UPDATE sessions SET work_ms = COALESCE(work_ms, 0) + %s, "
+                "work_started_at = NULL WHERE id = %s",
+                (banked, session_id),
+            )
+            return True
+    except Exception:  # noqa: BLE001 — display bookkeeping only
+        logger.warning("Session work-time pause failed for %s", session_id, exc_info=True)
+        return False
+
+
+def resume_session_work(session_id: Optional[str]) -> bool:
+    """Start counting again once the user has answered.
+
+    Opens a new segment at now, but only while a turn still holds the live
+    slot and no segment is open. Returns True when the row changed. Never
+    raises.
+    """
+    if not session_id:
+        return False
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE sessions SET work_started_at = NOW() "
+                "WHERE id = %s AND work_started_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM turns t WHERE t.session_id = %s "
+                "  AND t.state IN ('running','interrupting','draining'))",
+                (session_id, session_id),
+            )
+            return cursor.rowcount > 0
+    except Exception:  # noqa: BLE001 — display bookkeeping only
+        logger.warning("Session work-time resume failed for %s", session_id, exc_info=True)
+        return False
+
+
+def _dead_runner_end(row: Dict[str, Any]) -> Optional[datetime]:
+    """End of a turn whose runner died: its run's lease expiry, if earlier.
 
     The reap and the orphan Stop stamp ``ended_at=NOW()``, which can be long
     after the runner stopped (a worker that was down for an hour reaps at
@@ -159,16 +272,18 @@ def _dead_runner_interval_ms(row: Dict[str, Any]) -> int:
                 end = lease_end
         except Exception:  # noqa: BLE001 — display bookkeeping only
             logger.debug("Run lease lookup failed for %s", run_id, exc_info=True)
-    return interval_ms(row.get("started_at"), end)
+    return end
 
 
 def _bank_ended(row: Optional[Dict[str, Any]]) -> None:
-    """Bank a turn row that just left the live slot (settled, parked, aborted)."""
-    if row is None:
+    """Bank a turn row that just left the live slot (settled, parked, aborted).
+
+    A row that never started (a queued turn removed or aborted) never held
+    the slot, so the segment of the turn that does hold it is left alone.
+    """
+    if row is None or row.get("started_at") is None:
         return
-    _record_session_work(
-        row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at"))
-    )
+    _bank_live_segment(row.get("session_id"), row.get("started_at"), row.get("ended_at"))
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +469,9 @@ def record_adhoc_turn(
             raise RuntimeError(f"record_adhoc_turn: INSERT returned no row for {turn_id}")
     # The ad-hoc paths refuse to run while a turn is live (busy-write guard),
     # so their interval never overlaps one the scheduler already banked.
-    _bank_ended(row)
+    _record_session_work(
+        row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at"))
+    )
     return row
 
 
@@ -420,7 +537,7 @@ def stop_orphaned_turns(
         cursor.execute(sql + " RETURNING *", tuple(params))
         stopped = _rows(cursor.fetchall())
     for row in stopped:
-        _record_session_work(row.get("session_id"), _dead_runner_interval_ms(row))
+        _bank_live_segment(row.get("session_id"), row.get("started_at"), _dead_runner_end(row))
     return stopped
 
 
@@ -943,7 +1060,10 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                      "run_id": turn.get("run_id")} if ended else None,
                 ))
     for session_id, ended_row in banked:
-        _record_session_work(
-            session_id, _dead_runner_interval_ms(ended_row) if ended_row else 0
-        )
+        if ended_row is None:
+            _record_session_work(session_id)
+        else:
+            _bank_live_segment(
+                session_id, ended_row["started_at"], _dead_runner_end(ended_row)
+            )
     return dead
