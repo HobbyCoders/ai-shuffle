@@ -110,6 +110,45 @@ def test_token_is_bound_to_a_live_session(monkeypatch):
     assert preview_access.verify(preview_access.mint("sess-gone")) is None
 
 
+def test_session_token_is_stable_inside_a_window_and_never_outlives_the_ttl():
+    """#1237: the harness quotes this token in the cached prompt prefix, so
+    re-minting it on a reconnect must give back the same string."""
+    window = preview_access.STABLE_WINDOW
+    start = 1_800_000_000 // window * window
+    tokens = {
+        preview_access.session_token(SESSION, now=start + offset)
+        for offset in (0, 1, 600, window - 1)
+    }
+    assert len(tokens) == 1
+    (token,) = tokens
+    # Crossing a boundary moves the expiry by exactly one window.
+    later = preview_access.session_token(SESSION, now=start + window)
+    assert later != token
+    assert int(later.split(".")[2]) - int(token.split(".")[2]) == window
+    # Bound to its session, and alive for at most DEFAULT_TTL.
+    assert preview_access.session_token("sess-other", now=start) != token
+    for offset in (0, 1, window // 2, window - 1):
+        now = start + offset
+        minted = preview_access.session_token(SESSION, now=now)
+        found = preview_access.verify(minted, now=now)
+        assert found is not None and found.session_id == SESSION
+        lifetime = found.expires_at - now
+        assert preview_access.DEFAULT_TTL - window < lifetime <= preview_access.DEFAULT_TTL
+        assert preview_access.verify(minted, now=now + preview_access.DEFAULT_TTL) is None
+    with pytest.raises(ValueError):
+        preview_access.session_token("")
+
+
+def test_preview_url_is_stable_across_renders(monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(preview_access, "time", SimpleNamespace(time=lambda: clock[0]))
+    first = preview_access.preview_url(SESSION, "10.0.0.135", 8000)
+    clock[0] += 300
+    assert preview_access.preview_url(SESSION, "10.0.0.135", 8000) == first
+
+
 def test_preview_url_carries_the_token_and_a_safe_next():
     url = preview_access.preview_url(SESSION, "10.0.0.135", 8000, next_path="/chat/abc")
     assert url.startswith("http://10.0.0.135:8000/api/v1/auth/preview-access?token=v1.")
