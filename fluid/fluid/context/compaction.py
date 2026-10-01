@@ -166,6 +166,48 @@ class CompactionConfig:
     # hard zone and window protection skip the watermark, so it never delays
     # a needed batch. Off restores the legacy clear on every commit.
     shortfall_watermark: bool = True
+    # Token-budgeted recency (plan item 2, B3). With a known window the
+    # newest min(recency_tail_tokens, recency_tail_window_ratio * window)
+    # measured tokens of history stay verbatim, together with the newest
+    # recency_tail_calls model calls and the in-flight turn-start node.
+    # Everything older is in reach: tool results anywhere, and completed
+    # segments of any turn, the in-flight one included. This replaces "the
+    # newest 3 turns keep their newest 3 segments" and "the newest 5 results
+    # stay" (keep_recent_tool_results), which let one long turn grow past
+    # the window with nothing the guarded rungs were allowed to touch. 0
+    # restores the legacy guards, and so does an unknown window.
+    recency_tail_tokens: int = 40_000
+    recency_tail_window_ratio: float = 0.15
+    recency_tail_calls: int = 2
+    # The guarded in-flight rung (tier 1, reason "turn_budget"). When the
+    # in-flight turn holds more than turn_budget_window_ratio * window live
+    # tokens and the prompt is at or above turn_budget_floor_ratio * window
+    # (the F zone), the guarded escalation trims in-flight results older
+    # than the recency tail. At or over the window-protection limit it
+    # narrows the tail to the newest calls and also digests completed
+    # in-flight segments, because a provider may accept prompts far past
+    # the configured window and never send the overflow error the unguarded
+    # rungs wait for. 0 turns the rung off.
+    turn_budget_window_ratio: float = 0.2
+    turn_budget_floor_ratio: float = 0.45
+    # Window protection at or above window_floor_waiver_ratio * window
+    # commits any batch that reclaims window_floor_waiver_tokens measured
+    # tokens or more, in place of the 5% floor. Near the window a small
+    # reclaim beats a prompt the provider may reject or bill past the
+    # window. 0 keeps the 5% floor everywhere.
+    window_floor_waiver_ratio: float = 0.9
+    window_floor_waiver_tokens: int = 2_000
+    # Wake-aware turn counting. Turns started by an unpark, a wakeup or a
+    # peer agent message (the engine reads the source from TurnStarted and
+    # fills ``Compactor.wake_turn_starts``) do not count toward
+    # keep_recent_turns, so a run of wakes cannot age a real user turn out
+    # of the protected set. Off restores the legacy count.
+    wake_aware_turns: bool = True
+
+
+# TurnStarted sources that are wakes rather than a person's message. Their
+# turns do not age real user turns out of keep_recent_turns.
+WAKE_TURN_SOURCES = frozenset({"unpark", "wakeup", "agent_message"})
 
 
 # Absolute floor for a derived trigger. Below this the ladder would be
@@ -530,6 +572,20 @@ class Compactor:
     # Shortfall watermark (plan item 5): reclaimable chars at the commit and
     # the growth the next mid-turn batch over the trigger waits for.
     _shortfall_retry: tuple[int, int] | None = None
+    # Node ids of turn starts whose TurnStarted source is a wake (see
+    # WAKE_TURN_SOURCES). SessionNode carries no source, so the engine reads
+    # it from the TurnStarted events and fills this set; turns it does not
+    # name count as real user turns, which is the legacy behaviour.
+    wake_turn_starts: set = field(default_factory=set)
+    # Where the token-budgeted recency tail starts (an index into the nodes
+    # of the decision in progress), or None for the legacy count-based
+    # guards. Set for the length of one apply or escalate call only.
+    _tail_from: int | None = None
+    # The in-flight turn's live size in measured tokens when the decision in
+    # progress started, before any rung ran, or None outside one.
+    _turn_live: int | None = None
+    # Consecutive window-protection decisions that committed nothing.
+    _window_misses: int = 0
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -668,11 +724,13 @@ class Compactor:
         """Commit a batch only when its complete view saves enough.
 
         The 5% floor amortizes prefix rewrites; it is not a savings estimate.
-        It applies to window protection too: a mandatory pass that cannot free
-        5% is a cache break for almost nothing, and a prompt that really is
-        too large is caught by the provider's overflow error and the unguarded
-        ``escalate`` the engine runs then. Window protection bypasses only the
-        retry watermark.
+        It applies to window protection too, up to
+        ``window_floor_waiver_ratio`` of the window: a mandatory pass that
+        cannot free 5% there is a cache break for almost nothing. From that
+        line on any reclaim of ``window_floor_waiver_tokens`` commits,
+        because a provider may bill a prompt far past the configured window
+        without ever sending the overflow error that runs the unguarded
+        ``escalate``. Window protection bypasses the retry watermarks.
 
         ``measured_prompt_tokens`` is the last billed prompt carried forward to
         this request. chars/4 runs about 12% high at the median and up to 49%
@@ -686,6 +744,28 @@ class Compactor:
         is not needed on the measured prompt does not run as
         ``meaningful_reclaim`` either.
         """
+        try:
+            return self._apply(
+                nodes, overhead_tokens=overhead_tokens,
+                context_window=context_window,
+                output_reserve_tokens=output_reserve_tokens,
+                turn_boundary=turn_boundary,
+                measured_prompt_tokens=measured_prompt_tokens,
+            )
+        finally:
+            self._tail_from = None
+            self._turn_live = None
+
+    def _apply(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int,
+        context_window: int | None,
+        output_reserve_tokens: int,
+        turn_boundary: bool,
+        measured_prompt_tokens: int | None,
+    ) -> tuple[list[Message], list[Promotion]]:
         before_view = self.view(nodes)
         before = overhead_tokens + estimate_tokens_of_messages(before_view)
         limit = (
@@ -711,12 +791,31 @@ class Compactor:
         )
         hard = not mandatory and hard_at is not None and before * scale >= hard_at
         minimum = max(1, int(before * 0.05))
+        waiver = self.config.window_floor_waiver_ratio
+        if (
+            mandatory and self.config.enabled and waiver > 0
+            and context_window is not None
+            and before * scale >= context_window * waiver
+        ):
+            # Near the window a small reclaim beats a prompt the provider may
+            # reject, or bill past the window without a word (plan item 2).
+            minimum = min(minimum, max(1, _in_estimate_units(
+                self.config.window_floor_waiver_tokens, scale,
+            )))
+        self._tail_from = self._recency_tail_start(nodes, context_window, scale)
         eligible_chars = self._eligible_chars(nodes)
         basis_fields = {"token_basis": basis, "measured_prompt_tokens": measured}
         decision_fields = {"window_protection": mandatory, **basis_fields}
         if hard_at is not None:
             decision_fields["hard_ceiling_tokens"] = hard_at
             decision_fields["hard_ceiling"] = hard
+        if self.config.enabled and context_window is not None:
+            self._turn_live = int(self._inflight_estimate(nodes) * scale)
+            decision_fields["turn_live_tokens"] = self._turn_live
+        if context_window is not None and before * scale > context_window:
+            # The prompt is past the configured window. Some providers accept
+            # that silently, so the decision has to say so.
+            decision_fields["over_window"] = True
         retry = self._optional_retry
         if not mandatory and retry is not None and not turn_boundary:
             last_chars, growth = retry
@@ -761,12 +860,11 @@ class Compactor:
         if unreached or (
             mandatory and self._estimate(nodes, overhead_tokens) * scale >= limit
         ):
-            # Recency-guarded rungs only. The unguarded ones trim and digest
-            # the in-flight turn, including its newest result and any steer
-            # delivered with it; they are for a prompt the provider rejected.
-            # TODO(lane A, plan item 2): the guarded in-flight rung
-            # (turn_budget) joins escalate(guarded_only=True), and the hard
-            # zone reaches the in-flight turn through it.
+            # Recency-guarded rungs only, the in-flight rung (turn_budget)
+            # included, so the hard zone and window protection reach into a
+            # long turn. The unguarded rungs trim and digest the newest
+            # result and any steer delivered with it; they are for a prompt
+            # the provider rejected.
             promotions.extend(self.escalate(
                 nodes, overhead_tokens=overhead_tokens, context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens, guarded_only=True,
@@ -785,8 +883,13 @@ class Compactor:
         )
         if self._candidate_target is not None:
             threshold_fields["target_tokens"] = self._candidate_target
+        if mandatory:
+            decision_fields["window_protection_misses"] = (
+                self._window_misses + int(before - after < minimum)
+            )
         if before - after < minimum:
             restore()
+            self._window_misses = self._window_misses + 1 if mandatory else 0
             below = self._candidate_below
             # The retry watermark makes later mid-turn calls wait for more
             # reclaimable growth before building another candidate. It is
@@ -820,6 +923,7 @@ class Compactor:
         # reclaimable growth covers the shortfall. The hard zone and window
         # protection skip the watermark, so it never holds a needed batch.
         self._optional_retry = None
+        self._window_misses = 0
         target = self._candidate_target
         shortfall = 0
         if (
@@ -915,7 +1019,7 @@ class Compactor:
         self._candidate_target = target
 
         # Rung 1: batch-trim tool results.
-        pairs = self.trimmer.trim_batch(nodes)
+        pairs = self.trimmer.trim_batch(nodes, protected_from=self._tail_from)
         if pairs:
             before = estimate_tokens_of_messages(rendered)
             rendered = self._render(nodes)
@@ -1030,7 +1134,9 @@ class Compactor:
     def _eligible_chars(self, nodes: list[SessionNode]) -> int:
         """Raw chars the guarded rungs could reclaim now. The retry watermark
         measures growth in these."""
-        chars = _chars_of(nodes, self.trimmer._eligible(nodes))
+        chars = _chars_of(nodes, self.trimmer._eligible(
+            nodes, protected_from=self._tail_from,
+        ))
         if self.config.enabled:
             chars += sum(
                 block_chars(b) for span in self._eligible_spans(nodes)
@@ -1061,7 +1167,10 @@ class Compactor:
                         block_chars(b)
                         for b in self._render_live(node, trimmed, consumed).content
                     )
-        pairs = [p for p in self.trimmer._eligible(nodes) if p[0] not in in_spans]
+        pairs = [
+            p for p in self.trimmer._eligible(nodes, protected_from=self._tail_from)
+            if p[0] not in in_spans
+        ]
         return chars + _chars_of(nodes, pairs)
 
     def _image_threshold(self, threshold: int) -> int:
@@ -1177,14 +1286,58 @@ class Compactor:
         estimate is under the normal trigger, so one retry usually suffices.
 
         ``guarded_only`` drops the two unguarded rungs. ``apply`` sets it for
-        window protection, which acts on a size check before any request is
-        sent; only a prompt the provider actually rejected may reach into the
-        in-flight turn. ``scale`` is ``apply``'s measured/estimated factor;
+        window protection and the hard zone, which act on a size check before
+        any request is sent; only a prompt the provider actually rejected may
+        trim the newest result or digest the in-flight turn whole. The
+        guarded list reaches into the in-flight turn only through the
+        in-flight rung below. ``scale`` is ``apply``'s measured/estimated factor;
         the stop target is divided by it. Provider-overflow recovery leaves
         it at 1.
+
+        The guarded list ends with the in-flight rung (reason
+        ``turn_budget``, plan item 2). When the in-flight turn holds more
+        than ``turn_budget_window_ratio`` of the window and the prompt is at
+        or above ``turn_budget_floor_ratio`` of it, the rung trims results
+        older than the recency tail. If the prompt is still at or over the
+        window-protection limit, it narrows the tail to the newest
+        ``recency_tail_calls`` calls, trims what that frees, and then
+        digests completed in-flight segments before it. It never touches
+        the newest calls or the turn-start node. That is the only hard cap
+        on a provider that bills past the configured window instead of
+        rejecting the prompt.
         """
         if not self.active:
             return []
+        # Provider-overflow recovery keeps the count-based guards on its
+        # guarded rungs; the unguarded rungs follow them at once anyway. The
+        # guarded escalation (window protection and the hard zone) uses the
+        # recency tail ``apply`` set, or works one out when called alone.
+        owns_tail = guarded_only and self._tail_from is None
+        if owns_tail:
+            self._tail_from = self._recency_tail_start(nodes, context_window, scale)
+            self._turn_live = int(self._inflight_estimate(nodes) * scale)
+        try:
+            return self._escalate(
+                nodes, overhead_tokens=overhead_tokens,
+                context_window=context_window,
+                output_reserve_tokens=output_reserve_tokens,
+                guarded_only=guarded_only, scale=scale,
+            )
+        finally:
+            if owns_tail:
+                self._tail_from = None
+                self._turn_live = None
+
+    def _escalate(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int,
+        context_window: int | None,
+        output_reserve_tokens: int,
+        guarded_only: bool,
+        scale: float,
+    ) -> list[Promotion]:
         trim_only = not self.config.enabled
         target: int | None = None
         if context_window is not None:
@@ -1217,7 +1370,10 @@ class Compactor:
 
         def trim(keep: int | None) -> Callable[[], Promotion | None]:
             def rung() -> Promotion | None:
-                pairs = self.trimmer.trim_batch(nodes, keep_recent=keep)
+                pairs = self.trimmer.trim_batch(
+                    nodes, keep_recent=keep,
+                    protected_from=self._tail_from if keep is None else None,
+                )
                 if not pairs:
                     return None
                 return Promotion(tier=1, reason="overflow", trimmed=tuple(pairs))
@@ -1250,6 +1406,69 @@ class Compactor:
                 spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
             )
 
+        limit = (
+            max(1, context_window - self.config.headroom_tokens - output_reserve_tokens)
+            if context_window is not None
+            else None
+        )
+
+        def turn_budget_from() -> int | None:
+            """Where the in-flight rung's protection starts, or None when the
+            rung does not apply to the prompt as it stands now."""
+            ratio = self.config.turn_budget_window_ratio
+            if trim_only or ratio <= 0 or context_window is None or limit is None:
+                return None
+            # The turn's size when the decision started: the rungs before
+            # this one shrink it, and a turn that was heavy stays in reach.
+            if (self._turn_live or 0) <= context_window * ratio:
+                return None
+            current = self._estimate(nodes, overhead_tokens) * scale
+            if current < context_window * self.config.turn_budget_floor_ratio:
+                return None
+            if current >= limit:
+                # Still at or over the limit after every other guarded rung:
+                # only the newest calls and the turn-start node stay.
+                return self._newest_calls_start(nodes)
+            return self._tail_from
+
+        def turn_budget_trim() -> Promotion | None:
+            protected_from = turn_budget_from()
+            if protected_from is None:
+                return None
+            pairs = self.trimmer.trim_batch(nodes, protected_from=protected_from)
+            if not pairs:
+                return None
+            return Promotion(tier=1, reason="turn_budget", trimmed=tuple(pairs))
+
+        def turn_budget_digest() -> Promotion | None:
+            protected_from = turn_budget_from()
+            if (
+                protected_from is None or limit is None
+                or not self.config.recall_tools
+                or self._estimate(nodes, overhead_tokens) * scale < limit
+            ):
+                return None
+            index = {n.node_id: i for i, n in enumerate(nodes)}
+            covered = self._covered_ids(nodes)
+            segments = [
+                seg for seg in completed_segments(
+                    split_spans(nodes)[-1],
+                    error_text_cap=self.config.error_text_cap,
+                )
+                if index[seg[-1].node_id] < protected_from
+                and seg[0].node_id not in covered
+            ]
+            promoted = self._digest_until(
+                nodes, overhead_tokens=overhead_tokens, target=digest_target,
+                eligible=segments,
+            )
+            if not promoted:
+                return None
+            return Promotion(
+                tier=2, reason="turn_budget",
+                spans=tuple((s, e, SPAN_DIGEST) for s, e in promoted),
+            )
+
         rungs: list[Callable[[], Promotion | None]] = (
             [images, trim(None), trim(0)]
             if trim_only
@@ -1257,6 +1476,8 @@ class Compactor:
         )
         if guarded_only:
             rungs = rungs[:2] if trim_only else rungs[:4]
+            if not trim_only and self.config.turn_budget_window_ratio > 0:
+                rungs += [turn_budget_trim, turn_budget_digest]
         promotions: list[Promotion] = []
         for rung in rungs:
             before_view = self.view(nodes)
@@ -1348,23 +1569,121 @@ class Compactor:
     ) -> list[list[SessionNode]]:
         """Old spans not yet promoted, oldest first. ``keep_recent`` overrides
         ``keep_recent_turns`` for one call (0 makes the in-flight turn
-        eligible; overflow recovery's last rung)."""
+        eligible; overflow recovery's last rung).
+
+        The newest ``keep_recent_turns`` turns are never digested whole.
+        With wake-aware counting the newest real user turns are protected
+        too, so a run of wake turns cannot age them out. Inside a protected
+        turn, completed segments are eligible: all but the newest three
+        under the legacy guard, or every one that ends before the recency
+        tail when a tail is set. The tail also keeps any whole span that
+        reaches into it.
+        """
         spans = split_spans(nodes)
         keep = self.config.keep_recent_turns if keep_recent is None else keep_recent
-        old = spans[:-keep] if keep else spans
-        if keep and self.config.recall_tools:
-            # Protect three completed segments plus the still-open tail.
-            for span in spans[-keep:]:
-                old.extend(completed_segments(
+        protected = self._protected_spans(spans, keep, wake_aware=keep_recent is None)
+        tail = self._tail_from if keep_recent is None else None
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        old: list[list[SessionNode]] = []
+        for i, span in enumerate(spans):
+            if i not in protected:
+                old.append(span)
+            elif self.config.recall_tools:
+                segments = completed_segments(
                     span, error_text_cap=self.config.error_text_cap,
-                )[:-3])
-        covered: set[str] = set()  # node ids inside existing promotions
+                )
+                # Legacy: protect three completed segments plus the
+                # still-open tail.
+                old.extend(segments if tail is not None else segments[:-3])
+        if tail is not None:
+            old = [s for s in old if index[s[-1].node_id] < tail]
+        covered = self._covered_ids(nodes)
+        return [s for s in old if s[0].node_id not in covered]
+
+    def _protected_spans(
+        self, spans: list[list[SessionNode]], keep: int, *, wake_aware: bool,
+    ) -> set[int]:
+        """Indexes of the spans that are never digested whole: the newest
+        ``keep``, and with wake-aware counting also the newest ``keep - 1``
+        real user turns before the in-flight one. Turns started by a wake
+        never count toward that second set."""
+        if not keep:
+            return set()
+        protected = set(range(max(0, len(spans) - keep), len(spans)))
+        if wake_aware and self.config.wake_aware_turns and self.wake_turn_starts:
+            real = 1  # the in-flight turn always counts
+            for i in range(len(spans) - 2, -1, -1):
+                if real >= keep:
+                    break
+                if spans[i][0].node_id in self.wake_turn_starts:
+                    continue
+                protected.add(i)
+                real += 1
+        return protected
+
+    def _covered_ids(self, nodes: list[SessionNode]) -> set[str]:
+        """Node ids inside a promotion that is live on this path."""
+        covered: set[str] = set()
         index = {n.node_id: i for i, n in enumerate(nodes)}
         for (start, end), _kind in self._digested.items():
             if start in index and end in index:
                 for k in range(index[start], index[end] + 1):
                     covered.add(nodes[k].node_id)
-        return [s for s in old if s[0].node_id not in covered]
+        return covered
+
+    def _newest_calls_start(self, nodes: list[SessionNode]) -> int:
+        """Index of the oldest of the newest ``recency_tail_calls`` model
+        calls (assistant nodes), so those calls and their results stay
+        verbatim. A path with fewer calls is protected from its start."""
+        calls = self.config.recency_tail_calls
+        if calls <= 0:
+            return len(nodes)
+        seen = 0
+        for i in range(len(nodes) - 1, -1, -1):
+            if nodes[i].message.role == "assistant":
+                seen += 1
+                if seen >= calls:
+                    return i
+        return 0
+
+    def _recency_tail_start(
+        self, nodes: list[SessionNode], context_window: int | None, scale: float,
+    ) -> int | None:
+        """Index where the token-budgeted recency tail starts, or None for the
+        legacy count-based guards (trim-only, no known window, or a tail of
+        0).
+
+        The tail holds the newest min(recency_tail_tokens,
+        recency_tail_window_ratio * window) measured tokens, priced in
+        chars/4 units through ``scale`` on the raw nodes so it does not move
+        while a batch rewrites the view, and never fewer than the newest
+        ``recency_tail_calls`` calls. The in-flight turn-start node needs no
+        entry here: tier 1 never trims it, completed segments skip it, and
+        the in-flight span is always among the protected spans.
+        """
+        cfg = self.config
+        if not cfg.enabled or context_window is None or cfg.recency_tail_tokens <= 0:
+            return None
+        tokens = cfg.recency_tail_tokens
+        if cfg.recency_tail_window_ratio > 0:
+            tokens = min(tokens, int(context_window * cfg.recency_tail_window_ratio))
+        budget = _in_estimate_units(tokens, scale) * 4
+        start = len(nodes)
+        used = 0
+        for i in range(len(nodes) - 1, -1, -1):
+            used += sum(block_chars(b) for b in nodes[i].message.content)
+            if used > budget:
+                break
+            start = i
+        return min(start, self._newest_calls_start(nodes))
+
+    def _inflight_estimate(self, nodes: list[SessionNode]) -> int:
+        """Estimated tokens the in-flight turn carries under the current
+        view (its span from the newest turn-start node)."""
+        if not nodes:
+            return 0
+        start = len(nodes) - len(split_spans(nodes)[-1])
+        return estimate_tokens_of_messages(self._render(nodes[start:]))
 
     def _digest_until(
         self,
@@ -1373,11 +1692,14 @@ class Compactor:
         overhead_tokens: int,
         target: int,
         keep_recent: int | None = None,
+        eligible: list[list[SessionNode]] | None = None,
     ) -> list[tuple[str, str]]:
         """Promote eligible spans oldest-first until the estimate reaches
         target (target=0 → promote everything eligible). Incremental
-        accounting avoids a full re-render per span."""
-        eligible = self._eligible_spans(nodes, keep_recent=keep_recent)
+        accounting avoids a full re-render per span. ``eligible`` replaces
+        the usual candidate list (the in-flight rung passes its own)."""
+        if eligible is None:
+            eligible = self._eligible_spans(nodes, keep_recent=keep_recent)
         if not eligible:
             return []
         current = overhead_tokens + estimate_tokens_of_messages(

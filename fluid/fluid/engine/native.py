@@ -1843,6 +1843,39 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         return measured
 
+    async def _note_wake_turn_starts(self, sid: str) -> None:
+        """Tell the compactor which turn starts were wakes.
+
+        SessionNode has no source, so wake-aware turn counting reads it from
+        the persisted TurnStarted events: the first event that names a node
+        decides, so a resumed turn that re-reports an old node cannot relabel
+        it. Called at each turn's first model call; the first call reads the
+        whole log (which is what a resumed engine needs) and later ones read
+        only past the newest seq seen. A store that cannot replay leaves the
+        set as it is, and every unnamed turn counts as a real user turn,
+        which is the legacy count.
+        """
+        from fluid.context.compaction import WAKE_TURN_SOURCES
+
+        # Scan state is created on first use: the newest seq read and every
+        # node a TurnStarted has already named.
+        cursor: int = getattr(self, "_wake_scan_seq", 0)
+        seen: set[str] = getattr(self, "_wake_scan_nodes", set())
+        try:
+            async for event in iter_events(self.store, sid, cursor):
+                cursor = max(cursor, event.seq)
+                if not isinstance(event, TurnStarted) or not event.node_id:
+                    continue
+                if event.node_id in seen:
+                    continue
+                seen.add(event.node_id)
+                if event.source in WAKE_TURN_SOURCES:
+                    self._compactor.wake_turn_starts.add(event.node_id)
+        except Exception:  # noqa: BLE001 - counting falls back to legacy
+            return
+        self._wake_scan_seq = cursor
+        self._wake_scan_nodes = seen
+
     async def _rehydrate_last_call_usage(
         self, sid: str, nodes: list[SessionNode]
     ) -> tuple[str, dict[str, Any]] | None:
@@ -2754,6 +2787,8 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
+            if num_calls == 0:
+                await self._note_wake_turn_starts(sid)
             rendered, promotions = self._compactor.apply(
                 nodes,
                 overhead_tokens=self._context_overhead_tokens(),

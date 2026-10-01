@@ -196,7 +196,13 @@ def test_optional_rejection_rolls_back_and_window_protection_keeps_the_floor() -
     from fluid.context.trim import estimate_tokens_of_messages
 
     nodes = _growing_turn(50, metadata=False)
-    c = Compactor(config=CompactionConfig(trim=TrimConfig(keep_recent_tool_results=49)))
+    # Plan item 2 replaced keep_recent_tool_results with a token tail when the
+    # window is known, and waived the floor at 90% of the window, where this
+    # window sits. Both are off here so the 5% floor itself stays pinned;
+    # test_window_protection_floor_is_waived_near_the_window covers the
+    # waiver.
+    c = Compactor(config=CompactionConfig(
+        trim=TrimConfig(keep_recent_tool_results=49), **_ITEM2_OFF))
     original = c.view(nodes)
     before = estimate_tokens_of_messages(original)
     rendered, promotions = c.apply(nodes, turn_boundary=False)
@@ -1467,13 +1473,20 @@ def _drive_legacy(compactor: Compactor, nodes: list[SessionNode], *,
 # Plan item 6 turned image_rung_in_batch on, which runs the size rungs in the
 # same batch as the images. Plan item 5 turned on the deep target, the hard
 # zone and the shortfall watermark, which change every windowed scenario.
+# Plan item 2 turned on the token-budgeted recency tail, the in-flight rung,
+# the floor waiver near the window and wake-aware turn counting (_ITEM2_OFF).
 # The trim-only scenario needs no flag: that
 # contract keeps the legacy path.
+_ITEM2_OFF = {"recency_tail_tokens": 0,
+              "turn_budget_window_ratio": 0.0,
+              "window_floor_waiver_ratio": 0.0,
+              "wake_aware_turns": False}
 _LEGACY_FLAGS = {"below_threshold_skips_retry": False,
                  "image_rung_in_batch": False,
                  "deep_target_window_ratio": 0.0,
                  "hard_window_ratio": 0.0,
-                 "shortfall_watermark": False}
+                 "shortfall_watermark": False,
+                 **_ITEM2_OFF}
 
 
 def _parity_ladder() -> CompactionConfig:
@@ -1703,8 +1716,10 @@ async def test_rehydrate_over_events_persisted_without_the_new_fields(tmp_path) 
 # 163,200, deep target T = 0.35W = 95,200, hard ceiling H = min(0.75W,
 # L - 32k) = 204,000 and window-protection limit L = 252,000.
 
+# Item 5's comparisons run against the legacy recency guards as well, so the
+# item 2 flags are off in the baseline too.
 _ITEM5_OFF = {"deep_target_window_ratio": 0.0, "hard_window_ratio": 0.0,
-              "shortfall_watermark": False}
+              "shortfall_watermark": False, **_ITEM2_OFF}
 _W, _RESERVE = 272_000, 4_000
 
 
@@ -1752,8 +1767,10 @@ def test_mega_turn_fires_at_most_two_batches_where_legacy_fires_five() -> None:
     _, _, old, _, old_peak = _drive_mega_turn(
         CompactionConfig(**_ITEM5_OFF), 60, overhead=130_000)
     assert len(old) == 5
+    # Item 5 alone: the item 2 recency tail keeps 40k tokens verbatim, which
+    # changes what the first batch can take, so it stays off on both sides.
     c, nodes, new, decisions, peak = _drive_mega_turn(
-        CompactionConfig(), 60, overhead=130_000)
+        CompactionConfig(**_ITEM2_OFF), 60, overhead=130_000)
     assert len(new) <= 2
     # The first batch is the same. The shortfall watermark then holds the
     # next one until a batch can reclaim the shortfall, so it is deeper than
@@ -1767,7 +1784,7 @@ def test_mega_turn_fires_at_most_two_batches_where_legacy_fires_five() -> None:
     assert old_peak < peak < 204_000
     assert not any(d.get("window_protection") for d in decisions)
     # Persisted decisions replay to the same view.
-    resumed = Compactor(config=CompactionConfig())
+    resumed = Compactor(config=CompactionConfig(**_ITEM2_OFF))
     resumed.rehydrate(p for batch in new for p in batch)
     assert resumed.view(nodes) == c.view(nodes)
 
@@ -1910,3 +1927,347 @@ def test_shortfall_watermark_needs_a_known_window() -> None:
     assert c.last_decision["after_tokens"] > c.last_decision["target_tokens"]
     assert c._shortfall_retry is None
     assert "shortfall_tokens" not in c.last_decision
+
+
+# ── Plan item 2 (B3, B2): token-budgeted recency and the in-flight rung ────
+#
+# The steer-extended turn below follows session e104534c: one user turn of
+# 46 calls, results of 2k to 40k chars, a task notification delivered as a
+# steer every third call, and a 272k window sized on the measured basis. The
+# engine's default output reserve (32k) puts the window-protection limit L
+# at 272k - 16k - 32k = 224k.
+
+_ITEM2_SIZES = [2_000, 9_000, 40_000, 4_000, 22_000, 31_000, 6_000, 15_000]
+_ITEM2_RESERVE = 32_000
+_ITEM2_LIMIT = _W - 16_000 - _ITEM2_RESERVE
+
+
+def _steer_turn(calls: int, *, arg: int) -> list[SessionNode]:
+    from fluid.messages.content import SteerDelivery
+
+    nodes = [_node("start", "user", [
+        Text("Fix the git panel. Never force-push main. " + "pad " * 50)])]
+    for i in range(calls):
+        steers = []
+        if i % 3 == 2:
+            steers = [SteerDelivery(
+                text=f"<task-notification>task {i} finished</task-notification>",
+                origin="system", id=f"s{i}")]
+        nodes += [
+            _node(f"a{i}", "assistant", [ToolUseBlock(
+                id=f"c{i}", name="run_python",
+                input={"code": f"step {i} " + "x" * arg})]),
+            _node(f"r{i}", "user", [ToolResultBlock(
+                tool_use_id=f"c{i}",
+                content=[Text(f"result-{i} " + "y" * _ITEM2_SIZES[i % 8])],
+                delivered_steers=steers, delivery_metadata_version=1)]),
+        ]
+    return nodes
+
+
+def _measured_after(rendered: list[Message], overhead: int, ratio: float) -> int:
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    return int((overhead + estimate_tokens_of_messages(rendered)) * ratio)
+
+
+def _drive_steer_turn(config: CompactionConfig, *, overhead: int,
+                      arg: int, ratio: float = 0.92) -> tuple[
+        Compactor, list[SessionNode], list[dict], list[int], list[list]]:
+    """Every model call of the turn, with the billed prompt running at
+    ``ratio`` of the chars/4 estimate."""
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    c = Compactor(config=config)
+    nodes = _steer_turn(46, arg=arg)
+    decisions, prompts, batches = [], [], []
+    for end in range(1, len(nodes) + 1, 2):
+        prefix = nodes[:end]
+        measured = int((overhead + estimate_tokens_of_messages(c.view(prefix))) * ratio)
+        rendered, promotions = c.apply(
+            prefix, overhead_tokens=overhead, context_window=_W,
+            output_reserve_tokens=_ITEM2_RESERVE, turn_boundary=end == 1,
+            measured_prompt_tokens=measured)
+        assert rendered == c.view(prefix)
+        decisions.append(dict(c.last_decision))
+        prompts.append(_measured_after(rendered, overhead, ratio))
+        if promotions:
+            batches.append(promotions)
+    return c, nodes, decisions, prompts, batches
+
+
+def _assert_turn_start_and_newest_calls_kept(
+    nodes: list[SessionNode], promotions: list, rendered: list[Message],
+) -> None:
+    index = {n.node_id: i for i, n in enumerate(nodes)}
+    newest = {n.node_id for n in nodes[-4:]}  # the newest two calls
+    for promo in promotions:
+        for start, end, _kind in promo.spans:
+            covered = {n.node_id for n in nodes[index[start]:index[end] + 1]}
+            assert "start" not in covered, (start, end)
+            assert not covered & newest, (start, end)
+        assert not {nid for nid, _ in promo.trimmed} & newest
+    texts = "\n".join(_texts(rendered))
+    assert "Fix the git panel. Never force-push main." in texts
+    for node in nodes[-4:]:
+        if node.message.role == "user":
+            assert _texts([node.message])[0] in texts
+
+
+def test_steer_extended_turn_stays_under_the_window_limit() -> None:
+    # Legacy guards: three protected segments plus the newest five results
+    # leave the long turn's run_python arguments out of reach, so the prompt
+    # crosses L and window protection rejects its sub-5% candidates.
+    _, _, legacy_decisions, legacy_prompts, _ = _drive_steer_turn(
+        CompactionConfig(**_LEGACY_FLAGS), overhead=40_000, arg=22_000)
+    assert max(legacy_prompts) >= _ITEM2_LIMIT
+    assert any(d["reason"] == "insufficient_reclaim" and d["window_protection"]
+               for d in legacy_decisions)
+
+    c, nodes, decisions, prompts, batches = _drive_steer_turn(
+        CompactionConfig(), overhead=40_000, arg=22_000)
+    crossings = [i for i, d in enumerate(decisions) if d["window_protection"]]
+    first = crossings[0] if crossings else 0
+    # After the first crossing (there is none here) no call carries a prompt
+    # at or over L, and the tail kept the turn well under it.
+    assert all(p < _ITEM2_LIMIT for p in prompts[first:])
+    assert max(prompts) < 0.75 * _W
+    assert len(batches) <= len([b for b in legacy_decisions
+                                if b["reason"] in ("meaningful_reclaim",
+                                                   "hard_ceiling",
+                                                   "window_protection")])
+    rendered = c.view(nodes)
+    _assert_turn_start_and_newest_calls_kept(
+        nodes, [p for b in batches for p in b], rendered)
+    # Every task notification survives, verbatim or inside a digest.
+    texts = "\n".join(str(b) for m in rendered for b in m.content)
+    for i in range(2, 46, 3):
+        assert f"task {i} finished" in texts, i
+    # The decisions replay to the same view.
+    resumed = Compactor(config=CompactionConfig())
+    resumed.rehydrate(p for b in batches for p in b)
+    assert resumed.view(nodes) == rendered
+
+
+def test_turn_already_over_the_limit_is_reclaimed_below_it() -> None:
+    # A 46-call turn that is over L when it is first measured, after a resume
+    # or a model switch, over a floor no rung can touch. The candidate and
+    # the guarded tiers take everything before the recency tail and are still
+    # over L. Only the in-flight rung reaches the tail itself.
+    overhead, ratio = 210_000, 0.92
+    nodes = _steer_turn(46, arg=1_000)
+
+    def run(**flags) -> tuple[Compactor, list[Message], list]:
+        from fluid.context.trim import estimate_tokens_of_messages
+
+        c = Compactor(config=CompactionConfig(**flags))
+        estimate = overhead + estimate_tokens_of_messages(c.view(nodes))
+        rendered, promotions = c.apply(
+            nodes, overhead_tokens=overhead, context_window=_W,
+            output_reserve_tokens=_ITEM2_RESERVE, turn_boundary=False,
+            measured_prompt_tokens=int(estimate * ratio))
+        return c, rendered, promotions
+
+    off, off_rendered, _ = run(turn_budget_window_ratio=0.0)
+    assert off.last_decision["window_protection"] is True
+    assert _measured_after(off_rendered, overhead, ratio) >= _ITEM2_LIMIT
+
+    c, rendered, promotions = run()
+    assert c.last_decision["reason"] == "window_protection"
+    assert c.last_decision["turn_live_tokens"] > 0.2 * _W
+    budget = [p for p in promotions if p.reason == "turn_budget"]
+    assert budget and budget[0].tier == 1
+    assert {p.decision_reason for p in promotions} == {"window_protection"}
+    assert _measured_after(rendered, overhead, ratio) < _ITEM2_LIMIT
+    _assert_turn_start_and_newest_calls_kept(nodes, promotions, rendered)
+    # The store is untouched and the decisions replay byte-identically.
+    assert all("y" * 2_000 in _texts([n.message])[0]
+               for n in nodes if n.node_id.startswith("r"))
+    resumed = Compactor(config=CompactionConfig())
+    resumed.rehydrate(promotions)
+    assert resumed.view(nodes) == rendered
+
+
+def test_in_flight_rung_digests_segments_only_at_the_limit() -> None:
+    # Over L with nothing left to trim, the rung digests completed in-flight
+    # segments inside the recency tail, up to the newest calls. Under L it
+    # leaves the tail alone.
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _floor_heavy_turn(60)
+    window, reserve = 100_000, 4_000
+    limit = window - 16_000 - reserve
+    tail_from = index_of(nodes, "a30")
+
+    def prepared() -> Compactor:
+        c = Compactor(config=CompactionConfig())
+        # Everything trimmable is already trimmed, so only digests reclaim.
+        c.trimmer.mark_trimmed(c.trimmer._eligible(nodes, keep_recent=0))
+        c._tail_from, c._turn_live = tail_from, 100_000
+        return c
+
+    # What the guarded digest rung can reach on its own: segments ending
+    # before the tail.
+    probe = prepared()
+    probe._digest_until(nodes, overhead_tokens=0, target=0)
+    floor = estimate_tokens_of_messages(probe.view(nodes))
+
+    def escalate(over_limit_by: int) -> tuple[Compactor, list]:
+        c = prepared()
+        overhead = limit - floor + over_limit_by
+        promotions = c.escalate(nodes, overhead_tokens=overhead,
+                                context_window=window,
+                                output_reserve_tokens=reserve, guarded_only=True)
+        return c, promotions
+
+    # 5k over: more than the fold of the guarded digests frees (about 1k).
+    c, promotions = escalate(5_000)
+    digests = [p for p in promotions if p.reason == "turn_budget"]
+    assert digests and all(p.tier == 2 for p in digests)
+    index = {n.node_id: i for i, n in enumerate(nodes)}
+    newest_call = len(nodes) - 4
+    for promo in digests:
+        for start, end, _kind in promo.spans:
+            assert start != "start"
+            assert tail_from <= index[end] < newest_call
+    assert c._estimate(nodes, limit - floor + 5_000) < limit
+
+    _, promotions = escalate(-1_000)
+    assert not [p for p in promotions if p.reason == "turn_budget"]
+
+
+def test_window_protection_floor_is_waived_near_the_window() -> None:
+    # The test above pins the 5% floor under window protection. At 90% of
+    # the window and above, any reclaim of 2k tokens or more commits instead
+    # (the 33dc66c6 turn rejected 13 candidates of 7k to 16k units that way
+    # while the prompt climbed to 98.5% of the window).
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _growing_turn(50, metadata=False)
+    no_tail = {**_ITEM2_OFF}
+    no_tail.pop("window_floor_waiver_ratio")
+
+    def run(**flags) -> tuple[Compactor, list, int]:
+        c = Compactor(config=CompactionConfig(
+            trim=TrimConfig(keep_recent_tool_results=40), **flags))
+        before = estimate_tokens_of_messages(c.view(nodes))
+        window = before + c.config.headroom_tokens + 4_000 - 1
+        _, promotions = c.apply(nodes, turn_boundary=False, context_window=window,
+                                output_reserve_tokens=4_000)
+        return c, promotions, before
+
+    floor, promotions, before = run(**_ITEM2_OFF)
+    assert not promotions
+    assert floor.last_decision["reason"] == "insufficient_reclaim"
+    assert floor.last_decision["window_protection_misses"] == 1
+    reclaim = before - floor.last_decision["candidate_after_tokens"]
+    assert 2_000 <= reclaim < before * 0.05
+
+    waived, promotions, _ = run(**no_tail)
+    assert promotions
+    assert waived.last_decision["reason"] == "window_protection"
+    assert waived.last_decision["window_protection_misses"] == 0
+    assert waived.last_decision["after_tokens"] == before - reclaim
+
+
+def test_trim_eligibility_uses_the_tail_only_with_a_known_window() -> None:
+    from fluid.context.trim import ToolResultTrimmer
+
+    nodes = _steer_turn(12, arg=100)
+    trimmer = ToolResultTrimmer(config=TrimConfig(keep_recent_tool_results=5))
+    legacy = trimmer._eligible(nodes)
+    assert ("r6", "c6") in legacy and ("r7", "c7") not in legacy
+    # A protected-from index replaces the count: results before it are in
+    # reach whatever the count says, results from it on are kept.
+    tailed = trimmer._eligible(nodes, protected_from=index_of(nodes, "a10"))
+    assert ("r9", "c9") in tailed and ("r10", "c10") not in tailed
+    # An explicit keep_recent (overflow recovery) still wins.
+    assert trimmer._eligible(nodes, keep_recent=0, protected_from=1) == (
+        trimmer._eligible(nodes, keep_recent=0))
+
+    c = Compactor()
+    assert c._recency_tail_start(nodes, None, 1.0) is None
+    start = c._recency_tail_start(nodes, _W, 1.0)
+    # The tail never holds fewer than the newest two calls.
+    assert start is not None and start <= index_of(nodes, "a10")
+    trim_only = Compactor(config=CompactionConfig(enabled=False))
+    assert trim_only._recency_tail_start(nodes, _W, 1.0) is None
+
+
+def index_of(nodes: list[SessionNode], node_id: str) -> int:
+    return next(i for i, n in enumerate(nodes) if n.node_id == node_id)
+
+
+def _wake_history() -> list[SessionNode]:
+    """Two real user turns, five wake turns, then an in-flight wake turn.
+    Every turn carries one large result and one argument-heavy call."""
+    nodes: list[SessionNode] = []
+    for t, name in enumerate(["u0", "u1", "w2", "w3", "w4", "w5", "w6", "w7"]):
+        nodes += [
+            _node(name, "user", [Text(f"turn {name} " + "pad " * 40)]),
+            _node(f"{name}_a", "assistant", [ToolUseBlock(
+                id=f"{name}_c", name="Edit", input={"text": "e" * 3_000})]),
+            _node(f"{name}_r", "user", [ToolResultBlock(
+                tool_use_id=f"{name}_c", content=[Text("ok " * 400)])]),
+            _node(f"{name}_f", "assistant", [Text(f"done {name}")]),
+        ]
+    return nodes
+
+
+def test_wake_turns_do_not_age_out_real_user_turns() -> None:
+    nodes = _wake_history()
+    wakes = {"w2", "w3", "w4", "w5", "w6", "w7"}
+
+    def digested(c: Compactor) -> set[str]:
+        _, promotions = c.apply(nodes)
+        return {s for p in promotions for s, _e, _k in p.spans}
+
+    legacy = Compactor(config=_cfg(keep_recent_turns=3))
+    assert {"u0", "u1"} <= digested(legacy)
+
+    aware = Compactor(config=_cfg(keep_recent_turns=3))
+    aware.wake_turn_starts = set(wakes)
+    starts = digested(aware)
+    assert starts and not starts & {"u0", "u1", "w5", "w6", "w7"}
+    assert starts <= {"w2", "w3", "w4"}
+
+    # The flag off restores the legacy count even with sources known.
+    off = Compactor(config=_cfg(keep_recent_turns=3, wake_aware_turns=False))
+    off.wake_turn_starts = set(wakes)
+    assert {"u0", "u1"} <= digested(off)
+
+
+async def test_engine_reads_wake_turn_sources_from_turn_started(tmp_path) -> None:
+    import json
+
+    from fluid.events.model import TurnStarted
+    from fluid.store.base import persist_event
+
+    sid = "ses_wake"
+    rows = [
+        TurnStarted(session_id=sid, node_id="u0", turn_id="t0", seq=1,
+                    model="m", provider="p", source="user"),
+        TurnStarted(session_id=sid, node_id="w1", turn_id="t1", seq=2,
+                    model="m", provider="p", source="unpark"),
+        TurnStarted(session_id=sid, node_id="w2", turn_id="t2", seq=3,
+                    model="m", provider="p", source="agent_message"),
+        TurnStarted(session_id=sid, node_id="old", turn_id="t3", seq=4,
+                    model="m", provider="p"),  # a row from before sources
+        # A resumed turn re-reports w1 as a user turn; the first row decides.
+        TurnStarted(session_id=sid, node_id="w1", turn_id="t4", seq=5,
+                    model="m", provider="p", source="user"),
+    ]
+    (tmp_path / f"{sid}.events.jsonl").write_text(
+        "".join(json.dumps(event_to_dict(r)) + "\n" for r in rows),
+        encoding="utf-8")
+    store = JsonlStore(tmp_path)
+    loop = NativeLoop(provider=_ScriptedProvider([_text_script("done")]),
+                      store=store, model="m", session_id=sid)
+    await loop._note_wake_turn_starts(sid)
+    assert loop._compactor.wake_turn_starts == {"w1", "w2"}
+    await persist_event(store, TurnStarted(
+        session_id=sid, node_id="w3", turn_id="t5", seq=6,
+        model="m", provider="p", source="wakeup"))
+    await loop._note_wake_turn_starts(sid)
+    assert loop._compactor.wake_turn_starts == {"w1", "w2", "w3"}
+    await loop.aclose()
