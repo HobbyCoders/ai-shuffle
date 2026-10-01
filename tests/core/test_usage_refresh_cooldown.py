@@ -263,6 +263,27 @@ async def test_duplicate_rows_share_one_request_and_all_refresh(clock, counts, u
 
 
 @pytest.mark.asyncio
+async def test_duplicate_rows_share_a_compressed_response(clock, upstream):
+    """Real providers answer gzip-encoded. The shared copy must not be decoded
+    twice, or every row after the first fails instead of refreshing."""
+    import gzip
+    import json
+
+    from app.api.usage import _load_provider_usage
+
+    ids = ("dup-a", "dup-b", "dup-c")
+    _duplicate_rows(*ids)
+    body = gzip.compress(json.dumps({"data": {"usage": 2.0, "limit": 10.0}}).encode())
+    upstream.return_value = httpx.Response(
+        200, headers={"Content-Encoding": "gzip", "Content-Type": "application/json"}, content=body,
+        request=httpx.Request("GET", "https://router.example.test/api/v1/key"))
+    await provider_usage.ProviderUsageMonitor().request_refresh(force=True, cooldown=30)
+    assert upstream.await_count == 1
+    entries = {p.provider_id: p for p in await _load_provider_usage()}
+    assert all(entries[i].status == "fresh" and entries[i].credits["usage"] == 2.0 for i in ids)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [403, 429, 503])
 async def test_duplicate_rows_do_not_multiply_failed_requests(clock, upstream, status):
     _duplicate_rows("dup-a", "dup-b", "dup-c")

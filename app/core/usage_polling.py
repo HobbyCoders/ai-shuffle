@@ -53,8 +53,14 @@ def _request_key(url, headers, params, paginate):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+# ``Response.content`` is already decoded. Copying these with it would make
+# httpx decode a gzip/br/zstd body a second time and fail every waiting row.
+_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
 def _copy(response):
-    return httpx.Response(response.status_code, headers=response.headers,
+    headers = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _ENCODING_HEADERS]
+    return httpx.Response(response.status_code, headers=headers,
                           content=response.content, request=response.request)
 
 
