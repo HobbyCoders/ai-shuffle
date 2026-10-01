@@ -92,6 +92,18 @@ Get usage trends over time.
 
 List the highest-usage sessions.
 
+### GET /api/v1/analytics/providers
+
+Get turns, tokens and estimated cost per provider (Claude, ChatGPT/Codex, OpenAI, xAI/Grok, OpenRouter, custom endpoints) for `start_date`..`end_date`. Each item has a `billing` (`subscription`, `api`, `mixed` or `unknown`; a subscription's cost is what the same usage would cost at API prices) and a `cost_status` (`estimated`, `partial`, or `unknown` when the model has no known price, in which case the cost is missing rather than zero). `inferred_query_count` counts turns recorded before per-provider tracking, which are attributed to their session's current provider.
+
+**Auth:** Required. API users see only their own usage.
+
+### GET /api/v1/analytics/export
+
+Download the per-provider usage for `start_date`..`end_date` as CSV: one `day` row per provider per day, then one `range_total` row per provider. `estimated_cost_usd` is blank when the cost is unknown.
+
+**Auth:** Required. API users see only their own usage.
+
 ## Usage Limits
 
 ### GET /api/v1/usage/limits

@@ -289,6 +289,47 @@ class TestGenerateWithClaude:
         assert kwargs["duration_ms"] == 321
 
     @pytest.mark.asyncio
+    async def test_generation_usage_is_attributed_to_its_provider(self):
+        """The row names the provider the generation setting routed to, and
+        carries the cache tokens the turn reported (#1614)."""
+        from types import SimpleNamespace
+
+        from app.api.generation import generate_with_claude
+        from app.core.provider.events import ResultMessage
+
+        result = ResultMessage(
+            subtype="success",
+            is_error=False,
+            usage={"input_tokens": 12, "output_tokens": 7,
+                   "cache_read_input_tokens": 300, "cache_creation_input_tokens": 40},
+            total_cost_usd=0.0,
+            duration_ms=10,
+        )
+        adapter = FakeAdapter([assistant_text("ok"), result])
+        log_usage = MagicMock()
+        attribution = {"provider_id": "p-codex", "provider_type": "chatgpt",
+                       "billing": "subscription"}
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "gpt-5", "provider": "p-codex", "effort": None},
+                ), \
+                patch("app.core.generation_options.build_generation_options",
+                      return_value=SimpleNamespace(aih_provider_id="p-codex")), \
+                patch("app.core.usage_attribution.usage_attribution",
+                      return_value=attribution) as attribute, \
+                patch("app.api.generation.database.log_usage", log_usage), \
+                patch_adapter(adapter):
+            await generate_with_claude("Test prompt")
+
+        attribute.assert_called_once_with("p-codex")
+        kwargs = log_usage.call_args.kwargs
+        assert kwargs["provider_id"] == "p-codex"
+        assert kwargs["provider_type"] == "chatgpt"
+        assert kwargs["billing"] == "subscription"
+        assert kwargs["cache_read_tokens"] == 300
+        assert kwargs["cache_creation_tokens"] == 40
+
+    @pytest.mark.asyncio
     async def test_generate_with_claude_uses_app_local_event_classes(self):
         """Regression guard: the loop must match app.core.provider.events.
 

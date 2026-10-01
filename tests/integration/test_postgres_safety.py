@@ -116,7 +116,7 @@ def test_maintenance_commits_later_steps_after_missing_table(pg):
         cur.execute("CREATE TABLE audit_log (created_at timestamptz)")
         cur.execute("INSERT INTO audit_log VALUES (NOW() - INTERVAL '8 days')")
     result = run_database_maintenance(skip_vacuum=True)
-    assert result["cleaned_usage_log"].startswith("error:")
+    assert result["cleaned_sync_log"].startswith("error:")
     assert result["cleaned_audit_log"] == 1
     with base.get_db() as conn:
         cur = conn.cursor()

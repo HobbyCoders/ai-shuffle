@@ -1007,3 +1007,71 @@ class TestEstimatedUsageFields:
         assert summary.json()["usage_stats"]["estimated_query_count"] == 0
         assert top.status_code == 200
         assert top.json()[0]["usage_estimated"] is False
+
+
+# =============================================================================
+# Per-provider breakdown and CSV export (#1614)
+# =============================================================================
+
+class TestProviderBreakdownAndExport:
+    """``/providers`` and ``/export`` read the real ledger (no DB patching)."""
+
+    @pytest.fixture
+    def ledger(self, mock_db, monkeypatch):
+        from app.core import claude_auth_mode
+        from app.db import database
+
+        monkeypatch.setattr(claude_auth_mode, "current_mode",
+                            lambda: claude_auth_mode.MODE_SUBSCRIPTION)
+        database.create_model_provider("p-local", "Local", "custom", "http://x.invalid")
+        database.create_session(session_id="s1", profile_id="default")
+        database.settle_turn_usage(
+            "s1", "k1", tokens_in=100, tokens_out=20, cost_usd=0.5, model_calls=1,
+            provider_type="claude", billing="subscription")
+        database.settle_turn_usage(
+            "s1", "k2", tokens_in=40, tokens_out=4, cost_usd=0, model_calls=1,
+            provider_id="p-local", provider_type="custom", billing="api")
+
+    def test_providers_endpoint_reports_each_provider(self, authenticated_client, ledger):
+        # Explicit range: the SQLite shim compares the raw timestamp to the
+        # end date as text, so a row stamped today misses a range ending today.
+        response = authenticated_client.get(
+            "/api/v1/analytics/providers?start_date=2020-01-01&end_date=2099-12-31")
+        assert response.status_code == 200
+        items = {i["key"]: i for i in response.json()["items"]}
+        assert items["claude"]["name"] == "Claude"
+        assert items["claude"]["billing"] == "subscription"
+        assert items["claude"]["total_cost_usd"] == 0.5
+        assert items["claude"]["query_count"] == 1
+        assert items["p-local"]["cost_status"] == "unknown"
+        assert items["p-local"]["total_tokens_in"] == 40
+
+    def test_providers_endpoint_validates_dates(self, authenticated_client):
+        response = authenticated_client.get("/api/v1/analytics/providers?start_date=bad")
+        assert response.status_code == 400
+
+    def test_export_is_a_per_provider_csv_with_unknown_cost_blank(
+        self, authenticated_client, ledger,
+    ):
+        import csv
+        import io
+
+        response = authenticated_client.get(
+            "/api/v1/analytics/export?start_date=2020-01-01&end_date=2099-12-31")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert "usage-by-provider-2020-01-01-to-2099-12-31.csv" in (
+            response.headers["content-disposition"])
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        totals = {r["provider_key"]: r for r in rows if r["row_type"] == "range_total"}
+        assert totals["claude"]["estimated_cost_usd"] == "0.500000"
+        assert totals["claude"]["billing"] == "subscription"
+        assert totals["claude"]["turns"] == "1"
+        # Unpriced: blank, never "0".
+        assert totals["p-local"]["estimated_cost_usd"] == ""
+        assert totals["p-local"]["cost_status"] == "unknown"
+        days = [r for r in rows if r["row_type"] == "day"]
+        assert sorted(r["provider_key"] for r in days) == ["claude", "p-local"]
+
+    def test_export_requires_auth(self, client):
+        assert client.get("/api/v1/analytics/export").status_code in (401, 403)

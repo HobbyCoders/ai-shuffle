@@ -388,6 +388,13 @@ async def generate_with_claude(
     # usage was ever written.)
     if result_usage is not None:
         try:
+            from app.core.usage_attribution import usage_attribution
+
+            # Attributed to the leg the generation setting routed to, so this
+            # spend lands under its provider in the Stats breakdown.
+            attribution = await run_sync(
+                usage_attribution, getattr(options, "aih_provider_id", None)
+            )
             await run_sync(
                 database.log_usage,
                 session_id=None,
@@ -395,8 +402,12 @@ async def generate_with_claude(
                 model=effective_model,
                 tokens_in=result_usage.get("input_tokens", 0),
                 tokens_out=result_usage.get("output_tokens", 0),
+                cache_read_tokens=result_usage.get("cache_read_input_tokens", 0),
+                cache_creation_tokens=result_usage.get("cache_creation_input_tokens", 0),
                 cost_usd=result_cost or 0,
                 duration_ms=result_duration_ms or int(t_total * 1000),
+                usage_estimated=bool(result_usage.get("usage_estimated")),
+                **attribution,
             )
         except Exception as usage_err:  # noqa: BLE001 - accounting is best-effort
             logger.warning(

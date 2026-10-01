@@ -797,6 +797,12 @@ def _run_column_migrations(cursor):
                 "ALTER TABLE usage_log ADD COLUMN usage_estimated BOOLEAN DEFAULT FALSE"
             )
             migrations_applied.append("usage_log.usage_estimated")
+        # Per-provider attribution for the Stats breakdown. Older rows stay
+        # NULL; the breakdown attributes them from the session's binding.
+        for column in ("provider_id", "provider_type", "billing"):
+            if not column_exists(cursor, "usage_log", column):
+                cursor.execute(f"ALTER TABLE usage_log ADD COLUMN {column} TEXT")
+                migrations_applied.append(f"usage_log.{column}")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
@@ -2993,8 +2999,11 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             results["analyze"] = f"error: {e}"
 
         # 2. Cleanup unbounded log tables (older than 7 days).
+        # ``usage_log`` is NOT one of them: it is the usage ledger behind the
+        # Stats page's 30/90-day ranges and the per-turn cost footers, and
+        # pruning it at 7 days made every longer range silently report one
+        # week of usage.
         log_tables = {
-            "usage_log": "created_at",
             "audit_log": "created_at",
             "sync_log": "created_at",
             "connector_event_log": "created_at",
@@ -3253,6 +3262,7 @@ from app.db.analytics import (  # noqa: F401
     get_analytics_cost_breakdown,
     get_analytics_usage_trends,
     get_analytics_top_sessions,
+    get_analytics_provider_breakdown,
 )
 
 from app.db.api_users import (  # noqa: F401
