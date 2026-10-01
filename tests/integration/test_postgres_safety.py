@@ -175,3 +175,64 @@ def test_mobile_expiry_without_a_sweep(pg, monkeypatch):
         cur.execute("SELECT arguments, result FROM mobile_tool_commands WHERE id=%s", (command["id"],))
         assert dict(cur.fetchone()) == {"arguments": "{}", "result": None}
 
+
+def test_usage_provider_breakdown_on_real_postgres(pg, monkeypatch):
+    """#1614: the per-provider breakdown, its daily split and the usage
+    ledger's retention on real PostgreSQL (the SQLite shim drops ``::date``)."""
+    from app.core import claude_auth_mode
+    from app.db import database
+    from app.db.database import init_database, run_database_maintenance
+
+    base, _, _ = pg
+    init_database()
+    monkeypatch.setattr(claude_auth_mode, "current_mode",
+                        lambda: claude_auth_mode.MODE_SUBSCRIPTION)
+    database.create_model_provider("p-codex", "My Codex", "chatgpt", "https://example.invalid")
+    database.create_api_user("u-1", "User", "hash-u-1")
+    database.create_session(session_id="s-mine", profile_id=None, api_user_id="u-1")
+    database.create_session(session_id="s-old", profile_id=None, provider_id="p-codex")
+
+    def book(sid, key, **kw):
+        row = dict(profile_id=None, model="m", tokens_in=100, tokens_out=10,
+                   cost_usd=0.01, model_calls=1, turn_increment=1)
+        row.update(kw)
+        assert database.settle_turn_usage(sid, key, **row)
+
+    book("s-mine", "a", provider_type="claude", billing="subscription", usage_estimated=True)
+    book("s-mine", "b", provider_type="claude", billing="subscription")
+    book("s-mine", "c", provider_id="p-codex", provider_type="chatgpt",
+         billing="subscription", cost_usd=0)
+    # Booked before attribution: inferred from the session's binding.
+    database.log_usage("s-old", None, "gpt", 10, 1, 0.0, 1)
+    database.log_usage(None, None, "haiku", 10, 1, 0.001, 1)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE usage_log SET created_at = '2026-09-01 08:00:00' WHERE settlement_key = 'a'")
+        cur.execute("UPDATE usage_log SET created_at = '2026-09-01 20:00:00' WHERE settlement_key = 'b'")
+        cur.execute("UPDATE usage_log SET created_at = '2026-09-03 12:00:00' "
+                    "WHERE settlement_key = 'c' OR settlement_key IS NULL")
+
+    items = {i["key"]: i for i in database.get_analytics_provider_breakdown("2026-09-01", "2026-09-30")}
+    assert set(items) == {"claude", "p-codex", "unattributed"}
+    assert items["claude"]["query_count"] == 2
+    assert items["claude"]["estimated_query_count"] == 1
+    assert items["claude"]["billing"] == "subscription"
+    assert items["p-codex"]["query_count"] == 2
+    assert items["p-codex"]["inferred_query_count"] == 1
+    assert items["p-codex"]["cost_status"] == "unknown"
+    assert items["p-codex"]["billing"] == "subscription"
+
+    daily = database.get_analytics_provider_breakdown("2026-09-01", "2026-09-30", by_date=True)
+    assert [(i["date"], i["key"], i["query_count"]) for i in daily if i["key"] != "unattributed"] == [
+        ("2026-09-01", "claude", 2), ("2026-09-03", "p-codex", 2),
+    ]
+    mine = database.get_analytics_provider_breakdown("2026-09-01", "2026-09-30", api_user_id="u-1")
+    assert sorted((i["key"], i["query_count"]) for i in mine) == [("claude", 2), ("p-codex", 1)]
+
+    result = run_database_maintenance(skip_vacuum=True)
+    assert "cleaned_usage_log" not in result
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM usage_log")
+        assert cur.fetchone()["n"] == 5
+
