@@ -96,7 +96,9 @@ def classify_cache_miss(
             return PROVIDER_FALLBACK
         # Headers that moved on their own are an unannounced routing change.
         # Headers that moved with the model or endpoint (a provider switch)
-        # are part of that switch.
+        # are part of that switch. One of these on the first call after the
+        # OpenAI Responses routing arm changes (arm A to B on upgrade) is
+        # expected: the new arm sends new identity headers once.
         if diagnosis.get("routing_headers_changed") and not diagnosis.get(
             "other_settings_changed"
         ):

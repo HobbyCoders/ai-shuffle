@@ -1165,6 +1165,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.cache_key = cache_key or None
         self._prefix_fingerprint: dict[str, str] | None = None
         self._prev_prefix_fingerprint: dict[str, str] | None = None
+        # Total prompt tokens (fresh + cache read + cache write) of the call
+        # behind ``_prev_prefix_fingerprint``, so the next call can report how
+        # much of it the provider read back (``prev_prompt_coverage``).
+        # Always set and cleared together with that fingerprint.
+        self._prev_prompt_tokens: int | None = None
         # Consecutive misses the probe could not pin on anything fluid did,
         # and whether this run has already been alerted on. Both reset by any
         # explained call and at the start of every turn.
@@ -2667,6 +2672,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             }
             if recovered:
                 self._prev_prefix_fingerprint = recovered
+                self._prev_prompt_tokens = (
+                    event.input_tokens + event.cache_read_tokens
+                    + event.cache_creation_tokens
+                ) or None
             return
 
     async def _emit_compaction(
@@ -3665,6 +3674,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     endpoint=getattr(self.provider, "_base_url", None),
                     routing_headers=routing_headers,
                 )
+            # Which routing arm sent this request (OpenAI Responses). The
+            # underscore keeps it out of the miss diagnosis: the headers the
+            # arm sends are already hashed in ``_routing_headers``.
+            arm = getattr(self.provider, "routing_arm", None)
+            if isinstance(arm, str):
+                self._prefix_fingerprint["_routing_arm"] = arm
             self._prefix_fingerprint["_requested_at"] = str(time.time())
             # The text behind the system hash, kept in-process so a change
             # can be diffed against the previous request's text (across a
@@ -3740,6 +3755,25 @@ class NativeLoop(BackgroundLifecycleMixin):
         except (TypeError, ValueError):
             pass  # Old or malformed diagnostic metadata is not a turn failure.
         sticky_dropped, self._sticky_drop_unreported = self._sticky_drop_unreported, False
+        # How much of the previous call's prompt this call read from cache:
+        # near 1.0 when it landed where the previous request was cached, near
+        # 0 when it landed on a node that never saw it.
+        try:
+            cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+            prompt_tokens: int | None = (
+                int(usage.get("input_tokens", 0) or 0) + cache_read
+                + int(usage.get("cache_creation_input_tokens", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            cache_read, prompt_tokens = 0, None
+        previous_prompt = (
+            self._prev_prompt_tokens
+            if self._prev_prefix_fingerprint is not None else None
+        )
+        if previous_prompt is not None and previous_prompt >= 1 and prompt_tokens is not None:
+            out["prev_prompt_coverage"] = round(
+                min(1.0, cache_read / previous_prompt), 4
+            )
         try:
             diagnosis = diagnose_cache_miss(
                 previous=self._prev_prefix_fingerprint,
@@ -3763,6 +3797,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             log.debug("cache-miss diagnosis failed", exc_info=True)
             diagnosis = None
         self._prev_prefix_fingerprint = fingerprint
+        self._prev_prompt_tokens = prompt_tokens
         if diagnosis is None:
             self._unexplained_misses = 0
             _stamp_miss_class(out)

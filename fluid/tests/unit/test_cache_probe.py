@@ -14,6 +14,8 @@ Pins three things the audit asked for:
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.context.cache_probe import (
     CacheProbeConfig,
     checkpoint_positions,
@@ -1164,11 +1166,18 @@ def test_headers_that_move_with_a_settings_switch_are_reported_with_it() -> None
     assert diagnosis["other_settings_changed"] is True
 
 
-async def test_the_responses_client_routing_headers_are_the_ones_it_sends() -> None:
+async def test_the_responses_client_routing_headers_are_the_ones_it_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.providers.openai_responses.client import (
         CODEX_RESPONSES_URL,
+        ROUTING_ARM_ENV,
+        ROUTING_HINT_ENV,
         OpenAIResponsesClient,
     )
+
+    monkeypatch.delenv(ROUTING_ARM_ENV, raising=False)
+    monkeypatch.delenv(ROUTING_HINT_ENV, raising=False)
 
     class _Auth:
         account_id = "acct-1"
@@ -1248,3 +1257,183 @@ async def test_an_anthropic_prefix_mutation_is_classified_as_a_mutation() -> Non
     assert second["cache_miss"]["reason"] == "prefix_changed"
     assert second["cache_miss"]["changed"] == "system"
     assert second["cache_miss_class"] == "harness_mutation"
+
+
+# ─── OpenAI routing arm and previous-prompt coverage ─────────────────────────
+
+
+class _CodexAuth:
+    account_id = "acct-1"
+
+    async def get_access_token(self) -> str:
+        return "secret-token"
+
+    async def on_401(self) -> None:
+        return None
+
+
+def _codex_client(arm: str | None = None):
+    from fluid.providers.openai_responses.client import (
+        CODEX_RESPONSES_URL,
+        OpenAIResponsesClient,
+    )
+
+    return OpenAIResponsesClient(
+        auth=_CodexAuth(), base_url=CODEX_RESPONSES_URL, routing_arm=arm,
+    )
+
+
+class _CodexRoutedProvider(_MissProvider):
+    """Full misses, with the routing arm and headers of a real Codex-backend
+    Responses client. ``switch_after`` calls in, a second client takes over
+    (a worker restarted onto a new arm)."""
+
+    def __init__(
+        self, tool_calls: int, *, arm: str | None = None,
+        then: str | None = None, switch_after: int = 0,
+    ) -> None:
+        super().__init__(tool_calls)
+        self.first = _codex_client(arm)
+        self.second = _codex_client(then) if then is not None else self.first
+        self.switch_after = switch_after
+
+    def _current(self):
+        if self.switch_after and self.calls >= self.switch_after:
+            return self.second
+        return self.first
+
+    @property
+    def routing_arm(self) -> str:
+        return self._current().routing_arm
+
+    def routing_headers(self, request=None) -> dict[str, str]:
+        return self._current().routing_headers(request)
+
+
+@pytest.fixture
+def _no_routing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.providers.openai_responses.client import ROUTING_ARM_ENV, ROUTING_HINT_ENV
+
+    monkeypatch.delenv(ROUTING_ARM_ENV, raising=False)
+    monkeypatch.delenv(ROUTING_HINT_ENV, raising=False)
+
+
+@pytest.mark.usefixtures("_no_routing_env")
+async def test_the_default_arm_gives_each_session_its_own_route_hash() -> None:
+    first = await _run_misses(2, provider=_CodexRoutedProvider(2))
+    second = await _run_misses(2, provider=_CodexRoutedProvider(2))
+
+    def hashes(loop: NativeLoop) -> list[dict]:
+        return [e.raw["prefix_hashes"] for e in loop.bus.log(loop.session_id)
+                if isinstance(e, Usage)]
+
+    one, two = hashes(first), hashes(second)
+    assert {h["_routing_arm"] for h in one + two} == {"B"}
+    assert len({h["_routing_headers"] for h in one}) == 1, "constant within a session"
+    assert len({h["_routing_headers"] for h in two}) == 1
+    assert one[0]["_routing_headers"] != two[0]["_routing_headers"]
+
+    diagnoses = [e.raw["cache_miss"] for e in first.bus.log(first.session_id)
+                 if isinstance(e, Usage)]
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request", "prefix_grew_only", "prefix_grew_only",
+    ]
+    assert not any(d.get("routing_headers_changed") for d in diagnoses)
+
+
+@pytest.mark.usefixtures("_no_routing_env")
+async def test_an_arm_change_is_one_routing_headers_change() -> None:
+    provider = _CodexRoutedProvider(3, arm="A", then="B", switch_after=2)
+    loop = await _run_misses(3, provider=provider)
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    diagnoses = [u.raw["cache_miss"] for u in usages]
+
+    assert [u.raw["prefix_hashes"]["_routing_arm"] for u in usages] == ["A", "A", "B", "B"]
+    assert [d["reason"] for d in diagnoses] == [
+        "no_previous_request",
+        "prefix_grew_only",
+        "request_settings_changed",
+        "prefix_grew_only",
+    ]
+    assert [bool(d.get("routing_headers_changed")) for d in diagnoses] == [
+        False, False, True, False,
+    ]
+
+
+def test_the_routing_arm_key_never_marks_a_miss() -> None:
+    previous = _fp(_routing_arm="A")
+    current = _fp(_routing_arm="B")
+    diagnosis = diagnose_cache_miss(previous=previous, current=current,
+                                    input_tokens=150_000, cache_read_tokens=0)
+    assert diagnosis["reason"] == "prefix_unchanged"
+
+
+class _CoverageProvider(_MissProvider):
+    """Scripted prompt usage per call, on top of the miss provider's turn."""
+
+    def __init__(self, usages: list[dict]) -> None:
+        super().__init__(len(usages) - 1)
+        self.usages = usages
+
+    async def stream(self, request: ProviderRequest):
+        index = self.calls
+        async for chunk in super().stream(request):
+            if chunk.kind == "message_start":
+                chunk = StreamChunk("message_start", {"usage": self.usages[index]})
+            yield chunk
+
+
+async def test_prev_prompt_coverage_is_the_share_of_the_last_prompt_read() -> None:
+    provider = _CoverageProvider([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 1_000, "cache_read_input_tokens": 30_000},
+        # More than the previous prompt read back: capped at 1.0.
+        {"input_tokens": 500, "cache_read_input_tokens": 40_000},
+    ])
+    loop = await _run_misses(0, provider=provider)
+    raws = [e.raw for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+
+    assert "prev_prompt_coverage" not in raws[0], "nothing to compare on the first call"
+    assert raws[1]["prev_prompt_coverage"] == 0.5
+    assert raws[2]["prev_prompt_coverage"] == 1.0
+
+
+async def test_prev_prompt_coverage_starts_over_with_a_new_session() -> None:
+    first = await _run_misses(0, provider=_CoverageProvider([
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 1_000, "cache_read_input_tokens": 60_000},
+    ]))
+    assert [e.raw.get("prev_prompt_coverage") for e in first.bus.log(first.session_id)
+            if isinstance(e, Usage)] == [None, 1.0]
+
+    fresh = await _run_misses(0, provider=_CoverageProvider([
+        {"input_tokens": 70_000, "cache_read_input_tokens": 0},
+    ]))
+    (usage,) = [e for e in fresh.bus.log(fresh.session_id) if isinstance(e, Usage)]
+    assert "prev_prompt_coverage" not in usage.raw
+
+
+async def test_prev_prompt_coverage_survives_a_rebuilt_engine() -> None:
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 40_000, "cache_read_input_tokens": 0},
+        ]),
+        store=store, model="m", system="sys " * 50_000,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await first.submit(UserTurn(content="one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=10)
+    sid = first.session_id
+
+    second = NativeLoop(
+        provider=_CoverageProvider([
+            {"input_tokens": 2_000, "cache_read_input_tokens": 30_000},
+        ]),
+        store=store, model="m", system="sys " * 50_000, session_id=sid,
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    await second.submit(UserTurn(content="two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=10)
+    usage = [e for e in second.bus.log(sid) if isinstance(e, Usage)][-1]
+    assert usage.raw["prev_prompt_coverage"] == 0.75
