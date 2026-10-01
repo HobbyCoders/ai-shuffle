@@ -1530,7 +1530,7 @@ def test_the_usage_record_carries_the_followon_count() -> None:
 
 def _loop_with_rewrites(
     usages: list[dict], rewrite_on: set[int], *, store: MemoryStore | None = None,
-    session_id: str | None = None,
+    session_id: str | None = None, provider: _MissProvider | None = None,
 ) -> tuple[NativeLoop, list[list[Message]]]:
     """A loop whose compactor reports a rewrite before the given calls.
 
@@ -1542,7 +1542,7 @@ def _loop_with_rewrites(
 
     kwargs = {"session_id": session_id} if session_id else {}
     loop = NativeLoop(
-        provider=_CoverageProvider(usages), store=store or MemoryStore(),
+        provider=provider or _CoverageProvider(usages), store=store or MemoryStore(),
         model="m", system="sys " * 50_000,
         registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
         **kwargs,
@@ -1606,6 +1606,59 @@ async def test_the_rewrite_tail_is_logged_and_the_next_misses_are_followons() ->
         + ["provider_fallback"]
     )
     assert loop.reuse_floor_tokens == 24_000
+
+
+class _EmptyOnceProvider(_CoverageProvider):
+    """The coverage provider, except call ``empty_at`` (0-based) comes back empty."""
+
+    def __init__(self, usages: list[dict], empty_at: int) -> None:
+        super().__init__(usages)
+        self.empty_at = empty_at
+
+    async def stream(self, request: ProviderRequest):
+        if self.calls == self.empty_at:
+            self.calls += 1
+            yield StreamChunk("message_start", {"usage": {"input_tokens": 0}})
+            yield StreamChunk("usage", {"usage": {"input_tokens": 0, "output_tokens": 0},
+                                        "stop_reason": "end_turn"})
+            yield StreamChunk("message_stop", {})
+            return
+        async for chunk in super().stream(request):
+            yield chunk
+
+
+async def test_an_empty_retry_leaves_the_rewrite_tail_for_the_logged_call(monkeypatch) -> None:
+    """The dud call's probe fields are dropped, so it must not consume the
+    parked rewrite tail: the retry that re-sends the rewritten history logs it."""
+    import fluid.engine.native as native
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.events import ContextCompaction
+
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
+    miss = {"input_tokens": 60_000, "cache_read_input_tokens": 0}
+    usages = [
+        miss,
+        {},  # the empty call that carried the rewrite
+        {"input_tokens": 30_000, "cache_read_input_tokens": 24_000},  # its retry
+        miss,
+    ]
+    loop, rendered = _loop_with_rewrites(
+        usages, rewrite_on={2}, provider=_EmptyOnceProvider(usages, empty_at=1),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    events = loop.bus.log(loop.session_id)
+
+    (compaction,) = [e for e in events if isinstance(e, ContextCompaction)]
+    tail = estimate_tokens_of_messages(rendered[0][1:])
+    assert compaction.rewrite_tail_tokens_est == tail
+
+    raws = [e.raw for e in events if isinstance(e, Usage)]
+    assert len(raws) == 3, "the dud call logs no Usage row"
+    assert raws[1]["rewrite_tail_tokens_est"] == tail
+    assert raws[1]["calls_since_rewrite"] == 0
+    assert raws[1]["reuse_floor_tokens"] == 24_000
+    assert raws[2]["calls_since_rewrite"] == 1
 
 
 async def test_the_reuse_floor_smooths_each_measured_rewrite() -> None:

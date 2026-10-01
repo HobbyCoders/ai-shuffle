@@ -3179,8 +3179,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._fold_call_usage(total_usage, result.usage)
                 # Rotate the prefix fingerprint past the dud call too, so the
                 # next cache-miss diagnosis diffs against the request that
-                # was actually sent last, not the one before it.
-                self._cache_probe_fields(result.usage)
+                # was actually sent last, not the one before it. No Usage row
+                # carries these fields, so the rewrite window stays put: a
+                # parked rewrite tail belongs to the retry, which re-sends
+                # the same history and does emit a row.
+                self._cache_probe_fields(result.usage, advance_rewrite_window=False)
                 if call_was_sticky and drops_sticky:
                     # Set after the dud call's own probe fields: the call
                     # that follows is the first without the key.
@@ -4060,11 +4063,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             return {}
         return dict(headers) if isinstance(headers, Mapping) else {}
 
-    def _cache_probe_fields(self, usage: dict[str, Any]) -> dict[str, Any]:
+    def _cache_probe_fields(
+        self, usage: dict[str, Any], *, advance_rewrite_window: bool = True,
+    ) -> dict[str, Any]:
         """``prefix_hashes`` (+ ``cache_miss`` on a miss) for a Usage payload.
 
         Consumes the fingerprint of the call that just completed and rotates it
         into the "previous" slot, so the next call diffs against this one.
+        ``advance_rewrite_window=False`` is for a caller that drops the result
+        instead of attaching it to a Usage row: the parked rewrite tail and
+        the follow-on count then wait for the next request that is logged.
         """
         fingerprint = self._prefix_fingerprint
         rewrites = self._history_rewrites
@@ -4082,7 +4090,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             pass
-        self._advance_rewrite_window(out)
+        if advance_rewrite_window:
+            self._advance_rewrite_window(out)
         if fingerprint is None:
             return out
         self._prefix_fingerprint = None
