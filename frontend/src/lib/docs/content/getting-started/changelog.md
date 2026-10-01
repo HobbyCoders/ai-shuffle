@@ -14,7 +14,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 - Long conversations compact less often and keep more of their prompt cache, which lowers cost on Codex models.
 - Delegated Claude Code sessions behave more like Claude Code itself, and search tools are no longer missing from them.
 - Move local sessions to another worker again; project sessions carry their Git state and context with them.
-- Change permissions, effort and Fast mode while a session is running. Fast mode and context controls now work for newer GPT-6 models.
+- Change permissions, effort and Fast mode while a session is running. Fast mode and context controls now work for newer models that support them.
 - The chat header's Git controls are folded into one Changes button and panel. Mobile action rows are reorganized, and busy Git worktrees are protected from cleanup.
 - Sign in to other workers with your account, without approving each one on your phone. Android account sign-in links no longer reach a 404 page.
 - See remaining provider usage without setting up an extra billing key. Claude subscription usage refreshes correctly again.
