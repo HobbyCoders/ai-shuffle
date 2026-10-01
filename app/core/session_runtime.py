@@ -1208,6 +1208,14 @@ class SessionRuntime:
 
         prompt = self.turn.get("prompt") or ""
         turn_overrides = dict(self.turn.get("overrides") or {})
+        proactive = (self.turn.get("payload") or {}).get("_assistant_proactive")
+        override_proactive = turn_overrides.get("_assistant_proactive")
+        if proactive is not None or override_proactive is not None:
+            if proactive != override_proactive:
+                raise ValueError("Proactive turn provenance differs between payload and overrides")
+            from app.core.assistant_service import assert_proactive_allowed
+            await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
+            turn_overrides["_assistant_proactive"] = proactive
         completion_frames = list(
             ((self.turn.get("payload") or {}).get("pending_frames") or [])
         )
@@ -1859,6 +1867,10 @@ class SessionRuntime:
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids"):
+            return False
+        # Never steer external observation into a foreground/broad-permission
+        # turn (or vice versa). Admission is part of the execution identity.
+        if payload.get("_assistant_proactive") != (self.turn.get("payload") or {}).get("_assistant_proactive"):
             return False
         if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
             return False

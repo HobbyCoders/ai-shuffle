@@ -296,6 +296,11 @@ export function createVoiceSession(body: VoiceSessionContext): Promise<VoiceSess
 	return api.post<VoiceSessionCreated>('/voice/sessions', body);
 }
 
+/** Pin a separate audio binding to a permitted conversation; never alter its text context. */
+export function prepareConversationCall(sessionId: string): Promise<VoiceSessionCreated> {
+	return api.post<VoiceSessionCreated>(`/voice/sessions/${encodeURIComponent(sessionId)}/attach`, {});
+}
+
 // ============================================================================
 // Call lifecycle (VW3 contract — graceful while unmerged)
 // ============================================================================

@@ -430,8 +430,11 @@
 	}
 
 	function buildProfilePayload() {
-		// `PUT /agents/{id}` replaces the whole config column, so a key left out
-		// here is genuinely cleared — that is how 'all'/'none' drop a stale list.
+		// `PUT /agents/{id}` replaces the typed config, so a schema key left out
+		// here is genuinely cleared — that is how 'all'/'none' drop a stale list and
+		// how hidden legacy bindings (model, provider, permission mode, effort) are
+		// retired. The backend keeps keys outside the schema, including the avatar
+		// (owned by the identity PATCH), so neither is sent from this snapshot.
 		const config: any = {
 			include_partial_messages: profileForm.include_partial_messages
 		};

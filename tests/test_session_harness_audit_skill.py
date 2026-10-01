@@ -108,6 +108,19 @@ def test_compaction_reporting_never_invents_token_savings():
         "reported_tokens_reclaimed"] is None
 
 
+def test_compaction_reasons_cover_the_current_ladder():
+    events = [dict(tier=1, reason="sweep", decision_reason="sweep"),
+              dict(tier=1, reason="turn_budget", decision_reason="hard_ceiling"),
+              dict(tier=2, reason="trigger", decision_reason="break_even"),
+              dict(tier=2, reason="mystery", decision_reason="mystery"),
+              dict(tier=1, reason="overflow")]
+    summary = metrics.compaction_summary(events)
+    assert summary["reasons"] == {"sweep": 1, "turn_budget": 1, "trigger": 1,
+                                  "other": 1, "overflow": 1}
+    assert summary["decision_reasons"] == {"sweep": 1, "hard_ceiling": 1,
+                                           "break_even": 1, "other": 1, "unknown": 1}
+
+
 def test_cohorts_and_engines_are_not_pooled_for_comparison():
     before = metrics.analyze(snapshot(call()))
     data = snapshot(call(cache_read_tokens=0))

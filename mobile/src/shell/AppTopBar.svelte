@@ -58,6 +58,7 @@
 
 	// Current-page title shown beside the ☰ on the mobile bar.
 	const TITLES: Record<string, string> = {
+		assistant: 'Assistant',
 		'file-browser': 'Files',
 		notes: 'Notes',
 		automations: 'Automations',

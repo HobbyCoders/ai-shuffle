@@ -103,6 +103,8 @@ class GmailConnector(BaseConnector):
             on_trigger=on_trigger,
         )
         self._service: Optional[Any] = None
+        # In-memory only; shared with off-loop clients built by build_thread_client().
+        self._credentials: Optional[Any] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._seen_message_ids: Set[str] = set()
         self._email_address: str = ""
@@ -125,6 +127,18 @@ class GmailConnector(BaseConnector):
     def _build_service(self, creds: Any) -> Any:
         """Build the Gmail API service client."""
         return build("gmail", "v1", credentials=creds)
+
+    def build_thread_client(self) -> Optional[Any]:
+        """Return a new Gmail service for use off the event loop, or None.
+
+        ``self._service`` belongs to the event-loop thread, and its httplib2
+        connection is not thread-safe. This client gets its own
+        ``AuthorizedHttp`` but shares the connected credentials, so google-auth
+        refreshes the token as usual. Nothing is copied or persisted.
+        """
+        if self._service is None or self._credentials is None:
+            return None
+        return self._build_service(self._credentials)
 
     @staticmethod
     def _extract_body(payload: Dict[str, Any]) -> str:
@@ -228,6 +242,7 @@ class GmailConnector(BaseConnector):
         """Build credentials, initialise the Gmail service, and start polling."""
         creds = self._build_credentials()
         self._service = self._build_service(creds)
+        self._credentials = creds
 
         # Verify credentials by fetching user profile
         profile = self._service.users().getProfile(userId="me").execute()
@@ -284,6 +299,7 @@ class GmailConnector(BaseConnector):
             logger.warning("Error during GmailConnector disconnect: %s", exc)
         finally:
             self._service = None
+            self._credentials = None
             self._status = ConnectorStatus.DISCONNECTED
             self._status_message = None
             logger.info("GmailConnector %s disconnected", self.connector_id)

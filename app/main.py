@@ -24,7 +24,7 @@ from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
 from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
-from app.api import voice_context
+from app.api import voice_context, assistant
 from app.api import tools as tools_api
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
@@ -534,6 +534,7 @@ from app.api import owner_login
 app.include_router(owner_login.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)
+app.include_router(assistant.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 from app.api import chat_access

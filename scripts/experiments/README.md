@@ -29,8 +29,8 @@ python -m pytest tests/experiments -q
 conversation of about 40-60k tokens that grows by one tool round per call, 2-5 s
 between calls. Five arms, interleaved:
 
-- **A**: today's client.
-- **B**: A plus `session-id`, `thread-id` and `x-client-request-id`, all equal to `prompt_cache_key`.
+- **A**: the client with no per-session routing headers. It is the default on every host except the Codex backend.
+- **B**: A plus `session-id`, `thread-id` and `x-client-request-id`, all equal to `prompt_cache_key`. It is the default on the Codex (chatgpt.com) backend when `FLUID_RESPONSES_ROUTING_ARM` is unset.
 - **C**: B plus `x-codex-turn-state` replay within a turn.
 - **D**: B plus a `generate:false` prewarm at the start of each turn.
 - **E**: the real Codex CLI on the same account at the same time (the positive control).
@@ -55,7 +55,10 @@ day.
 `e1_cache_routing.py run` drives `fluid.providers.openai_responses.client.OpenAIResponsesClient`
 directly, not the app. Arms A-D are chosen per call through the environment
 variable `FLUID_RESPONSES_ROUTING_ARM` (values `A`, `B`, `C`, `D`). The client
-implements the arms (fix #1); the runner only sets the variable. The turn marker
+implements the arms (fix #1); the runner only sets the variable, so the endpoint
+default (B on the Codex backend, A elsewhere) never decides an arm here. Outside
+the runner, `FLUID_RESPONSES_ROUTING_ARM=A` reverts a Codex-backend worker to
+the old wire. The turn marker
 goes in `request.extra["_fluid_turn_id"]`, as fix #1 describes.
 
 - One block is one synthetic user turn: 5 calls for one arm. Each round runs

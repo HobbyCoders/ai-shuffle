@@ -361,6 +361,31 @@ class ContextCompaction(Event):
     # call is on the path). "" on provider-overflow rungs and older events.
     token_basis: str = ""
     measured_prompt_tokens: int = 0
+    # The cache-priced schedule (plan item 3). ``schedule`` is the zone the
+    # decision fell in ("priced", "opportunistic", "hard", "window", ...) or
+    # "" when no cache signal priced it; ``cold_reason`` says why the cache
+    # was presumed cold ("gap", "static_changed", "resumed") or "".
+    # ``threshold_tokens`` and ``target_tokens`` are the trigger and the
+    # batch target in the chars/4 units of ``before_tokens``; ``rent_paid``
+    # (warm-deferral rent at the commit) and ``turn_live_tokens`` (the
+    # in-flight turn's size) are measured tokens. All default to "not
+    # reported", which is what every older event replays as.
+    schedule: str = ""
+    cold_reason: str = ""
+    threshold_tokens: int = 0
+    target_tokens: int = 0
+    rent_paid: int = 0
+    turn_live_tokens: int = 0
+    # Renderer version the decisions were made under (see
+    # fluid.context.steer_render). 1 on every event persisted before the field
+    # existed, which keeps old sessions rendering byte-for-byte as they did.
+    render_version: int = 1
+    # Estimated tokens (chars/4) from ``first_changed_message`` to the end of
+    # the rewritten view: the part of the prompt the provider has to bill
+    # fresh on the next call. The next Usage row repeats it in ``raw`` next
+    # to the cache_read it actually got. None when the batch has no
+    # ``first_changed_message`` and on events written before the field.
+    rewrite_tail_tokens_est: int | None = None
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────
@@ -406,7 +431,7 @@ class CacheMissAlert(Event):
     ``prompt_cache_key`` / OpenRouter ``session_id``), so a reader can tell a
     routing problem from a partitioning one.
 
-    ``miss_class`` is one of the six classes in
+    ``miss_class`` is one of the classes in
     :mod:`fluid.context.cache_miss_classes`. The engine also raises this
     alert, with ``reason="sticky_key_dropped"`` and class
     ``provider_fallback``, when it drops OpenRouter's sticky routing key after

@@ -2536,7 +2536,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if self.tool_policy is not None:
             try:
-                verdict = self.tool_policy(tool_name, tool_input)
+                # A sync policy may block on a DB read (the app's saved-rule
+                # lookup), so it runs off the loop; an async policy returns
+                # its coroutine from the thread and is awaited here.
+                verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input)
                 if inspect.isawaitable(verdict):
                     verdict = await verdict
             except asyncio.CancelledError:

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fluid.context.recall import DEFAULT_SEARCH_RESULTS, render_hits, search_path
+from fluid.context.recall import (
+    DEFAULT_SEARCH_RESULTS,
+    calling_node_ids,
+    render_hits,
+    search_path,
+)
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -67,5 +72,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         nodes,
         query,
         max_results=int(input.get("max_results") or DEFAULT_SEARCH_RESULTS),
+        # The calling node spells out the query; it is never a useful hit.
+        exclude=calling_node_ids(nodes, (ctx.extra or {}).get("tool_use_id")),
     )
     return ToolOutcome(text=render_hits(hits, query))
