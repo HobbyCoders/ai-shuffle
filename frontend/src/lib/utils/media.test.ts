@@ -9,8 +9,10 @@ import {
 	rewriteMediaMarkdown,
 	clampRevealToMediaBoundary,
 	extractToolResultMedia,
+	filenameFromMediaUrl,
 	mediaHtml
 } from './media';
+import { chatFileUrl } from './chat-files';
 
 describe('classifyMediaUrl', () => {
 	it('classifies the /api/generated-* serve routes', () => {
@@ -152,5 +154,34 @@ describe('mediaHtml', () => {
 		expect(html).toContain('<audio');
 		expect(html).not.toContain('media-expand-btn');
 		expect(html).toContain('media-download-btn');
+	});
+});
+
+describe('session-routed media download names', () => {
+	const name = 'a & b (新)+1.mp4';
+	const byPath = `/api/generated-videos/by-path?path=${encodeURIComponent(`/work/generated-videos/${name}`)}`;
+	const byName = `/api/generated-videos/${encodeURIComponent(name)}`;
+
+	it.each([byPath, byName])('keeps the original filename once %s is routed to the session owner', (raw) => {
+		expect(filenameFromMediaUrl(raw)).toBe(name);
+		const routed = chatFileUrl(raw, 'remote-chat');
+		expect(new URL(routed, 'https://viewer').searchParams.get('session_id')).toBe('remote-chat');
+		expect(filenameFromMediaUrl(routed)).toBe(name);
+		expect(filenameFromMediaUrl(`https://worker${routed}`)).toBe(name);
+	});
+
+	it('names the inline download of an already-routed player source', () => {
+		const html = mediaHtml('video', chatFileUrl(byPath, 'remote-chat'));
+		expect(html).toContain(`download="a &amp; b (新)+1.mp4"`);
+		expect(html).toContain('session_id=remote-chat');
+	});
+
+	it('treats a plus in a query path as the space the server decodes it to', () => {
+		expect(filenameFromMediaUrl('/api/generated-images/by-path?path=%2Fw%2Fmy+shot.png&session_id=c')).toBe('my shot.png');
+	});
+
+	it('names no file for data URIs or bare directories', () => {
+		expect(filenameFromMediaUrl('data:image/png;base64,AAAA')).toBeNull();
+		expect(filenameFromMediaUrl('/api/generated-images/')).toBeNull();
 	});
 });
