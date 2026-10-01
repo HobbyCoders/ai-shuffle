@@ -96,6 +96,8 @@ class Service:
         self.requests = []
         self.connections = 0
         self.held = asyncio.Event()
+        self.dripping = asyncio.Event()
+        self.drip_closed = asyncio.Event()
         self.port = 0
 
     async def handle(self, reader, writer):
@@ -150,6 +152,27 @@ class Service:
             self.held.set()
             await asyncio.sleep(60)
             payload = b""
+        elif target.startswith("/api/drip"):
+            # Each byte arrives well inside the per-read timeout, so only an overall
+            # deadline ends the request. The body would take far longer than any test.
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                b"Content-Length: 100000\r\nConnection: close\r\n\r\n"
+            )
+            self.dripping.set()
+            try:
+                for _ in range(100000):
+                    writer.write(b".")
+                    await writer.drain()
+                    if reader.at_eof():
+                        break
+                    await asyncio.sleep(0.02)
+            except (ConnectionError, ssl.SSLError):
+                pass
+            finally:
+                self.drip_closed.set()
+                writer.close()
+            return
         else:
             payload = json.dumps({"method": method, "target": target}).encode()
         response = [
@@ -221,6 +244,10 @@ async def pending(broker):
         "https://example.com/?q=1",
         "https://example.com/#x",
         "https://example.com:99999",
+        "https://example.com:0",
+        "https://example.com:00",
+        "https://example.com:-1",
+        "https://example.com:+443",
         "https://169.254.169.254",
         "https://0.0.0.0",
         "https://exa mple.com",
@@ -611,6 +638,31 @@ async def test_revoke_cancels_in_flight_request_and_clears_credential(
         await asyncio.wait_for(task, 3)
     assert held.header is None and held.secret == ""
     assert not broker.grants and len(service.requests) == 1
+
+
+async def test_slow_drip_response_is_bounded_by_an_overall_deadline(
+    broker, service, trust, monkeypatch
+):
+    monkeypatch.setattr(chat_services, "REQUEST_DEADLINE", 0.5)
+    grant = await broker.create("chat", spec(service))
+    async with asyncio.timeout(10):
+        with pytest.raises(AccessDenied, match="within 0.5 seconds") as denied:
+            await broker.run(
+                "chat", grant["id"], "http", {"method": "GET", "path": "/drip"}
+            )
+        # Cancelling at the deadline closed the stream; the service sees it go away.
+        await service.drip_closed.wait()
+    assert service.dripping.is_set() and len(service.requests) == 1
+    message = str(denied.value)
+    assert SECRET not in message and "Bearer" not in message
+    assert denied.value.__cause__ is None and denied.value.__suppress_context__
+    # The grant stays usable after a deadline; nothing is left in flight.
+    assert not broker.grants[grant["id"]].tasks
+    result = await broker.run(
+        "chat", grant["id"], "http", {"method": "GET", "path": "/status"}
+    )
+    assert result["status"] == 200
+    broker.revoke("chat", grant["id"])
 
 
 async def test_expiry_stops_new_requests(broker, service, trust):
