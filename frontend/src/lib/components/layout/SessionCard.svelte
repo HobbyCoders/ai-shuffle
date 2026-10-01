@@ -10,7 +10,7 @@
 	 * competing for the same pixel.
 	 *
 	 * Active card (three lines):
-	 *   L1  glyph · title · elapsed
+	 *   L1  glyph · title · total working time
 	 *   L2  project · status word · PR state · diffstat
 	 *   L3  device icon · branch
 	 *
@@ -54,6 +54,8 @@
 		diffCounts,
 		isAttentionStatus,
 		isLiveStatus,
+		isTurnLiveStatus,
+		sessionWorkMs,
 		formatElapsed,
 		formatAge,
 		deviceLabel,
@@ -110,8 +112,15 @@
 
 	const live = $derived(isLiveStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
-	const elapsed = $derived(Math.max(0, now - lastActivity));
-	const timer = $derived(live ? formatElapsed(elapsed) : formatAge(elapsed));
+	// Active cards (and any row with a turn in flight) show the session's total
+	// working time, which survives Done/Parked; settled rows keep their age.
+	const showsWorkTime = $derived(!compact || live);
+	const timer = $derived(
+		showsWorkTime
+			? formatElapsed(sessionWorkMs(session, now, isTurnLiveStatus(status), lastActivity))
+			: formatAge(Math.max(0, now - lastActivity))
+	);
+	const timerTitle = $derived(showsWorkTime ? 'Total working time' : 'Last activity');
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
@@ -529,7 +538,7 @@
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
-				<span class="timer" class:live>{timer}</span>
+				<span class="timer" class:live title={timerTitle}>{timer}</span>
 			</span>
 
 			{#if !compact}

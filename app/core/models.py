@@ -437,6 +437,20 @@ class Session(SessionBase):
     # V2 streaming path marker. Forced TRUE on every session; the model default
     # stays False for unset/legacy construction.
     v2_stream: bool = False
+    # Working time for the sidepanel card. ``work_ms`` is the banked total of
+    # every finished turn's live interval (idle gaps between turns never count);
+    # ``work_started_at`` is the running turn's start, NULL when none is live.
+    # The card shows ``work_ms`` plus the live interval while a turn runs.
+    work_ms: int = 0
+    work_started_at: Optional[datetime] = None
+
+    @field_validator("work_ms", mode="before")
+    @classmethod
+    def _coalesce_work_ms(cls, value):
+        """NULL ``sessions.work_ms`` (a row the default never reached) reads as 0."""
+        if value is None:
+            return 0
+        return value
 
     @field_validator("mode", mode="before")
     @classmethod

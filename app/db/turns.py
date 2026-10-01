@@ -37,6 +37,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Collection, Dict, List, Optional
 
 import psycopg2
@@ -70,6 +71,80 @@ def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def _rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [d for r in rows if (d := _row(r)) is not None]
+
+
+# ---------------------------------------------------------------------------
+# Session working time (sessions.work_ms / sessions.work_started_at)
+# ---------------------------------------------------------------------------
+#
+# The sidebar shows how long a session has actually worked: the sum of its
+# turns' live intervals (start -> settle/park), never the idle gaps between
+# them. The total lives on the SESSION row rather than being summed from this
+# table on read because session rows travel to peer workers and turns do not
+# (app/network/policy.py), so a mirrored session could never show it otherwise.
+#
+# Each transition that ends a live interval banks it exactly once: the guarded
+# UPDATE only returns a row on the transition that actually happened. The
+# session write runs in its OWN transaction after the turn transition commits,
+# so a failure there can never roll back or deadlock the transition; a crash
+# between the two loses one interval, nothing more. A requeued crash turn banks
+# nothing (its partial run is discarded along with its started_at).
+
+def _to_utc(value: Any) -> Optional[datetime]:
+    """A DB timestamp (aware/naive datetime or text) as an aware UTC datetime."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def interval_ms(started_at: Any, ended_at: Any) -> int:
+    """Milliseconds between two DB timestamps; 0 when either is missing."""
+    start, end = _to_utc(started_at), _to_utc(ended_at)
+    if start is None or end is None or end <= start:
+        return 0
+    return int((end - start).total_seconds() * 1000)
+
+
+def _record_session_work(session_id: Optional[str], banked_ms: int = 0) -> None:
+    """Bank ``banked_ms`` onto the session and re-derive its live-turn start.
+
+    ``work_started_at`` is always re-read from the turn holding the session's
+    live slot, so a missed write self-corrects on the next transition. Never
+    raises: the working-time display must never break a turn transition.
+    """
+    if not session_id:
+        return
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE sessions SET work_ms = COALESCE(work_ms, 0) + %s, "
+                "work_started_at = (SELECT MAX(t.started_at) FROM turns t "
+                "  WHERE t.session_id = %s "
+                "  AND t.state IN ('running','interrupting','draining')) "
+                "WHERE id = %s",
+                (max(0, int(banked_ms)), session_id, session_id),
+            )
+    except Exception:  # noqa: BLE001 — display bookkeeping only
+        logger.warning("Session work-time update failed for %s", session_id, exc_info=True)
+
+
+def _bank_ended(row: Optional[Dict[str, Any]]) -> None:
+    """Bank a turn row that just left the live slot (settled, parked, aborted)."""
+    if row is None:
+        return
+    _record_session_work(
+        row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +328,10 @@ def record_adhoc_turn(
         row = _row(cursor.fetchone())
         if row is None:  # INSERT ... RETURNING always yields the new row
             raise RuntimeError(f"record_adhoc_turn: INSERT returned no row for {turn_id}")
-        return row
+    # The ad-hoc paths refuse to run while a turn is live (busy-write guard),
+    # so their interval never overlaps one the scheduler already banked.
+    _bank_ended(row)
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +366,10 @@ def start_turn(
         except _INTEGRITY_ERRORS:
             conn.rollback()
             return None
-    return _row(row)
+    result = _row(row)
+    if result is not None:
+        _record_session_work(result.get("session_id"))
+    return result
 
 
 def stop_orphaned_turns(
@@ -313,7 +394,10 @@ def stop_orphaned_turns(
             sql += " AND id=%s"
             params.append(turn_id)
         cursor.execute(sql + " RETURNING *", tuple(params))
-        return _rows(cursor.fetchall())
+        stopped = _rows(cursor.fetchall())
+    for row in stopped:
+        _bank_ended(row)
+    return stopped
 
 
 def interrupt_turn(
@@ -415,7 +499,10 @@ def settle_turn(
         cursor = conn.cursor()
         cursor.execute(sql + "RETURNING *", params)
         row = cursor.fetchone()
-    return _row(row)
+    result = _row(row)
+    # A queued row settled without ever starting has no interval to bank.
+    _bank_ended(result)
+    return result
 
 
 def remove_queued_turn(turn_id: str) -> Optional[Dict[str, Any]]:
@@ -491,7 +578,11 @@ def park_turn(
             (json.dumps(payload), turn_id),
         )
         row = cursor.fetchone()
-    return _row(row)
+    # Parking ends the foreground interval: the wait on background work is
+    # not counted, and the wake turn that follows banks its own interval.
+    result = _row(row)
+    _bank_ended(result)
+    return result
 
 
 def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
@@ -585,7 +676,10 @@ def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:
             (turn_id,),
         )
         row = cursor.fetchone()
-    return _row(row)
+    result = _row(row)
+    if result is not None:
+        _record_session_work(result.get("session_id"))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +892,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
         )
         skip = set(skip_turn_ids)
         dead = [t for t in _rows(cursor.fetchall()) if t["id"] not in skip]
+        banked: List[tuple] = []
         for turn in dead:
             if turn["state"] == "running" and turn["source"] in (
                 "user", "queue", "agent_message", "promotion",
@@ -808,11 +903,20 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                     "WHERE id=%s AND state IN ('running','interrupting','draining')",
                     (turn["id"],),
                 )
+                banked.append((turn["session_id"], 0))
             else:
                 cursor.execute(
                     "UPDATE turns SET state='aborted', stop_reason='lease_expired', "
                     "ended_at=NOW() "
-                    "WHERE id=%s AND state IN ('running','interrupting','draining')",
+                    "WHERE id=%s AND state IN ('running','interrupting','draining') "
+                    "RETURNING started_at, ended_at",
                     (turn["id"],),
                 )
+                ended = cursor.fetchone()
+                banked.append((
+                    turn["session_id"],
+                    interval_ms(ended["started_at"], ended["ended_at"]) if ended else 0,
+                ))
+    for session_id, ms in banked:
+        _record_session_work(session_id, ms)
     return dead

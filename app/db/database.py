@@ -2179,6 +2179,23 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN pr_state TEXT")
         migrations_applied.append("sessions.pr_state")
 
+    # Working time for the sidepanel. ``work_ms`` banks every finished turn's
+    # live interval (app/db/turns.py), ``work_started_at`` is the live turn's
+    # start. Both ride the session row so peer mirrors show them too. No
+    # SCHEMA_VERSION bump: the migrations fingerprint re-runs this pass.
+    if table_exists(cursor, "sessions"):
+        if not column_exists(cursor, "sessions", "work_ms"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN work_ms BIGINT DEFAULT 0")
+            migrations_applied.append("sessions.work_ms")
+        if not column_exists(cursor, "sessions", "work_started_at"):
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN work_started_at TIMESTAMP WITH TIME ZONE"
+            )
+            migrations_applied.append("sessions.work_started_at")
+        backfilled = _backfill_sessions_work_ms(cursor)
+        if backfilled is not None:
+            migrations_applied.append(f"sessions.work_ms_backfill({backfilled} rows)")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``
@@ -2690,6 +2707,80 @@ def _backfill_sessions_is_worker(cursor) -> Optional[int]:
     else:
         updated = 0
     _set_marker(cursor, IS_WORKER_BACKFILL_MARKER, "1")
+    return updated
+
+
+#: system_settings key marking that the one-time ``sessions.work_ms`` backfill
+#: has run against this database.
+WORK_MS_BACKFILL_MARKER = "migration:sessions_work_ms_backfilled"
+
+
+def _backfill_sessions_work_ms(cursor) -> Optional[int]:
+    """One-time backfill of ``sessions.work_ms`` from the ``turns`` history.
+
+    Sums each session's turn intervals (``started_at`` -> ``ended_at``),
+    merging any that overlap so an ad-hoc run beside a scheduled turn is not
+    counted twice. A parked turn settled later (``stop_reason='parked_settled'``)
+    had its ``ended_at`` rewritten to the settlement time, which would count
+    the whole background wait; its last recorded event is used as the end
+    instead, and the turn is skipped when it recorded none. Only rows still at
+    0 are written, so a session that already banked a turn under the new code
+    keeps its value. Marker-gated like ``_backfill_sessions_is_worker``.
+    Returns the number of rows updated, or ``None`` when the backfill had
+    already run.
+    """
+    from app.db.turns import _to_utc, interval_ms
+
+    if _get_marker(cursor, WORK_MS_BACKFILL_MARKER):
+        return None
+    if not column_exists(cursor, "sessions", "work_ms"):
+        return None
+    updated = 0
+    if table_exists(cursor, "turns"):
+        last_event: dict = {}
+        if table_exists(cursor, "session_events"):
+            cursor.execute(
+                "SELECT t.id AS turn_id, MAX(e.created_at) AS last_at "
+                "FROM turns t JOIN session_events e "
+                "  ON e.session_id = t.session_id AND e.turn_id = t.id "
+                "WHERE t.stop_reason = 'parked_settled' "
+                "GROUP BY t.id"
+            )
+            last_event = {r["turn_id"]: r["last_at"] for r in cursor.fetchall()}
+        cursor.execute(
+            "SELECT id, session_id, started_at, ended_at, stop_reason FROM turns "
+            "WHERE started_at IS NOT NULL AND ended_at IS NOT NULL"
+        )
+        spans: dict = {}
+        for row in cursor.fetchall():
+            start, end = _to_utc(row["started_at"]), _to_utc(row["ended_at"])
+            if row["stop_reason"] == "parked_settled":
+                event_end = _to_utc(last_event.get(row["id"]))
+                end = min(end, event_end) if (end and event_end) else None
+            if start is None or end is None or end <= start:
+                continue
+            spans.setdefault(row["session_id"], []).append((start, end))
+        for session_id, intervals in spans.items():
+            total = 0
+            cur_start, cur_end = None, None
+            for start, end in sorted(intervals):
+                if cur_end is None or start > cur_end:
+                    if cur_end is not None:
+                        total += interval_ms(cur_start, cur_end)
+                    cur_start, cur_end = start, end
+                elif end > cur_end:
+                    cur_end = end
+            if cur_end is not None:
+                total += interval_ms(cur_start, cur_end)
+            if total <= 0:
+                continue
+            cursor.execute(
+                "UPDATE sessions SET work_ms = %s "
+                "WHERE id = %s AND COALESCE(work_ms, 0) = 0",
+                (total, session_id),
+            )
+            updated += cursor.rowcount or 0
+    _set_marker(cursor, WORK_MS_BACKFILL_MARKER, "1")
     return updated
 
 

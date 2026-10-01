@@ -260,6 +260,12 @@ def create_postgres_schema(cursor) -> None:
             pr_number INTEGER,
             pr_url TEXT,
             pr_state TEXT,
+            -- Working time for the sidepanel. work_ms is the banked sum of
+            -- the session's finished turn intervals (start -> settle/park), so
+            -- idle gaps never count; work_started_at is the live turn's start
+            -- (NULL when no turn holds the live slot). See app/db/turns.py.
+            work_ms BIGINT DEFAULT 0,
+            work_started_at TIMESTAMP WITH TIME ZONE,
             -- Worker network: the device this session executes on. Replaces
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.

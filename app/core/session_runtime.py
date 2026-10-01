@@ -554,6 +554,35 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
         )
 
 
+async def _broadcast_work_time(session_id: str) -> None:
+    """Push the session's working-time fields to every device's sidebar.
+
+    Sent after a turn takes the live slot and after it settles or parks, so
+    a card ticks from the real turn start and banks the finished interval
+    without waiting for the next list reload. Best-effort.
+    """
+    try:
+        from app.core.sync_engine import sync_engine
+        from app.db import sessions as sessions_db
+
+        row = await asyncio.to_thread(sessions_db.get_session, session_id)
+        if not row:
+            return
+        started = row.get("work_started_at")
+        if hasattr(started, "isoformat"):
+            started = started.isoformat()
+        await sync_engine.broadcast_user_session_updated(
+            user_id=row.get("api_user_id") or "admin",
+            session_id=session_id,
+            updates={"work_ms": int(row.get("work_ms") or 0), "work_started_at": started},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "SessionRuntime: work-time broadcast failed for %s",
+            session_id, exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Durable surface for a turn that died on a provider error
 # ---------------------------------------------------------------------------
@@ -965,6 +994,8 @@ class SessionRuntime:
             # forget: nothing may add latency in front of the pump.
             broadcast_task = asyncio.create_task(_broadcast_queue_after_start(sid))
             broadcast_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            work_task = asyncio.create_task(_broadcast_work_time(sid))
+            work_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
             # 3. Sticky pin: the FIRST winner of an
             #    "anywhere"/capability placement pins the session to itself
@@ -1161,6 +1192,11 @@ class SessionRuntime:
                     outcome = final["state"]
                 return outcome
             outcome, settled_here = await self._finalize(sid, tid)
+            if settled_here:
+                # The finished interval is banked now. Fire-and-forget: the
+                # done frame below must not wait on a row read.
+                work_task = asyncio.create_task(_broadcast_work_time(sid))
+                work_task.add_done_callback(lambda t: t.cancelled() or t.exception())
             if (
                 self._pending_done is not None
                 and self._abort_reason != "recording_failed"
