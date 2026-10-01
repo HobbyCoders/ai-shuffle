@@ -201,6 +201,41 @@ describe('SystemMessage — provider_retry', () => {
 		expect(container.textContent).toBe('');
 		expect(container.children).toHaveLength(0);
 	});
+
+	it('shows a live reconnect after a dropped connection', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						model: 'gpt-6.1-sol',
+						cause: 'connection_dropped'
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Reconnecting')).toBeTruthy();
+		expect(container.textContent).toContain('attempt 1 of 2');
+		expect(container.textContent).toContain('gpt-6.1-sol');
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('hides a reconnect once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 2, cause: 'connection_dropped', settled: true }
+				})
+			}
+		});
+
+		expect(container.textContent).toBe('');
+	});
 });
 
 describe('SystemMessage — provider_retry exhausted', () => {

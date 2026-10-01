@@ -411,6 +411,32 @@ function settleRetryCards(messages: ChatMessage[], present = true): ChatMessage[
 	return touched ? out : messages;
 }
 
+/** A tool card that only ever saw argument deltas: its call never closed. */
+function isAbandonedToolCard(m: ChatMessage): boolean {
+	return (
+		m.type === 'tool_use' &&
+		m.toolStatus === 'running' &&
+		m.toolInput === undefined &&
+		m.partialToolInput !== undefined
+	);
+}
+
+/**
+ * Retire the tool cards a re-sent request abandoned.
+ *
+ * A `provider_retry` means the engine dropped the last response and is sending
+ * the same request again. A card that got argument deltas but never its
+ * `tool.use` belonged to that response: the call never closed, never ran, and
+ * the new response gives its calls new ids. Left alone it would spin until the
+ * turn ends.
+ */
+function retireAbandonedToolCards(messages: ChatMessage[]): ChatMessage[] {
+	if (!messages.some(isAbandonedToolCard)) return messages;
+	return messages.map((m) =>
+		isAbandonedToolCard(m) ? { ...m, streaming: false, toolStatus: 'error' as const } : m
+	);
+}
+
 /** systemData of a `provider_retry` card, or undefined for any other message. */
 function retryCardData(m: ChatMessage): Record<string, unknown> | undefined {
 	if (m.role !== 'system' || m.systemSubtype !== 'provider_retry') return undefined;
@@ -1954,6 +1980,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// the same way: it records a turn that already ended, so the next
 			// turn's retries append beside it instead of rewriting history.
 			if (str(event.subtype) === 'provider_retry') {
+				const retired = retireAbandonedToolCards(state.messages);
+				if (retired !== state.messages) state = { ...state, messages: retired };
 				const last = state.messages[state.messages.length - 1];
 				const lastData = last?.systemData as Record<string, unknown> | undefined;
 				const lastFinished = !!(lastData?.exhausted || lastData?.settled);

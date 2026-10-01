@@ -1831,6 +1831,25 @@ describe('system + unknown events', () => {
 		expect(s.messages[0].systemData).toMatchObject({ attempt: 2, max_attempts: 10 });
 	});
 
+	it('a provider_retry retires the tool card its dropped response left open', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('tool.use', { tool_use_id: 'done', name: 'Read', input: { file_path: 'a' } }),
+			ev('tool.result', { tool_use_id: 'done', content_preview: 'ok' }),
+			ev('tool.input_delta', { tool_use_id: 'cut', partial_json: '{"code":', name: 'run_python' }),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 2, cause: 'connection_dropped' },
+			}),
+		]);
+		const cut = s.messages.find((m) => m.toolId === 'cut');
+		expect(cut).toMatchObject({ toolStatus: 'error', streaming: false });
+		// A call that closed and ran keeps its own status.
+		expect(s.messages.find((m) => m.toolId === 'done')?.toolStatus).toBe('complete');
+		expect(s.messages.at(-1)?.systemData).toMatchObject({ cause: 'connection_dropped' });
+	});
+
 	it('a provider_retry after an unrelated message appends a new card', () => {
 		const s = fold([
 			ev('turn.started'),
