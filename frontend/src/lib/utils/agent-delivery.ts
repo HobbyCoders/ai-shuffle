@@ -1,6 +1,8 @@
-import type { ChatMessage } from '$lib/stores/types';
+import type { ChatMessage, Task } from '$lib/stores/types';
 
-export interface AgentDelivery { sender: string; content: string; }
+/** `sender` is the sending session's id; `senderLabel` is the name the
+ *  backend stamped on a delivery note, when it knew one. */
+export interface AgentDelivery { sender: string; content: string; senderLabel?: string; }
 
 // One complete envelope from fluid.context.peer.format_peer_message. The body is
 // defanged by the producer, so it never contains a marker of its own.
@@ -15,7 +17,12 @@ const HELD_BLOCK = /<system-reminder>\s*Messages from other agents that arrived 
 export function agentDelivery(message: ChatMessage): AgentDelivery | null {
 	if (message.type === 'system' && message.systemSubtype === 'agent_message') {
 		const data = message.systemData;
-		return { sender: String(data?.sender || 'Agent'), content: String(data?.content || message.content || '') };
+		const label = typeof data?.sender_label === 'string' && data.sender_label.trim() ? data.sender_label.trim() : undefined;
+		return {
+			sender: String(data?.sender || 'Agent'),
+			content: String(data?.content || message.content || ''),
+			...(label ? { senderLabel: label } : {}),
+		};
 	}
 	if (message.role !== 'user') return null;
 	// Match the complete envelope emitted by fluid.context.peer, never a quoted fragment.
@@ -56,4 +63,36 @@ export function heldAgentDeliveries(text: string): AgentDelivery[] | null {
 	if (fresh === null) return null;
 	deliveries.push(...fresh);
 	return deliveries.length ? deliveries : null;
+}
+
+/**
+ * What this transcript knows each worker as, keyed by every id a sender can
+ * carry (task id, worker session id, launch id): the Task call's description,
+ * else the dispatched agent's name. Task summaries fill in what no card covers.
+ */
+export function agentSenderNames(messages: readonly ChatMessage[], tasks: readonly Task[] = []): Map<string, string> {
+	const names = new Map<string, string>();
+	const add = (id: unknown, name: unknown) => {
+		if (typeof id !== 'string' || !id || typeof name !== 'string') return;
+		const label = name.trim();
+		if (label && label !== id && !names.has(id)) names.set(id, label);
+	};
+	for (const message of messages) {
+		if (message.type !== 'subagent') continue;
+		const name = message.agentDescription || message.agentName;
+		add(message.agentSessionId, name);
+		add(message.toolId, name);
+		add(message.agentId, name);
+	}
+	for (const task of tasks) add(task.id, task.subject || task.agent);
+	return names;
+}
+
+/** The row's name for a delivery (the worker's task) and its session id,
+ *  which the row keeps as secondary detail. Falls back to the id alone. */
+export function agentSender(delivery: AgentDelivery, names?: ReadonlyMap<string, string>): { name: string; id: string | null } {
+	const name = delivery.senderLabel || names?.get(delivery.sender);
+	return name && name !== delivery.sender
+		? { name, id: delivery.sender }
+		: { name: delivery.sender, id: null };
 }

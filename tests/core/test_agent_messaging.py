@@ -284,3 +284,21 @@ def test_dispatch_forwards_the_name_to_the_registry(monkeypatch):
     # Re-registration never clobbers a name already recorded.
     registry.start_task("parent", "w1", "agent", "Task · General Purpose", name="other")
     assert registry.get_task("parent", "w1")["name"] == "fix-flaky-login"
+
+
+# ─── owner decision 2026-10-01: a delivery names the worker by its task ───
+
+
+def test_sender_label_is_the_workers_task_description(runtime):
+    registry, _ = runtime
+    registry.start_task("parent", "worker-a", "agent", "Fix flaky login",
+                        agent="General Purpose", name="fix-flaky-login")
+    registry.start_task("parent", "worker-b", "agent", "", agent="Reviewer")
+    assert messaging.sender_label("parent", "worker-a") == "Fix flaky login"
+    # No description: the roster name the worker is addressed by.
+    assert messaging.sender_label("parent", "worker-b") == "Reviewer"
+    # The worker's view of its parent.
+    assert messaging.sender_label("worker-a", "parent") == "main"
+    # Unknown to the receiver: no label, so the chat shows the session id.
+    assert messaging.sender_label("parent", "stranger") is None
+    assert messaging.sender_label(None, "worker-a") is None

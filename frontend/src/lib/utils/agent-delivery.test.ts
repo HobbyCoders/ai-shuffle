@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import type { ChatMessage } from '$lib/stores/types';
-import { agentDelivery, heldAgentDeliveries } from './agent-delivery';
+import type { ChatMessage, Task } from '$lib/stores/types';
+import { agentDelivery, agentSender, agentSenderNames, heldAgentDeliveries } from './agent-delivery';
 import { buildTranscriptModel } from './work-log';
 import { deriveUserTurnNavigationItems } from './transcript-navigation';
 import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
@@ -132,5 +132,43 @@ describe('agent delivery presentation', () => {
   expect([...model.itemIndexByTurnId.keys()]).toEqual(['user']);
   expect(deriveUserTurnNavigationItems(messages).map(item => item.id)).toEqual(['user']);
   expect(messages[3].role).toBe('user');
+ });
+
+ describe('sender attribution (owner decision 2026-10-01)', () => {
+  const card = (extra: Partial<ChatMessage>) => msg('card', 'assistant', '', { type: 'subagent', ...extra });
+  const task = (id: string, subject: string, extra: Partial<Task> = {}): Task => ({ id, subject, status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: '', updatedAt: '', ...extra });
+
+  it('names a worker by its Task description and keeps the session id as secondary', () => {
+   const names = agentSenderNames([card({ toolId: 'w-1', agentSessionId: 'w-1', agentDescription: 'Fix flaky login', agentName: 'fix-flaky-login' })]);
+   const delivery = agentDelivery(msg('peer', 'user', peer('w-1')))!;
+   expect(agentSender(delivery, names)).toEqual({ name: 'Fix flaky login', id: 'w-1' });
+  });
+
+  it('uses the agent name when the card has no description, and the task registry when no card exists', () => {
+   const names = agentSenderNames([card({ toolId: 'launch-9', agentSessionId: 'w-2', agentName: 'Reviewer' })], [task('w-3', 'Audit the schema')]);
+   expect(names.get('w-2')).toBe('Reviewer');
+   expect(names.get('launch-9')).toBe('Reviewer');
+   expect(names.get('w-3')).toBe('Audit the schema');
+  });
+
+  it('prefers the label the backend stamped on a delivery note', () => {
+   const note = msg('live', 'system', '', { type: 'system', systemSubtype: 'agent_message', systemData: { sender: 'w-1', sender_label: 'Fix flaky login', content: 'Found it', delivery: 'delivered' } });
+   const delivery = agentDelivery(note)!;
+   expect(delivery).toEqual({ sender: 'w-1', senderLabel: 'Fix flaky login', content: 'Found it' });
+   expect(agentSender(delivery, new Map())).toEqual({ name: 'Fix flaky login', id: 'w-1' });
+  });
+
+  it('falls back to the session id when no name is known', () => {
+   const delivery = agentDelivery(msg('peer', 'user', peer('w-unknown')))!;
+   expect(agentSender(delivery, agentSenderNames([], [task('other', 'Something else')]))).toEqual({ name: 'w-unknown', id: null });
+   expect(agentSender(delivery)).toEqual({ name: 'w-unknown', id: null });
+  });
+
+  it('names every held delivery from the same lookup', () => {
+   const held = heldAgentDeliveries(producer.prompts.promotion)!;
+   expect(held.length).toBeGreaterThan(0);
+   const names = agentSenderNames([], held.map(d => task(d.sender, `Task for ${d.sender}`)));
+   expect(held.map(d => agentSender(d, names))).toEqual(held.map(d => ({ name: `Task for ${d.sender}`, id: d.sender })));
+  });
  });
 });

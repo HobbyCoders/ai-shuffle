@@ -24,7 +24,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
-	import { agentDelivery } from '$lib/utils/agent-delivery';
+	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
@@ -364,6 +364,9 @@
 				.map(t => t.toolUseId as string)
 		)
 	);
+
+	// Worker task names for attributed agent messages, keyed by session id.
+	const agentNames = $derived(agentSenderNames($activeSession.messages, $activeSession.activeTasks ?? []));
 
 	// --- Transcript grouping ---
 	// The turn-aware work-log builder lives in $lib/utils/work-log so it can be
@@ -1954,7 +1957,14 @@
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
 	{#if delivery}
-		<ToolUseMessage name="Agent message" input={{ label: delivery.sender }} result={delivery.content} status="complete" />
+		{@const sender = agentSender(delivery, agentNames)}
+		<ToolUseMessage
+			name="Agent message"
+			input={sender.id ? { label: sender.name, session: sender.id } : { label: sender.name }}
+			previewTitle={sender.id ? `${sender.name} (session ${sender.id})` : undefined}
+			result={delivery.content}
+			status="complete"
+		/>
 	{:else if message.type === 'command'}
 		<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
 		<CommandMessage

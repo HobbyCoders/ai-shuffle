@@ -314,6 +314,49 @@ async def test_a_steered_completion_receipt_shows_its_held_messages(mock_db, _cl
     ]
 
 
+async def test_held_message_notes_name_the_worker_by_its_task(mock_db, _clean_delivered, monkeypatch):
+    """Owner decision 2026-10-01: a delivery note carries the worker's task
+    description beside its session id; a sender the receiver does not know
+    keeps the id alone."""
+    from fluid.context.peer import format_peer_message
+
+    from app.core import session_runtime
+    from app.core import task_registry as registry_module
+    from app.core.turn_recorder import TurnRecorder
+
+    registry = registry_module.TaskRegistry()
+    monkeypatch.setattr(registry_module, "task_registry", registry)
+    registry.start_task("g9", "w1", "agent", "Fix flaky login", agent="General Purpose")
+
+    _seed("g9")
+    live = turns_db.enqueue_turn("g9", "user", prompt="ongoing", profile_id="profile")
+    turns_db.start_turn(live["id"], None, "runner")
+    held = turn_scheduler._join_held(
+        turn_scheduler._held_entry(format_peer_message("w1", "first").strip()),
+        turn_scheduler._held_entry(format_peer_message("w2", "second").strip()),
+    )
+    runtime = session_runtime.SessionRuntime(live)
+    recorder = TurnRecorder("g9", "cmd", None, None, None)
+    recorder.turn_id = live["id"]
+
+    assert await runtime._on_task_notification_delivered(
+        recorder, {"frames": [], "task_ids": [], "held_peer_messages": held},
+    )
+    # A live peer receipt (no queue row) is labelled the same way.
+    await runtime._on_steer_delivered(
+        recorder, {"type": "steer_delivered", "steers": [{"from": "w1", "text": "third"}]},
+    )
+    notes = [
+        e["payload"]["data"] for e in _events("g9")
+        if e["event_type"] == "system.note" and e["payload"].get("subtype") == "agent_message"
+    ]
+    assert notes == [
+        {"sender": "w1", "sender_label": "Fix flaky login", "content": "first", "delivery": "delivered"},
+        {"sender": "w2", "content": "second", "delivery": "delivered"},
+        {"sender": "w1", "sender_label": "Fix flaky login", "content": "third", "delivery": "delivered"},
+    ]
+
+
 async def test_an_unpark_wake_carries_held_messages_once(mock_db, _clean_delivered):
     _seed("g2")
     _parked("g2")

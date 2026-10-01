@@ -1941,8 +1941,7 @@ class SessionRuntime:
                 # rather than silently dropping it or asking the user to interrupt.
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": {"sender": str(steer["from"]),
-                             "content": str(steer["text"]), "delivery": "delivered"},
+                    "data": self._peer_note_data(str(steer["from"]), str(steer["text"])),
                 })
                 continue
             if not row_id:
@@ -2071,6 +2070,20 @@ class SessionRuntime:
             )
         return True
 
+    def _peer_note_data(self, sender: str, content: str) -> Dict[str, Any]:
+        """An ``agent_message`` note: the sender's session id, plus the name
+        this session knows it by (its task description) when there is one."""
+        data: Dict[str, Any] = {"sender": sender, "content": content, "delivery": "delivered"}
+        try:
+            from app.core import agent_messaging
+
+            label = agent_messaging.sender_label(self.session_id, sender)
+        except Exception:  # noqa: BLE001 — the label is cosmetic
+            label = None
+        if label:
+            data["sender_label"] = label
+        return data
+
     async def _note_held_peer_deliveries(self, recorder: TurnRecorder, held: str) -> None:
         """Show held peer messages this turn delivered, one attributed item each.
 
@@ -2085,7 +2098,7 @@ class SessionRuntime:
             for item in turn_scheduler.held_peer_deliveries(held):
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": {**item, "delivery": "delivered"},
+                    "data": self._peer_note_data(item["sender"], item["content"]),
                 })
         except Exception:  # noqa: BLE001
             logger.warning(

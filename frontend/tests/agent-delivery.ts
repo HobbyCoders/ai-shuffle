@@ -32,7 +32,14 @@ const turn = (id: string, source: string, prompt: string, reply: string) => [
 	event('turn.completed', { turn_id: id }),
 ];
 const state = reduceAll([
-	...turn('t1', 'user', 'Split the investigation across two workers and report back.', 'Started two background workers.'),
+	event('turn.started', { turn_id: 't1', source: 'user' }),
+	event('message.user', { turn_id: 't1', content: 'Split the investigation across two workers and report back.' }),
+	// worker-a is named by its Task call's description (the subagent card);
+	// worker-b only by the parent's task registry; worker-c by neither, so it
+	// keeps its session id.
+	event('subagent.started', { turn_id: 't1', task_id: 'worker-a', worker_session_id: 'worker-a', description: 'Trace the flaky login', agent_name: 'General Purpose' }),
+	event('message.assistant', { turn_id: 't1', kind: 'text', content: 'Started two background workers.' }),
+	event('turn.completed', { turn_id: 't1' }),
 	...turn('t2', 'promotion', producer.prompts.promotion, 'Read both worker notes.'),
 	...turn('t3', 'unpark', producer.prompts.unpark_with_held, 'worker-a finished; continuing.'),
 	...turn('t4', 'agent_message', producer.prompts.urgent_with_held, 'Yes, edit control.py.'),
@@ -42,6 +49,10 @@ const state = reduceAll([
 activeSession.current.sessionId = 'fixture-session';
 activeSession.current.messages = state.messages;
 activeSession.current.isLoadingSession = false;
+activeSession.current.activeTasks = [{
+	id: 'worker-b', subject: 'Audit the retry path', status: 'running', kind: 'agent', summary: null,
+	toolUseId: null, startedAt: '2026-10-01T12:00:00Z', updatedAt: '2026-10-01T12:00:00Z',
+}];
 // Any store update republishes the state object the component reads.
 activeSession.setDraft('');
 (window as unknown as { fixture: unknown }).fixture = { messages: state.messages.length };

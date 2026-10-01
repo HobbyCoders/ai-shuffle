@@ -24,7 +24,10 @@ const browser = await chromium.launch({
 });
 const url = process.env.AGENT_DELIVERY_FIXTURE_URL || 'http://127.0.0.1:5291/tests/agent-delivery.html';
 // promotion 2 + unpark 2 + urgent 3 + idle 1
-const EXPECTED = ['worker-a', 'worker-b', 'worker-a', 'worker-b', 'worker-a', 'worker-b', 'worker-c', 'worker-c'];
+// Owner decision 2026-10-01: a known worker shows its task, with the session
+// id on hover; an unknown one (worker-c) keeps its id.
+const NAMES = { 'worker-a': 'Trace the flaky login', 'worker-b': 'Audit the retry path', 'worker-c': 'worker-c' };
+const EXPECTED = ['worker-a', 'worker-b', 'worker-a', 'worker-b', 'worker-a', 'worker-b', 'worker-c', 'worker-c'].map((id) => NAMES[id]);
 
 try {
 	for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
@@ -44,12 +47,19 @@ try {
 		// Each peer message is its own attributed tool-style card, in order.
 		const cards = page.getByText('Agent message', { exact: true });
 		assert.equal(await cards.count(), EXPECTED.length, `${name}: one card per peer message`);
+		// Read each Agent message row's sender preview and its hover text. The
+		// worker-a subagent card also shows its description, so stay in the rows.
+		const rows = page.locator('.wlrow').filter({ has: page.getByText('Agent message', { exact: true }) });
+		const ids = Object.fromEntries(Object.entries(NAMES).map(([id, label]) => [label, id]));
 		const order = [];
-		for (const sender of ['worker-a', 'worker-b', 'worker-c']) {
-			for (const box of await page.getByText(sender, { exact: true }).all()) {
-				const rect = await box.boundingBox();
-				if (rect) order.push([rect.y, sender]);
-			}
+		for (const row of await rows.all()) {
+			const preview = row.locator('.wtxt');
+			const label = (await preview.innerText()).trim();
+			const rect = await row.boundingBox();
+			if (rect) order.push([rect.y, label]);
+			const id = ids[label];
+			const hover = id === label ? label : `${label} (session ${id})`;
+			assert.equal(await preview.getAttribute('title'), hover, `${name}: hover for ${label}`);
 		}
 		assert.deepEqual(order.sort((a, b) => a[0] - b[0]).map(([, s]) => s), EXPECTED, `${name}: attribution and order`);
 		// Opening a card shows that peer's own message, not the envelope.
