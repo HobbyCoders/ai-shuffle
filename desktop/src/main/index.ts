@@ -24,7 +24,7 @@ import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
-import { ManualUpdateCheck } from './manual-update-check';
+import { ManualUpdateCheck, type FleetReceipt, type FleetSnapshot } from './manual-update-check';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
@@ -246,7 +246,15 @@ async function main(): Promise<void> {
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
 	// macOS and Linux: new releases come as signed installers (D22: checked on
 	// launch and daily without asking). Windows keeps its source-update path.
-	const manualUpdateCheck = new ManualUpdateCheck(updater, options => dialog.showMessageBox(options));
+	// The menu goes through the worker's update dispatch (the web button's), so
+	// Update all workers applies; the local updater is the fallback only.
+	const manualUpdateCheck = new ManualUpdateCheck(updater, options => dialog.showMessageBox(options), {
+		workers: async () => (await supervisor?.updateWorkers() ?? null) as FleetSnapshot | null,
+		act: async action => {
+			if (!supervisor) throw new Error('The worker is not running');
+			return await supervisor.updateAction(action) as unknown as FleetReceipt;
+		},
+	});
 	const platform = installerPlatform();
 	if (!applications && platform && app.isPackaged && !isolation) {
 		try {

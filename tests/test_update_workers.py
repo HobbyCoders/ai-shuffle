@@ -59,7 +59,8 @@ def test_all_scope_targets_online_once_and_local_last(setup, monkeypatch):
     assert [r["device_id"] for r in result["results"]] == ["peer", "offline", "self"]
     assert result["results"][1]["reason"] == "Offline; not queued"
     assert updates._desktop_request["action"] == "install"
-    assert remote.await_count == 2  # staged target, then action
+    # The install guard's fresh reading, the staged target, then the action.
+    assert remote.await_count == 3
 
 
 def test_disabled_busy_and_unavailable_do_not_receive_commands(setup, monkeypatch):
@@ -362,8 +363,10 @@ def test_container_reports_running_code_not_staged_status(setup, monkeypatch, tm
 def test_rejected_duplicate_install_recovers_after_both_workers_reach_target(setup):
     values, remote = setup
     values[updates.ALL_KEY] = "true"
+    # The peer checked its feed after the desktop found B and found nothing, so
+    # the install guard counts it out rather than sending it a download.
     peer_state = {"supported": True, "allow_updates": True, "phase": "idle",
-                  "version": B[:12], "running_version": A}
+                  "version": B[:12], "running_version": A, "checked_at": time.time()}
 
     async def call(_device, _kind, body, **kwargs):
         if body["operation"] == "status":

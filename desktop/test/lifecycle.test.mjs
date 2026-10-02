@@ -101,3 +101,36 @@ test('NC-11: a forced stop does not ask a wedged worker to stop sessions; it end
     await assert.rejects(graceful.stop(), /did not finish/);
     assert.equal(asked, 1);
 });
+
+test('native update checks read the worker plan and dispatch through it, with refusals passed on', async t => {
+    const seen = [];
+    const notes = 'n'.repeat(4000);
+    const port = await server(t, (req, res) => {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            seen.push([req.method, req.url, body]);
+            if (req.url.endsWith('/update-workers')) return res.end(JSON.stringify({plan: {action: 'download'}, workers: [{notes}, {notes}]}));
+            if (JSON.parse(body).action === 'install') {
+                res.statusCode = 409;
+                return res.end(JSON.stringify({detail: 'Waiting on workers to finish the previous update'}));
+            }
+            res.end(JSON.stringify({sent: 'download', results: []}));
+        });
+    });
+    const worker = supervisor();
+    worker._state = {...worker.state, phase: 'ready', port};
+    worker.lifecycleToken = 'test-secret';
+    // Two workers' release notes exceed the 4 KiB limit of the other lifecycle calls.
+    assert.equal((await worker.updateWorkers()).workers.length, 2);
+    assert.deepEqual(await worker.updateAction('download'), {sent: 'download', results: []});
+    await assert.rejects(worker.updateAction('install'), /Waiting on workers to finish/);
+    assert.deepEqual(seen.map(([method, url, body]) => [method, url, body]), [
+        ['GET', '/api/v1/internal/desktop/update-workers', ''],
+        ['POST', '/api/v1/internal/desktop/update-action', '{"action":"download"}'],
+        ['POST', '/api/v1/internal/desktop/update-action', '{"action":"install"}'],
+    ]);
+    worker._state = {...worker.state, external: true};
+    assert.equal(await worker.updateWorkers(), null);
+    await assert.rejects(worker.updateAction('check'));
+});

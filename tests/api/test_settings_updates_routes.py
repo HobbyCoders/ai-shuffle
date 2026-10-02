@@ -127,7 +127,9 @@ def test_workers_lists_this_worker_without_peer_endpoints(c):
     assert [w["device_name"] for w in body["workers"]] == ["Current worker"]
     assert set(body["workers"][0]) == {
         "device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version",
-        "running_version", "percent", "message", "error", "reason", "request_pending"}
+        "running_version", "percent", "message", "error", "reason", "request_pending", "checked_at",
+        "channel", "release", "notes", "role", "label"}
+    assert body["plan"]["action"] in ("check", "download", "install")
 
 
 def test_api_users_may_read_but_not_change_or_act(client, api_user, updater):

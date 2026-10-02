@@ -419,3 +419,29 @@ it('ignores an idle message that claims an update is in progress', async()=>{
  expect(button.title).not.toContain('Application update is running');
  expect(button.title).toContain('Desk: Updated version is running.');
 });
+
+// #1623: a staged desktop offered restart while a peer that had not checked yet sat idle.
+const desktopStaged = { ...worker, phase:'ready', version:'b'.repeat(12), running_version:'a'.repeat(40), checked_at: 2_000 };
+const idlePeer = { ...worker, device_id:'peer', device_name:'Unraid', is_self:false, phase:'idle', version:null, running_version:'a'.repeat(40) };
+it.each([
+ ['never reported a check', { checked_at: null }, 'Download update'],
+ ['checked before the update was found', { checked_at: 1_000 }, 'Download update'],
+ ['checked after and found nothing', { checked_at: 3_000 }, 'Update and restart'],
+ ['predates checked_at', {}, 'Update and restart'],
+])('fallback: an idle peer that %s', async (_name, peer, action) => {
+ api.get.mockResolvedValue({ ...state, update_all_workers:true, workers:[desktopStaged, { ...idlePeer, ...peer }] });
+ render(DesktopUpdateButton);
+ await screen.findByRole('button', { name: action });
+});
+it('uses the worker’s own role and label when the snapshot carries them', async () => {
+ api.get.mockResolvedValue({ ...state, update_all_workers:true, workers:[
+  { ...desktopStaged, role:'staged', label:'Staged, awaiting restart' },
+  // The server's verdict wins even where the fallback would read it differently.
+  { ...idlePeer, checked_at: 3_000, role:'available', label:'Not checked yet; will check and download' },
+ ] });
+ render(DesktopUpdateButton);
+ const button = await screen.findByRole('button', { name: 'Download update' });
+ expect(button.getAttribute('title')).toContain('Unraid: Not checked yet; will check and download');
+ await fireEvent.click(button);
+ await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates', { action:'download' }));
+});
