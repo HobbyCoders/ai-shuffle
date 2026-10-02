@@ -92,7 +92,7 @@
 	{danger}
 	item={FAL_KEY_ITEM}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status={credential.status} />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<span class="onoff">
 			{s.falEnabled ? 'On' : 'Off'}

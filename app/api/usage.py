@@ -12,10 +12,10 @@ import math
 import time
 from typing import Any, Callable, List, Literal, Optional
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, field_validator
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict, field_validator
 
-from app.api.auth import require_auth
+from app.api.auth import require_admin, require_auth
 from app.core import usage_sources
 from app.core.usage_limits import usage_limits_monitor
 
@@ -504,3 +504,180 @@ def session_usage_callback(resolve_session_id: Callable[[], Optional[str]]) -> C
         return await get_session_usage_payload(session_id)
 
     return _callback
+
+
+# ============================================================================
+# Claude subscription resets (weekly and 5-hour)
+# ============================================================================
+#
+# The token comes from the Claude Code CLI's own sign-in, read only when one of
+# these routes runs (see app.core.claude_rate_limit_resets). Owner only.
+
+_EXPIRED = "Claude Code's sign-in has expired. Run a Claude turn to refresh it, then try again."
+_CLAUDE_RESET_MESSAGES = {
+    "not_signed_in": (status.HTTP_409_CONFLICT, "Claude Code is not signed in. Sign in, then try again."),
+    "token_unavailable": (
+        status.HTTP_409_CONFLICT,
+        "AI Shuffle can't read Claude Code's sign-in on this machine. Use claude.ai to reset.",
+    ),
+    "token_expired": (status.HTTP_409_CONFLICT, _EXPIRED),
+    "unauthorized": (status.HTTP_409_CONFLICT, _EXPIRED),
+    "missing_scope": (
+        status.HTTP_409_CONFLICT,
+        "This Claude Code sign-in can't manage resets. Sign in to Claude Code again.",
+    ),
+    "rate_limited": (status.HTTP_429_TOO_MANY_REQUESTS, "Too many reset requests. Try again in a minute."),
+}
+_CLAUDE_RESET_UNAVAILABLE = (status.HTTP_502_BAD_GATEWAY, "Claude's reset service is unavailable right now.")
+
+
+class ClaudeWeeklyGrant(BaseModel):
+    id: str
+    label: str
+    resets_total: int
+    resets_left: int
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
+    clears: List[str]
+    paused: bool
+    usable_now: bool
+    use_requires_limit: bool
+    blocking: List[str]
+
+
+class ClaudeWeeklyResets(BaseModel):
+    eligible: bool
+    ineligible_reason: Optional[str] = None
+    at_limit: bool
+    exhausted: List[str]
+    grants: List[ClaudeWeeklyGrant]
+    next_grant_id: Optional[str] = None
+    weekly_resets_at: Optional[str] = None
+    cooldown_until: Optional[str] = None
+
+
+class ClaudeSessionReset(BaseModel):
+    eligible: bool
+    ineligible_reason: Optional[str] = None
+    available: bool
+    next_available_at: Optional[str] = None
+    weekly_resets_at: Optional[str] = None
+    resets_per_week: int
+
+
+class ClaudeResetsResponse(BaseModel):
+    weekly: Optional[ClaudeWeeklyResets] = None
+    session: Optional[ClaudeSessionReset] = None
+
+
+class ClaudeWeeklyResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: str
+    idempotency_key: str
+
+    @field_validator("grant_id")
+    @classmethod
+    def _grant_id(cls, value: str) -> str:
+        from app.core.claude_rate_limit_resets import GRANT_ID_RE
+
+        if not GRANT_ID_RE.match(value):
+            raise ValueError("malformed grant id")
+        return value
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _key(cls, value: str) -> str:
+        from app.core.claude_rate_limit_resets import REQUEST_ID_RE
+
+        if not REQUEST_ID_RE.match(value):
+            raise ValueError("must be 1-64 letters, digits, '-' or '_'")
+        return value
+
+
+class ClaudeWeeklyResetResponse(BaseModel):
+    result: Literal["reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable"]
+    reason: Optional[str] = None
+    resets_left: Optional[int] = None
+    cleared: List[str]
+    weekly_resets_at: Optional[str] = None
+    cooldown_until: Optional[str] = None
+
+
+class ClaudeSessionResetResponse(BaseModel):
+    result: Literal["reset", "already_used", "not_limited", "ineligible", "unavailable"]
+    next_available_at: Optional[str] = None
+
+
+def _claude_reset_http_error(exc: Exception) -> HTTPException:
+    kind = getattr(exc, "kind", "")
+    code, detail = _CLAUDE_RESET_MESSAGES.get(kind, _CLAUDE_RESET_UNAVAILABLE)
+    return HTTPException(status_code=code, detail=detail)
+
+
+async def _claude_reset_call(request_call):
+    """Read the CLI's sign-in for this one request and run *request_call*."""
+    import asyncio
+
+    from app.core import claude_cli_status
+    from app.core import claude_rate_limit_resets as resets
+
+    cli = await claude_cli_status.get_status_async()
+    try:
+        if not cli.signed_in:
+            raise resets.ClaudeResetsError("not_signed_in")
+        token = await asyncio.to_thread(resets.read_cli_access_token, cli.config_dir)
+        return await request_call(token, cli.cli_version, cli.org_id)
+    except resets.ClaudeResetsError as exc:
+        if exc.kind in ("unauthorized", "not_signed_in"):
+            # The next status read asks the CLI again instead of a stale cache.
+            claude_cli_status.invalidate()
+        logger.info("Claude reset request failed: %s (status %s)", exc.kind, exc.status_code)
+        raise _claude_reset_http_error(exc) from exc
+
+
+@router.get("/claude/resets", response_model=ClaudeResetsResponse)
+async def get_claude_resets(_: str = Depends(require_admin)) -> ClaudeResetsResponse:
+    """Weekly and 5-hour reset status for the signed-in Claude subscription."""
+    from app.core import claude_rate_limit_resets as resets
+
+    async def _request(token, cli_version, _org_id):
+        return await resets.get_status(token, cli_version)
+
+    return ClaudeResetsResponse(**await _claude_reset_call(_request))
+
+
+@router.post("/claude/resets/weekly", response_model=ClaudeWeeklyResetResponse)
+async def claim_claude_weekly_reset(
+    body: ClaudeWeeklyResetRequest, _: str = Depends(require_admin)
+) -> ClaudeWeeklyResetResponse:
+    """Spend one weekly reset. The idempotency key is sent as the claim's request id."""
+    from app.core import claude_rate_limit_resets as resets
+
+    async def _request(token, cli_version, org_id):
+        return await resets.claim_weekly(
+            token, cli_version, org_id, grant_id=body.grant_id, request_id=body.idempotency_key
+        )
+
+    result = await _claude_reset_call(_request)
+    if result["result"] == "reset" and result["cleared"]:
+        weekly_at = result.get("weekly_resets_at")
+        await usage_limits_monitor.note_reset_and_broadcast(
+            result["cleared"],
+            {"seven_day": weekly_at} if weekly_at else None,
+        )
+    return ClaudeWeeklyResetResponse(**result)
+
+
+@router.post("/claude/resets/session", response_model=ClaudeSessionResetResponse)
+async def claim_claude_session_reset(_: str = Depends(require_admin)) -> ClaudeSessionResetResponse:
+    """Use the 5-hour reset. A repeat answers ``already_used``."""
+    from app.core import claude_rate_limit_resets as resets
+
+    async def _request(token, cli_version, org_id):
+        return await resets.claim_session(token, cli_version, org_id)
+
+    result = await _claude_reset_call(_request)
+    if result["result"] == "reset":
+        await usage_limits_monitor.note_reset_and_broadcast(["five_hour"])
+    return ClaudeSessionResetResponse(**result)

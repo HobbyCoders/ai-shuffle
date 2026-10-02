@@ -55,7 +55,7 @@ services:
       # The Claude Code CLI's own config directory (historical volume name). Run
       # `claude auth login` in the AI Shuffle terminal (or
       # `docker exec -it -u appuser <container> claude auth login`); the CLI keeps
-      # its login here. AI Shuffle never reads your Claude credentials.
+      # its login here. AI Shuffle never stores or refreshes your Claude credentials.
       - claude-auth:/home/appuser/.claude
       # Optional external Claude/Codex home (Linux/macOS): mount it read-only with a
       # small override file, then enter /imports/provider-settings in the import dialog:

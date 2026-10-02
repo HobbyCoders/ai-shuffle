@@ -1,7 +1,9 @@
-"""The app never refreshes, reads or deletes the Claude CLI's credentials.
+"""The app never refreshes, writes or deletes the Claude CLI's credentials.
 
-Sign-in state comes from `claude auth status`, logout goes through
-`claude auth logout`, and nothing at runtime opens the CLI's credential file.
+Sign-in state comes from `claude auth status` and logout goes through
+`claude auth logout`. The one reader of the CLI's credential file is the reset
+client (app/core/claude_rate_limit_resets.py), and only when the owner asks for
+reset status or presses Reset; turns, status routes and startup never open it.
 """
 
 import builtins
@@ -50,6 +52,24 @@ def test_no_refresh_call_sites_remain():
         assert "seed_from_credentials_file" not in text, rel
     for rel in ("app/core/cli_bridge.py", "app/api/auth.py", "run_local.py", "entrypoint.sh", ".env.example"):
         assert ".credentials.json" not in (ROOT / rel).read_text(), rel
+
+
+def test_only_the_reset_client_names_the_credentials_file():
+    readers = sorted(
+        str(p.relative_to(ROOT)).replace("\\", "/")
+        for p in (ROOT / "app").rglob("*.py")
+        if ".credentials.json" in p.read_text(encoding="utf-8", errors="ignore")
+    )
+    assert readers == ["app/core/claude_rate_limit_resets.py"]
+
+
+def test_cli_status_keeps_org_and_config_dir_server_side():
+    status = cs.ClaudeCliStatus(signed_in=True)
+    cs.parse_json_status({"loggedIn": True, "orgId": "org-1", "configDirectory": "/home/u/.claude",
+                          "email": "a@b.c"}, status)
+    assert status.org_id == "org-1" and status.config_dir == "/home/u/.claude"
+    public = status.to_dict()
+    assert "org_id" not in public and "config_dir" not in public
 
 
 def test_is_authenticated_asks_the_cli(monkeypatch, cli_home):

@@ -20,7 +20,7 @@ Check the [requirements](/docs/getting-started/requirements) first: the image ru
 - **A pinned version.** Your compose file or Unraid template names an exact release. Nothing changes until you change that version (or accept an in-app update). See [Updates](/docs/getting-started/updates).
 - **A pull token, not a login.** The image is private. Your pull token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
 - **Your data stays on your machine.** Projects, sessions, the database and your saved credentials live in folders or volumes on the host. Back them up while the container is stopped.
-- **Your Claude sign-in stays with the Claude Code CLI.** Run `claude auth login` in the AI Shuffle terminal (or `docker exec -it -u appuser <container> claude auth login`). AI Shuffle never reads your Claude credentials.
+- **Your Claude sign-in stays with the Claude Code CLI.** Run `claude auth login` in the AI Shuffle terminal (or `docker exec -it -u appuser <container> claude auth login`). AI Shuffle never stores or refreshes your Claude credentials; it reads the CLI's current sign-in only when you check or use a Claude usage reset.
 - **Reachable from one address.** The web interface listens on one address you choose: the host itself by default, or one LAN or Tailscale address. Never `0.0.0.0`, and never a port forwarded from your router.
 
 ## After installing

@@ -27,7 +27,7 @@
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 </script>
 
-<div class="pgh" class:lit class:bare={provider.credentials.length === 0} aria-current={selected ? 'true' : undefined}>
+<div class="pgh" class:lit class:claude={!!provider.claude} class:bare={provider.credentials.length === 0} aria-current={selected ? 'true' : undefined}>
 	<button
 		type="button"
 		class="pgn"
@@ -50,7 +50,6 @@
 				onchange={(v: ClaudeAuthMode) => changeClaudeMode(v)}
 			/>
 		</span>
-		<span></span>
 	{:else}
 		<span class="cnt">{provider.draft ? 'Setting up' : `${provider.onCount} on`}</span>
 		<AddKindMenu
@@ -122,9 +121,15 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* Claude: the name gives way before the mode switch does, so the switch
+	   never has to scroll. */
+	.pgh.claude {
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
 	.mode {
 		justify-self: end;
 		display: flex;
+		align-items: center;
 		min-width: 0;
 	}
 	.cnt {

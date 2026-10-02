@@ -96,7 +96,7 @@
 	{danger}
 	item={credential.item}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status={credential.status} />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		{#if !signedIn && !reconnecting}
 			<button type="button" class="st-btn warn" onclick={reconnect}><RefreshCw />Reconnect</button>

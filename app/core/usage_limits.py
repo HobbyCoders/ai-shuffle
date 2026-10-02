@@ -1,9 +1,8 @@
 """
 Claude usage-limit monitor.
 
-AI Shuffle never reads the Claude Code CLI's credentials, so it does not poll
-any Claude usage endpoint. The only Claude usage source is the ``rate_limit``
-events the running CLI emits in its own stream (``claude_rate_limit_events``
+AI Shuffle does not poll any Claude usage endpoint. The only Claude usage
+source is the ``rate_limit`` events the running CLI emits in its own stream (``claude_rate_limit_events``
 in ``app.core.usage_sources``): each one refines a single window, which this
 monitor keeps in memory, persists per install and broadcasts to connected
 clients as a ``usage_snapshot`` WebSocket event. The full picture lives on the
@@ -438,6 +437,25 @@ class UsageLimitsMonitor:
             return
         if await run_sync(self._persist_observed, due, observed_at):
             await self._broadcast(await run_sync(self._cluster_snapshot))
+
+    async def note_reset_and_broadcast(
+        self, window_types: List[str], resets_at: Optional[Dict[str, Optional[str]]] = None,
+    ) -> None:
+        """A Claude reset refilled these windows: show them unused until the CLI reports again.
+
+        Only windows already on screen are touched. The 5-hour window restarts
+        with the next request, so its old reset time is dropped; other windows
+        keep theirs unless *resets_at* names a new one.
+        """
+        for window_type in dict.fromkeys(window_types):
+            current = next((w for w in self._windows if w.get("type") == window_type), None)
+            if current is None:
+                continue
+            if resets_at and window_type in resets_at:
+                at = resets_at[window_type]
+            else:
+                at = None if window_type == "five_hour" else current.get("resets_at")
+            await self.apply_live_event_and_broadcast(window_type, 0.0, at, status="allowed")
 
 
 # Global singleton.

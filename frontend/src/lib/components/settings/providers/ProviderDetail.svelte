@@ -121,7 +121,7 @@
 	{danger}
 	item={provider.item}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status={head.status} />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet banner()}
 		{#if provider.claude && claude?.gate && !claude.gate.ready && claude.gate.reason && mode !== 'off'}
 			<InlineBanner tone="warn">{claude.gate.reason}</InlineBanner>

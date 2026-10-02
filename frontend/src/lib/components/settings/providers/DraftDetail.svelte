@@ -56,7 +56,7 @@
 </script>
 
 <DetailPane name={draft.name} badge="Draft" status="busy" statusText="Setting up" {subtitle} item={draft.item}>
-	{#snippet tile()}<ProviderTile {provider} size="lg" status="busy" />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 
 	{#if draft.flavor === 'device'}
 		{#if draft.step === 'models' && draft.rowId}

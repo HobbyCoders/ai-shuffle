@@ -186,7 +186,7 @@
 	{danger}
 	item={credential.item}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status={credential.status} />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<span class="onoff">
 			{row.enabled ? 'On' : 'Off'}

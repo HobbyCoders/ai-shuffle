@@ -66,6 +66,11 @@
 		overflow-x: auto;
 		scrollbar-width: none;
 	}
+	/* app.css gives every element an 8px WebKit scrollbar; the Android WebView
+	   keeps that track inside the control, so hide it here too. */
+	.st-seg::-webkit-scrollbar {
+		display: none;
+	}
 	.st-seg button {
 		border: 0;
 		background: none;

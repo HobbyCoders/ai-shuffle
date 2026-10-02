@@ -328,24 +328,40 @@
 .settings-shell[data-stacked] .st-page-h h1 {
 	font-size: 17px;
 }
-.settings-shell[data-stacked] .st-row {
-	gap: 10px;
+/*
+ * SettingRow on the phone: label and control share a line while they fit and
+ * the control drops under the label (still right-aligned) when it does not.
+ * Text fields and meters always take the full width. The reset stays left
+ * of the control, as on desktop.
+ */
+.settings-shell[data-stacked] .st-row:has(> .st-rt) {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
 	padding: 10px 14px;
 }
-.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-sel, .st-seg, .st-vbtn, .st-meter)) {
-	grid-template-columns: minmax(0, 1fr);
-	gap: 8px;
+.settings-shell[data-stacked] .st-row > .st-rt {
+	flex: 1 1 128px;
 }
-.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-sel, .st-seg, .st-vbtn, .st-meter)) .st-rc {
-	justify-content: flex-start;
+.settings-shell[data-stacked] .st-row > .st-rt .st-rh {
+	white-space: normal;
+}
+.settings-shell[data-stacked] .st-row > .st-rc {
+	flex: 0 1 auto;
+	max-width: 100%;
+	margin-left: auto;
 	flex-wrap: wrap;
+}
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter)) > .st-rc {
+	flex: 1 1 100%;
+	flex-wrap: nowrap;
 }
 .settings-shell[data-stacked] .st-row .st-txt {
 	flex: 1 1 160px;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
-	order: 2;
 }
 .settings-shell[data-stacked] .st-rowx {
 	padding: 4px 14px 14px;

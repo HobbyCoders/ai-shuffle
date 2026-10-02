@@ -103,7 +103,7 @@
 	{danger}
 	item={CLAUDE_KEY_ITEM}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status={credential.status} />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		{#if mode !== 'api_key' && keySet}
 			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use for Claude</button>

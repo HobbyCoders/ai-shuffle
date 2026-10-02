@@ -123,7 +123,7 @@ class AuthService:
                 "2. Run: claude auth login (Docker: docker exec -it -u appuser <container> claude auth login)",
                 "3. Open the link it prints and sign in on Anthropic's page",
                 "4. Return here and check again",
-                "AI Shuffle never reads your Claude credentials."
+                "AI Shuffle never stores or refreshes your Claude credentials."
             ],
             "command": "claude auth login"
         }

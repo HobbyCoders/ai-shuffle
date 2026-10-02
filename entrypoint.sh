@@ -81,7 +81,7 @@ if [ ! -e "$CLAUDE_JSON_LINK" ] && [ ! -L "$CLAUDE_JSON_LINK" ]; then
     echo "Routed .claude.json into the retained provider volume without creating or rewriting provider data"
 fi
 
-echo "Claude: run \`claude auth login\` in the AI Shuffle terminal (or \`docker exec -it -u appuser <container> claude auth login\`). AI Shuffle never reads your Claude credentials."
+echo "Claude: run \`claude auth login\` in the AI Shuffle terminal (or \`docker exec -it -u appuser <container> claude auth login\`). AI Shuffle never stores or refreshes your Claude credentials."
 
 if [ -n "$(find /home/appuser/.claude -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
     echo "Legacy Claude data detected and preserved; preview an explicit import from Settings > Providers"

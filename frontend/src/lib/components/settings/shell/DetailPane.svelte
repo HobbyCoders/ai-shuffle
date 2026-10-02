@@ -2,8 +2,9 @@
 	/**
 	 * DetailPane: the one anatomy every collection object uses.
 	 *
-	 *   1. Header: 42px tile with status dot, name (h2), kind badge, status,
-	 *      subtitle, one primary action.
+	 *   1. Header: 42px tile, name (h2), kind badge, status, subtitle, one
+	 *      primary action. The tile carries the status dot only when there is
+	 *      no status text (one dot per header).
 	 *   2. Facts strip: up to 4 facts; facts without data are left out.
 	 *   3. Tabs, only with 2+ (state lives in the navigation store, so search
 	 *      can land on a tab).
@@ -100,7 +101,7 @@
 		<SavedTick />
 	</div>
 	<div class="st-dh">
-		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} {status} ring="bg" />{/if}
+		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
 		<div class="st-dh-main">
 			<div class="st-dhn">
 				<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>

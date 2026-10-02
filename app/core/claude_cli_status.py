@@ -1,13 +1,14 @@
 """What the stock Claude Code CLI says about its own sign-in.
 
-AI Shuffle never reads the CLI's credential files. To learn whether the CLI is
-signed in, and as whom, it asks the CLI: ``claude auth status``. That command
-prints JSON by default (``--json`` is accepted and is the default) and exits 0
-when signed in, 1 when not. The fields read here are ``loggedIn``,
-``authMethod``, ``apiProvider``, ``email``, ``orgName`` and
-``subscriptionType``; every one is optional, unknown fields are ignored, and a
+To learn whether the CLI is signed in, and as whom, AI Shuffle asks the CLI:
+``claude auth status``. That command prints JSON by default (``--json`` is
+accepted and is the default) and exits 0 when signed in, 1 when not. The fields
+read here are ``loggedIn``, ``authMethod``, ``apiProvider``, ``email``,
+``orgName``, ``orgId``, ``configDirectory`` and ``subscriptionType``; every
+one is optional, unknown fields are ignored, and a
 reply that is not JSON falls back to the plain-text form and then to the exit
-code alone. A missing binary, a CLI without the ``auth`` command, a timeout or
+code alone. ``orgId`` and ``configDirectory`` stay server-side (``to_dict``
+leaves them out); the Claude usage-reset client needs them. A missing binary, a CLI without the ``auth`` command, a timeout or
 garbage output all produce a status with ``error`` set instead of an exception.
 
 The result is cached briefly: a positive answer for a minute, a negative one
@@ -78,9 +79,16 @@ class ClaudeCliStatus:
     binary_path: Optional[str] = None
     error: Optional[str] = None
     checked_at: float = field(default_factory=time.time)
+    # Server-side only: the organization the reset endpoints are scoped to and
+    # the CLI's config directory (where its sign-in lives).
+    org_id: Optional[str] = None
+    config_dir: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("org_id", None)
+        data.pop("config_dir", None)
+        return data
 
 
 def _probe_env() -> dict:
@@ -137,6 +145,8 @@ def parse_json_status(data: dict, status: ClaudeCliStatus) -> None:
     status.api_provider = _string(data.get("apiProvider", data.get("api_provider")))
     status.email = _string(data.get("email", data.get("emailAddress")))
     status.org_name = _string(data.get("orgName", data.get("organizationName")))
+    status.org_id = _string(data.get("orgId", data.get("organizationUuid")))
+    status.config_dir = _string(data.get("configDirectory"))
     status.plan = _string(data.get("subscriptionType", data.get("plan")))
     if isinstance(logged_in, bool):
         status.signed_in = logged_in
@@ -233,7 +243,7 @@ def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
         status.auth_method_label = _METHOD_LABELS.get(status.auth_method, status.auth_method)
     if not status.signed_in:
         # Nothing about an account is shown for a CLI that is not signed in.
-        status.email = status.org_name = status.plan = None
+        status.email = status.org_name = status.plan = status.org_id = None
     return status
 
 

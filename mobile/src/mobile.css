@@ -496,6 +496,14 @@ html:root[data-platform='mobile'] .settings-shell .st-back {
 	min-width: 44px;
 }
 
+/* A chevron-only back button centres its icon in the 44px target and pulls
+   the title in, so the gap after it matches the labelled back button. */
+html:root[data-platform='mobile'] .settings-shell .st-back:not(:has(span)) {
+	justify-content: center;
+	padding: 0;
+	margin-right: -6px;
+}
+
 html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm) {
 	width: 42px;
 	height: 25px;

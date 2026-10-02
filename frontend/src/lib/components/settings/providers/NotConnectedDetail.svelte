@@ -36,7 +36,7 @@
 	]}
 	item={provider.item}
 >
-	{#snippet tile()}<ProviderTile {provider} size="lg" status="off" dashed />{/snippet}
+	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>

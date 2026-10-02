@@ -367,7 +367,7 @@ def check_claude_auth():
     print_status("Claude Code CLI is not signed in", "warning")
     print_status("  Run `claude auth login` in the AI Shuffle terminal (Settings > Providers > Claude Code CLI)", "info")
     print_status("  or any terminal on this machine, or add an Anthropic API key in Settings.", "info")
-    print_status("  AI Shuffle never reads your Claude credentials.", "info")
+    print_status("  AI Shuffle never stores or refreshes your Claude credentials.", "info")
     return False
 
 

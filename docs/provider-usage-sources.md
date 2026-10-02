@@ -82,14 +82,16 @@ deletes a stored one. When no key is saved, the poller uses `FAL_KEY` or
 saved key always wins. The cached balance records a digest of the environment
 key (never the key), so a changed or removed environment key hides it.
 
-Claude remains a credential-free, passive reader of Claude Code's own live
-usage reports; refresh cannot fetch usage spent outside a running CLI session.
+Claude usage is still read passively from Claude Code's own live usage
+reports; refresh cannot fetch usage spent outside a running CLI session. The
+reset controls described under [Claude resets](#claude-resets) are the one
+place the app reads the CLI's sign-in, and they do not feed the usage meters.
 Old readings are labeled "Last reported" with their age, on Claude and on every
 provider row. A passed reset does not prove
 100% remains: the panel retains the last reported percentage and says it awaits
 a new report. Compare the provider dashboard for exact idle/external usage.
-No CLI credential extraction, browser scraping, challenge bypass, or balance
-estimate from this app's token costs is introduced.
+No browser scraping, challenge bypass, or balance estimate from this app's
+token costs is introduced.
 
 Two snapshot types have both a passive and a polled writer. `codex_headers` and
 `codex_usage` describe the same ChatGPT subscription windows, and the header
@@ -190,8 +192,8 @@ budget.
 
 ## Claude usage
 
-AI Shuffle never reads the Claude Code CLI's credentials, so it calls no
-Claude usage or profile endpoint. The only Claude source is
+AI Shuffle calls no Claude usage or profile endpoint for the meters. The only
+Claude usage source is
 `claude_rate_limit_events`: the rate-limit events the running CLI reports in
 its own output stream. Each event refines one window, so the popover shows
 only the windows the CLI has reported, and nothing before the first agent run.
@@ -200,6 +202,42 @@ ago still counts as stale when a newer event has refreshed another window.
 The popover links to the user's own usage page,
 [claude.ai/settings/usage](https://claude.ai/settings/usage), for the full
 picture. Snapshots carry no Claude account identity or plan.
+
+### Claude resets
+
+Claude offers two resets, shown under Settings > Providers > Claude
+subscription > Usage for the owner while the CLI is signed in:
+
+- **Weekly resets** (program `cedar_ember`): banked grants, each with a count
+  of resets left and a use-by date. They clear the weekly limits and usually
+  open only once a weekly limit is hit.
+- **The 5-hour reset** (program `juniper_tide`): clears the current 5-hour
+  window a set number of times a week, only at the 5-hour limit. It counts
+  against the weekly limit.
+
+The worker routes are `GET /api/v1/usage/claude/resets` (both programs),
+`POST /api/v1/usage/claude/resets/weekly` with `grant_id` and
+`idempotency_key`, and `POST /api/v1/usage/claude/resets/session`. Upstream,
+status comes from `GET https://api.anthropic.com/api/oauth/usage` and claims go
+to `POST https://api.anthropic.com/api/organizations/{org}/reset_rate_limits`,
+the same calls the Claude Code CLI makes. These endpoints are unofficial and
+subscription-specific, like the Codex and SuperGrok reset readers.
+
+Credential policy:
+
+- The organization ID comes from `claude auth status` and stays on the worker.
+- The access token is read from the CLI's own credentials file only when the
+  owner opens the Usage tab, presses refresh, or confirms a reset. It is never
+  refreshed, written, cached, logged or returned to the browser.
+- An expired or missing token answers 409 with "run a Claude turn", which lets
+  the CLI refresh its own sign-in. On macOS the CLI keeps its token in the
+  Keychain, which the app does not read, so resets are unavailable there.
+- `tests/core/test_claude_cli_no_token_access.py` fails if any other module
+  names the credentials file.
+
+A weekly claim reuses its idempotency key on retry, so an ambiguous failure
+cannot spend a second reset. After a successful reset the app refills only the
+windows the panel already shows, and the next CLI report replaces them.
 
 ## OpenRouter setup and account separation
 
@@ -243,7 +281,9 @@ notice; a refusal is shown as unavailable rather than as a zero balance.
 The [Claude Code authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)
 distinguishes an end user's login in the unmodified native client from collecting
 or intermediating subscription OAuth credentials in a third-party app, which is
-why the app has no Claude usage reader of its own. xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
+why the app has no Claude usage reader of its own. The reset controls read the
+CLI's token on the owner's own worker, on demand, and never store or refresh
+it; whether that use is supported is part of the same open review (#1387). xAI's [documented management billing API](https://docs.x.ai/developers/rest-api-reference/management/billing)
 does not establish support for the existing SuperGrok proxy endpoints. Those
 readers are labeled unofficial and subscription-specific; deciding their
 supported replacement or default behavior remains part of issue #1387.
