@@ -195,7 +195,7 @@
 				<span>
 					{#if machine}{sentTo}, never to the model or chat history. Commands run with this account’s authority and follow this session’s permission mode. Bypass skips repeat approvals after you grant access.
 					{:else if service}{sentTo}, never to the model or chat history. HTTPS with a trusted certificate only; requests stay under this address, redirects are not followed, and the model can use this credential’s full authority there.
-					{:else}{sentTo}. Linux file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
+					{:else}{sentTo}. Kernel file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
 				</span>
 			</p>
 		</div>

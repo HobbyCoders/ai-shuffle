@@ -419,7 +419,7 @@ Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for a
 
 When an agent asks for access to a folder on this worker, a machine over SSH, or an HTTPS API service, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write, command or state-changing API request the agent attempts needs a separate approval (unless the session is in Bypass).
 
-**Auth:** Owner only, over HTTPS or from the same machine. Refused (`403`) for agent previews.
+**Auth:** Owner only, and only from the desktop app window, the worker's HTTPS remote access address, or a browser on the machine running a worker the desktop app did not start. Other connections get `403`, including plain `http://` LAN addresses and `X-Forwarded-Proto` headers sent to port 8000 (see [Remote access](/docs/getting-started/remote-access#private-access-details)). Refused (`403`) for agent previews.
 
 ### GET /api/v1/chat-access/{session_id}
 

@@ -505,6 +505,10 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
     transport.note_contact(device_id)
 
     def _work():
+        if engine.outbox_held():
+            # A peer we may be unable to dial just showed what it holds of our
+            # stream (#1621). Before a flush, so the flush can publish.
+            transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
         if body.flush:
             engine.scan_all(strict=True)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
