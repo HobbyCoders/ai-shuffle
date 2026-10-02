@@ -1,34 +1,54 @@
 # Mobile and desktop UI split
 
-Decided 2026-09-07; revised 2026-09-08. There are two UIs and two builds:
+Decided 2026-09-07; revised 2026-09-08; delivery changed 2026-10-02 (the
+worker serves the phone UI, see "How the apps get the UI"). There are two UIs
+and two builds:
 
 - **Web UI (`frontend/`) — desktop only.** This is what a worker serves at
   `/`. Every browser, at any window width, including a phone browser, gets the
   desktop shell. A narrow window only resizes it: the sidebar becomes an
   overlay, drawers clamp to the viewport, rows wrap. It never turns into the
   mobile UI, and it carries no mobile-shell code or CSS at all.
-- **Mobile UI (`mobile/`) — the Android app's.** A separate SvelteKit static
+- **Mobile UI (`mobile/`) — the phone apps'.** A separate SvelteKit static
   app, based on the former mobile shell (compact app bar, slide-in drawer,
   collapsing composer with its controls sheet, fullscreen panels, touch-sized
-  rows), free to diverge from the web UI over time. The app ships its own
-  build of it and loads it from its own assets; the app talks to workers only
-  through their HTTP/WebSocket APIs.
+  rows), free to diverge from the web UI over time. Every worker serves it at
+  `/mobile/`, beside the web UI, and the Android and iOS apps load it from the
+  paired worker.
 
 ## Why
 
-A worker on any version must never change what the phone shows. Workers are
-self-hosted and upgrade on their own schedule; the phone may be paired with
-several of them. If the worker served the phone's UI, every worker upgrade
-(or downgrade, or a worker running a fork) would change the app's behaviour
-and its security surface under the user's feet, and the app could not be
-tested against a fixed UI. So the app bundles the UI and pins the worker to
-an API contract instead.
+The two UIs are separate builds so the phone UI can diverge from the desktop
+one without either carrying the other's code. That separation is about
+*code*; it says nothing about *where* the phone UI is delivered from.
+
+From 2026-09-07 the Android app bundled its own build of `mobile/`, loaded it
+from its asset origin and pinned workers to an API contract. That made every
+phone UI change an app release: build, sign, upload to Play internal testing,
+wait for testers to update. Most phone UI work is ordinary frontend work in
+the shared `$lib`, so in practice almost every UI change needed a Play build,
+and the phone lagged the worker until it was installed.
+
+So the phone UI now ships with the worker, like the desktop UI. The app
+release is only for what really is native: phone tools, permissions, pairing,
+the WebView shell and the native bridges. The trade-off is that the page now
+changes with the worker. A worker update can change what the phone shows, and
+a page must cope with app builds older or newer than itself. The capability
+descriptor below is the contract for that, and the apps' confinement (only the
+paired worker's `/mobile/` is a chat document, only that worker may be
+reached) is unchanged.
+
+| Change | What ships it |
+|---|---|
+| Anything under `mobile/` or the shared `frontend/src/lib` | a worker update |
+| Phone tools, permissions, pairing, a new or changed native bridge | an app release (Play internal testing / TestFlight) |
+| A new native capability the page uses | an app release first, then a worker release whose page checks `nativeCapability()` |
 
 ## Where things live
 
 | | `frontend/` (web UI) | `mobile/` (mobile UI) |
 |---|---|---|
-| Kind | SvelteKit static app served by the worker | SvelteKit static app bundled in the APK |
+| Kind | SvelteKit static app served by the worker at `/` | SvelteKit static app served by the worker at `/mobile/` |
 | Shell | `src/lib/components/layout/AppLayout.svelte` (desktop) | `src/shell/MobileAppLayout.svelte` (one AppTopBar + drawer) |
 | Shared code | `src/lib` | the same `src/lib`, via `kit.files.lib = '../frontend/src/lib'` (`$lib` resolves there) |
 | Page | `src/routes/+page.svelte` → shared `AppPage` with the desktop shell | `src/routes/+page.svelte` → the same `AppPage` with the mobile shell |
@@ -108,23 +128,53 @@ When you add mobile-specific styling to a shared component, add it to
 (run by `npm run check` and after `npm run build`) fails the web build if
 `data-platform='mobile'` reappears under `frontend/src` or in the output.
 
-## How the app gets the UI
+## How the apps get the UI
 
-1. `mobile/` builds with `paths.base = '/assets/mobile-ui'` and an
-   `index.html` fallback (client-only, no service worker, no manifest).
-2. `android/scripts/sync-mobile-ui.sh` (also `npm run sync:mobile` in
-   `frontend/`) builds it and copies `mobile/build/` to
-   `android/app/src/main/assets/mobile-ui/` (git-ignored), plus a
-   `version.json` for bug reports.
-3. Gradle's `checkMobileUi` task, a `preBuild` dependency, fails any APK
-   build without `assets/mobile-ui/index.html`. CI runs the sync script before
-   `gradlew` (`.github/workflows/android.yml`).
-4. `ChatActivity` serves the bundle through `WebViewAssetLoader` at
-   `https://appassets.androidplatform.net/assets/mobile-ui/` (`MobileUi.kt`),
-   injects the runtime with `WebViewCompat.addDocumentStartJavaScript` scoped
-   to that origin, and confines the WebView: the asset origin may load, the
-   paired worker may be *called* (fetch / SSE / WebSocket / media), and nothing
-   else — a document from the worker is refused.
+1. `mobile/` builds with `paths.base = '/mobile'` and an `index.html`
+   fallback (client-only, no service worker, no manifest).
+2. The frontend build's `postbuild` runs `frontend/scripts/build-mobile-ui.mjs`,
+   which builds `mobile/` into `frontend/build/mobile`. Every install path
+   copies `frontend/build` into `app/static` (Docker image, source archive,
+   desktop source build), so every worker has `app/static/mobile`. A build
+   without it fails unless `SHUFFLE_SKIP_MOBILE_UI=1` is set on purpose.
+3. `app/mobile_ui.py` serves it at `/mobile/`: hashed assets from
+   `/mobile/_app`, real files as themselves, every other route the entry page,
+   and missing file-like paths as 404. `/mobile` redirects to `/mobile/`. The
+   page is public like the desktop `index.html`; every API call it makes is
+   authenticated. Branch previews (`app/preview.py`) serve the branch's
+   `/mobile/` under the same owner check.
+4. **Android.** `ChatActivity` loads `MobileUi.indexUrl(base)`
+   (`https://<worker>/mobile/`). It injects the runtime with
+   `WebViewCompat.addDocumentStartJavaScript` scoped to the worker origin and
+   guarded to the top-level `/mobile/` page. It confines the WebView: only the
+   worker's `/mobile/` pages may be the document (`MobileUi.isUiUrl`, no dot
+   segments), the paired worker may be *called* (fetch / SSE / WebSocket /
+   media), and nothing else. Any other worker document (the desktop UI, an API
+   response) is refused, and worker files go to the save bridge. Every native
+   bridge checks `MobileUi.isUiUrl` on the top-level document.
+5. **iOS.** `ChatWebController` loads `MobileUI.indexURL(base:)`. WebKit user
+   scripts cannot be scoped to an origin, so the bootstrap checks
+   `window.top`, `location.origin` and the `/mobile/` path itself. A content
+   rule list (`ChatPolicy.contentRules`) blocks every load except the worker's
+   `https://`/`wss://` origin, `data:` and `blob:`.
+6. **Errors.** If the worker answers `/mobile/` with an HTTP error, both apps
+   show a status instead of a page. A 404 means the worker is from before
+   `/mobile/` existed: "This worker is too old to serve the phone UI. Update
+   the worker, then refresh chat." A connection failure says the worker could
+   not be reached.
+7. **Offline demo.** The APK still bundles one copy of the phone UI, only for
+   Settings → offline demo, which has no worker.
+   `android/scripts/sync-offline-demo.sh` copies `mobile/build` to
+   `android/app/src/main/assets/offline-demo/` (git-ignored), and Gradle's
+   `checkOfflineDemo` task fails an APK build without it. The demo is served
+   at `https://offline-demo.shuffle.invalid/mobile/demo`, so the same
+   `/mobile` base works. Instrumentation smoke tests serve this copy as the
+   fixture worker's `/mobile/` (`PhoneUiFixture`).
+
+The phone UI never registers a service worker. Inside the apps it also
+removes any it finds on the worker origin (`pwa.removeAppServiceWorkers`):
+Android builds from before the bundled UI loaded the worker's root page, and
+its `/sw.js` (scope `/`) would otherwise sit in front of `/mobile/`.
 
 ### Runtime contract (`frontend/src/lib/api/runtime.ts`)
 
@@ -136,44 +186,97 @@ window.__SHUFFLE_MOBILE__ = {
   token: 'shc_…',                      // paired session, sent as Bearer
   version: '0.8.6',                    // app versionName (optional)
   deviceName: 'Pixel 9',               // optional
-  sendCookies: false                   // true only for Cloudflare Access workers
+  sendCookies: false,                  // true only for Cloudflare Access workers
+  native: {                            // what this app build offers
+    platform: 'android',               // or 'ios'
+    bridge: 1,                         // bumped when a capability changes shape
+    capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools']
+  }
 };
 ```
 
-Every request in `$lib` goes through the helpers: `apiBase()` (`'/api/v1'`
-on the web UI, `'https://worker/api/v1'` when bundled), `apiOrigin()`,
-`apiUrl(path)`, `authHeaders()` (`Authorization: Bearer …` when bundled),
-`requestCredentials()` (`include` on the web UI, `omit` when bundled unless
-`sendCookies`), `withAuth(init)` (applies both), `wsUrl(path, params)` /
-`wsBaseUrl(path)` (`wss://worker…?token=…` when bundled) and
-`isBundledMobile()`. A new token reaches a loaded page through
-`window.shuffleMobileSetToken(token)` or a `message` event
-`{ type: 'shuffle-mobile-token', token }` from the page's own origin — no
-reload. On the worker, `Authorization: Bearer shc_…` is accepted by every
-`require_auth` route, is CSRF-exempt, and the app origins (Android's asset
-origin and the iOS app's `aishuffle://app`) are always in the CORS allow-list
-(`app/core/cors.py`); the chat / global / browser WebSockets take
-`?token=`.
+The page uses the paired session, never the worker's cookie, even though it
+is now same-origin with the worker. Every request in `$lib` goes through the
+helpers:
 
-Worker-hosted media uses `WorkerAssetLoader` in the native WebView client.
-It intercepts approved file/media URLs (including legacy root-relative `/api/`
-URLs at the bundle origin), supplies the paired Bearer token through the existing
-worker HTTP client, and streams responses with Range/206 headers intact. It does
-not put tokens in URLs or grant worker documents the native bridge. Redirects and
-credentials remain restricted to the paired origin; token/worker changes cancel
-in-flight transfers. Ordinary note attachment links, as well as download anchors,
-use the native save bridge. Only the Cloudflare Access cookie is forwarded when
-needed, not a worker session cookie.
+- `apiBase()`: `'/api/v1'` on the web UI, `'https://worker/api/v1'` in the app.
+- `apiOrigin()` and `apiUrl(path)`.
+- `authHeaders()`: `Authorization: Bearer …` in the app.
+- `requestCredentials()`: `include` on the web UI; `omit` in the app unless
+  `sendCookies` is set.
+- `withAuth(init)`: applies both.
+- `wsUrl(path, params)` / `wsBaseUrl(path)`: `wss://worker…?token=…` in the app.
+- `isBundledMobile()`.
+
+A new token reaches a loaded page through
+`window.shuffleMobileSetToken(token)` or a `message` event
+`{ type: 'shuffle-mobile-token', token }` from the page's own origin, with no
+reload. On the worker:
+
+- `Authorization: Bearer shc_…` is accepted by every `require_auth` route and
+  is CSRF-exempt.
+- The chat, global and browser WebSockets take `?token=`.
+- The origins of app builds from before `/mobile/` stay in the CORS allow-list
+  (`app/core/cors.py`): Android's asset origin and iOS's `aishuffle://app`.
+
+### Native capabilities
+
+The page outlives any one app build: a worker update reaches every installed
+app version at once. So the page must not assume a native feature exists.
+`nativeBridge()` returns the descriptor, and `nativeCapability(name)` is
+true only when the app showing the page offers `name`:
+
+| Capability | Android | iOS | What it is |
+|---|---|---|---|
+| `file-save` | yes | no | the `shuffleFileSave` download bridge (system Save dialog) |
+| `file-chooser` | yes | yes | `<input type=file>` opens the system picker |
+| `microphone` | yes | yes | `getUserMedia` audio for the page's own voice mode |
+| `device-tools` | yes | no | phone tools the worker can call on this device |
+
+Both are false on the web UI and in app builds from before the descriptor.
+Those builds bundle their own UI, so they never show a worker page anyway.
+The rules for changing the contract:
+
+- Adding a native capability means adding its name to `MobileUi.CAPABILITIES`
+  (Android) or `MobileUI.capabilities` (iOS) in the same app release.
+- Changing a bridge's shape incompatibly means bumping `BRIDGE_VERSION` /
+  `bridgeVersion` on both platforms.
+- Names are never renamed or reused.
+
+Worker-hosted media on Android uses `WorkerAssetLoader` in the native WebView
+client. It intercepts approved file/media URLs and supplies the paired Bearer
+token through the existing worker HTTP client. Responses stream with
+Range/206 headers intact. It does not put tokens in URLs or grant other worker
+documents the native bridge. Redirects and credentials stay restricted to the
+paired origin, and token or worker changes cancel in-flight transfers.
+Ordinary note attachment links and download anchors use the native save
+bridge. Only the Cloudflare Access cookie is forwarded when needed, never a
+worker session cookie. iOS has no equivalent yet: WKWebView cannot intercept
+`https`.
 
 ### Release ordering
 
-Merging no longer publishes an APK automatically. First deploy compatible workers
-(the bundle origin must be allowed by CORS) and the account hub migrations/API,
-then verify pairing, API requests, inline media and attachment downloads. A manual
-Android workflow may publish only with `publish_download=true`. Versioned releases
-also require the repository variable `ANDROID_WORKERS_READY=true`; leave it unset
-until that rollout has been verified. Building an APK or Docker image does not
-update running workers.
+**Workers first, then the apps.** An app that loads `/mobile/` needs a worker
+that serves it; an older worker answers 404 and the app shows "update the
+worker".
+
+1. Release and deploy workers that serve `/mobile/`. Check
+   `https://<worker>/mobile/` in a browser. It is served if it shows the phone
+   UI, or the phone UI's "session expired" screen when the browser is not
+   signed in to that worker.
+   Already-installed apps keep working throughout: they bundle their own UI
+   and still reach the worker through CORS.
+2. Only then build the apps. On Android, a versioned release publishes to Play
+   internal testing only with the repository variable
+   `ANDROID_WORKERS_READY=true`; a manual workflow run needs
+   `publish_download=true`. On iOS, `IOS_WORKERS_READY=true` plays the same
+   role (`ios/RELEASING.md`). Leave each unset until step 1 has been verified
+   on the workers that testers use.
+3. After that, phone UI changes need only step 1. An app release is needed
+   only for native changes. If a worker change needs a new capability, ship
+   the app first and gate the page on `nativeCapability()`.
+
+Building an APK or a Docker image does not update running workers.
 
 ## Rules for component code
 
@@ -229,19 +332,25 @@ gesture, mobile CSS) lives in `mobile/src/shell/*.test.ts`, calls
 ```sh
 # Web UI (desktop), served by the worker
 cd frontend && npm ci && npm run dev            # http://localhost:5173
-cd frontend && npm run check && npm test && npm run build
+cd frontend && npm run check && npm test && npm run build   # → build/, plus build/mobile
 
 # Mobile UI, in a desktop browser against a local backend (same /api proxy)
-cd mobile && npm run deps && npm run dev        # http://localhost:5173/assets/mobile-ui/
+cd mobile && npm run deps && npm run dev        # http://localhost:5173/mobile/
 cd mobile && npm run check && npm test && npm run build   # → mobile/build
 
-# Bundle it into the app, then build the APK
-bash android/scripts/sync-mobile-ui.sh          # or: cd frontend && npm run sync:mobile
+# A worker running from this checkout serves both: / and /mobile/
+
+# APK (bundles the offline demo copy first)
+bash android/scripts/sync-offline-demo.sh
 cd android && ./gradlew testDebugUnitTest assembleDebug
 ```
 
-Manual: load the web build in a desktop browser at 390px wide and confirm the
-desktop shell (StudioTopBar, floating sidebar), not the app bar; open the
-Android app and confirm the mobile shell, that DevTools shows the document at
-`https://appassets.androidplatform.net/assets/mobile-ui/`, and that API calls
-go to the worker with an `Authorization: Bearer shc_…` header and no cookie.
+Manual checks:
+
+- Load the web build in a desktop browser at 390px wide. Confirm the desktop
+  shell (StudioTopBar, floating sidebar), not the app bar.
+- Open a worker in the Android app and confirm the mobile shell. In DevTools,
+  the document should be `https://<worker>/mobile/`, and API calls should go
+  to the worker with an `Authorization: Bearer shc_…` header and no cookie.
+- Pair the app with a worker from before `/mobile/`. It should show the
+  "update the worker" message.

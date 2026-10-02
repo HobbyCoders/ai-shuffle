@@ -44,7 +44,7 @@ final class PairingInputTests: XCTestCase {
         XCTAssertFalse(PairingInput.sameOrigin(base, "http://worker.example/"))
         XCTAssertFalse(PairingInput.sameOrigin(base, "https://user@worker.example/"))
         XCTAssertFalse(PairingInput.sameOrigin(base, "https://worker.example.evil.test/"))
-        XCTAssertFalse(PairingInput.sameOrigin(base, "aishuffle://app/assets/mobile-ui/"))
+        XCTAssertFalse(PairingInput.sameOrigin(base, "aishuffle://app/mobile/"))
     }
 }
 
@@ -56,11 +56,16 @@ final class MobileUITests: XCTestCase {
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
     }
 
-    func testBootstrapScriptIsGuardedToTheBundleOrigin() throws {
+    func testBootstrapScriptIsGuardedToTheWorkersPhoneUi() throws {
         let script = try MobileUI.bootstrapScript(apiOrigin: "https://Worker.Example:443", token: "shc_abc-DEF_123",
                                                   version: " 0.9.0 ", deviceName: "iPhone")
-        XCTAssertTrue(script.hasPrefix("if (location.protocol === 'aishuffle:' && location.host === 'app') { "))
+        XCTAssertTrue(script.hasPrefix(#"if (window.top === window && location.origin === "https://worker.example" && location.pathname.indexOf("/mobile/") === 0) { "#), script)
         let values = try config(script)
+        let native = try XCTUnwrap(values["native"] as? [String: Any])
+        XCTAssertEqual(native["platform"] as? String, "ios")
+        XCTAssertEqual(native["bridge"] as? Int, MobileUI.bridgeVersion)
+        XCTAssertEqual(native["capabilities"] as? [String], MobileUI.capabilities)
+        XCTAssertFalse(MobileUI.capabilities.contains("file-save"), "iOS has no save bridge yet")
         XCTAssertEqual(values["apiOrigin"] as? String, "https://worker.example")
         XCTAssertEqual(values["token"] as? String, "shc_abc-DEF_123")
         XCTAssertEqual(values["sendCookies"] as? Bool, false)
@@ -83,16 +88,31 @@ final class MobileUITests: XCTestCase {
         XCTAssertTrue(script.contains(#"window.__SHUFFLE_MOBILE__.token = "shc_new""#))
     }
 
-    func testBundleOriginAndIndexPath() {
-        XCTAssertEqual(MobileUI.indexURL.absoluteString, "aishuffle://app/assets/mobile-ui/")
-        XCTAssertTrue(MobileUI.isAssetOrigin(URL(string: "aishuffle://app/assets/mobile-ui/_app/x.js")))
-        XCTAssertTrue(MobileUI.isAssetOrigin(URL(string: "AISHUFFLE://APP/")))
-        XCTAssertFalse(MobileUI.isAssetOrigin(URL(string: "aishuffle://app:1/")))
-        XCTAssertFalse(MobileUI.isAssetOrigin(URL(string: "aishuffle://other/")))
-        XCTAssertFalse(MobileUI.isAssetOrigin(URL(string: "https://app/")))
-        XCTAssertTrue(MobileUI.isIndexPath("/assets/mobile-ui/"))
-        XCTAssertTrue(MobileUI.isIndexPath("/assets/mobile-ui"))
-        XCTAssertFalse(MobileUI.isIndexPath("/assets/mobile-ui/index"))
+    func testTheWorkerServesThePhoneUiAtMobile() throws {
+        XCTAssertEqual(try MobileUI.indexURL(base: "https://Worker.Example/").absoluteString, "https://worker.example/mobile/")
+        XCTAssertEqual(try MobileUI.indexURL(base: "https://worker.example:8443").absoluteString, "https://worker.example:8443/mobile/")
+        XCTAssertThrowsError(try MobileUI.indexURL(base: "http://worker.example"))
+    }
+
+    func testOnlyThePairedWorkersPhoneUiCounts() {
+        let base = "https://worker.example"
+        for raw in ["https://worker.example/mobile/", "https://worker.example/mobile", "https://worker.example/mobile/chat/abc?x=1",
+                    "https://WORKER.example:443/mobile/_app/immutable/start.js"] {
+            XCTAssertTrue(MobileUI.isUiURL(base: base, url: URL(string: raw)), raw)
+        }
+        for raw in ["https://worker.example/", "https://worker.example/chat", "https://worker.example/mobilex",
+                    "https://worker.example/api/v1/auth/status", "https://worker.example/mobile/../api/v1/x",
+                    "https://worker.example/mobile/%2E%2E/api", "http://worker.example/mobile/", "https://worker.example:8443/mobile/",
+                    "https://worker.example.evil/mobile/", "https://user@worker.example/mobile/",
+                    "aishuffle://app/assets/mobile-ui/", "about:blank"] {
+            XCTAssertFalse(MobileUI.isUiURL(base: base, url: URL(string: raw)), raw)
+        }
+        XCTAssertFalse(MobileUI.isUiURL(base: base, url: nil))
+    }
+
+    func testAnOldWorkerGetsAnUpdateMessage() {
+        XCTAssertTrue(MobileUI.loadFailure(status: 404).contains("Update the worker"))
+        XCTAssertTrue(MobileUI.loadFailure(status: 502).contains("HTTP 502"))
     }
 
     func testUserAgentToken() {
@@ -109,13 +129,13 @@ final class ChatPolicyTests: XCTestCase {
         func decide(_ raw: String?, main: Bool = true, tap: Bool = true) -> ChatPolicy.Navigation {
             ChatPolicy.navigation(base: base, url: raw.flatMap { URL(string: $0) }, mainFrame: main, userInitiated: tap)
         }
-        XCTAssertEqual(decide("aishuffle://app/assets/mobile-ui/", tap: false), .allow)
-        XCTAssertEqual(decide("aishuffle://app/assets/mobile-ui/sessions/1"), .allow)
+        XCTAssertEqual(decide("https://worker.example/mobile/", tap: false), .allow)
+        XCTAssertEqual(decide("https://worker.example/mobile/chat/1"), .allow)
         XCTAssertEqual(decide("https://worker.example/api/v1/files/a.png"),
                        .workerFile(URL(string: "https://worker.example/api/v1/files/a.png")!))
-        // Old markdown /api links resolve against the bundle origin; they mean the worker.
-        XCTAssertEqual(decide("aishuffle://app/api/v1/files/a.png?x=1"),
-                       .workerFile(URL(string: "https://worker.example/api/v1/files/a.png?x=1")!))
+        // Another worker page (the desktop UI) is never the chat document.
+        XCTAssertEqual(decide("https://worker.example/chat"), .workerFile(URL(string: "https://worker.example/chat")!))
+        XCTAssertEqual(decide("aishuffle://app/assets/mobile-ui/"), .cancel)
         XCTAssertEqual(decide("https://docs.example/page"), .openExternally(URL(string: "https://docs.example/page")!))
         XCTAssertEqual(decide("https://docs.example/page", tap: false), .cancel)
         XCTAssertEqual(decide("https://docs.example/page", main: false), .cancel)
@@ -137,43 +157,45 @@ final class ChatPolicyTests: XCTestCase {
 
     /// Android offers any main-frame HTTPS navigation with a gesture; WebKit reports
     /// `window.open` and `location` changes from a tap handler as `.other`.
-    func testScriptOpenedLinksCountOnlyFromTheBundleMainFrame() {
-        XCTAssertTrue(ChatPolicy.userInitiated(.linkTap, fromBundleMainFrame: false))
-        XCTAssertTrue(ChatPolicy.userInitiated(.script, fromBundleMainFrame: true))
-        XCTAssertTrue(ChatPolicy.userInitiated(.newWindow, fromBundleMainFrame: true))
-        XCTAssertFalse(ChatPolicy.userInitiated(.script, fromBundleMainFrame: false))
-        XCTAssertFalse(ChatPolicy.userInitiated(.newWindow, fromBundleMainFrame: false))
-        XCTAssertFalse(ChatPolicy.userInitiated(.other, fromBundleMainFrame: true))
+    func testScriptOpenedLinksCountOnlyFromThePhoneUiMainFrame() {
+        XCTAssertTrue(ChatPolicy.userInitiated(.linkTap, fromUiMainFrame: false))
+        XCTAssertTrue(ChatPolicy.userInitiated(.script, fromUiMainFrame: true))
+        XCTAssertTrue(ChatPolicy.userInitiated(.newWindow, fromUiMainFrame: true))
+        XCTAssertFalse(ChatPolicy.userInitiated(.script, fromUiMainFrame: false))
+        XCTAssertFalse(ChatPolicy.userInitiated(.newWindow, fromUiMainFrame: false))
+        XCTAssertFalse(ChatPolicy.userInitiated(.other, fromUiMainFrame: true))
 
-        let script = ChatPolicy.userInitiated(.script, fromBundleMainFrame: true)
+        let script = ChatPolicy.userInitiated(.script, fromUiMainFrame: true)
         XCTAssertEqual(ChatPolicy.navigation(base: base, url: URL(string: "https://docs.example/x"), mainFrame: true,
                                              userInitiated: script),
                        .openExternally(URL(string: "https://docs.example/x")!))
-        let framed = ChatPolicy.userInitiated(.script, fromBundleMainFrame: false)
+        let framed = ChatPolicy.userInitiated(.script, fromUiMainFrame: false)
         XCTAssertEqual(ChatPolicy.navigation(base: base, url: URL(string: "https://docs.example/x"), mainFrame: true,
                                              userInitiated: framed), .cancel)
     }
 
-    func testBundleOrigin() {
-        XCTAssertTrue(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app", port: 0))
-        XCTAssertTrue(ChatPolicy.isBundleOrigin(scheme: "AIShuffle", host: "APP", port: 0))
-        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app.evil", port: 0))
-        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app", port: 8443))
-        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "https", host: "app", port: 0))
-        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "", host: "", port: 0))
+    func testWorkerOrigin() {
+        XCTAssertTrue(ChatPolicy.isWorkerOrigin(base: base, scheme: "https", host: "worker.example", port: 0))
+        XCTAssertTrue(ChatPolicy.isWorkerOrigin(base: base, scheme: "HTTPS", host: "WORKER.example", port: 443))
+        XCTAssertTrue(ChatPolicy.isWorkerOrigin(base: "https://[::1]:8443", scheme: "https", host: "::1", port: 8443))
+        XCTAssertFalse(ChatPolicy.isWorkerOrigin(base: base, scheme: "https", host: "worker.example.evil", port: 0))
+        XCTAssertFalse(ChatPolicy.isWorkerOrigin(base: base, scheme: "https", host: "worker.example", port: 8443))
+        XCTAssertFalse(ChatPolicy.isWorkerOrigin(base: base, scheme: "http", host: "worker.example", port: 0))
+        XCTAssertFalse(ChatPolicy.isWorkerOrigin(base: base, scheme: "aishuffle", host: "app", port: 0))
+        XCTAssertFalse(ChatPolicy.isWorkerOrigin(base: base, scheme: "", host: "", port: 0))
     }
 
-    func testMicrophoneOnlyForTheBundleDocument() {
-        let page = URL(string: "aishuffle://app/assets/mobile-ui/")
-        func allowed(top: URL? = page, scheme: String = "aishuffle", host: String = "app", port: Int = 0,
+    func testMicrophoneOnlyForThePhoneUiDocument() {
+        let page = URL(string: "https://worker.example/mobile/chat/1")
+        func allowed(top: URL? = page, scheme: String = "https", host: String = "worker.example", port: Int = 0,
                      main: Bool = true, micOnly: Bool = true, authorized: Bool = true) -> Bool {
-            ChatPolicy.microphone(topLevel: top, requestScheme: scheme, requestHost: host, requestPort: port,
+            ChatPolicy.microphone(base: base, topLevel: top, requestScheme: scheme, requestHost: host, requestPort: port,
                                   mainFrame: main, microphoneOnly: micOnly, authorized: authorized)
         }
         XCTAssertTrue(allowed())
         XCTAssertFalse(allowed(top: URL(string: "https://worker.example/")))
         XCTAssertFalse(allowed(top: nil))
-        XCTAssertFalse(allowed(scheme: "https", host: "worker.example"))
+        XCTAssertFalse(allowed(scheme: "aishuffle", host: "app"))
         XCTAssertFalse(allowed(host: "other"))
         XCTAssertFalse(allowed(port: 8443))
         XCTAssertFalse(allowed(main: false))
@@ -181,15 +203,14 @@ final class ChatPolicyTests: XCTestCase {
         XCTAssertFalse(allowed(authorized: false))
     }
 
-    func testContentRulesBlockEverythingButTheBundleAndWorker() throws {
+    func testContentRulesBlockEverythingButTheWorker() throws {
         let source = try ChatPolicy.contentRules(base: "https://Worker.Example:8443/")
         let rules = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(source.utf8)) as? [[String: [String: Any]]])
         XCTAssertEqual(rules.first?["trigger"]?["url-filter"] as? String, ".*")
         XCTAssertNil(rules.first?["trigger"]?["resource-type"])
         XCTAssertEqual(rules.first?["action"]?["type"] as? String, "block")
-        XCTAssertEqual(rules.dropFirst().map { $0["action"]?["type"] as? String }, Array(repeating: "ignore-previous-rules", count: 6))
+        XCTAssertEqual(rules.dropFirst().map { $0["action"]?["type"] as? String }, Array(repeating: "ignore-previous-rules", count: 5))
         XCTAssertEqual(rules.dropFirst().compactMap { $0["trigger"]?["url-filter"] as? String }, [
-            #"^aishuffle://app/"#,
             #"^https://worker\.example:8443/"#,
             #"^wss://worker\.example:8443/"#,
             "^data:",
@@ -198,62 +219,11 @@ final class ChatPolicyTests: XCTestCase {
         ])
         // Only the allowlist entries apply to every load; the HTTPS exception is for popups alone.
         XCTAssertEqual(rules.dropFirst().compactMap { $0["trigger"]?["resource-type"] as? [String] }, [["popup"]])
-        XCTAssertNil(rules[5]["trigger"]?["resource-type"])
-        XCTAssertEqual(rules[6]["trigger"]?["resource-type"] as? [String], ["popup"])
+        XCTAssertNil(rules[4]["trigger"]?["resource-type"])
+        XCTAssertEqual(rules[5]["trigger"]?["resource-type"] as? [String], ["popup"])
         let ipv6 = try ChatPolicy.contentRules(base: "https://[::1]")
         XCTAssertTrue(ipv6.contains(#"^https://\\[::1\\]/"#), ipv6)
         XCTAssertThrowsError(try ChatPolicy.contentRules(base: "http://worker.example"))
-    }
-}
-
-final class BundleAssetsTests: XCTestCase {
-    private var root: URL!
-
-    override func setUpWithError() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("_app"), withIntermediateDirectories: true)
-        try Data("<html></html>".utf8).write(to: root.appendingPathComponent("index.html"))
-        try Data("x".utf8).write(to: root.appendingPathComponent("_app/start.js"))
-        try Data("secret".utf8).write(to: root.deletingLastPathComponent().appendingPathComponent("\(root.lastPathComponent)-secret.txt"))
-    }
-
-    override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: root)
-        try? FileManager.default.removeItem(at: root.deletingLastPathComponent().appendingPathComponent("\(root.lastPathComponent)-secret.txt"))
-    }
-
-    private func file(_ raw: String) -> String? {
-        BundleAssets.file(for: URL(string: raw)!, root: root)?.lastPathComponent
-    }
-
-    func testServesBundleFilesAndTheIndex() {
-        XCTAssertEqual(file("aishuffle://app/assets/mobile-ui/"), "index.html")
-        XCTAssertEqual(file("aishuffle://app/assets/mobile-ui"), "index.html")
-        XCTAssertEqual(file("aishuffle://app/assets/mobile-ui/_app/start.js?v=1"), "start.js")
-    }
-
-    func testBlocksEverythingElse() {
-        let secret = "\(root.lastPathComponent)-secret.txt"
-        for raw in ["aishuffle://app/assets/mobile-ui/missing.js",
-                    "aishuffle://app/assets/mobile-ui/_app",
-                    "aishuffle://app/assets/mobile-ui/_app/",
-                    "aishuffle://app/assets/mobile-ui/../\(secret)",
-                    "aishuffle://app/assets/mobile-ui/%2e%2e/\(secret)",
-                    "aishuffle://app/assets/mobile-ui/_app%2F..%2F..%2F\(secret)",
-                    "aishuffle://app/assets/mobile-ui//index.html",
-                    "aishuffle://app/api/v1/files/a.png",
-                    "aishuffle://app/index.html",
-                    "aishuffle://other/assets/mobile-ui/index.html",
-                    "https://app/assets/mobile-ui/index.html"] {
-            XCTAssertNil(file(raw), raw)
-        }
-    }
-
-    func testMimeTypes() {
-        XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/index.html")), "text/html; charset=utf-8")
-        XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.js")), "text/javascript; charset=utf-8")
-        XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.woff2")), "font/woff2")
-        XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.unknown")), "application/octet-stream")
     }
 }
 

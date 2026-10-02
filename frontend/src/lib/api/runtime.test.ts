@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 let withAuth: typeof import('./runtime').withAuth;
 beforeEach(async () => {
 	vi.resetModules();
@@ -24,4 +24,48 @@ it.each([false, true])('keeps bundled bearer and Access cookie policy (cookies=%
 it('also refuses redirects when called without a browser', () => {
 	vi.stubGlobal('window', undefined);
 	expect(withAuth().redirect).toBe('error');
+});
+
+describe('native capability descriptor', () => {
+	const runtime = { apiOrigin: 'https://worker.example', token: 'shc_test' };
+	let native: typeof import('./runtime');
+	beforeEach(async () => {
+		vi.resetModules();
+		vi.stubGlobal('window', { addEventListener: vi.fn(), location: { origin: 'https://worker.example' } });
+		native = await import('./runtime');
+	});
+
+	it('reports what the app offers', () => {
+		window.__SHUFFLE_MOBILE__ = { ...runtime, native: { platform: 'ios', bridge: 1, capabilities: ['file-chooser', 'microphone'] } };
+		expect(native.nativeBridge()).toEqual({ platform: 'ios', bridge: 1, capabilities: ['file-chooser', 'microphone'] });
+		expect(native.nativeCapability('microphone')).toBe(true);
+		expect(native.nativeCapability('file-save')).toBe(false);
+	});
+
+	it('an app from before the descriptor offers nothing', () => {
+		window.__SHUFFLE_MOBILE__ = { ...runtime };
+		expect(native.isBundledMobile()).toBe(true);
+		expect(native.nativeBridge()).toBeNull();
+		expect(native.nativeCapability('file-chooser')).toBe(false);
+	});
+
+	it('the web UI offers nothing', () => {
+		expect(native.isBundledMobile()).toBe(false);
+		expect(native.nativeCapability('microphone')).toBe(false);
+	});
+
+	it.each([
+		{ bridge: 0, capabilities: ['microphone'] },
+		{ bridge: 1.5, capabilities: ['microphone'] },
+		{ bridge: 1, capabilities: 'microphone' }
+	])('ignores a malformed descriptor %j', (descriptor) => {
+		window.__SHUFFLE_MOBILE__ = { ...runtime, native: descriptor as never };
+		expect(native.nativeBridge()).toBeNull();
+		expect(native.nativeCapability('microphone')).toBe(false);
+	});
+
+	it('drops capability names that are not strings', () => {
+		window.__SHUFFLE_MOBILE__ = { ...runtime, native: { bridge: 2, capabilities: ['microphone', 7 as never] } };
+		expect(native.nativeBridge()?.capabilities).toEqual(['microphone']);
+	});
 });

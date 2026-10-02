@@ -155,7 +155,8 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
 
 /** Detach our dependency junctions before deleting a staged/old version. */
 export async function removeSourceDirectory(root: string): Promise<void> {
-  for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) {
+  // mobile/node_modules is the phone UI build's link to frontend/node_modules.
+  for (const name of ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop']) {
     for (const base of ['source', 'server']) {
       const link = path.join(root, base, name, 'node_modules');
       try { if ((await fs.lstat(link)).isSymbolicLink()) await fs.unlink(link); }

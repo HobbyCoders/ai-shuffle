@@ -20,7 +20,9 @@ The app keeps the same application ID and release signing key as the former stan
 
 Locally, `./gradlew assembleRelease` produces `app/build/outputs/apk/release/app-release.apk` when signing is configured. Debug builds use `./gradlew assembleDebug` and produce `app/build/outputs/apk/debug/app-debug.apk`.
 
-The APK ships its own build of the mobile UI (`mobile/` at the repository root, sharing `frontend/src/lib`). Run `bash scripts/sync-mobile-ui.sh` (or `npm run sync:mobile` in `frontend/`) first: it builds `mobile/` and copies it to `app/src/main/assets/mobile-ui/` (git-ignored). Gradle's `checkMobileUi` task refuses to assemble without it. Workers never serve the phone's UI; the app only calls their APIs (see `docs/mobile-desktop-ui-split.md`).
+Chat shows the phone UI the paired worker serves at `https://<worker>/mobile/` (`mobile/` at the repository root, sharing `frontend/src/lib`; served by `app/mobile_ui.py`). A UI change therefore ships with a worker update; a new APK is needed only for native changes: phone tools, permissions, pairing, or a new native capability (`ui/MobileUi.kt` `CAPABILITIES`). See `docs/mobile-desktop-ui-split.md`.
+
+The APK bundles one copy of the phone UI for the offline demo only (Settings → offline demo, no worker). Run `bash scripts/sync-offline-demo.sh` before assembling: it builds `mobile/` and copies it to `app/src/main/assets/offline-demo/` (git-ignored). Gradle's `checkOfflineDemo` task refuses to assemble without it.
 
 ## Build and test
 

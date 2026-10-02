@@ -1,8 +1,9 @@
 """Build the runtime source archive served as an in-app update, and its tree digest.
 
 The Docker and desktop updaters rebuild the application from this archive, so
-it carries only what they build and run: the backend, fluid, the three Node
-packages, the desktop launcher, the in-app docs and the dependency lists.
+it carries only what they build and run: the backend, fluid, the Node
+packages (including mobile/, the phone UI the frontend build emits at
+/mobile/), the desktop launcher, the in-app docs and the dependency lists.
 Internal docs, reviews, mockups, videos, tests, the Android app, CI and owner
 tooling (scripts/, including scripts/unraid-lab) never leave the repository
 through the update feed.
@@ -38,6 +39,9 @@ RUNTIME_PATHS = (
     "fluid/pyproject.toml",
     "fluid/README.md",
     "frontend",
+    # The phone UI: the frontend build compiles it into build/mobile, which the
+    # worker serves at /mobile/ to the Android and iOS apps.
+    "mobile",
     "tools",
     "browser-mcp",
     "desktop",
@@ -57,6 +61,8 @@ EXCLUDED = (
     "frontend/tests",
     "frontend/notification-sound-harness.html",
     "frontend/src/lib/test-stubs",
+    "mobile/tests",
+    "mobile/src/shell/test-fixtures",
     "**/*.test.ts",
     "**/*.test.js",
     "**/*.spec.ts",

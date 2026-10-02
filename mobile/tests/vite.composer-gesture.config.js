@@ -7,7 +7,7 @@ export default defineConfig({ ...base, server: { proxy: {}, fs: { allow: ['..'] 
   server.middlewares.use(async (req, res, next) => {
    if (req.url?.startsWith('/api/') || req.url?.startsWith('/health')) { res.setHeader('Content-Type','application/json'); res.end('[]'); return; }
    // Under the app's base path (kit.paths.base) so `./composer-gesture.ts` resolves through Vite.
-   if (req.url?.split('?')[0] !== '/assets/mobile-ui/tests/composer-gesture.html') return next();
+   if (req.url?.split('?')[0] !== '/mobile/tests/composer-gesture.html') return next();
    try { const html = await readFile(new URL('./composer-gesture.html', import.meta.url),'utf8'); res.setHeader('Content-Type','text/html'); res.end(await server.transformIndexHtml(req.url,html)); } catch(error) { next(error); }
   });
  }

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Verify a built APK or AAB contains the mobile bundle, not just its HTML shell."""
+"""Verify a built APK or AAB contains the offline demo bundle, not just its HTML shell.
+
+Chat loads the phone UI from the worker; the APK carries mobile/build only as the offline demo.
+"""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +11,7 @@ import zipfile
 
 
 def verify_apk(apk: Path, bundle: Path, *, app_bundle: bool = False) -> None:
-    prefix = "base/assets/mobile-ui/" if app_bundle else "assets/mobile-ui/"
+    prefix = "base/assets/offline-demo/" if app_bundle else "assets/offline-demo/"
     kind = "AAB" if app_bundle else "APK"
     expected = {file.relative_to(bundle).as_posix(): file for file in bundle.rglob("*") if file.is_file()}
     if "index.html" not in expected or not any(name.startswith("_app/") and name.endswith(".js") for name in expected):
@@ -28,6 +31,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apk", type=Path)
     parser.add_argument("--app-bundle", action="store_true", help="Verify an AAB instead of an APK")
-    parser.add_argument("--bundle", type=Path, default=Path(__file__).resolve().parents[1] / "app/src/main/assets/mobile-ui")
+    parser.add_argument("--bundle", type=Path, default=Path(__file__).resolve().parents[1] / "app/src/main/assets/offline-demo")
     args = parser.parse_args()
     verify_apk(args.apk, args.bundle, app_bundle=args.app_bundle)

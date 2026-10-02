@@ -616,6 +616,12 @@ if not install_preview(app) and static_dir.exists():
     if icons_dir.exists():
         app.mount("/icons", StaticFiles(directory=str(icons_dir)), name="icons")
 
+    # The phone UI the Android and iOS apps load from this worker (app/mobile_ui.py).
+    from app.mobile_ui import install_mobile_ui
+    if not install_mobile_ui(app, static_dir / "mobile"):
+        logger.warning("app/static/mobile is missing: the phone apps cannot open chat on this worker. "
+                       "Rebuild the frontend with mobile/ present.")
+
     # Serve other static files
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static_files")
 

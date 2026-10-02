@@ -1,34 +1,43 @@
 import Foundation
 
-/// The app's own copy of the mobile UI.
+/// The phone UI, served by the paired worker at `/mobile/`.
 ///
-/// `mobile/` at the repository root builds the UI; `ios/scripts/sync-mobile-ui.sh`
-/// copies it to `ios/mobile-ui/`, which ships inside the app bundle. The chat
-/// WebView serves it through `BundleSchemeHandler` at `indexURL`. A worker is
-/// never asked for the UI; it only answers the page's HTTP/WebSocket calls,
-/// authenticated with the paired session as a Bearer token that
-/// `bootstrapScript` hands the page before any of its own script runs
-/// (contract: frontend/src/lib/api/runtime.ts). Mirrors Android's MobileUi.kt.
+/// `mobile/` at the repository root builds it and every worker ships it beside the desktop UI
+/// (app/mobile_ui.py), so a UI change reaches this app with a worker update and never needs an
+/// App Store build. The app owns only the native side: pairing, permissions and the capabilities
+/// in `capabilities`. The paired session reaches the page as a Bearer token through
+/// `bootstrapScript`, installed before any page script runs (contract:
+/// frontend/src/lib/api/runtime.ts). Mirrors Android's MobileUi.kt; see
+/// docs/mobile-desktop-ui-split.md.
 enum MobileUI {
-    static let scheme = "aishuffle"
-    static let host = "app"
-    /// The only origin that may load in the chat WebView.
-    static let origin = "\(scheme)://\(host)"
-    /// Directory name inside the app bundle.
-    static let assetDirectory = "mobile-ui"
-    /// The bundle's SvelteKit `paths.base`, the same path Android serves it at.
-    static let path = "/assets/mobile-ui/"
-    static let indexURL = URL(string: origin + path)!
+    /// Path the worker serves the phone UI under (the build's `paths.base` plus `/`).
+    static let path = "/mobile/"
+    /// Version of the native bridge this app offers the page; same numbering as Android.
+    static let bridgeVersion = 1
+    /// What the page may rely on here. iOS has no save bridge yet: worker files are not saved.
+    static let capabilities = ["file-chooser", "microphone"]
 
-    static func isAssetOrigin(_ url: URL?) -> Bool {
-        guard let url, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        return parts.scheme?.lowercased() == scheme && parts.host?.lowercased() == host &&
-            parts.port == nil && parts.user == nil && parts.password == nil
+    /// The document the chat WebView loads from a worker.
+    static func indexURL(base: String) throws -> URL {
+        guard let url = URL(string: try PairingInput.origin(base) + path) else { throw ShuffleError("Invalid worker address.") }
+        return url
     }
 
-    /// The bundle root (with or without its trailing slash) is served as index.html.
-    static func isIndexPath(_ value: String) -> Bool {
-        value == path || value == String(path.dropLast())
+    /// Whether `url` is the phone UI on this worker: same origin, path `/mobile` or below and no
+    /// dot segments. The only document the chat WebView may show, and the only one with capabilities.
+    static func isUiURL(base: String, url: URL?) -> Bool {
+        guard let url, PairingInput.sameOrigin(base, url.absoluteString),
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        let value = parts.percentEncodedPath
+        guard value == String(path.dropLast()) || value.hasPrefix(path) else { return false }
+        return !value.split(separator: "/").contains { $0 == ".." || $0.lowercased() == "%2e%2e" }
+    }
+
+    /// What to show when the worker answers the UI page with an HTTP error.
+    static func loadFailure(status: Int) -> String {
+        status == 404
+            ? "This worker is too old to serve the phone UI. Update the worker, then refresh chat."
+            : "The worker could not open chat (HTTP \(status)). Refresh chat to try again."
     }
 
     /// Paired chat tokens are URL-safe base64; anything else is refused before it reaches script.
@@ -38,18 +47,23 @@ enum MobileUI {
 
     private static let tokenCharacters = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
-    /// Document-start script installing `window.__SHUFFLE_MOBILE__`, only on the bundle's own origin.
+    /// Document-start script installing `window.__SHUFFLE_MOBILE__`. WebKit user scripts cannot be
+    /// scoped to an origin, so the guard keeps it to the worker's top-level phone UI page.
     static func bootstrapScript(apiOrigin: String, token: String, version: String?, deviceName: String?) throws -> String {
         guard isValidToken(token) else { throw ShuffleError("The worker returned an invalid chat authorization. Update the worker and retry.") }
+        let origin = try PairingInput.origin(apiOrigin)
         var config: [String: Any] = [
-            "apiOrigin": try PairingInput.origin(apiOrigin),
+            "apiOrigin": origin,
             "token": token,
             "sendCookies": false,
+            "native": ["platform": "ios", "bridge": bridgeVersion, "capabilities": capabilities] as [String: Any],
         ]
         if let version = version?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty { config["version"] = version }
         if let device = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines), !device.isEmpty { config["deviceName"] = device }
         let json = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys, .withoutEscapingSlashes])
-        return "if (location.protocol === '\(scheme):' && location.host === '\(host)') { " +
+        let quotedOrigin = String(decoding: try JSONSerialization.data(withJSONObject: origin, options: [.fragmentsAllowed, .withoutEscapingSlashes]), as: UTF8.self)
+        let quotedPath = String(decoding: try JSONSerialization.data(withJSONObject: path, options: [.fragmentsAllowed, .withoutEscapingSlashes]), as: UTF8.self)
+        return "if (window.top === window && location.origin === \(quotedOrigin) && location.pathname.indexOf(\(quotedPath)) === 0) { " +
             "window.__SHUFFLE_MOBILE__ = \(String(decoding: json, as: UTF8.self)); }"
     }
 

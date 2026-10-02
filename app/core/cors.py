@@ -1,11 +1,13 @@
 """Browser origins this worker answers.
 
 One allow-list feeds both the CORS middleware (app.main) and the CSRF
-middleware. It is `CORS_ORIGINS` plus the phone apps' bundled-UI origins: the
-Android app's asset origin and the iOS app's `aishuffle://app`. Each app ships
-its own build of the mobile UI, loads it from that origin and calls the worker
-cross-origin with a Bearer paired-session token, so a worker on any version
-must accept both without being asked to serve the UI.
+middleware. It is `CORS_ORIGINS` plus the origins of phone apps from before
+the worker served the phone UI at /mobile/ (app/mobile_ui.py): the Android
+app's asset origin and the iOS app's `aishuffle://app`. Those builds ship their
+own copy of the mobile UI, load it from that origin and call the worker
+cross-origin with a Bearer paired-session token, so workers keep accepting both
+until no such build is in use. Current apps load the page from the worker
+itself, so their requests are same-origin.
 """
 from __future__ import annotations
 

@@ -38,7 +38,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
-/** Real ChatActivity/WebView loading the bundled UI; all worker/account traffic is synthetic. The paired
+/** Real ChatActivity/WebView loading the worker's phone UI (PhoneUiFixture); all worker/account traffic is synthetic. The paired
  * session reaches the page as `window.__SHUFFLE_MOBILE__.token` (a Bearer), never as a cookie. */
 @RunWith(AndroidJUnit4::class)
 class WebSessionReservationSmokeTest {
@@ -65,13 +65,13 @@ class WebSessionReservationSmokeTest {
         val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
         return (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
     }
-    /** The token the bundled page currently holds (its runtime contract), or "" before the page has one. */
+    /** The token the phone UI page currently holds (its runtime contract), or "" before the page has one. */
     private fun pageToken(scenario: ActivityScenario<ChatActivity>): String {
         val result = AtomicReference("")
         val done = CountDownLatch(1)
         scenario.onActivity { activity ->
             val view = web(activity)
-            if (view.url != MobileUi.INDEX_URL) { done.countDown(); return@onActivity }
+            if (!MobileUi.isUiUrl(server.baseUrl, view.url)) { done.countDown(); return@onActivity }
             view.evaluateJavascript("window.__SHUFFLE_MOBILE__ ? String(window.__SHUFFLE_MOBILE__.token) : ''") { value ->
                 result.set(value?.trim('"').orEmpty()); done.countDown()
             }
@@ -81,7 +81,7 @@ class WebSessionReservationSmokeTest {
     }
     private fun pageLoaded(scenario: ActivityScenario<ChatActivity>): Boolean {
         var loaded = false
-        scenario.onActivity { loaded = web(it).url == MobileUi.INDEX_URL }
+        scenario.onActivity { loaded = MobileUi.isUiUrl(server.baseUrl, web(it).url) }
         return loaded
     }
     private fun response(request: Request, status: Int, body: String, mime: String = "application/json") = Response.Builder().request(request)
@@ -120,8 +120,9 @@ class WebSessionReservationSmokeTest {
             else { check(request.url.encodedPath == commitPath); check(body.opt("purpose") == "web") }
             handler(request)
         }.build()))
+        PhoneUiFixture.install(context)
         try { block() } finally {
-            apiField.set(null, oldApi)
+            apiField.set(null, oldApi); PhoneUiFixture.clear()
             instrumentation.runOnMainSync {
                 DeviceToolsRuntime.stop(); AccountStore(context).clear()
                 ServerStore.get(context).apply { remove(server.id); remove(other.id) }

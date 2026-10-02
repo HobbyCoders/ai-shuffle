@@ -1,7 +1,7 @@
 # Voice
 
 The app has no voice code of its own. Voice calls in the Android app are the
-bundled web page's voice mode, the same as on the website: the page opens the
+phone UI's own voice mode (the page the worker serves at `/mobile/`), the same as on the website: the page opens the
 worker's voice session and audio connection, and the phone streams microphone
 audio to that worker (which talks to the AI provider you configured there).
 The prompts and settings live on the server under Settings → Voice.
@@ -9,7 +9,7 @@ The prompts and settings live on the server under Settings → Voice.
 What the shell contributes (`ui/ChatActivity.kt`):
 
 - the `RECORD_AUDIO` permission and the WebView microphone grant, scoped to the
-  bundle's own origin, the current document and a focused, authorized chat;
+  worker's `/mobile/` page, the current document and a focused, authorized chat;
 - nothing else: there is no foreground service, notification, call screen or
   JavaScript bridge for voice, and the app never holds a voice credential.
 

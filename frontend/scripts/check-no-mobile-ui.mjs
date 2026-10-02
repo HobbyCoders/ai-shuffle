@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * Guard: the worker-served web UI must not carry the mobile shell.
+ * Guard: the desktop web UI must not carry the mobile shell.
  *
- * The mobile UI lives in mobile/ (its own SvelteKit app, bundled into the
- * Android app). Nothing under frontend/src — and nothing in the web build
- * output — may select on the mobile platform attribute, because a worker on
- * any version must never be able to change what the phone shows, and the web
- * UI is desktop-only by decision (docs/mobile-desktop-ui-split.md).
+ * The mobile UI lives in mobile/ (its own SvelteKit app, which the worker
+ * serves to the phone apps at /mobile/). Nothing under frontend/src — and
+ * nothing in the desktop build output — may select on the mobile platform
+ * attribute: the web UI is desktop-only by decision, at every window width
+ * (docs/mobile-desktop-ui-split.md).
  *
  * Runs as part of `npm run check` and after `npm run build`. Exits 1 with the
  * offending locations when the literal `data-platform='mobile'` /
- * `data-platform="mobile"` appears in frontend/src or frontend/build.
+ * `data-platform="mobile"` appears in frontend/src or frontend/build. The
+ * phone UI's own output, build/mobile (scripts/build-mobile-ui.mjs), is the
+ * one place those rules belong and is skipped.
  */
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
@@ -21,9 +23,12 @@ const roots = ['src', 'build'].map((d) => join(frontendRoot, d)).filter(existsSy
 const NEEDLE = /data-platform=(['"])mobile\1/;
 const TEXT = /\.(svelte|ts|js|mjs|css|html|json|txt|md)$/;
 
+const phoneBuild = join(frontendRoot, 'build', 'mobile');
+
 function* walk(dir) {
 	for (const name of readdirSync(dir)) {
 		const path = join(dir, name);
+		if (path === phoneBuild) continue;
 		if (statSync(path).isDirectory()) yield* walk(path);
 		else if (TEXT.test(name)) yield path;
 	}

@@ -1,16 +1,17 @@
 import UIKit
 import WebKit
 
-/// The chat WebView: the app's own build of the mobile UI, which may load nothing but that
-/// bundle and talk to nothing but the paired worker's HTTPS/WebSocket API. The worker never
-/// serves a document here. Mirrors Android's ChatActivity:
+/// The chat WebView: the paired worker's phone UI at `/mobile/`, which may talk to nothing but
+/// that worker's HTTPS/WebSocket API. UI changes ship with the worker, not the app. Mirrors
+/// Android's ChatActivity:
 ///
-/// - the bundle comes from `BundleSchemeHandler` (WebViewAssetLoader there);
+/// - the only document is `MobileUI.indexURL` and its in-app routes; another worker page
+///   (the desktop UI, an API response) is refused, and an HTTP error shows a status instead;
 /// - `ChatPolicy.contentRules` blocks every other load (shouldInterceptRequest there);
-/// - navigation stays on the bundle; worker links never navigate the document;
-/// - the paired session reaches the page only through a document-start script;
+/// - worker links never navigate the document;
+/// - the paired session reaches the page only through a guarded document-start script;
 /// - there is no script message handler, so the page has no native bridge;
-/// - the microphone is granted only to the bundle's own origin.
+/// - the microphone is granted only to the phone UI's own main frame.
 @MainActor
 final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
@@ -21,10 +22,10 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     var onStatus: (String) -> Void = { _ in }
     var onExternalLink: (URL) -> Void = { _ in }
 
-    init(server: Server, rules: WKContentRuleList, root: URL, authorized: @escaping () -> Bool) {
+    init(server: Server, rules: WKContentRuleList, authorized: @escaping () -> Bool) {
         self.server = server
         self.authorized = authorized
-        webView = WKWebView(frame: .zero, configuration: Self.configuration(rules: rules, root: root))
+        webView = WKWebView(frame: .zero, configuration: Self.configuration(rules: rules))
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -33,9 +34,8 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// Shared with the WebKit tests so they exercise the exact settings the app uses.
-    static func configuration(rules: WKContentRuleList?, root: URL, schemeHandler: WKURLSchemeHandler? = nil) -> WKWebViewConfiguration {
+    static func configuration(rules: WKContentRuleList?) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
-        configuration.setURLSchemeHandler(schemeHandler ?? BundleSchemeHandler(root: root), forURLScheme: MobileUI.scheme)
         if let rules { configuration.userContentController.add(rules) }
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
@@ -56,11 +56,15 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        if MobileUI.isAssetOrigin(webView.url) { webView.evaluateJavaScript(update, completionHandler: nil) }
+        if MobileUI.isUiURL(base: server.baseUrl, url: webView.url) { webView.evaluateJavaScript(update, completionHandler: nil) }
     }
 
     func loadIndex() {
-        webView.load(URLRequest(url: MobileUI.indexURL))
+        guard let url = try? MobileUI.indexURL(base: server.baseUrl) else {
+            onStatus("This worker address is invalid. Remove it and pair again.")
+            return
+        }
+        webView.load(URLRequest(url: url))
     }
 
     /// Unloads the chat document (and the token in its memory). The blank page is about:blank,
@@ -90,8 +94,22 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
             decisionHandler(response.isForMainFrame && response.response.url?.absoluteString == "about:blank" ? .allow : .cancel)
             return
         }
-        let allowed = !response.isForMainFrame || MobileUI.isAssetOrigin(response.response.url)
+        if response.isForMainFrame, let http = response.response as? HTTPURLResponse, http.statusCode >= 400,
+           MobileUI.isUiURL(base: server.baseUrl, url: http.url) {
+            // Usually a worker from before /mobile/ existed (404): it must be updated, not the app.
+            onStatus(MobileUI.loadFailure(status: http.statusCode))
+            decisionHandler(.cancel)
+            return
+        }
+        let allowed = !response.isForMainFrame || MobileUI.isUiURL(base: server.baseUrl, url: response.response.url)
         decisionHandler(allowed && authorized() ? .allow : .cancel)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let failure = error as NSError
+        // Cancelled loads (including the ones this controller refuses) are not connection failures.
+        guard !closing, failure.domain == NSURLErrorDomain, failure.code != NSURLErrorCancelled else { return }
+        onStatus("Chat could not reach \(server.name). Check the connection, then refresh chat.")
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -110,7 +128,7 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        let allowed = ChatPolicy.microphone(topLevel: webView.url, requestScheme: origin.protocol, requestHost: origin.host,
+        let allowed = ChatPolicy.microphone(base: server.baseUrl, topLevel: webView.url, requestScheme: origin.protocol, requestHost: origin.host,
                                             requestPort: origin.port, mainFrame: frame.isMainFrame,
                                             microphoneOnly: type == .microphone,
                                             authorized: authorized() && UIApplication.shared.applicationState == .active)
@@ -136,7 +154,7 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     // MARK: Helpers
 
-    /// Applies ChatPolicy to a navigation; true only for in-app routes of the bundle.
+    /// Applies ChatPolicy to a navigation; true only for in-app routes of the phone UI.
     /// `newWindow` is true for `createWebViewWith`, whose target is a window that will never exist.
     private func handle(_ action: WKNavigationAction, newWindow: Bool) -> Bool {
         let mainFrame = action.targetFrame?.isMainFrame ?? true
@@ -146,7 +164,7 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         case .other: trigger = newWindow ? .newWindow : .script
         default: trigger = .other
         }
-        let userInitiated = ChatPolicy.userInitiated(trigger, fromBundleMainFrame: isBundleMainFrame(Self.sourceFrame(of: action)))
+        let userInitiated = ChatPolicy.userInitiated(trigger, fromUiMainFrame: isUiMainFrame(Self.sourceFrame(of: action)))
         let decision = ChatPolicy.navigation(base: server.baseUrl, url: action.request.url, mainFrame: mainFrame,
                                              userInitiated: userInitiated)
         switch decision {
@@ -160,7 +178,7 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
             }
             return false
         case let .openExternally(url):
-            if ChatPolicy.document(topLevel: webView.url, authorized: authorized()) { onExternalLink(url) }
+            if ChatPolicy.document(base: server.baseUrl, topLevel: webView.url, authorized: authorized()) { onExternalLink(url) }
             return false
         }
     }
@@ -171,17 +189,17 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         action.value(forKey: "sourceFrame") as? WKFrameInfo
     }
 
-    /// The bundled UI's own main frame, while it is the document on screen and the chat is authorized.
-    private func isBundleMainFrame(_ frame: WKFrameInfo?) -> Bool {
+    /// The phone UI's own main frame, while it is the document on screen and the chat is authorized.
+    private func isUiMainFrame(_ frame: WKFrameInfo?) -> Bool {
         guard let frame, frame.isMainFrame else { return false }
         let origin = frame.securityOrigin
-        return ChatPolicy.document(topLevel: webView.url, authorized: authorized()) &&
-            ChatPolicy.isBundleOrigin(scheme: origin.protocol, host: origin.host, port: origin.port)
+        return ChatPolicy.document(base: server.baseUrl, topLevel: webView.url, authorized: authorized()) &&
+            ChatPolicy.isWorkerOrigin(base: server.baseUrl, scheme: origin.protocol, host: origin.host, port: origin.port)
     }
 
-    /// Script dialogs only for the bundle's own main frame, presented over the chat.
+    /// Script dialogs only for the phone UI's own main frame, presented over the chat.
     private func presenter(for frame: WKFrameInfo) -> UIViewController? {
-        guard isBundleMainFrame(frame), var top = webView.window?.rootViewController else { return nil }
+        guard isUiMainFrame(frame), var top = webView.window?.rootViewController else { return nil }
         while let next = top.presentedViewController { top = next }
         return top
     }

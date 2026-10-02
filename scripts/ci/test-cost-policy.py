@@ -135,7 +135,7 @@ class CostPolicyTests(unittest.TestCase):
             return inputs.apk_required([[{"filename": name} for name in names]])
         for path in ["android/hub/src/index.ts", "android/site/package-lock.json", "android/docs/testing.md", "docs/content/setup.md"]:
             self.assertFalse(check(path))
-        for path in ["android/app/src/Main.kt", "android/build.gradle.kts", "android/gradle.properties", "android/ci/test-mobile-apk.py", "android/scripts/sync-mobile-ui.sh", "mobile/src/App.svelte", "frontend/src/lib/api.ts", ".github/workflows/android.yml", "scripts/ci/android-inputs.py", "android/new-build-input/data"]:
+        for path in ["android/app/src/Main.kt", "android/build.gradle.kts", "android/gradle.properties", "android/ci/test-mobile-apk.py", "android/scripts/sync-offline-demo.sh", "mobile/src/App.svelte", "frontend/src/lib/api.ts", ".github/workflows/android.yml", "scripts/ci/android-inputs.py", "android/new-build-input/data"]:
             self.assertTrue(check(path))
             self.assertTrue(check("android/site/src/index.ts", path))
         self.assertTrue(inputs.apk_required([[{"filename": "android/site/old.kt", "previous_filename": "android/app/src/old.kt", "status": "renamed"}]]))
@@ -185,7 +185,7 @@ class CostPolicyTests(unittest.TestCase):
     def test_ios_macos_job_is_path_filtered_unsigned_and_bounded(self):
         config = workflow("ios.yml")
         self.assertEqual(set(config["on"]), {"pull_request", "workflow_dispatch"})
-        self.assertEqual(config["on"]["pull_request"]["paths"], ["ios/**", "mobile/**", ".github/workflows/ios.yml"])
+        self.assertEqual(config["on"]["pull_request"]["paths"], ["ios/**", ".github/workflows/ios.yml"])
         self.assertIsNone(config["on"]["workflow_dispatch"] or None)
         self.assertEqual(config["permissions"], {"contents": "read"})
         self.assertEqual(config["concurrency"]["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}")

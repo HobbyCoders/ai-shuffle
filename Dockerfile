@@ -3,15 +3,19 @@
 # ============================================================================
 FROM node:22-slim AS frontend-builder
 
-WORKDIR /build
+# frontend/ and mobile/ sit side by side as in the repo: the phone UI shares
+# ../frontend/src/lib and node_modules, and the frontend build emits it into
+# build/mobile, which the worker serves to the Android and iOS apps at /mobile/.
+WORKDIR /src/frontend
 
 # Install dependencies first (cached unless package-lock changes)
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
-# Build frontend
+# Build frontend (desktop UI plus the phone UI)
 ARG CACHEBUST=0
 COPY frontend/ ./
+COPY mobile/ /src/mobile/
 ARG APP_VERSION=
 ENV APP_VERSION=$APP_VERSION
 RUN npm run build
@@ -171,7 +175,7 @@ COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # ── Copy pre-built frontend assets from builder stage ──
 RUN mkdir -p /app/app/static
-COPY --from=frontend-builder --chown=appuser:appuser /build/build/ /app/app/static/
+COPY --from=frontend-builder --chown=appuser:appuser /src/frontend/build/ /app/app/static/
 
 # ── Copy pre-built AI tools from builder stage ──
 COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/

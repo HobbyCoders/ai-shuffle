@@ -1,7 +1,7 @@
 import SwiftUI
 import WebKit
 
-/// Mints the paired session natively, then shows the bundled UI with it.
+/// Mints the paired session natively, then shows the worker's phone UI (`/mobile/`) with it.
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var status = ""
@@ -53,7 +53,7 @@ final class ChatModel: ObservableObject {
             let token = try await api.webSession(server)
             guard !Task.isCancelled, authorized() else { return }
             try web.install(token: token)
-            if reload || !MobileUI.isAssetOrigin(web.webView.url) { web.loadIndex() }
+            if reload || !MobileUI.isUiURL(base: server.baseUrl, url: web.webView.url) { web.loadIndex() }
             connected = true
             status = ""
         } catch {
@@ -63,11 +63,8 @@ final class ChatModel: ObservableObject {
 
     private func webController() async throws -> ChatWebController {
         if let controller { return controller }
-        guard let root = BundleAssets.root else {
-            throw ShuffleError("The chat UI is missing from this build of the app. Reinstall AI Shuffle.")
-        }
         let rules = try await Self.compileRules(for: server)
-        let web = ChatWebController(server: server, rules: rules, root: root) { [weak self] in self?.authorized() ?? false }
+        let web = ChatWebController(server: server, rules: rules) { [weak self] in self?.authorized() ?? false }
         web.onStatus = { [weak self] in self?.status = $0 }
         web.onExternalLink = { [weak self] in self?.offerExternalLink($0) }
         controller = web

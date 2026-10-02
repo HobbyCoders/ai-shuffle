@@ -18,7 +18,7 @@ export default defineConfig({
 	server: {
 		// `vite dev` against a local backend: same /api proxy as the web UI, so
 		// the mobile shell can be exercised in a desktop browser at
-		// http://localhost:5173/assets/mobile-ui/ before it is bundled.
+		// http://localhost:5173/mobile/.
 		proxy: webConfig.server?.proxy,
 		fs: {
 			// The shared $lib lives one directory up.

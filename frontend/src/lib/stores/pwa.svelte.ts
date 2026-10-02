@@ -133,8 +133,8 @@ async function registerServiceWorker() {
 	if (isDesktop || isDesktopUserAgent()) {
 		return null;
 	}
-	// The Android app ships the UI as bundled assets and updates it with the
-	// app itself; a service worker would only cache a copy it never serves.
+	// The phone apps load the worker's /mobile/ fresh on every open; a service
+	// worker would only sit in front of it (see removeAppServiceWorkers).
 	if (isBundledMobile()) {
 		return null;
 	}
@@ -304,6 +304,25 @@ export const pwa = {
 
 	async registerServiceWorker() {
 		return registerServiceWorker();
+	},
+
+	/**
+	 * Inside the phone apps only: remove any service worker on this worker's
+	 * origin. The phone UI is the worker's /mobile/, and an Android app from
+	 * before the bundled UI loaded the worker's root page, whose /sw.js (scope
+	 * `/`) can still be registered in the app's WebView. It would answer
+	 * /mobile/ requests from its cache and outside the app's request checks.
+	 * Never runs in a browser, where that worker is the user's installed web app.
+	 */
+	async removeAppServiceWorkers(): Promise<number> {
+		if (!browser || !isBundledMobile() || !('serviceWorker' in navigator)) return 0;
+		try {
+			const registrations = await navigator.serviceWorker.getRegistrations();
+			const removed = await Promise.all(registrations.map((registration) => registration.unregister()));
+			return removed.filter(Boolean).length;
+		} catch {
+			return 0;
+		}
 	},
 
 	/**

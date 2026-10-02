@@ -28,7 +28,7 @@ class MobileApkTests(unittest.TestCase):
     def pack(self, contents):
         with zipfile.ZipFile(self.apk, "w") as archive:
             for name, data in contents.items():
-                archive.writestr("assets/mobile-ui/" + name, data)
+                archive.writestr("assets/offline-demo/" + name, data)
 
     def test_complete_bundle_matches_apk(self):
         self.pack(self.contents)
@@ -47,7 +47,7 @@ class MobileApkTests(unittest.TestCase):
     def test_complete_app_bundle_matches_source(self):
         with zipfile.ZipFile(self.apk, "w") as archive:
             for name, data in self.contents.items():
-                archive.writestr("base/assets/mobile-ui/" + name, data)
+                archive.writestr("base/assets/offline-demo/" + name, data)
         module.verify_apk(self.apk, self.bundle, app_bundle=True)
 
     def test_app_bundle_rejects_apk_layout(self):
@@ -58,7 +58,7 @@ class MobileApkTests(unittest.TestCase):
     def test_app_bundle_rejects_stale_asset(self):
         with zipfile.ZipFile(self.apk, "w") as archive:
             for name, data in self.contents.items():
-                archive.writestr("base/assets/mobile-ui/" + name, b"stale" if name.endswith(".js") else data)
+                archive.writestr("base/assets/offline-demo/" + name, b"stale" if name.endswith(".js") else data)
         with self.assertRaisesRegex(ValueError, "stale or modified"):
             module.verify_apk(self.apk, self.bundle, app_bundle=True)
 

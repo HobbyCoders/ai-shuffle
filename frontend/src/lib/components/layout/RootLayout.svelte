@@ -3,7 +3,8 @@
 	 * RootLayout — bootstrap shared by the worker web UI and the mobile app:
 	 * theme, live sync, error reporting, the auth poll and the loading gate.
 	 *
-	 * `mobileApp` marks the app-bundled build: there are no /setup or /pair
+	 * `mobileApp` marks the phone UI build (`mobile/`, served at /mobile/ and
+	 * shown by the Android and iOS apps): there are no /setup or /pair
 	 * routes there (the app owns the session and passes a Bearer token), there
 	 * is no service worker, and an expired session shows a reconnect message.
 	 *
@@ -153,8 +154,10 @@
 		teardownDesktop = initDesktop();
 		teardownLiveSync = startLiveSync();
 
-		// Initialize PWA features (the app bundle updates with the app itself)
+		// PWA features are the web UI's. The phone UI (served at /mobile/ and
+		// shown by the phone apps) gets no service worker and drops a stale one.
 		if (!mobileApp) pwa.init();
+		else void pwa.removeAppServiceWorkers();
 
 		// Funnel uncaught frontend errors into the durable error_log so agents
 		// can read them via GetAppErrors. Gated on auth inside the reporter.
@@ -205,7 +208,7 @@
 </svelte:head>
 
 {#if mobileApp && initialized && !$auth.loading && !$auth.error && $auth.status?.authenticated === false}
-	<!-- The bundled UI cannot sign in by itself: the app minted the session. -->
+	<!-- The phone UI cannot sign in by itself: the app minted the session. -->
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">
 			<p role="status" class="text-muted-foreground mb-4">Your session on this worker has expired.</p>

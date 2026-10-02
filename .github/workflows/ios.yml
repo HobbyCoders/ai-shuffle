@@ -1,10 +1,10 @@
 name: iOS CI
 
-# iOS app (ios/). Builds the mobile UI it bundles, generates the Xcode project
-# with XcodeGen, builds for the iOS Simulator without signing and runs the unit
-# and WebKit tests. Paths-filtered like Android CI: only PRs that touch ios/ or
-# mobile/ start it. frontend/ is deliberately not a trigger (same reasoning as
-# android.yml); run this manually for a frontend PR that matters to the phone.
+# iOS app (ios/). Generates the Xcode project with XcodeGen, builds for the
+# iOS Simulator without signing and runs the unit and WebKit tests. Chat loads
+# the phone UI from the paired worker's /mobile/, so the app bundles no UI and
+# mobile/ or frontend/ changes never need an app build; frontend CI covers
+# them. Paths-filtered like Android CI: only PRs that touch ios/ start it.
 #
 # macOS runners are PAID per minute and cost more than Linux ones. This
 # workflow never signs, uploads or publishes; TestFlight stays a manual,
@@ -13,7 +13,6 @@ on:
   pull_request:
     paths:
       - 'ios/**'
-      - 'mobile/**'
       - '.github/workflows/ios.yml'
   workflow_dispatch:
 
@@ -31,20 +30,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # The app ships its own build of the mobile UI (mobile/ + shared
-      # frontend/src/lib); the app target refuses to build without it.
-      - name: Build and bundle the mobile UI
-        working-directory: frontend
-        run: |
-          npm ci
-          bash ../ios/scripts/sync-mobile-ui.sh
 
       - name: Generate the Xcode project
         working-directory: ios

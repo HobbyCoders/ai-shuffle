@@ -70,24 +70,24 @@ android {
     }
 }
 
-// The APK ships its own build of the mobile UI (see android/scripts/sync-mobile-ui.sh).
-// Never assemble without it: the WebView has nothing to load and a worker must
-// never be asked for the UI instead.
-val mobileUiIndex = layout.projectDirectory.file("src/main/assets/mobile-ui/index.html")
-val checkMobileUi by tasks.registering {
-    description = "Fails when the bundled mobile UI (src/main/assets/mobile-ui) is missing."
+// Chat loads the phone UI from the paired worker's /mobile/; the APK carries one
+// copy only for the offline demo (see android/scripts/sync-offline-demo.sh).
+// Never assemble without it: the demo would open to a blank page.
+val offlineDemoIndex = layout.projectDirectory.file("src/main/assets/offline-demo/index.html")
+val checkOfflineDemo by tasks.registering {
+    description = "Fails when the offline demo UI (src/main/assets/offline-demo) is missing."
     group = "verification"
     doLast {
-        if (!mobileUiIndex.asFile.exists()) {
+        if (!offlineDemoIndex.asFile.exists()) {
             throw GradleException(
-                "The bundled mobile UI is missing: ${mobileUiIndex.asFile}\n" +
-                    "Run `bash android/scripts/sync-mobile-ui.sh` (or `npm run sync:mobile` in frontend/) " +
-                    "before building the APK. The app ships its own UI; workers never serve it."
+                "The offline demo UI is missing: ${offlineDemoIndex.asFile}\n" +
+                    "Run `bash android/scripts/sync-offline-demo.sh` before building the APK. " +
+                    "Chat itself loads the phone UI from the worker; only the demo is bundled."
             )
         }
     }
 }
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkMobileUi) }
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkOfflineDemo) }
 
 dependencies {
     implementation("net.openid:appauth:0.11.1")

@@ -18,7 +18,7 @@ const page = appStores.page as unknown as Writable<unknown>;
 const children = createRawSnippet(() => ({ render: () => '<p>page content</p>' }));
 
 function at(path: string) {
-	page.set({ url: new URL(`https://appassets.androidplatform.net${path}`), params: {}, data: {}, status: 200, error: null });
+	page.set({ url: new URL(`https://worker.example${path}`), params: {}, data: {}, status: 200, error: null });
 	return render(Layout, { props: { children } });
 }
 
@@ -26,14 +26,14 @@ afterEach(() => cleanup());
 
 describe('mobile root layout', () => {
 	it('wraps the app page in RootLayout in mobile-app mode and selects the mobile shell', () => {
-		at('/assets/mobile-ui/');
+		at('/mobile/');
 		const root = screen.getByTestId('root-layout');
 		expect(root.getAttribute('data-mobile-app')).toBe('true');
 		expect(root.textContent).toContain('page content');
 		expect(platform.isMobile).toBe(true);
 	});
 
-	it.each(['/assets/mobile-ui/demo', '/assets/mobile-ui/demo/'])(
+	it.each(['/mobile/demo', '/mobile/demo/'])(
 		'renders the offline demo (%s) without the worker bootstrap',
 		(path) => {
 			at(path);
@@ -43,7 +43,7 @@ describe('mobile root layout', () => {
 	);
 
 	it('does not treat a path that merely contains "demo" as the demo route', () => {
-		at('/assets/mobile-ui/demos');
+		at('/mobile/demos');
 		expect(screen.getByTestId('root-layout')).toBeTruthy();
 	});
 });

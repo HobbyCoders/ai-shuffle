@@ -17,6 +17,10 @@ FILES = {
     "frontend/src/lib/a.ts": "export {}",
     "frontend/src/lib/a.test.ts": "internal",
     "frontend/tests/e2e.spec.ts": "internal",
+    "mobile/package.json": "{}",
+    "mobile/src/shell/register.ts": "export {}",
+    "mobile/src/shell/register.test.ts": "internal",
+    "mobile/tests/composer-gesture.html": "internal",
     "tools/package.json": "{}",
     "tools/ws_live_gate_probe.py": "internal",
     "browser-mcp/src/index.ts": "export {}",
@@ -67,6 +71,7 @@ def test_archive_holds_only_runtime_paths_under_the_accepted_root(repo, tmp_path
     assert names == {
         "app/main.py", "fluid/pyproject.toml", "fluid/README.md", "fluid/fluid/__init__.py",
         "frontend/package.json", "frontend/src/lib/a.ts", "tools/package.json",
+        "mobile/package.json", "mobile/src/shell/register.ts",
         "browser-mcp/src/index.ts", "desktop/src/main/index.ts",
         "docs/content/getting-started/overview.md", "requirements.txt", "requirements.lock",
         "requirements-native.lock", "LICENSE",

@@ -2,11 +2,13 @@ import adapter from '@sveltejs/adapter-static';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 /**
- * The mobile UI: a static, client-only SvelteKit app that the Android app
- * loads from its own assets at
- * https://appassets.androidplatform.net/assets/mobile-ui/ (WebViewAssetLoader).
- * It shares `$lib` with ../frontend and talks to a worker only through the
- * worker's HTTP/WebSocket APIs (see frontend/src/lib/api/runtime.ts).
+ * The mobile UI: a static, client-only SvelteKit app that every worker serves
+ * at /mobile/ and the Android and iOS apps load from the paired worker. The
+ * frontend build emits it into frontend/build/mobile
+ * (frontend/scripts/build-mobile-ui.mjs), so it ships with the worker and a UI
+ * change never needs a new app release. It shares `$lib` with ../frontend; the
+ * apps hand it the paired session through `window.__SHUFFLE_MOBILE__`
+ * (frontend/src/lib/api/runtime.ts). See docs/mobile-desktop-ui-split.md.
  */
 
 /** @type {import('@sveltejs/kit').Config} */
@@ -38,8 +40,9 @@ const config = {
 			lib: '../frontend/src/lib'
 		},
 		paths: {
-			// Where the Android app mounts the bundle (WebViewAssetLoader path).
-			base: '/assets/mobile-ui',
+			// Where workers serve it (app/mobile_ui.py). The Android offline demo
+			// serves the same build under this path on its own sandboxed origin.
+			base: '/mobile',
 			relative: true
 		}
 	}

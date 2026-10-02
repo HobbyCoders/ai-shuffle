@@ -30,11 +30,12 @@ that involves Apple accounts, money or credentials is the owner's.
 
 ## Before the first upload
 
-- **Worker support.** The app's page origin is `aishuffle://app`. Workers
-  accept it in CORS from the release that added this app on (`app/core/cors.py`).
-  Deploy a worker release that includes it, and only then set a repository
-  variable `IOS_WORKERS_READY=true`, the same kind of gate as
-  `ANDROID_WORKERS_READY`.
+- **Worker support.** The app shows the phone UI the paired worker serves at
+  `/mobile/` (`app/mobile_ui.py`), so it needs a worker release that serves it.
+  Deploy that release, and only then set a repository variable
+  `IOS_WORKERS_READY=true`, the same kind of gate as `ANDROID_WORKERS_READY`.
+  UI changes after that ship with worker updates; an app build is only for
+  native changes (see docs/mobile-desktop-ui-split.md).
 - **Toolchain.** Per the design on issue #1617, uploads since April 28, 2026
   must be built with Xcode 26 and the iOS 26 SDK. The deployment target stays
   iOS 16.
@@ -54,8 +55,6 @@ Write the API key to a file outside the repository first, for example
 repository root:
 
 ```sh
-(cd frontend && npm ci)
-bash ios/scripts/sync-mobile-ui.sh
 cd ios
 xcodegen generate
 

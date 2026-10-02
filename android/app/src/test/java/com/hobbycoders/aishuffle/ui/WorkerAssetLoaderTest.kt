@@ -29,13 +29,13 @@ class WorkerAssetLoaderTest {
         "/api/v1/workspace/files/download?path=report.pdf",
     )
 
-    @Test fun everyAssetConsumerAndLegacyRelativeLinkResolvesOnlyToPairedWorker() {
+    @Test fun everyAssetConsumerResolvesOnlyToPairedWorker() {
         for (path in assetPaths) {
             assertEquals(server.baseUrl + path, WorkerAssetLoader.workerUrl(server.baseUrl, server.baseUrl + path))
-            assertEquals(server.baseUrl + path, WorkerAssetLoader.workerUrl(server.baseUrl, MobileUi.ORIGIN + path))
         }
-        for (url in listOf(MobileUi.INDEX_URL, "https://outside.example/api/file", "http://worker.example/a",
-            "https://user@worker.example/a", "https://worker.example:8443/a", "https://appassets.androidplatform.net.evil/api/a")) {
+        // The phone UI is same-origin with the worker now, so the old bundled-asset origin is just another site.
+        for (url in listOf("https://outside.example/api/file", "http://worker.example/a", "https://user@worker.example/a",
+            "https://worker.example:8443/a", "https://appassets.androidplatform.net/api/generated-images/by-path?path=/work/image.png")) {
             assertNull(url, WorkerAssetLoader.workerUrl(server.baseUrl, url))
         }
     }
@@ -70,7 +70,7 @@ class WorkerAssetLoaderTest {
         assertNull(result.responseHeaders["Content-Length"])
         assertEquals("bytes 2-4/12", result.responseHeaders["Content-Range"])
         assertEquals("bytes", result.responseHeaders["Accept-Ranges"])
-        assertEquals(MobileUi.ORIGIN, result.responseHeaders["Access-Control-Allow-Origin"])
+        assertEquals(server.baseUrl, result.responseHeaders["Access-Control-Allow-Origin"])
         assertEquals("no-store", result.responseHeaders["Cache-Control"])
         assertNull(result.responseHeaders["Set-Cookie"])
         result.data.use {
