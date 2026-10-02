@@ -494,6 +494,45 @@ html:root[data-platform='mobile'] .ghostrow { height: 40px;
 html:root[data-platform='mobile'] .mi { height: 40px;
 }
 
+/* ── frontend/src/lib/components/settings/shell (Settings) ───────────────── */
+
+/* Settings always stacks in the app (index, then page, then detail; see
+   settings.css). The app bar already says "Settings", so the index drops its
+   own title. Fields stay at 16px so focusing one never zooms the page, and
+   the stack's back buttons get thumb-sized targets. */
+html:root[data-platform='mobile'] .settings-shell .st-ix-title {
+	display: none;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-index {
+	padding-top: 12px;
+}
+
+html:root[data-platform='mobile'] .settings-shell input:not([type='checkbox']):not([type='radio']),
+html:root[data-platform='mobile'] .settings-shell select,
+html:root[data-platform='mobile'] .settings-shell textarea {
+	font-size: 16px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-back {
+	min-height: 44px;
+	min-width: 44px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm) {
+	width: 42px;
+	height: 25px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)::after {
+	width: 20px;
+	height: 20px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)[aria-checked='true']::after {
+	transform: translateX(17px);
+}
+
 /* ── frontend/src/lib/components/ui/RowActionMenu.svelte ───────────────────── */
 
 /* Mobile shell (Android WebView). Mirrors the component's (hover: none) block
