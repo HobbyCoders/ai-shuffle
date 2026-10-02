@@ -1607,7 +1607,10 @@ def _cleanup_working_set_ref(session_id: str) -> None:
 
 
 def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]:
-    """Set the is_active flag for a session and return the updated session"""
+    """Set sidebar membership, sharing it independently of execution ownership."""
+    from app.network import engine, session_active
+    if engine.context() is not None:
+        return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)

@@ -302,6 +302,22 @@ _register(Collection(
     notes="Fact snapshots (memory-v2:), code-mode skills (skill:<name>, <data_dir>/fluid/skills/*.py) and "
           "prose skill folders (prose-skill:<name>, ~/.fluid/skills/<name>/SKILL.md). The journal stays local."))
 
+def _serialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
+    # PostgreSQL returns bool; the SQLite test/import adapter returns 0/1.
+    # Keep signed membership canonical without coercing malformed values.
+    value = record.get("is_active")
+    if isinstance(value, int) and value in (0, 1):
+        record["is_active"] = bool(value)
+    return record
+
+
+_register(Collection(
+    name="session_active", table="network_session_active", keys=("session_id",),
+    fields=("session_id", "is_active", "updated_at"), resource="sessions", priority=89,
+    serialize_hook=_serialize_session_active,
+    notes="Active/Settled membership editable on any worker, including while the execution owner is offline. "
+          "Last writer wins; projected onto the session catalog without changing execution ownership."))
+
 _register(Collection(
     name="sessions", table="sessions", keys=("id",),
     fields=("id", "project_id", "profile_id", "api_user_id", "title", "status", "is_active",

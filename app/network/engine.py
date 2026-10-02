@@ -539,7 +539,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
         new_hash = ""
     else:
         new_hash = content_hash(coll, plaintext)
-        if (not force and existing is not None and not bool(existing["deleted"])
+        pending_active = coll.name == "session_active" and bool(row.get("local_pending"))
+        if (not force and not pending_active and existing is not None and not bool(existing["deleted"])
                 and existing["content_hash"] == new_hash):
             return None
     # Sequence numbers are allocated under the state row lock: two writers in
@@ -558,6 +559,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     store.insert_op(cursor, data, _lane(coll))
     store.put_record(cursor, collection, record_id, clock=clock, origin_device_id=ctx.device_id,
                      content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq)
+    if collection == "session_active":
+        cursor.execute("UPDATE network_session_active SET local_pending=FALSE WHERE session_id=%s", (record_id,))
     return data
 
 
@@ -683,7 +686,9 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
         record_id = coll.record_id(plaintext)
         seen.add(record_id)
         existing = known.get(record_id)
-        if existing is not None and not bool(existing["deleted"]) and existing["content_hash"] == content_hash(coll, plaintext):
+        pending_active = coll.name == "session_active" and bool(row.get("local_pending"))
+        if (not pending_active and existing is not None and not bool(existing["deleted"])
+                and existing["content_hash"] == content_hash(coll, plaintext)):
             continue
         changed.append((record_id, row))
     if skipped:
@@ -1051,6 +1056,21 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
 
+    if coll.name == "session_active":
+        if env.op == OP_UPSERT and (
+                plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)):
+            raise ApplyError("malformed session membership")
+        # A sidebar click committed while the outbox was held must survive
+        # reconnect. Sign it after observing the incoming clock, before the
+        # incoming record can overwrite it. Never allocate while still held.
+        local = _read_row(cursor, coll, env.record_id)
+        if local is not None and bool(local.get("local_pending")):
+            # Batch application normally defers clock observation. Flush its
+            # high-water mark before allocating a causally newer local op.
+            observed = max(env.clock, (getattr(_deferred_clock, "box", None) or [0])[0])
+            store.observe_clock(cursor, observed)
+            if record(cursor, coll.name, env.record_id, local, ctx=ctx, force=True) is None:
+                raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
     if coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
@@ -1125,7 +1145,10 @@ def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any
 
 
 def _after_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any]) -> None:
-    if coll.name == "session_events":
+    if coll.name == "session_active":
+        from app.network import session_active
+        session_active.project(cursor, plaintext)
+    elif coll.name == "session_events":
         from app.network import catalog
         catalog.after_event_mirrored(cursor, dict(plaintext))
     elif coll.name in ("artifacts", "note_attachments"):

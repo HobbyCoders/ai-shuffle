@@ -1,4 +1,8 @@
-"""Owner-authoritative Active/Settled changes and ordered read-back."""
+"""Shared Active/Settled membership, independent of execution ownership.
+
+The owner-control protocol remains for older workers. New UIs write a shared
+record locally; normal signed network replication reconciles it on reconnect.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +21,56 @@ from app.network import control, engine, membership, transport
 logger = logging.getLogger(__name__)
 
 
+def project(cursor, record: dict) -> None:
+    """Project shared membership without touching execution or recency.
+
+    There is deliberately no FK: a membership envelope can precede the session
+    catalog on a third worker. prepare_session_mirror applies it on insertion.
+    """
+    cursor.execute("UPDATE sessions SET is_active=%s WHERE id=%s",
+                   (record["is_active"], record["session_id"]))
+
+
+def _record_active(cursor, session_id: str, active: bool) -> Optional[dict]:
+    record = {"session_id": session_id, "is_active": active,
+              "updated_at": datetime.now(timezone.utc).isoformat()}
+    cursor.execute(
+        "INSERT INTO network_session_active (session_id, is_active, updated_at, local_pending) VALUES (%s, %s, %s, TRUE) "
+        "ON CONFLICT (session_id) DO UPDATE SET is_active=EXCLUDED.is_active, updated_at=EXCLUDED.updated_at, local_pending=TRUE",
+        (session_id, active, record["updated_at"]),
+    )
+    project(cursor, record)
+    # While publishing is held, the scanner signs this durable row later.
+    return engine.record(cursor, "session_active", session_id, record, force=True)
+
+
+def write_shared(session_id: str, active: bool) -> Optional[dict]:
+    """Commit a sidebar edit here, even when its execution owner is offline."""
+    if not isinstance(active, bool):
+        raise ValueError("boolean is_active is required")
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Incoming replication locks network_state before projecting sessions.
+        # Use the same order so a simultaneous sidebar click cannot deadlock.
+        store.lock_state(cur)
+        cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        if cur.fetchone() is None:
+            return None
+        _record_active(cur, session_id, active)
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
+        row = dict(cur.fetchone())
+    engine.kick()
+    return row
+
+
+async def set_shared(session_id: str, active: bool) -> dict:
+    row = await run_sync(write_shared, session_id, active)
+    if row is None:
+        raise LookupError("Unknown session")
+    await _broadcast(row, session_id, active)
+    return row
+
+
 def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict, Optional[dict]]:
     """Change membership on the owner; ``local`` marks an edit from this worker's own UI.
 
@@ -28,6 +82,7 @@ def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict,
     """
     with get_db() as conn:
         cur = conn.cursor()
+        store.lock_state(cur)
         # Serialize with ownership transfer and other membership changes.
         cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         row = cur.fetchone()
@@ -35,6 +90,9 @@ def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict,
             raise LookupError("Unknown session")
         if control.owner_of(dict(row)) is not None:
             raise PermissionError("This worker does not own the session")
+        # Older peers still ask the execution owner. Write the shared record
+        # too so their edits participate in the same conflict order.
+        _record_active(cur, session_id, active)
         cur.execute("UPDATE sessions SET is_active=%s, updated_at=%s WHERE id=%s RETURNING *",
                     (active, datetime.now(timezone.utc).isoformat(), session_id))
         row = dict(cur.fetchone())

@@ -221,6 +221,14 @@ def create_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_session_active (
+            session_id TEXT PRIMARY KEY,
+            is_active BOOLEAN NOT NULL,
+            local_pending BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_catalog_cursors (
             session_id TEXT PRIMARY KEY,
             published_seq BIGINT NOT NULL DEFAULT 0,

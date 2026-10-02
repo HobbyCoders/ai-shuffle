@@ -399,6 +399,13 @@ def prepare_session_mirror(cursor, record: Dict[str, Any]) -> Dict[str, Any]:
         local = cursor.fetchone()
         if local is not None and local["api_user_id"]:
             record["api_user_id"] = local["api_user_id"]
+    # A later owner catalog update must not undo an offline sidebar edit.
+    # Keep this independent of the owner's stream, including when membership
+    # arrives before the session catalog during bootstrap.
+    cursor.execute("SELECT is_active FROM network_session_active WHERE session_id = %s", (record["id"],))
+    active = cursor.fetchone()
+    if active is not None:
+        record["is_active"] = bool(active["is_active"])
     parent = record.get("parent_session_id")
     if parent:
         cursor.execute("SELECT 1 FROM sessions WHERE id = %s", (parent,))

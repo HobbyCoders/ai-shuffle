@@ -1823,24 +1823,12 @@ async def set_session_active(
     token: str = Depends(require_auth),
 ):
     """Set the active status of a session. Returns the updated session."""
-    existing = await require_session(request, session_id)
+    await require_session(request, session_id)
 
-    from app.network import control, engine, session_active
-    owner = control.owner_of(existing)
-    if owner is not None:
+    from app.network import engine, session_active
+    if engine.context() is not None:
         try:
-            return await session_active.set_remote(owner, session_id, payload.is_active)
-        except control.RunnerUnreachable as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except control.ControlRefused as exc:
-            raise HTTPException(409, str(exc)) from exc
-    ctx = engine.context()
-    if ctx is not None:
-        try:
-            await session_active.set_local(session_id, payload.is_active)
-            return await run_sync(database.get_session, session_id)
-        except PermissionError as exc:
-            raise HTTPException(409, str(exc)) from exc
+            return await session_active.set_shared(session_id, payload.is_active)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
