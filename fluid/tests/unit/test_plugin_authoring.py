@@ -125,6 +125,26 @@ def test_enabled_but_unapproved_draft_does_not_load(home, tmp_path):
     assert discover_plugins(tmp_path) == []
 
 
+@pytest.mark.parametrize("marketplace", ["Authored", "AUTHORED", "authored.", "authored "])
+def test_another_spelling_of_the_authored_source_does_not_skip_review(home, tmp_path, marketplace):
+    # Windows and macOS open cache/Authored as cache/authored (and Windows
+    # drops trailing dots), so these keys must hit the same approval check.
+    save_authored_plugin(_spec())
+    _enable(home, f"release-notes@{marketplace}")
+    assert discover_plugins(tmp_path) == []
+
+
+def test_an_alias_folder_for_the_authored_source_does_not_skip_review(home, tmp_path):
+    save_authored_plugin(_spec())
+    cache = home / ".fluid" / "plugins" / "cache"
+    try:
+        (cache / "alias").symlink_to(cache / "authored", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available here")
+    _enable(home, "release-notes@alias")
+    assert discover_plugins(tmp_path) == []
+
+
 def test_approved_content_loads_and_any_edit_stops_it(home, tmp_path):
     saved = save_authored_plugin(_spec())
     _enable(home, saved.id)

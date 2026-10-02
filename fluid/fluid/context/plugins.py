@@ -211,6 +211,25 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
     return None
 
 
+def _authored_source(marketplace: str, *, home: Path | None = None) -> bool:
+    """Whether ``marketplace`` reaches the authored drafts folder.
+
+    Windows and macOS open ``cache/Authored`` as ``cache/authored``, and
+    Windows drops trailing dots and spaces, so an ``enabledPlugins`` key such
+    as ``x@Authored`` would otherwise load an unreviewed draft. Compare the
+    folders themselves, and treat an error as authored (fail closed).
+    """
+    if marketplace.casefold().rstrip(". ") == AUTHORED_SOURCE:
+        return True
+    home = plugins_home() if home is None else home
+    authored = home / "cache" / AUTHORED_SOURCE
+    candidate = home / "cache" / marketplace
+    try:
+        return authored.exists() and candidate.exists() and os.path.samefile(authored, candidate)
+    except OSError:
+        return True
+
+
 def plugin_data_dir(name: str, marketplace: str, *, home: Path | None = None) -> Path:
     """The stable per-plugin data folder ``${CLAUDE_PLUGIN_DATA}``/``${PLUGIN_DATA}``
     point at: ``~/.fluid/plugins/data/<name>@<marketplace>``. It survives plugin
@@ -291,7 +310,7 @@ def load_plugin(
         )
         return None
     root, version = resolved
-    if marketplace == AUTHORED_SOURCE and not is_approved(name, root, home=home):
+    if _authored_source(marketplace, home=home) and not is_approved(name, root, home=home):
         # An agent-written plugin loads only as the exact content the owner
         # approved; a new or edited version waits for review (fail closed).
         log.warning(

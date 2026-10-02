@@ -110,6 +110,16 @@ def test_uninstall_refuses_names_outside_the_authored_folder(svc):
             svc.uninstall_plugin(bad)
 
 
+@pytest.mark.parametrize("name", ["authored", "Authored"])
+def test_a_marketplace_cannot_take_the_authored_source_name(svc, name):
+    # Its plugins would land in the drafts folder and be read as drafts.
+    with pytest.raises(ValueError, match="reserved"):
+        svc.add_marketplace("https://github.com/example/plugins.git", name=name)
+    with pytest.raises(ValueError, match="reserved"):
+        svc.add_marketplace(f"https://github.com/example/{name}.git")
+    assert not (svc.MARKETPLACES_DIR / name).exists()
+
+
 def test_enable_route_passes_the_reviewed_hash_and_refuses_stale_reviews(svc, monkeypatch):
     saved = _save(svc)
     app = FastAPI()
