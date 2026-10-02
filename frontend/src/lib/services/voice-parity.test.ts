@@ -22,6 +22,6 @@ describe('voice composer parity', () => {
 		const input = source('components/chat/ChatInput.svelte');
 		expect(input).toContain('$activeSession.sessionId !== sendingSessionId');
 		expect(input).toContain('writeDraft(sendingSessionId, priorDraftJSON)');
-		expect(input).toContain('editorRef?.setContent(priorDraftJSON)');
+		expect(input).toContain('editorRef?.setContent(restored)');
 	});
 });

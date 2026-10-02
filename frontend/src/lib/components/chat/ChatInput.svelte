@@ -573,6 +573,18 @@
 		sendMessage(messageToSend);
 	}
 
+	/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
+	 *  plain text when no editor was mounted. */
+	function joinDrafts(earlier: string, later: string): string {
+		try {
+			const a = JSON.parse(earlier), b = JSON.parse(later);
+			if (a?.type === 'doc' && b?.type === 'doc') {
+				return JSON.stringify({ ...a, content: [...(a.content ?? []), ...(b.content ?? [])] });
+			}
+		} catch { /* plain text */ }
+		return [earlier, later].join('\n\n');
+	}
+
 	// Actually send the message. There is no send-later fork: a send during a live
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
@@ -622,14 +634,28 @@
 
 		const restoreOnFailure = () => {
 			if (!ownsComposer()) return;
-			if ($activeSession.sessionId !== sendingSessionId) {
+			// A move to another view hands the text to the session it was typed
+			// in. A New Chat adopting the session its own create made (a worktree
+			// session whose first message was then refused) is still this view
+			// (#1636).
+			const adoptedOwnSession = sendingSessionId === null && getInitGeneration() === sendingNavigation;
+			if ($activeSession.sessionId !== sendingSessionId && !adoptedOwnSession) {
 				writeDraft(sendingSessionId, priorDraftJSON);
 				return;
 			}
-			inputValue = priorInputValue;
-			uploadedFiles = priorUploadedFiles;
-			editorRef?.setContent(priorDraftJSON);
-			saveDraftImmediately(priorDraftJSON);
+			// Every refusal names its reason in the session's error or worktree
+			// banner; this covers one that does not.
+			if (!get(activeSession).error && !get(activeSession).worktreeError) {
+				notify('Message not sent. Try again.', { severity: 'warning' });
+			}
+			// A slow create can fail after the user started a new message: put
+			// the refused one back in front of it instead of replacing it.
+			const laterDraft = getDraftJSON();
+			const restored = hasComposerDraft(laterDraft) ? joinDrafts(priorDraftJSON, laterDraft) : priorDraftJSON;
+			uploadedFiles = [...priorUploadedFiles, ...uploadedFiles];
+			editorRef?.setContent(restored);
+			inputValue = editorRef?.getMessage() ?? priorInputValue;
+			saveDraftImmediately(restored);
 			messageSent = false;
 		};
 

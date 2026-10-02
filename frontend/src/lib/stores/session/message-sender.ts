@@ -135,7 +135,7 @@ export interface MessageSenderDeps {
 	getActiveSession: () => {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
 		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<string | null>;
-		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
+		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<boolean>;
 	};
 }
 
@@ -156,16 +156,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// ─── Internal helper for worktree existing branch sessions ──────
 
-	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]) {
+	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
 		const _state = getState();
-		if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
-		if (!_state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
-		if (!_state.worktreeId) { update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
+		if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
+		if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
+		if (!_state.worktreeId) { update(s => ({ ...s, worktreeError: 'Please select an existing worktree' })); return false; }
 
 		// The plain WS query path carries both the device pick and the upload
 		// paths, so an existing-worktree session composes with a device choice
 		// exactly like any other send.
-		await getActiveSession().sendMessage(prompt, {
+		return getActiveSession().sendMessage(prompt, {
 			skipWorktreeSetup: true,
 			pendingUploadPaths,
 		});
@@ -373,16 +373,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
 					return false;
 				}
+				// Report the creator's outcome (#1636). Answering true for a create
+				// that was refused before any request went out left the composer
+				// cleared with the message gone. A navigation during the create
+				// counts as sent: the request is out, and its text must not
+				// reappear in the view the user moved to.
+				const creationGen = internal.worktreeCreationGeneration;
+				let accepted: boolean;
 				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-					await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
 				} else if (_state.worktreeBranch) {
-					await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths)) !== null;
 				} else {
-					await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
 				}
+				return accepted || creationGen !== internal.worktreeCreationGeneration;
 			}
 
 			// Backstop: a worktree-intended NEW session must never fall through to
@@ -630,8 +635,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		},
 
 		/** Create the staged branch session. Resolves to the new session id once
-		 *  this view adopted it, or null (the reason is in `worktreeError`, or
-		 *  the user navigated away). */
+		 *  this view adopted it, or null (the reason is in `worktreeError` or
+		 *  `error`, or the user navigated away). With a prompt, null also means
+		 *  the session was created but its first message was refused. */
 		async createWorktree(prompt?: string, pendingUploadPaths?: string[]): Promise<string | null> {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return null; }
@@ -752,10 +758,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// turn to attach uploads to — this follow-up query is that turn.
 					// Locally the files are already in the checkout and the backend
 					// ignores the list; on a remote target it lifts them into blobs.
-					getActiveSession().sendMessage(prompt, {
+					// Its refusal is the send's refusal: the composer keeps the text.
+					const sent = await getActiveSession().sendMessage(prompt, {
 						skipWorktreeSetup: true,
 						pendingUploadPaths,
 					});
+					if (!sent && creationGen === internal.worktreeCreationGeneration) return null;
 				}
 				return response.session_id;
 			} catch (error) {
@@ -803,14 +811,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			return promptlessCreate;
 		},
 
-		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]) {
+		/** Resolves false when this view refused or failed the create (the reason
+		 *  is in `worktreeError`), true once the request was accepted or the
+		 *  user navigated away from it. */
+		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
 			prompt = prompt.trim();
 			const _state = getState();
-			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
+			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
 			if (!_state.project && pendingUploadPaths?.length) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
-				return;
+				return false;
 			}
 
 			const queryProfileId = _state.profile;
@@ -955,7 +966,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 						});
 					}
-					return;
+					return true;
 				}
 
 				// Atomic state commit: sessionId + streaming flags land in the
@@ -1013,7 +1024,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						wsConn.connect();
 						await waitForConnectionVoid();
 					}
-					return;
+					return true;
 				}
 
 				// Fallback path: backend failed to spawn the query (rare). The
@@ -1033,14 +1044,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						project: projectId,
 						overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 					});
-					return;
+					return true;
 				}
 
-				getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
+				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
+				// Refused: the composer takes the text back, so drop its echo.
+				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));
+				return sent;
 			} catch (error) {
 				// User navigation guard — don't surface errors in a session
 				// the user already left.
-				if (creationGen !== internal.worktreeCreationGeneration) return;
+				if (creationGen !== internal.worktreeCreationGeneration) return true;
 
 				const err = error as { detail?: string; message?: string; status?: number };
 				const rawError = err.detail || err.message || '';
@@ -1054,6 +1068,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					worktreeError: formatted,
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
+				return false;
 			}
 		},
 
