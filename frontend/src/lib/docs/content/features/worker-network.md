@@ -12,10 +12,10 @@ Everything the network shares is encrypted with one network key that only the me
 
 ## Connecting a worker
 
-Worker connections are managed in Settings > Providers > Devices (owner only). Until a worker joins a network, that section shows **Set up this worker**. The choices are:
+Worker connections are managed in Settings > Devices (owner only). Until a worker joins a network, that section shows **Set up this worker**. The choices are:
 
 - **Sign in to your Shuffle account.** Use **Sign in** at the top of the section to sign the worker into the same account as your other workers (the setup wizard's *Account & GitHub* step does the same). The first worker on an account founds its network; every later worker is admitted by whichever of your workers is online, with nothing to approve. Phones signed in to the account see and control every worker on it.
-- **Join with an invite.** On an existing worker open Settings > Providers > Devices > *Add device* > *Worker*. Scan the QR code or paste the link on the new worker. The one-time code is the authorization: the new worker joins as soon as it reaches the inviter, copies a snapshot and starts syncing.
+- **Join with an invite.** On an existing worker open Settings > Devices > *Add device* and set *Kind* to *Worker*. Scan the QR code or paste the link on the new worker. The one-time code is the authorization: the new worker joins as soon as it reaches the inviter, copies a snapshot and starts syncing.
 - **Keep separate settings.** The worker keeps its own settings. You can sign in or connect other devices later.
 
 Adding a phone or browser works the same way: *Add device* > *Phone or browser* shows a QR code and link that connect it immediately, and a phone signed in to your account needs no code at all.
@@ -48,11 +48,11 @@ Two workers editing the same setting while disconnected both keep the higher wri
 
 ## Removing a device
 
-Remove a worker, phone or browser from Settings > Providers > Devices. A removed worker stops receiving your settings and its later writes are rejected; the remaining workers switch to a fresh network key on their own. Sessions the removed worker owned stay on the other workers as read-only copies: messages, permission answers and stops are no longer sent to it, and **Fork here** continues the conversation on the current worker. Any secret the worker had already received should be treated as compromised; rotate provider keys from Settings > Providers.
+Remove a worker, phone or browser from Settings > Devices. A removed worker stops receiving your settings and its later writes are rejected; the remaining workers switch to a fresh network key on their own. Sessions the removed worker owned stay on the other workers as read-only copies: messages, permission answers and stops are no longer sent to it, and **Fork here** continues the conversation on the current worker. Any secret the worker had already received should be treated as compromised; rotate provider keys from Settings > Providers.
 
 ## The account always wins
 
-A worker set up with separate settings that later signs in to an account which already syncs other workers switches to the account's network on its own: settings the account already has replace the worker's copies, and anything only that worker has is added to the account. A worker signed in to an account is always in that account's network; there is no separate state to keep. Joining another worker's network with its invite (Settings > Providers > Devices) moves a worker between networks the same way.
+A worker set up with separate settings that later signs in to an account which already syncs other workers switches to the account's network on its own: settings the account already has replace the worker's copies, and anything only that worker has is added to the account. A worker signed in to an account is always in that account's network; there is no separate state to keep. Joining another worker's network with its invite (Settings > Devices) moves a worker between networks the same way.
 
 ## Existing shared-database installations
 

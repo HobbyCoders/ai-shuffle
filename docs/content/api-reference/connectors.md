@@ -144,7 +144,7 @@ Note: Sensitive config fields (tokens, secrets, passwords) are stored encrypted 
 
 ### POST /api/v1/connectors
 
-Create a new connector. The app's runtime must be installed and enabled first (**Settings → Plugins → Apps**). Unless you pass `api_user_id`, an API user is created for the connector; `profile_ids` sets which agents it may run. Incoming messages are refused while that API user has no agent.
+Create a new connector. The app's runtime must be installed and enabled first (**Settings → Plugins → Explore plugins**, filter **Apps**). Unless you pass `api_user_id`, an API user is created for the connector; `profile_ids` sets which agents it may run. Incoming messages are refused while that API user has no agent.
 
 **Auth:** Owner only
 
@@ -366,7 +366,7 @@ curl -X POST http://localhost:8000/api/v1/connectors/conn-1a2b3c4d/actions/send_
 
 Gmail connections are created by signing in with Google instead of pasting credentials. You register your own Google OAuth app once, then each sign-in creates (or reconnects) a Gmail connector. See the [Gmail connector guide](/docs/connectors/gmail) for the Google Cloud setup.
 
-The Gmail app must be installed and enabled first (**Settings → Plugins → Apps**).
+The Gmail app must be installed and enabled first (**Settings → Plugins → Explore plugins**, filter **Apps**).
 
 ### GET /api/v1/connectors/oauth/google/status
 
@@ -430,7 +430,7 @@ Google redirects here after sign-in. It creates or updates the connector and sho
 
 The Plaid connector gives agents read-only access to bank and credit-card accounts through Plaid Link. Agents cannot make payments or transfers, and bank logins never reach AI Shuffle. You need your own Plaid app with the Transactions product; `sandbox` uses Plaid's test institutions, `production` uses real accounts and may incur Plaid fees.
 
-The Plaid app must be installed and enabled first (**Settings → Plugins → Apps**). Connecting a bank needs a browser, because Plaid Link runs in the page at `/plaid-link`.
+The Plaid app must be installed and enabled first (**Settings → Plugins → Explore plugins**, filter **Apps**). Connecting a bank needs a browser, because Plaid Link runs in the page at `/plaid-link`.
 
 ### GET /api/v1/connectors/oauth/plaid/status
 

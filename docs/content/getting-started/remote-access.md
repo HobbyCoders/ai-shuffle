@@ -18,7 +18,7 @@ AI Shuffle runs at home, on your server. There are three ways to reach it from s
 
 Set the web interface to your server's LAN address: `BIND_HOST` in `.env` for Docker Compose, **WebUI address** in the Unraid template. Any device on your network can then open `http://<server address>:8000`.
 
-Every browser signs in with your owner password once per device (see [First run](/docs/getting-started/first-run)). **Settings → Account → Owner access → Trusted LAN, no login** skips the password for every device on your network; it is off by default, and turning it on makes anyone on your Wi-Fi or tailnet the owner.
+Every browser signs in with your owner password once per device (see [First run](/docs/getting-started/first-run)). **Settings → Security → Trusted LAN, no login** skips the password for every device on your network; it is off by default, and turning it on makes anyone on your Wi-Fi or tailnet the owner.
 
 ## With Tailscale
 
@@ -36,17 +36,17 @@ This is the easiest way to use AI Shuffle from the Android app, and it works fro
 
 ### Set it up
 
-1. On the worker, open **Settings → Providers → Devices** and sign in to (or create) your free HobbyCoders account. Check the worker name.
+1. On the worker, open **Settings → Devices** and sign in to (or create) your free HobbyCoders account. Check the worker name.
 2. Install the [Android app](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) and sign in with the same account.
 3. Open the worker from your account's worker list. Account-linked workers verify your phone's account and device credential automatically; no separate approval on each worker is required.
 
 Account sign-in authorizes access to your linked workers, including running commands. This trusts HobbyCoders' account service: a compromised account or account service could expose those workers. A matching device name, a trusted-LAN connection, or a different account does not grant this access.
 
-Older controller-linked connections and locally repaired credentials still require owner confirmation under **Settings → Providers → Devices → Account device access to this worker**. Compare the device ID with the one on your phone before approving. For a same-account phone that is still waiting after an upgrade, reopen the worker to retry with its saved credential.
+Older controller-linked connections and locally repaired credentials still require owner confirmation as a request under **Settings → Devices**. Compare the device ID with the one on your phone before approving. For a same-account phone that is still waiting after an upgrade, reopen the worker to retry with its saved credential.
 
 To stop access, choose **Deny request** or **Revoke worker access**, then confirm the denial. This immediately blocks that identity on this worker, including existing sessions. A denied identity cannot be approved again; restoring access requires a fresh pairing with a new device identity. Expired keys also require pairing again. Supported Android clients renew still-valid keys automatically; renewal cannot override a denial or revocation.
 
-AI Shuffle sets up the remote connection for that worker. Each phone or browser has its own authorization, visible under **Settings → Providers → Devices**.
+AI Shuffle sets up the remote connection for that worker. Each phone or browser has its own authorization, visible under **Settings → Devices**.
 
 ### What passes through HobbyCoders' infrastructure
 
@@ -61,7 +61,7 @@ Local use, Tailscale, and pairing with a direct HTTPS address you manage yoursel
 
 ### Turn it off
 
-To stop remote access for a worker, disconnect it from your account in **Settings → Providers → Devices**, and revoke any phone or browser you no longer use there. Deleting your HobbyCoders account (at hobbycoders.com/delete-account) also removes every tunnel and DNS entry for your workers.
+To stop remote access for a worker, disconnect it from your account in **Settings → Devices**, and revoke any phone or browser you no longer use there. Deleting your HobbyCoders account (at hobbycoders.com/delete-account) also removes every tunnel and DNS entry for your workers.
 
 ## Private access details
 

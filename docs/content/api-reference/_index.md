@@ -27,7 +27,7 @@ curl http://localhost:8000/api/v1/sessions
 
 ### API Key (Bearer Token)
 
-Used for external integrations, connectors, and programmatic access. Create API users in **Settings → API**. They are application credentials, not human account logins or administrator credentials. Supplying an API key retains its restricted role even on the local network.
+Used for external integrations, connectors, and programmatic access. Create API users in **Settings → Integrations**. They are application credentials, not human account logins or administrator credentials. Supplying an API key retains its restricted role even on the local network.
 
 ```bash
 curl http://localhost:8000/api/v1/sessions \

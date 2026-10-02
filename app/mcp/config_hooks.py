@@ -210,7 +210,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             "message": (
                 f"Hook '{args['name']}' created. It will trigger on {event} events"
                 + (f" matching tool pattern '{args.get('tool_matcher')}'" if args.get("tool_matcher") else "")
-                + ". Visible in Settings → Hooks."
+                + ". Visible in Build > Hooks."
             ),
         })
 

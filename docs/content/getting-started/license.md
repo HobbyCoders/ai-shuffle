@@ -10,7 +10,7 @@ AI Shuffle is sold as a subscription license. The license pays for the app and i
 
 ## During the beta
 
-While the beta runs, **Settings → License** reads **Beta: no license needed** and every feature works. When paid licenses start, you add your key there. Nothing else changes.
+While the beta runs, **Settings → System → License** reads **Beta: no license needed** and every feature works. When paid licenses start, you add your key there. Nothing else changes.
 
 ## What a license covers
 
@@ -32,7 +32,7 @@ Keep the license key private. The pull token is less sensitive (it only download
 
 ## Activate a worker
 
-1. Open **Settings → License**.
+1. Open **Settings → System → License**.
 2. Paste your license key and activate.
 3. The card shows the plan, how many of your 3 seats are in use, and the date the current lease runs until.
 
@@ -44,7 +44,7 @@ You can hand AI Shuffle the key before its first start, and it activates on its 
 - **Docker Compose:** `LICENSE_KEY=` in `.env`.
 - **Unraid:** the **License key** field in the template.
 
-Each key is tried once. If it is not accepted (a typo, or all 3 seats taken), **Settings → License** says why; activate there instead. After the first start, `LICENSE_KEY` and the template field are ignored and you can clear them.
+Each key is tried once. If it is not accepted (a typo, or all 3 seats taken), **Settings → System → License** says why; activate there instead. After the first start, `LICENSE_KEY` and the template field are ignored and you can clear them.
 
 When you activate, the worker sends the license key, a random install ID, a fingerprint made from that ID and the machine ID, the host name (as the worker's display name) and the app version. It never sends prompts, files, model traffic or AI provider credentials.
 
@@ -53,7 +53,7 @@ When you activate, the worker sends the license key, a random install ID, a fing
 Activation then lists the workers holding seats. Free the seat of a worker you no longer use, then activate again:
 
 - In that list, choose **Deactivate** next to the old worker.
-- Or, on the old worker if it still runs: **Settings → License → Deactivate on this worker**.
+- Or, on the old worker if it still runs: **Settings → System → License → Deactivate on this worker**.
 - A worker that has not checked in for 21 days gives up its seat on its own.
 
 ### Moving to a new machine
@@ -63,7 +63,7 @@ Deactivate the old worker (or let its seat free itself), install on the new mach
 ## Offline use and renewals
 
 - The license server gives each worker a signed **lease** that is good for **14 days**. The worker checks it offline, so a worker can be offline for two weeks without any effect, and an outage of the license server never stops you.
-- The worker renews its lease about once a day. **Settings → License → Check now** renews immediately.
+- The worker renews its lease about once a day. **Settings → System → License → Check now** renews immediately.
 - If a worker cannot renew, a banner warns you **3 days** before its lease ends. Connect it to the internet to renew.
 
 ## Failed payments

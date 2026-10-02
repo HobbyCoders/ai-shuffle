@@ -29,11 +29,11 @@ Next, AI Shuffle asks you to create the password for the owner of this install. 
 
 Phones and remote browsers linked through your HobbyCoders account (see [Remote access](/docs/getting-started/remote-access)) use their own device authorization instead.
 
-To change the password later, open **Settings → Account → Owner access**. The same place has **Trusted LAN, no login**, off by default: when on, every device on your network or tailnet is the owner without a password. Leave it off unless the network is yours alone.
+To change the password later, open **Settings → Security → Owner password**. The same place has **Trusted LAN, no login**, off by default: when on, every device on your network or tailnet is the owner without a password. Leave it off unless the network is yours alone.
 
 ## 3. License
 
-Enter your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`, from your license email) and choose **Activate**. While the beta runs, this step reads **Beta: no license needed** and you just continue. If you gave the key when installing (the desktop launcher, `LICENSE_KEY` in `.env`, or **License key** in the Unraid template), it is already active and the step says so. If you have no key yet, choose **Add it later** and add it in **Settings → License**; until a license is active, agents do not start new runs, and nothing else is affected. See [License](/docs/getting-started/license).
+Enter your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`, from your license email) and choose **Activate**. While the beta runs, this step reads **Beta: no license needed** and you just continue. If you gave the key when installing (the desktop launcher, `LICENSE_KEY` in `.env`, or **License key** in the Unraid template), it is already active and the step says so. If you have no key yet, choose **Add it later** and add it in **Settings → System → License**; until a license is active, agents do not start new runs, and nothing else is affected. See [License](/docs/getting-started/license).
 
 ## 4. Choose how Claude Code is paid for
 
@@ -103,7 +103,7 @@ If the run fails, the message says what is missing; see [Troubleshooting](/docs/
 
 ## 8. Optional: account and GitHub
 
-- **HobbyCoders account:** sign in to link this worker to the Android app, to your other workers and to remote access. Local use never needs an account. To join another worker's network with an invite instead, choose **Use a worker invite instead**. You can do either later in **Settings → Providers → Devices**.
+- **HobbyCoders account:** sign in to link this worker to the Android app, to your other workers and to remote access. Local use never needs an account. To join another worker's network with an invite instead, choose **Use a worker invite instead**. You can do either later in **Settings → Devices**.
 - **GitHub:** sign in to the GitHub CLI for repository features (pull requests, issues, CI). You can do this later in Settings.
 
 Then choose **Finish**. Continue with the [Quick start](/docs/getting-started/quick-start).

@@ -3,7 +3,7 @@
  * runs on: session titles, commit messages, PR descriptions, branch names, and
  * agent generation.
  *
- * It lives in Settings → Providers rather than on an agent, because generation
+ * It lives in Settings > Default models > Text tasks rather than on an agent, because generation
  * never runs inside a session and so has no agent whose configuration would
  * apply. Mirrors the `settings/voice` client below it in shape.
  */

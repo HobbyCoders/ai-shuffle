@@ -60,7 +60,7 @@ Changing **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env
 
 - **A browser keeps asking for the password:** its sign-in expired (after 30 days) or the password was changed, which signs every browser out. Sign in again.
 - **"Too many wrong passwords":** after five wrong passwords from one device, sign-in pauses for up to 15 minutes. Wait, then try again.
-- **A phone or linked device stopped working:** it does not use the owner password; check **Settings → Providers → Devices** for the device.
+- **A phone or linked device stopped working:** it does not use the owner password; check **Settings → Devices** for the device.
 - **Desktop app:** the desktop app never asks for a password. If a browser you opened some other way shows "Desktop listener token required", use **Open in Browser** from the app's menu instead.
 
 ## Agents do not start
@@ -73,7 +73,7 @@ The message in the app says which of these it is.
 
 **The Claude Code CLI is not signed in** (subscription mode):
 
-- Sign in again from the in-app terminal (**Settings → Providers → Claude Code CLI → Sign in**), or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
+- Sign in again from the in-app terminal (**Settings → Providers → Claude subscription → Sign in**), or from the host: `docker exec -it -u appuser ai-shuffle claude auth login`.
 - Check whose account it uses: `docker exec -u appuser ai-shuffle claude auth status`.
 - The login is kept in the Claude Code folder (`/home/appuser/.claude`). If that volume or appdata folder was removed or not mapped, the login is lost on every update; check the mapping.
 
@@ -81,9 +81,9 @@ The message in the app says which of these it is.
 
 **Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets. Wait, or switch to API key mode for heavy or unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-**An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Loop guard**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
+**An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-**A background agent stopped after an hour** (subscription mode): the loop guard's default time limit ended it. Change the limit under **Settings → Providers → Loop guard**, or use API key mode for long unattended work.
+**A background agent stopped after an hour** (subscription mode): the loop guard's default time limit ended it. Change the limit under **Settings → Providers → Claude subscription → Policy**, or use API key mode for long unattended work.
 
 **The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
 
@@ -109,7 +109,7 @@ Pages crash or the browser closes when the container has too little shared memor
 
 **The container stops at `The installed application update … was built for a different container image`**: the data folder or volume still holds an in-app update that is newer than the image you changed to, and the two need different container builds. The message names both. Change the version to a release at least as new as the installed update and recreate the container. To run this image's code over the existing data anyway, stop the container, delete `application-updates/state.json` from the data folder or volume (delete the whole `application-updates` folder to reclaim the space of stored builds), and start it again.
 
-**No update is offered:** check **Settings → Account → Application updates → Allow updates**. The worker checks about 15 seconds after it starts and once a day, so restarting the container runs a check. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
+**No update is offered:** check **Settings → System → Updates → Allow updates**. The worker checks about 15 seconds after it starts and once a day, so restarting the container runs a check. Unraid's "update ready" notice only covers the tag you already run; a new release always means changing the version.
 
 ## Stopping and the database
 

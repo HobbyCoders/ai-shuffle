@@ -38,7 +38,7 @@ An agent contains a `config` object with the following settings:
 
 `model`, `permission_mode` and `effort` are session settings, not agent settings. Agents saved by older versions may still carry them; they are used only as a fallback for sessions created before the move.
 
-Text the app generates for you outside a chat — session titles, commit messages, PR descriptions, branch names, generated agents — runs on its own model and effort, set once under **Settings → Providers → Generated text**.
+Text the app generates for you outside a chat — session titles, commit messages, PR descriptions, branch names, generated agents — runs on its own model and effort, set once under **Settings → Default models → Text tasks**.
 
 The vocabularies below describe what you can pick per session.
 

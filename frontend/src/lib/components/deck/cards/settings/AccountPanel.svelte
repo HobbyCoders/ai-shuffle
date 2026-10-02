@@ -142,9 +142,9 @@
 			<p>{refusal.message}</p>
 			<p class="muted">{refusal.used} of {refusal.limit} remote {refusal.limit === 1 ? 'connection' : 'connections'} in use on this account. This worker keeps working here and on your local network. It asks again every hour, and right away when you add a license key.</p>
 			{#if variant === 'settings'}
-				<button type="button" class="btn" onclick={() => openSettingsTab('license')}>Open Settings &gt; License</button>
+				<button type="button" class="btn" onclick={() => openSettingsTab('license')}>Open Settings &gt; System &gt; License</button>
 			{:else}
-				<p class="muted">You can add a license key in Settings &gt; License once setup is done.</p>
+				<p class="muted">You can add a license key in Settings &gt; System &gt; License once setup is done.</p>
 			{/if}
 		</div>
 	{/if}

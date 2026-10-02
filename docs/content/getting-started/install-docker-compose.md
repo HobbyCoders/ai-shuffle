@@ -173,7 +173,7 @@ COOKIE_SECURE=false
 
 # Optional. The password every browser signs in with. It is read on the FIRST
 # start only; after that AI Shuffle keeps its own hashed copy and ignores this
-# line, so change the password in Settings > Account > Owner access (and clear
+# line, so change the password in Settings > Security > Owner password (and clear
 # this line if you like). Leave it empty to create the password in your
 # browser on first visit instead. At least 12 characters.
 OWNER_PASSWORD=
@@ -183,7 +183,7 @@ OWNER_PASSWORD=
 # Optional. Your license key (ASH-XXXXX-XXXXX-XXXXX-XXXXX) from your license
 # email. On the first start AI Shuffle activates it for this install, then
 # ignores this line: the license lives in AI Shuffle from then on, so you can
-# clear it. Leave it empty to paste the key in Settings > License instead.
+# clear it. Leave it empty to paste the key in Settings > System > License instead.
 # While the beta runs, no key is needed and this line is not used.
 LICENSE_KEY=
 
@@ -231,7 +231,7 @@ Paste your pull token after `AI_SHUFFLE_PULL_TOKEN=`. It is part of the image na
 
 The pull token only downloads the image; it is not your license key and cannot sign in to anything. It shows in `docker ps` and in logs, so if you share it by accident, get a new one from your account on hobbycoders.com, put it in `.env` and run `docker compose up -d`. The old token stops working within a minute; the running container is not affected.
 
-Optionally, paste your **license key** (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`) after `LICENSE_KEY=` too. AI Shuffle activates it on the first start and ignores the line after that, so you can clear it once the license shows in **Settings → License**. Leave it empty to paste the key there instead. While the beta runs, no key is needed. See [License](/docs/getting-started/license).
+Optionally, paste your **license key** (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`) after `LICENSE_KEY=` too. AI Shuffle activates it on the first start and ignores the line after that, so you can clear it once the license shows in **Settings → System → License**. Leave it empty to paste the key there instead. While the beta runs, no key is needed. See [License](/docs/getting-started/license).
 
 ## 3. Choose who can reach it
 
@@ -319,7 +319,7 @@ To opt out, remove the `security_opt` lines, or set `CODE_MODE_OS_SANDBOX: "off"
 - `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
 - `off`: never use it.
 
-**Settings → System** distinguishes an active sandbox, an explicitly disabled sandbox, and one that is unavailable because its self-test failed. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell. Bypass skips ordinary tool approvals whether or not the sandbox is active; private-access consent and other explicit approval requirements still apply.
+**Settings → Security → Code sandbox** distinguishes an active sandbox, an explicitly disabled sandbox, and one that is unavailable because its self-test failed. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell. Bypass skips ordinary tool approvals whether or not the sandbox is active; private-access consent and other explicit approval requirements still apply.
 
 The OS sandbox currently supports Linux only. Windows and macOS workers run without it. The Python kernel's in-process restrictions and host-side tool permission checks still apply, but those in-process restrictions are not an OS security boundary: code that escapes them can access files and the network as the worker's app account. Leaving the sandbox off does not disable ordinary tools, but it removes this extra protection against malicious code.
 

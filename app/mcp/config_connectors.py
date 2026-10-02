@@ -43,7 +43,7 @@ def _create_connector_tools(is_admin: bool) -> list:
                 for c in connectors
             ],
             "count": len(connectors),
-            "note": "To create or configure connectors (which require API tokens/secrets), use Settings → Connectors in the UI.",
+            "note": "To create or configure connectors (which require API tokens/secrets), use Settings > Plugins in the UI.",
         })
 
     tools.append(list_connectors)
