@@ -1,6 +1,7 @@
 /**
  * Which credential Claude Code runs on: the user's Claude subscription (the
- * stock CLI's own sign-in) or the Anthropic API key stored on this worker.
+ * stock CLI's own sign-in), the Anthropic API key stored on this worker, or
+ * off (Claude models leave the picker and Claude turns are refused).
  *
  * The mode is an explicit choice. AI Shuffle never switches it on its own,
  * whichever credentials exist.
@@ -8,7 +9,9 @@
 
 import { api, type AgentGateStatus } from './client';
 
-export type ClaudeAuthMode = 'subscription' | 'api_key';
+export type ClaudeAuthMode = 'subscription' | 'api_key' | 'off';
+
+export const CLAUDE_AUTH_MODES: readonly ClaudeAuthMode[] = ['subscription', 'api_key', 'off'];
 
 export interface ClaudeAuthSummary {
 	mode: ClaudeAuthMode;

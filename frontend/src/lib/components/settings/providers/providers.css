@@ -1,0 +1,180 @@
+/*
+ * Providers collection: the pieces several provider components share (model
+ * checklists, sign-in flows, the add menu). Theme tokens only, through the
+ * Settings aliases in shell/settings.css.
+ */
+
+/* A card of rows outside RowGroup's own list (bare groups) */
+.settings-shell .pv-card {
+	background: var(--st-card);
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	overflow: hidden;
+}
+.settings-shell .pv-card > * + * {
+	border-top: 1px solid var(--st-border);
+}
+
+/* Model checklist rows */
+.settings-shell .pv-mlist {
+	max-height: 320px;
+	overflow-y: auto;
+}
+.settings-shell .pv-mrow {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 12px;
+	align-items: center;
+	padding: 8px 16px;
+	min-height: 40px;
+	cursor: pointer;
+	font-size: 12px;
+}
+.settings-shell .pv-mrow.static {
+	cursor: default;
+}
+.settings-shell .pv-mrow:hover:not(.static) {
+	background: var(--st-hover);
+}
+.settings-shell .pv-mrow + .pv-mrow {
+	border-top: 1px solid var(--st-border);
+}
+.settings-shell .pv-mrow .id {
+	font-family: var(--st-mono);
+	font-size: 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.settings-shell .pv-mrow .lbl {
+	color: var(--st-mfg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 220px;
+}
+.settings-shell .pv-chk {
+	width: 16px;
+	height: 16px;
+	accent-color: var(--st-primary);
+	margin: 0;
+}
+
+/* Inline flows (sign-in, setup) */
+.settings-shell .pv-flow {
+	display: grid;
+	gap: 12px;
+	padding: 14px 16px;
+}
+.settings-shell .pv-flow-head {
+	font-size: 12.5px;
+	color: var(--st-mfg);
+}
+.settings-shell .pv-bigcode {
+	font-family: var(--st-mono);
+	font-size: 24px;
+	letter-spacing: 0.08em;
+	font-weight: 500;
+	user-select: all;
+}
+.settings-shell .pv-wait {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--st-mfg);
+	font-size: 13px;
+}
+.settings-shell .pv-spin {
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	border: 2px solid var(--st-border-strong);
+	border-top-color: var(--st-fg);
+	animation: pv-spin 0.8s linear infinite;
+	flex: none;
+}
+@keyframes pv-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.settings-shell .pv-spin {
+		animation-duration: 2.4s;
+	}
+}
+.settings-shell .pv-acts {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+	align-items: center;
+	margin-top: 12px;
+	flex-wrap: wrap;
+}
+.settings-shell .pv-acts .left {
+	margin-right: auto;
+}
+.settings-shell .pv-row-inline {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	flex-wrap: wrap;
+}
+.settings-shell .pv-msg {
+	margin: 6px 2px 0;
+	font-size: 12.5px;
+	color: var(--st-mfg);
+}
+.settings-shell .pv-msg.err {
+	color: var(--st-destructive);
+}
+.settings-shell .pv-msg.ok {
+	color: var(--st-success);
+}
+.settings-shell .pv-term {
+	margin: 0;
+	max-height: 220px;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--st-mono);
+	font-size: 12px;
+	line-height: 1.55;
+	padding: 10px 12px;
+	border-radius: var(--st-radius-md);
+	border: 1px solid var(--st-border);
+	background: var(--st-code-bg);
+}
+.settings-shell .pv-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--st-mfg);
+	font-size: 13px;
+	text-decoration: none;
+	border-radius: var(--st-radius-sm);
+	padding: 2px;
+}
+.settings-shell .pv-link:hover {
+	color: var(--st-fg);
+}
+.settings-shell .pv-link svg.lucide {
+	width: 14px;
+	height: 14px;
+}
+.settings-shell .pv-empty {
+	padding: 12px 16px;
+	color: var(--st-mfg);
+	font-size: 13px;
+}
+.settings-shell .pv-badge {
+	display: inline-flex;
+	align-items: center;
+	font-size: 11.5px;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: var(--st-muted);
+	color: var(--st-mfg);
+	white-space: nowrap;
+	font-weight: 500;
+}

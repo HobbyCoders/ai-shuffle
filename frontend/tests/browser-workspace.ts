@@ -3,8 +3,7 @@ import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import '../src/app.css';
 import BrowserWorkspaceParent from './BrowserWorkspaceParent.svelte';
-import OpenAICredits from '../src/lib/components/deck/cards/settings/providers/OpenAICredits.svelte';
-import type { ModelProvider } from '../src/lib/api/model-providers';
+import KeyUsage from '../src/lib/components/settings/providers/tabs/KeyUsage.svelte';
 const providerLogin = new URLSearchParams(location.search).has('provider-login');
 let loginOpened = false;
 let loginSocketUrl = '';
@@ -295,9 +294,10 @@ Object.assign(window, {
 });
 activeSession.current.sessionId = live?.session ?? 'isolated-fixture';
 if (providerLogin) {
-	mount(OpenAICredits, {
+	// Settings > Providers > OpenAI API key > Usage, for a key with no readable balance.
+	mount(KeyUsage, {
 		target: document.getElementById('app')!,
-		props: { provider: { id: 'p1', name: 'OpenAI', enabled: true, provider_type: 'openai', base_url: 'https://api.openai.com/v1' } as ModelProvider },
+		props: { credits: null, openRouter: false, openAI: true },
 	});
 } else {
 	browserPanel.openPanel(activeSession.current.sessionId);

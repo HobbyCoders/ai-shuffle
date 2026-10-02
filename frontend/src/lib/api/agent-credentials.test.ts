@@ -43,6 +43,13 @@ describe('agent credentials', () => {
 		expect(mocks.get).toHaveBeenCalledWith('/settings/claude-auth', { cache: 'no-store' });
 	});
 
+	it('keeps the off mode and reports no credential in use', () => {
+		const creds = credentialsFromSummary(summary({ mode: 'off', api_key: { set: true, last4: 'abcd' }, gate: undefined }));
+		expect(creds.mode).toBe('off');
+		expect(creds.credentialReady).toBe(false);
+		expect(creds.ready).toBe(false);
+	});
+
 	it('asks the worker to re-run the CLI check on refresh', async () => {
 		mocks.get.mockResolvedValue(summary());
 		await getAgentCredentials(true);

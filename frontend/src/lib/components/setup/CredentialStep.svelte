@@ -186,5 +186,5 @@
 		{/if}
 		<button type="button" onclick={onContinue} class="btn btn-primary flex-1 py-3" disabled={!ready}>Continue</button>
 	</div>
-	<p class="text-xs text-muted-foreground text-center">OpenAI, xAI, OpenRouter and fal.ai can be added in Settings > Providers after setup.</p>
+	<p class="text-xs text-muted-foreground text-center">Add OpenAI, xAI, OpenRouter, fal.ai or your own gateway later in Settings > Providers.</p>
 </div>

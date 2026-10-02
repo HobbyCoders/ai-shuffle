@@ -116,8 +116,21 @@ const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
 	}
 };
 
+/**
+ * Collections whose entries live on items that only exist with worker data
+ * assert their coverage in their own test, which loads that data and opens
+ * each item and tab.
+ */
+const COVERED_WITH_DATA: Partial<Record<CategoryId, string>> = {
+	providers: 'components/settings/providers/ProvidersCollection.test.ts'
+};
+
 describe('every category page matches the registry', () => {
 	for (const category of CATEGORY_IDS) {
+		if (COVERED_WITH_DATA[category]) {
+			it.skip(`${category} (covered in ${COVERED_WITH_DATA[category]})`, () => {});
+			continue;
+		}
 		it(category, async () => {
 			const component: Component = isPreferenceCategory(category)
 				? PREFERENCE_PAGES[category]

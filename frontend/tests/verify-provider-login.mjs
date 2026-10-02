@@ -26,19 +26,21 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     await page.clock.install();
     const url = new URL(fixtureUrl); url.searchParams.set('provider-login', '1');
     await page.goto(url.href);
-    const usage = page.getByRole('region', { name: 'OpenAI account usage' });
-    await usage.getByRole('heading', { name: 'API credit balance', exact: true }).waitFor();
-    const guidance = await usage.innerText();
-    assert.match(guidance, /OpenAI does not expose a prepaid credit balance through the model API key/);
-    assert.match(guidance, /No additional key is needed or requested here/);
-    assert.match(guidance, /An Admin API key reports organization spending, not credit left/);
-    assert.match(guidance, /Any previously configured usage access is preserved/);
-    assert.match(guidance, /Usage keeps that spending separate from balances/);
-    assert.match(guidance, /For weekly subscription allowance and available extra credits, use the ChatGPT sign-in provider/);
-    assert.match(guidance, /ChatGPT credits are separate from OpenAI API billing/);
+    // Settings > Providers > OpenAI API key > Usage.
+    const usage = page.getByRole('region', { name: 'Billing', exact: true });
+    await usage.getByRole('heading', { name: 'Billing', exact: true }).waitFor();
+    assert.match(await usage.innerText(), /Not available for this key/);
+    // The guidance lives in the row's help tip; showing it is local only.
+    const help = usage.getByRole('button', { name: 'About Balance', exact: true });
+    await help.focus();
+    const guidance = await page.getByRole('tooltip').innerText();
+    assert.match(guidance, /OpenAI does not expose a prepaid balance through the model API key/);
+    assert.match(guidance, /An Admin key reports organization spending, not credit left/);
+    assert.match(guidance, /ChatGPT credits are separate from API billing/);
+    await help.blur();
 
     // Inspect the official link without clicking it or making a billing request.
-    const billing = usage.getByRole('link', { name: 'View balance in OpenAI Platform billing', exact: true });
+    const billing = usage.getByRole('link', { name: 'Open billing', exact: true });
     assert.equal(await billing.isVisible(), true);
     assert.equal(await billing.getAttribute('href'), 'https://platform.openai.com/settings/organization/billing/overview');
     assert.equal(await billing.getAttribute('target'), '_blank');
@@ -47,7 +49,9 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     assert.ok(rel.includes('noreferrer'));
 
     const assertPassive = async () => {
-      assert.equal(await page.locator('input, textarea, select, form, button').count(), 0, 'no key/organization form or billing sign-in action');
+      assert.equal(await page.locator('input, textarea, select, form').count(), 0, 'no key/organization form');
+      // The only button is the help tip; no billing sign-in action.
+      assert.deepEqual(await page.getByRole('button').evaluateAll(els => els.map(el => el.getAttribute('aria-label'))), ['About Balance']);
       assert.equal(await page.getByRole('dialog').count(), 0);
       // The fixture records attempts even when a socket is closed or a panel-start
       // fetch is intercepted before it reaches Playwright's network routing.
@@ -96,7 +100,7 @@ export async function verifyProviderPollingCanary(browser, fixtureUrl, viewport)
       // continue the unmodified source, never replace the HTML or component.
       await page.route(new URL('browser-workspace.ts*', fixtureUrl).href, async route => {
         assert.equal(await page.evaluate(() => {
-          const beforeMount = !document.querySelector('[aria-label="OpenAI account usage"]');
+          const beforeMount = !document.querySelector('#app section');
           setInterval(() => {
             void fetch('/api/v1/model-providers/p1/openai-usage').catch(() => {});
           }, 30_000);

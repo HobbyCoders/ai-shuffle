@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * ClaudeCliPanel — the "Claude Code CLI" status and sign-in panel.
+	 * ClaudeCliPanel — the setup wizard's "Claude Code CLI" status and sign-in panel.
 	 *
 	 * Shows what the stock CLI reports about its own login (`claude auth
 	 * status`): signed in or not, the account, method, plan, CLI version and
@@ -11,25 +11,14 @@
 	 *    shows into that terminal.
 	 *  - The desktop app, the phone app and non-owner devices: the command to
 	 *    run in a terminal on the worker, then "Check again".
-	 * An Anthropic API key is offered as the alternative. Used by Settings →
-	 * Providers and by the setup wizard.
+	 * An Anthropic API key is offered as the alternative. The terminal state
+	 * machine is `ClaudeCliLogin`, shared with Settings > Providers > Claude.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { ExternalLink, Loader2, RefreshCw, SquareTerminal } from 'lucide-svelte';
-	import { getErrorMessage } from '$lib/api/client';
-	import {
-		cancelClaudeCliLogin,
-		claudePlanLabel,
-		getClaudeCliStatus,
-		logoutClaudeCli,
-		readClaudeCliLogin,
-		sendClaudeCliLogin,
-		startClaudeCliLogin,
-		type ClaudeCliStatus
-	} from '$lib/api/claude-cli';
+	import { claudePlanLabel, type ClaudeCliStatus } from '$lib/api/claude-cli';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { auth } from '$lib/stores/auth.svelte';
-	import { hydrateModelRegistry } from '$lib/constants/models.svelte';
+	import { ClaudeCliLogin } from './providers/claude-cli-login.svelte';
 
 	interface Props {
 		/** Only the install owner may run the sign-in terminal. */
@@ -38,186 +27,38 @@
 		onStatus?: (status: ClaudeCliStatus) => void;
 		/** When set, shows a button for the API-key alternative. */
 		onUseApiKey?: () => void;
-		/** Settings uses the editor's button styles; the setup wizard the app's. */
+		/** Kept for callers; the panel always uses the app's button styles. */
 		variant?: 'settings' | 'setup';
 	}
 
-	let { isAdmin = false, onStatus, onUseApiKey, variant = 'settings' }: Props = $props();
+	let { isAdmin = false, onStatus, onUseApiKey, variant = 'setup' }: Props = $props();
 
 	const btn = $derived(variant === 'setup' ? 'btn btn-secondary' : 'ed-btn');
 	const btnPrimary = $derived(variant === 'setup' ? 'btn btn-primary' : 'ed-btn primary');
 	const inputClass = $derived(variant === 'setup' ? 'input mono' : 'inp mono');
 
-	let status = $state<ClaudeCliStatus | null>(null);
-	let loadError = $state('');
-	let checking = $state(false);
-
-	// Login terminal
-	let terminalOpen = $state(false);
-	let running = $state(false);
-	let output = $state('');
-	let offset = 0;
-	let url = $state<string | null>(null);
-	let code = $state('');
-	let sending = $state(false);
-	let loginError = $state('');
-	let loginResult = $state<'ok' | 'failed' | null>(null);
-	let pollTimer: ReturnType<typeof setTimeout> | undefined;
-	let disposed = false;
 	let outputEl = $state<HTMLPreElement | null>(null);
+	const cli = new ClaudeCliLogin({
+		onStatus: (s) => onStatus?.(s),
+		onOutput: () => {
+			if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
+		}
+	});
 
-	const canUseTerminal = $derived(!!status?.login.terminal && isAdmin && !platform.isMobile);
+	const status = $derived(cli.status);
+	const canUseTerminal = $derived(cli.terminalAvailable(isAdmin, platform.isMobile));
 	const planLabel = $derived(claudePlanLabel(status?.plan));
-	const hostCommand = $derived(status?.login.docker_command ?? status?.login.command ?? 'claude auth login');
-
-	async function load(refresh: boolean) {
-		checking = true;
-		try {
-			const next = await getClaudeCliStatus(refresh);
-			if (disposed) return;
-			const changed = status !== null && (status.signed_in !== next.signed_in
-				|| !!status.relogin_notice !== !!next.relogin_notice);
-			const accountChanged = status !== null && (status.signed_in !== next.signed_in
-				|| (status.plan ?? null) !== (next.plan ?? null));
-			status = next;
-			// The app-wide gates and the upgrade notice read /auth/status.
-			if (changed) auth.checkAuth().catch(() => {});
-			// The model picker lists Claude models only while the registry says
-			// Claude is signed in (its `claude.auth_kind`), and the registry is
-			// otherwise fetched once per page load. Re-read it so a sign-in, a
-			// sign-out or a plan change shows up in the composer right away.
-			if (accountChanged) void hydrateModelRegistry();
-			loadError = '';
-			onStatus?.(next);
-		} catch (e) {
-			if (!disposed) loadError = getErrorMessage(e, 'Could not ask the Claude Code CLI for its status.');
-		} finally {
-			checking = false;
-		}
-	}
-
-	function schedulePoll(delay = 800) {
-		clearTimeout(pollTimer);
-		if (!disposed) pollTimer = setTimeout(poll, delay);
-	}
-
-	function absorb(state: { output: string; offset: number; reset: boolean; url: string | null; running: boolean; succeeded: boolean | null; error: string | null }) {
-		output = state.reset ? state.output : output + state.output;
-		offset = state.offset;
-		url = state.url ?? url;
-		running = state.running;
-		if (state.error) loginError = state.error;
-		queueMicrotask(() => { if (outputEl) outputEl.scrollTop = outputEl.scrollHeight; });
-	}
-
-	async function poll() {
-		try {
-			const state = await readClaudeCliLogin(offset);
-			if (disposed) return;
-			absorb(state);
-			if (state.running) {
-				schedulePoll();
-				return;
-			}
-			loginResult = state.succeeded ? 'ok' : state.active ? 'failed' : null;
-			await load(true);
-		} catch (e) {
-			if (!disposed) {
-				loginError = getErrorMessage(e, 'Lost contact with the sign-in terminal.');
-				running = false;
-			}
-		}
-	}
-
-	async function startLogin() {
-		loginError = '';
-		loginResult = null;
-		output = '';
-		offset = 0;
-		url = null;
-		terminalOpen = true;
-		try {
-			absorb(await startClaudeCliLogin());
-			schedulePoll(300);
-		} catch (e) {
-			loginError = getErrorMessage(e, 'Could not start `claude auth login`.');
-			running = false;
-		}
-	}
-
-	async function sendCode() {
-		const text = code.trim();
-		if (!text || sending) return;
-		sending = true;
-		try {
-			absorb(await sendClaudeCliLogin(text, offset));
-			code = '';
-			schedulePoll(300);
-		} catch (e) {
-			loginError = getErrorMessage(e, 'Could not pass the code to the CLI.');
-		} finally {
-			sending = false;
-		}
-	}
-
-	let signingOut = $state(false);
-	async function signOut() {
-		if (signingOut) return;
-		signingOut = true;
-		loginError = '';
-		try {
-			const result = await logoutClaudeCli();
-			if (!result.success) loginError = result.error || 'The CLI could not sign out.';
-		} catch (e) {
-			loginError = getErrorMessage(e, 'The CLI could not sign out.');
-		} finally {
-			signingOut = false;
-			await load(true);
-		}
-	}
-
-	async function closeTerminal() {
-		clearTimeout(pollTimer);
-		if (running) {
-			try {
-				await cancelClaudeCliLogin();
-			} catch {
-				// The server stops an abandoned login on its own.
-			}
-		}
-		running = false;
-		terminalOpen = false;
-		output = '';
-		url = null;
-		code = '';
-	}
 
 	onMount(() => {
-		void load(false).then(async () => {
-			// Pick up a login that is still running from before a reload.
-			if (!canUseTerminal) return;
-			try {
-				const state = await readClaudeCliLogin(0);
-				if (!disposed && state.active && state.running) {
-					terminalOpen = true;
-					absorb(state);
-					schedulePoll();
-				}
-			} catch {
-				// No terminal to resume.
-			}
-		});
+		void cli.init(() => canUseTerminal);
 	});
 
-	onDestroy(() => {
-		disposed = true;
-		clearTimeout(pollTimer);
-	});
+	onDestroy(() => cli.dispose());
 </script>
 
 <div class="cli-panel" data-testid="claude-cli-panel">
 	{#if !status}
-		<p class="hint">{loadError || 'Asking the Claude Code CLI…'}</p>
+		<p class="hint">{cli.loadError || 'Asking the Claude Code CLI…'}</p>
 	{:else}
 		<dl class="facts">
 			<div>
@@ -255,29 +96,29 @@
 		{/if}
 
 		<div class="actions">
-			{#if status.installed && !status.signed_in && canUseTerminal && !terminalOpen}
-				<button type="button" class={btnPrimary} onclick={startLogin}>
+			{#if status.installed && !status.signed_in && canUseTerminal && !cli.terminalOpen}
+				<button type="button" class={btnPrimary} onclick={() => cli.startLogin()}>
 					<SquareTerminal size={14} /> Sign in
 				</button>
 			{/if}
 			{#if status.signed_in && isAdmin}
-				<button type="button" class={btn} onclick={signOut} disabled={signingOut}>Sign out</button>
+				<button type="button" class={btn} onclick={() => cli.signOut()} disabled={cli.signingOut}>Sign out</button>
 			{/if}
-			<button type="button" class={btn} onclick={() => load(true)} disabled={checking}>
-				{#if checking}<Loader2 size={14} class="spin" />{:else}<RefreshCw size={14} />{/if} Check again
+			<button type="button" class={btn} onclick={() => cli.load(true)} disabled={cli.checking}>
+				{#if cli.checking}<Loader2 size={14} class="spin" />{:else}<RefreshCw size={14} />{/if} Check again
 			</button>
 		</div>
 
-		{#if terminalOpen}
+		{#if cli.terminalOpen}
 			<div class="terminal" aria-label="Claude Code sign-in terminal">
 				<p class="hint">Running <code>claude auth login</code> on this worker. Open the link, sign in to your Claude account on Anthropic's page, then paste the code it shows below.</p>
-				<pre bind:this={outputEl} class="term-out" data-testid="claude-cli-terminal">{output || 'Starting…'}</pre>
-				{#if url}
-					<a class="{btn} link" href={url} target="_blank" rel="noopener noreferrer">
+				<pre bind:this={outputEl} class="term-out" data-testid="claude-cli-terminal">{cli.output || 'Starting…'}</pre>
+				{#if cli.url}
+					<a class="{btn} link" href={cli.url} target="_blank" rel="noopener noreferrer">
 						<ExternalLink size={14} /> Open Anthropic's sign-in page
 					</a>
 				{/if}
-				{#if running}
+				{#if cli.running}
 					<div class="code-row">
 						<input
 							class={inputClass}
@@ -285,28 +126,28 @@
 							placeholder="Paste the code here"
 							autocomplete="off"
 							spellcheck="false"
-							bind:value={code}
-							onkeydown={(e) => { if (e.key === 'Enter') void sendCode(); }}
+							bind:value={cli.code}
+							onkeydown={(e) => { if (e.key === 'Enter') void cli.sendCode(); }}
 						/>
-						<button type="button" class={btnPrimary} disabled={!code.trim() || sending} onclick={sendCode}>Send</button>
-						<button type="button" class={btn} onclick={closeTerminal}>Stop</button>
+						<button type="button" class={btnPrimary} disabled={!cli.code.trim() || cli.sending} onclick={() => cli.sendCode()}>Send</button>
+						<button type="button" class={btn} onclick={() => cli.closeTerminal()}>Stop</button>
 					</div>
 				{:else}
 					<div class="code-row">
-						{#if loginResult === 'failed'}
-							<button type="button" class={btn} onclick={startLogin}>Try again</button>
+						{#if cli.loginResult === 'failed'}
+							<button type="button" class={btn} onclick={() => cli.startLogin()}>Try again</button>
 						{/if}
-						<button type="button" class={btn} onclick={closeTerminal}>Close</button>
+						<button type="button" class={btn} onclick={() => cli.closeTerminal()}>Close</button>
 					</div>
 				{/if}
-				{#if loginResult === 'ok'}<p class="msg ok" role="status">The CLI reports a successful sign-in.</p>{/if}
-				{#if loginError}<p class="msg err" role="alert">{loginError}</p>{/if}
+				{#if cli.loginResult === 'ok'}<p class="msg ok" role="status">The CLI reports a successful sign-in.</p>{/if}
+				{#if cli.loginError}<p class="msg err" role="alert">{cli.loginError}</p>{/if}
 			</div>
 		{/if}
 
-		{#if loginError && !terminalOpen}<p class="msg err pad" role="alert">{loginError}</p>{/if}
+		{#if cli.loginError && !cli.terminalOpen}<p class="msg err pad" role="alert">{cli.loginError}</p>{/if}
 
-		{#if !status.signed_in && !terminalOpen}
+		{#if !status.signed_in && !cli.terminalOpen}
 			<div class="howto" data-testid="claude-cli-instructions">
 				{#if !status.installed}
 					{#if status.login.surface === 'docker'}
@@ -316,7 +157,7 @@
 					{/if}
 				{:else if status.login.surface === 'docker'}
 					<p class="hint">{canUseTerminal ? 'Or sign in from the host:' : 'Sign in from the host:'} open a terminal on the machine running Docker (on Unraid, the >_ Terminal) and run</p>
-					<pre class="cmd">{hostCommand}</pre>
+					<pre class="cmd">{cli.hostCommand}</pre>
 					<p class="hint">with your container name for <code>&lt;container&gt;</code>: <code>ai-shuffle</code> with Docker Compose, <code>AI-Shuffle</code> on Unraid. Then choose Check again.</p>
 				{:else if !canUseTerminal}
 					<p class="hint">Open a terminal on the computer running AI Shuffle and run</p>
