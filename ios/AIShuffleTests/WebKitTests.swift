@@ -168,6 +168,10 @@ final class WebKitTests: XCTestCase {
         let script = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/script")!) }
         XCTAssertTrue(script, "A script location change was not offered: \(offered.urls)")
 
+        // In the app WebKit asks for a new window only from a real tap, since popups are off; a
+        // test script has no tap, so let it through here and check what the controller does with it.
+        controller.webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        // The same call the UI makes (frontend MainPanel.svelte).
         _ = try await evaluate(controller.webView, "window.open('https://docs.example/popup', '_blank', 'noopener'); return true")
         let popup = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/popup")!) }
         XCTAssertTrue(popup, "window.open was not offered: \(offered.urls)")
