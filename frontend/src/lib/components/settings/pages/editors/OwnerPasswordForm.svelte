@@ -82,6 +82,6 @@
 
 <style>
 	.st-acts > .st-note {
-		margin: 0;
+		margin: 0 auto 0 0;
 	}
 </style>

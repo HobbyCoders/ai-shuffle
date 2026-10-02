@@ -297,20 +297,24 @@
 			{#each preview.diagnostics as d, i (i)}<li class:err={d.severity === 'error'}>{d.message}</li>{/each}
 		</ul>
 	{/if}
-	<div class="st-xh">Confirm</div>
-	<div class="st-xlist">
-		<label class="st-check">
-			<input type="checkbox" bind:checked={acknowledged} disabled={applying || chosen.length === 0} />
-			<span>Sources untouched, existing settings win</span>
-			<span></span>
-		</label>
-	</div>
+	{#if items.length > 0}
+		<div class="st-xh">Confirm</div>
+		<div class="st-xlist">
+			<label class="st-check">
+				<input type="checkbox" bind:checked={acknowledged} disabled={applying || chosen.length === 0} />
+				<span>Sources untouched, existing settings win</span>
+				<span></span>
+			</label>
+		</div>
+	{/if}
 	{#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
 	<div class="st-acts">
 		<button type="button" class="st-btn ghost" disabled={applying} onclick={restart}>Back</button>
-		<button type="button" class="st-btn primary" disabled={!acknowledged || applying || chosen.length === 0} onclick={apply}>
-			{applying ? 'Importing…' : `Import ${chosen.length} ${chosen.length === 1 ? 'item' : 'items'}`}
-		</button>
+		{#if items.length > 0}
+			<button type="button" class="st-btn primary" disabled={!acknowledged || applying || chosen.length === 0} onclick={apply}>
+				{applying ? 'Importing…' : `Import ${chosen.length} ${chosen.length === 1 ? 'item' : 'items'}`}
+			</button>
+		{/if}
 	</div>
 {:else if step === 'result' && result}
 	<div class="st-xh">Result</div>
