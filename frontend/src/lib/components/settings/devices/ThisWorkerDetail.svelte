@@ -183,7 +183,7 @@
 				<TextField
 					bind:value={join.endpoint}
 					mono
-					width={160}
+					width={184}
 					placeholder="http://10.0.0.5:8000"
 					label="Worker address"
 				/>

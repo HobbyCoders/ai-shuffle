@@ -52,7 +52,7 @@
 	{name}
 	icon={ShieldQuestion}
 	status={tone}
-	statusText={pending && expired ? 'Key expired' : requestStatusText(device)}
+	statusText={pending ? (expired ? 'Key expired' : 'Awaiting your approval') : requestStatusText(device)}
 	badge="Access request"
 	subtitle={pending ? 'Wants to be approved' : undefined}
 	category="devices"
