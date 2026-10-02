@@ -538,3 +538,37 @@ export function sessionModeOf(s: Session): SessionMode {
 export function isArchived(s: Session): boolean {
 	return s.status === 'archived';
 }
+
+/** A sidebar row action. */
+export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
+
+/**
+ * The actions a row offers, in rail order. The LAST one sits at the trailing
+ * edge and is what a long swipe commits: Settle for an Active row, Archive
+ * for a settled one (Settled is where the list gets tidied), Restore for an
+ * archived one.
+ */
+export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
+	if (isArchived(s as Session)) return ['restore'];
+	if (s.is_active) return ['settle'];
+	return ['activate', 'archive'];
+}
+
+/**
+ * Whether a session is waiting on the user right now (a permission or
+ * question prompt). A remote session's owner state wins over the local
+ * attention map, matching `deriveStatus`. Archived rows never count.
+ */
+export function sessionNeedsYou(
+	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
+	attention: { count: number } | null | undefined
+): boolean {
+	if (isArchived(s as Session)) return false;
+	if (s.is_remote) return s.remote_runtime_state === 'permission' || s.remote_runtime_state === 'question';
+	return !!attention && attention.count > 0;
+}
+
+/** The tab title with the number of sessions waiting on the user in front. */
+export function attentionTitle(base: string, count: number): string {
+	return count > 0 ? `(${count}) ${base}` : base;
+}

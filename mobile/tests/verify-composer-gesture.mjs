@@ -9,7 +9,7 @@ const browser = await chromium.launch({
 	headless: true,
 	args: ['--no-sandbox', '--disable-gpu']
 });
-const baseUrl = process.env.COMPOSER_FIXTURE_URL || 'http://127.0.0.1:5181/assets/mobile-ui/tests/composer-gesture.html';
+const baseUrl = process.env.COMPOSER_FIXTURE_URL || 'http://127.0.0.1:5181/mobile/tests/composer-gesture.html';
 const artifacts = process.env.COMPOSER_ARTIFACTS || '/tmp/composer-gesture-artifacts';
 await mkdir(artifacts, { recursive: true });
 

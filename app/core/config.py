@@ -299,13 +299,14 @@ class Settings(BaseSettings):
     # Security - CORS (comma-separated origins, or "*" for development only)
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
 
-    # The Android app ships its own build of the mobile UI and loads it from
-    # this origin (WebViewAssetLoader). It talks to a worker only through the
-    # HTTP/WebSocket APIs, authenticated with a Bearer paired-session token, so
-    # this origin is always allowed for CORS regardless of `cors_origins`.
+    # Android apps from before /mobile/ (app/mobile_ui.py) ship their own build
+    # of the mobile UI and load it from this origin (WebViewAssetLoader). They
+    # talk to a worker only through the HTTP/WebSocket APIs, authenticated with
+    # a Bearer paired-session token, so this origin stays allowed for CORS
+    # regardless of `cors_origins` while such builds are installed.
     mobile_app_origin: str = "https://appassets.androidplatform.net"
-    # The iOS app does the same from its own URL scheme (WKURLSchemeHandler in
-    # ios/AIShuffle/Web/BundleSchemeHandler.swift), under the same rules.
+    # iOS builds from before /mobile/ did the same from their own URL scheme
+    # (a WKURLSchemeHandler), under the same rules.
     mobile_ios_app_origin: str = "aishuffle://app"
 
     # Security - Cookie settings

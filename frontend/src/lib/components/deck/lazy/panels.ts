@@ -30,6 +30,9 @@ export const AutomationsPanel = createLazyComponent('automations', () =>
 export const StatsPanel = createLazyComponent('stats', () =>
 	import('$lib/components/deck/cards/StatsCard.svelte')
 );
+export const PrInboxPanel = createLazyComponent('prs', () =>
+	import('$lib/components/deck/cards/PrInboxCard.svelte')
+);
 export const BuildPanel = createLazyComponent('build', () =>
 	import('$lib/components/layout/BuildPage.svelte')
 );
@@ -67,6 +70,7 @@ export type FeaturePanelKey =
 	| 'file-browser'
 	| 'notes'
 	| 'automations'
+	| 'prs'
 	| 'stats'
 	| 'docs';
 
@@ -85,6 +89,7 @@ const PANEL_BY_KEY: Record<FeaturePanelKey, LazyComponentHandle<unknown>> = {
 	'file-browser': FileBrowserPanel,
 	notes: NotesPanel,
 	automations: AutomationsPanel,
+	prs: PrInboxPanel,
 	stats: StatsPanel,
 	docs: DocsPanel
 };
@@ -121,5 +126,6 @@ export const IDLE_PRELOAD_ORDER: readonly LazyComponentHandle<unknown>[] = [
 	NotesPanel,
 	FileBrowserPanel,
 	StatsPanel,
-	AutomationsPanel
+	AutomationsPanel,
+	PrInboxPanel
 ];

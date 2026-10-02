@@ -2,31 +2,27 @@ import Foundation
 
 /// What the chat WebView may load and which native capabilities its document may use.
 /// Same rules as Android's ChatActivity, ChatAccessPolicy and ChatDownloadPolicy:
-/// the document is only ever the bundled UI, and the network is only the paired worker.
+/// the document is only ever the paired worker's phone UI (`/mobile/`), and the network is
+/// only that worker.
 enum ChatPolicy {
     static let maxURLLength = 8192
 
     enum Navigation: Equatable {
-        /// An in-app route of the bundled UI.
+        /// An in-app route of the phone UI.
         case allow
         case cancel
-        /// A worker link (or an old `/api` link resolved against the bundle). It never
-        /// navigates the chat document; Android saves it through the system file picker.
+        /// Any other worker URL (a file, an API response, the desktop UI). It never navigates
+        /// the chat document; Android saves it through the system file picker.
         case workerFile(URL)
         /// A user-tapped HTTPS link, opened outside the app after confirmation, with no credential.
         case openExternally(URL)
     }
 
-    /// Worker URL for `url`: a URL on the worker's own origin, or a bundle-origin `/api/` path
-    /// that old markdown stores and the browser resolves against the bundle.
+    /// Worker URL for `url`: a URL on the worker's own origin. The page is on that origin, so a
+    /// relative `/api/` link in old markdown already resolves here.
     static func workerURL(base: String, url: URL) -> URL? {
         let value = url.absoluteString
-        if value.count <= maxURLLength, PairingInput.sameOrigin(base, value) { return url }
-        guard MobileUI.isAssetOrigin(url), let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.percentEncodedPath.hasPrefix("/api/"), let origin = try? PairingInput.origin(base) else { return nil }
-        let resolved = origin + parts.percentEncodedPath + (parts.percentEncodedQuery.map { "?\($0)" } ?? "")
-        guard resolved.count <= maxURLLength, PairingInput.sameOrigin(base, resolved) else { return nil }
-        return URL(string: resolved)
+        return value.count <= maxURLLength && PairingInput.sameOrigin(base, value) ? url : nil
     }
 
     /// How WebKit says a navigation started.
@@ -45,26 +41,28 @@ enum ChatPolicy {
     /// WebKit has no public gesture flag. Link taps carry `.linkActivated`. `window.open` reaches
     /// `createWebViewWith` only from a user gesture, because `javaScriptCanOpenWindowsAutomatically`
     /// is off. A script `location` change is reported as `.other` with no gesture information,
-    /// so it counts only when the bundled UI's own main frame made it: HTML previews are
+    /// so it counts only when the phone UI's own main frame made it: HTML previews are
     /// sandboxed frames without top navigation or popups, and the user still confirms every
     /// external link before it opens.
-    static func userInitiated(_ trigger: Trigger, fromBundleMainFrame: Bool) -> Bool {
+    static func userInitiated(_ trigger: Trigger, fromUiMainFrame: Bool) -> Bool {
         switch trigger {
         case .linkTap: return true
-        case .script, .newWindow: return fromBundleMainFrame
+        case .script, .newWindow: return fromUiMainFrame
         case .other: return false
         }
     }
 
-    /// A WebKit security origin that is exactly the bundle's `aishuffle://app`.
-    static func isBundleOrigin(scheme: String, host: String, port: Int) -> Bool {
-        scheme.lowercased() == MobileUI.scheme && host.lowercased() == MobileUI.host && port == 0
+    /// A WebKit security origin (port 0 for the scheme default) that is exactly the paired worker.
+    static func isWorkerOrigin(base: String, scheme: String, host: String, port: Int) -> Bool {
+        guard !scheme.isEmpty, !host.isEmpty, port >= 0 else { return false }
+        let bracketed = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return PairingInput.sameOrigin(base, "\(scheme)://\(bracketed)" + (port == 0 ? "" : ":\(port)") + "/")
     }
 
     static func navigation(base: String, url: URL?, mainFrame: Bool, userInitiated: Bool) -> Navigation {
         guard let url else { return .cancel }
+        if MobileUI.isUiURL(base: base, url: url) { return .allow }
         if let worker = workerURL(base: base, url: url) { return .workerFile(worker) }
-        if MobileUI.isAssetOrigin(url) { return .allow }
         // Chat HTML previews render in a sandboxed srcdoc frame (frontend HtmlPreview.svelte).
         // Android's shouldOverrideUrlLoading never sees that load; WebKit asks, so allow it for frames only.
         if !mainFrame, url.absoluteString == "about:srcdoc" { return .allow }
@@ -72,26 +70,25 @@ enum ChatPolicy {
         return .cancel
     }
 
-    /// Whether the document on screen is the bundled UI and the chat is still authorized.
-    static func document(topLevel: URL?, authorized: Bool) -> Bool {
-        authorized && MobileUI.isAssetOrigin(topLevel)
+    /// Whether the document on screen is the worker's phone UI and the chat is still authorized.
+    static func document(base: String, topLevel: URL?, authorized: Bool) -> Bool {
+        authorized && MobileUI.isUiURL(base: base, url: topLevel)
     }
 
-    /// The microphone goes only to the bundled UI's own origin, never to a frame or another document.
-    static func microphone(topLevel: URL?, requestScheme: String, requestHost: String, requestPort: Int,
+    /// The microphone goes only to the phone UI's own main frame, never to a frame or another document.
+    static func microphone(base: String, topLevel: URL?, requestScheme: String, requestHost: String, requestPort: Int,
                            mainFrame: Bool, microphoneOnly: Bool, authorized: Bool) -> Bool {
-        document(topLevel: topLevel, authorized: authorized) && mainFrame && microphoneOnly &&
-            isBundleOrigin(scheme: requestScheme, host: requestHost, port: requestPort)
+        document(base: base, topLevel: topLevel, authorized: authorized) && mainFrame && microphoneOnly &&
+            isWorkerOrigin(base: base, scheme: requestScheme, host: requestHost, port: requestPort)
     }
 
-    /// WebKit content rules: block every load except the bundle, the paired worker's HTTPS and
+    /// WebKit content rules: block every load except the paired worker's HTTPS and
     /// WebSocket origin, and in-memory `data:`/`blob:` URLs. This is the iOS form of Android's
     /// `shouldInterceptRequest` allowlist; WKWebView cannot intercept https loads itself.
     static func contentRules(base: String) throws -> String {
         let origin = try PairingInput.origin(base)
         let hostAndPort = String(origin.dropFirst("https://".count))
         let allowed = [
-            "^" + escape(MobileUI.origin) + "/",
             "^https://" + escape(hostAndPort) + "/",
             "^wss://" + escape(hostAndPort) + "/",
             "^data:",

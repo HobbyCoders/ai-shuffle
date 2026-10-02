@@ -24,6 +24,10 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { promptStash, type StashedPrompt } from '$lib/stores/session/prompt-stash';
+	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
+	import { pastedTextFile } from './tiptap/large-paste';
+	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
 	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
@@ -32,7 +36,7 @@
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
-	import { evaluateSubmitGuards } from './submit-guards';
+	import { evaluateSubmitGuards, sendButtonState } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
@@ -210,6 +214,16 @@
 	});
 
 	let isUploading = $state(false);
+	let isRecording = $state(false);
+	let isTranscribing = $state(false);
+	const sendState = $derived(sendButtonState({
+		hasContent: hasMessageContent,
+		hasCredential: $anyCredential,
+		isUploading,
+		isRecording,
+		isTranscribing,
+		autoBranch: $activeSession.worktreeIntent === 'worktree' && !$activeSession.worktreeId
+	}));
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
 
@@ -260,6 +274,8 @@
 				writeDraft(prevSessionId, leavingDraft);
 			}
 			prevSessionId = newSessionId;
+			recall.reset();
+			stashOpen = false;
 			// Prefer the in-memory draft; fall back to the sessionStorage mirror
 			// (populated across reloads) when the cache has nothing.
 			const newDraft = $activeSession.draft || readDraft(newSessionId) || '';
@@ -272,10 +288,11 @@
 
 	// Restore a removed user prompt back into the editor so the user can edit or
 	// resend it. Set by the backend's `user_message_discarded` event when a turn
-	// is stopped before any assistant output, and by a successful rewind that
-	// truncated away the target user message. Only fill an EMPTY editor so we
-	// never clobber text the user has already started typing; either way clear
-	// the pending prompt so it fires exactly once.
+	// is stopped before any assistant output, by a successful rewind that
+	// truncated away the target user message, and by unsending a pending
+	// message. An empty editor takes the prompt as is; text the user already
+	// typed is kept and the prompt goes in front of it, so neither is lost.
+	// Either way clear the pending prompt so it fires exactly once.
 	$effect(() => {
 		const pending = $activeSession.pendingRestorePrompt;
 		if (!ownsComposer()) return;
@@ -285,16 +302,138 @@
 			inputValue = pending;
 			plainTextValue = pending;
 			editorRef?.setContent(pending);
-			tick().then(() => editorRef?.focus());
+		} else {
+			setComposerDraft(joinDrafts(textDoc(pending), getDraftJSON()));
 		}
+		recall.reset();
+		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
 	});
 
+	/** Plain text as a composer document, one paragraph per line. */
+	function textDoc(text: string): string {
+		return JSON.stringify({
+			type: 'doc',
+			content: text.split('\n').map(line => ({
+				type: 'paragraph',
+				...(line ? { content: [{ type: 'text', text: line }] } : {})
+			}))
+		});
+	}
+
+	/** Replace the composer's content and persist it at once. */
+	function setComposerDraft(draft: string) {
+		editorRef?.setContent(draft);
+		inputValue = editorRef?.getMessage() ?? draft;
+		plainTextValue = editorRef?.getText() ?? '';
+		saveDraftImmediately(draft);
+	}
+
+	// ── Prompt recall (ArrowUp in an empty composer) ──────────────────────────
+	const recall = createPromptRecall();
+
+	function composerIsEmpty(): boolean {
+		return !hasComposerDraft(getDraftJSON()) && uploadedFiles.length === 0;
+	}
+
+	/** Step through earlier prompts; true when the key was used. */
+	function recallPrompt(direction: 'up' | 'down'): boolean {
+		const history = promptHistory(get(activeSession).messages);
+		const step = recall.step(direction, history, composerIsEmpty());
+		if (!step) return false;
+		if (step.text) editorRef?.setPlainText(step.text);
+		else editorRef?.clear();
+		inputValue = editorRef?.getMessage() ?? step.text;
+		plainTextValue = editorRef?.getText() ?? step.text;
+		editorRef?.getEditor()?.commands.focus('end');
+		return true;
+	}
+
+	// ── Prompt stash (Ctrl/Cmd+S) ─────────────────────────────────────────────
+	let stashOpen = $state(false);
+
+	function offerUndo(message: string, undo: () => void) {
+		const id = notify.banner(message, {
+			severity: 'info',
+			persist: false,
+			duration_ms: 6000,
+			action: { label: 'Undo', onClick: () => { notify.dismissLive(id); undo(); } }
+		});
+	}
+
+	/** Set the composer's draft aside. With nothing to stash, open the list. */
+	function stashDraft() {
+		const draft = getDraftJSON();
+		if (!hasComposerDraft(draft)) {
+			if ($promptStash.length) stashOpen = !stashOpen;
+			else notify('Nothing to stash — type a prompt, then press Ctrl+S.', { severity: 'info' });
+			return;
+		}
+		const entry = promptStash.push(draft);
+		if (!entry) return;
+		setComposerDraft('');
+		recall.reset();
+		composerSuggestion.invalidate();
+		offerUndo('Prompt stashed', () => {
+			const back = promptStash.take(entry.id);
+			if (back) restoreEntry(back);
+		});
+	}
+
+	/** Put a stashed prompt in the composer, stashing whatever is there first. */
+	function restoreEntry(entry: StashedPrompt) {
+		const current = getDraftJSON();
+		const swapped = hasComposerDraft(current) ? promptStash.push(current) : null;
+		setComposerDraft(entry.draft);
+		recall.reset();
+		stashOpen = false;
+		tick().then(() => editorRef?.getEditor()?.commands.focus('end'));
+		if (swapped) notify('Your previous draft was stashed.', { severity: 'info' });
+	}
+
+	function restoreStashed(id: string) {
+		const entry = promptStash.take(id);
+		if (entry) restoreEntry(entry);
+	}
+
+	function deleteStashed(id: string) {
+		const entry = promptStash.take(id);
+		if (entry) offerUndo('Stashed prompt deleted', () => promptStash.putBack(entry));
+	}
+
+	// ── Large paste → text attachment ─────────────────────────────────────────
+	/** Take a large paste as a .txt attachment; false keeps it inline. */
+	function handleLargePaste(text: string): boolean {
+		if (!attachSupported || !$anyCredential || isUploading) return false;
+		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)) return false;
+		const file = pastedTextFile(text);
+		isUploading = true;
+		uploadComposerFile(file)
+			.then(result => {
+				editorRef?.insertFileChip({
+					path: result.path,
+					filename: result.filename,
+					fullPath: result.full_path,
+					size: result.size,
+					type: 'file'
+				});
+				inputValue = editorRef?.getMessage() ?? '';
+			})
+			.catch((error: unknown) => {
+				// Never lose the paste: fall back to inline.
+				editorRef?.insertPlainText(text);
+				inputValue = editorRef?.getMessage() ?? '';
+				const err = error as { detail?: string };
+				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
+			})
+			.finally(() => { isUploading = false; });
+		return true;
+	}
+
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 
-	// Voice recording state (bindable from VoiceRecorder)
-	let isRecording = $state(false);
-	let isTranscribing = $state(false);
+	// Voice recording state (bindable from VoiceRecorder) is declared with
+	// isUploading above, since the send button's state reads all three.
 
 	// Error display — shared between file upload errors and voice recording errors
 	let errorMessage = $state('');
@@ -669,6 +808,7 @@
 
 		inputValue = '';
 		uploadedFiles = [];
+		recall.reset();
 
 		// Clear editor content
 		editorRef?.clear();
@@ -754,6 +894,13 @@
 
 	// Handle keydown for textarea
 	function handleKeyDown(e: KeyboardEvent) {
+		// Ctrl/Cmd+S stashes the draft. Only while the composer has focus: the
+		// browser's own Save keeps working everywhere else.
+		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's' && !e.isComposing) {
+			e.preventDefault();
+			if (!e.repeat) stashDraft();
+			return true;
+		}
 		// Never turn an IME confirmation, held key, or modifier shortcut into Send.
 		if (e.isComposing || e.keyCode === 229 || e.repeat || e.ctrlKey || e.altKey || e.metaKey) return;
 		if (ghostReply) {
@@ -776,6 +923,15 @@
 		if (fileAutocompleteRef && showFileAutocomplete) {
 			const handled = fileAutocompleteRef.handleKeyDown(e, editorRef?.getText() ?? plainTextValue);
 			if (handled) return;
+		}
+
+		// ArrowUp in an empty composer recalls earlier prompts; ArrowDown steps
+		// back toward the empty composer. Editing a recalled prompt ends recall.
+		if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && (recall.active || e.key === 'ArrowUp')) {
+			if (recallPrompt(e.key === 'ArrowUp' ? 'up' : 'down')) {
+				e.preventDefault();
+				return true;
+			}
 		}
 
 		// Check for mobile device
@@ -1148,8 +1304,9 @@
 								plainTextValue = editorRef?.getText() ?? '';
 								handleInputChange();
 							}}
-							onUserInput={() => composerSuggestion.invalidate()}
+							onUserInput={() => { composerSuggestion.invalidate(); recall.reset(); }}
 							onKeyDown={handleKeyDown}
+							onLargePaste={handleLargePaste}
 							onFocusChange={(focused) => {
 								composerFocused = focused;
 								if (focused) keepMobileComposerExpanded();
@@ -1162,6 +1319,13 @@
 					     including with a draft. Send can queue that draft independently.
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
+						<PromptStashMenu
+							entries={$promptStash}
+							open={stashOpen}
+							onOpenChange={(open) => { stashOpen = open; }}
+							onRestore={restoreStashed}
+							onDelete={deleteStashed}
+						/>
 						{#if $activeSession.isCreatingWorktree || heldForCatalog}
 							<!-- Creating worktree, or a send held for the project catalog - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
@@ -1172,7 +1336,7 @@
 							</button>
 						{:else if stoppableWork}
 							{#if hasMessageContent}
-								<button type="submit" class="send-btn" disabled={!$anyCredential || isUploading || isRecording || isTranscribing} title="Send — Enter" aria-label="Send">
+								<button type="submit" class="send-btn" disabled={sendState.disabled} title={sendState.disabled ? sendState.title : 'Send — Enter'} aria-label="Send">
 									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
 								</button>
 							{/if}
@@ -1184,8 +1348,8 @@
 							<button
 								type="submit"
 								class="send-btn"
-								disabled={!hasMessageContent || !$anyCredential || isUploading || isRecording || isTranscribing}
-								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+								disabled={sendState.disabled}
+								title={sendState.title}
 								aria-label="Send"
 							>
 								<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />

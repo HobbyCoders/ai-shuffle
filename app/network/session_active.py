@@ -67,11 +67,12 @@ async def set_shared(session_id: str, active: bool) -> dict:
     row = await run_sync(write_shared, session_id, active)
     if row is None:
         raise LookupError("Unknown session")
-    await _broadcast(row, session_id, active)
+    await _broadcast(row, session_id)
     return row
 
 
-def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict, Optional[dict]]:
+def _write(session_id: str, active: bool, *, archived: Optional[bool] = None,
+           local: bool = False) -> tuple[dict, Optional[dict]]:
     """Change membership on the owner; ``local`` marks an edit from this worker's own UI.
 
     A peer needs the signed envelope to update its mirror, so a remote edit
@@ -92,9 +93,11 @@ def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict,
             raise PermissionError("This worker does not own the session")
         # Older peers still ask the execution owner. Write the shared record
         # too so their edits participate in the same conflict order.
+        active = False if archived else active
         _record_active(cur, session_id, active)
-        cur.execute("UPDATE sessions SET is_active=%s, updated_at=%s WHERE id=%s RETURNING *",
-                    (active, datetime.now(timezone.utc).isoformat(), session_id))
+        status_sql, status_params = database.archive_status_sql(archived, "%s")
+        cur.execute(f"UPDATE sessions SET is_active=%s, updated_at=%s{status_sql} WHERE id=%s RETURNING *",
+                    (active, datetime.now(timezone.utc).isoformat(), *status_params, session_id))
         row = dict(cur.fetchone())
         envelope = engine.record(cur, "sessions", session_id, row, force=True)
         if envelope is None and not local:
@@ -109,33 +112,37 @@ def _write(session_id: str, active: bool, *, local: bool = False) -> tuple[dict,
 
 async def handle(body: dict, from_device: str) -> dict:
     session_id, active = body.get("session_id"), body.get("is_active")
+    archived = body.get("archived")
     if not isinstance(session_id, str) or not session_id or not isinstance(active, bool):
         raise ValueError("session_id and boolean is_active are required")
+    if archived is not None and not isinstance(archived, bool):
+        raise ValueError("archived must be a boolean when given")
     view = body.get("owner_watermarks")
     if engine.outbox_held() and isinstance(view, dict):
         # Startup sync: our outbox is held until a peer has compared streams
         # with us. The asking peer's view of our stream is that comparison
         # (#1621); without it the request is refused below as before.
         await run_sync(transport.release_hold_for_peer_view, from_device, view)
-    row, envelope = await run_sync(_write, session_id, active)
-    await _broadcast(row, session_id, active)
+    row, envelope = await run_sync(lambda: _write(session_id, active, archived=archived))
+    await _broadcast(row, session_id)
     # Only the signed catalog representation crosses the worker boundary.
     return {"envelope": envelope}
 
 
-async def set_local(session_id: str, active: bool) -> dict:
-    """Settle or reopen a session this worker owns, for its own UI."""
-    row, _envelope = await run_sync(_write, session_id, active, local=True)
-    await _broadcast(row, session_id, active)
+async def set_local(session_id: str, active: bool, archived: Optional[bool] = None) -> dict:
+    """Settle, reopen, archive or restore a session this worker owns, for its own UI."""
+    row, _envelope = await run_sync(lambda: _write(session_id, active, archived=archived, local=True))
+    await _broadcast(row, session_id)
     return row
 
 
-async def _broadcast(row: dict, session_id: str, active: bool) -> None:
+async def _broadcast(row: dict, session_id: str) -> None:
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_user_session_updated(
             user_id=row.get("api_user_id") or "admin", session_id=session_id,
-            updates={"is_active": active}, source_device_id=None,
+            updates={"is_active": bool(row.get("is_active")), "status": row.get("status")},
+            source_device_id=None,
         )
     except Exception:  # durable update already committed
         logger.warning("Could not broadcast settlement for %s", session_id, exc_info=True)
@@ -161,14 +168,17 @@ def _view_of(owner: str) -> dict:
     return store.local_watermarks().get(owner) or {}
 
 
-async def set_remote(owner: str, session_id: str, active: bool) -> dict:
+async def set_remote(owner: str, session_id: str, active: bool, archived: Optional[bool] = None) -> dict:
     try:
-        response = await control.call(owner, "session-active", {
+        payload = {
             "session_id": session_id, "is_active": active,
             # Lets an owner whose outbox is still held after a restart compare
             # streams with us and sign the change (owners before #1621 ignore it).
             "owner_watermarks": await run_sync(_view_of, owner),
-        })
+        }
+        if archived is not None:
+            payload["archived"] = archived
+        response = await control.call(owner, "session-active", payload)
     except control.RunnerUnreachable as exc:
         # The transport reason ("PeerError: HTTP 530") says nothing to the
         # person settling the session; name the worker they need back online.

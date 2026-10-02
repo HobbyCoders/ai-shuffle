@@ -717,16 +717,29 @@ async def test_turn_start_revives_on_a_server_originated_wake(mock_db):
     assert _status_of(sid) == "active"
 
 
-async def test_turn_start_leaves_a_non_failed_status_alone(mock_db):
-    """Archived is not a run verdict — the revive must not touch it."""
+async def test_server_wake_leaves_an_archived_session_archived(mock_db):
+    """Archived is not a run verdict — a server-originated wake must not undo it."""
     sid = "s4archived"
+    _seed_session(sid, "archived")
+    turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
+
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    assert _status_of(sid) == "archived"
+
+
+async def test_user_turn_brings_an_archived_session_back(mock_db):
+    """The user talking to an archived session again is the one thing that
+    brings it back into the history."""
+    sid = "s4archiveduser"
     _seed_session(sid, "archived")
     turn = turns_db.enqueue_turn(sid, "user", prompt="hi")
 
     with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         await session_runtime.SessionRuntime(turn).execute()
 
-    assert _status_of(sid) == "archived"
+    assert _status_of(sid) == "active"
 
 
 async def test_queued_turn_that_never_starts_does_not_revive(mock_db):

@@ -47,6 +47,9 @@ class BatchDeleteRequest(BaseModel):
 class SessionActiveUpdate(BaseModel):
     """Request body for setting a session's active status"""
     is_active: bool
+    #: True archives the session (it also leaves Active); False restores an
+    #: archived session to the history. None leaves the archive state alone.
+    archived: Optional[bool] = None
 
 
 class SessionImportResponse(BaseModel):

@@ -1606,20 +1606,38 @@ def _cleanup_working_set_ref(session_id: str) -> None:
         )
 
 
-def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]:
-    """Set sidebar membership, sharing it independently of execution ownership."""
+def set_session_active(
+    session_id: str, is_active: bool, archived: Optional[bool] = None
+) -> Optional[SessionRow]:
+    """Set the is_active flag (and optionally the archive state) for a session
+    and return the updated session. Archiving always leaves Active; restoring
+    only touches a row that is actually archived.
+
+    On a networked worker a plain membership change is shared sidebar state,
+    committed independently of execution ownership."""
     from app.network import engine, session_active
-    if engine.context() is not None:
+    if archived is None and engine.context() is not None:
         return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
+        status_sql, params = archive_status_sql(archived, _ph)
         cursor.execute(
-            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}
+            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}{status_sql}
                WHERE id = {_ph} RETURNING *""",
-            (is_active, datetime.now(timezone.utc).isoformat(), session_id)
+            (False if archived else is_active, datetime.now(timezone.utc).isoformat(), *params, session_id)
         )
         return row_to_dict(cursor.fetchone())
+
+
+def archive_status_sql(archived: Optional[bool], placeholder: str) -> tuple[str, tuple]:
+    """The ``status`` assignment for an archive change, as SQL plus params."""
+    if archived is None:
+        return "", ()
+    if archived:
+        return f", status = {placeholder}", ("archived",)
+    return (f", status = CASE WHEN status = {placeholder} THEN {placeholder} ELSE status END",
+            ("archived", "active"))
 
 
 def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:

@@ -21,7 +21,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.ScriptHandler
-import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -48,26 +47,32 @@ import com.google.android.material.button.MaterialButton
 import java.io.ByteArrayInputStream
 
 /**
- * The chat screen: the app's own build of the mobile UI (see MobileUi) in a
- * WebView that may load nothing but that bundle and may talk to nothing but
- * the paired worker's HTTP/WebSocket API. The worker never serves a document
- * here — a worker on any version cannot change what this phone shows.
+ * The chat screen: the paired worker's phone UI (`https://<worker>/mobile/`,
+ * see MobileUi) in a WebView that may show no other document and may talk to
+ * nothing but that worker. The UI ships with the worker, so UI changes never
+ * need a new APK; this activity owns only the native side.
  *
- * Native capabilities are restricted to the bundle's asset origin; no
- * JavascriptInterface. The paired session is handed to the page as a Bearer
- * token through a document-start script, never as a cookie. Voice calls are
- * the page's own (the same as the website); the shell only grants the
- * microphone to that origin.
+ * Native capabilities are restricted to the top-level phone UI page on the
+ * paired worker; no JavascriptInterface. The paired session is handed to the
+ * page as a Bearer token through a document-start script, never as a cookie.
+ * Voice calls are the page's own (the same as the website); the shell only
+ * grants the microphone to that page.
  */
 class ChatActivity : NativeScreen() {
     private lateinit var server: Server
     private lateinit var web: WebView
-    private lateinit var assetLoader: WebViewAssetLoader
     private var bootstrap: ScriptHandler? = null
     @Volatile private var sessionToken: String? = null
     @Volatile private var workerDocumentAllowed = false
     private val workerAssets = WorkerAssetLoader()
     private var assetFailure: String? = null
+    /**
+     * Why the phone UI page itself failed to load (old worker, HTTP error), shown
+     * instead of the page. Cleared only when this activity starts a new load:
+     * WebView may report the error before or after onPageStarted.
+     */
+    private var pageFailure: String? = null
+    private var pageLoads = 0
     private var sessionJob: Job? = null
     private var sessionAttempt = 0
     private lateinit var sessionOwner: ChatSessionOwner
@@ -121,20 +126,16 @@ class ChatActivity : NativeScreen() {
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
             mediaPlaybackRequiresUserGesture = true
-            // Diagnostics only: the shell is the bundle's, not chosen from the user agent.
+            // Diagnostics only: the worker serves /mobile/ by path, not by user agent.
             userAgentString = WebUserAgent.decorate(userAgentString, appVersionName())
         }
         chatLayout()
-        // The bundled UI: assets/mobile-ui/ at https://appassets.androidplatform.net/assets/mobile-ui/.
-        assetLoader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
-            .build()
         downloads = ChatDownloads(this, web, server, ::authorized, { sessionToken }) { status.text = it }
         downloads.install()
-        // The page's own origin never gets a cookie. A Cloudflare Access worker is
-        // the one exception: its CF cookie (installed below with SameSite=None) must
-        // ride the page's cross-origin API calls, which the WebView counts as third-party.
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, server.hasCfAccess)
+        // The page is the worker's own origin and authenticates with the Bearer token;
+        // no third-party cookies. A Cloudflare Access worker's CF cookie (installed below)
+        // is first-party here and rides the page load and its API calls.
+        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
         web.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(message: ConsoleMessage?) = true
             override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
@@ -163,15 +164,15 @@ class ChatActivity : NativeScreen() {
         }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                // Worker links (including old /api attachment links) save through SAF, never
+                // The phone UI's own routes are the only navigation the page may perform.
+                if (MobileUi.isUiUrl(server.baseUrl, request.url.toString())) return false
+                // Other worker links (attachments, /api files) save through SAF, never
                 // navigate the privileged document or open an unauthenticated browser tab.
                 val asset = WorkerAssetLoader.workerUrl(server.baseUrl, request.url.toString())
                 if (asset != null) {
                     if (request.isForMainFrame && request.hasGesture()) downloads.fromUrl(asset, null, null, null, -1)
                     return true
                 }
-                // The bundle is a single page; its own in-app routes are the only navigation it may perform.
-                if (MobileUi.isAssetOrigin(request.url.toString())) return false
                 if (request.isForMainFrame && request.hasGesture() && request.url.scheme == "https") {
                     confirm("Open outside Shuffle?", "${request.url.host} opens in your browser. No account or server credential will be added.") {
                         runCatching { startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
@@ -182,8 +183,15 @@ class ChatActivity : NativeScreen() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val url = request.url
                 return when {
+                    // The phone UI page and its hashed assets: public files the worker serves,
+                    // loaded normally so they cache like any site's.
+                    MobileUi.isUiUrl(server.baseUrl, url.toString()) ->
+                        if (request.method == "GET" || request.method == "HEAD") uiFixture?.invoke(request) else blocked("Blocked")
                     WorkerAssetLoader.workerUrl(server.baseUrl, url.toString()) != null -> {
-                        if (request.isForMainFrame) blocked("Chat opens from the app, not from the worker.")
+                        if (request.isForMainFrame) blocked("Chat opens the phone UI, not other worker pages.")
+                        // The engine's automatic icon probe: not a page load, so never proxy it
+                        // (a miss would surface as "This file could not be loaded").
+                        else if (url.path == "/favicon.ico") blocked("No icon")
                         // Explicitly authenticated fetch/SSE keep their existing API/CORS path.
                         // Element loads have no Authorization header and need the native stream.
                         else if (PairingInput.sameOrigin(server.baseUrl, url.toString()) &&
@@ -199,23 +207,31 @@ class ChatActivity : NativeScreen() {
                             }
                         }
                     }
-                    MobileUi.isAssetOrigin(url.toString()) -> {
-                        if (request.method != "GET") blocked("Blocked")
-                        else if (MobileUi.isIndexPath(url.path)) index()
-                        else assetLoader.shouldInterceptRequest(url) ?: blocked("This content is blocked.")
-                    }
                     else -> blocked("External content blocked")
                 }
             }
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 document++
-                workerDocumentAllowed = MobileUi.isAssetOrigin(url) && WorkerAssetLoader.workerUrl(server.baseUrl, url) == null
+                workerDocumentAllowed = MobileUi.isUiUrl(server.baseUrl, url)
                 workerAssets.cancel()
                 downloads.navigating()
                 cancelPagePermissions()
-                if (!MobileUi.isAssetOrigin(url)) { view.stopLoading(); return }
+                if (!workerDocumentAllowed) { view.stopLoading(); return }
+                if (pageFailure != null) workerDocumentAllowed = false
             }
-            override fun onPageFinished(view: WebView, url: String) { if (MobileUi.isAssetOrigin(url)) status.text = assetFailure.orEmpty() }
+            override fun onPageFinished(view: WebView, url: String) {
+                if (MobileUi.isUiUrl(server.baseUrl, url)) status.text = pageFailure ?: assetFailure.orEmpty()
+            }
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                // A worker from before the phone UI moved to /mobile/ answers 404 here.
+                if (request.isForMainFrame && MobileUi.isUiUrl(server.baseUrl, request.url.toString()))
+                    pageFailed(view, MobileUi.loadFailure(response.statusCode))
+            }
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                // ERROR_UNKNOWN covers a load we replaced ourselves (Refresh chat); not a failure.
+                if (request.isForMainFrame && error.errorCode != ERROR_UNKNOWN && MobileUi.isUiUrl(server.baseUrl, request.url.toString()))
+                    pageFailed(view, "Chat could not reach ${server.name}. Check the connection, then refresh chat.")
+            }
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
                 handler.cancel(); status.text = "HTTPS verification failed. Fix the server certificate before reconnecting."
             }
@@ -226,11 +242,19 @@ class ChatActivity : NativeScreen() {
             override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
         })
     }
-    /** The bundle root as index.html: the SPA's router treats the base path as `/`. */
-    private fun index(): WebResourceResponse = try {
-        WebResourceResponse("text/html", "UTF-8", 200, "OK", mapOf("Cache-Control" to "no-store"), getAssets().open(MobileUi.INDEX_ASSET))
-    } catch (_: Exception) {
-        blocked("The chat UI is missing from this build of the app. Reinstall Shuffle.")
+    /** Replace a failed phone UI page with a blank document and say why; Refresh chat retries. */
+    private fun pageFailed(view: WebView, message: String) {
+        val load = pageLoads
+        pageFailure = message
+        workerDocumentAllowed = false
+        status.text = message
+        // Only if Refresh chat has not started a newer load meanwhile.
+        view.post { if (!isDestroyed && load == pageLoads) { view.stopLoading(); view.loadUrl("about:blank") } }
+    }
+    private fun loadUi() {
+        pageLoads++
+        pageFailure = null
+        web.loadUrl(MobileUi.indexUrl(server.baseUrl))
     }
     private fun blocked(message: String) = WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(message.toByteArray()))
     private fun appVersionName(): String? =
@@ -286,9 +310,9 @@ class ChatActivity : NativeScreen() {
     }
     private fun authorized() = ::sessionOwner.isInitialized && sessionOwner.current()
     private fun validDocument() = ::web.isInitialized && !isFinishing && !isDestroyed &&
-        ChatAccessPolicy.document(MobileUi.ORIGIN, web.url, authorized())
+        ChatAccessPolicy.document(server.baseUrl, web.url, authorized())
     private fun validMicrophone(request: PermissionRequest) = validDocument() &&
-        ChatAccessPolicy.microphone(MobileUi.ORIGIN, web.url, request.origin.toString(), request.resources, authorized())
+        ChatAccessPolicy.microphone(server.baseUrl, web.url, request.origin.toString(), request.resources, authorized())
     private fun microphoneForeground() = hasWindowFocus() && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
     private fun completeMicrophonePermission() {
         val request = microphone ?: return
@@ -333,8 +357,8 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus && ::web.isInitialized) completeMicrophonePermission() }
-    /** Whether the bundle is on screen (as opposed to nothing / about:blank). */
-    private fun pageLoaded() = MobileUi.isAssetOrigin(web.url)
+    /** Whether the phone UI is on screen (as opposed to nothing / about:blank / a failed load). */
+    private fun pageLoaded() = MobileUi.isUiUrl(server.baseUrl, web.url) && pageFailure == null
     /**
      * Hand the page its runtime: worker origin + Bearer token, installed before
      * any page script runs (document start) and pushed into an already-loaded
@@ -347,8 +371,10 @@ class ChatActivity : NativeScreen() {
         }
         workerAssets.cancel()
         bootstrap?.remove()
+        val capabilities = MobileUi.CAPABILITIES.filter { it != "file-save" || downloads.available }
         bootstrap = WebViewCompat.addDocumentStartJavaScript(web,
-            MobileUi.bootstrapScript(server.baseUrl, token, appVersionName(), android.os.Build.MODEL, server.hasCfAccess), setOf(MobileUi.ORIGIN))
+            MobileUi.bootstrapScript(server.baseUrl, token, appVersionName(), android.os.Build.MODEL, server.hasCfAccess, capabilities),
+            setOf(PairingInput.origin(server.baseUrl)))
         sessionToken = token
         if (pageLoaded()) web.evaluateJavascript(MobileUi.tokenUpdateScript(token), null)
         return true
@@ -366,7 +392,7 @@ class ChatActivity : NativeScreen() {
             assetFailure = null
             status.text = "Opening a secure chat…"
             if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { cookie ->
-                // Cross-site from the bundle's origin, so SameSite=None; still HttpOnly and worker-only.
+                // HttpOnly and worker-only; SameSite=None as Cloudflare Access issues it.
                 val saved = WebSessionBootstrap.installCookie(shared, ::owns) { done ->
                     CookieManager.getInstance().setCookie(server.baseUrl, "$cookie; Path=/; Secure; HttpOnly; SameSite=None", done)
                 }
@@ -381,7 +407,7 @@ class ChatActivity : NativeScreen() {
                     if (!owns() || !WebSessionBootstrap.current(shared)) return@launch
                     if (!installRuntime(result.data)) return@launch
                     needsSession = false
-                    if (reloadOnSession || !pageLoaded()) { reloadOnSession = false; web.loadUrl(MobileUi.INDEX_URL) }
+                    if (reloadOnSession || !pageLoaded()) { reloadOnSession = false; loadUi() }
                     else status.text = ""
                 }
                 is ApiResult.Failure -> {
@@ -446,5 +472,9 @@ class ChatActivity : NativeScreen() {
         if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
         super.onDestroy()
     }
-    companion object { const val EXTRA_SERVER_ID = "server_id" }
+    companion object {
+        const val EXTRA_SERVER_ID = "server_id"
+        /** Instrumentation tests only: answers phone UI requests for a fixture worker that has no network. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var uiFixture: ((WebResourceRequest) -> WebResourceResponse?)? = null
+    }
 }

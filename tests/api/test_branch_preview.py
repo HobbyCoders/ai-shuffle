@@ -26,7 +26,8 @@ def checkout(tmp_path):
     build = root / "frontend" / "build"
     (build / "_app").mkdir(parents=True)
     (build / "icons").mkdir()
-    for name, content in {"index.html": "<title>Branch fixture</title><button>Branch UI</button>", "_app/app.js": "branch bundle", "icons/icon.svg": "<svg/>", "sw.js": "// fixture", "favicon.svg": "<svg/>", "manifest.json": "{}"}.items():
+    (build / "mobile" / "_app").mkdir(parents=True)
+    for name, content in {"index.html": "<title>Branch fixture</title><button>Branch UI</button>", "_app/app.js": "branch bundle", "icons/icon.svg": "<svg/>", "sw.js": "// fixture", "favicon.svg": "<svg/>", "manifest.json": "{}", "mobile/index.html": "Branch phone UI", "mobile/_app/m.js": "branch phone bundle"}.items():
         (build / name).write_text(content, encoding="utf-8")
     preview.stamp_build(root)
     return root
@@ -53,7 +54,7 @@ def test_identity_and_assets_are_the_stamped_branch(app, checkout):
     assert identity == json.loads((checkout / "frontend/build" / preview.MANIFEST).read_text())
     assert identity["branch"] == "preview-fixture"
     assert str(checkout) not in response.text
-    for path, content in (("/plaid-link?oauth_state_id=resume", "Branch UI"), ("/chat/real-session", "Branch UI"), ("/_app/app.js", "branch bundle"), ("/static/index.html", "Branch UI"), ("/icons/icon.svg", "<svg/>"), ("/favicon.svg?filename=../../.git/config", "<svg/>")):
+    for path, content in (("/plaid-link?oauth_state_id=resume", "Branch UI"), ("/chat/real-session", "Branch UI"), ("/_app/app.js", "branch bundle"), ("/static/index.html", "Branch UI"), ("/icons/icon.svg", "<svg/>"), ("/favicon.svg?filename=../../.git/config", "<svg/>"), ("/mobile/chat/real-session", "Branch phone UI"), ("/mobile/_app/m.js", "branch phone bundle")):
         page = c.get(path)
         assert page.status_code == 200
         assert content in page.text
@@ -64,7 +65,7 @@ def test_identity_and_assets_are_the_stamped_branch(app, checkout):
 
 
 @pytest.mark.parametrize("header", ["Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "CF-Connecting-IP", "CF-Ray"])
-@pytest.mark.parametrize("path", ["/api/preview", "/chat", "/_app/app.js", "/static/index.html", "/sw.js"])
+@pytest.mark.parametrize("path", ["/api/preview", "/chat", "/_app/app.js", "/static/index.html", "/sw.js", "/mobile/", "/mobile/_app/m.js"])
 def test_proxy_headers_cannot_borrow_local_owner_auth(app, header, path):
     # Even an empty forwarded header disqualifies transport-derived authority.
     assert client(app).get(path, headers={header: ""}).status_code == 403

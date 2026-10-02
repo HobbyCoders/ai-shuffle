@@ -1096,6 +1096,48 @@ async def discard_changes(
     )
 
 
+async def _switch_to_new_branch_for_commit(
+    request: Request,
+    project_id: str,
+    working_dir: str,
+    name: str,
+    worktree_id: Optional[str],
+    session_id: Optional[str],
+) -> None:
+    """Move a base checkout onto a fresh branch before "Commit on new branch".
+
+    Only the project's base checkout may switch: a worktree, or a session bound
+    to a recorded branch, stays on that branch (switching it would orphan the
+    binding), so those are refused rather than silently committing elsewhere.
+    """
+    if worktree_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This worktree is bound to its branch. Start a new session on a new branch instead.",
+        )
+    if session_id:
+        session = await run_sync(database.get_session, session_id)
+        bound = (session or {}).get("branch") or (session or {}).get("worktree_branch")
+        if bound:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"This session is bound to '{bound}'. Start a new session on a new branch instead.",
+            )
+    ok, error = await run_git(git_service.switch_to_new_branch, working_dir, name)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
+    api_user = get_api_user_from_request(request)
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_branch_changed(
+            user_id=api_user["id"] if api_user else "admin",
+            project_id=project_id,
+            branch_name=name,
+        )
+    except Exception as e:  # noqa: BLE001 — the switch already happened
+        logger.warning(f"Failed to broadcast branch change: {e}")
+
+
 @router.post("/commit", response_model=CommitResponse)
 @session_git_action
 async def create_commit(
@@ -1121,6 +1163,9 @@ async def create_commit(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
+
+    if body.new_branch:
+        await _switch_to_new_branch_for_commit(request, project_id, working_dir, body.new_branch, worktree_id, session_id)
 
     # Stage (optionally) and commit via the shared helper so this endpoint and
     # the Ship-It flow enforce identical staging / "no staged changes" rules.

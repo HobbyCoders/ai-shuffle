@@ -319,8 +319,8 @@ async def get_auth_status(request: Request, response: Response = None):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
-    # The app-bundled UI sends its paired session as a Bearer and omits
-    # cookies. Match require_auth's cookie-first, Bearer-fallback order so a
+    # The phone UI in the Android/iOS apps sends its paired session as a
+    # Bearer and omits cookies. Match require_auth's cookie-first, Bearer-fallback order so a
     # working mobile session is not reported as expired. Only paired sessions
     # qualify here, not mobile enrollment keys or integration API keys.
     api_key = get_api_key(request)

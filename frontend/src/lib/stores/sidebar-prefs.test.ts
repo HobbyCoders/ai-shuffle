@@ -42,7 +42,7 @@ describe('sidebar-prefs defaults', () => {
 	it('splits the shown rows from the ones that fold into More', () => {
 		const { shown, hidden } = splitWorkspaceItems(ALL, sidebarWorkspace.current);
 		expect(shown.map((i) => i.id)).toEqual(['file-browser', 'build', 'project']);
-		expect(hidden.map((i) => i.id)).toEqual(['notes', 'automations', 'stats', 'docs', 'settings']);
+		expect(hidden.map((i) => i.id)).toEqual(['notes', 'automations', 'prs', 'stats', 'docs', 'settings']);
 	});
 
 	it('never surfaces a destination the caller did not offer (admin gating)', () => {
@@ -58,6 +58,7 @@ describe('sidebar-prefs defaults', () => {
 			'notes',
 			'build',
 			'project',
+			'prs',
 			'stats',
 			'docs',
 		]);

@@ -1483,18 +1483,14 @@ class TestArchiveSession:
     """Test POST /api/v1/sessions/{session_id}/archive endpoint."""
 
     def test_archive_session_success(self, client, mock_database, sample_session):
-        """Should archive session."""
+        """Should archive the session through the Active path (it also leaves Active)."""
         mock_database.get_session.return_value = sample_session
-        mock_database.update_session.return_value = {**sample_session, "status": "archived"}
+        mock_database.set_session_active.return_value = {**sample_session, "status": "archived", "is_active": False}
 
         response = client.post("/api/v1/sessions/test-session-id/archive")
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "ok"
-        mock_database.update_session.assert_called_once()
-        call_kwargs = mock_database.update_session.call_args[1]
-        assert call_kwargs["status"] == "archived"
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, True)
 
     def test_archive_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
@@ -1538,7 +1534,7 @@ class TestSetSessionActive:
 
         assert response.status_code == 200
         assert response.json()["is_active"] is False
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
 
     def test_set_active_true_success(self, client, mock_database, sample_session):
         """Should re-activate a session (is_active=True)."""
@@ -1553,7 +1549,23 @@ class TestSetSessionActive:
 
         assert response.status_code == 200
         assert response.json()["is_active"] is True
-        mock_database.set_session_active.assert_called_once_with("test-session-id", True)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", True, None)
+
+    @pytest.mark.parametrize("archived", [True, False])
+    def test_set_active_passes_archive_state(self, client, mock_database, sample_session, archived):
+        """Archive and restore ride the Active PATCH."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.set_session_active.return_value = {
+            **sample_session, "is_active": False, "status": "archived" if archived else "active"}
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False, "archived": archived},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == ("archived" if archived else "active")
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, archived)
 
     def test_set_active_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""

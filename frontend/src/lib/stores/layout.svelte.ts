@@ -27,6 +27,7 @@ export type ViewType =
 	| 'hooks'
 	| 'automations'
 	| 'notes'
+	| 'prs'
 	| 'stats'
 	| 'docs';
 

@@ -141,6 +141,10 @@ def install_preview(app, root: Path | None = None) -> bool:
     for name in ("favicon.svg", "manifest.json"):
         router.add_api_route("/" + name, file_handler(name), methods=["GET"], include_in_schema=False)
     app.include_router(router)
+    # The phone UI the frontend build emits beside the desktop UI, under the same owner check.
+    from app.mobile_ui import install_mobile_ui
+    install_mobile_ui(app, directory / "mobile", headers=headers, dependencies=[Depends(_require_preview_owner)],
+                      files=lambda folder: _PreviewFiles(folder, headers))
     for route, folder in (("/_app", directory / "_app"), ("/icons", directory / "icons"), ("/static", directory)):
         if folder.is_dir():
             app.mount(route, _PreviewFiles(folder, headers))

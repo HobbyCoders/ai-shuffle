@@ -303,7 +303,7 @@ function isImageFile(filename: string): boolean {
 /**
  * Build the URL used to fetch the image thumbnail. On the web UI the endpoint
  * authenticates via the session cookie that is already present on same-origin
- * requests; the bundled mobile UI resolves it against the worker origin.
+ * requests; the phone UI in the apps resolves it against the worker origin.
  */
 function buildThumbnailUrl(fullPath: string): string {
 	return apiUrl(`/api/files/by-path?path=${encodeURIComponent(fullPath)}`);

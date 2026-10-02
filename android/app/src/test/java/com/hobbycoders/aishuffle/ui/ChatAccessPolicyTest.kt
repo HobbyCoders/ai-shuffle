@@ -5,7 +5,7 @@ import org.junit.Test
 
 class ChatAccessPolicyTest {
     private val base = "https://worker.example:8443"
-    private val page = "$base/chat"
+    private val page = "$base/mobile/chat/a"
     @Test fun onlyTopLevelWorkerMessagesCanSaveFiles() {
         assertTrue(ChatAccessPolicy.message(base, page, base, true, true))
         assertFalse(ChatAccessPolicy.message(base, page, base, false, true))
@@ -29,6 +29,9 @@ class ChatAccessPolicyTest {
         assertTrue(ChatAccessPolicy.document(base, page, true))
         assertFalse(ChatAccessPolicy.document(base, page, false))
         assertFalse(ChatAccessPolicy.document(base, "about:blank", true))
-        assertFalse(ChatAccessPolicy.document(base, "https://worker.example.evil:8443/chat", true))
+        assertFalse(ChatAccessPolicy.document(base, "https://worker.example.evil:8443/mobile/chat", true))
+        // Another page on the paired worker (the desktop UI, an API response) gets no capability.
+        assertFalse(ChatAccessPolicy.document(base, "$base/chat", true))
+        assertFalse(ChatAccessPolicy.document(base, "$base/api/v1/auth/status", true))
     }
 }

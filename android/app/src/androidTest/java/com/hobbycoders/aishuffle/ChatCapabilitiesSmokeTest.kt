@@ -34,7 +34,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 
-/** Real WebView loading the bundled UI + native activity callbacks, local intercepted HTTP for the worker API and a test-only SAF destination. */
+/** Real WebView loading the phone UI from the fixture worker (PhoneUiFixture) + native activity callbacks, local intercepted HTTP for the worker API and a test-only SAF destination. */
 @RunWith(AndroidJUnit4::class)
 class ChatCapabilitiesSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -79,15 +79,15 @@ class ChatCapabilitiesSmokeTest {
             override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? =
                 if (intent.action == Intent.ACTION_CREATE_DOCUMENT || intent.action == Intent.ACTION_GET_CONTENT) picker(intent, server) else null
         }
-        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor)
+        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor); PhoneUiFixture.install(context)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 beforeReady(scenario)
-                // The document is the app's own bundle; the worker only answered the session mint.
+                // The document is the worker's /mobile/ phone UI, answered by PhoneUiFixture.
                 var runtimeReady = false
-                waitFor("Bundled UI JavaScript never initialized") {
+                waitFor("Phone UI JavaScript never initialized") {
                     scenario.onActivity {
-                        if (it.hasWindowFocus() && web(it).url == MobileUi.INDEX_URL && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty()) {
+                        if (it.hasWindowFocus() && MobileUi.isUiUrl(server.baseUrl, web(it).url) && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty()) {
                             web(it).evaluateJavascript("document.readyState === 'complete' && typeof window.shuffleMobileSetToken === 'function'") { raw ->
                                 runtimeReady = raw == "true"
                             }
@@ -98,7 +98,7 @@ class ChatCapabilitiesSmokeTest {
                 block(scenario, server)
             }
         } finally {
-            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi)
+            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi); PhoneUiFixture.clear()
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
             context.contentResolver.delete(destination, null, null)
         }
@@ -119,12 +119,12 @@ class ChatCapabilitiesSmokeTest {
     // cold start (not just a WebView warmed by another test). WebView 151 used to
     // throw in ChatDownloads.install before the activity could show its first page.
     @Test fun coldChatStartsWithBootstrapAndNativeBridges() {
-        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, _ ->
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
             var ready = false
             waitFor("First chat document is missing its bootstrap or native bridges") {
                 scenario.onActivity { activity ->
                     web(activity).evaluateJavascript("""
-                        location.origin === '${MobileUi.ORIGIN}' &&
+                        location.origin === '${server.baseUrl}' && location.pathname.startsWith('${MobileUi.PATH}') &&
                         window.__SHUFFLE_MOBILE__?.token === 'fixture-cookie' &&
                         typeof window.shuffleFileSave?.postMessage === 'function'
                     """.trimIndent()) { ready = it == "true" }
@@ -246,7 +246,7 @@ class ChatCapabilitiesSmokeTest {
                 waitFor("Native attachment download was not requested") { seen.drop(before).any { it.url.toString() == expected } }
                 status(scenario, "File saved.")
                 assertEquals("benign attachment", context.contentResolver.openInputStream(destination)!!.bufferedReader().use { it.readText() })
-                scenario.onActivity { assertEquals(MobileUi.INDEX_URL, web(it).url) }
+                scenario.onActivity { assertTrue(MobileUi.isUiUrl(server.baseUrl, web(it).url)) }
             }
             assertTrue(seen.any { it.url.encodedPath.contains("notes/") })
             seen.forEach {
@@ -335,14 +335,14 @@ class ChatCapabilitiesSmokeTest {
         fixture({ _, server -> ServerStore.get(context).remove(server.id); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
             scenario.onActivity { activity ->
                 val view = web(activity); val chrome = requireNotNull(view.webChromeClient)
-                val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                // The phone UI is served by the worker, so the worker origin is the one that may hold the microphone.
+                val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(audio); assertArrayEquals(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE), audio.granted)
                 val outside = Permission(Uri.parse("https://outside.example"), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(outside); assertTrue(outside.denied)
-                // The worker is an API origin, never the document: it cannot hold the microphone either.
-                val worker = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
-                chrome.onPermissionRequest(worker); assertTrue(worker.denied)
-                val mixed = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                val legacy = Permission(Uri.parse("https://appassets.androidplatform.net"), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                chrome.onPermissionRequest(legacy); assertTrue(legacy.denied)
+                val mixed = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
                 chrome.onPermissionRequest(mixed); assertTrue(mixed.denied)
             }
             var delivered = false; var selected: Array<Uri>? = null
@@ -374,12 +374,12 @@ class ChatCapabilitiesSmokeTest {
                 complete.invoke(activity)
             }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity { pending(it, audio); assertNull(audio.granted); assertFalse(audio.denied) }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             waitFor("Pending audio permission was not completed on resume") { audio.granted != null }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val stale = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val stale = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity {
                 pending(it, stale); assertNull(stale.granted)
                 ServerStore.get(context).remove(server.id)

@@ -14,5 +14,5 @@ local.properties
 *.jks.b64
 *.keystore
 
-# Generated: the mobile UI bundle copied from mobile/build by scripts/sync-mobile-ui.sh.
-/app/src/main/assets/mobile-ui/
+# Generated: the offline demo copied from mobile/build by scripts/sync-offline-demo.sh.
+/app/src/main/assets/offline-demo/

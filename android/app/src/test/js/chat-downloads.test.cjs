@@ -1,10 +1,10 @@
 const {test} = require('node:test');
 test('ordinary Notes attachments and relative markdown file links use authenticated native save', async () => {
-  const location = {origin: 'https://appassets.androidplatform.net', href: 'https://appassets.androidplatform.net/assets/mobile-ui/'};
+  const location = {origin: 'https://worker.example', href: 'https://worker.example/mobile/chat/s'};
   const runtime = {apiOrigin: 'https://worker.example', token: 'never-in-the-url'};
   for (const [href, expected] of [
     ['https://worker.example/api/v1/notes/n/attachments/a/download', 'https://worker.example/api/v1/notes/n/attachments/a/download'],
-    ['https://appassets.androidplatform.net/api/files/by-path?path=%2Fwork%2Freport.pdf', 'https://worker.example/api/files/by-path?path=%2Fwork%2Freport.pdf'],
+    ['/api/files/by-path?path=%2Fwork%2Freport.pdf', 'https://worker.example/api/files/by-path?path=%2Fwork%2Freport.pdf'],
     ['https://worker.example/api/generated-images/by-path?path=%2Fwork%2Fimage.png', 'https://worker.example/api/generated-images/by-path?path=%2Fwork%2Fimage.png']
   ]) {
     const f = fixture(undefined, {location, runtime});
@@ -112,20 +112,27 @@ test('empty blob finishes and declared oversize is reported without copying data
   assert.equal(large.messages[0].type, 'error'); assert.equal(large.messages[0].reason, 'size');
 });
 
-test('on the bundled UI, worker URLs from the injected runtime stay native; the asset origin and others do not', async () => {
-  const location = {origin: 'https://appassets.androidplatform.net', href: 'https://appassets.androidplatform.net/assets/mobile-ui/'};
+test('on the worker-served phone UI, worker files stay native and the UI\'s own routes stay navigation', async () => {
+  const location = {origin: 'https://worker.example', href: 'https://worker.example/mobile/'};
   const runtime = {apiOrigin: 'https://worker.example/', token: 'shc_fixture'};
   const f = fixture(undefined, {location, runtime});
   new f.Anchor('https://worker.example/api/v1/workspace/files/download?path=report.pdf', 'report.pdf').click();
   await settled();
   assert.equal(f.messages[0].type, 'url'); assert.equal(f.messages[0].url, 'https://worker.example/api/v1/workspace/files/download?path=report.pdf');
-  for (const url of ['https://appassets.androidplatform.net/assets/mobile-ui/index.html', 'https://outside.example/file', 'http://worker.example/file']) {
+  for (const url of ['https://outside.example/file', 'http://worker.example/file']) {
     const g = fixture(undefined, {location, runtime}); new g.Anchor(url, 'x').click(); await settled();
     assert.equal(g.messages[0].type, 'error'); assert.equal(g.messages[0].reason, 'unsupported');
   }
-  // The bundle's own blob: URLs (same origin as the page) still stream through the bridge.
+  // In-app links (SvelteKit routes under /mobile/) are left to the router.
+  for (const href of ['https://worker.example/mobile/settings', 'https://worker.example/mobile', '/mobile/chat/abc']) {
+    const g = fixture(undefined, {location, runtime});
+    g.handlers.click({target: new g.Anchor(href, null), defaultPrevented: false, preventDefault() { assert.fail(`In-app link was captured: ${href}`); }});
+    await settled();
+    assert.equal(g.messages.length, 0, href);
+  }
+  // The page's own blob: URLs still stream through the bridge.
   const h = fixture(undefined, {location, runtime, blobOrigin: location.origin});
-  const payload = 'bundle blob';
+  const payload = 'page blob';
   const url = h.URL.createObjectURL(new Blob([payload], {type: 'text/plain'}));
   new h.Anchor(url, 'notes.txt').click();
   await settled();

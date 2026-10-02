@@ -1186,6 +1186,12 @@ export const activeSession = {
 
 	removeQueuedMessage: (id: string) => messageSender.removeQueuedMessage(id),
 
+	/** Unsend a pending message and put its text back in the composer to edit. */
+	unsendQueuedMessage(id: string) {
+		const text = messageSender.removeQueuedMessage(id);
+		if (text?.trim()) draftManager.setPendingRestorePrompt(text);
+	},
+
 	// ── System Messages & Error Handling (delegated to draft-manager) ──
 
 	// (already delegated above)

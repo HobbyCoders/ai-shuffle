@@ -2,7 +2,7 @@
    * Mobile shell styles — the rules that used to sit behind
    * `html[data-platform='mobile']` inside the shared components' scoped
    * <style> blocks. They are global here: the mobile app is the only build that
-   * stamps <html data-platform="mobile">, so the worker-served web UI never
+   * stamps <html data-platform="mobile">, so the desktop web UI (frontend/) never
    * carries them (see docs/mobile-desktop-ui-split.md and
    * frontend/scripts/check-no-mobile-ui.mjs).
    *

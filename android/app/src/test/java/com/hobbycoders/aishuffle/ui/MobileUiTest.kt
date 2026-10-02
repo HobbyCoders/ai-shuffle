@@ -7,28 +7,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MobileUiTest {
-    @Test fun bundleRootIsServedAsTheIndexAndNothingElseIs() {
-        assertEquals("https://appassets.androidplatform.net/assets/mobile-ui/", MobileUi.INDEX_URL)
-        assertTrue(MobileUi.isIndexPath("/assets/mobile-ui/"))
-        assertTrue(MobileUi.isIndexPath("/assets/mobile-ui"))
-        assertFalse(MobileUi.isIndexPath("/assets/mobile-ui/index.html"))
-        assertFalse(MobileUi.isIndexPath("/assets/mobile-ui/_app/immutable/entry/start.js"))
-        assertFalse(MobileUi.isIndexPath(null))
+    @Test fun theWorkerServesThePhoneUiAtMobile() {
+        assertEquals("https://worker.example/mobile/", MobileUi.indexUrl("https://Worker.Example/"))
+        assertEquals("https://worker.example:8443/mobile/", MobileUi.indexUrl("https://worker.example:8443"))
     }
 
-    @Test fun onlyTheAssetOriginCounts() {
-        assertTrue(MobileUi.isAssetOrigin("https://appassets.androidplatform.net/assets/mobile-ui/"))
-        assertFalse(MobileUi.isAssetOrigin("http://appassets.androidplatform.net/assets/mobile-ui/"))
-        assertFalse(MobileUi.isAssetOrigin("https://appassets.androidplatform.net.evil/assets/"))
-        assertFalse(MobileUi.isAssetOrigin("https://worker.example/"))
-        assertFalse(MobileUi.isAssetOrigin(null))
+    @Test fun onlyThePairedWorkersPhoneUiCounts() {
+        val base = "https://worker.example"
+        for (url in listOf("https://worker.example/mobile/", "https://worker.example/mobile", "https://worker.example/mobile/chat/abc?x=1",
+                "https://worker.example:443/mobile/_app/immutable/entry/start.js")) assertTrue(url, MobileUi.isUiUrl(base, url))
+        for (url in listOf("https://worker.example/", "https://worker.example/chat", "https://worker.example/mobilex",
+                "https://worker.example/api/v1/auth/status", "https://worker.example/mobile/../api/v1/x",
+                "https://worker.example/mobile/%2E%2E/api", "http://worker.example/mobile/", "https://worker.example:8443/mobile/",
+                "https://worker.example.evil/mobile/", "https://user@worker.example/mobile/",
+                "https://appassets.androidplatform.net/assets/mobile-ui/", "about:blank", null)) assertFalse(url.toString(), MobileUi.isUiUrl(base, url))
+    }
+
+    @Test fun anOldWorkerGetsAnUpdateMessage() {
+        assertTrue(MobileUi.loadFailure(404).contains("Update the worker"))
+        assertTrue(MobileUi.loadFailure(502).contains("HTTP 502"))
     }
 
     @Test fun bootstrapScriptCarriesTheRuntimeContractAsJson() {
         val script = MobileUi.bootstrapScript("https://Worker.Example:8443/", "shc_abc\"</script>", " 0.8.6 ", "Pixel 9", false)
-        assertTrue(script.startsWith("window.__SHUFFLE_MOBILE__ = {"))
-        assertTrue(script.endsWith("};"))
-        val json = JSONObject(script.removePrefix("window.__SHUFFLE_MOBILE__ = ").removeSuffix(";"))
+        // Only the top-level phone UI page receives the session.
+        assertTrue(script.startsWith("if (window.top === window && location.pathname.indexOf(\"/mobile/\") === 0) { window.__SHUFFLE_MOBILE__ = {"))
+        assertTrue(script.endsWith("}; }"))
+        val json = runtime(script)
         assertEquals("https://worker.example:8443", json.getString("apiOrigin"))
         assertEquals("shc_abc\"</script>", json.getString("token"))
         assertEquals("0.8.6", json.getString("version"))
@@ -36,11 +41,22 @@ class MobileUiTest {
         assertFalse(json.getBoolean("sendCookies"))
         // The raw closing tag never appears: org.json escapes the slash.
         assertFalse(script.contains("</script>"))
+        val native = json.getJSONObject("native")
+        assertEquals("android", native.getString("platform"))
+        assertEquals(MobileUi.BRIDGE_VERSION, native.getInt("bridge"))
+        assertEquals(MobileUi.CAPABILITIES, (0 until native.getJSONArray("capabilities").length()).map { native.getJSONArray("capabilities").getString(it) })
     }
 
+    @Test fun capabilitiesTheDeviceLacksAreNotAdvertised() {
+        val json = runtime(MobileUi.bootstrapScript("https://worker.example", "shc_x", null, null, false, listOf("microphone")))
+        assertEquals(1, json.getJSONObject("native").getJSONArray("capabilities").length())
+    }
+
+    private fun runtime(script: String) =
+        JSONObject(script.substringAfter("window.__SHUFFLE_MOBILE__ = ").removeSuffix(" }").removeSuffix(";"))
+
     @Test fun optionalFieldsAreOmittedWhenBlank() {
-        val json = JSONObject(MobileUi.bootstrapScript("https://worker.example", "shc_x", "", null, true)
-            .removePrefix("window.__SHUFFLE_MOBILE__ = ").removeSuffix(";"))
+        val json = runtime(MobileUi.bootstrapScript("https://worker.example", "shc_x", "", null, true))
         assertFalse(json.has("version"))
         assertFalse(json.has("deviceName"))
         assertTrue(json.getBoolean("sendCookies"))

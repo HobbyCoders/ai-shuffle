@@ -846,6 +846,43 @@ def _confined_jsonl_path(raw_path: str) -> Path:
     return resolved
 
 
+def _cli_history(days: int, limit: int) -> list:
+    """Blocking body of :func:`list_cli_history` (directory scan + DB reads)."""
+    from app.core.cli_history import find_cli_conversations
+    from app.core.config import settings
+    from app.core.jsonl_parser import _get_session_title_and_preview
+
+    project_dirs = {}
+    for project in database.get_all_projects() or []:
+        try:
+            project_dirs[get_project_working_dir(project)] = project["id"]
+        except Exception:  # noqa: BLE001 — a bad row just matches nothing
+            continue
+    return find_cli_conversations(
+        Path(settings.get_claude_projects_dir),
+        is_registered=lambda sdk_id: database.get_session_by_sdk_id(sdk_id) is not None,
+        summarize=_get_session_title_and_preview,
+        project_dirs=project_dirs,
+        days=days,
+        limit=limit,
+    )
+
+
+@export_router.get("/import/cli-history")
+async def list_cli_history(
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=200),
+    token: str = Depends(require_admin),
+):
+    """Claude Code CLI conversations on this worker that are not sessions yet - Owner only.
+
+    Newest first, with the project each one ran in when it matches one.
+    Import one with ``POST /sessions/import-jsonl``. Only transcripts are
+    read; nothing else in the Claude config directory is touched.
+    """
+    return {"conversations": await run_sync(_cli_history, days, limit)}
+
+
 @export_router.post("/import-jsonl", response_model=ImportJSONLResponse)
 async def import_jsonl_session(
     request: Request,

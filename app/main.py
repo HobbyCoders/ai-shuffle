@@ -23,7 +23,7 @@ from app.core.cors import configured_origins
 from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
-from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, github_inbox, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import voice_context, assistant
 from app.api import tools as tools_api
 from app.api import events as events_api
@@ -566,6 +566,7 @@ app.include_router(api_users.router)
 app.include_router(automations.router)
 app.include_router(security.router)
 app.include_router(github.router)
+app.include_router(github_inbox.router)
 app.include_router(git.router)
 app.include_router(git_operations.router)
 app.include_router(plugins.router)
@@ -615,6 +616,12 @@ if not install_preview(app) and static_dir.exists():
     icons_dir = static_dir / "icons"
     if icons_dir.exists():
         app.mount("/icons", StaticFiles(directory=str(icons_dir)), name="icons")
+
+    # The phone UI the Android and iOS apps load from this worker (app/mobile_ui.py).
+    from app.mobile_ui import install_mobile_ui
+    if not install_mobile_ui(app, static_dir / "mobile"):
+        logger.warning("app/static/mobile is missing: the phone apps cannot open chat on this worker. "
+                       "Rebuild the frontend with mobile/ present.")
 
     # Serve other static files
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static_files")

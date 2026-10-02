@@ -27,6 +27,41 @@ function mount(action: string, extra: Record<string, unknown> = {}) {
 }
 const submit = (name: string) => screen.getAllByRole('button', { name }).find((b) => b.classList.contains('opt-submit')) as HTMLButtonElement;
 
+describe('commit options on the default branch (#1659)', () => {
+	const onMain = { currentBranch: 'main', defaultBranch: 'main' };
+
+	it('defaults to committing on a new branch named by the user', async () => {
+		const onCommit = vi.fn();
+		mount('commit', { ...onMain, onCommit });
+		expect(screen.getByRole('note').textContent).toContain('on main');
+		await fireEvent.input(screen.getByLabelText('Branch name'), { target: { value: ' fix/login ' } });
+		await fireEvent.click(submit('Commit on new branch'));
+		expect(onCommit).toHaveBeenCalledWith({ message: undefined, includeUnstaged: true, nextStep: 'push', newBranch: 'fix/login' });
+	});
+
+	it('pushes to the default branch only as an explicit choice and keeps saved prefs', async () => {
+		const onCommit = vi.fn();
+		mount('commit', { ...onMain, onCommit });
+		await fireEvent.click(screen.getByRole('button', { name: 'main' }));
+		expect(submit('Commit only')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Commit + push to main' }));
+		const go = submit('Commit + push to main');
+		expect(go.classList.contains('warn')).toBe(true);
+		await fireEvent.click(go);
+		expect(onCommit).toHaveBeenCalledWith({ message: undefined, includeUnstaged: true, nextStep: 'push', pushToDefaultBranch: true });
+		expect(gitActionPreferences.current.nextStep).toBe('push');
+		expect(save).not.toHaveBeenCalled();
+	});
+
+	it('offers no new-branch choice for a branch-bound checkout', async () => {
+		const onCommit = vi.fn();
+		mount('commit', { ...onMain, canCommitOnNewBranch: false, onCommit });
+		expect(screen.queryByLabelText('Branch name')).toBeNull();
+		await fireEvent.click(submit('Commit only'));
+		expect(onCommit).toHaveBeenCalledWith({ message: undefined, includeUnstaged: true, nextStep: 'commit', pushToDefaultBranch: false });
+	});
+});
+
 describe('commit options', () => {
 	it('sends the trimmed message with the saved defaults and closes', async () => {
 		const onCommit = vi.fn();

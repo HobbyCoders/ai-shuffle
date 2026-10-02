@@ -7,7 +7,6 @@ import okhttp3.Call
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.IOException
-import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 
 /** No cookie/session-token URL workaround: image/audio/video requests use the same paired auth as fetch. */
@@ -17,18 +16,8 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
     companion object {
         const val AUTH_MESSAGE = "This worker could not authorize a file. Update the worker, refresh chat, then pair again if needed."
 
-        /** Old markdown stores /api links, resolved by the browser against the bundle origin. */
-        fun workerUrl(base: String, url: String): String? = runCatching {
-            when {
-                ChatDownloadPolicy.url(base, url) -> url
-                MobileUi.isAssetOrigin(url) && URI(url).rawPath.startsWith("/api/") -> {
-                    val uri = URI(url)
-                    val resolved = PairingInput.origin(base) + uri.rawPath + (uri.rawQuery?.let { "?$it" } ?: "")
-                    resolved.takeIf { ChatDownloadPolicy.url(base, it) }
-                }
-                else -> null
-            }
-        }.getOrNull()
+        /** A URL on the paired worker (the phone UI page's own origin), or null. */
+        fun workerUrl(base: String, url: String): String? = url.takeIf { ChatDownloadPolicy.url(base, it) }
 
         private fun failure(code: Int, message: String) = WebResourceResponse(
             "text/plain", "utf-8", code, "Blocked", mapOf("Cache-Control" to "no-store"),
@@ -70,11 +59,12 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                 var reading = false
                 val responseHeaders = linkedMapOf(
                     "Cache-Control" to "no-store",
-                    "Access-Control-Allow-Origin" to MobileUi.ORIGIN,
+                    // Same-origin for the phone UI page; kept explicit for crossorigin media elements.
+                    "Access-Control-Allow-Origin" to PairingInput.origin(server.baseUrl),
                     "Access-Control-Allow-Credentials" to "true",
                     "Access-Control-Expose-Headers" to "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, ETag, Last-Modified",
                 )
-                // Do not install worker cookies or forward hop-by-hop/redirect headers into the bundle.
+                // Do not install worker cookies or forward hop-by-hop/redirect headers into the page.
                 for (name in listOf("Content-Type", "Content-Range", "Accept-Ranges", "Content-Disposition", "ETag", "Last-Modified", "Content-Encoding")) {
                     response.header(name)?.let { responseHeaders[name] = it }
                 }

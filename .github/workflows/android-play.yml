@@ -134,8 +134,8 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Build bundled mobile UI
-        run: bash android/scripts/sync-mobile-ui.sh
+      - name: Build the bundled offline demo
+        run: bash android/scripts/sync-offline-demo.sh
       - name: Set compatible version code
         id: version
         # Same epoch-minute scheme as android.yml, not this workflow's run_number.

@@ -844,6 +844,8 @@ export async function getDiffStats(projectId: string, includeUnstaged: boolean =
 export interface CommitRequest {
     message: string;
     include_unstaged?: boolean;
+    /** Create and switch to this branch before committing (base checkouts only). */
+    new_branch?: string;
 }
 
 export interface CommitResponse {

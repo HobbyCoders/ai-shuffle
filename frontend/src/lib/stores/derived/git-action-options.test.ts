@@ -6,7 +6,7 @@
  * → Create PR step, cleanup preference → Clean up step) must stay honest.
  */
 import { describe, it, expect } from 'vitest';
-import { computeShipItSteps, computeOperationSideEffects } from './git-action-options';
+import { computeShipItSteps, computeOperationSideEffects, resolveCommitPlan, branchNameFromMessage } from './git-action-options';
 
 const ids = (input: Parameters<typeof computeShipItSteps>[0]) =>
 	computeShipItSteps(input).map((s) => s.id);
@@ -130,5 +130,52 @@ describe('computeOperationSideEffects', () => {
 		);
 		expect(fx!.toast.label).toBe('Operation complete');
 		expect(fx!.toast.prUrl).toBe('https://x/pull/z');
+	});
+});
+
+describe('resolveCommitPlan (#1659)', () => {
+	const base = { isOnDefaultBranch: true, needsPull: false };
+	it('refuses a saved PR flow on the default branch instead of pushing to it', () => {
+		const plan = resolveCommitPlan({ ...base, requested: 'pr' });
+		expect(plan.blocked).toMatch(/default branch/);
+	});
+	it('refuses an unconfirmed push on the default branch', () => {
+		expect(resolveCommitPlan({ ...base, requested: 'push' }).blocked).not.toBeNull();
+	});
+	it('allows an explicit push to the default branch', () => {
+		expect(resolveCommitPlan({ ...base, requested: 'push', pushToDefaultBranch: true })).toEqual({ nextStep: 'push', newBranch: null, blocked: null });
+	});
+	it('an explicit push choice never upgrades to a PR from the default branch', () => {
+		expect(resolveCommitPlan({ ...base, requested: 'pr', pushToDefaultBranch: true }).blocked).not.toBeNull();
+	});
+	it('commits on a new branch and keeps the PR step', () => {
+		expect(resolveCommitPlan({ ...base, requested: 'pr', newBranch: ' feat/x ' })).toEqual({ nextStep: 'pr', newBranch: 'feat/x', blocked: null });
+	});
+	it('a new branch skips the pull-first downgrade (it has no upstream yet)', () => {
+		expect(resolveCommitPlan({ ...base, needsPull: true, requested: 'push', newBranch: '' }).nextStep).toBe('push');
+	});
+	it('commit-only on the default branch is always fine', () => {
+		expect(resolveCommitPlan({ ...base, requested: 'commit' }).blocked).toBeNull();
+	});
+	it('feature branches keep the saved flow; behind still means commit only', () => {
+		expect(resolveCommitPlan({ isOnDefaultBranch: false, needsPull: false, requested: 'pr' }).nextStep).toBe('pr');
+		expect(resolveCommitPlan({ isOnDefaultBranch: false, needsPull: true, requested: 'pr' }).nextStep).toBe('commit');
+	});
+});
+
+describe('branchNameFromMessage', () => {
+	it('uses the conventional-commit type as the prefix', () => {
+		expect(branchNameFromMessage('fix(git): Guard the default branch!\n\nbody')).toBe('fix/guard-the-default-branch');
+	});
+	it('falls back to change/ for free-form subjects', () => {
+		expect(branchNameFromMessage('Update README links')).toBe('change/update-readme-links');
+	});
+	it('caps the slug and never ends with a dash', () => {
+		const name = branchNameFromMessage(`feat: ${'word '.repeat(30)}`);
+		expect(name.length).toBeLessThanOrEqual(53);
+		expect(name.endsWith('-')).toBe(false);
+	});
+	it('stamps an empty subject', () => {
+		expect(branchNameFromMessage('!!!', new Date('2026-10-02T10:05:00Z'))).toBe('change/202610021005');
 	});
 });

@@ -10,6 +10,7 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { createChatEditor, setEditorPlaceholder, type Editor } from './tiptap/editorConfig';
 	import { createLiveDictation } from './tiptap/liveDictation';
+	import { createPlainPasteIntent } from './tiptap/large-paste';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
 
@@ -24,6 +25,8 @@
 		onKeyDown?: (event: KeyboardEvent) => boolean | void;
 		onFocusChange?: (focused: boolean) => void;
 		onBeforeDestroy?: (editor: Editor) => void;
+		/** A paste of LARGE_PASTE_BYTES or more; return true to take it as an attachment. */
+		onLargePaste?: (text: string) => boolean;
 	}
 
 	let {
@@ -36,8 +39,10 @@
 		onUserInput,
 		onKeyDown,
 		onFocusChange,
-		onBeforeDestroy
+		onBeforeDestroy,
+		onLargePaste
 	}: Props = $props();
+	const plainPaste = createPlainPasteIntent();
 
 	let editorElement = $state<HTMLDivElement | null>(null);
 	let editor = $state<Editor | null>(null);
@@ -55,6 +60,8 @@
 				element: editorElement,
 				placeholder,
 				initialContent,
+				onLargePaste: text => onLargePaste?.(text) ?? false,
+				consumePlainPaste: () => plainPaste.consume(),
 				onUpdate: () => {
 					// Use getMessage() to include chip @path references in the text
 					// This ensures send button enables when chips are present
@@ -122,6 +129,7 @@
 	function handleUserInput() { onUserInput?.(); }
 
 	function handleEditorKeyDown(event: KeyboardEvent) {
+		plainPaste.keydown(event);
 		// Let parent component handle first (for autocomplete, etc.)
 		if (onKeyDown) {
 			const handled = onKeyDown(event);
@@ -241,6 +249,12 @@
 				]
 			});
 		}
+	}
+
+	/** Insert text at the cursor as text (never parsed as HTML). */
+	export function insertPlainText(text: string) {
+		if (!editor) return;
+		editor.view.dispatch(editor.state.tr.insertText(text));
 	}
 
 	/**

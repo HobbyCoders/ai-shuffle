@@ -3,9 +3,11 @@
 ## Automated
 
 Build and unit-test commands are in [README.md](../README.md#build-and-test)
-(JDK 21). The APK bundles its own mobile UI, so run
-`bash scripts/sync-mobile-ui.sh` from `android/` before any `assemble*` task;
-Gradle's `checkMobileUi` task fails the build without it.
+(JDK 21). Chat loads the paired worker's `/mobile/`, but the APK bundles a copy
+of the phone UI for the offline demo, so run `bash scripts/sync-offline-demo.sh`
+from `android/` before any `assemble*` task; Gradle's `checkOfflineDemo` task
+fails the build without it. The chat smoke tests serve that copy as the fixture
+worker's `/mobile/` (`androidTest/.../PhoneUiFixture.kt`).
 
 Instrumentation tests (`ci/run-android-ui-tests.sh`) reset app state. Run them
 on a disposable emulator, never on a phone with saved accounts.
@@ -18,7 +20,9 @@ targetSdk 36. Workers must be reachable over HTTPS: the app does not allow
 cleartext HTTP (`usesCleartextTraffic="false"`).
 
 - [ ] Add a worker (account sign-in, or Add server with its HTTPS address or QR
-      code). Opening it loads the bundled UI already authenticated.
+      code). Opening it loads the worker's phone UI (`/mobile/`) already
+      authenticated. A worker too old to serve `/mobile/` shows an
+      "update the worker" message instead.
 - [ ] Send a message and get a normal response.
 - [ ] Add a second worker; both appear and open independently.
 - [ ] Start a voice call from the chat page's own voice button; the first call

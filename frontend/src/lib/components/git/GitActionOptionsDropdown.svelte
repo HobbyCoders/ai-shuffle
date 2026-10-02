@@ -26,6 +26,8 @@
 		unpushed?: number | null;
 		/** Worktree sessions delete a worktree on cleanup; plain repos delete a branch. */
 		isWorktreeMode?: boolean;
+		/** The checkout may move to a fresh branch (not a worktree or branch-bound session). */
+		canCommitOnNewBranch?: boolean;
 		/** Disables the whole editor (an operation or stream is running). */
 		busy?: boolean;
 		/** Why submitting is blocked right now (merge conflicts, state still
@@ -49,6 +51,7 @@
 		hasChanges,
 		unpushed = null,
 		isWorktreeMode = false,
+		canCommitOnNewBranch = true,
 		busy = false,
 		submitBlocked = null,
 		onClose,
@@ -63,6 +66,19 @@
 
 	// ── Per-invocation local state (reset on every open) ────────────────────────
 	let commitMessage = $state('');
+	// On the default branch (#1659): commit on a new branch by default, or push
+	// to the default branch only as an explicit, labelled choice. The default-
+	// branch step is local so it never overwrites the saved after-commit flow.
+	const onDefaultBranch = $derived(!!currentBranch && currentBranch === defaultBranch);
+	let commitWhere = $state<'new' | 'default'>('new');
+	let newBranchName = $state('');
+	let defaultStep = $state<'commit' | 'push'>('commit');
+	const committingOnNewBranch = $derived(onDefaultBranch && canCommitOnNewBranch && commitWhere === 'new');
+	const commitSubmitLabel = $derived(
+		!onDefaultBranch ? 'Commit'
+			: committingOnNewBranch ? 'Commit on new branch'
+			: defaultStep === 'push' ? `Commit + push to ${defaultBranch}` : 'Commit only'
+	);
 	let forcePush = $state(false);
 	let prTitle = $state('');
 	let prBody = $state('');
@@ -101,11 +117,21 @@
 	// ── Submit handlers (build the option bag, fire, close) ─────────────────────
 	function submitCommit() {
 		if (cannotSubmit) return;
-		onCommit?.({
-			message: commitMessage.trim() || undefined,
-			includeUnstaged: prefs.includeUnstaged,
-			nextStep: prefs.nextStep
-		});
+		if (onDefaultBranch && !committingOnNewBranch) {
+			onCommit?.({
+				message: commitMessage.trim() || undefined,
+				includeUnstaged: prefs.includeUnstaged,
+				nextStep: defaultStep,
+				pushToDefaultBranch: defaultStep === 'push'
+			});
+		} else {
+			onCommit?.({
+				message: commitMessage.trim() || undefined,
+				includeUnstaged: prefs.includeUnstaged,
+				nextStep: prefs.nextStep,
+				...(committingOnNewBranch ? { newBranch: newBranchName.trim() } : {})
+			});
+		}
 		onClose();
 	}
 	function submitPush() {
@@ -216,22 +242,65 @@
 			<span class="opt-switch" class:on={prefs.includeUnstaged}></span>
 		</button>
 
-		<fieldset class="opt-radio-group">
-			<legend class="opt-label">After commit</legend>
-			{#each [{ v: 'commit', l: 'Commit only' }, { v: 'push', l: 'Commit + push' }, { v: 'pr', l: 'Commit + push + PR' }] as opt (opt.v)}
-				<button
-					type="button"
-					class="opt-radio"
-					class:selected={prefs.nextStep === opt.v}
-					aria-pressed={prefs.nextStep === opt.v}
-					onclick={() => gitActionPreferences.setNextStep(opt.v as 'commit' | 'push' | 'pr')}
-				>
-					<span class="opt-radio-dot"></span>{opt.l}
-				</button>
-			{/each}
-		</fieldset>
+		{#if onDefaultBranch}
+			<p class="opt-warning" role="note">
+				<strong>You’re on {defaultBranch}.</strong>
+				{canCommitOnNewBranch
+					? 'Commit on a new branch to open a pull request, or push to it directly only if you mean to.'
+					: 'This checkout is bound to its branch, so a push from here goes straight to it.'}
+			</p>
+			{#if canCommitOnNewBranch}
+				<fieldset class="opt-radio-group">
+					<legend class="opt-label">Where to commit</legend>
+					<button type="button" class="opt-radio" class:selected={commitWhere === 'new'} aria-pressed={commitWhere === 'new'} onclick={() => (commitWhere = 'new')}>
+						<span class="opt-radio-dot"></span>New branch
+					</button>
+					<button type="button" class="opt-radio" class:selected={commitWhere === 'default'} aria-pressed={commitWhere === 'default'} onclick={() => (commitWhere = 'default')}>
+						<span class="opt-radio-dot"></span>{defaultBranch}
+					</button>
+				</fieldset>
+			{/if}
+			{#if committingOnNewBranch}
+				<label class="opt-field">
+					<span class="opt-label">Branch name</span>
+					<input class="opt-input" type="text" bind:value={newBranchName} placeholder="Named from the commit message if empty" spellcheck="false" autocomplete="off" />
+				</label>
+			{/if}
+		{/if}
 
-		<button type="button" class="opt-submit" disabled={cannotSubmit} onclick={submitCommit}>Commit</button>
+		{#if onDefaultBranch && !committingOnNewBranch}
+			<fieldset class="opt-radio-group">
+				<legend class="opt-label">After commit</legend>
+				{#each [{ v: 'commit', l: 'Commit only' }, { v: 'push', l: `Commit + push to ${defaultBranch}` }] as opt (opt.v)}
+					<button
+						type="button"
+						class="opt-radio"
+						class:selected={defaultStep === opt.v}
+						aria-pressed={defaultStep === opt.v}
+						onclick={() => (defaultStep = opt.v as 'commit' | 'push')}
+					>
+						<span class="opt-radio-dot"></span>{opt.l}
+					</button>
+				{/each}
+			</fieldset>
+		{:else}
+			<fieldset class="opt-radio-group">
+				<legend class="opt-label">After commit</legend>
+				{#each [{ v: 'commit', l: 'Commit only' }, { v: 'push', l: 'Commit + push' }, { v: 'pr', l: 'Commit + push + PR' }] as opt (opt.v)}
+					<button
+						type="button"
+						class="opt-radio"
+						class:selected={prefs.nextStep === opt.v}
+						aria-pressed={prefs.nextStep === opt.v}
+						onclick={() => gitActionPreferences.setNextStep(opt.v as 'commit' | 'push' | 'pr')}
+					>
+						<span class="opt-radio-dot"></span>{opt.l}
+					</button>
+				{/each}
+			</fieldset>
+		{/if}
+
+		<button type="button" class="opt-submit" class:warn={onDefaultBranch && !committingOnNewBranch && defaultStep === 'push'} disabled={cannotSubmit} onclick={submitCommit}>{commitSubmitLabel}</button>
 
 	{:else if action === 'push'}
 		<p class="opt-readonly">Pushing <strong>{currentBranch ?? 'current branch'}</strong> to remote.</p>
@@ -584,6 +653,22 @@
 	.opt-submit:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+	.opt-warning {
+		margin: 0;
+		padding: 10px 12px;
+		border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent);
+		border-radius: .5rem;
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		color: var(--foreground);
+		font-size: .75rem;
+		line-height: 1.5;
+	}
+	.opt-warning strong { color: var(--warning); }
+	.opt-submit.warn {
+		background: var(--warning);
+		border-color: var(--warning);
+		color: var(--warning-foreground, #000);
 	}
 	.opt-submit.danger {
 		background: var(--destructive);

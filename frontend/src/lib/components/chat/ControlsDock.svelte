@@ -37,6 +37,7 @@
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { anyCredential } from '$lib/stores/auth.svelte';
+	import { NO_CREDENTIAL_REASON } from './submit-guards';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
@@ -525,7 +526,9 @@
 			disabled={attachDisabled}
 			class="dock-ico attach-btn"
 			aria-label="Attach file"
-			title={isUploading
+			title={!$anyCredential
+				? NO_CREDENTIAL_REASON
+				: isUploading
 				? 'Uploading...'
 				: (attachmentBlockReason(
 						$activeSession.project,

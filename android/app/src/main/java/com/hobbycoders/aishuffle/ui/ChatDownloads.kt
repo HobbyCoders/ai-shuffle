@@ -23,7 +23,7 @@ import java.io.OutputStream
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
 
-/** One user-selected file at a time. The bridge is scoped to the bundled UI's origin and can only save bounded bytes. */
+/** One user-selected file at a time. The bridge is scoped to the paired worker's phone UI page (MobileUi.isUiUrl) and can only save bounded bytes. */
 internal class ChatDownloads(
     private val activity: ComponentActivity,
     private val web: WebView,
@@ -46,6 +46,8 @@ internal class ChatDownloads(
     private var chooserOpen = false
     private var script: ScriptHandler? = null
     private var bridgeInstalled = false
+    /** Whether the page has the `shuffleFileSave` bridge (advertised as the "file-save" capability). */
+    val available get() = bridgeInstalled
     private val client = WorkerDownloadClient()
     private val chooser = activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         chooserOpen = false
@@ -74,9 +76,10 @@ internal class ChatDownloads(
     fun install() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
             !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
-        val origins = setOf(MobileUi.ORIGIN)
+        // The worker's origin; ChatAccessPolicy then requires the top-level phone UI page.
+        val origins = setOf(com.hobbycoders.aishuffle.account.PairingInput.origin(server.baseUrl))
         WebViewCompat.addWebMessageListener(web, "shuffleFileSave", origins) { _, message, origin, mainFrame, reply ->
-            if (!ChatAccessPolicy.message(MobileUi.ORIGIN, web.url, origin.toString(), mainFrame, authorized()) ||
+            if (!ChatAccessPolicy.message(server.baseUrl, web.url, origin.toString(), mainFrame, authorized()) ||
                 activity.isFinishing || activity.isDestroyed) return@addWebMessageListener
             if (message.type != WebMessageCompat.TYPE_STRING) return@addWebMessageListener
             val raw = message.data ?: return@addWebMessageListener
@@ -88,7 +91,7 @@ internal class ChatDownloads(
     }
 
     private fun current(transfer: Transfer) = active === transfer && transfer.page == page &&
-        !activity.isFinishing && !activity.isDestroyed && ChatAccessPolicy.document(MobileUi.ORIGIN, web.url, authorized())
+        !activity.isFinishing && !activity.isDestroyed && ChatAccessPolicy.document(server.baseUrl, web.url, authorized())
 
     private fun receive(raw: String, proxy: JavaScriptReplyProxy) {
         try {
@@ -137,7 +140,7 @@ internal class ChatDownloads(
     }
 
     fun fromUrl(url: String, @Suppress("UNUSED_PARAMETER") userAgent: String?, disposition: String?, mime: String?, length: Long) {
-        if (!ChatAccessPolicy.document(MobileUi.ORIGIN, web.url, authorized())) return
+        if (!ChatAccessPolicy.document(server.baseUrl, web.url, authorized())) return
         if (!ChatDownloadPolicy.url(server.baseUrl, url)) {
             status(if (url.startsWith("blob:") || url.startsWith("data:"))
                 "Update Android System WebView, then refresh chat and try downloading again." else "Only files from this worker can be saved.")

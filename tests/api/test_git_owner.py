@@ -332,3 +332,54 @@ def test_worker_commit_generation_reads_owner_diff(worker_repositories, monkeypa
         assert set(envelopes[0]) == {"action", "project_id", "branch", "params"}
         assert set(envelopes[0]["params"]) <= {"project_id", "body", "worktree_id", "session_id"}
     assert (a / "viewer-only.txt").read_text() == "do not touch"
+
+
+async def test_commit_on_new_branch_moves_unbound_checkout(worker_repositories):
+    """#1659: "Commit on new branch" commits on a fresh branch, never on main."""
+    project, a, b, git_at = worker_repositories
+    # CI runners have no global git identity; the owner checkout needs one to commit.
+    for key, value in [("user.name", "Test"), ("user.email", "test@example.invalid")]:
+        git_at(b, "config", key, value)
+    main_before = git_at(b, "rev-parse", "main")
+    (b / "tracked.txt").write_text("feature work\n")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "main",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": "feature/new-work"}},
+    }, from_device="worker-a")
+    assert result["status"] == 200, result
+    assert git_at(b, "branch", "--show-current") == "feature/new-work"
+    assert git_at(b, "rev-parse", "main") == main_before
+    assert git_at(b, "log", "-1", "--format=%s") == "Feature work"
+
+
+@pytest.mark.parametrize("bad", ["-x", "has space", "a..b"])
+async def test_commit_on_new_branch_rejects_invalid_names(worker_repositories, bad):
+    project, a, b, git_at = worker_repositories
+    (b / "tracked.txt").write_text("feature work\n")
+    head = git_at(b, "rev-parse", "HEAD")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "main",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": bad}},
+    }, from_device="worker-a")
+    assert result["status"] == 400, result
+    assert git_at(b, "branch", "--show-current") == "main"
+    assert git_at(b, "rev-parse", "HEAD") == head
+
+
+async def test_commit_on_new_branch_refuses_branch_bound_checkout(worker_repositories):
+    from app.db import checkouts
+    project, a, b, git_at = worker_repositories
+    feature = b.parent / "feature"
+    git_at(b, "worktree", "add", "-b", "feature/a", str(feature))
+    checkouts.upsert_checkout(project["id"], "worker-b", str(feature), branch="feature/a")
+    (feature / "tracked.txt").write_text("feature work\n")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "feature/a",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": "feature/other"}},
+    }, from_device="worker-a")
+    assert result["status"] == 400, result
+    assert "bound to its branch" in result["detail"]
+    assert git_at(feature, "branch", "--show-current") == "feature/a"

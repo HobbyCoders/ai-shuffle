@@ -10,9 +10,8 @@
   "scripts": {
     "dev": "vite dev",
     "build": "svelte-kit sync && vite build",
-    "build:mobile": "cd ../mobile && npm run deps && npm run build",
-    "sync:mobile": "bash ../android/scripts/sync-mobile-ui.sh",
-    "postbuild": "node scripts/stamp-sw-version.mjs && node scripts/check-no-mobile-ui.mjs",
+    "build:mobile": "node scripts/build-mobile-ui.mjs",
+    "postbuild": "node scripts/stamp-sw-version.mjs && node scripts/check-no-mobile-ui.mjs && node scripts/build-mobile-ui.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && node scripts/check-no-mobile-ui.mjs",
     "test": "vitest run",

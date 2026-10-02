@@ -14,7 +14,8 @@
 	 *    without one.
 	 * 6. Workspace, with the host folder behind it on Docker and Unraid.
 	 * 7. First run: one short prompt, the reply streamed in.
-	 * 8. Optional: HobbyCoders account (or a worker invite) and GitHub.
+	 * 8. Optional: HobbyCoders account (or a worker invite), GitHub, and
+	 *    importing recent Claude Code CLI conversations found on this worker.
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
@@ -38,6 +39,7 @@
 	import CredentialStep from '$lib/components/setup/CredentialStep.svelte';
 	import WorkspaceStep from '$lib/components/setup/WorkspaceStep.svelte';
 	import FirstRunStep from '$lib/components/setup/FirstRunStep.svelte';
+	import CliHistoryImport from '$lib/components/setup/CliHistoryImport.svelte';
 	import {
 		hasOwnerStep, markWelcomeSeen, setupSteps, welcomeSeen, type SetupStepId
 	} from '$lib/components/setup/setup-steps';
@@ -61,7 +63,7 @@
 		credential: 'Sign in to the Claude Code CLI or add your API key.',
 		workspace: 'Where your projects live.',
 		'first-run': 'Watch an agent answer.',
-		extras: 'Optional: your HobbyCoders account and GitHub. Both are also in Settings.',
+		extras: 'Optional: your HobbyCoders account, GitHub and earlier Claude Code conversations.',
 	};
 
 	function goTo(step: SetupStepId) { currentStep = step; setupError = ''; }
@@ -301,6 +303,8 @@
 					{/if}
 
 					<GitHubConnection />
+
+					<CliHistoryImport />
 
 					<div class="border-t border-border pt-4 flex gap-3">
 						<button type="button" onclick={() => back('extras')} class="btn btn-secondary flex-1 py-3" disabled={finishing}>Back</button>

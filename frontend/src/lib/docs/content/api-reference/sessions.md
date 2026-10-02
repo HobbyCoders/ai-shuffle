@@ -308,6 +308,8 @@ Set whether a session is in the Active group. Send a JSON body with the new valu
 
 In a worker network, this is shared sidebar state, not an execution command. Any worker holding the session can save the change for an authorized caller even when the execution owner is offline. The change is durable locally and syncs on reconnect; concurrent edits use the network's last-writer-wins order. Owner catalog updates do not overwrite this membership. Settling does not interrupt running work, change placement, or transfer ownership. Update all workers for consistent membership on every device.
 
+Add `"archived": true` to archive the session (it always leaves Active) or `"archived": false` to restore an archived one. Archiving changes the session's status on the worker that runs it, so unlike settling it needs that worker online: an offline owner returns `503` and a refused change `409`.
+
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -H "Authorization: Bearer aih_your_key" \

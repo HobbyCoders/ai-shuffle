@@ -2,7 +2,7 @@
   "name": "ai-shuffle-mobile",
   "private": true,
   "type": "module",
-  "description": "The AI Shuffle mobile UI: a SvelteKit static app bundled into the Android app. Shares $lib with ../frontend; talks to workers only through their HTTP/WebSocket APIs.",
+  "description": "The AI Shuffle mobile UI: a SvelteKit static app the worker serves at /mobile/ to the Android and iOS apps. Shares $lib with ../frontend; talks to workers only through their HTTP/WebSocket APIs.",
   "scripts": {
     "deps": "node scripts/link-deps.mjs",
     "dev": "vite dev",

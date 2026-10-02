@@ -28,7 +28,7 @@ async def test_offline_repeated_edits_survive_restart_and_reconnect(workers, mon
             row = await settle("offline", active)
             assert bool(row["is_active"]) is active
         broadcast.assert_awaited()
-        assert broadcast.call_args.kwargs["updates"] == {"is_active": final_active}
+        assert broadcast.call_args.kwargs["updates"]["is_active"] is final_active
         # Reload context from this worker's durable DB, not a fixture-seeded flag.
         engine.load_context()
         assert bool(database.get_session("offline")["is_active"]) is final_active

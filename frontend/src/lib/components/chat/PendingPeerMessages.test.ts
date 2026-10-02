@@ -29,7 +29,7 @@ describe('PendingPeerMessages', () => {
 		expect(container.querySelector('.userrow, .bubble')).toBeNull();
 		expect(screen.queryByRole('button')).toBeNull();
 		expect(screen.queryByText('Interrupt')).toBeNull();
-		expect(screen.queryByLabelText('Unsend message')).toBeNull();
+		expect(screen.queryByLabelText(/Unsend message/)).toBeNull();
 	});
 
 	it('renders peer content and attribution as text, never executable markup', () => {
@@ -46,7 +46,7 @@ describe('PendingPeerMessages', () => {
 		const { container } = render(PendingPeerMessages, { messages: [{ ...peer, content }] });
 		expect(container.querySelector('details > summary')?.textContent).toBe('Read queued message');
 		expect(container.querySelector('details .peer-content')?.textContent).toBe(content);
-		expect(screen.queryByLabelText('Unsend message')).toBeNull();
+		expect(screen.queryByLabelText(/Unsend message/)).toBeNull();
 	});
 
 	it('falls back to peer attribution when a sender label is unavailable', () => {

@@ -1,4 +1,4 @@
-// Client-only bundle (adapter-static fallback page). The Android app loads
-// index.html from its assets; there is no server to render on.
+// Client-only bundle (adapter-static fallback page). Workers serve index.html
+// for every /mobile/ route (app/mobile_ui.py); there is no server rendering.
 export const ssr = false;
 export const prerender = false;

@@ -1,4 +1,4 @@
-/* Injected at document start on the app's bundled UI (its asset origin). No credential access. */
+/* Injected at document start on the paired worker's phone UI page (/mobile/). No credential access. */
 (() => {
   if (window !== window.top || !window.shuffleFileSave) return;
   const bridge = window.shuffleFileSave;
@@ -52,12 +52,15 @@
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     return new Blob([bytes], {type: match[1]});
   }
+  // The phone UI's own routes: in-app navigation, never a file to save.
+  const uiRoute = url => url.origin === location.origin && (url.pathname === '/mobile' || url.pathname.startsWith('/mobile/'));
   function workerUrl(href) {
     try {
       const url = new URL(href, location.href);
       if (url.username || url.password || url.protocol !== 'https:') return null;
+      if (uiRoute(url)) return null;
       if (url.origin === workerOrigin()) return url.href;
-      // Markdown generated before the app-bundled UI used root-relative /api URLs.
+      // Pages from an app-origin build (before the worker served /mobile/) resolved root-relative /api URLs there.
       if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
         const worker = new URL(workerOrigin());
         if (worker.protocol === 'https:' && !worker.username && !worker.password) {

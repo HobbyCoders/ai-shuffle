@@ -25,8 +25,11 @@ describe('streaming composer actions', () => {
 	});
 
 	it('uses the same content gate while idle and retains upload blocking during streaming', () => {
-		expect(source).toContain('disabled={!hasMessageContent || !$anyCredential || isUploading || isRecording || isTranscribing}');
-		expect(streaming).toContain('disabled={!$anyCredential || isUploading || isRecording || isTranscribing}');
+		// One gate (submit-guards.sendButtonState) drives both send buttons, so
+		// the disabled state and its reason can never disagree.
+		expect(source).toMatch(/sendButtonState\(\{\s*hasContent: hasMessageContent,\s*hasCredential: \$anyCredential,\s*isUploading,\s*isRecording,\s*isTranscribing/);
+		expect(source.match(/disabled=\{sendState\.disabled\}/g)).toHaveLength(2);
+		expect(streaming).toContain('disabled={sendState.disabled}');
 	});
 
 	it('keeps Stop outside the draft gate so typing never removes the control', () => {

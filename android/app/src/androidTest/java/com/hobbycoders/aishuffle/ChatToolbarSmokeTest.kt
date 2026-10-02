@@ -36,7 +36,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Uses the real native shell and the bundled UI in the WebView, with local HTTP fixtures for the worker API. */
+/** Uses the real native shell and the phone UI (served by PhoneUiFixture as the worker's /mobile/) in the WebView, with local HTTP fixtures for the worker API. */
 @RunWith(AndroidJUnit4::class)
 class ChatToolbarSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -69,7 +69,7 @@ class ChatToolbarSmokeTest {
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
                 .body("{\"session_token\":\"fixture-session\"}".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        apiField.set(null, lazyOf(api))
+        apiField.set(null, lazyOf(api)); PhoneUiFixture.install(context)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 fun loaded(orientation: Int) = waitFor("Chat did not load in the expected viewport") {
@@ -79,7 +79,7 @@ class ChatToolbarSmokeTest {
                         val shell = status.parent as LinearLayout
                         val web = (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
                         ready = activity.hasWindowFocus() && activity.resources.configuration.orientation == orientation &&
-                            status.visibility == View.GONE && web.url == MobileUi.INDEX_URL && web.height > 0
+                            status.visibility == View.GONE && MobileUi.isUiUrl(server.baseUrl, web.url) && web.height > 0
                     }
                     ready
                 }
@@ -146,7 +146,7 @@ class ChatToolbarSmokeTest {
                 }
             }
         } finally {
-            apiField.set(null, oldApi)
+            apiField.set(null, oldApi); PhoneUiFixture.clear()
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
         }
     }

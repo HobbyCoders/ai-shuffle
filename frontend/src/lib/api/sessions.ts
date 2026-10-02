@@ -214,6 +214,15 @@ export async function setSessionActive(sessionId: string, isActive: boolean): Pr
 }
 
 /**
+ * Archive a session (it also leaves Active) or restore an archived one to the
+ * history. Rides the same owner-authoritative PATCH as Settle, so a session
+ * that runs on another worker is archived on its owner.
+ */
+export async function setSessionArchived(sessionId: string, archived: boolean, isActive = false): Promise<Session> {
+	return api.patch<Session>(`/sessions/${sessionId}/active`, { is_active: isActive, archived });
+}
+
+/**
  * Rename a session. The backend `PATCH /sessions/{id}` endpoint takes the new
  * title as a query parameter (not a JSON body) and returns the updated Session.
  */

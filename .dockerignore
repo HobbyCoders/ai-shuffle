@@ -94,6 +94,13 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/tests/screenshots/
 
+# Phone UI: its source is built into the image's /mobile/ (see Dockerfile);
+# its build artifacts and browser fixtures are not.
+mobile/node_modules
+mobile/build/
+mobile/.svelte-kit/
+mobile/tests/
+
 # Owner and developer tooling. None of this runs inside the container, and the
 # published image is public, so it must never ship. `COPY scripts/` in the
 # Dockerfile takes whatever this file leaves in scripts/: keep only the
@@ -121,7 +128,6 @@ docs/reviews/
 docs/audits/
 mockups/
 videos/
-mobile/
 Start AI Shuffle.cmd
 run_local.*
 LOCAL_SETUP.md

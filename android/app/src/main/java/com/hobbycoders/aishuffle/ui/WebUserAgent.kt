@@ -3,8 +3,8 @@ package com.hobbycoders.aishuffle.ui
 /**
  * Marks the embedded chat WebView as the Android app: `AIShuffleAndroid/<version>`
  * in `navigator.userAgent`, for worker-side diagnostics and logs only. The UI
- * shell is no longer chosen from it — the app ships its own build of the mobile
- * UI (see MobileUi) and the web UI a worker serves is desktop-only.
+ * is not chosen from it: the app loads the worker's phone UI at `/mobile/` (see
+ * MobileUi) and the worker's root UI is desktop-only.
  *
  * The token is appended to the WebView's default user agent rather than
  * replacing it, so the server still sees the real WebView/Chrome version.

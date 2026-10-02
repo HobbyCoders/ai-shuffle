@@ -19,7 +19,8 @@ export type MediaKind = 'image' | 'video' | 'audio';
 /**
  * Backend-relative media paths (`/api/generated-*`, `/api/files/by-path`) are
  * same-origin on the web UI but must point at the worker when the page is the
- * app-bundled mobile UI. Everything else (data:, blob:, absolute) is untouched.
+ * phone UI in the apps (older Android apps load it from their own origin).
+ * Everything else (data:, blob:, absolute) is untouched.
  */
 export function resolveMediaUrl(url: string, sessionId?: string | null): string {
 	const routed = chatFileUrl(url, sessionId);

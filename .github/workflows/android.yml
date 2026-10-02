@@ -3,16 +3,15 @@ run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (git
 
 # Android app (android/) and the Cloudflare account hub (android/hub). Paths-
 # filtered like the other CI workflows: a PR that touches nothing under
-# android/, frontend/ or mobile/ never starts it (the APK bundles the mobile
-# UI built from mobile/ and the shared frontend/src/lib). Signed sideload builds
-# require publish_download; normal CI only stages APKs for emulator verification.
-# A merge must not ship a client before its workers support the bundled UI.
-# PRs run this when the app or the mobile UI it bundles change. frontend/ is
-# deliberately not a trigger: the mobile shell imports from it, but running an
-# emulator for every frontend PR cost more than the whole backend suite, and
-# frontend/ has its own CI. Merges to main do not re-run it — the PR already
-# did, and the publish job below only fires from a dispatch or a release
-# workflow_call that sets publish_download.
+# android/ never starts it. Chat loads the phone UI from the paired worker's
+# /mobile/ (app/mobile_ui.py), so mobile/ and frontend/ changes ship with a
+# worker update and are covered by frontend CI, not an emulator run. The APK
+# bundles mobile/ only as the offline demo. Signed sideload builds require
+# publish_download; normal CI only stages APKs for emulator verification.
+# A merge must not ship a client before its workers serve /mobile/
+# (docs/mobile-desktop-ui-split.md). Merges to main do not re-run it — the PR
+# already did, and the publish job below only fires from a dispatch or a
+# release workflow_call that sets publish_download.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
@@ -22,7 +21,6 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'android/**'
-      - 'mobile/**'
       - '.github/workflows/android.yml'
       - 'scripts/ci/require-full-ci.py'
       - 'scripts/ci/android-inputs.py'
@@ -152,14 +150,14 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # The APK ships its own build of the mobile UI (mobile/ + shared
-      # frontend/src/lib). Gradle's checkMobileUi task refuses to assemble
-      # without it, so this runs before any gradlew invocation.
-      - name: Build and bundle the mobile UI
+      # The APK carries mobile/ (+ shared frontend/src/lib) only as the offline
+      # demo; chat loads the UI from the worker. Gradle's checkOfflineDemo task
+      # refuses to assemble without it, so this runs before any gradlew invocation.
+      - name: Build and bundle the offline demo
         working-directory: frontend
         run: |
           npm ci
-          bash ../android/scripts/sync-mobile-ui.sh
+          bash ../android/scripts/sync-offline-demo.sh
 
       - name: Unit tests and Android lint
         run: |

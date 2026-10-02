@@ -7,9 +7,10 @@
  *   talks to, so every API path is same-origin (`/api/v1/...`), auth is the
  *   `session` cookie, and WebSockets derive from `window.location`.
  *
- * - **Bundled mobile UI** (the Android app). The page is loaded from the app's
- *   own asset origin (`https://appassets.androidplatform.net/...`) and talks to
- *   a worker on a different origin. Before any script runs, the app sets
+ * - **Phone UI in the Android/iOS app.** The worker serves the phone build
+ *   (`mobile/`) at `/mobile/` and the apps load `https://<worker>/mobile/`, so
+ *   UI changes ship with the worker, not the app. The page does not use the
+ *   worker cookie: before any script runs, the app sets
  *
  *   ```js
  *   window.__SHUFFLE_MOBILE__ = {
@@ -17,12 +18,23 @@
  *     token: 'shc_…',                        // paired-session token (Bearer)
  *     version: '0.8.6',                      // app versionName (optional)
  *     deviceName: 'Pixel 9',                 // (optional)
- *     sendCookies: false                     // optional; true only when the
+ *     sendCookies: false,                    // optional; true only when the
  *                                            // worker sits behind Cloudflare
  *                                            // Access and the app installed
  *                                            // the CF cookie (SameSite=None)
+ *     native: {                              // what this app build offers;
+ *       platform: 'android',                 // absent before bridge 1
+ *       bridge: 1,
+ *       capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools']
+ *     }
  *   };
  *   ```
+ *
+ *   The page outlives any one app build, so it must check `nativeCapability`
+ *   before relying on a native feature and degrade when the app lacks it.
+ *   Older Android apps (before /mobile/) bundle their own copy of this UI on
+ *   `https://appassets.androidplatform.net` and call the worker cross-origin;
+ *   the same code serves both.
  *
  *   Every helper below then returns absolute URLs on that origin, adds
  *   `Authorization: Bearer <token>`, omits cookies (unless `sendCookies`), and
@@ -53,6 +65,19 @@ export interface ShuffleMobileRuntime {
 	 * installed the `CF_Authorization` cookie itself.
 	 */
 	sendCookies?: boolean;
+	/** Native side of the app shell; absent from apps older than bridge 1. */
+	native?: ShuffleNativeBridge;
+}
+
+/**
+ * What the app build showing this page offers. Names are added, never
+ * renamed: `file-save` (shuffleFileSave download bridge), `file-chooser`,
+ * `microphone`, `device-tools`. `bridge` increases when one changes shape.
+ */
+export interface ShuffleNativeBridge {
+	platform?: string;
+	bridge: number;
+	capabilities: string[];
 }
 
 declare global {
@@ -89,9 +114,29 @@ export function mobileRuntime(): ShuffleMobileRuntime | null {
 	return raw;
 }
 
-/** True when this page is the app-bundled mobile UI. */
+/** True when this page is the phone UI inside the Android or iOS app. */
 export function isBundledMobile(): boolean {
 	return mobileRuntime() !== null;
+}
+
+/** The app's native bridge, or `null` on the web UI and in apps older than bridge 1. */
+export function nativeBridge(): ShuffleNativeBridge | null {
+	const native = mobileRuntime()?.native;
+	if (!native || typeof native !== 'object' || !Number.isInteger(native.bridge) || native.bridge < 1) return null;
+	if (!Array.isArray(native.capabilities)) return null;
+	return {
+		platform: typeof native.platform === 'string' ? native.platform : undefined,
+		bridge: native.bridge,
+		capabilities: native.capabilities.filter((name): name is string => typeof name === 'string')
+	};
+}
+
+/**
+ * Whether the app showing this page offers `name`. Always false on the web UI
+ * and in apps older than bridge 1, which advertised nothing.
+ */
+export function nativeCapability(name: string): boolean {
+	return nativeBridge()?.capabilities.includes(name) ?? false;
 }
 
 /** Backend origin: `''` (same origin) on the web UI, the worker origin when bundled. */
@@ -100,7 +145,7 @@ export function apiOrigin(): string {
 	return runtime ? normalizeOrigin(runtime.apiOrigin)! : '';
 }
 
-/** `'/api/v1'` on the web UI; `'https://worker/api/v1'` when bundled. */
+/** `'/api/v1'` on the web UI; `'https://worker/api/v1'` in the app. */
 export function apiBase(): string {
 	return `${apiOrigin()}/api/v1`;
 }
@@ -202,7 +247,7 @@ function installTokenHooks(): void {
 		setMobileToken(token);
 	};
 	window.addEventListener('message', (event: MessageEvent) => {
-		// Only the app's own origin (the page origin) may rotate the token.
+		// Only the page's own origin may rotate the token.
 		if (event.origin !== window.location.origin) return;
 		const data = event.data;
 		if (!data || typeof data !== 'object') return;

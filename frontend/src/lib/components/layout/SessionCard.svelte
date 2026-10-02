@@ -18,13 +18,16 @@
 	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
-	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
-	 * (settled). On the swipe layout a long swipe across the row commits that
-	 * action on release. Rename, Fork, and Delete live on the header
-	 * session-title menu.
+	 * Hover/swipe exposes the row's actions (see `cardActions`): Settle (active),
+	 * Move to Active + Archive (settled), or Restore (archived). On the swipe
+	 * layout a long swipe across the row commits the trailing action on
+	 * release. Settle and Archive offer Undo. Rename, Fork, and Delete live on
+	 * the header session-title menu.
 	 */
 	import { onMount, untrack } from 'svelte';
 	import {
+		Archive,
+		ArchiveRestore,
 		ArrowUpFromLine,
 		Check,
 		Cloud,
@@ -63,6 +66,8 @@
 		prStateText,
 		sessionModeOf,
 		sessionTimestamp,
+		cardActions,
+		type CardAction,
 		type SessionCardStatus,
 		type SessionGitFacts
 	} from './session-card-data';
@@ -261,8 +266,12 @@
 	// action itself: one long swipe settles a row, no second tap needed.
 	let swipeCommit = $state(false);
 
-	// Width of the swipe rail; the styles read it back through `--reveal`.
-	const ACTION_REVEAL_WIDTH = 60;
+	const actions = $derived(cardActions(session));
+	const primaryAction = $derived(actions[actions.length - 1]);
+	// Width of one swipe action; the rail is that times the action count and
+	// the styles read it back through `--reveal`.
+	const ACTION_WIDTH = 60;
+	const ACTION_REVEAL_WIDTH = $derived(ACTION_WIDTH * actions.length);
 	// A short swipe latches the rail open once it has come this far.
 	const SWIPE_COMMIT_DISTANCE = 24;
 	// Past the rail the card keeps following the finger, with a little drag.
@@ -293,22 +302,65 @@
 		swipeCommit = false;
 	}
 
-	async function commitToggle() {
+	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
+		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Active' },
+		archive: { title: 'Archive session', aria: 'Archive session', label: 'Archive' },
+		restore: { title: 'Restore archived session', aria: 'Restore archived session', label: 'Restore' }
+	};
+
+	/** A short banner whose Undo reverts the change it reports. */
+	function offerUndo(message: string, undo: () => Promise<unknown>) {
+		const id = notify.banner(message, {
+			severity: 'info',
+			persist: false,
+			duration_ms: 6000,
+			action: {
+				label: 'Undo',
+				onClick: () => {
+					notify.dismissLive(id);
+					undo().catch((err) => reportFailure(err));
+				}
+			}
+		});
+	}
+
+	function reportFailure(err: unknown) {
+		// The server says why (owner offline, owner still syncing); pass that
+		// on so the toast tells the user what to do instead of a bare failure.
+		const detail = (err as { detail?: unknown } | null)?.detail;
+		const reason = typeof detail === 'string' ? detail.trim() : '';
+		notify(reason ? `Failed to update session: ${reason}` : 'Failed to update session', {
+			severity: 'error'
+		});
+	}
+
+	async function commitAction(action: CardAction = primaryAction) {
 		setActionsOpen(false);
-		const settling = session.is_active;
+		const id = session.id;
+		const wasActive = !!session.is_active;
 		try {
-			await appData.setSessionActive(session.id, !settling);
-			// Desktop moves to a fresh composer. On mobile, keep the current
-			// session and drawer open so settling does not navigate the user away.
-			if (settling && active && !platform.isMobile) onSettled?.();
+			switch (action) {
+				case 'settle':
+					await appData.setSessionActive(id, false);
+					// Desktop moves to a fresh composer. On mobile, keep the current
+					// session and drawer open so settling does not navigate the user away.
+					if (active && !platform.isMobile) onSettled?.();
+					offerUndo(`Settled “${title}”`, () => appData.setSessionActive(id, true));
+					break;
+				case 'activate':
+					await appData.setSessionActive(id, true);
+					break;
+				case 'archive':
+					await appData.setSessionArchived(id, true);
+					offerUndo(`Archived “${title}”`, () => appData.setSessionArchived(id, false, wasActive));
+					break;
+				case 'restore':
+					await appData.setSessionArchived(id, false);
+					break;
+			}
 		} catch (err) {
-			// The server says why (owner offline, owner still syncing); pass that
-			// on so the toast tells the user what to do instead of a bare failure.
-			const detail = (err as { detail?: unknown } | null)?.detail;
-			const reason = typeof detail === 'string' ? detail.trim() : '';
-			notify(reason ? `Failed to update session: ${reason}` : 'Failed to update session', {
-				severity: 'error'
-			});
+			reportFailure(err);
 		}
 	}
 
@@ -321,23 +373,23 @@
 	// the browser dispatches that trailing click. The click then hit-tests the
 	// card sliding back underneath and used to OPEN the session. Arm the card's
 	// click guard as well so the click dies wherever it lands.
-	function handleActionPointerUp(event: PointerEvent) {
+	function handleActionPointerUp(event: PointerEvent, action: CardAction) {
 		if (event.pointerType === 'mouse') return;
 		event.stopPropagation();
 		actionJustCommitted = true;
 		suppressNextClick = true;
 		lastCommitAt = event.timeStamp;
-		void commitToggle();
+		void commitAction(action);
 	}
 
 	// Mouse and keyboard path; skips the work when pointerup already handled a tap.
-	function handleActionClick(event: MouseEvent) {
+	function handleActionClick(event: MouseEvent, action: CardAction) {
 		event.stopPropagation();
 		if (actionJustCommitted) {
 			actionJustCommitted = false;
 			return;
 		}
-		void commitToggle();
+		void commitAction(action);
 	}
 
 	function openCard(event?: Event) {
@@ -378,7 +430,7 @@
 		pointerStartOffset = actionsOpen ? -ACTION_REVEAL_WIDTH : 0;
 		// A swipe across half the row commits outright. The floor keeps a
 		// narrow (or unmeasured) row from committing on what is really a reveal.
-		fullSwipeDistance = Math.max(ACTION_REVEAL_WIDTH * 2.5, (cardRef?.clientWidth ?? 0) * 0.5);
+		fullSwipeDistance = Math.max(ACTION_REVEAL_WIDTH + ACTION_WIDTH * 1.5, (cardRef?.clientWidth ?? 0) * 0.5);
 		horizontalDrag = false;
 		lastMoveX = event.clientX;
 		lastMoveTime = performance.now();
@@ -428,9 +480,9 @@
 			const nextOffset = dragOffset ?? pointerStartOffset;
 			const flick = performance.now() - lastMoveTime <= FLICK_MAX_AGE && Math.abs(velocity) >= FLICK_VELOCITY;
 			if (swipeCommit) {
-				// The long swipe IS the tap on the action.
+				// The long swipe IS the tap on the trailing action.
 				lastCommitAt = event.timeStamp;
-				void commitToggle();
+				void commitAction(primaryAction);
 			} else if (flick) {
 				setActionsOpen(velocity < 0);
 			} else {
@@ -497,6 +549,8 @@
 	class:dragging={dragOffset !== null}
 	class:swipe-commit={swipeCommit}
 	style:--reveal={`${ACTION_REVEAL_WIDTH}px`}
+	style:--action-w={`${ACTION_WIDTH}px`}
+	style:--action-count={actions.length}
 	style:--rail-shift={dragOffset === null ? undefined : `${Math.min(0, dragOffset + ACTION_REVEAL_WIDTH)}px`}
 	role="group"
 	aria-label={`${title} session`}
@@ -594,29 +648,27 @@
 		aria-hidden={swipeLayout && !actionsOpen ? 'true' : undefined}
 		inert={swipeLayout && !actionsOpen}
 	>
-		{#if session.is_active}
+		{#each actions as action (action)}
 			<button
 				class="row-action state-toggle"
-				title="Settle session"
-				aria-label="Settle session"
-				onpointerup={handleActionPointerUp}
-				onclick={handleActionClick}
+				class:primary={action === primaryAction}
+				title={ACTION_META[action].title}
+				aria-label={ACTION_META[action].aria}
+				onpointerup={(e) => handleActionPointerUp(e, action)}
+				onclick={(e) => handleActionClick(e, action)}
 			>
-				<Check size={16} strokeWidth={1.8} />
-				{#if swipeLayout && !compact}<span class="row-action-label" aria-hidden="true">Settle</span>{/if}
+				{#if action === 'settle'}
+					<Check size={16} strokeWidth={1.8} />
+				{:else if action === 'activate'}
+					<Undo2 size={16} strokeWidth={1.8} />
+				{:else if action === 'archive'}
+					<Archive size={16} strokeWidth={1.8} />
+				{:else}
+					<ArchiveRestore size={16} strokeWidth={1.8} />
+				{/if}
+				{#if swipeLayout && (!compact || actions.length > 1)}<span class="row-action-label" aria-hidden="true">{ACTION_META[action].label}</span>{/if}
 			</button>
-		{:else}
-			<button
-				class="row-action state-toggle"
-				title="Move to Active"
-				aria-label="Move session to Active"
-				onpointerup={handleActionPointerUp}
-				onclick={handleActionClick}
-			>
-				<Undo2 size={16} strokeWidth={1.8} />
-				{#if swipeLayout && !compact}<span class="row-action-label" aria-hidden="true">Restore</span>{/if}
-			</button>
-		{/if}
+		{/each}
 	</span>
 </div>
 
@@ -647,7 +699,7 @@
 		text-align: left;
 		/* When the hover action reveals, grow the right padding so lines
 		   truncate short of the button instead of running underneath it. */
-		padding: 7px calc(8px + var(--ram-reveal) * 30px) 8px 8px;
+		padding: 7px calc(8px + var(--ram-reveal) * (30px + (var(--action-count, 1) - 1) * 32px)) 8px 8px;
 		border: none;
 		border-radius: 9px;
 		background: transparent;
@@ -895,7 +947,7 @@
 		top: 0;
 		right: 0;
 		bottom: 0;
-		width: 38px;
+		width: calc(38px + (var(--action-count, 1) - 1) * 32px);
 		display: flex;
 		align-items: stretch;
 		gap: 1px;
@@ -982,7 +1034,8 @@
 		.scard-frame.dragging .card-actions { transition: none; }
 		.scard-frame.actions-open .card-actions { pointer-events: auto; }
 		.card-actions > * {
-			width: var(--reveal);
+			flex: none;
+			width: var(--action-w, var(--reveal));
 			height: 100%;
 			min-height: 44px;
 			border-radius: 0;
@@ -1007,12 +1060,15 @@
 			line-height: 1;
 			letter-spacing: 0.02em;
 		}
-		.scard-frame.swipe-commit .card-actions > * {
+		.scard-frame.swipe-commit .card-actions > .primary {
+			flex: 1;
 			color: var(--primary-foreground);
 			background: var(--primary);
 		}
+		/* A committing long swipe is about one action only. */
+		.scard-frame.swipe-commit .card-actions > :not(.primary) { display: none; }
 		.card-actions > * :global(svg) { transition: transform 120ms ease; }
-		.scard-frame.swipe-commit .card-actions > * :global(svg) { transform: scale(1.18); }
+		.scard-frame.swipe-commit .card-actions > .primary :global(svg) { transform: scale(1.18); }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

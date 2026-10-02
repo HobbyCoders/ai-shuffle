@@ -291,6 +291,32 @@ class GitBranchMixin:
             logger.error(f"Error creating branch {name}: {e}")
             return False
 
+    def switch_to_new_branch(self, working_dir: str, name: str) -> Tuple[bool, str]:
+        """Create ``name`` at HEAD and switch to it, carrying working-tree changes.
+
+        Returns ``(success, error)``. Uncommitted changes come along because the
+        new branch starts at the current HEAD.
+        """
+        if not name or name.startswith("-") or not self.is_valid_branch_name(working_dir, name):
+            return False, f"Invalid branch name: {name!r}"
+        try:
+            result = self._run_git(working_dir, ["switch", "-c", name], timeout=30)
+            if result.returncode == 0:
+                self.invalidate_status_cache(working_dir)
+                return True, ""
+            return False, (result.stderr or "").strip() or f"Failed to create branch '{name}'"
+        except Exception as e:
+            logger.error(f"Error switching to new branch {name}: {e}")
+            return False, f"Failed to create branch '{name}'"
+
+    def is_valid_branch_name(self, working_dir: str, name: str) -> bool:
+        """Ask git itself whether ``name`` is a legal branch name."""
+        try:
+            result = self._run_git(working_dir, ["check-ref-format", "--branch", name], timeout=10)
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def delete_branch(
         self,
         working_dir: str,
