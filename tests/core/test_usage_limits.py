@@ -59,6 +59,7 @@ async def test_live_cli_unified_windows_reach_usage_snapshot(monitor):
         "unifiedWindows": {
             "five_hour": {"utilization": 0.06, "resetsAt": 1790754000},
             "seven_day": {"utilization": 0.4, "resetsAt": 1790978400},
+            "seven_day_overage_included": {"utilization": 0.83, "resetsAt": 1790978400},
         },
     }}).events
     for event in events:
@@ -66,7 +67,7 @@ async def test_live_cli_unified_windows_reach_usage_snapshot(monitor):
     snapshot = await monitor.get_snapshot()
     assert snapshot["available"] is True
     assert {w["type"]: w["utilization"] for w in snapshot["windows"]} == {
-        "five_hour": 94.0, "seven_day": 60.0,
+        "five_hour": 94.0, "seven_day": 60.0, "seven_day_overage_included": 17.0,
     }
 
 

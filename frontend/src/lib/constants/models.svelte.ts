@@ -372,7 +372,9 @@ export function getProviderDisplay(entry: ProviderDisplayInput): ProviderDisplay
 	const kind: ProviderAuthKind =
 		entry.auth_kind ?? (type === 'chatgpt' || type === 'grok' ? 'subscription' : 'api');
 	if (kind === 'subscription') {
-		return { name, subtext: entry.plan_type || SUBSCRIPTION_SUBTEXT };
+		const plan = entry.plan_type?.trim();
+		const uppercasePlan = type === 'anthropic' || type === 'openai' || type === 'chatgpt';
+		return { name, subtext: plan ? (uppercasePlan ? plan.toUpperCase() : plan) : SUBSCRIPTION_SUBTEXT };
 	}
 	return { name, subtext: API_SUBTEXT };
 }
@@ -391,7 +393,7 @@ export function getClaudeDisplay(opts?: {
 }): ProviderDisplay {
 	if (opts?.authKind === 'api') return { name: CLAUDE_BRAND, subtext: API_SUBTEXT };
 	const plan = opts?.planType?.trim();
-	return { name: CLAUDE_BRAND, subtext: plan ? plan : null };
+	return { name: CLAUDE_BRAND, subtext: plan ? plan.toUpperCase() : null };
 }
 
 /** One-line `"Brand · subtext"` rendering — for titles/aria labels. */

@@ -119,6 +119,23 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe('ContextUsageBar — Fable remaining quota', () => {
+	it('renders an 83%-used CLI report as 17% left in the row and collapsed summary', async () => {
+		rateLimit.applyLiveEvent({
+			rate_limit_type: 'seven_day_overage_included', utilization: 0.83, resets_at: future(),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const row = Array.from(container.querySelectorAll('.popover-row')).find(
+			(el) => el.querySelector('.row-label')?.textContent === 'Fable 5 limit',
+		)!;
+		expect(row.querySelector('.row-pct')?.textContent).toBe('17% left');
+		expect((row.querySelector('.row-fill') as HTMLElement).style.width).toBe('17%');
+		await fireEvent.click(container.querySelector('[aria-label="Plan usage limits — collapse"]')!);
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('17% left');
+	});
+});
+
 describe('ContextUsageBar — updates while closed', () => {
 	it.each([false, true])('animates snapshot balances and live quota on reopen (expanded=%s)', async (expanded) => {
 		let callbacks = new Map<number, FrameRequestCallback>();
@@ -1197,7 +1214,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.section-account')?.textContent).toBe('pro');
+		expect(container.querySelector('.section-account')?.textContent).toBe('PRO');
 	});
 
 	it('collapses the Claude plan section on header click: hides window rows and persists', async () => {
@@ -1303,7 +1320,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		);
 		expect(deviceLabels).toEqual(['Claude', 'OpenAI']);
 		// The only .section-account belongs to the provider header (Claude self is unlabeled).
-		expect(container.querySelector('.section-account')?.textContent).toBe('prolite');
+		expect(container.querySelector('.section-account')?.textContent).toBe('PROLITE');
 
 		// One row per provider window (the empty Claude section shows a
 		// non-.popover-row "No usage data yet" line, not counted here).
@@ -1474,7 +1491,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
-		expect(accounts).toEqual(['prolite', 'API']);
+		expect(accounts).toEqual(['PROLITE', 'API']);
 		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
 
@@ -1552,7 +1569,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		// Claude (native) stays first; then subs A–Z (Grok, OpenAI prolite);
 		// then APIs A–Z (fal.ai, OpenAI API, OpenRouter).
 		expect(labels).toEqual(['Claude', 'Grok', 'OpenAI', 'fal.ai', 'OpenAI', 'OpenRouter']);
-		expect(accounts).toEqual(['SuperGrok', 'prolite', 'API', 'API', 'API']);
+		expect(accounts).toEqual(['SuperGrok', 'PROLITE', 'API', 'API', 'API']);
 	});
 
 	it('does not show Codex extra-credit $0 on the ChatGPT subscription row', async () => {

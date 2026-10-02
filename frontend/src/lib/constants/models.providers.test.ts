@@ -196,7 +196,7 @@ describe('getClaudeAuth — native-Claude auth block hydration', () => {
 				planType: getClaudeAuth().plan_type,
 				authKind: getClaudeAuth().auth_kind
 			})
-		).toEqual({ name: 'Claude', subtext: 'max' });
+		).toEqual({ name: 'Claude', subtext: 'MAX' });
 	});
 
 	it('carries an API-key block through hydration', async () => {
@@ -259,7 +259,18 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 				auth_kind: 'subscription',
 				plan_type: 'prolite'
 			})
-		).toEqual({ name: 'OpenAI', subtext: 'prolite' });
+		).toEqual({ name: 'OpenAI', subtext: 'PROLITE' });
+	});
+
+	it.each(['anthropic', 'openai', 'chatgpt'])('uppercases %s subscription plans without changing stored metadata', (type) => {
+		const entry = { provider_type: type, auth_kind: 'subscription' as const, plan_type: ' pro ' };
+		expect(getProviderDisplay(entry).subtext).toBe('PRO');
+		expect(entry.plan_type).toBe(' pro ');
+	});
+
+	it('uppercases native Claude plans and preserves numeric tier suffixes', () => {
+		expect(getClaudeDisplay({ planType: ' pro ' }).subtext).toBe('PRO');
+		expect(getClaudeDisplay({ planType: 'max 20x' }).subtext).toBe('MAX 20X');
 	});
 
 	it('shows an OpenAI API-key row as OpenAI + API', () => {
@@ -340,7 +351,7 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 	});
 
 	it('names the native Claude group by plan, by API-key auth, or bare', () => {
-		expect(getClaudeDisplay({ planType: 'max' })).toEqual({ name: 'Claude', subtext: 'max' });
+		expect(getClaudeDisplay({ planType: 'max' })).toEqual({ name: 'Claude', subtext: 'MAX' });
 		expect(getClaudeDisplay({ authKind: 'api' })).toEqual({ name: 'Claude', subtext: 'API' });
 		expect(getClaudeDisplay()).toEqual({ name: 'Claude', subtext: null });
 		expect(getClaudeDisplay({ planType: '  ' })).toEqual({ name: 'Claude', subtext: null });
