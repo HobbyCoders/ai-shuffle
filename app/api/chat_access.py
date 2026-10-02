@@ -13,13 +13,26 @@ from app.core.chat_access import AccessDenied, GrantSubmission, broker, session_
 router = APIRouter(prefix="/api/v1/chat-access", tags=["Chat access"])
 logger = logging.getLogger(__name__)
 
+INSECURE_TRANSPORT = ("Private access is not available on this connection. Open this chat in the "
+                      "AI Shuffle desktop app window, or through this worker's HTTPS remote access address.")
+
 
 async def checked(request: Request, session_id: str) -> dict:
+    """Private inputs need a transport the worker itself can vouch for.
+
+    Accepted: the local listener from loopback (with the desktop's per-launch
+    token when the desktop started the worker), a TLS socket, or the managed
+    remote listener, whose ``shuffle.forwarded_https`` flag is derived from the
+    accepting socket in app.serve and cannot be set by a request header on any
+    other listener. A browser tab on localhost beside the desktop app, plain
+    HTTP from the LAN, and forwarded-proto headers on the local listener are
+    refused.
+    """
     from app.core.owner_auth import loopback_request
     if (request.url.scheme != "https"
             and request.scope.get("shuffle.forwarded_https") is not True
             and not loopback_request(request)):
-        raise HTTPException(403, "Private access requires the desktop loopback connection or HTTPS to this worker, directly or through its protected remote connection.")
+        raise HTTPException(403, INSECURE_TRANSPORT)
     if getattr(request.state, "preview_grant", None) is not None:
         raise HTTPException(403, "Preview access cannot manage private connections.")
     return await require_session(request, session_id)
