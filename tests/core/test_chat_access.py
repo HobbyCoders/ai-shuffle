@@ -736,8 +736,7 @@ async def test_saved_list_changes_invalidate_every_owner_session(broker, ssh_tar
 
     published.clear()
     monkeypatch.setattr(api, "broker", broker)
-    monkeypatch.setattr(api, "checked", AsyncMock())
-    monkeypatch.setattr(api, "session_owner", owner)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
