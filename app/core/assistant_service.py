@@ -51,7 +51,7 @@ RETIRED_HOME_TITLE = "Assistant (earlier home)"
 # (agents sync between workers), so a second worker reuses it, not a copy.
 DEDICATED_KEY = "assistant_dedicated"
 # Settings that belong to the owner's assistant rather than to one worker.
-ACCOUNT_SETTINGS = ("agent_id", "enabled", "paused", "introduction")
+ACCOUNT_SETTINGS = ("agent_id", "introduction")
 _ACTIVE_TURN_SQL = "SELECT id FROM turns WHERE session_id=%s AND state NOT IN ('completed','aborted','parked') LIMIT 1"
 _guard_version = 0
 
@@ -191,8 +191,7 @@ def _publish():
 def _seed(cursor, local):
     """The account row a pre-sync worker's own configuration implies."""
     cursor.execute("SELECT connector_id FROM assistant_sources WHERE assistant_id=%s AND enabled=TRUE", (assistant_id(),))
-    seed = dict(agent_id=local.get("agent_id"), enabled=bool(local.get("enabled")), paused=bool(local.get("paused")),
-                introduction=local.get("introduction") or {},
+    seed = dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {},
                 sources={row["connector_id"]: True for row in cursor.fetchall()})
     home = _session(cursor, local.get("home_session_id"))
     if _owned_here(home):
@@ -275,8 +274,11 @@ def _project(conn, account):
             and not _rebind_home_agent(cursor, home, agent_id)):
         agent_id = previous_agent  # Retried on a later pass, once the turn settles.
     runs_here = kind in (None, "self")
-    values = dict(agent_id=agent_id, enabled=bool(account.get("enabled")) and runs_here,
-                  paused=bool(account.get("paused")), introduction=account.get("introduction") or {},
+    # enabled is no longer an owner setting. On a runner row it only marks
+    # placement: research runs on the worker that holds the home, and every
+    # other worker fails closed (store.research_allowed).
+    values = dict(agent_id=agent_id, enabled=runs_here, paused=False,
+                  introduction=account.get("introduction") or {},
                   home_session_id=home["id"] if home is not None else None)
     store.project(conn, assistant_id(), values, (account.get("sources") or {}) if runs_here else {})
     return kind
@@ -346,8 +348,7 @@ def get_state():
     # Report the limits runs are actually admitted under, not stored columns.
     state.update(store.research_limits(state))
     # Configuration is the owner's, not this worker's runner view of it.
-    state.update(agent_id=account.get("agent_id"), enabled=bool(account.get("enabled")),
-                 paused=bool(account.get("paused")), introduction=account.get("introduction") or {},
+    state.update(agent_id=account.get("agent_id"), introduction=account.get("introduction") or {},
                  home_session_id=account.get("home_session_id"))
     home = database.get_session(account["home_session_id"]) if account.get("home_session_id") else None
     kind = _home_kind(account, home)
@@ -363,19 +364,25 @@ def get_state():
     state["assistant_name"] = agent["name"] if agent else None
     state["avatar_id"] = state["agent"]["avatar_id"] if agent else "robot"
     state["avatar_presets"] = list(AVATAR_PRESETS)
+    # Research has no owner switch: it runs whenever an agent is set, the
+    # server guard is up where the home is, and at least one source is opted
+    # in. "enabled" and "paused" are reported for older clients and derived
+    # from that rule. Opt-ins are the account's, so every worker counts them.
+    sources = [cid for cid, on in (account.get("sources") or {}).items() if on] if agent else []
+    state["research_sources"] = len(sources)
     if not state["configured"]:
         state["status"] = "unconfigured"
     elif not agent:
         state["status"] = "agent_unavailable"
-    elif not state["enabled"]:
-        state["status"] = "disabled"
-    elif state["paused"]:
-        state["status"] = "paused"
     elif state["runs_here"] and not proactive_guard_available():
         # The guard only matters where research runs.
         state["status"] = "guard_unavailable"
+    elif not sources:
+        state["status"] = "no_sources"
     else:
         state["status"] = "ready"
+    state["enabled"] = state["status"] == "ready"
+    state["paused"] = False
     state["proactive_guard_ready"] = proactive_guard_available()
     state["cost_accounting"] = "reported_after_run_not_hard_cap"
     state["usage"] = store.get_usage(assistant_id())
@@ -449,6 +456,9 @@ def configure(changes):
     name = changes.pop("assistant_name", None)
     avatar = changes.pop("avatar_id", None)
     create_agent = changes.pop("create_agent", False)
+    # Owners no longer switch research on or off; see store.research_allowed.
+    changes.pop("enabled", None)
+    changes.pop("paused", None)
     if create_agent and changes.get("agent_id"):
         raise ValueError("Choose an existing agent or a new assistant agent, not both")
     introduction = changes.get("introduction")
@@ -472,10 +482,6 @@ def configure(changes):
         profile = row_to_dict(cursor.fetchone())
         if agent_id and not profile:
             raise ValueError("Assistant agent does not exist")
-        if "agent_id" in shared and agent_id is None:
-            shared["enabled"] = False
-        if shared.get("enabled") and not agent_id:
-            raise ValueError("Choose an assistant agent before enabling it")
         if agent_id and agent_id != current.get("agent_id"):
             home = _session(cursor, current.get("home_session_id"))
             # Only the owning worker sees the home's turns. Elsewhere the
@@ -739,11 +745,12 @@ def assert_proactive_allowed(metadata, session_id=None):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM assistant_state WHERE id=%s", (assistant_id(),))
         state = store._parse(cursor.fetchone())
-        if not state or not state["enabled"] or state["paused"] or not state["agent_id"]:
-            raise ValueError("Assistant is disabled, paused or missing its agent")
+        if not store.research_allowed(state):
+            raise ValueError("Assistant research does not run on this worker" if state and state.get("agent_id")
+                             else "Assistant is missing its agent")
         cursor.execute("SELECT id FROM agents WHERE id=%s", (state["agent_id"],))
         if not cursor.fetchone() or state["agent_id"] != run["agent_id"]:
-            raise ValueError("Assistant is disabled, paused or missing its agent")
+            raise ValueError("Assistant is missing its agent")
         if state["home_session_id"] != run["home_session_id"] or state["runner_id"] != assistant_id():
             raise ValueError("Assistant placement changed")
         for source_id in run["source_ids"]:

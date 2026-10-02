@@ -62,9 +62,9 @@ async def test_dispatch_ceiling_ignores_bypass_safe_risk_and_registry_escape(adm
     assert "Ignore permissions" in data["events"][0]["payload"]["data"]
     denied = await registry.dispatch("AssistantReadSource", {"source_id": "ungranted"})
     assert denied.is_error and "opted-in" in denied.text
-    service.configure({"paused": True})
-    paused = await registry.dispatch("WebSearch", {"query": "test"})
-    assert paused.is_error and "paused" in paused.text
+    service.configure({"agent_id": None})
+    revoked = await registry.dispatch("WebSearch", {"query": "test"})
+    assert revoked.is_error and "missing its agent" in revoked.text
 
 
 async def test_delegated_pretool_and_wake_revalidate_provenance(admitted):
@@ -90,17 +90,15 @@ async def test_delegated_pretool_and_wake_revalidate_provenance(admitted):
     assert policy("mcp__fluid_bundled__AssistantReadSource", {})
 
 
-@pytest.mark.parametrize("change", ["disabled", "paused", "optout", "credential", "agent_scope", "runner", "home_stop", "research_stop"])
+@pytest.mark.parametrize("change", ["agent", "optout", "credential", "agent_scope", "runner", "home_stop", "research_stop"])
 async def test_running_registry_rechecks_live_source_and_session_scope(admitted, change):
     run, turn = admitted
     options = SessionOptions(model="fake", permission_mode="bypassPermissions", extra={
         "app_session_id": run["session_id"], "assistant_proactive": turn["payload"]["_assistant_proactive"],
     })
     registry = await ha.HarnessAdapter()._build_registry(options, native=True)
-    if change == "disabled":
-        service.configure({"enabled": False})
-    elif change == "paused":
-        service.configure({"paused": True})
+    if change == "agent":
+        service.configure({"agent_id": None})
     elif change == "optout":
         service.set_source("conn-mail", False)
     elif change == "credential":
@@ -162,8 +160,8 @@ async def test_native_connect_builds_no_kernel_or_learning_surface(admitted, mon
     })
     await adapter.connect(opts)
     assert adapter._engine._codemode is None
-    service.configure({"paused": True})
-    with pytest.raises(ValueError, match="paused"):
+    service.configure({"agent_id": None})
+    with pytest.raises(ValueError, match="missing its agent"):
         await adapter.send_query("Continue")
     await adapter.disconnect()
 
@@ -221,6 +219,6 @@ async def test_tool_recheck_denies_by_name_first_and_never_takes_install_lock(ad
     # In-surface names still get the live recheck, without the row lock.
     assert modes.proactive_tool_denial(metadata, run["session_id"], "mcp__fluid_bundled__AssistantReadSource") is None
     with service.get_db() as conn:
-        conn.cursor().execute("UPDATE assistant_state SET paused=TRUE WHERE id=%s", (service.assistant_id(),))
-    assert "paused" in modes.proactive_tool_denial(metadata, run["session_id"], "WebSearch")
+        conn.cursor().execute("UPDATE assistant_state SET agent_id=NULL WHERE id=%s", (service.assistant_id(),))
+    assert "missing its agent" in modes.proactive_tool_denial(metadata, run["session_id"], "WebSearch")
     assert len(calls) == 2

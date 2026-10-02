@@ -76,7 +76,8 @@ def test_configuration_syncs_and_a_second_worker_opens_the_one_home(workers, mon
         assert store.get_state(service.assistant_id())["home_session_id"] == home["id"]
         state = service.get_state()
         assert state["configured"] and state["assistant_name"] == "Ada" and state["avatar_id"] == "fox"
-        assert state["enabled"] and state["status"] == "ready"
+        # No source is opted in yet, so research has nothing to read.
+        assert not state["enabled"] and state["status"] == "no_sources"
         assert state["home_session_id"] == home["id"]
         assert not state["runs_here"]
         assert state["home_worker"]["device_id"] == a.device_id and not state["home_worker"]["is_self"]
@@ -89,15 +90,15 @@ def test_configuration_syncs_and_a_second_worker_opens_the_one_home(workers, mon
             not store.get_state(service.assistant_id())["enabled"]
     assert [row["id"] for row in homes(b)] == [home["id"]]
 
-    # An edit made on B reaches A.
+    # An edit made on B reaches A. An old client's pause is ignored.
     with b.active():
         service.configure({"paused": True, "assistant_name": "Ada Lovelace"})
         engine.scan_all()
     converge([a, b])
     with a.active():
         state = service.get_state()
-        assert state["paused"] and state["assistant_name"] == "Ada Lovelace" and state["runs_here"]
-        assert store.get_state(service.assistant_id())["paused"]
+        assert not state["paused"] and state["assistant_name"] == "Ada Lovelace" and state["runs_here"]
+        assert not store.get_state(service.assistant_id())["paused"]
         assert store.get_state(service.assistant_id())["enabled"]
     assert [row["id"] for row in homes(a)] == [home["id"]]
 
@@ -207,7 +208,7 @@ def test_research_stops_on_a_worker_that_loses_the_home(workers):
     settle([a, b])
     with b.active():
         assert store.get_account()["home_session_id"] == older["id"]
-        with pytest.raises(ValueError, match="disabled"):
+        with pytest.raises(ValueError, match="does not run on this worker"):
             service.assert_proactive_allowed(service.proactive_metadata(store.get_run(run_id)))
         assert store.admit_run(service.assistant_id()) is None
     assert runner_row(a)["enabled"]

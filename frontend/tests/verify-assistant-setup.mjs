@@ -1,6 +1,7 @@
 // Real-browser check of the minimal Assistant setup (issue #1608): name,
-// avatar and agent only, with the background-research explanation where the
-// introduction and limit forms used to be. A fake /api/v1/assistant backend
+// avatar and agent only. Background research has no owner controls (no
+// switch, pause, usage or limits); only the per-source opt-in remains. A fake
+// /api/v1/assistant backend
 // lives in this script, so nothing reaches a server or a model provider.
 //
 // Run from frontend/ while the fixture is serving:
@@ -23,7 +24,11 @@ const browser = await chromium.launch({
 	args: ['--no-sandbox', '--disable-gpu'],
 });
 const url = process.env.ASSISTANT_FIXTURE_URL || 'http://127.0.0.1:5741/tests/assistant-setup.html';
-const LIMITS = { max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5 };
+// The server still returns these legacy fields; the page must not show them.
+const LEGACY = {
+	max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5,
+	paused: false, cost_accounting: 'reported_after_run_not_hard_cap', usage: { runs_today: 7, reported_cost_today: 0.42, in_flight_runs: 1 },
+};
 let passed = 0;
 
 function fakeBackend() {
@@ -32,10 +37,18 @@ function fakeBackend() {
 		{ id: 'reviewer', name: 'Reviewer', avatar_id: 'pixel', dedicated: false },
 	];
 	const state = {
-		...LIMITS, configured: false, agent_id: null, home_session_id: null, enabled: false, paused: false,
+		...LEGACY, configured: false, agent_id: null, home_session_id: null, enabled: false, research_sources: 0,
 		status: 'unconfigured', agent: null, assistant_name: null, avatar_id: 'robot', avatar_presets: [],
-		introduction: {}, proactive_guard_ready: true, cost_accounting: 'reported_after_run_not_hard_cap',
-		usage: { runs_today: 0, reported_cost_today: 0, in_flight_runs: 0 },
+		introduction: {}, proactive_guard_ready: true,
+	};
+	const sources = [{
+		id: 'gmail', connector_id: 'gmail', name: 'Work Gmail', type: 'gmail', enabled: false, available: true, status: 'connected',
+		trigger_ids: ['new_email'], observation_mode: 'poll_and_events', last_observed_at: null, last_error: null,
+	}];
+	const derive = () => {
+		state.research_sources = sources.filter((s) => s.enabled).length;
+		state.status = !state.configured ? 'unconfigured' : state.research_sources ? 'ready' : 'no_sources';
+		state.enabled = state.status === 'ready';
 	};
 	const patches = [];
 	function configure(patch) {
@@ -50,11 +63,8 @@ function fakeBackend() {
 		const agent = identities.find((a) => a.id === state.agent_id);
 		if (patch.assistant_name) agent.name = patch.assistant_name;
 		if (patch.avatar_id) agent.avatar_id = patch.avatar_id;
-		for (const key of ['enabled', 'paused']) if (key in patch) state[key] = patch[key];
-		Object.assign(state, {
-			configured: true, agent: { ...agent }, assistant_name: agent.name, avatar_id: agent.avatar_id,
-			status: state.enabled ? (state.paused ? 'paused' : 'ready') : 'disabled',
-		});
+		Object.assign(state, { configured: true, agent: { ...agent }, assistant_name: agent.name, avatar_id: agent.avatar_id });
+		derive();
 	}
 	async function handle(route) {
 		const request = route.request();
@@ -63,7 +73,14 @@ function fakeBackend() {
 		if (path === '/assistant' && request.method() === 'GET') return json(state);
 		if (path === '/assistant' && request.method() === 'PATCH') { configure(request.postDataJSON()); return json(state); }
 		if (path === '/assistant/agents') return json(identities);
-		if (path === '/assistant/sources' || path === '/assistant/activity') return json([]);
+		if (path === '/assistant/sources') return json(sources);
+		if (path.startsWith('/assistant/sources/') && request.method() === 'PATCH') {
+			const source = sources.find((s) => s.id === decodeURIComponent(path.split('/').pop()));
+			source.enabled = request.postDataJSON().enabled;
+			derive();
+			return json(source);
+		}
+		if (path === '/assistant/activity') return json([]);
 		return json({ detail: `unexpected ${request.method()} ${path}` }, 404);
 	}
 	return { handle, patches, state };
@@ -110,9 +127,8 @@ async function run(viewport) {
 	check(boxes.every((b) => b.w >= 44 && b.h >= 44), 'avatar targets at least 44px', boxes[0]);
 	check(await page.getByRole('textbox', { name: 'What should I call you?' }).count() === 0, 'no introduction form');
 	check(await page.getByRole('spinbutton').count() === 0, 'no limit fields');
-	check(await page.getByText('Lets your assistant look into opted-in sources while you’re away.').isVisible(), 'one-line research hint by the toggle');
-	check(!(await page.locator('body').textContent()).match(/12 passes|admission limit|Per run/), 'no limit numbers shown');
-	check(await page.getByRole('checkbox', { name: /Enable background research/ }).isChecked() === false, 'research stays off by default');
+	check(await page.getByRole('checkbox').count() === 0, 'no background research switch');
+	check(!(await page.locator('body').textContent()).match(/background research|12 passes|admission limit|Per run/i), 'no research toggle text or limit numbers');
 	check(await overflow() <= 0, 'no horizontal overflow on setup', await overflow());
 	await shoot('setup');
 
@@ -133,11 +149,24 @@ async function run(viewport) {
 	await press(page.getByRole('button', { name: 'Create assistant' }));
 	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
 	check(backend.patches.length === 1, 'one save request', backend.patches);
-	assert.deepEqual(backend.patches[0], { create_agent: true, assistant_name: 'Juniper', avatar_id: 'fox', enabled: false, paused: true }, `[${name}] save payload`);
+	assert.deepEqual(backend.patches[0], { create_agent: true, assistant_name: 'Juniper', avatar_id: 'fox' }, `[${name}] save payload`);
 	passed++;
 	check(await page.getByRole('heading', { level: 1 }).textContent() === 'Juniper', 'home shows the new name');
 	check(await page.getByText(/Assistant created/).isVisible(), 'creation confirmed');
 	check(await overflow() <= 0, 'no horizontal overflow on home', await overflow());
+	for (const label of [/Pause/, /Resume/, /Review & enable/]) {
+		check(await page.getByRole('button', { name: label }).count() === 0, `no ${label.source} button`);
+	}
+	const homeText = () => page.locator('body').textContent();
+	check(!(await homeText()).match(/runs · last 24 hours|in flight|hard billing cap|fixed limits|\$0\.42|\b12\b/), 'no usage panel, cost or limit numbers', (await homeText()).slice(0, 400));
+	check(await page.getByText('No connected sources in use.').isVisible(), 'neutral line before any opt-in');
+	// The per-source opt-in is data-access consent and stays.
+	const toggle = page.getByRole('switch', { name: 'Observe Work Gmail' });
+	check(await toggle.getAttribute('aria-checked') === 'false', 'source opt-in offered and off');
+	await press(toggle);
+	await page.waitForFunction(() => document.querySelector('[role=switch]')?.getAttribute('aria-checked') === 'true');
+	check(await page.getByText('Using 1 connected source.').isVisible(), 'one neutral line once a source is opted in');
+	check(await overflow() <= 0, 'no horizontal overflow after opting in', await overflow());
 	await shoot('home');
 
 	// Editing reopens on the dedicated agent rather than offering a second one.
