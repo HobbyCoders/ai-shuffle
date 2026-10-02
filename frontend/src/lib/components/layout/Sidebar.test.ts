@@ -178,6 +178,15 @@ function session(
 	};
 }
 
+describe('Archived sessions', () => {
+	it('keeps archived history out of the sidebar; Settings owns the archive', () => {
+		mocks.sessions.set([session('history', 'Archived work', null, false, false, { status: 'archived' })]);
+		render(Sidebar, sidebarProps);
+		expect(screen.queryByText('Archived work')).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Archived/ })).toBeNull();
+	});
+});
+
 const sidebarProps = {
 	onSettledOpenSession: vi.fn(),
 	onNewSession: vi.fn(),

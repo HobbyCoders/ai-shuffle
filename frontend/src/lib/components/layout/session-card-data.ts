@@ -550,7 +550,7 @@ export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
  */
 export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
 	if (isArchived(s as Session)) return ['restore'];
-	if (s.is_active) return ['settle'];
+	if (s.is_active) return ['archive', 'settle'];
 	return ['activate', 'archive'];
 }
 

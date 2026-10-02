@@ -18,7 +18,7 @@
 	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
-	 * Hover/swipe exposes the row's actions (see `cardActions`): Settle (active),
+	 * Hover/swipe exposes the row's actions (see `cardActions`): Archive + Settle (active),
 	 * Move to Active + Archive (settled), or Restore (archived). On the swipe
 	 * layout a long swipe across the row commits the trailing action on
 	 * release. Settle and Archive offer Undo. Rename, Fork, and Delete live on
@@ -547,6 +547,7 @@
 	bind:this={cardRef}
 	data-session-card={session.id}
 	class="scard-frame"
+	class:swipe-layout={swipeLayout}
 	class:compact
 	class:actions-open={actionsOpen}
 	class:dragging={dragOffset !== null}
@@ -986,97 +987,94 @@
 	.row-action:disabled { opacity: 0.45; cursor: not-allowed; }
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Swipe layout. Two independent triggers, matching `swipeLayout` in the
-	   script: a touch-only pointer (still true on a touch laptop), and the
-	   mobile shell regardless of pointer. */
-	@media (hover: none) {
-		.scard-frame {
-			overflow: hidden;
-			touch-action: pan-y;
-			background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
-		}
-		.scard {
-			background: var(--sidebar);
-			padding: 7px 8px 8px;
-			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
-			will-change: transform;
-		}
-		/* The swipe track sits behind the card, so the card surface has to be
-		   opaque or the revealed actions bleed through the accent tint. */
-		.scard.active {
-			background:
-				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-				var(--sidebar);
-		}
-		.scard-frame.actions-open .scard { transform: translateX(calc(-1 * var(--reveal))); }
-		.scard-frame.dragging .scard { transition: none; }
-		.scard-frame:hover .scard { background: var(--sidebar); }
-		.scard-frame:hover .scard.active {
-			background:
-				linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-				var(--sidebar);
-		}
-		/* A long swipe arms the commit: the whole track goes solid so the
-		   release reads as "this will settle now", not "this reveals a button". */
-		.scard-frame.swipe-commit { background: var(--primary); }
-
-		/* The rail hugs the card's trailing edge. Inside the reveal width it is
-		   pinned to the frame; once the finger drags past, `--rail-shift`
-		   carries it along with the card so the button never detaches. */
-		.card-actions {
-			top: 0;
-			right: 0;
-			bottom: 0;
-			width: var(--reveal);
-			justify-content: flex-end;
-			gap: 0;
-			padding-left: 0;
-			background: none;
-			opacity: 1;
-			z-index: 1;
-			pointer-events: none;
-			transform: translateX(var(--rail-shift, 0px));
-			transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
-		}
-		.scard-frame.dragging .card-actions { transition: none; }
-		.scard-frame.actions-open .card-actions { pointer-events: auto; }
-		.card-actions > * {
-			flex: none;
-			width: var(--action-w, var(--reveal));
-			height: 100%;
-			min-height: 44px;
-			border-radius: 0;
-			display: grid;
-			grid-auto-flow: row;
-			place-items: center;
-			align-content: center;
-			gap: 3px;
-			color: var(--foreground);
-			background: color-mix(in oklch, var(--foreground) 9%, var(--sidebar));
-			transition: color 120ms ease, background-color 120ms ease, transform 120ms ease;
-		}
-		.card-actions > *:hover {
-			background: color-mix(in oklch, var(--foreground) 14%, var(--sidebar));
-		}
-		.card-actions > *:active {
-			background: color-mix(in oklch, var(--foreground) 18%, var(--sidebar));
-		}
-		.row-action-label {
-			font-size: 10px;
-			font-weight: 600;
-			line-height: 1;
-			letter-spacing: 0.02em;
-		}
-		.scard-frame.swipe-commit .card-actions > .primary {
-			flex: 1;
-			color: var(--primary-foreground);
-			background: var(--primary);
-		}
-		/* A committing long swipe is about one action only. */
-		.scard-frame.swipe-commit .card-actions > :not(.primary) { display: none; }
-		.card-actions > * :global(svg) { transition: transform 120ms ease; }
-		.scard-frame.swipe-commit .card-actions > .primary :global(svg) { transform: scale(1.18); }
+	/* One swipe stylesheet for touch browsers and the mobile shell. The
+	   class follows the same layout state as gesture handling and accessibility. */
+	.scard-frame.swipe-layout {
+		overflow: hidden;
+		touch-action: pan-y;
+		background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
 	}
+	.scard-frame.swipe-layout .scard {
+		background: var(--sidebar);
+		padding: 7px 8px 8px;
+		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
+		will-change: transform;
+	}
+	/* The swipe track sits behind the card, so the card surface has to be
+	   opaque or the revealed actions bleed through the accent tint. */
+	.scard-frame.swipe-layout .scard.active {
+		background:
+			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+			var(--sidebar);
+	}
+	.scard-frame.swipe-layout.actions-open .scard { transform: translateX(calc(-1 * var(--reveal))); }
+	.scard-frame.swipe-layout.dragging .scard { transition: none; }
+	.scard-frame.swipe-layout:hover .scard { background: var(--sidebar); }
+	.scard-frame.swipe-layout:hover .scard.active {
+		background:
+			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+			var(--sidebar);
+	}
+	/* A long swipe arms the commit: the whole track goes solid so the
+	   release reads as "this will settle now", not "this reveals a button". */
+	.scard-frame.swipe-layout.swipe-commit { background: var(--primary); }
+
+	/* The rail hugs the card's trailing edge. Inside the reveal width it is
+	   pinned to the frame; once the finger drags past, `--rail-shift`
+	   carries it along with the card so the button never detaches. */
+	.scard-frame.swipe-layout .card-actions {
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: var(--reveal);
+		justify-content: flex-end;
+		gap: 0;
+		padding-left: 0;
+		background: none;
+		opacity: 1;
+		z-index: 1;
+		pointer-events: none;
+		transform: translateX(var(--rail-shift, 0px));
+		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+	}
+	.scard-frame.swipe-layout.dragging .card-actions { transition: none; }
+	.scard-frame.swipe-layout.actions-open .card-actions { pointer-events: auto; }
+	.scard-frame.swipe-layout .card-actions > * {
+		flex: none;
+		width: var(--action-w, var(--reveal));
+		height: 100%;
+		min-height: 44px;
+		border-radius: 0;
+		display: grid;
+		grid-auto-flow: row;
+		place-items: center;
+		align-content: center;
+		gap: 3px;
+		color: var(--foreground);
+		background: color-mix(in oklch, var(--foreground) 9%, var(--sidebar));
+		transition: color 120ms ease, background-color 120ms ease, transform 120ms ease;
+	}
+	.scard-frame.swipe-layout .card-actions > *:hover {
+		background: color-mix(in oklch, var(--foreground) 14%, var(--sidebar));
+	}
+	.scard-frame.swipe-layout .card-actions > *:active {
+		background: color-mix(in oklch, var(--foreground) 18%, var(--sidebar));
+	}
+	.scard-frame.swipe-layout .row-action-label {
+		font-size: 10px;
+		font-weight: 600;
+		line-height: 1;
+		letter-spacing: 0.02em;
+	}
+	.scard-frame.swipe-layout.swipe-commit .card-actions > .primary {
+		flex: 1;
+		color: var(--primary-foreground);
+		background: var(--primary);
+	}
+	/* A committing long swipe is about one action only. */
+	.scard-frame.swipe-layout.swipe-commit .card-actions > :not(.primary) { display: none; }
+	.scard-frame.swipe-layout .card-actions > * :global(svg) { transition: transform 120ms ease; }
+	.scard-frame.swipe-layout.swipe-commit .card-actions > .primary :global(svg) { transform: scale(1.18); }
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
@@ -1084,6 +1082,10 @@
 		.title :global(.warn) { animation: none; }
 		.scard,
 		.card-actions,
-		.card-actions > * { transition: none; }
+		.card-actions > *,
+		.scard-frame.swipe-layout .scard,
+		.scard-frame.swipe-layout .card-actions,
+		.scard-frame.swipe-layout .card-actions > *,
+		.scard-frame.swipe-layout .card-actions > * :global(svg) { transition: none; }
 	}
 </style>

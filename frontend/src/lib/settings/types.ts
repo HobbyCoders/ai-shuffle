@@ -9,6 +9,7 @@
 
 export const CATEGORY_IDS = [
 	'general',
+	'archived',
 	'voice',
 	'providers',
 	'models',
@@ -27,6 +28,7 @@ export type PageType = 'preference' | 'collection';
 /** Page type per category. Collections are list + detail; the rest are one column of rows. */
 export const PAGE_TYPES: Record<CategoryId, PageType> = {
 	general: 'preference',
+	archived: 'preference',
 	voice: 'preference',
 	providers: 'collection',
 	models: 'collection',

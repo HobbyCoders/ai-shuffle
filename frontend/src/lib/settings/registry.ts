@@ -19,6 +19,7 @@ import { CATEGORY_IDS, isCategoryId, type CategoryId, type CategoryModule, type 
 
 export const MODULES: Record<CategoryId, CategoryModule> = {
 	general,
+	archived: { entries: [] },
 	voice,
 	providers,
 	models,

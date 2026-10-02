@@ -200,6 +200,32 @@ describe('SessionCard archive and undo', () => {
 		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', true);
 	});
 
+	it('archives an active desktop session directly and Undo restores Active', async () => {
+		renderCard({ is_active: true });
+		await fireEvent.click(screen.getByTitle('Archive session'));
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		lastBanner()[1].action.onClick();
+		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, true);
+	});
+
+	it.each([true, false])('keeps both mobile actions exposed after release (active=%s)', async (is_active) => {
+		platform.set('mobile');
+		const { container } = renderCard({ is_active });
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		expect(frame.classList.contains('swipe-layout')).toBe(true);
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
+		expect(frame.classList.contains('actions-open')).toBe(true);
+		expect(frame.classList.contains('swipe-commit')).toBe(false);
+		expect(frame.style.getPropertyValue('--reveal')).toBe('120px');
+		expect(screen.getByTitle('Archive session')).toBeTruthy();
+		expect(screen.getByTitle(is_active ? 'Settle session' : 'Move to Active')).toBeTruthy();
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
 	it('archives a settled session and Undo restores it where it was', async () => {
 		renderCard({ is_active: false });
 		await fireEvent.click(screen.getByTitle('Archive session'));

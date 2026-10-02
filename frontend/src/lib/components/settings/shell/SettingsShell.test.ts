@@ -52,7 +52,7 @@ function nav() {
 }
 
 describe('SettingsShell index', () => {
-	it('lists ten categories in three groups and opens General', async () => {
+	it('lists categories in three groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
 		for (const group of ['Personal', 'AI', 'This worker']) expect(within(index).getByText(group)).toBeTruthy();
@@ -61,6 +61,7 @@ describe('SettingsShell index', () => {
 			.map((b) => b.textContent?.trim());
 		expect(names).toEqual([
 			'General',
+			'Archived chats',
 			'Voice',
 			'Providers',
 			'Default models',
@@ -81,7 +82,7 @@ describe('SettingsShell index', () => {
 		const general = within(nav()).getByRole('button', { name: 'General' });
 		general.focus();
 		await fireEvent.keyDown(general, { key: 'ArrowDown' });
-		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Voice' }));
+		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Archived chats' }));
 	});
 
 	it('loads a collection page on first visit and focuses its heading', async () => {

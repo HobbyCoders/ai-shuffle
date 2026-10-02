@@ -99,7 +99,6 @@
 	// The list starts capped; "All sessions" grows it in place (the board is gone).
 	const SETTLED_LIMIT = 30;
 	const SHOW_MORE_STEP = 50;
-	const ARCHIVED_LIMIT = 30;
 
 	const collapsedGroups = $derived($sidebarGroups);
 	function toggleGroup(name: string) {
@@ -365,15 +364,7 @@
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
 	const fullyExpanded = $derived(hiddenSettled === 0 && settledLimit > SETTLED_LIMIT);
 
-	const archivedRows = $derived.by((): CardRow[] =>
-		visibleSessions
-			.filter((s) => isArchived(s))
-			.map((s) => ({ session: s, status: 'idle' as SessionCardStatus, openPr: false, ts: sessionTimestamp(s) }))
-			.sort((a, b) => b.ts - a.ts)
-			.slice(0, ARCHIVED_LIMIT)
-	);
-	const archivedCount = $derived(visibleSessions.filter(isArchived).length);
-	let archivedOpen = $state(false);
+	// Archived chats are browsed in Settings, not in the session sidebar.
 
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
@@ -780,37 +771,6 @@
 					<span class="rule" aria-hidden="true"></span>
 					<ChevronRight size={14} strokeWidth={2} />
 				</button>
-			{/if}
-		{/if}
-
-		{#if archivedCount > 0}
-			<button class="shelf" onclick={() => (archivedOpen = !archivedOpen)} aria-expanded={archivedOpen}>
-				<span class="txt">Archived ({archivedCount})</span>
-				<span class="rule" aria-hidden="true"></span>
-				{#if archivedOpen}
-					<ChevronDown size={14} strokeWidth={2} />
-				{:else}
-					<ChevronRight size={14} strokeWidth={2} />
-				{/if}
-			</button>
-			{#if archivedOpen}
-				<div class="cards">
-					{#each archivedRows as row (row.session.id)}
-						<SessionCard
-							session={row.session}
-							status={row.status}
-							openPr={row.openPr}
-							projectLabel={projectLabel(row.session)}
-							active={row.session.id === activeId}
-							{now}
-							timestamp={row.ts}
-							openActionsId={openActionsCardId}
-							onActionsOpenChange={(id) => (openActionsCardId = id)}
-							compact
-							onOpen={onOpenSession}
-						/>
-					{/each}
-				</div>
 			{/if}
 		{/if}
 	</div>
