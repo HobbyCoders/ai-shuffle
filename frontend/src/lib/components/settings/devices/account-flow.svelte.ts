@@ -322,6 +322,26 @@ export class AccountFlow {
 		}
 	}
 
+	/** Back to a fresh state (tests). */
+	reset(): void {
+		this.stop();
+		this.connection = null;
+		this.profile = null;
+		this.inventoryReady = false;
+		this.checking = true;
+		this.busy = false;
+		this.loadingProfile = false;
+		this.statusError = '';
+		this.actionError = '';
+		this.profileError = '';
+		this.intent = null;
+		this.showPhone = false;
+		this.copied = false;
+		this.editingName = false;
+		this.usernameInput = '';
+		this.savingUsername = false;
+	}
+
 	async signOutBrowser(): Promise<void> {
 		try {
 			await auth.logout();
