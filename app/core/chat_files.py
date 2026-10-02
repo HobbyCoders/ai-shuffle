@@ -145,9 +145,10 @@ def _darwin_open(root: int, path: str, flags: int, mode: int = 0) -> int:
     O_RESOLVE_BENEATH where the kernel enforces it), so no symlink or ".." is
     followed. XNU rejects O_NOFOLLOW alongside O_NOFOLLOW_ANY, which already
     covers the last component. Existing files are opened with O_UNIQUE where
-    enforced, so the kernel refuses hard links. macOS has no RESOLVE_NO_XDEV, so every opened component must
-    report the root's device and mount point; that also refuses APFS
-    firmlinks into another volume. Last, the kernel's path for the result must
+    enforced, so the kernel refuses hard links. macOS has no RESOLVE_NO_XDEV,
+    so every opened component must report the root's device and mount point.
+    The mount point is what refuses APFS firmlinks: the system and Data
+    volumes can report the same st_dev. Last, the kernel's path for the result must
     lie under the root's current path, which catches a directory moved out of
     the root during the walk.
     """
