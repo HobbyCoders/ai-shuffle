@@ -18,6 +18,7 @@ Package layout (see docs/network/README.md for the design as built):
 - ``control``         driving a session that executes on another device
 - ``ownership``       which device fires an automation or holds a connector
 - ``memory_records``  facts and skills as records
+- ``prose_skills``    ``~/.fluid/skills/<name>/`` prose skill folders, one record each
 - ``plugins_sync``    desired plugin state
 - ``blobs``           content-addressed bytes for artifacts and note attachments
 - ``startup``         boot wiring, single-install migration, resource hooks

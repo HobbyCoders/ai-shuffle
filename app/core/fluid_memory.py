@@ -10,6 +10,20 @@ def skills_root() -> Path:
     return Path(settings.fluid_skills_dir) if settings.fluid_skills_dir else settings.effective_data_dir / "fluid" / "skills"
 
 
+def prose_skills_root() -> Path:
+    """User-level prose skills (``<name>/SKILL.md``): the directory fluid's
+    discovery reads as its global skill scope, which is ``~/.fluid/skills``.
+
+    This is the source of truth the network replicates. It is deliberately
+    not under the data dir: native sessions and the delegated leg's
+    "# More skills" list read only this path, so a copy anywhere else would
+    have to be mirrored back here to be seen. Docker keeps it on the
+    ``fluid-settings`` volume.
+    """
+    from fluid.context.instructions import skill_search_roots
+    return next(root for root, scope in skill_search_roots(".", include_project=False) if scope == "global")
+
+
 def owner_root(owner: str) -> Path:
     if owner == "local":
         return skills_root()  # existing installation-owner store; never an API user's store

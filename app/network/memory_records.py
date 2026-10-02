@@ -2,6 +2,9 @@
 
 A missing hot fact is not a deletion. Fact revisions, expiry, archive and
 forget barriers travel together; all imports use the normal transaction API.
+Code-mode Python skills live under ``skills_root()``; prose skill folders
+(``~/.fluid/skills/<name>/SKILL.md``) ride the same collection through
+:mod:`app.network.prose_skills`.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import re
 from pathlib import Path
 
 from app.db.base import get_db
-from app.network import engine
+from app.network import engine, prose_skills
 
 log = logging.getLogger(__name__)
 _SKILL_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$")
@@ -55,11 +58,16 @@ def refresh_from_files(*, ctx=None) -> None:
     ctx = ctx or engine.context()
     if not ctx:
         return
+    with prose_skills.LOCK:
+        manifest = prose_skills.load_manifest()
+        if _refresh(ctx, manifest):
+            prose_skills.save_manifest(manifest)
+
+
+def _refresh(ctx, manifest) -> bool:
     root = _root()
-    if not root.is_dir():
-        return
     incoming = {}
-    for store in _stores():
+    for store in (_stores() if root.is_dir() else ()):
         payload = store._facts.export()
         # Usage counters affect local ranking, not fact truth or sync revisions.
         for entry in payload["entries"]:
@@ -68,7 +76,7 @@ def refresh_from_files(*, ctx=None) -> None:
         content = json.dumps(payload, sort_keys=True)
         rid = f"memory-v2:{ctx.device_id}:{_hash(store._facts.owner)}"
         incoming[rid] = ("fact", "global", content, _hash(content))
-    if root.exists():
+    if root.is_dir():
         for path in root.glob("*.py"):
             if path.stem.startswith("_") or not _SKILL_NAME.fullmatch(path.stem):
                 continue
@@ -93,8 +101,10 @@ def refresh_from_files(*, ctx=None) -> None:
             )
         # Fact snapshots are not deleted for absence, archive or expiry.
         for rid, old in known.items():
-            if rid.startswith("skill:") and rid not in incoming and not old.get("deleted"):
+            if rid.startswith("skill:") and rid not in incoming and not old.get("deleted") and root.is_dir():
                 cur.execute("UPDATE network_memory_records SET deleted=TRUE, updated_at=NOW() WHERE id=%s", (rid,))
+        changed = prose_skills.stage_publish(cur, known, manifest)
+    return changed
 
 
 def publish(*, ctx=None) -> int:
@@ -109,6 +119,16 @@ def apply_to_files(ids: list[str], *, ctx=None) -> int:
     ctx = ctx or engine.context()
     if not ctx or not ids:
         return 0
+    with prose_skills.LOCK:
+        manifest = prose_skills.load_manifest()
+        before = json.dumps(manifest, sort_keys=True)
+        applied = _apply(ids, ctx, manifest)
+        if json.dumps(manifest, sort_keys=True) != before:
+            prose_skills.save_manifest(manifest)
+    return applied
+
+
+def _apply(ids, ctx, manifest) -> int:
     applied = 0
     with get_db() as conn:
         cur = conn.cursor()
@@ -118,6 +138,10 @@ def apply_to_files(ids: list[str], *, ctx=None) -> int:
     for record in records:
         rid = record["id"]
         try:
+            if record.get("kind") == prose_skills.KIND:
+                if rid.startswith(prose_skills.PREFIX) and prose_skills.apply_record(record, manifest):
+                    applied += 1
+                continue
             if record.get("kind") == "skill":
                 name = rid.removeprefix("skill:")
                 if not _SKILL_NAME.fullmatch(name):
