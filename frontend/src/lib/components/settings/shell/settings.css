@@ -68,13 +68,20 @@
 	outline-offset: 2px;
 }
 
-.settings-shell button {
-	font: inherit;
-	color: inherit;
-	cursor: pointer;
-}
-.settings-shell button:disabled {
-	cursor: not-allowed;
+/*
+ * Base layer, so Tailwind utilities on buttons in embedded older panels
+ * (ConnectorManager's text-primary-foreground and the like) still win.
+ * Unlayered, this rule beat every utility and left white text on white.
+ */
+@layer base {
+	.settings-shell button {
+		font: inherit;
+		color: inherit;
+		cursor: pointer;
+	}
+	.settings-shell button:disabled {
+		cursor: not-allowed;
+	}
 }
 
 .settings-shell .st-vh {

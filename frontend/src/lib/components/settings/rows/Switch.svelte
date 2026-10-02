@@ -69,8 +69,11 @@
 	.st-sw[aria-checked='true'] {
 		background: var(--st-primary);
 	}
+	/* On the primary track the knob takes primary-foreground: themes with a
+	   white primary in dark mode (Vercel) otherwise draw white on white. */
 	.st-sw[aria-checked='true']::after {
 		transform: translateX(15px);
+		background: var(--st-pfg);
 	}
 	.st-sw:disabled {
 		opacity: 0.4;
