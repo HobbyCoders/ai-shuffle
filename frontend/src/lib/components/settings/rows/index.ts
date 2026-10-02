@@ -6,6 +6,7 @@ export { default as Segmented } from './Segmented.svelte';
 export { default as SelectField } from './SelectField.svelte';
 export type { SelectOption, SelectGroup } from './SelectField.svelte';
 export { default as NumberField } from './NumberField.svelte';
+export { default as RangeField } from './RangeField.svelte';
 export { default as TextField } from './TextField.svelte';
 export { default as PathField } from './PathField.svelte';
 export type { PathCheck } from './PathField.svelte';

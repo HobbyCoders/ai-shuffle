@@ -2,7 +2,8 @@
 	/**
 	 * RowGroup: a titled card of rows. On a preference page it is an h2
 	 * section; inside a DetailPane it becomes an h3 detail section. `tone`
-	 * danger is the danger-zone style (use DangerZone for that).
+	 * danger is the danger-zone style (use DangerZone for that). The card is
+	 * the global `.st-card` (settings.css), so custom layouts can reuse it.
 	 */
 	import type { Snippet } from 'svelte';
 	import { isInDetail } from './row-context';
@@ -35,7 +36,7 @@
 	{#if bare}
 		{@render children()}
 	{:else}
-		<div class="st-list">{@render children()}</div>
+		<div class="st-list st-card">{@render children()}</div>
 	{/if}
 </section>
 
@@ -71,22 +72,11 @@
 		gap: 4px;
 		font-weight: 400;
 	}
-	.st-list {
-		background: var(--st-card);
-		border: 1px solid var(--st-border);
-		border-radius: var(--st-radius);
-		overflow: hidden;
-	}
 	.st-grp.danger .st-gt {
 		color: var(--st-destructive);
 	}
 	.st-grp.danger .st-list {
 		border-color: var(--st-destructive-line);
 		background: var(--st-destructive-soft);
-	}
-	/* Hairlines between rows (SettingRow renders .st-row and .st-rowx siblings). */
-	.st-list > :global(.st-row + .st-row),
-	.st-list > :global(.st-rowx + .st-row) {
-		border-top: 1px solid var(--st-border);
 	}
 </style>

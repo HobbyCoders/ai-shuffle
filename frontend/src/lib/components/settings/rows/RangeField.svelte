@@ -1,11 +1,10 @@
 <script lang="ts">
 	/**
 	 * RangeField: a slider with its value beside it ("1.00x"). Labelled by the
-	 * SettingRow it sits in. Local to Default models until the row set has a
-	 * slider primitive.
+	 * SettingRow it sits in, or by `label`.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
-	import { controlAria, getRowContext } from '../rows/row-context';
+	import { controlAria, getRowContext } from './row-context';
 
 	interface Props {
 		value: number;

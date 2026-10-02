@@ -62,9 +62,7 @@
 		{#if text.status === 'error'}
 			<InlineBanner tone="warn">Could not load the text model.</InlineBanner>
 		{/if}
-		<!-- Bare group: the picker's popover must not be clipped by the card. -->
-		<RowGroup title="Model" bare>
-			<div class="rows">
+		<RowGroup title="Model">
 			<SettingRow id="models.textModel">
 				<div class="picker">
 					<ModelPicker
@@ -83,7 +81,6 @@
 					onchange={(v) => text.setEffort(v)}
 				/>
 			</SettingRow>
-			</div>
 		</RowGroup>
 		<RowGroup title="Used for" bare>
 			<ul class="chips">
@@ -94,14 +91,6 @@
 </DetailPane>
 
 <style>
-	.rows {
-		background: var(--st-card);
-		border: 1px solid var(--st-border);
-		border-radius: var(--st-radius);
-	}
-	.rows > :global(.st-row + .st-row) {
-		border-top: 1px solid var(--st-border);
-	}
 	.picker {
 		width: 240px;
 		max-width: 100%;

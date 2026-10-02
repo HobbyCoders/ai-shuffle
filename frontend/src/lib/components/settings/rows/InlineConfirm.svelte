@@ -23,7 +23,7 @@
 		/** danger: red question and solid red confirm. primary: plain question, teal confirm. */
 		tone?: 'danger' | 'primary';
 		/** Look of the default trigger. */
-		variant?: 'danger' | 'ghost' | 'default' | 'warn';
+		variant?: 'danger' | 'ghost' | 'default' | 'warn' | 'primary';
 		size?: 'md' | 'sm';
 		onConfirm: () => void | Promise<void>;
 		onCancel?: () => void;
@@ -116,6 +116,7 @@
 			class:danger={variant === 'danger'}
 			class:ghost={variant === 'ghost'}
 			class:warn={variant === 'warn'}
+			class:primary={variant === 'primary'}
 			class:sm={size === 'sm'}
 			disabled={off}
 			onclick={arm}>{label}</button

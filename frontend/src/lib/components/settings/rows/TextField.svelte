@@ -20,6 +20,8 @@
 		label?: string;
 		autocomplete?: HTMLInputElement['autocomplete'];
 		maxlength?: number;
+		/** Keyboard hint, e.g. 'numeric' for token counts typed as text. */
+		inputmode?: 'text' | 'numeric' | 'decimal' | 'email' | 'url' | 'tel' | 'search' | 'none';
 	}
 
 	let {
@@ -33,7 +35,8 @@
 		disabled = false,
 		label,
 		autocomplete = 'off',
-		maxlength
+		maxlength,
+		inputmode
 	}: Props = $props();
 
 	const access = getSettingsAccess();
@@ -56,6 +59,7 @@
 	{placeholder}
 	{autocomplete}
 	{maxlength}
+	{inputmode}
 	bind:value
 	disabled={disabled || access.readOnly}
 	{...controlAria(row, label)}

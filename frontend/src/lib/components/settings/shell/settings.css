@@ -108,6 +108,28 @@
 	overflow: hidden;
 }
 
+/* ---------- row cards ---------- */
+/* The card rows sit in (RowGroup). Global so bare groups and custom lists
+   reuse it. No overflow clipping: popovers inside rows must escape it. */
+.settings-shell .st-card {
+	background: var(--st-card);
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+}
+.settings-shell .st-card > :first-child {
+	border-top-left-radius: calc(var(--st-radius) - 1px);
+	border-top-right-radius: calc(var(--st-radius) - 1px);
+}
+.settings-shell .st-card > :last-child {
+	border-bottom-left-radius: calc(var(--st-radius) - 1px);
+	border-bottom-right-radius: calc(var(--st-radius) - 1px);
+}
+/* Hairlines between rows (SettingRow renders .st-row and .st-rowx siblings). */
+.settings-shell .st-card > .st-row + .st-row,
+.settings-shell .st-card > .st-rowx + .st-row {
+	border-top: 1px solid var(--st-border);
+}
+
 /* ---------- shared buttons (used by several primitives and pages) ---------- */
 .settings-shell .st-btn {
 	display: inline-flex;
@@ -401,4 +423,9 @@
 		animation: none !important;
 		transition: none !important;
 	}
+}
+
+/* A danger zone whose custom rows rendered nothing (DetailPane dangerRows). */
+.settings-shell .st-grp.danger:has(> .st-card:not(:has(*))) {
+	display: none;
 }

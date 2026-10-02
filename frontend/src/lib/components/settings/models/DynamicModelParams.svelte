@@ -21,7 +21,7 @@
 	import SelectField from '../rows/SelectField.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
-	import RangeField from './RangeField.svelte';
+	import RangeField from '../rows/RangeField.svelte';
 	import { onDestroy } from 'svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { modelSchemaStore, type ModelSchema, type ParamField } from '$lib/stores/modelSchema';

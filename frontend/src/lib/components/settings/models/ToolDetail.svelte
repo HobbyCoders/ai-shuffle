@@ -17,7 +17,7 @@
 	import SelectField from '../rows/SelectField.svelte';
 	import Segmented from '../rows/Segmented.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
-	import RangeField from './RangeField.svelte';
+	import RangeField from '../rows/RangeField.svelte';
 	import DynamicModelParams from './DynamicModelParams.svelte';
 	import ToolModelList from './ToolModelList.svelte';
 	import { OPTION_ENTRY, toolMeta } from './media-tools.svelte';
