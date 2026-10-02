@@ -137,6 +137,8 @@ const operation = { id: 'install-1', phase: 'waiting', workers: [
  {device_id:'peer',device_name:'Worker 2',status:'waiting',message:'Waiting for startup…'}
 ] };
 const settled = {...state,workers:[{...worker,phase:'idle',version:null}],operation:{...operation,phase:'complete',workers:operation.workers.map(w=>({...w,status:'verified',message:'Updated and verified'}))}};
+// The app restarted into this install a moment ago, so a fresh mount may celebrate it.
+const justSettled = {...settled,server_time:1_000_030,operation:{...settled.operation,completed_at:1_000_000}};
 
 it('restores waiting after reload instead of offering a stale ready update', async()=>{
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}],operation});
@@ -201,7 +203,7 @@ it('suppresses stale updater availability for the running revision, but shows a 
 it('cleans up animation timers on unmount', async()=>{
  vi.useFakeTimers();
  try {
-  api.get.mockResolvedValue(settled);const view=render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
+  api.get.mockResolvedValue(justSettled);const view=render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
   expect(screen.getByRole('button',{name:'Update complete'})).toBeTruthy();
   view.unmount();expect(vi.getTimerCount()).toBe(0);
  } finally { cleanup();vi.useRealTimers(); }
@@ -259,4 +261,161 @@ it('stops polling while the window is hidden and refreshes when it returns', asy
   hidden=false;document.dispatchEvent(new Event('visibilitychange'));await vi.advanceTimersByTimeAsync(0);
   expect(api.get.mock.calls.length).toBe(before+1);
  } finally { spy.mockRestore();cleanup();vi.useRealTimers(); }
+});
+
+// #1623: readiness aggregates over every included worker, each row shows its real phase.
+const peer = {...worker,device_id:'peer',device_name:'Unraid'};
+it('waits for every included worker before offering restart and labels each phase', async()=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'downloading',message:'Building frontend…'}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Downloading update'});
+ expect(button.getAttribute('aria-disabled')).toBe('true');
+ expect(button.title).toContain('1 of 2 staged');
+ expect(button.title).toContain('Current worker: Staged, awaiting restart');
+ expect(button.title).toContain('Unraid: Building frontend…');
+ await fireEvent.click(button);expect(api.post).not.toHaveBeenCalled();
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'checking'}]});
+ window.dispatchEvent(new Event('application-update-policy'));
+ await waitFor(()=>expect(button.title).toContain('Unraid: Checking for updates…'));
+ expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'ready',message:'Update ready. Choose Update and restart.'}]});
+ window.dispatchEvent(new Event('application-update-policy'));
+ const restart=await screen.findByRole('button',{name:'Update and restart'});
+ expect(restart.title).toContain('Unraid: Staged, awaiting restart');
+ expect(restart.title).not.toContain('running');
+ await fireEvent.focus(restart);
+ const rows=[...screen.getByRole('tooltip').querySelectorAll('.worker-row')].map(row=>row.textContent);
+ expect(rows).toEqual(['Current workerStaged, awaiting restart','UnraidStaged, awaiting restart']);
+});
+it('lists excluded workers with a reason without counting them ready or letting them block', async()=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[
+  {...worker,phase:'ready'},
+  {...peer,device_id:'off',device_name:'Laptop',online:false,supported:false,phase:'unsupported',reason:'Offline; not queued'},
+  {...peer,device_id:'cur',device_name:'Desk',phase:'ready',version:'bbbbbbbbbbbb',running_version:'b'.repeat(40)},
+  {...peer,device_id:'old',device_name:'Old',supported:false,phase:'unsupported',version:null},
+  {...peer,device_id:'off2',device_name:'Locked',allow_updates:false,phase:'available'},
+  {...peer,device_id:'idle',device_name:'Idle',phase:'idle',version:null},
+ ]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Update and restart'});
+ for (const text of ['Laptop: Offline; not queued','Desk: Already up to date','Old: No application updater; not included',
+  'Locked: Updates disabled on this worker; not included','Idle: No update offered']) expect(button.title).toContain(text);
+});
+it.each([
+ ['an unreadable status',{phase:'unknown',supported:false,reason:'Worker unavailable or does not support application updates'},'Unraid (Status unavailable)'],
+ ['a failed check',{phase:'error',version:null,error:'Feed unreachable'},'Feed unreachable'],
+])('never offers restart while an included worker has %s', async(_label,change,text)=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,...change}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Check for updates'});
+ expect(button.title).toContain(text);
+ expect(screen.getByRole('alert').textContent).toContain(text);
+ await fireEvent.click(button);
+ expect(api.post).toHaveBeenCalledWith('/settings/application-updates',{action:'check'});
+});
+it('does not keep showing accepted requests once workers report their phase', async()=>{
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Download update'});
+ api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}]});
+ await fireEvent.click(button);
+ const restart=await screen.findByRole('button',{name:'Update and restart'});
+ expect(restart.title).not.toContain('Request queued');
+ expect(restart.title).toContain('Current worker: Staged, awaiting restart');
+});
+
+// #1623: a reload while staged must not replay a historical completion.
+const history = {...settled,server_time:2_000_000,operation:{...settled.operation,completed_at:1_000_000}};
+it.each([
+ ['an old completion', history],
+ ['a completion from an older worker without a timestamp', settled],
+ ['a recent completion', justSettled],
+])('reloading with fresh storage while staged skips %s and shows restart', async(_label,snap)=>{
+ vi.useFakeTimers();
+ try {
+  api.get.mockResolvedValue({...snap,workers:[{...worker,phase:'ready',version:'cccccccccccc',running_version:'b'.repeat(40)}]});
+  render(DesktopUpdateButton);await vi.advanceTimersByTimeAsync(0);
+  expect(document.querySelector('.complete')).toBeNull();
+  expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
+  expect(screen.getByRole('button',{name:'Update and restart'})).toBeTruthy();
+  expect(localStorage.getItem('application-update-completed')).toBe('install-1');
+  await vi.advanceTimersByTimeAsync(2500);
+  expect(document.querySelector('.complete')).toBeNull();
+  expect(screen.getByRole('button',{name:'Update and restart'})).toBeTruthy();
+ } finally { cleanup();vi.useRealTimers(); }
+});
+it.each([['an old completion', history], ['an untimed completion', settled]])('a fresh browser never celebrates %s', async(_label,snap)=>{
+ api.get.mockResolvedValue(snap);
+ render(DesktopUpdateButton);await waitFor(()=>expect(api.get).toHaveBeenCalledOnce());
+ expect(screen.queryByRole('button')).toBeNull();
+ expect(localStorage.getItem('application-update-completed')).toBe('install-1');
+});
+it('celebrates a just-finished install once after the app restarts into it', async()=>{
+ localStorage.setItem('application-update-completed','install-0');
+ api.get.mockResolvedValue(justSettled);
+ const view=render(DesktopUpdateButton);
+ expect(await screen.findByRole('button',{name:'Update complete'})).toBeTruthy();
+ view.unmount();render(DesktopUpdateButton);await waitFor(()=>expect(api.get).toHaveBeenCalledTimes(2));
+ expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
+});
+it('does not let a peer outside a current-worker update hold or join the restart', async()=>{
+ // A peer read only to verify an earlier all-worker install stays out of a current-worker update.
+ api.get.mockResolvedValue({...state,workers:[{...worker,is_self:true,phase:'ready'},{...peer,is_self:false,phase:'unknown',supported:false}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Update and restart'});
+ expect(button.title).not.toContain('Restart waits');
+ expect(button.title).toContain('Unraid: Not in scope; current worker only');
+});
+it('never celebrates a recent completion while an update is staged but held for an unknown worker', async()=>{
+ api.get.mockResolvedValue({...justSettled,update_all_workers:true,workers:[{...worker,phase:'ready',version:'cccccccccccc',running_version:'b'.repeat(40)},{...peer,phase:'unknown',supported:false}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Check for updates'});
+ expect(button.title).toContain('Restart waits for Unraid');
+ expect(document.querySelector('.complete')).toBeNull();
+ expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
+});
+
+// #1623 live test: a peer that refused the fanned-out request was left idle and
+// the button offered restart from the initiating worker's state alone.
+it('names a worker that refused the last request and holds restart for it', async()=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker},{...peer,phase:'idle',version:null}]});
+ api.post.mockResolvedValue({results:[
+  {device_id:'peer',device_name:'Unraid',accepted:false,reason:'No application update available; current version left running'},
+  {device_id:'local',device_name:'Current worker',accepted:true,reason:'Request queued'}]});
+ render(DesktopUpdateButton);
+ const download=await screen.findByRole('button',{name:'Download update'});
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'idle',version:null}]});
+ await fireEvent.click(download);
+ const button=await screen.findByRole('button',{name:'Check for updates'});
+ expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
+ expect(button.title).toContain('Restart waits for Unraid (Refused: No application update available');
+ expect(screen.getByRole('alert').textContent).toContain('Refused: No application update available');
+ await fireEvent.focus(button);
+ const rows=[...screen.getByRole('tooltip').querySelectorAll('.worker-row')].map(row=>row.textContent);
+ expect(rows).toContain('UnraidRefused: No application update available; current version left running');
+ // A check that reaches the peer clears the refusal; the peer then reports its own phase.
+ api.post.mockResolvedValue({results:[{device_id:'peer',device_name:'Unraid',accepted:true,reason:'Request queued'},
+  {device_id:'local',device_name:'Current worker',accepted:true,reason:'Already staged'}]});
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'available',version:'cccccccccccc'}]});
+ await fireEvent.click(button);
+ expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'check'});
+ const next=await screen.findByRole('button',{name:'Download update'});
+ expect(next.title).not.toContain('Refused');
+});
+it('counts a worker with a queued request it has not taken yet as preparing', async()=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'idle',version:null,request_pending:true}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Downloading update'});
+ expect(button.getAttribute('aria-disabled')).toBe('true');
+ expect(button.title).toContain('Unraid: Request queued; waiting for the updater');
+ expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
+});
+it('ignores an idle message that claims an update is in progress', async()=>{
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},
+  {...peer,phase:'idle',version:null,message:'Application update is running.'},
+  {...peer,device_id:'desk',device_name:'Desk',phase:'idle',version:null,message:'Updated version is running.'}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Update and restart'});
+ expect(button.title).toContain('Unraid: No update offered');
+ expect(button.title).not.toContain('Application update is running');
+ expect(button.title).toContain('Desk: Updated version is running.');
 });

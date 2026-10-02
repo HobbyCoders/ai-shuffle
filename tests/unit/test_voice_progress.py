@@ -166,6 +166,7 @@ async def test_peer_receipt_reaches_voice_without_a_user_queue_or_interrupt():
     from types import SimpleNamespace
     from app.core.session_runtime import SessionRuntime
     runtime = SimpleNamespace(session_id="s")
+    runtime._peer_note_data = lambda sender, content: SessionRuntime._peer_note_data(runtime, sender, content)
     send = AsyncMock()
     progress = voice_progress.VoiceProgress("s", send)
     async def record(frame):

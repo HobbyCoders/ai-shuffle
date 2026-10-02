@@ -663,12 +663,12 @@ class TestUsageLimitsProviders:
         still names it so the popover can render without a registry join."""
         from app.db import database as db
 
-        db.set_system_setting("fal_billing_api_key", "dummy-fal-key")
+        db.set_system_setting("fal_api_key", "dummy-fal-key")
         db.upsert_provider_usage_snapshot(
             provider_id="fal-ai", provider_type="fal", plan_type=None,
             windows=[], credits={"balance_remaining": 24.5, "currency": "USD"},
             raw=None, fetched_at=9,
-            expected_credential_generation=db.get_system_setting_revision("fal_billing_api_key"),
+            expected_credential_generation=db.get_system_setting_revision("fal_api_key"),
         )
 
         with patch("app.api.usage.usage_limits_monitor") as mon:

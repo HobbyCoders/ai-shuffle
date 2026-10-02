@@ -23,6 +23,7 @@ def bridge(monkeypatch):
     monkeypatch.setattr(updates, "_desktop_seen", 0)
     monkeypatch.setattr(updates, "_desktop_state", {})
     monkeypatch.setattr(updates, "_desktop_request", None)
+    monkeypatch.setattr(updates, "_desktop_followup", None)
     return reads
 
 
@@ -149,3 +150,66 @@ def test_container_request_expiry_spans_several_supervisor_polls():
     poll = float(re.search(r"next_update = time\.monotonic\(\) \+ ([\d.]+)", watch)[1])
     assert updates.CONTAINER_REQUEST_SECONDS == 10
     assert updates.CONTAINER_REQUEST_SECONDS >= 5 * poll
+
+
+# #1623: a fanned-out download reaches a desktop that has not checked yet. The
+# shell only downloads an update it has found, so it gets a check first and
+# the download once that check reports an update.
+def test_download_for_an_idle_desktop_checks_first_then_downloads(bridge):
+    updates.desktop_exchange({"phase": "idle"})
+    updates.enqueue("download")
+    assert updates.status()["request_pending"] is True
+    assert updates.desktop_exchange({"phase": "idle"})["action"] == "check"
+    assert updates.desktop_exchange({"phase": "checking"}) == {}
+    assert updates.status()["request_pending"] is True
+    request = updates.desktop_exchange({"phase": "available"})
+    assert request["action"] == "download" and request["expires_at"] > time.time()
+    assert updates.desktop_exchange({"phase": "downloading"}) == {}
+    assert updates.status()["request_pending"] is False
+
+
+@pytest.mark.parametrize("outcome", ["idle", "error", "ready"])
+def test_chained_download_is_dropped_when_the_check_finds_nothing_or_fails(bridge, outcome):
+    updates.desktop_exchange({"phase": "idle"})
+    updates.enqueue("download")
+    assert updates.desktop_exchange({"phase": "idle"})["action"] == "check"
+    assert updates.desktop_exchange({"phase": "checking"}) == {}
+    assert updates.desktop_exchange({"phase": outcome}) == {}
+    assert updates._desktop_followup is None
+    # A later, unrelated "available" report must not start a download.
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+
+
+def test_chained_download_lapses_with_a_slow_check(bridge, monkeypatch):
+    updates.desktop_exchange({"phase": "idle"})
+    updates.enqueue("download")
+    assert updates.desktop_exchange({"phase": "idle"})["action"] == "check"
+    now = time.time()
+    monkeypatch.setattr(updates.time, "time",
+                        lambda: now + updates.DESKTOP_REQUEST_SECONDS + updates.DESKTOP_FOLLOWUP_SECONDS + 1)
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+    assert updates._desktop_followup is None
+
+
+def test_chained_download_is_dropped_with_its_check_when_updates_are_disabled(bridge, monkeypatch):
+    updates.desktop_exchange({"phase": "idle"})
+    updates.enqueue("download")
+    monkeypatch.setattr(updates.database, "get_system_setting", lambda key: "false")
+    assert updates.desktop_exchange({"phase": "idle"}) == {}
+    assert updates._desktop_followup is None
+    monkeypatch.setattr(updates.database, "get_system_setting", lambda key: None)
+    assert updates.desktop_exchange({"phase": "available"}) == {}
+
+
+def test_download_for_a_desktop_with_an_update_on_offer_is_sent_as_is(bridge):
+    updates.desktop_exchange({"phase": "available"})
+    updates.enqueue("download")
+    assert updates._desktop_followup is None
+    assert updates.desktop_exchange({"phase": "available"})["action"] == "download"
+
+
+def test_desktop_idle_status_drops_a_stale_in_progress_message(bridge):
+    updates.desktop_exchange({"phase": "idle", "message": "Checking for updates…"})
+    assert updates.status()["message"] is None
+    updates.desktop_exchange({"phase": "checking", "message": "Checking for updates…"})
+    assert updates.status()["message"] == "Checking for updates…"

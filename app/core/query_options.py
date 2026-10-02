@@ -296,12 +296,24 @@ class WorktreeUnavailableError(Exception):
         branch_name: Optional[str] = None,
         reason: str = "",
         path: Optional[str] = None,
+        mismatch: Optional[str] = None,
     ):
         self.session_id = session_id
         self.branch_name = branch_name
         self.reason = reason
         self.path = path
+        self.mismatch = mismatch
         branch = f" (branch '{branch_name}')" if branch_name else ""
+        if mismatch:
+            # The folder is present but on another branch: saying it "no
+            # longer exists" sends the user looking for a deleted checkout.
+            super().__init__(
+                f"This session's checkout{branch} is on the wrong branch: "
+                f"{mismatch}. Switch that folder back to its branch (keep the "
+                f"other work on its own branch or checkout), then retry. "
+                f"Refusing to run on the wrong branch or in the main checkout."
+            )
+            return
         where = f" at {path}" if path else ""
         detail = f" ({reason})" if reason else ""
         hint = (
@@ -773,6 +785,12 @@ def build_options_from_profile(
                     ):
                         retry_cwd = project_resolver.resolve_cwd(session_row)
                     if retry_cwd is None:
+                        mismatch = None
+                        if session_row:
+                            try:
+                                mismatch = project_resolver.describe_checkout_mismatch(session_row)
+                            except Exception:  # noqa: BLE001 — diagnosis only; still refuse
+                                logger.debug("checkout mismatch diagnosis failed", exc_info=True)
                         raise WorktreeUnavailableError(
                             session_id,
                             branch_name=branch,
@@ -780,6 +798,7 @@ def build_options_from_profile(
                                 "its checkout is not materialized on this device "
                                 "(or could not be prepared — see server logs)"
                             ),
+                            mismatch=mismatch,
                         )
                     working_dir = retry_cwd
                     working_dir_source = "project-v2"

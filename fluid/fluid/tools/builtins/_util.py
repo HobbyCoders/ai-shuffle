@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
 import os
 import re
+import shutil
+import stat
+import subprocess
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -107,18 +112,307 @@ def walk_files(root: Path, state: WalkState | None = None) -> Iterator[Path]:
         state.files_seen += 1
         yield root
         return
+    dirpath, base = "", root
+    for parent, name in _walk(root, state):
+        if parent is not dirpath:
+            dirpath, base = parent, Path(parent)
+        yield base / name
+
+
+def _walk(root: Path, state: WalkState) -> Iterator[tuple[str, str]]:
+    """``(dirpath, filename)`` for every file the pruned walk reaches."""
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
         if state.expired:
             state.deadline_hit = True
             return
-        base = Path(dirpath)
         for name in sorted(filenames):
             if state.expired:
                 state.deadline_hit = True
                 return
             state.files_seen += 1
-            yield base / name
+            yield dirpath, name
+
+
+def list_rel_files(
+    root: Path, state: WalkState | None = None, rg: str | None = None
+) -> Generator[str, None, None]:
+    """The files :func:`walk_files` yields, as root-relative POSIX paths.
+
+    This is what a glob is matched against, so the strings are built directly
+    rather than through ``Path.relative_to(...).as_posix()``, which costs more
+    than the listing itself on a few thousand files. The root itself, when it
+    is a file, comes back as ``.``, as ``relative_to`` would give it.
+
+    With ``rg``, a directory is listed by ``rg --files``: ``-uu`` (no ignore
+    files, hidden files included) plus the :data:`PRUNE_DIRS` excludes covers
+    the same tree as the walk, an order of magnitude faster. Ripgrep without
+    ``--follow`` lists no symlinks at all, so :class:`_LinkProbe` adds the
+    symlinked files the walk lists. Neither enters a symlinked directory; the
+    one remaining difference is that the walk enters Windows junctions and
+    ripgrep does not. Following links is not an option, because a link out of
+    the tree (to a home or data directory) would turn every listing into a
+    walk of that tree. When ripgrep cannot be started, or exits with an error
+    having listed nothing, the walk runs instead; a listing that also met an
+    error (an unreadable directory) stands, as the walk skips such a
+    directory too. The deadline in ``state`` kills ripgrep and the listing
+    stops with ``deadline_hit`` set, exactly like the walk.
+    """
+    state = state or WalkState()
+    if root.is_file():
+        state.files_seen += 1
+        yield "."
+        return
+    if rg:
+        listing = _rg_listing(rg, root, state)
+        if listing is not None:
+            yield from listing
+            return
+    yield from _walk_rel(root, state)
+
+
+def _walk_rel(root: Path, state: WalkState) -> Iterator[str]:
+    top = len(os.fspath(root))
+    for dirpath, name in _walk(root, state):
+        sub = dirpath[top:].lstrip(os.sep)
+        if sub and os.sep != "/":
+            sub = sub.replace(os.sep, "/")
+        yield f"{sub}/{name}" if sub else name
+
+
+def rg_prune_globs() -> list[str]:
+    """``--glob`` arguments that make ripgrep prune exactly :data:`PRUNE_DIRS`.
+
+    A glob with no slash but a trailing one matches a *directory* of that name
+    at any depth below the search root, and only a directory, which is what
+    :func:`walk_files` prunes (case-sensitively, like the set lookup there).
+    Ripgrep lets the last matching glob win, so these go after any glob of the
+    caller's that could match the same directory.
+    """
+    args: list[str] = []
+    for name in sorted(PRUNE_DIRS):
+        args += ["--glob", f"!{name}/"]
+    return args
+
+
+def _rg_listing(rg: str, root: Path, state: WalkState) -> Iterator[str] | None:
+    """``rg --files`` under ``root`` as a stream, or ``None`` if it cannot start."""
+    args = [
+        rg, "--files", "--no-config", "-uu", "--null", "--path-separator", "/",
+        *rg_prune_globs(),
+    ]
+    try:
+        proc = subprocess.Popen(
+            args, cwd=str(root), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    return _rg_stream(proc, root, state, _LinkProbe(root))
+
+
+def _rg_stream(
+    proc: subprocess.Popen[bytes], root: Path, state: WalkState, links: _LinkProbe
+) -> Iterator[str]:
+    timer = None
+    if state.deadline is not None:
+        def _expire() -> None:
+            proc.kill()
+            links.close()
+
+        timer = threading.Timer(max(0.0, state.deadline - time.monotonic()), _expire)
+        timer.daemon = True
+        timer.start()
+    assert proc.stdout is not None
+    listed = 0
+    try:
+        pending = b""
+        while chunk := proc.stdout.read(65536):
+            *names, pending = (pending + chunk).split(b"\0")
+            for raw in names:
+                if not raw:
+                    continue
+                if state.expired:
+                    state.deadline_hit = True
+                    return
+                state.files_seen += 1
+                listed += 1
+                rel = os.fsdecode(raw)
+                yield rel[2:] if rel.startswith("./") else rel
+        if state.expired:
+            state.deadline_hit = True
+            return
+        # rg: 0 = files listed, 1 = none, >=2 = an error.
+        if proc.wait() >= 2 and listed == 0:
+            links.close()
+            yield from _walk_rel(root, state)
+            return
+        yield from links.files(state)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        links.close()
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        proc.wait()
+
+
+# ── symlinked files ──────────────────────────────────────────────────────────
+#
+# ``rg --files`` without ``--follow`` lists no symlinks at all, and following
+# them is not an option (one link out of the tree would make every Glob walk
+# that tree). The walk lists a symlink as a file whenever it does not resolve
+# to a directory, so a symlinked CLAUDE.md or a dangling link shows up there.
+# These helpers find exactly those entries, without entering linked
+# directories: in a git work tree from the index and the untracked listing
+# (git does not follow links either), anywhere else from a scandir pass that
+# looks only at entry types.
+
+_GIT_CMDS = (
+    # Tracked entries with their modes; 120000 is a symlink.
+    ("ls-files", "--stage", "-z", "--recurse-submodules"),
+    # Untracked and ignored entries. --directory folds a wholly untracked
+    # directory (an ignored build tree, a nested repository) into one
+    # "dir/" line, which is scanned below unless it is pruned.
+    ("ls-files", "--others", "--directory", "-z"),
+)
+
+
+class _LinkProbe:
+    """Finds the symlinked files under ``root`` that ``rg --files`` leaves out.
+
+    The git listings start when the probe is made, so they run while rg does.
+    Anything that keeps git from answering (not a work tree, no git, a
+    "dubious ownership" refusal) falls back to the scandir pass, which is
+    exact but walks every directory.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.procs: list[subprocess.Popen[bytes]] = []
+        git = shutil.which("git")
+        if git is None:
+            return
+        try:
+            for cmd in _GIT_CMDS:
+                self.procs.append(subprocess.Popen(
+                    # A repository's fsmonitor setting names a program to run;
+                    # listing files is no reason to run it.
+                    [git, "-c", "core.fsmonitor=false", *cmd],
+                    cwd=str(root), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                ))
+        except OSError:
+            self.close()
+            self.procs = []
+
+    def close(self) -> None:
+        for proc in self.procs:
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+
+    def _git_output(self) -> list[bytes] | None:
+        if len(self.procs) != len(_GIT_CMDS):
+            return None
+        outputs = []
+        for proc in self.procs:
+            out, _ = proc.communicate()
+            if proc.returncode != 0:
+                return None
+            outputs.append(out)
+        return outputs
+
+    def files(self, state: WalkState) -> Iterator[str]:
+        outputs = self._git_output()
+        if outputs is None:
+            yield from _scan_links(self.root, "", state)
+            return
+        staged, others = outputs
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for entry in staged.split(b"\0"):
+            meta, sep, name = entry.partition(b"\t")
+            if sep and meta.startswith(b"120000 "):
+                candidates.append(os.fsdecode(name))
+        dirs: list[str] = []
+        for entry in others.split(b"\0"):
+            if not entry:
+                continue
+            rel = os.fsdecode(entry)
+            if rel.endswith("/") or rel in ("", "."):
+                folded = rel.rstrip("/")
+                dirs.append("" if folded in ("", ".") else folded.removeprefix("./"))
+            else:
+                candidates.append(rel)
+        for rel in candidates:
+            if rel in seen or _pruned(rel.split("/")[:-1]):
+                continue
+            seen.add(rel)
+            if _is_listed_link(os.path.join(self.root, rel)):
+                if state.expired:
+                    state.deadline_hit = True
+                    return
+                state.files_seen += 1
+                yield rel
+        for rel_dir in dirs:
+            if rel_dir and _pruned(rel_dir.split("/")):
+                continue
+            for rel in _scan_links(self.root, rel_dir, state):
+                if rel not in seen:
+                    seen.add(rel)
+                    yield rel
+            if state.deadline_hit:
+                return
+
+
+def _pruned(dir_parts: list[str]) -> bool:
+    return any(part in PRUNE_DIRS for part in dir_parts)
+
+
+def _is_listed_link(path: str) -> bool:
+    """A symlink the walk would list as a file: one not resolving to a directory."""
+    try:
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            return False
+    except OSError:
+        return False
+    return not os.path.isdir(path)
+
+
+def _scan_links(root: Path, start: str, state: WalkState) -> Iterator[str]:
+    """Symlinked files under ``root/start``, found by entry type alone.
+
+    Prunes like the walk and never enters a symlinked directory or a
+    junction. Counts what it yields in ``state.files_seen``.
+    """
+    stack = [start]
+    while stack:
+        if state.expired:
+            state.deadline_hit = True
+            return
+        rel_dir = stack.pop()
+        try:
+            entries = os.scandir(os.path.join(root, rel_dir) if rel_dir else root)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                try:
+                    if entry.is_symlink():
+                        if not entry.is_dir():
+                            state.files_seen += 1
+                            yield rel
+                    elif (
+                        entry.is_dir(follow_symlinks=False)
+                        and not entry.is_junction()
+                        and entry.name not in PRUNE_DIRS
+                    ):
+                        stack.append(rel)
+                except OSError:
+                    continue
 
 
 def is_binary(path: Path) -> bool:

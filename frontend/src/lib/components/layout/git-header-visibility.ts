@@ -47,6 +47,30 @@ export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolea
 	return true;
 }
 
+export interface GitPanelTriggerInput {
+	/** The git store's status does not say "not a repository". */
+	isGitRepo: boolean;
+	/** The session is on a worktree or branch checkout (known from the tab, or the store's mode). */
+	worktreeMode: boolean;
+	/** The git store's load error, if any. */
+	error: string | null | undefined;
+}
+
+/**
+ * Whether GitHeaderActions renders its panel button rather than the
+ * "Git unavailable · Retry" or Init Repo buttons. The panel lists the chat's
+ * Swarm workflows, so the header shows the standalone Swarm button exactly
+ * when this is false.
+ *
+ * A worktree or branch session keeps the panel button even while status reads
+ * "not a repository". That reading can be a placeholder carried over from the
+ * previous session, or an unreadable checkout that recovers on the next poll.
+ * Hiding the button then left only the Swarm button in the header (#1615).
+ */
+export function shouldShowGitPanelTrigger(input: GitPanelTriggerInput): boolean {
+	return !input.error && (input.isGitRepo || input.worktreeMode);
+}
+
 /**
  * How the conversation header reaches the private-access dialog. When the git
  * cluster is shown, its panel has a "Private access" row, so ChatAccess renders

@@ -48,6 +48,11 @@ jobs:
       - name: Install fluid with its dev extras
         run: pip install './fluid[dev]'
 
+      - name: Install ripgrep
+        # Glob and Grep use rg when it is on PATH (as in the Docker image);
+        # the engine-parity tests skip without it.
+        run: command -v rg || (sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep)
+
       - name: Run the unit suite
         # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
         # pytest picks it up as rootdir because the test path sits under it.

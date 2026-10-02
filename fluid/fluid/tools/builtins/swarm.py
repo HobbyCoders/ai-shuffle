@@ -2,7 +2,7 @@
 import asyncio
 from fluid.tools.registry import ToolOutcome, ToolSpec
 
-from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SWARM_ROUTING
+from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -16,7 +16,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
     return (
         "Start, inspect, or cancel a bounded multi-agent workflow. "
         + routing +
-        "Declare the planned tasks and their depends_on IDs in one start call. "
+        "Declare the complete planned tasks and their depends_on IDs in one "
+        "start call. The schema accepts at most 64 tasks; that is a ceiling, "
+        "not a target. Omit max_parallel to run every dependency-ready task "
+        "at once, or set it lower to throttle. " + SUBAGENT_WORKTREE_GUIDANCE + " " +
         "The scheduler launches ready tasks up to max_parallel, hands bounded "
         "dependency results to successors, blocks successors of failed tasks, "
         "and sends one workflow completion wake instead of waking the parent "

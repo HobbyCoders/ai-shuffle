@@ -55,7 +55,6 @@ router.include_router(updates_router)
 class IntegrationSettingsResponse(BaseModel):
     """Response containing integration configuration status"""
     fal_api_key_set: bool
-    fal_billing_api_key_set: bool = False
     fal_api_key_masked: str
     # Anthropic API key — a Claude Code AUTHENTICATION credential. When set, it
     # is injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
@@ -173,27 +172,23 @@ async def _check_fal_key(api_key: str) -> tuple[Optional[bool], Optional[str]]:
     return None, f"fal.ai answered the check with HTTP {response.status_code}; the key was saved without verification."
 
 
-@router.post("/integrations/fal-billing")
-async def set_fal_billing_key(request: FalAIKeyRequest, token: str = Depends(require_admin)):
-    key = request.api_key.strip()
-    if not key or len(key) > 4096 or any(c.isspace() for c in key):
-        raise HTTPException(400, "Enter an Admin API key without whitespace")
-    await run_sync(_store_api_key, "fal_billing_api_key", key)
-    from app.core.provider_usage import FAL_BILLING_URL
+async def _resume_fal_balance_polling(api_key: str) -> None:
+    """Let the usage poller read the balance with a (re-)saved fal.ai key.
+
+    Re-saving a key fal.ai had refused clears its paused polling state, the
+    same as the other usage credentials. Best-effort: the key is already
+    saved, so a deferral or error here never fails the request.
+    """
+    from app.core.provider_usage import FAL_BALANCE_URL, _fal_auth_header
     from app.core.usage_polling import UsageDeferred
     from app.network.usage_budget import resume_authentication
 
     try:
-        await resume_authentication(FAL_BILLING_URL, {"Authorization": f"Key {key}"})
+        await resume_authentication(FAL_BALANCE_URL, {"Authorization": _fal_auth_header(api_key)})
     except UsageDeferred:
-        raise HTTPException(503, "Key saved. Reconnect the network founder and save again to resume usage polling.") from None
-    return {"success": True}
-
-
-@router.delete("/integrations/fal-billing")
-async def remove_fal_billing_key(token: str = Depends(require_admin)):
-    await run_sync(database.delete_system_setting, "fal_billing_api_key")
-    return {"success": True}
+        logger.info("fal.ai balance polling resumes after the network founder reconnects")
+    except Exception:  # noqa: BLE001 — usage polling never blocks saving a key
+        logger.warning("Could not resume fal.ai balance polling", exc_info=True)
 
 
 class AnthropicKeyRequest(BaseModel):
@@ -252,7 +247,6 @@ async def get_integration_settings(token: str = Depends(require_auth)):
 
         return IntegrationSettingsResponse(
             fal_api_key_set=bool(fal_key),
-            fal_billing_api_key_set=bool(database.get_system_setting("fal_billing_api_key")),
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
@@ -291,7 +285,8 @@ async def set_fal_api_key(
     """
     Set the fal.ai API key (admin only).
 
-    The key is used for all AI tools: image, video, 3D, TTS, and STT.
+    The key is used for all AI tools: image, video, 3D, TTS, and STT, and to
+    read the fal.ai credit balance shown with usage.
     Get your API key from: https://fal.ai/dashboard/keys
     """
     api_key = request.api_key.strip()
@@ -308,6 +303,7 @@ async def set_fal_api_key(
     # Save to database, always encrypted. One hop: the fal.ai validation above
     # is a real network await, so this cannot share a closure with it.
     await run_sync(_store_api_key, "fal_api_key", api_key)
+    await _resume_fal_balance_polling(api_key)
 
     return FalAIKeyResponse(
         success=True,
