@@ -15,7 +15,8 @@ Mode x leg x watched/unwatched, for a call the runtime asked about:
   the mode, so fluid's own ``acceptEdits`` allow rules are never installed);
   the approver allows an edit only after the user's saved rules, so a
   remembered Deny on Write still wins under Accept Edits.
-* Bypass approves everything, watched or not.
+* Bypass approves everything, watched or not, except the session's first
+  computer-use access request, which always asks a person.
 """
 
 import asyncio
@@ -255,16 +256,42 @@ async def test_accept_edits_asks_on_the_claude_cli_leg_too(tmp_path):
 
 
 async def test_bypass_still_approves_everything(tmp_path):
+    """Once the session's first screen-control grant exists."""
+    from app.mcp.computer_use import access
+
     cb, broadcast, _ = await _callback(
         tmp_path, session_row={"permission_mode": "bypassPermissions"},
     )
-    for tool, tool_input in (
-        ("Bash", {"command": "ls"}),
-        ("run_python", {"code": "print(1)"}),
-        (COMPUTER_USE_REQUEST_ACCESS, {"apps": []}),
-    ):
-        assert _allowed(await cb(tool, tool_input, _ctx(delegated=False)))
-    assert _prompt_count(broadcast) == 0
+    access.grant(SID, ["Notepad"])
+    try:
+        for tool, tool_input in (
+            ("Bash", {"command": "ls"}),
+            ("run_python", {"code": "print(1)"}),
+            (COMPUTER_USE_REQUEST_ACCESS, {"apps": []}),
+        ):
+            assert _allowed(await cb(tool, tool_input, _ctx(delegated=False)))
+        assert _prompt_count(broadcast) == 0
+    finally:
+        access.revoke(SID)
+
+
+async def test_bypass_asks_for_the_first_screen_control_grant(tmp_path):
+    from app.mcp.computer_use import access
+
+    access.revoke(SID)
+    cb, broadcast, _ = await _callback(
+        tmp_path, session_row={"permission_mode": "bypassPermissions"},
+    )
+    try:
+        call = asyncio.create_task(
+            cb(COMPUTER_USE_REQUEST_ACCESS, {"apps": []}, _ctx(delegated=False)))
+        prompt = await _next_prompt(broadcast)
+        assert prompt["tool_name"] == COMPUTER_USE_REQUEST_ACCESS
+        await permission_handler.respond(prompt["request_id"], SID, "allow")
+        assert _allowed(await asyncio.wait_for(call, 5))
+        assert access.consume_first_use_confirmation(SID)
+    finally:
+        access.revoke(SID)
 
 
 # ─── the adapter ──────────────────────────────────────────────────────────

@@ -160,6 +160,7 @@ class PermissionHandler:
         blocked_path: Optional[str] = None,
         provider_agent: Optional[Dict[str, Any]] = None,
         mode_managed: bool = False,
+        skip_saved_rules: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
@@ -187,6 +188,9 @@ class PermissionHandler:
                 when this prompt was raised by a Task worker and
                 redirected onto its parent's session. None otherwise, and then
                 invisible in every payload and WS event.
+            skip_saved_rules: always put the call to a person, even when a
+                saved rule would decide it (the first computer-use grant in a
+                session).
 
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
@@ -207,6 +211,7 @@ class PermissionHandler:
             blocked_path=blocked_path,
             provider_agent=provider_agent,
             mode_managed=mode_managed,
+            skip_saved_rules=skip_saved_rules,
         )
 
     # ------------------------------------------------------------------
@@ -332,6 +337,7 @@ class PermissionHandler:
         blocked_path: Optional[str] = None,
         provider_agent: Optional[Dict[str, Any]] = None,
         mode_managed: bool = False,
+        skip_saved_rules: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """Table-backed request_permission."""
         from app.core import interaction_wait
@@ -339,7 +345,9 @@ class PermissionHandler:
 
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
-        rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
+        rule = None if skip_saved_rules else self._check_rules(
+            session_id, profile_id, tool_name, tool_input
+        )
         if rule:
             logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
             if rule.decision == PermissionDecision.ALLOW:

@@ -2212,6 +2212,29 @@ class HarnessAdapter(ProviderAdapter):
         """True when permission prompts reach an app approver (the WS path)."""
         return self._can_use_tool is not None
 
+    async def ask_approver(
+        self, tool_name: str, tool_input: Dict[str, Any]
+    ) -> Optional[bool]:
+        """Put one call to the app's approver from inside a running tool.
+
+        For a decision the runtime's gate did not ask for: computer use's
+        first grant in a session needs a person even when the mode (Bypass),
+        a hook or a rule let the call through. True for an allow, False for
+        anything else, None when no approver is attached (nobody to ask).
+        """
+        from types import SimpleNamespace
+
+        if self._can_use_tool is None:
+            return None
+        result = await self._can_use_tool(
+            tool_name,
+            tool_input,
+            SimpleNamespace(
+                tool_use_id=None, agent_id=None, delegated=self._is_delegated,
+            ),
+        )
+        return type(result).__name__ == "PermissionResultAllow"
+
     async def _saved_rule_decision(
         self, tool_name: str, tool_input: Optional[Dict[str, Any]]
     ) -> Optional[str]:

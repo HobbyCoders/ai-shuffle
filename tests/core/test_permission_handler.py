@@ -603,6 +603,32 @@ class TestPermissionHandler:
         mock_broadcast.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_skip_saved_rules_puts_the_call_to_a_person(self, handler, mock_broadcast):
+        """A matching ALLOW rule does not answer a call that must be asked."""
+        handler._session_rules["session-1"] = [PermissionRule(
+            id="rule-1",
+            session_id="session-1",
+            profile_id=None,
+            tool_name="mcp__computer-use__request_access",
+            tool_pattern=None,
+            decision=PermissionDecision.ALLOW,
+        )]
+        with patch("app.db.database.get_permission_rules", return_value=[]):
+            task = asyncio.create_task(handler.request_permission(
+                request_id="req-1",
+                session_id="session-1",
+                profile_id="profile-1",
+                tool_name="mcp__computer-use__request_access",
+                tool_input={"apps": ["Notepad"]},
+                broadcast_func=mock_broadcast,
+                skip_saved_rules=True,
+            ))
+            await _wait_until(lambda: mock_broadcast.called)
+            assert handler.get_queue_count("session-1") == 1
+            await handler.cancel_request("req-1", "session-1")
+            await task
+
+    @pytest.mark.asyncio
     async def test_request_permission_queued(self, handler, mock_broadcast):
         """Should queue request when no rule matches and broadcast."""
         with patch("app.db.database.get_permission_rules", return_value=[]):

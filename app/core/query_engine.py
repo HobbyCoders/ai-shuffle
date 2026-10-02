@@ -2297,7 +2297,14 @@ async def _stream_to_websocket_impl(
                         # An allow here is recorded for the tool when fluid's
                         # gate lets the call through (HarnessAdapter.
                         # _on_tool_allowed), not here, so it counts once.
-                        if _perm_mode == "bypassPermissions":
+                        # The session's FIRST grant is different: it always
+                        # goes to a person, in every mode and past any saved
+                        # rule, and the person's allow is recorded here for
+                        # the tool to spend (see computer_use.access).
+                        from app.mcp.computer_use import access as cu_access
+
+                        first_use = not cu_access.is_granted(_sid)
+                        if _perm_mode == "bypassPermissions" and not first_use:
                             return PermissionResultAllow()
                         apps = tool_input.get("apps") or []
                         reason = tool_input.get("reason") or ""
@@ -2317,11 +2324,14 @@ async def _stream_to_websocket_impl(
                             title="Computer control access",
                             display_name="Control your computer",
                             description=desc,
+                            skip_saved_rules=first_use,
                         )
                         if isinstance(result, _DeferSentinel):
                             return PermissionResultDeny(message="Computer-use access deferred by user")
                         if getattr(result, "behavior", None) == "deny":
                             return result
+                        if first_use:
+                            cu_access.confirm_first_use(_sid)
                         return PermissionResultAllow()
                     # All other computer-use actions: access is gated by request_access.
                     return PermissionResultAllow()

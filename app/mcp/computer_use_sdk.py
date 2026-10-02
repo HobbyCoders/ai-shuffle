@@ -10,8 +10,10 @@ shared cursor. Native mode only — auto-disabled in Docker/headless.
 
 Permission model (faithful to the official `request_access` flow, keyed to the
 session's permission mode — enforced in query_engine's can_use_tool callback):
-- bypassPermissions -> implicit access, no request needed
-- default/ask/auto/acceptEdits -> request_access surfaces an approve/deny prompt
+- every mode: the session's first request_access waits for a person to approve
+  it; nothing (Bypass, a saved rule, a hook) skips that first prompt
+- bypassPermissions -> later requests in the session need no prompt
+- default/ask/auto/acceptEdits -> every request_access surfaces a prompt
 Action tools refuse until access is granted (see app/mcp/computer_use/access.py),
 and always check their session's halt flag first (the chat Stop button
 sets it; the session's next turn clears it).
@@ -142,8 +144,8 @@ def create_computer_use_server(
     # ----- access / abort gating --------------------------------------------
 
     def _access_error() -> Optional[dict]:
-        if permission_mode == "bypassPermissions":
-            return None
+        # No mode skips this: even Bypass needs the session's first
+        # request_access approved by a person before the screen is touched.
         if not access.is_granted(session_id):
             return _err(
                 "No access yet. Call request_access(apps=[...], reason='...') first; "
@@ -432,20 +434,43 @@ def create_computer_use_server(
                             "description": "[x, y] in pixels of the most recent screenshot."}}
     MODS = {"text": {"type": "string", "description": "Modifier keys to hold, e.g. 'shift', 'ctrl+shift'."}}
 
+    def _live_adapter() -> Any:
+        """The session's pooled adapter, or None."""
+        try:
+            from app.core.session_pool import get_session_pool
+            state = get_session_pool().peek(session_id) if session_id else None
+            return getattr(state, "adapter", None)
+        except Exception:
+            logger.debug("computer-use: session adapter lookup failed", exc_info=True)
+            return None
+
     def _bypass_mode() -> bool:
         """True when the session runs in bypassPermissions — read live from the
         pooled adapter (the mode can change between turns without a rebuild),
         falling back to the mode this server was built with."""
         mode = permission_mode
-        try:
-            from app.core.session_pool import get_session_pool
-            state = get_session_pool().peek(session_id) if session_id else None
-            live = getattr(getattr(state, "adapter", None), "permission_mode", None)
-            if isinstance(live, str) and live:
-                mode = live
-        except Exception:
-            logger.debug("computer-use: live permission mode lookup failed", exc_info=True)
+        live = getattr(_live_adapter(), "permission_mode", None)
+        if isinstance(live, str) and live:
+            mode = live
         return mode == "bypassPermissions"
+
+    async def _confirm_first_use(args: dict) -> bool:
+        """A person's allow for the session's first grant.
+
+        Spends the allow the permission prompt recorded when the gate asked.
+        When no prompt ran (Bypass, a hook or rule allowed the call), raises
+        one now through the session's approver. With no approver attached
+        there is nobody to ask, and the answer is no.
+        """
+        if access.consume_first_use_confirmation(session_id):
+            return True
+        ask: Any = getattr(_live_adapter(), "ask_approver", None)
+        if not callable(ask):
+            return False
+        allowed = await ask("mcp__computer-use__request_access", dict(args))
+        # The approver records the person's allow; require that record, so
+        # an allow that did not come from a prompt cannot stand in for one.
+        return bool(allowed) and access.consume_first_use_confirmation(session_id)
 
     # ----- access tools ------------------------------------------------------
     @tool(
@@ -471,13 +496,21 @@ def create_computer_use_server(
         # The runtime's allow decision is a server-side record, not an
         # assumption: fluid's gate reports each allowed call (prompt, hook,
         # rule or mode) and the adapter records one per call; bypass mode is
-        # itself the decision.
+        # itself the decision. The session's first grant additionally needs
+        # a person's allow (_confirm_first_use), whatever let the call in.
         approved = access.consume_request_approval(session_id) or _bypass_mode()
         if is_stopped(session_id):
             return _err("Computer-use was stopped. Start a new turn to request access again.")
         if not approved:
             return _err("request_access was not approved for this session. "
                         "The user must approve the request before access is granted.")
+        if not access.is_granted(session_id):
+            if not await _confirm_first_use(args):
+                return _err("The user did not approve computer use for this session. "
+                            "The first request in every session needs their approval; "
+                            "do not control the screen without it.")
+            if is_stopped(session_id):
+                return _err("Computer-use was stopped. Start a new turn to request access again.")
         granted = access.grant(
             session_id, args.get("apps") or [],
             clipboard_read=bool(args.get("clipboardRead")),

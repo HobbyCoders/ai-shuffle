@@ -10,9 +10,13 @@ and spent by the tool) and what was granted, keyed by session, so the tools
 can enforce it.
 
 Approval policy by permission mode (decided in the callback, not here):
-- bypassPermissions -> implicit access, no request needed
-- plan              -> denied
-- default/ask/auto/acceptEdits -> request_access surfaces an approve/deny prompt
+- the FIRST grant in every session needs a person's answer to a prompt, in
+  every mode, Bypass included, and saved "always allow" rules do not count.
+  The callback records that answer (``confirm_first_use``) and the tool spends
+  it before it grants; when no prompt ran (Bypass, a hook or rule allow), the
+  tool raises the prompt itself through the session's approver.
+- bypassPermissions -> after that first grant, later requests need no prompt
+- default/ask/auto/acceptEdits -> every request_access surfaces a prompt
 """
 
 from __future__ import annotations
@@ -28,9 +32,25 @@ _grants: Dict[str, dict] = {}
 # allow and the tool has not yet run. One-shot: ``consume_request_approval``
 # spends one per call, so request_access cannot grant on a call nobody allowed.
 _approvals: Dict[str, List[float]] = {}
+# session_id -> monotonic stamp of a person's allow on the session's first
+# request_access prompt, until the tool spends it on the first grant.
+_first_use: Dict[str, float] = {}
 # The tool runs right after the decision; an unspent approval (the call was
 # cancelled in between) must not linger for a later, unapproved call.
 _APPROVAL_TTL_S = 300.0
+
+
+def confirm_first_use(session_id: Optional[str]) -> None:
+    """Record that a person allowed the session's first access request."""
+    with _lock:
+        _first_use[session_id or "_global"] = time.monotonic()
+
+
+def consume_first_use_confirmation(session_id: Optional[str]) -> bool:
+    """Spend the person's first-use allow for the session; False when absent."""
+    with _lock:
+        stamp = _first_use.pop(session_id or "_global", None)
+    return stamp is not None and stamp >= time.monotonic() - _APPROVAL_TTL_S
 
 
 def approve_request(session_id: Optional[str]) -> None:
@@ -96,6 +116,7 @@ def revoke(session_id: Optional[str]) -> None:
     with _lock:
         _grants.pop(session_id or "_global", None)
         _approvals.pop(session_id or "_global", None)
+        _first_use.pop(session_id or "_global", None)
 
 
 def _snapshot(g: dict) -> dict:

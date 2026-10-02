@@ -2,7 +2,11 @@
 
 The permission callback (or the headless auto-approver) records one approval
 per allowed call; the tool spends it. Bypass mode is itself the decision. A
-call that reaches the tool with neither is refused and grants nothing. No real
+call that reaches the tool with neither is refused and grants nothing.
+
+The session's first grant also needs a person's allow, in every mode: a
+prompt answered by the user, or one the tool raises through the session's
+approver when nothing prompted. With no approver it is refused. No real
 display or input device is touched.
 """
 
@@ -59,9 +63,35 @@ def server(monkeypatch):
     access.revoke(SID)
 
 
+def _pool_adapter(monkeypatch, adapter):
+    """Make ``adapter`` the session's pooled adapter."""
+    from app.core import session_pool
+
+    state = SimpleNamespace(adapter=adapter)
+    pool = SimpleNamespace(peek=lambda sid: state if sid == SID else None)
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+
+
+class _Approver:
+    """A pooled adapter stand-in whose approver answers like a person: an
+    allow records the first-use confirmation, as the permission callback does."""
+
+    def __init__(self, allow, permission_mode="bypassPermissions"):
+        self.allow = allow
+        self.permission_mode = permission_mode
+        self.asked = []
+
+    async def ask_approver(self, tool_name, tool_input):
+        self.asked.append((tool_name, tool_input))
+        if self.allow:
+            access.confirm_first_use(SID)
+        return self.allow
+
+
 async def test_approved_call_grants_and_the_approval_is_one_shot(server):
     tools = server("default")
     access.approve_request(SID)
+    access.confirm_first_use(SID)  # the person answered the prompt
     result = payload(await tools["request_access"]({"apps": ["Notepad"], "reason": "r"}))
     assert result["granted_apps"] == ["Notepad"]
     again = await tools["request_access"]({"apps": ["Calculator"], "reason": "r"})
@@ -87,23 +117,81 @@ async def test_approval_is_keyed_to_the_servers_session(server):
         access.revoke("another-session")
 
 
-async def test_bypass_mode_needs_no_record(server):
-    result = payload(await server("bypassPermissions")["request_access"](
-        {"apps": ["Notepad"], "reason": "r"}))
-    assert result["granted_apps"] == ["Notepad"]
+async def test_approval_without_a_person_does_not_grant_the_first_use(server):
+    """A gate approval (hook, rule, auto-approver) alone is not a person's allow."""
+    access.approve_request(SID)
+    result = await server("default")["request_access"]({"apps": ["Notepad"], "reason": "r"})
+    assert result["isError"]
+    assert "did not approve" in payload(result)["error"]
+    assert not access.is_granted(SID)
+
+
+async def test_bypass_first_use_without_an_approver_is_refused(server):
+    result = await server("bypassPermissions")["request_access"](
+        {"apps": ["Notepad"], "reason": "r"})
+    assert result["isError"]
+    assert "did not approve" in payload(result)["error"]
+    assert not access.is_granted(SID)
+
+
+@pytest.mark.parametrize("allow", [True, False])
+async def test_bypass_first_use_asks_the_person(server, monkeypatch, allow):
+    approver = _Approver(allow)
+    _pool_adapter(monkeypatch, approver)
+    tools = server("bypassPermissions")
+    result = await tools["request_access"]({"apps": ["Notepad"], "reason": "r"})
+    assert len(approver.asked) == 1
+    assert approver.asked[0][0] == "mcp__computer-use__request_access"
+    assert bool(result.get("isError")) is (not allow)
+    assert access.is_granted(SID) is allow
+
+
+async def test_bypass_after_the_first_grant_needs_no_prompt(server, monkeypatch):
+    approver = _Approver(True)
+    _pool_adapter(monkeypatch, approver)
+    tools = server("bypassPermissions")
+    assert payload(await tools["request_access"]({"apps": ["A"], "reason": "r"}))["success"]
+    result = payload(await tools["request_access"]({"apps": ["B"], "reason": "r"}))
+    assert result["granted_apps"] == ["A", "B"]
+    assert len(approver.asked) == 1
+
+
+async def test_approver_allow_without_a_record_does_not_count(server, monkeypatch):
+    """An approver that says yes without a person's record (an auto-allow
+    leaking through) cannot stand in for the person."""
+    class Silent(_Approver):
+        async def ask_approver(self, tool_name, tool_input):
+            self.asked.append((tool_name, tool_input))
+            return True
+    _pool_adapter(monkeypatch, Silent(True))
+    result = await server("bypassPermissions")["request_access"](
+        {"apps": ["Notepad"], "reason": "r"})
+    assert result["isError"]
+    assert not access.is_granted(SID)
+
+
+async def test_stop_drops_the_first_use_confirmation(server):
+    access.approve_request(SID)
+    access.confirm_first_use(SID)
+    access.revoke(SID)
+    assert not access.consume_first_use_confirmation(SID)
+
+
+async def test_actions_in_bypass_need_a_grant(server):
+    result = await server("bypassPermissions")["screenshot"]({})
+    assert result["isError"]
+    assert not access.is_granted(SID)
 
 
 async def test_live_permission_mode_wins_over_the_build_time_mode(server, monkeypatch):
     """The mode can change between turns without rebuilding the server."""
-    from app.core import session_pool
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.core.provider.types import SessionOptions
 
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(model="m", permission_mode="bypassPermissions")
-    state = SimpleNamespace(adapter=adapter)
-    pool = SimpleNamespace(peek=lambda sid: state if sid == SID else None)
-    monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+    _pool_adapter(monkeypatch, adapter)
+    access.grant(SID)  # past the session's first grant
     assert payload(await server("default")["request_access"](
         {"apps": ["A"], "reason": "r"}))["success"]
     adapter._options.permission_mode = "default"
@@ -257,33 +345,79 @@ async def _turn(registry, adapter, permissions, *, answer=None):
     return bool(prompted), result
 
 
-async def test_hook_allowed_request_access_executes(bridged):
-    """A PreToolUse hook's allow skips the prompt; the call still grants."""
+def _person(allow=True):
+    """A can_use_tool callback standing in for the user: an allow records the
+    first-use confirmation, as the app's permission callback does."""
+    from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+
+    async def answer(_name, _input, _ctx):
+        if allow:
+            access.confirm_first_use(SID)
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="no")
+    return AsyncMock(side_effect=answer)
+
+
+def _hook_allowed_adapter():
     from fluid.hooks.bus import PRE_TOOL_USE, HookDecision
-    from fluid.permissions.engine import PermissionEngine
 
     adapter = _adapter()
 
     async def allow(_event, _payload):
         return HookDecision(permission_decision="allow")
     adapter._hooks.on(PRE_TOOL_USE, allow)
+    return adapter
+
+
+async def test_hook_allowed_first_use_still_asks_the_person(bridged, monkeypatch):
+    """A PreToolUse hook's allow skips the gate's prompt; the session's first
+    grant still asks the person, once."""
+    from fluid.permissions.engine import PermissionEngine
+
+    adapter = _hook_allowed_adapter()
+    adapter._can_use_tool = _person()
+    _pool_adapter(monkeypatch, adapter)
     prompted, result = await _turn(bridged, adapter, PermissionEngine("on_write"))
     assert not prompted
+    adapter._can_use_tool.assert_awaited_once()
     assert not result.is_error, result.output
     assert access.info(SID)["apps"] == ["Notepad"]
     assert not access.consume_request_approval(SID)  # exactly one, spent
 
 
-async def test_remembered_allow_executes(bridged):
+async def test_hook_allowed_first_use_without_a_person_is_refused(bridged):
+    from fluid.permissions.engine import PermissionEngine
+
+    prompted, result = await _turn(bridged, _hook_allowed_adapter(), PermissionEngine("on_write"))
+    assert not prompted
+    assert result.is_error
+    assert not access.is_granted(SID)
+    assert not access.consume_request_approval(SID)  # spent, not left behind
+
+
+async def test_hook_allowed_call_after_the_first_grant_executes(bridged):
+    from fluid.permissions.engine import PermissionEngine
+
+    access.grant(SID, ["Calculator"])
+    prompted, result = await _turn(bridged, _hook_allowed_adapter(), PermissionEngine("on_write"))
+    assert not prompted
+    assert not result.is_error, result.output
+    assert access.info(SID)["apps"] == ["Calculator", "Notepad"]
+
+
+async def test_remembered_allow_does_not_skip_the_first_ask(bridged, monkeypatch):
     from fluid.permissions.engine import PermissionEngine
 
     permissions = PermissionEngine("on_write")
     permissions.allow_always(TOOL)
-    prompted, result = await _turn(bridged, _adapter(), permissions)
+    adapter = _adapter()
+    adapter._can_use_tool = _person(allow=False)
+    _pool_adapter(monkeypatch, adapter)
+    prompted, result = await _turn(bridged, adapter, permissions)
     assert not prompted
-    assert not result.is_error, result.output
-    assert access.info(SID)["apps"] == ["Notepad"]
-    assert not access.consume_request_approval(SID)
+    adapter._can_use_tool.assert_awaited_once()
+    assert result.is_error
+    assert not access.is_granted(SID)
 
 
 @pytest.mark.parametrize("allowed", [True, False])
@@ -293,12 +427,10 @@ async def test_prompt_answer_through_the_adapter_bridge(bridged, allowed):
     deny is refused and leaves nothing behind."""
     from fluid.permissions.engine import PermissionEngine
 
-    from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
     from app.core.provider.types import PermissionRequestEvent
 
     adapter = _adapter()
-    adapter._can_use_tool = AsyncMock(
-        return_value=PermissionResultAllow() if allowed else PermissionResultDeny(message="no"))
+    adapter._can_use_tool = _person(allowed)
 
     async def answer(event):
         adapter._perm_requests[event.tool_use_id] = event.request_id

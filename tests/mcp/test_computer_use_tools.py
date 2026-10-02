@@ -67,6 +67,8 @@ def desktop(monkeypatch):
     monkeypatch.setattr(sdk, "_clipboard_write", write)
     tools = sdk.create_computer_use_server(enabled=True, permission_mode="bypassPermissions",
                                            session_id="test", virtual_size=(150, 100))
+    # The session's first request was approved: these tests drive the actions.
+    access.grant("test")
     yield SimpleNamespace(tools=tools, mouse=mouse, keyboard=keyboard, captures=captures,
                           monitors=monitors, read=read, write=write)
     abort.request_stop("test")
