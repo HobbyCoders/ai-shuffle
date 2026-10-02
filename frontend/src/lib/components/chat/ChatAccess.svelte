@@ -239,6 +239,7 @@
 		{/each}
 		{#each data.actions as action (action.id)}
 			{@const grant = data.grants.find(g => g.id === action.grant_id)}
+			{@const sandboxed = action.operation === 'command' && grant?.kind === 'folder'}
 			<section class="pa-card" aria-label="One-shot action approval">
 				<header class="pa-head">
 					<div class="pa-icon" aria-hidden="true">
@@ -251,7 +252,7 @@
 						{/if}
 					</div>
 					<div class="pa-title">
-						<h3><span>Approve this {action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
+						<h3><span>Approve this {sandboxed ? 'sandboxed command' : action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
 						<p class="pa-subtitle">{grant ? `${grant.label} · ${grant.target}` : 'Temporary resource'}</p>
 					</div>
 				</header>
@@ -263,7 +264,7 @@
 					{:else}
 						<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
 					{/if}
-					<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
+					<p class="pa-hint">{sandboxed ? `Runs once in an isolated sandbox that sees only this folder and has no network. ${grant?.writable ? 'It can change files in the folder.' : 'The folder is read-only to it.'}` : action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
 				</div>
 				<div class="pa-section">
 					<div class="pa-actions">
