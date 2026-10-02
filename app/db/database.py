@@ -2179,6 +2179,15 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN pr_state TEXT")
         migrations_applied.append("sessions.pr_state")
 
+    # Per-session "# Workspace facts" snapshot (#1237). The card used to be
+    # re-probed on every connect, so a session that ran `npm ci` and was then
+    # idle-evicted came back with a different system prompt and a cold
+    # provider cache. Additive/nullable JSONB, no index, no SCHEMA_VERSION
+    # bump needed (the migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "workspace_facts"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN workspace_facts JSONB")
+        migrations_applied.append("sessions.workspace_facts")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``
@@ -3213,6 +3222,8 @@ from app.db.sessions import (  # noqa: F401
     set_session_run_binding,
     patch_voice_session_context,
     get_session_context_usage_snapshot,
+    get_session_workspace_facts,
+    set_session_workspace_facts,
     delete_session,
     set_session_active,
     set_session_hidden,
