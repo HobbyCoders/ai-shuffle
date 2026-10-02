@@ -468,6 +468,42 @@ describe('Sidebar session groups', () => {
 	});
 });
 
+describe('Sidebar Needs you lane', () => {
+	const labels = () => Array.from(document.querySelectorAll('.grouplabel')).map((node) =>
+		node.textContent?.replace(/\s+/g, ' ').trim()
+	);
+	const lane = () => document.querySelector('[data-group="needs-you"]');
+
+	it('lifts rows waiting on a prompt out of Active and Settled, and back when answered', async () => {
+		mocks.backgroundPermissions.set(new Map([
+			['active', { count: 1, kind: 'permission' }],
+			['settled', { count: 1, kind: 'question' }],
+		]));
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 2', 'Settled 0']);
+		expect(lane()?.textContent).toContain('Active chat');
+		expect(lane()?.textContent).toContain('Settled chat');
+
+		mocks.backgroundPermissions.set(new Map([['settled', { count: 1, kind: 'question' }]]));
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(lane()?.textContent).not.toContain('Active chat');
+
+		mocks.backgroundPermissions.set(new Map());
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(lane()).toBeNull();
+	});
+
+	it('takes a remote session from its owner state, not the local map', () => {
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'visible-project', true, false, { is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'question' }),
+		]);
+		render(Sidebar, { props: sidebarProps });
+		expect(lane()?.textContent).toContain('Remote chat');
+	});
+});
+
 describe('Sidebar ordering (must never change silently)', () => {
 	// Precomputing timestamps (R2) is only safe if the visible order is
 	// byte-for-byte what the date-parsing comparator produced. This fixture
@@ -944,6 +980,7 @@ describe('Sidebar workspace nav customization', () => {
 		const items = await openMore();
 		expect(items.map((n) => n.textContent?.trim())).toEqual([
 			'Notes',
+			'Pull requests',
 			'Stats',
 			'Docs',
 			'Customize',

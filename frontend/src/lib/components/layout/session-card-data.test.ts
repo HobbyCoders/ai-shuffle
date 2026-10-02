@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import {
+	cardActions,
+	sessionNeedsYou,
+	attentionTitle,
 	deriveGitStage,
 	deriveStatus,
 	diffCounts,
@@ -480,5 +483,32 @@ describe('sessionWorkMs (#1619)', () => {
 		for (const s of ['parked', 'done', 'idle', 'pr', 'pr_merged', 'offline'] as const) {
 			expect(isTurnLiveStatus(s)).toBe(false);
 		}
+	});
+});
+
+describe('cardActions', () => {
+	it('offers Settle, then Active + Archive, then Restore with the long-swipe action last', () => {
+		expect(cardActions({ is_active: true, status: 'active' })).toEqual(['settle']);
+		expect(cardActions({ is_active: false, status: 'active' })).toEqual(['activate', 'archive']);
+		expect(cardActions({ is_active: false, status: 'archived' })).toEqual(['restore']);
+	});
+});
+
+describe('sessionNeedsYou / attentionTitle', () => {
+	const local = { status: 'active', is_remote: false, remote_runtime_state: null } as const;
+	it('reads the local attention map for local sessions', () => {
+		expect(sessionNeedsYou(local, { count: 1 })).toBe(true);
+		expect(sessionNeedsYou(local, { count: 0 })).toBe(false);
+		expect(sessionNeedsYou(local, undefined)).toBe(false);
+		expect(sessionNeedsYou({ ...local, status: 'archived' }, { count: 2 })).toBe(false);
+	});
+	it('lets the owner state decide for a remote session', () => {
+		const remote = { status: 'active', is_remote: true } as const;
+		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'permission' }, null)).toBe(true);
+		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'idle' }, { count: 3 })).toBe(false);
+	});
+	it('prefixes the count only when something is waiting', () => {
+		expect(attentionTitle('AI Shuffle', 0)).toBe('AI Shuffle');
+		expect(attentionTitle('AI Shuffle', 3)).toBe('(3) AI Shuffle');
 	});
 });

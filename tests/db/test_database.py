@@ -504,6 +504,20 @@ class TestSessionOperations:
         result = db.set_session_active("session-1", False)
         assert result["is_active"] == 0
 
+    def test_set_session_active_archives_and_restores(self, mock_db, setup_profile):
+        """Archiving leaves Active; restoring only un-archives an archived row."""
+        db.create_session("session-1", setup_profile, is_active=True)
+
+        result = db.set_session_active("session-1", True, archived=True)
+        assert result["status"] == "archived" and not result["is_active"]
+
+        result = db.set_session_active("session-1", False, archived=False)
+        assert result["status"] == "active" and not result["is_active"]
+
+        db.update_session("session-1", status="failed")
+        result = db.set_session_active("session-1", False, archived=False)
+        assert result["status"] == "failed"
+
     def test_create_session_is_active(self, mock_db, setup_profile):
         """create_session should persist is_active=True when passed, and default
         to False (inactive) when the param is omitted."""

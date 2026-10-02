@@ -21,6 +21,7 @@
 		CalendarClock,
 		FolderKanban,
 		BarChart3,
+		GitPullRequest,
 		Settings,
 		BookOpen
 	} from 'lucide-svelte';
@@ -55,6 +56,7 @@
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
+		isAttentionStatus,
 		liveProjectKeys,
 		UNGROUPED_PROJECT,
 		type SessionCardStatus
@@ -352,8 +354,12 @@
 			.sort((a, b) => b.ts - a.ts)
 	);
 
-	const activeRows = $derived(rows.filter((r) => r.session.is_active));
-	const settledRows = $derived(rows.filter((r) => !r.session.is_active));
+	// "Needs you" lifts every row parked on a prompt out of Active/Settled.
+	// Membership follows the attention state alone, so a row moves when it
+	// starts or stops waiting on the user — never on unrelated activity.
+	const needsYouRows = $derived(rows.filter((r) => isAttentionStatus(r.status)));
+	const activeRows = $derived(rows.filter((r) => r.session.is_active && !isAttentionStatus(r.status)));
+	const settledRows = $derived(rows.filter((r) => !r.session.is_active && !isAttentionStatus(r.status)));
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
@@ -377,7 +383,7 @@
 	// Keep the ticker in step with what's actually on screen. The prompt-parked
 	// states keep their live timer too — a session blocked on you is still live.
 	$effect(() => {
-		retick(activeRows.some((row) => LIVE_TICK_STATUSES.has(row.status)));
+		retick(needsYouRows.length > 0 || activeRows.some((row) => LIVE_TICK_STATUSES.has(row.status)));
 	});
 
 	// --- workspace nav ------------------------------------------------------
@@ -396,6 +402,7 @@
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
 		{ id: 'project', label: 'Projects', icon: FolderKanban, on: currentType === 'project' },
+		{ id: 'prs', label: 'Pull requests', icon: GitPullRequest, on: currentType === 'prs' },
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
 		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
 		...(isAdmin
@@ -659,6 +666,36 @@
 				</button>
 			{/if}
 		</div>
+
+		{#if needsYouRows.length > 0}
+			<button class="grouplabel needs-you" onclick={() => toggleGroup('needs')} aria-expanded={!collapsedGroups.needs}>
+				Needs you <span class="count">{needsYouRows.length}</span>
+				<span class="rule" aria-hidden="true"></span>
+				<span class="group-chev" class:is-collapsed={collapsedGroups.needs}>
+					<ChevronDown size={13} strokeWidth={2} />
+				</span>
+			</button>
+			{#if !collapsedGroups.needs}
+				<div class="cards" data-group="needs-you">
+					{#each needsYouRows as row (row.session.id)}
+						<SessionCard
+							session={row.session}
+							status={row.status}
+							openPr={row.openPr}
+							projectLabel={projectLabel(row.session)}
+							active={row.session.id === activeId}
+							{now}
+							timestamp={row.ts}
+							openActionsId={openActionsCardId}
+							onActionsOpenChange={(id) => (openActionsCardId = id)}
+							onOpen={onOpenSession}
+							onSettled={onSettledOpenSession}
+						/>
+					{/each}
+				</div>
+			{/if}
+			<div class="divider" role="separator"></div>
+		{/if}
 
 		{#if activeRows.length > 0}
 			<button class="grouplabel" onclick={() => toggleGroup('active')} aria-expanded={!collapsedGroups.active}>
@@ -1110,6 +1147,9 @@
 	/* Rule fills the header row after the label so each group reads as a titled
 	   divider, breaking up the stacked lists below it. */
 	.grouplabel .rule { flex: 1 1 auto; height: 1px; background: var(--sidebar-border); }
+	.grouplabel.needs-you,
+	.grouplabel.needs-you .count { color: var(--warning); }
+	.grouplabel.needs-you .rule { background: color-mix(in oklch, var(--warning) 35%, var(--sidebar-border)); }
 	.divider { height: 1px; margin: 8px 8px 0; }
 	.empty {
 		margin: 0;

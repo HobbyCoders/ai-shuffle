@@ -3382,6 +3382,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_workspace_facts,
     delete_session,
     set_session_active,
+    archive_status_sql,
     set_session_hidden,
     set_session_parked_task_kind,
     adopt_session,

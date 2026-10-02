@@ -9,7 +9,7 @@
  * composer stays silent.
  */
 import { describe, it, expect } from 'vitest';
-import { evaluateSubmitGuards, type SubmitGuardInput } from './submit-guards';
+import { evaluateSubmitGuards, sendButtonState, NO_CREDENTIAL_REASON, type SubmitGuardInput } from './submit-guards';
 
 /** A fully-ready send: prompt typed, nothing uploading, profile + project set. */
 function ready(over: Partial<SubmitGuardInput> = {}): SubmitGuardInput {
@@ -113,5 +113,31 @@ describe('evaluateSubmitGuards', () => {
 	it('still blocks a chat-lane send with no agent selected', () => {
 		const block = evaluateSubmitGuards(ready({ hasProject: false, hasProfile: false, mode: 'chat' }));
 		expect(block!.notice?.message).toMatch(/agent/i);
+	});
+});
+
+describe('sendButtonState', () => {
+	const ready = { hasContent: true, hasCredential: true, isUploading: false, isRecording: false, isTranscribing: false };
+
+	it('is enabled with a plain title when nothing blocks', () => {
+		expect(sendButtonState(ready)).toEqual({ disabled: false, title: 'Send message' });
+		expect(sendButtonState({ ...ready, autoBranch: true }).title).toBe('Branch will be auto-created from your message');
+	});
+
+	it('names the actual blocker, never "Send message", when disabled', () => {
+		const cases: [Partial<typeof ready>, string][] = [
+			[{ hasCredential: false }, NO_CREDENTIAL_REASON],
+			[{ isUploading: true }, 'Uploading files...'],
+			[{ isRecording: true }, 'Recording...'],
+			[{ isTranscribing: true }, 'Transcribing...'],
+			[{ hasContent: false }, 'Type a message to send']
+		];
+		for (const [patch, title] of cases) {
+			expect(sendButtonState({ ...ready, ...patch })).toEqual({ disabled: true, title });
+		}
+	});
+
+	it('puts the missing credential first, since nothing else can be fixed without it', () => {
+		expect(sendButtonState({ ...ready, hasCredential: false, hasContent: false, isUploading: true }).title).toBe(NO_CREDENTIAL_REASON);
 	});
 });

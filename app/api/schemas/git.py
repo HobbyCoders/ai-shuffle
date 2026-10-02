@@ -179,6 +179,10 @@ class CommitRequest(BaseModel):
     """Request to create a commit"""
     message: str = Field(..., min_length=1, max_length=5000)
     include_unstaged: bool = Field(default=True, description="Stage unstaged files before committing")
+    new_branch: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+        description="Create and switch to this branch before committing (base checkouts only)",
+    )
 
 
 class CommitResponse(BaseModel):

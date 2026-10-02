@@ -412,9 +412,9 @@ describe('ControlsDock split controls', () => {
 		const attach = screen.getByRole('button', { name: /attach file/i });
 		expect(attach).toBeTruthy();
 		// Not captioned with the project advice — a projectless chat is the
-		// working state here, not a misconfiguration. (Whether the button is
-		// enabled depends on credentials, which this harness has none of.)
-		expect(attach.getAttribute('title')).toBe('Attach file');
+		// working state here, not a misconfiguration. This harness has no
+		// credential, so the caption names that reason instead.
+		expect(attach.getAttribute('title')).toBe('Connect a provider in Settings first');
 		// Everything else the chat composer keeps.
 		expect(screen.getByRole('button', { name: /^model:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^effort:/i })).toBeTruthy();

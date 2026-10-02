@@ -1,3 +1,18 @@
+<script lang="ts" module>
+	// Reading position per session, kept OUTSIDE the component instance so it
+	// survives MessageArea being destroyed and remounted (opening Settings or a
+	// full-page panel and coming back). Inside the instance these maps were
+	// recreated empty on every mount, so the remount saw "no prior state" and
+	// dropped a reader who had scrolled up back at the bottom.
+	// Non-reactive so saving a position never triggers effects; capped at 100
+	// entries to prevent unbounded growth over long sessions.
+	const SCROLL_CACHE_MAX = 100;
+	const scrollPositionCache = new Map<string, number>();
+	// Whether each session was following the bottom (true) or the reader had
+	// scrolled up (false) when it was last on screen.
+	const autoScrollCache = new Map<string, boolean>();
+</script>
+
 <script lang="ts">
 	/**
 	 * MessageArea - Scrollable message container with smart auto-scroll behavior
@@ -94,10 +109,6 @@
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 
-	// Non-reactive scroll position cache to avoid triggering effects.
-	// Module-level so it persists across component instances.
-	// Capped at 100 entries to prevent unbounded growth over long sessions.
-	const SCROLL_CACHE_MAX = 100;
 	// How many trailing messages are kept OUT of content-visibility virtualization.
 	// The actively-growing tail (the streaming message + its immediate predecessors)
 	// must never be virtualized/re-estimated, or the browser re-guesses their
@@ -105,9 +116,6 @@
 	// scrollHeight jitters — the "scroll jumps around while streaming" bug. Far-up
 	// off-screen messages keep content-visibility for the paint/layout perf win.
 	const LIVE_TAIL = 8;
-	const scrollPositionCache = new Map<string, number>();
-	// Persist auto-scroll state across component mount/destroy cycles
-	const autoScrollCache = new Map<string, boolean>();
 
 	/** Exhaustive keyed identity for every presentation-model variant. */
 	function displayItemKey(item: DisplayItem): string {
@@ -1890,7 +1898,7 @@
 			{#if pendingMessages.length > 0}
 				<PendingMessages
 					messages={pendingMessages}
-					onRemove={(id) => activeSession.removeQueuedMessage(id)}
+					onRemove={(id) => activeSession.unsendQueuedMessage(id)}
 					onInterrupt={() => activeSession.interruptForQueuedMessages()}
 				/>
 			{/if}

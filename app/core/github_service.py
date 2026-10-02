@@ -119,6 +119,46 @@ class WorkflowRun:
     created_at: str
 
 
+
+def _review_state(decision: Optional[str]) -> str:
+    """gh's ``reviewDecision`` as the inbox's review filter value."""
+    return {
+        'APPROVED': 'approved',
+        'CHANGES_REQUESTED': 'changes_requested',
+        'REVIEW_REQUIRED': 'review_required',
+    }.get(str(decision or '').upper(), 'none')
+
+
+_FAILED_CONCLUSIONS = {'FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
+
+
+def summarize_checks(rollup: Any) -> str:
+    """Fold a ``statusCheckRollup`` into ``passing``/``failing``/``pending``/``none``.
+
+    The rollup mixes check runs (``status`` + ``conclusion``) and commit
+    statuses (``state``). Any failure wins; then anything unfinished.
+    """
+    if not isinstance(rollup, list) or not rollup:
+        return 'none'
+    pending = False
+    for item in rollup:
+        if not isinstance(item, dict):
+            continue
+        if 'state' in item and 'conclusion' not in item:
+            state = str(item.get('state') or '').upper()
+            if state in ('FAILURE', 'ERROR'):
+                return 'failing'
+            if state in ('PENDING', 'EXPECTED', ''):
+                pending = True
+            continue
+        if str(item.get('status') or '').upper() != 'COMPLETED':
+            pending = True
+            continue
+        if str(item.get('conclusion') or '').upper() in _FAILED_CONCLUSIONS:
+            return 'failing'
+    return 'pending' if pending else 'passing'
+
+
 class GitHubService:
     """
     Service for interacting with GitHub via the gh CLI.
@@ -444,6 +484,59 @@ class GitHubService:
                 head_sha=pr_data.get('headRefOid'),
             ))
 
+        return pulls
+
+    def list_inbox_pulls(self, repo: str, state: str = 'open', limit: int = 50) -> List[Dict[str, Any]]:
+        """Pull requests with the review and check state the PR inbox shows.
+
+        One ``gh pr list`` per repository. Returns plain dicts:
+        ``number, title, url, author, head_branch, base_branch, state``
+        (``open``/``draft``/``merged``/``closed``), ``review``
+        (``approved``/``changes_requested``/``review_required``/``none``),
+        ``checks`` (``passing``/``failing``/``pending``/``none``) and
+        ``updated_at``.
+
+        Raises:
+            GitHubCliError: gh could not answer.
+        """
+        try:
+            result = self._run_gh([
+                'pr', 'list',
+                '--repo', repo,
+                '--state', state,
+                '--limit', str(limit),
+                '--json', 'number,title,url,author,headRefName,baseRefName,state,isDraft,reviewDecision,statusCheckRollup,updatedAt',
+            ])
+        except Exception as e:
+            raise GitHubCliError(f"gh pr list failed: {e}") from e
+        if result.returncode != 0:
+            raise GitHubCliError(f"gh pr list failed for {repo}", stderr=result.stderr)
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"gh pr list returned invalid JSON: {e}") from e
+
+        pulls: List[Dict[str, Any]] = []
+        for pr in data if isinstance(data, list) else []:
+            raw_state = str(pr.get('state') or '').upper()
+            pr_state = (
+                'merged' if raw_state == 'MERGED'
+                else 'closed' if raw_state == 'CLOSED'
+                else 'draft' if pr.get('isDraft')
+                else 'open'
+            )
+            pulls.append({
+                'number': pr.get('number', 0),
+                'title': pr.get('title', ''),
+                'url': pr.get('url', ''),
+                'author': (pr.get('author') or {}).get('login', 'unknown'),
+                'head_branch': pr.get('headRefName', ''),
+                'base_branch': pr.get('baseRefName', ''),
+                'state': pr_state,
+                'review': _review_state(pr.get('reviewDecision')),
+                'checks': summarize_checks(pr.get('statusCheckRollup')),
+                'updated_at': pr.get('updatedAt', ''),
+            })
         return pulls
 
     def get_pull(self, repo: str, pr_number: int) -> Optional[PullRequest]:

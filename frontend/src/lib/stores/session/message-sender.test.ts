@@ -972,7 +972,7 @@ describe('message-sender pending-bubble edges', () => {
 		}));
 		const sender = createMessageSender(deps);
 
-		sender.removeQueuedMessage('turn-q');
+		expect(sender.removeQueuedMessage('turn-q')).toBe('nope');
 
 		expect(getState().queuedMessages).toHaveLength(0);
 		expect(wsConn.send).toHaveBeenCalledWith({
@@ -1006,7 +1006,7 @@ describe('message-sender pending-bubble edges', () => {
 		const { deps, wsConn } = makeDeps(streamingState());
 		const sender = createMessageSender(deps);
 
-		sender.removeQueuedMessage('turn-gone');
+		expect(sender.removeQueuedMessage('turn-gone')).toBeNull();
 
 		expect(wsConn.send).not.toHaveBeenCalled();
 	});

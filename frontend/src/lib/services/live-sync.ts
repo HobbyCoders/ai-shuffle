@@ -18,6 +18,7 @@ import '$lib/stores/browser-panel.svelte';
 import './notificationSound';
 import { getOrCreateDeviceId } from '$lib/stores/device-id';
 import { bindSessionOwner } from '$lib/stores/session-owner';
+import { promptStash } from '$lib/stores/session/prompt-stash';
 import { preferenceSync } from './preferences';
 import { resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
@@ -135,6 +136,8 @@ export function startLiveSync() {
   // Retire old editors and restores before resetting adapters can notify them.
   if (bindSessionOwner(owner, next, cachedOwner)) activeSession.resetForAccountChange();
   const previous = owner; disconnect(!!previous); owner = next;
+  // Stashed prompts belong to the account that stashed them.
+  promptStash.setOwner(owner);
   syncedBefore = false;
   // Cached transcripts belong to the account that loaded them.
   feedController.invalidate();

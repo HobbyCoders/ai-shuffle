@@ -20,7 +20,8 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { sessionNeedsYou, attentionTitle } from './session-card-data';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { openSession as handleOpenSession } from '$lib/services/session-navigation';
@@ -432,10 +433,16 @@
 		await appData.loadSessions($sessionsTagFilter);
 	}
 	watchResources(["tags"], () => loadAllTags());
+
+	// Sessions waiting on a permission or question, shown in the tab title so a
+	// backgrounded tab still says when an agent is blocked on you.
+	const needsYouCount = $derived(
+		$sessions.filter((s) => !s.hidden && sessionNeedsYou(s, $backgroundPermissions.get(s.id))).length
+	);
 </script>
 
 <svelte:head>
-	<title>AI Shuffle</title>
+	<title>{attentionTitle('AI Shuffle', needsYouCount)}</title>
 </svelte:head>
 
 {#if !$isAuthenticated}

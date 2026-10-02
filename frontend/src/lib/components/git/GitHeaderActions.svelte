@@ -30,6 +30,7 @@
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
 	import { chatAccessSummary } from '$lib/stores/chat-access';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
@@ -250,6 +251,9 @@
 		snapshot.defaultBranch ?? $githubRepoInfo?.default_branch ?? 'main'
 	);
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
+	// #1659: a quick commit on the default branch with a saved push/PR flow
+	// would push straight to it, so that row opens the inline editor instead.
+	const quickCommitNeedsChoice = $derived(isOnDefaultBranch && $gitActionPreferences.nextStep !== 'commit');
 
 	// The open PR for this branch. The host passes it from the same store field;
 	// the snapshot is the fallback so the value can never disagree with the rest
@@ -569,6 +573,7 @@
 				{#key activeEditor}
 					<GitActionOptionsDropdown id={editorId} action={activeEditor} {currentBranch} {defaultBranch}
 						baseBranches={baseBranchNames} openPR={shownPr} {hasChanges} {isWorktreeMode}
+						canCommitOnNewBranch={!isWorktreeMode}
 						unpushed={snapshot.status?.unpushed} busy={actionsBusy}
 						submitBlocked={activeEditor === 'shipit' && mergeBlocked
 							? `PR #${shownPr?.number} has merge conflicts. Resolve them before shipping; you can still change these settings.`
@@ -637,10 +642,10 @@
 				{#if primaryAction === 'commit'}
 					<div class="row-group">
 						<button class="row" aria-label="Commit" class:stale={snapshotPending} disabled={primaryDisabled}
-							onclick={() => fire(onClickCommit)}
-							title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}>
+							onclick={() => quickCommitNeedsChoice ? toggleActionDropdown('git-commit') : fire(onClickCommit)}
+							title={isStreaming ? 'Cannot commit during streaming' : quickCommitNeedsChoice ? `On ${defaultBranch}: choose a new branch or an explicit push` : 'Quick commit with saved settings'}>
 							<GitCommitHorizontal size={14} strokeWidth={1.5} />
-							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub"><span class="count">{fileLabel(filesChanged)}</span></span></span>
+							<span class="row-text"><span class="row-title">Commit</span><span class="row-sub"><span class="count">{fileLabel(filesChanged)}</span>{#if quickCommitNeedsChoice}<span class="on-default"> · on {defaultBranch}</span>{/if}</span></span>
 						</button>
 						<button class="row-opts" class:active={commitOptsOpen} onclick={() => toggleActionDropdown('git-commit')} data-editor="git-commit" disabled={actionsBusy}
 							aria-label="Commit options" aria-controls={editorId} aria-expanded={commitOptsOpen} title="Commit options">
@@ -1324,6 +1329,7 @@
 		white-space: nowrap;
 	}
 
+	.on-default { color: var(--warning); }
 	.count {
 		font-family: var(--font-mono);
 		font-size: 0.65625rem;

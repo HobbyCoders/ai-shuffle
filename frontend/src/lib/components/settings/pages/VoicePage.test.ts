@@ -113,6 +113,18 @@ describe('Voice page', () => {
 		expect(screen.getByText('Voice input hotkey')).toBeTruthy();
 	});
 
+	it('marks the per-device dictation rows, and only those, as this device only', async () => {
+		hotkeyPreferences.setGlobalSttEnabled(true);
+		await mountPage();
+		const rowOf = (label: string) => screen.getByText(label).closest('[data-setting-anchor]') as HTMLElement;
+		for (const label of ['Global voice input', 'Voice input hotkey', 'Sound cues']) {
+			expect(rowOf(label).textContent, label).toContain('This device only');
+		}
+		// Worker settings follow the account to every device.
+		expect(rowOf('Microphone mode').textContent).not.toContain('This device only');
+		expect(rowOf('Stop after silence').textContent).not.toContain('This device only');
+	});
+
 	it('links the dictation model to Default models without editing it here', async () => {
 		await mountPage();
 		const link = screen.getByRole('button', { name: /Dictation model: Whisper \(Large v3\)/ });

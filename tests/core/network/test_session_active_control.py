@@ -195,3 +195,31 @@ async def test_control_rejects_non_boolean_state(active):
     from app.network import session_active
     with pytest.raises(ValueError, match="boolean"):
         await session_active.handle({"session_id": "any", "is_active": active}, "peer")
+
+
+async def test_remote_archive_and_restore_update_owner_and_mirror(workers, monkeypatch):
+    a, b = workers("a"), workers("b")
+    served = connect_owner(monkeypatch, a)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    _new_session(a, "archive-remote", "On owner")
+    converge([a, b])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        result = await api.set_session_active(
+            Request({"type": "http", "headers": []}), "archive-remote",
+            api.SessionActiveUpdate(is_active=True, archived=True), token="admin",
+        )
+        # Archiving always leaves Active, whatever is_active asked for.
+        assert result["status"] == "archived" and not result["is_active"]
+    with a.active():
+        assert database.get_session("archive-remote")["status"] == "archived"
+    with b.active():
+        result = await api.set_session_active(
+            Request({"type": "http", "headers": []}), "archive-remote",
+            api.SessionActiveUpdate(is_active=False, archived=False), token="admin",
+        )
+        assert result["status"] == "active" and not result["is_active"]
+    with a.active():
+        assert database.get_session("archive-remote")["status"] == "active"

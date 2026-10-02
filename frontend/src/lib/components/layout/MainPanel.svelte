@@ -40,7 +40,7 @@
 		ShipItOptions,
 		OperationOrigin
 	} from '$lib/stores/derived/git-action-options';
-	import { computeOperationSideEffects } from '$lib/stores/derived/git-action-options';
+	import { computeOperationSideEffects, resolveCommitPlan, branchNameFromMessage } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
 	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -127,6 +127,7 @@
 		'mcp': 'MCP Servers',
 		'notes': 'Notes',
 		'hooks': 'Hooks',
+		'prs': 'Pull requests',
 		'stats': 'Stats',
 		'docs': 'Documentation',
 	};
@@ -136,7 +137,7 @@
 	const embeddedViews = new Set([
 		'board', 'build',
 		'profile', 'project', 'settings',
-		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'stats', 'docs'
+		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'prs', 'stats', 'docs'
 	]);
 
 	// The Build page hosts the agent-config tools under one surface. The
@@ -641,14 +642,25 @@
 		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
 		const userMessage = opts.message?.trim();
 
-		// Guard the next step against invalid combos (mirrors the old logic):
-		// never push while behind, and downgrade PR→push on the default branch.
-		let nextStep: CommitNextStep = opts.nextStep ?? prefs.nextStep;
-		if (needsPull) nextStep = 'commit';
-		else if (nextStep === 'pr' && isOnDefaultBranch) nextStep = 'push';
+		// Never push while behind, and never push to the default branch unless
+		// the user explicitly chose it (#1659): a saved PR flow on the default
+		// branch is refused here rather than silently downgraded to a push.
+		const plan = resolveCommitPlan({
+			requested: opts.nextStep ?? prefs.nextStep,
+			isOnDefaultBranch,
+			needsPull,
+			newBranch: opts.newBranch,
+			pushToDefaultBranch: opts.pushToDefaultBranch
+		});
+		if (plan.blocked) {
+			notify(plan.blocked, { severity: 'warning' });
+			return;
+		}
+		const nextStep: CommitNextStep = plan.nextStep;
 
 		const steps: { id: string; label: string }[] = [];
 		if (!userMessage) steps.push({ id: 'message', label: 'Generate commit message' });
+		if (plan.newBranch !== null) steps.push({ id: 'branch', label: 'Create branch' });
 		steps.push({ id: 'commit', label: 'Commit changes' });
 		if (nextStep === 'push' || nextStep === 'pr') steps.push({ id: 'push', label: 'Push to remote' });
 		if (nextStep === 'pr') steps.push({ id: 'pr', label: 'Open pull request' });
@@ -663,20 +675,29 @@
 				gitOperations.setStep('message', 'done');
 			}
 
+			let commitTarget = target;
+			let newBranch: string | undefined;
+			if (plan.newBranch !== null) {
+				newBranch = plan.newBranch || branchNameFromMessage(message ?? '');
+				gitOperations.setStep('branch', 'running', { detail: newBranch });
+				commitTarget = { ...target, head: newBranch };
+			}
+
 			gitOperations.setStep('commit', 'running');
-			await git.commitChanges(message, includeUnstaged, target);
+			await git.commitChanges(message, includeUnstaged, target, newBranch);
+			if (newBranch) gitOperations.setStep('branch', 'done', { detail: newBranch });
 			gitOperations.setStep('commit', 'done');
 
 			if (nextStep === 'push' || nextStep === 'pr') {
 				gitOperations.setStep('push', 'running');
-				await git.pushCommits(undefined, true, false, target);
+				await git.pushCommits(newBranch, true, false, commitTarget);
 				gitOperations.setStep('push', 'done');
 			}
 
 			let prInfo: { url: string; number: number } | null = null;
 			if (nextStep === 'pr') {
 				gitOperations.setStep('pr', 'running');
-				prInfo = await runCreatePR({}, target);
+				prInfo = await runCreatePR({}, commitTarget);
 				gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
 				if (activeSessionId === (target.sessionId ?? null)) git.refreshPrState(true).catch(() => {});
 			}
@@ -993,6 +1014,8 @@
 						<LazyPanel handle={panelForKey('notes')} props={{ initialItemId: $activeView?.type === 'notes' ? $activeView.itemId : null }} label="Notes" />
 					{:else if key === 'automations'}
 						<LazyPanel handle={panelForKey('automations')} label="Automations" />
+					{:else if key === 'prs'}
+						<LazyPanel handle={panelForKey('prs')} label="Pull requests" />
 					{:else if key === 'stats'}
 						<LazyPanel
 							handle={panelForKey('stats')}

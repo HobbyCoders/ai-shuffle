@@ -112,3 +112,44 @@ export async function closePullRequest(
         `${BASE}/${projectId}/github/pulls/${number}`
     ) as Promise<{ status: string; message: string }>;
 }
+
+// ============================================================================
+// Cross-project pull request inbox
+// ============================================================================
+
+export type InboxPrState = 'open' | 'draft' | 'merged' | 'closed';
+export type InboxReview = 'approved' | 'changes_requested' | 'review_required' | 'none';
+export type InboxChecks = 'passing' | 'failing' | 'pending' | 'none';
+
+export interface InboxPullRequest {
+    repo: string;
+    number: number;
+    title: string;
+    url: string;
+    author: string;
+    head_branch: string;
+    base_branch: string;
+    state: InboxPrState;
+    review: InboxReview;
+    checks: InboxChecks;
+    updated_at: string;
+    projects: { id: string; name: string }[];
+}
+
+export interface PullRequestInbox {
+    items: InboxPullRequest[];
+    /** Projects (or repositories) that could not be read, with why. */
+    skipped: { project_id?: string | null; project_name?: string | null; repo?: string | null; reason: string }[];
+    repos: string[];
+}
+
+/**
+ * Pull requests across every project's GitHub repository, newest activity
+ * first. `state` is gh's filter: open (includes drafts), closed, merged, all.
+ */
+export async function getPullRequestInbox(
+    state: 'open' | 'closed' | 'merged' | 'all' = 'open',
+    limit = 30
+): Promise<PullRequestInbox> {
+    return api.get<PullRequestInbox>(`/github/inbox?state=${state}&limit=${limit}`);
+}

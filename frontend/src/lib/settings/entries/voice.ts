@@ -10,6 +10,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Global voice input',
+		hint: 'This device only',
 		keywords: ['dictation anywhere', 'speech to text', 'microphone'],
 		default: false
 	},
@@ -18,6 +19,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Voice input hotkey',
+		hint: 'This device only',
 		keywords: ['shortcut', 'keyboard', 'dictation'],
 		default: { key: 's', cmdOrCtrl: true, shift: true, alt: false }
 	},
@@ -42,6 +44,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Sound cues',
+		hint: 'This device only',
 		keywords: ['beep', 'tone', 'audio feedback'],
 		default: true
 	},

@@ -1802,16 +1802,12 @@ async def batch_delete_sessions(
 
 @router.post("/{session_id}/archive")
 async def archive_session(request: Request, session_id: str, token: str = Depends(require_auth)):
-    """Archive a session. API users can only archive their accessible sessions."""
-    await require_session(request, session_id)
+    """Archive a session. API users can only archive their accessible sessions.
 
-    # Update session - result not needed for response
-    await run_sync(
-        database.update_session,
-        session_id=session_id,
-        status="archived"
-    )
-
+    Kept for older clients; the sidebar uses ``PATCH /{id}/active`` with
+    ``archived`` so a session owned by another worker archives on its owner.
+    """
+    await set_session_active(request, session_id, SessionActiveUpdate(is_active=False, archived=True), token)
     return {"status": "ok", "message": "Session archived"}
 
 
@@ -1829,7 +1825,7 @@ async def set_session_active(
     owner = control.owner_of(existing)
     if owner is not None:
         try:
-            return await session_active.set_remote(owner, session_id, payload.is_active)
+            return await session_active.set_remote(owner, session_id, payload.is_active, payload.archived)
         except control.RunnerUnreachable as exc:
             raise HTTPException(503, str(exc)) from exc
         except control.ControlRefused as exc:
@@ -1837,14 +1833,14 @@ async def set_session_active(
     ctx = engine.context()
     if ctx is not None:
         try:
-            await session_active.set_local(session_id, payload.is_active)
+            await session_active.set_local(session_id, payload.is_active, payload.archived)
             return await run_sync(database.get_session, session_id)
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    session = await run_sync(database.set_session_active, session_id, payload.is_active)
+    session = await run_sync(database.set_session_active, session_id, payload.is_active, payload.archived)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1859,7 +1855,7 @@ async def set_session_active(
         await sync_engine.broadcast_user_session_updated(
             user_id=session.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"is_active": payload.is_active},
+            updates={"is_active": bool(session.get("is_active")), "status": session.get("status")},
             source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — list refresh is best-effort

@@ -1340,7 +1340,8 @@ export const git = {
 	async commitChanges(
 		message: string,
 		includeUnstaged: boolean = true,
-		target: GitActionTarget = git.captureTarget()
+		target: GitActionTarget = git.captureTarget(),
+		newBranch?: string
 	): Promise<gitApi.CommitResponse> {
 
 		try {
@@ -1348,7 +1349,8 @@ export const git = {
 				target.projectId,
 				{
 					message,
-					include_unstaged: includeUnstaged
+					include_unstaged: includeUnstaged,
+					...(newBranch ? { new_branch: newBranch } : {})
 				},
 				target.worktreeId,
 				target.sessionId ?? target.workerTarget

@@ -25,6 +25,7 @@ export const searchPages: SearchItem[] = [
  ['docs', 'Documentation', 'Guides and API reference'],
  ['project', 'Projects', 'Repositories and project configuration'],
  ['file-browser', 'Files', 'Browse workspace files'],
+ ['prs', 'Pull requests', 'Open pull requests, reviews and checks across every project'],
  ['stats', 'Usage statistics', 'Costs, tokens and analytics'],
  ['settings', 'Settings', 'Appearance, voice, providers, default models, devices and security']
 ].map(([view, label, description]) => ({ id: `page:${view}`, view: view as ViewType, label, description }));

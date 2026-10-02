@@ -15,15 +15,15 @@
 	 *
 	 * Under the LAST bubble sits one quiet action row: the "Not seen yet" hint,
 	 * an Interrupt link that stops the current turn (which delivers the message
-	 * on the next one), and an "×" that unsends it. Earlier bubbles get the same
-	 * "×" on hover.
+	 * on the next one), and an "×" that unsends it and puts its text back in the
+	 * composer to edit. Earlier bubbles get the same "×" on hover.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
 	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
 
 	interface Props {
 		messages: QueuedMessage[];
-		/** Unsend one pending message (server-side removal). */
+		/** Unsend one pending message (server-side removal); its text returns to the composer. */
 		onRemove: (id: string) => void;
 		/** Stop the live turn so the pending message is delivered next. */
 		onInterrupt: () => void;
@@ -43,8 +43,8 @@
 							<button
 								type="button"
 								class="hover-remove"
-								aria-label="Unsend message"
-								title="Unsend"
+								aria-label="Unsend message and edit it"
+								title="Unsend and edit"
 								onclick={() => onRemove(msg.id)}
 							>×</button>
 						{/if}
@@ -57,8 +57,8 @@
 							<button
 								type="button"
 								class="pending-remove"
-								aria-label="Unsend message"
-								title="Unsend"
+								aria-label="Unsend message and edit it"
+								title="Unsend and edit"
 								onclick={() => onRemove(msg.id)}
 							>×</button>
 						</div>

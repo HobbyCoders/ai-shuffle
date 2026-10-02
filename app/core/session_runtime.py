@@ -1083,14 +1083,18 @@ class SessionRuntime:
             try:
                 from app.core.provider_agent import WORKER_FAILED_STATUS
 
-                if (session_row or {}).get("status") == WORKER_FAILED_STATUS:
+                # Archived is a user choice, not a run verdict: only the user
+                # talking to the session again brings it back. A server-side
+                # wake (task notification, scheduler) leaves it archived.
+                status = (session_row or {}).get("status")
+                if status == WORKER_FAILED_STATUS or (status == "archived" and self.source == "user"):
                     from app.db import database as _database
 
                     await asyncio.to_thread(
                         _database.update_session, sid, status="active"
                     )
                     logger.info(
-                        "SessionRuntime: revived failed session %s to active at "
+                        "SessionRuntime: revived failed/archived session %s to active at "
                         "turn %s start", sid, tid,
                     )
             except Exception:

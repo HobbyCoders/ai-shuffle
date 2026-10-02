@@ -1085,23 +1085,25 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			});
 		},
 
-		/** Unsend a message that hasn't reached the model yet. */
-		removeQueuedMessage(id: string) {
+		/** Unsend a message that hasn't reached the model yet. Returns its text. */
+		removeQueuedMessage(id: string): string | null {
 			const _state = getState();
 			const entry = _state.queuedMessages.find(m => m.id === id);
-			if (!entry) return;
+			if (!entry) return null;
 			// An optimistic echo carries an id only this tab has ever seen, so the
 			// server cannot act on it — naming it in a remove frame just triggers a
 			// rebroadcast that puts the bubble back. Drop it here and let
 			// pendingQueue re-aim the removal at the real row when it arrives.
 			const serverId = pendingQueue.requestRemoval(_state.sessionId, entry);
 			update(s => ({ ...s, queuedMessages: s.queuedMessages.filter(m => m.id !== id) }));
-			if (!serverId) return;
-			wsConn.send({
-				type: 'remove_queued_message',
-				message_id: serverId,
-				session_id: _state.sessionId,
-			});
+			if (serverId) {
+				wsConn.send({
+					type: 'remove_queued_message',
+					message_id: serverId,
+					session_id: _state.sessionId,
+				});
+			}
+			return entry.content;
 		},
 	};
 }

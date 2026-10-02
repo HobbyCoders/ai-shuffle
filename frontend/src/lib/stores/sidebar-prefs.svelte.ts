@@ -40,6 +40,7 @@ export type WorkspaceItemId =
 	| 'build'
 	| 'automations'
 	| 'project'
+	| 'prs'
 	| 'stats'
 	| 'docs'
 	| 'settings';
@@ -51,6 +52,7 @@ export const WORKSPACE_ITEM_IDS: readonly WorkspaceItemId[] = [
 	'build',
 	'automations',
 	'project',
+	'prs',
 	'stats',
 	'docs',
 	'settings'

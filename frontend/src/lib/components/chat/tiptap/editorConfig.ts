@@ -2,6 +2,7 @@ import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import { FileChipNode } from './FileChipNode';
+import { isLargePaste } from './large-paste';
 
 /**
  * Parse initial content string: supports Tiptap JSON (preserves file chips)
@@ -51,6 +52,13 @@ export interface EditorOptions {
 	onTransaction?: () => void;
 	onFocus?: () => void;
 	onBlur?: () => void;
+	/**
+	 * Offered a paste at or above LARGE_PASTE_BYTES. Return true when it was
+	 * taken (as an attachment); false pastes it inline as usual.
+	 */
+	onLargePaste?: (text: string) => boolean;
+	/** True when this paste was Ctrl/Cmd+Shift+V, which always stays inline. */
+	consumePlainPaste?: () => boolean;
 }
 
 /**
@@ -60,7 +68,10 @@ export interface EditorOptions {
  * Rich formatting (bold, italic, etc.) is intentionally disabled.
  */
 export function createChatEditor(options: EditorOptions): Editor {
-	const { element, placeholder = 'Message...', initialContent = '', onUpdate, onTransaction, onFocus, onBlur } = options;
+	const {
+		element, placeholder = 'Message...', initialContent = '', onUpdate, onTransaction, onFocus, onBlur,
+		onLargePaste, consumePlainPaste
+	} = options;
 
 	// Captured by the placeholder callback so the first decoration pass (which runs
 	// inside `new Editor`, before the instance exists to key the WeakMap on) is correct.
@@ -107,6 +118,8 @@ export function createChatEditor(options: EditorOptions): Editor {
 			// Handle paste to strip formatting
 			handlePaste: (view, event) => {
 				const text = event.clipboardData?.getData('text/plain');
+				const plain = consumePlainPaste?.() ?? false;
+				if (text && !plain && onLargePaste && isLargePaste(text) && onLargePaste(text)) return true;
 				if (text) {
 					// Insert as plain text
 					view.dispatch(view.state.tr.insertText(text));

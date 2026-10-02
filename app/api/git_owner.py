@@ -271,6 +271,9 @@ async def handle_project_git(body, from_device):
     path, checkout = paths[0]
     if name == "checkout_branch" and checkout.get("branch"):
         return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}
+    if name == "create_commit" and checkout.get("branch") and isinstance(params.get("body"), dict) \
+            and params["body"].get("new_branch"):
+        return {"status": 400, "detail": "This worktree is bound to its branch. Start a new session on a new branch instead."}
     try:
         values = {}
         for name, parameter in signature.parameters.items():

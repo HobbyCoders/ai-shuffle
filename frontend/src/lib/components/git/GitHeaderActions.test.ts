@@ -721,6 +721,34 @@ describe('GitHeaderActions default branch', () => {
 	});
 });
 
+describe('GitHeaderActions quick commit on the default branch (#1659)', () => {
+	function dirtyMain() {
+		setSnapshot({
+			status: { current_branch: 'main', default_branch: 'main', ahead: 0, differs_from_base: false, is_git_repo: true, has_changes: true },
+			diffStats: { additions: 4, deletions: 1, files_changed: 2 },
+			branches: [{ name: 'main', current: true, remote: false, upstream: 'origin/main', ahead: 0, behind: 0 }]
+		});
+	}
+
+	it('opens the commit editor instead of pushing when the saved flow pushes', async () => {
+		dirtyMain();
+		const { handlers } = renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit'));
+		expect(handlers.onClickCommit).not.toHaveBeenCalled();
+		expect(popover('commit')).toBeTruthy();
+	});
+
+	it('still commits directly when the saved flow is commit only', async () => {
+		gitActionPreferences.setNextStep('commit');
+		dirtyMain();
+		const { handlers } = renderHeader();
+		await openPanel();
+		await fireEvent.click(row('Commit'));
+		expect(handlers.onClickCommit).toHaveBeenCalledWith();
+	});
+});
+
 // ── Snapshot coherence on a session switch (finding G4) ─────────────────────
 
 describe('GitHeaderActions snapshot coherence', () => {

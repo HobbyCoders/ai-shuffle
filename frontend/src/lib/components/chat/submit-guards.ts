@@ -84,3 +84,31 @@ export function evaluateSubmitGuards(s: SubmitGuardInput): SubmitBlock | null {
 
 	return null;
 }
+
+/** Why a credential-gated composer control is disabled. */
+export const NO_CREDENTIAL_REASON = 'Connect a provider in Settings first';
+
+/** What the send button's disabled state depends on. */
+export interface SendButtonInput {
+	hasContent: boolean;
+	hasCredential: boolean;
+	isUploading: boolean;
+	isRecording: boolean;
+	isTranscribing: boolean;
+	/** The send will create a branch/worktree from the message. */
+	autoBranch?: boolean;
+}
+
+/**
+ * The send button's disabled state and the tooltip that names the actual
+ * blocker, in the order the user can fix them. A disabled button must never
+ * read "Send message".
+ */
+export function sendButtonState(s: SendButtonInput): { disabled: boolean; title: string } {
+	if (!s.hasCredential) return { disabled: true, title: NO_CREDENTIAL_REASON };
+	if (s.isUploading) return { disabled: true, title: 'Uploading files...' };
+	if (s.isRecording) return { disabled: true, title: 'Recording...' };
+	if (s.isTranscribing) return { disabled: true, title: 'Transcribing...' };
+	if (!s.hasContent) return { disabled: true, title: 'Type a message to send' };
+	return { disabled: false, title: s.autoBranch ? 'Branch will be auto-created from your message' : 'Send message' };
+}

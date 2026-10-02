@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import CliHistoryImport from '$lib/components/setup/CliHistoryImport.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	import { appData } from '$lib/stores/app-data.svelte';
 	// Props
 	let { show = $bindable(false), onclose, onimported }: { show: boolean; onclose?: () => void; onimported?: (data: { sessionId: string; title: string; messageCount: number }) => void } = $props();
 
@@ -234,6 +237,11 @@
 								<p class="text-xs text-destructive/80 mt-0.5">{parseError}</p>
 							</div>
 						</div>
+					{/if}
+
+					{#if $isAdmin}
+						<!-- Claude Code CLI conversations on this worker; hides itself when there are none. -->
+						<CliHistoryImport onimported={() => void appData.loadSessions()} />
 					{/if}
 				{:else if previewData}
 					<!-- Preview -->

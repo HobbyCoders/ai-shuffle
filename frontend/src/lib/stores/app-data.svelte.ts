@@ -10,7 +10,7 @@
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { feedController } from './session/v2/feed-controller';
-import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive } from '$lib/api/client';
+import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive, setSessionArchived as apiSetSessionArchived } from '$lib/api/client';
 import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
@@ -832,6 +832,32 @@ export const appData = {
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
 			// Roll the optimistic change back and let the caller surface the error.
+			discardLocalEdits([sessionId]);
+			_update(s => ({ ...s, sessions: prevSessions }));
+			throw err;
+		}
+	},
+
+	/**
+	 * Archive a session (out of the history, and out of Active) or restore it.
+	 * Optimistic like setSessionActive; `isActive` is where a restore lands, so
+	 * undoing an archive puts an Active session back in Active.
+	 */
+	async setSessionArchived(sessionId: string, archived: boolean, isActive = false) {
+		const prevSessions = _state.sessions;
+		const patch: Partial<Session> = archived
+			? { status: 'archived', is_active: false }
+			: { status: 'active', is_active: isActive };
+		recordLocalEdit(sessionId, patch);
+		_update(s => ({
+			...s,
+			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, ...patch } : x)),
+		}));
+		try {
+			await apiSetSessionArchived(sessionId, archived, isActive);
+			confirmLocalEdits([sessionId]);
+			await loadSessionsInternal(_state.sessionsTagFilter);
+		} catch (err) {
 			discardLocalEdits([sessionId]);
 			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;

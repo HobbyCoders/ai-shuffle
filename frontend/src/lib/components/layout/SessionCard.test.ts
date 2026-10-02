@@ -23,6 +23,9 @@ const mocks = vi.hoisted(() => {
 	return {
 		activeSession: store({ sessionId: null as string | null }),
 		setSessionActive: vi.fn(),
+		setSessionArchived: vi.fn(),
+		banner: vi.fn((..._args: unknown[]) => 'banner-1'),
+		dismissLive: vi.fn(),
 		deleteSession: vi.fn(),
 		renameSession: vi.fn(),
 		loadSessions: vi.fn(),
@@ -47,6 +50,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	appData: {
 		setSessionActive: mocks.setSessionActive,
+		setSessionArchived: mocks.setSessionArchived,
 		deleteSession: mocks.deleteSession,
 		renameSession: mocks.renameSession,
 		loadSessions: mocks.loadSessions,
@@ -65,7 +69,7 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 vi.mock('$lib/stores/notifications', () => ({
-	notify: mocks.toastPush,
+	notify: Object.assign(mocks.toastPush, { banner: mocks.banner, dismissLive: mocks.dismissLive }),
 }));
 
 // The card reads the real git store only for the session open in the main
@@ -166,6 +170,7 @@ beforeEach(() => {
 	mocks.watch.mockReturnValue(() => {});
 	mocks.getSessionGit.mockReturnValue(null);
 	mocks.setSessionActive.mockResolvedValue(undefined);
+	mocks.setSessionArchived.mockResolvedValue(undefined);
 	mocks.deleteSession.mockResolvedValue(undefined);
 	mocks.renameSession.mockResolvedValue(undefined);
 	mocks.loadSessions.mockResolvedValue(undefined);
@@ -175,6 +180,55 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	platform.set('desktop');
+});
+
+describe('SessionCard archive and undo', () => {
+	type BannerOpts = { action: { label: string; onClick: () => void }; duration_ms: number; persist: boolean };
+	const lastBanner = () => mocks.banner.mock.calls.at(-1) as unknown as [string, BannerOpts];
+
+	it('offers Undo after settling, which moves the session back to Active', async () => {
+		renderCard({ is_active: true });
+		await fireEvent.click(screen.getByTitle('Settle session'));
+		const [message, opts] = lastBanner();
+		expect(message).toBe('Settled “Sidebar work”');
+		expect(opts).toMatchObject({ persist: false, duration_ms: 6000, action: { label: 'Undo' } });
+		opts.action.onClick();
+		expect(mocks.dismissLive).toHaveBeenCalledWith('banner-1');
+		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', true);
+	});
+
+	it('archives a settled session and Undo restores it where it was', async () => {
+		renderCard({ is_active: false });
+		await fireEvent.click(screen.getByTitle('Archive session'));
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		const [message, opts] = lastBanner();
+		expect(message).toBe('Archived “Sidebar work”');
+		opts.action.onClick();
+		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, false);
+	});
+
+	it('offers only Restore on an archived row, with no Undo banner', async () => {
+		renderCard({ is_active: false, status: 'archived' });
+		expect(screen.queryByTitle('Archive session')).toBeNull();
+		expect(screen.queryByTitle('Move to Active')).toBeNull();
+		await fireEvent.click(screen.getByTitle('Restore archived session'));
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
+		expect(mocks.banner).not.toHaveBeenCalled();
+	});
+
+	it('archives a settled row on a long swipe and widens the rail for two actions', async () => {
+		platform.set('mobile');
+		const { container } = renderCard({ is_active: false });
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		expect(frame.style.getPropertyValue('--reveal')).toBe('120px');
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 400, clientY: 20 });
+		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 100, clientY: 22 });
+		expect(frame.classList.contains('swipe-commit')).toBe(true);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 100, clientY: 22 });
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
 });
 
 describe('SessionCard actions', () => {

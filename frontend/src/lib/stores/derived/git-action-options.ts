@@ -15,6 +15,52 @@ export interface CommitOptions {
 	message?: string;
 	includeUnstaged?: boolean;
 	nextStep?: CommitNextStep;
+	/**
+	 * Commit on a fresh branch instead of the current (default) branch. An empty
+	 * string means "name it from the commit message".
+	 */
+	newBranch?: string;
+	/** The user explicitly chose to push straight to the default branch. */
+	pushToDefaultBranch?: boolean;
+}
+
+/**
+ * Resolve what a commit request may actually do on the current checkout.
+ *
+ * On the default branch a push (or a PR, which needs a push first) runs only
+ * when the user explicitly chose it: either a new branch or an explicit
+ * "push to <default>". Anything else is refused, never silently downgraded
+ * to a push (#1659). `blocked` carries the reason to show inline.
+ */
+export function resolveCommitPlan(input: {
+	requested: CommitNextStep;
+	isOnDefaultBranch: boolean;
+	needsPull: boolean;
+	newBranch?: string;
+	pushToDefaultBranch?: boolean;
+}): { nextStep: CommitNextStep; newBranch: string | null; blocked: string | null } {
+	const newBranch = input.isOnDefaultBranch && input.newBranch !== undefined ? input.newBranch.trim() : null;
+	if (newBranch !== null) return { nextStep: input.requested, newBranch, blocked: null };
+	if (input.needsPull) return { nextStep: 'commit', newBranch: null, blocked: null };
+	if (!input.isOnDefaultBranch || input.requested === 'commit') return { nextStep: input.requested, newBranch: null, blocked: null };
+	if (input.requested === 'push' && input.pushToDefaultBranch) return { nextStep: 'push', newBranch: null, blocked: null };
+	return {
+		nextStep: input.requested,
+		newBranch: null,
+		blocked: 'You are on the default branch. Choose “Commit on new branch” or an explicit push to it.'
+	};
+}
+
+/** A branch name derived from a commit message: `fix(git): Guard X` → `fix/guard-x`. */
+export function branchNameFromMessage(message: string, now: Date = new Date()): string {
+	const subject = (message.split('\n')[0] ?? '').trim();
+	const conventional = /^([a-z]+)(?:\([^)]*\))?!?:\s*(.*)$/i.exec(subject);
+	const prefix = conventional ? conventional[1].toLowerCase() : 'change';
+	const rest = conventional ? conventional[2] : subject;
+	const slug = rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/, '');
+	if (slug) return `${prefix}/${slug}`;
+	const stamp = now.toISOString().slice(0, 16).replace(/[-:T]/g, '');
+	return `${prefix}/${stamp}`;
 }
 export interface PushOptions {
 	force?: boolean;
