@@ -18,7 +18,7 @@ vi.mock('$lib/stores/timezonePreference.svelte', async () => {
 
 import { assertCategoryCoverage, coverageLocations } from './testing/coverage';
 import { PREFERENCE_PAGES, COLLECTION_LOADERS, isPreferenceCategory, type CollectionCategory } from '$lib/components/settings/pages/index';
-import { CATEGORY_IDS } from './types';
+import { CATEGORY_IDS, type CategoryId } from './types';
 import { MODULES } from './registry';
 
 afterEach(cleanup);
@@ -86,8 +86,21 @@ describe('assertCategoryCoverage', () => {
 	});
 });
 
+/**
+ * Collections whose entries live on items that only exist with worker data
+ * assert their coverage in their own test, which loads that data and opens
+ * each item and tab.
+ */
+const COVERED_WITH_DATA: Partial<Record<CategoryId, string>> = {
+	providers: 'components/settings/providers/ProvidersCollection.test.ts'
+};
+
 describe('every category page matches the registry', () => {
 	for (const category of CATEGORY_IDS) {
+		if (COVERED_WITH_DATA[category]) {
+			it.skip(`${category} (covered in ${COVERED_WITH_DATA[category]})`, () => {});
+			continue;
+		}
 		it(category, async () => {
 			const component: Component = isPreferenceCategory(category)
 				? PREFERENCE_PAGES[category]
