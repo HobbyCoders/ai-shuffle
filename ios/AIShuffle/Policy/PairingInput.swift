@@ -56,22 +56,24 @@ enum PairingInput {
         return value
     }
 
-    /// A worker pairing link: `https://worker/pair#code=XXXXXXXXXXXX`.
+    /// The pairing link a worker shows: `https://worker/pair#token=XXXXXXXXXXXX`
+    /// (app/core/pairing.py build_pairing_url; Android's PairingInput.parseDirect).
     static func parse(_ raw: String) throws -> Pair {
         guard let parts = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = parts.scheme, let host = parts.host else {
             throw ShuffleError("Enter the address and code manually, or paste the full pairing link.")
         }
         guard parts.percentEncodedPath == "/pair", parts.query == nil, parts.user == nil, parts.password == nil else {
-            throw ShuffleError("This is not the expected pairing link. Use /pair#code= followed by a pairing code.")
+            throw ShuffleError("This is not the expected pairing link. Use /pair#token= followed by a pairing code.")
         }
         let fragment = parts.percentEncodedFragment ?? ""
-        guard fragment.hasPrefix("code="), !fragment.contains("&") else {
+        let prefix = "token="
+        guard fragment.hasPrefix(prefix), !fragment.contains("&") else {
             throw ShuffleError("The link must contain only a pairing code.")
         }
         var authority = bracketed(host)
         if let port = parts.port { authority += ":\(port)" }
-        return Pair(origin: try origin("\(scheme)://\(authority)"), code: try code(String(fragment.dropFirst(5))))
+        return Pair(origin: try origin("\(scheme)://\(authority)"), code: try code(String(fragment.dropFirst(prefix.count))))
     }
 
     static func sameOrigin(_ base: String, _ candidate: String) -> Bool {

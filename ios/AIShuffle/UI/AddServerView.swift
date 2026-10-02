@@ -51,7 +51,7 @@ struct AddServerView: View {
         defer { busy = false }
         do {
             let target: PairingInput.Pair
-            if address.contains("#code=") {
+            if address.contains("#") {
                 target = try PairingInput.parse(address)
             } else {
                 target = PairingInput.Pair(origin: try PairingInput.origin(address), code: try PairingInput.code(code))

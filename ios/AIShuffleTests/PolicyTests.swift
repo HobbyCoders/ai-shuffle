@@ -24,11 +24,14 @@ final class PairingInputTests: XCTestCase {
     }
 
     func testPairingLink() throws {
-        XCTAssertEqual(try PairingInput.parse("https://Worker.Example/pair#code=abcd-efgh-1234"),
+        // The link a worker actually shows (app/core/pairing.py build_pairing_url).
+        XCTAssertEqual(try PairingInput.parse("https://Worker.Example/pair#token=abcd-efgh-1234"),
                        PairingInput.Pair(origin: "https://worker.example", code: "ABCDEFGH1234"))
-        for raw in ["https://worker.example/pair?x=1#code=ABCDEFGH1234", "https://worker.example/other#code=ABCDEFGH1234",
-                    "https://worker.example/pair#code=ABCDEFGH1234&token=x", "http://worker.example/pair#code=ABCDEFGH1234",
-                    "https://worker.example/pair#token=ABCDEFGH1234"] {
+        XCTAssertEqual(try PairingInput.parse("https://worker.example:8443/pair#token=ABCD-EFGH-1234"),
+                       PairingInput.Pair(origin: "https://worker.example:8443", code: "ABCDEFGH1234"))
+        for raw in ["https://worker.example/pair?x=1#token=ABCDEFGH1234", "https://worker.example/other#token=ABCDEFGH1234",
+                    "https://worker.example/pair#token=ABCDEFGH1234&code=x", "http://worker.example/pair#token=ABCDEFGH1234",
+                    "https://user@worker.example/pair#token=ABCDEFGH1234", "https://worker.example/pair#code=ABCDEFGH1234"] {
             XCTAssertThrowsError(try PairingInput.parse(raw), raw)
         }
     }
