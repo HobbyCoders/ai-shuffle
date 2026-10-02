@@ -2,10 +2,11 @@
 import { browser } from '$app/environment';
 import { preferenceSync } from '$lib/services/preferences';
 
-export type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
+export type BuildSub = 'profile' | 'mcp' | 'hooks';
 const CACHE_KEY = 'ai-shuffle-build-subtab';
 const normalize = (value: unknown): BuildSub =>
- value === 'mcp' || value === 'plugins' || value === 'hooks' ? value : 'profile';
+ // A remembered 'plugins' (Plugins moved to Settings) falls back to Agents.
+ value === 'mcp' || value === 'hooks' ? value : 'profile';
 function load(): BuildSub {
  try { return browser ? normalize(localStorage.getItem(CACHE_KEY)) : 'profile'; }
  catch { return 'profile'; }

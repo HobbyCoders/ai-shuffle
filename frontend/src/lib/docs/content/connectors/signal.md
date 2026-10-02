@@ -83,7 +83,7 @@ Replace `+15551234567` with your personal phone number. You should receive the m
 
 ### Step 5: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Signal**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Signal**.
 2. Click **Install Signal** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Phone Number (E.164)**: The registered phone number in E.164 format (e.g., `+14155551234`)

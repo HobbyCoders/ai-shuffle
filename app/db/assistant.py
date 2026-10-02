@@ -1,6 +1,13 @@
 """Durable owner assistant configuration, observation inbox and linked activity.
 
-The configuration row is also the per-install admission mutex. A guarded UPDATE
+There is one assistant per owner, not one per worker. ``assistant_account``
+holds the owner's configuration and names the one home conversation; it syncs
+between workers as the ``assistant`` network collection. ``assistant_state``
+is this worker's runner row: the account view it runs under (projected by
+``assistant_service.reconcile``) plus its own limits. Runs, events and source
+watermarks stay on the worker that runs research.
+
+The runner row is also the per-install admission mutex. A guarded UPDATE
 locks it on PostgreSQL (and serializes writers in the SQLite test shim). No
 configuration or source is seeded by a migration.
 """
@@ -14,10 +21,30 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
+# The source of truth is frontend/src/lib/components/assistant/avatars/: one
+# SVG per avatar and avatars.json for the order. The backend ships without the
+# frontend sources, so this copy stays here; tests/api/test_assistant_avatars.py
+# fails if it drifts from the manifest.
+AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
+                  "owl", "fox", "cat", "bear", "ghost", "cloud",
+                  "moon", "sun", "bolt", "gem", "drop")
+# Background research tuning. Owners never set these: this is the one place
+# they live, and every run is admitted under exactly these values:
+#   max_runs_per_day     12    research runs in any rolling 24 hours
+#   max_concurrent_runs   1    runs in progress at once
+#   max_turns             3    agent turns inside one run
+#   timeout_seconds     180    deadline for one run
+#   max_cost_per_run    1.0    USD reserved before a run is admitted
+#   max_cost_per_day    5.0    USD reserved/reported over the 24-hour window
+# The dollar figures are admission checks against costs reported after each
+# run, not provider billing caps. Values an owner saved in older releases are
+# ignored. The limit columns and the paused column stay only so older rows
+# keep working; research_allowed() is the on/off rule.
+RESEARCH_LIMITS = dict(max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
+                       timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0)
+LIMIT_KEYS = tuple(RESEARCH_LIMITS)
 DEFAULTS = dict(agent_id=None, home_session_id=None, enabled=False, paused=False,
-                max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
-                timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0, introduction={})
-AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel")
+                **RESEARCH_LIMITS, introduction={})
 ACTIVE = ("admitted", "submitting", "running")
 IN_FLIGHT = ACTIVE + ("cancelling",)
 # Per-"day" admission limits use a rolling window anchored on each run's
@@ -32,6 +59,11 @@ EVENT_PAYLOAD_RETENTION_DAYS = 30
 HISTORY_RETENTION_DAYS = 180
 RETENTION_BATCH = 500
 SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
+# The owner's single assistant row. Every worker uses the same key, so the
+# synced row is one record across the network.
+ACCOUNT_ID = "owner"
+ACCOUNT_DEFAULTS = dict(agent_id=None, enabled=False, paused=False, sources={}, introduction={},
+                        home_session_id=None, home_device_id=None, home_created_at=None)
 
 
 def now():
@@ -75,6 +107,11 @@ def create_schema(cursor):
                         ("limits", "JSONB NOT NULL DEFAULT '{}'")):
         if not column_exists(cursor, "assistant_runs", column):
             cursor.execute(f"ALTER TABLE assistant_runs ADD COLUMN {column} {ddl}")
+    # Home-conversation brief for a completed research run: NULL until decided,
+    # then 'posted' or 'none'. Runs from before briefs existed never get one.
+    if not column_exists(cursor, "assistant_runs", "brief"):
+        cursor.execute("ALTER TABLE assistant_runs ADD COLUMN brief TEXT")
+        cursor.execute("UPDATE assistant_runs SET brief='none'")
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_events (
         id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
         source_id TEXT NOT NULL, event_type TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -83,14 +120,40 @@ def create_schema(cursor):
         observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (assistant_id, source_id, fingerprint)
     )""")
+    # Synced (network collection "assistant"). No foreign keys: a peer's row
+    # can name an agent or a home session that has not reached this worker yet.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_account (
+        id TEXT PRIMARY KEY, agent_id TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE, paused BOOLEAN NOT NULL DEFAULT FALSE,
+        sources JSONB NOT NULL DEFAULT '{}', introduction JSONB NOT NULL DEFAULT '{}',
+        home_session_id TEXT, home_device_id TEXT, home_created_at TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
+
+
+def research_limits(state=None):
+    """The limits a run is admitted under. Stored per-row values are ignored."""
+    return dict(RESEARCH_LIMITS)
+
+
+def research_allowed(state):
+    """Background research is automatic on the worker that holds the home.
+
+    The owner's only control is which sources are opted in, and every
+    observation and admission also requires a trusted opted-in source.
+    ``enabled`` on a runner row is no longer an owner switch: reconcile sets
+    it only where the home is, so every other worker fails closed. The
+    legacy ``paused`` column is ignored.
+    """
+    return bool(state and state.get("agent_id") and state.get("enabled"))
 
 
 def _parse(row):
     row = row_to_dict(row)
     if row:
-        for key in ("watermark", "payload", "event_ids", "source_ids", "introduction", "limits"):
+        for key in ("watermark", "payload", "event_ids", "source_ids", "introduction", "limits", "sources"):
             if isinstance(row.get(key), str):
                 row[key] = json.loads(row[key])
     return row
@@ -126,26 +189,76 @@ def configure(assistant_id, changes, _conn=None):
         return state
 
 
+def get_account(_conn=None):
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_account WHERE id=%s", (ACCOUNT_ID,))
+        return _parse(cursor.fetchone())
+
+
+def lock_account(conn):
+    """Lock and return the account row, or None when nothing was configured."""
+    cursor = conn.cursor()
+    cursor.execute("UPDATE assistant_account SET updated_at=updated_at WHERE id=%s RETURNING *", (ACCOUNT_ID,))
+    return _parse(cursor.fetchone())
+
+
+def write_account(conn, changes):
+    """Create the account row if needed, apply ``changes`` and return the row."""
+    if set(changes) - set(ACCOUNT_DEFAULTS):
+        raise ValueError("Unknown assistant account setting")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO assistant_account (id) VALUES (%s) ON CONFLICT DO NOTHING", (ACCOUNT_ID,))
+    if not changes:
+        return lock_account(conn)
+    changes = {key: json.dumps(value) if key in ("sources", "introduction") else value
+               for key, value in changes.items()}
+    cursor.execute("UPDATE assistant_account SET " + ", ".join(key + "=%s" for key in changes) +
+                   ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), ACCOUNT_ID))
+    return _parse(cursor.fetchone())
+
+
+def project(conn, assistant_id, values, sources):
+    """Copy the account view this worker runs under into its runner row.
+
+    ``values`` holds runner-row columns (agent, flags, introduction, home).
+    ``sources`` maps connector id to the owner's opt-in. A connector this
+    worker does not know yet is skipped. Switching a source off here revokes
+    its pending events, as an explicit opt-out does.
+    """
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO assistant_state (id, runner_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (assistant_id, assistant_id))
+    state = lock_state(conn, assistant_id)
+    changes = {key: value for key, value in values.items() if state.get(key) != value}
+    if changes:
+        if "introduction" in changes:
+            changes["introduction"] = json.dumps(changes["introduction"])
+        cursor.execute("UPDATE assistant_state SET " + ", ".join(key + "=%s" for key in changes) +
+                       ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), assistant_id))
+        state = _parse(cursor.fetchone())
+    cursor.execute("SELECT connector_id, enabled FROM assistant_sources WHERE assistant_id=%s", (assistant_id,))
+    local = {row["connector_id"]: bool(row["enabled"]) for row in cursor.fetchall()}
+    wanted = {connector_id: bool(on) for connector_id, on in (sources or {}).items()}
+    for connector_id in sorted(set(local) | set(wanted)):
+        enabled = wanted.get(connector_id, False)
+        if local.get(connector_id, False) == enabled:
+            continue
+        cursor.execute("SELECT 1 FROM connectors WHERE id=%s", (connector_id,))
+        if not cursor.fetchone():
+            continue
+        cursor.execute("""INSERT INTO assistant_sources (assistant_id,connector_id,enabled)
+            VALUES (%s,%s,%s) ON CONFLICT (assistant_id,connector_id) DO UPDATE SET
+            enabled=EXCLUDED.enabled, updated_at=NOW()""", (assistant_id, connector_id, enabled))
+        if not enabled:
+            cursor.execute("UPDATE assistant_events SET status='revoked' WHERE assistant_id=%s AND source_id=%s AND status='pending'", (assistant_id, connector_id))
+    return state
+
+
 def get_sources(assistant_id):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM assistant_sources WHERE assistant_id=%s ORDER BY connector_id", (assistant_id,))
         return [_parse(row) for row in cursor.fetchall()]
-
-
-def set_source(assistant_id, connector_id, enabled):
-    with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not state:
-            raise ValueError("Choose an assistant agent first")
-        cursor = conn.cursor()
-        cursor.execute("""INSERT INTO assistant_sources (assistant_id,connector_id,enabled)
-            VALUES (%s,%s,%s) ON CONFLICT (assistant_id,connector_id) DO UPDATE SET
-            enabled=EXCLUDED.enabled, updated_at=NOW() RETURNING *""", (assistant_id, connector_id, enabled))
-        row = _parse(cursor.fetchone())
-        if not enabled:
-            cursor.execute("UPDATE assistant_events SET status='revoked' WHERE assistant_id=%s AND source_id=%s AND status='pending'", (assistant_id, connector_id))
-        return row
 
 
 def owner_connector(conn, connector):
@@ -221,7 +334,7 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
     """
     with get_db() as conn:
         state = lock_state(conn, assistant_id)
-        if not state or not state["enabled"] or state["paused"] or not trusted_source(conn, state, connector_id):
+        if not research_allowed(state) or not trusted_source(conn, state, connector_id):
             return []
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_events WHERE assistant_id=%s AND status='pending'", (assistant_id,))
@@ -339,18 +452,19 @@ def admit_run(assistant_id):
     """Coalesce <=10 events under the install mutex and reserve finite budgets."""
     with get_db() as conn:
         state = lock_state(conn, assistant_id)
-        if not state or not state["enabled"] or state["paused"] or not state["agent_id"] or not state["home_session_id"]:
+        if not research_allowed(state) or not state["home_session_id"]:
             return None
+        limits = research_limits(state)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        if cursor.fetchone()["n"] >= state["max_concurrent_runs"]:
+        if cursor.fetchone()["n"] >= limits["max_concurrent_runs"]:
             return None
         usage = _window_usage(cursor, assistant_id)
         # Reserve the configured per-run amount for *every* live run. Provider
         # billing is reported after a run, so this is not an exact dollar cap.
         cursor.execute("SELECT limits FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", state["max_cost_per_run"]) for row in cursor.fetchall())
-        if usage["n"] >= state["max_runs_per_day"] or usage["cost"] + reserved + state["max_cost_per_run"] > state["max_cost_per_day"]:
+        reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", limits["max_cost_per_run"]) for row in cursor.fetchall())
+        if usage["n"] >= limits["max_runs_per_day"] or usage["cost"] + reserved + limits["max_cost_per_run"] > limits["max_cost_per_day"]:
             return None
         # The inbox is capped at 100, so scanning it all lets events from a
         # reconnecting source wait without starving other sources' events.
@@ -379,16 +493,45 @@ def admit_run(assistant_id):
         run_id = str(uuid.uuid4())
         event_ids = [e["id"] for e in eligible]
         source_ids = sorted({e["source_id"] for e in eligible})
-        deadline = (now() + timedelta(seconds=state["timeout_seconds"])).isoformat()
+        deadline = (now() + timedelta(seconds=limits["timeout_seconds"])).isoformat()
         cursor.execute("""INSERT INTO assistant_runs (id,assistant_id,home_session_id,status,event_ids,source_ids,deadline_at,created_at,agent_id,limits)
             VALUES (%s,%s,%s,'admitted',%s,%s,%s,%s,%s,%s) RETURNING *""",
             (run_id, assistant_id, state["home_session_id"], json.dumps(event_ids), json.dumps(source_ids), deadline, now().isoformat(), state["agent_id"],
-             json.dumps({k: state[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
+             json.dumps({k: limits[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
         run = _parse(cursor.fetchone())
         for event in eligible:
             cursor.execute("UPDATE assistant_events SET status='admitted',run_id=%s WHERE id=%s AND status='pending'", (run_id, event["id"]))
         run["events"] = eligible
         return run
+
+
+# A completed run's brief is only posted while it is fresh; one the home could
+# not take in time (a long turn, a restart) is dropped rather than posted late.
+BRIEF_WINDOW = timedelta(hours=24)
+
+
+def pending_briefs(assistant_id, limit=5):
+    """Completed research runs whose brief has not been decided yet."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status='completed' "
+                       "AND brief IS NULL AND session_id IS NOT NULL AND ended_at >= %s ORDER BY ended_at,id LIMIT %s",
+                       (assistant_id, (now() - BRIEF_WINDOW).isoformat(), limit))
+        return [_parse(row) for row in cursor.fetchall()]
+
+
+def decide_brief(run_id, brief):
+    """Claim an undecided brief as ``brief`` ('posted' or 'none'); False when already decided."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE assistant_runs SET brief=%s WHERE id=%s AND brief IS NULL RETURNING id", (brief, run_id))
+        return cursor.fetchone() is not None
+
+
+def release_brief(run_id):
+    """Undo a 'posted' claim whose post failed, so the next pass retries it."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_runs SET brief=NULL WHERE id=%s AND brief='posted'", (run_id,))
 
 
 def bind_run_session(run_id, session_id):

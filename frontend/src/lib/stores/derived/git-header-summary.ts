@@ -146,6 +146,24 @@ export function computeHeaderSummary(input: HeaderSummaryInput): HeaderSummary {
 	};
 }
 
+/**
+ * The header button for a worktree or branch session whose status reads
+ * "not a repository". It names the branch instead of a git state, so the
+ * button never renders as a bare icon. `pending` means the reading is a
+ * placeholder from the previous session while this one loads.
+ */
+export function computeUnreadableCheckoutSummary(branch: string | null, pending: boolean): HeaderSummary {
+	const name = branch || 'Worktree';
+	return {
+		tone: 'idle',
+		icon: 'branch',
+		label: name,
+		detail: pending ? 'checking' : 'unavailable',
+		// The panel head names the branch on the line above, so the sentence doesn't.
+		summary: pending ? 'Checking this checkout…' : "This checkout can't be read right now"
+	};
+}
+
 export type PipelineStepState = 'done' | 'next' | 'todo' | 'stop';
 export interface PipelineStep {
 	id: 'commit' | 'push' | 'pr' | 'merge';

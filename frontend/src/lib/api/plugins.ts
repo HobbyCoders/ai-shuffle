@@ -27,6 +27,20 @@ export interface MarketplaceInfo {
 	last_updated: string | null;
 }
 
+/**
+ * One thing a plugin offers (skill, command, agent, mcp_server, hook, app,
+ * connector_runtime, ...) and whether this app runs it: `support` is
+ * "loaded", "unsupported" or "needs_config", with `reason` saying why not.
+ */
+export interface PluginComponent {
+	kind: string;
+	name: string;
+	support: string;
+	reason: string;
+	/** An MCP server's command line or URL, so it can be reviewed before it runs. */
+	detail?: string;
+}
+
 export interface PluginInfo {
 	id: string;
 	name: string;
@@ -44,6 +58,15 @@ export interface PluginInfo {
 	has_hooks: boolean;
 	has_mcp: boolean;
 	connector_type: string | null;
+	/** Package format: "claude", "agent-plugins" or "shuffle" (connector runtimes). */
+	format?: string | null;
+	/** "official", "marketplace" or "authored". */
+	trust?: string | null;
+	components?: PluginComponent[];
+	/** Agent-authored plugins only: "pending" until the owner approves this exact content. */
+	approval?: string | null;
+	/** Agent-authored plugins only: the hash an approval pins. */
+	content_hash?: string | null;
 }
 
 /**
@@ -74,6 +97,8 @@ export interface AvailablePlugin {
 	connector_type: string | null;
 	installed: boolean;
 	enabled: boolean;
+	format?: string | null;
+	components?: PluginComponent[];
 }
 
 export interface FileBasedAgent {
@@ -208,8 +233,12 @@ export async function uninstallPlugin(pluginId: string): Promise<void> {
 /**
  * Enable a plugin globally
  */
-export async function enablePlugin(pluginId: string): Promise<void> {
-	await api.post<void>(`/plugins/${encodeURIComponent(pluginId)}/enable`);
+export async function enablePlugin(pluginId: string, contentHash?: string | null): Promise<void> {
+	// An agent-authored plugin is approved by enabling it, pinned to the hash
+	// of the version that was reviewed.
+	const path = `/plugins/${encodeURIComponent(pluginId)}/enable`;
+	if (contentHash) await api.post<void>(path, { content_hash: contentHash });
+	else await api.post<void>(path);
 }
 
 /**

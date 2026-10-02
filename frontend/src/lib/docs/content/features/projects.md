@@ -71,11 +71,14 @@ Git worktrees allow parallel development on multiple branches without switching:
 3. Claude works in the isolated worktree directory
 4. Changes stay separate from the main branch
 
-A saved one-time request to **create a new branch** is cleared after a session is
-successfully created. Failed creation keeps the choice for retry. Clearing it
-does not delete the created branch or change the session using it, and project,
-model and other composer preferences remain remembered. A newer branch choice
-made while creation is in flight is not cleared by the earlier request.
+A branch chosen in the new-session composer's branch chip is a one-time choice,
+whether it was made with **New branch...** or picked from the list. It is cleared
+after a session is successfully created on it, so the next new chat starts from
+**Auto** again. Failed creation keeps the choice for retry. Clearing it does not
+delete the branch or change the session using it, and project, model and other
+composer preferences remain remembered. A new chat opened while that creation is
+still running does not pick the branch up, and a newer branch choice made in the
+meantime is not cleared.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \

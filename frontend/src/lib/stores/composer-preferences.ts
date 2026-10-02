@@ -4,6 +4,9 @@ import type { ClusterProject } from '$lib/api/installs';
 import { sessionOwnerEpoch } from './session-owner';
 
 type ProjectPick = { projectId: string; projectV2Id: string | null };
+// A `branch` pick (New branch..., or a branch/checkout picked from the list) is
+// one-time: the first session created on it spends it (#1528), so the next new
+// chat falls back to Auto. A legacy `existing` worktree-ID pick still persists.
 type CheckoutPick = ProjectPick & ({kind:'existing'; worktreeId:string; branch:string}
  | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean});
 interface Picks {
@@ -20,6 +23,8 @@ const defaults: Picks = {profile:'', project:{projectId:'',projectV2Id:null}, ch
  model:null, effort:null, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
 const values = {...defaults};
 let checkoutRevision = 0;
+export interface BranchClaim { consume(): void; release(): void }
+const claims = new Set<{revision: number; ownerEpoch: number}>();
 function sameCheckout(a: CheckoutPick | null, b: CheckoutPick | null) {
  if (a === b) return true;
  if (!a || !b || a.kind !== b.kind || a.projectId !== b.projectId
@@ -95,19 +100,38 @@ export const composerPreferences = {
   if (key === 'checkout') checkoutRevision++;
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);
  },
- /** Capture before POST; consume only the unchanged choice after success. */
- captureNewBranchChoice(project: ProjectPick, branch: string, createNew: boolean) {
+ /**
+  * Claim the remembered branch choice that this create request is spending,
+  * before the POST. While claimed, `checkoutClaimed` is true so a New Chat
+  * opened mid-create does not stage it. `consume` clears the unchanged choice
+  * after success; `release` (always safe to call, e.g. from `finally`) ends
+  * the claim and keeps the choice for a retry.
+  */
+ claimBranchChoice(project: ProjectPick, branch: string, createNew: boolean): BranchClaim {
   const pick = values.checkout;
   const matchesProject = pick && (pick.projectV2Id
    ? pick.projectV2Id === project.projectV2Id : pick.projectId === project.projectId);
-  if (!createNew || pick?.kind !== 'branch' || !pick.createNew || pick.branch !== branch || !matchesProject) return () => {};
-  const revision = checkoutRevision;
-  const ownerEpoch = sessionOwnerEpoch();
-  return () => {
-   if (checkoutRevision === revision && sessionOwnerEpoch() === ownerEpoch) {
-    composerPreferences.set('checkout', null);
-   }
+  if (pick?.kind !== 'branch' || pick.createNew !== createNew || pick.branch !== branch || !matchesProject) {
+   return {consume() {}, release() {}};
+  }
+  const claim = {revision: checkoutRevision, ownerEpoch: sessionOwnerEpoch()};
+  claims.add(claim);
+  return {
+   consume() {
+    if (!claims.delete(claim)) return;
+    if (checkoutRevision === claim.revision && sessionOwnerEpoch() === claim.ownerEpoch) {
+     composerPreferences.set('checkout', null);
+    }
+   },
+   release() { claims.delete(claim); },
   };
+ },
+ /** True while the current checkout choice is spoken for by an in-flight create. */
+ get checkoutClaimed() {
+  for (const claim of claims) {
+   if (claim.revision === checkoutRevision && claim.ownerEpoch === sessionOwnerEpoch()) return true;
+  }
+  return false;
  },
  onRemote(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
  async hydrate() { await preferenceSync.reconnect(); },

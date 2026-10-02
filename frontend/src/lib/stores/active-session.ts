@@ -717,6 +717,7 @@ feedController.attach({
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
+/** Remember the staged branch until a session is created on it (one-time, #1528). */
 function rememberBranchIntent() {
 	composerPreferences.set('checkout', _state.worktreeBranch ? {
 		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
@@ -770,6 +771,53 @@ async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null 
 	if (_state.sessionId !== sessionId) return;
 	_update(s => ({ ...s, [stateKey]: selected }));
 	persistSession();
+}
+
+/** A send or restore owns the composer; defaults must not touch it. */
+function composerBusy() {
+	return _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession;
+}
+
+type CheckoutSnapshot = Pick<ActiveSessionState, 'mode' | 'project' | 'projectV2Id' | 'worktreeIntent' | 'worktreeId' | 'selectedWorktreeBranch' | 'worktreeBranch' | 'worktreeMode'>;
+/** The checkout the composer defaults set while the project catalog was still loading. */
+let _checkoutBeforeCatalog: CheckoutSnapshot | null = null;
+function checkoutSnapshot(): CheckoutSnapshot {
+	const { mode, project, projectV2Id, worktreeIntent, worktreeId, selectedWorktreeBranch, worktreeBranch, worktreeMode } = _state;
+	return { mode, project, projectV2Id, worktreeIntent, worktreeId, selectedWorktreeBranch, worktreeBranch, worktreeMode };
+}
+function sameCheckout(a: CheckoutSnapshot, b: CheckoutSnapshot) {
+	return (Object.keys(a) as (keyof CheckoutSnapshot)[]).every(key => a[key] === b[key]);
+}
+
+/** The project and checkout fields the remembered composer picks resolve to. */
+function composerCheckoutDefaults(code: boolean) {
+	const picks = composerPreferences.current;
+	const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
+	// A branch choice spoken for by a create still in flight belongs to that
+	// session, not to this new compose.
+	const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout && !composerPreferences.checkoutClaimed
+		&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
+		? picks.checkout : null;
+	// A legacy worktree ID belongs to its original checkout. Never transplant
+	// it into a different runner's clone, even when both share a Git origin.
+	const existing = checkout?.kind === 'existing' ? checkout : null;
+	// Staging a branch protects this composer from later defaults. Wait for
+	// its project to resolve first, or that guard also blocks a late catalog
+	// from mapping a shared UUID to this worker's local clone.
+	const projectResolved = !!project.project || (!!project.projectV2Id
+		&& appData.current.clusterProjects.some(p => p.project_v2_id === project.projectV2Id
+			&& p.local_project_id === null));
+	const branch = checkout?.kind === 'branch' && projectResolved ? checkout : null;
+	const localCheckout = existing && existing.projectId === project.project && !!project.project;
+	return {
+		...(code ? project : {project:'', projectV2Id:null}),
+		worktreeIntent:code ? picks.worktreeIntent : 'local' as const,
+		worktreeId:localCheckout ? existing!.worktreeId : null,
+		selectedWorktreeBranch:existing?.branch ?? null,
+		worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
+		worktreeCreateNewBranch:branch?.createNew ?? false, worktreeMode:existing ? 'existing' as const : 'new' as const,
+		worktreeError:existing && !localCheckout ? 'The selected worktree belongs to another device. Select an available worktree to continue.' : null,
+	};
 }
 
 export const activeSession = {
@@ -1081,36 +1129,48 @@ export const activeSession = {
 
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
 	applyComposerDefaults() {
-		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession) return;
+		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || composerBusy()) return;
 		const picks = composerPreferences.current;
-		const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
 		const code = _state.mode !== 'chat';
-		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout
-			&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
-			? picks.checkout : null;
-		// A legacy worktree ID belongs to its original checkout. Never transplant
-		// it into a different runner's clone, even when both share a Git origin.
-		const existing = checkout?.kind === 'existing' ? checkout : null;
-		// Staging a branch protects this composer from later defaults. Wait for
-		// its project to resolve first, or that guard also blocks a late catalog
-		// from mapping a shared UUID to this worker's local clone.
-		const projectResolved = !!project.project || (!!project.projectV2Id
-			&& appData.current.clusterProjects.some(p => p.project_v2_id === project.projectV2Id
-				&& p.local_project_id === null));
-		const branch = checkout?.kind === 'branch' && projectResolved ? checkout : null;
-		const localCheckout = existing && existing.projectId === project.project && !!project.project;
 		_update(s => ({...s,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:picks.effort,
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:picks.fastMode === '1',
 			contextWindowChoice:getPersistedContextWindowChoice(),
-			...(code ? project : {project:'', projectV2Id:null}),
-			worktreeIntent:code ? picks.worktreeIntent : 'local',
-			worktreeId:localCheckout ? existing!.worktreeId : null,
-			selectedWorktreeBranch:existing?.branch ?? null,
-			worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
-			worktreeCreateNewBranch:branch?.createNew ?? false, worktreeMode:existing ? 'existing' : 'new',
-			worktreeError:existing && !localCheckout ? 'The selected worktree belongs to another device. Select an available worktree to continue.' : null,
+			...composerCheckoutDefaults(code),
 		}));
+		// A remembered project applied before the catalog is in is a placeholder
+		// (#1636): remember exactly what it set so the catalog can finish it.
+		const remembered = !!(picks.project.projectId || picks.project.projectV2Id);
+		_checkoutBeforeCatalog = code && remembered && !appData.projectCatalogLoaded ? checkoutSnapshot() : null;
+	},
+
+	/**
+	 * True while a new chat's remembered project and branch are still waiting on
+	 * the project catalog. A send now would go out without them (a cluster-linked
+	 * project on an auto-named branch), so the composer holds it (#1636).
+	 */
+	get composerAwaitingProjectCatalog() {
+		return !!_checkoutBeforeCatalog && !appData.projectCatalogLoaded && !_state.sessionId
+			&& sameCheckout(_checkoutBeforeCatalog, checkoutSnapshot());
+	},
+
+	/**
+	 * The project catalog has answered: finish resolving the remembered project
+	 * and branch. When the composer still holds exactly the placeholder the
+	 * early defaults set, that finishes even under a typed draft: the draft was
+	 * typed for this same remembered checkout, and without this a send would
+	 * leave on an auto-named branch. Anything the user changed since keeps the
+	 * ordinary rules. Idempotent.
+	 */
+	resolveComposerDefaultsAfterCatalog() {
+		const before = _checkoutBeforeCatalog;
+		if (!before || !appData.projectCatalogLoaded) { activeSession.applyComposerDefaults(); return; }
+		_checkoutBeforeCatalog = null;
+		if (_state.sessionId || composerBusy() || !sameCheckout(before, checkoutSnapshot())) {
+			activeSession.applyComposerDefaults();
+			return;
+		}
+		_update(s => ({ ...s, ...composerCheckoutDefaults(s.mode !== 'chat') }));
 	},
 
 	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
@@ -1118,6 +1178,9 @@ export const activeSession = {
 
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
+
+	/** Create the composed session with no first message (the call button). */
+	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),
 
 	// ── Pending Messages (delegated to message-sender) ─────────────
 

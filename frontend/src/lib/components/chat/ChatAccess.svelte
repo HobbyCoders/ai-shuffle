@@ -16,6 +16,8 @@
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
+	/** The device a mirrored conversation runs on, where its grants and saved connections live. */
+	let owner = $state<string | null>(null);
 	async function removeSaved(id: string) {
 		busy = true; error = '';
 		try { await api.delete(`${base}/saved/${id}`); confirmingDelete = null; await refresh(); }
@@ -96,11 +98,12 @@
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
 			if (!verified) {
-				const session = await api.get<{mode: string; is_remote?: boolean}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				const session = await api.get<{mode: string; is_remote?: boolean; device_name?: string | null}>(`/sessions/${encodeURIComponent(sessionId)}`);
 				if (!alive) return;
-				// Mirrored conversations can run remotely, but private grants stay
-				// on the owner. Do not probe this worker's private-access endpoint.
-				enabled = !session.is_remote && (session.mode == null || ['code', 'chat', 'voice'].includes(session.mode));
+				// A mirrored conversation's grants stay on the device that runs it;
+				// this worker forwards the panel's requests there.
+				enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
+				owner = session.is_remote ? (session.device_name || 'the device that runs this conversation') : null;
 				verified = true;
 			}
 			if (!enabled) {
@@ -235,10 +238,11 @@
 		<div class="private-access" aria-label="Temporary access in this conversation">
 		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#each data.requests as request (request.id)}
-			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} onComplete={() => void refresh()} />
+			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} onComplete={() => void refresh()} />
 		{/each}
 		{#each data.actions as action (action.id)}
 			{@const grant = data.grants.find(g => g.id === action.grant_id)}
+			{@const sandboxed = action.operation === 'command' && grant?.kind === 'folder'}
 			<section class="pa-card" aria-label="One-shot action approval">
 				<header class="pa-head">
 					<div class="pa-icon" aria-hidden="true">
@@ -251,7 +255,7 @@
 						{/if}
 					</div>
 					<div class="pa-title">
-						<h3><span>Approve this {action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
+						<h3><span>Approve this {sandboxed ? 'sandboxed command' : action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
 						<p class="pa-subtitle">{grant ? `${grant.label} · ${grant.target}` : 'Temporary resource'}</p>
 					</div>
 				</header>
@@ -263,7 +267,7 @@
 					{:else}
 						<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
 					{/if}
-					<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
+					<p class="pa-hint">{sandboxed ? `Runs once in an isolated sandbox that sees only this folder and has no network. ${grant?.writable ? 'It can change files in the folder.' : 'The folder is read-only to it.'}` : action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
 				</div>
 				<div class="pa-section">
 					<div class="pa-actions">
@@ -312,7 +316,7 @@
 							<div class="pa-row-main">
 								<strong>{saved.label}</strong>
 								<code>{saved.target}</code>
-								<small>Encrypted on this worker{#if saved.fingerprint} · host key {saved.fingerprint.slice(0, 19)}…{/if}</small>
+								<small>Encrypted on {owner ?? 'this worker'}{#if saved.fingerprint} · host key {saved.fingerprint.slice(0, 19)}…{/if}</small>
 							</div>
 							<div class="pa-row-actions">
 								{#if confirmingDelete === saved.id}

@@ -47,6 +47,15 @@ class MarketplaceAddRequest(BaseModel):
     name: Optional[str] = Field(None, description="Optional name (derived from URL if not provided)")
 
 
+class PluginComponentResponse(BaseModel):
+    """One component of a plugin and whether this app runs it."""
+    kind: str
+    name: str
+    support: str  # loaded | unsupported | needs_config
+    reason: str = ""
+    detail: str = ""  # an MCP server's command line or URL, for review
+
+
 class PluginResponse(BaseModel):
     """Response model for installed plugin info"""
     id: str
@@ -64,6 +73,30 @@ class PluginResponse(BaseModel):
     has_hooks: bool
     has_mcp: bool = False
     connector_type: Optional[str] = None
+    # Optional additions (#1610): package format, trust level and every
+    # component with its support status. Older clients ignore them.
+    format: Optional[str] = None
+    trust: Optional[str] = None
+    components: List[PluginComponentResponse] = Field(default_factory=list)
+    # Authored plugins only: review state and the hash an approval pins.
+    approval: Optional[str] = None
+    content_hash: Optional[str] = None
+
+
+def _record_fields(plugin) -> dict:
+    """The optional format/trust/components fields of an installed plugin."""
+    def text(name: str) -> Optional[str]:
+        value = getattr(plugin, name, None)
+        return value if isinstance(value, str) else None
+
+    components = getattr(plugin, "components", None)
+    return {
+        "format": text("format"),
+        "trust": text("trust"),
+        "components": components if isinstance(components, list) else [],
+        "approval": text("approval"),
+        "content_hash": text("content_hash"),
+    }
 
 
 class PluginDetailsResponse(PluginResponse):
@@ -89,6 +122,15 @@ class AvailablePluginResponse(BaseModel):
     connector_type: Optional[str] = None
     installed: bool
     enabled: bool
+    format: Optional[str] = None
+    components: List[PluginComponentResponse] = Field(default_factory=list)
+
+
+class PluginEnableRequest(BaseModel):
+    """Optional body for enabling a plugin."""
+    content_hash: Optional[str] = Field(
+        None, description="For an authored plugin: the content hash of the reviewed version"
+    )
 
 
 class PluginInstallRequest(BaseModel):
@@ -277,7 +319,9 @@ async def list_available_plugins(
                 connector_type=p.connector_type,
                 has_mcp=p.has_mcp,
                 installed=p.installed,
-                enabled=p.enabled
+                enabled=p.enabled,
+                format=_record_fields(p)["format"],
+                components=_record_fields(p)["components"],
             )
             for p in plugins
         ]
@@ -309,7 +353,8 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
                 connector_type=p.connector_type,
-                has_mcp=p.has_mcp
+                has_mcp=p.has_mcp,
+                **_record_fields(p)
             )
             for p in plugins
         ]
@@ -389,7 +434,8 @@ async def update_plugin(
                 has_agents=plugin.has_agents,
                 has_skills=plugin.has_skills,
                 has_hooks=plugin.has_hooks,
-                connector_type=plugin.connector_type, has_mcp=plugin.has_mcp
+                connector_type=plugin.connector_type, has_mcp=plugin.has_mcp,
+                **_record_fields(plugin)
             )
         except ValueError as e:
             raise HTTPException(
@@ -420,7 +466,8 @@ async def update_all_plugins(token: str = Depends(require_admin)):
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
                 connector_type=p.connector_type,
-                has_mcp=p.has_mcp
+                has_mcp=p.has_mcp,
+                **_record_fields(p)
             )
             for p in plugins
         ]
@@ -556,6 +603,7 @@ async def get_plugin_details(
         has_skills=plugin.has_skills,
         has_hooks=plugin.has_hooks,
         connector_type=plugin.connector_type, has_mcp=plugin.has_mcp,
+        **_record_fields(plugin),
         commands=plugin.commands,
         agents=plugin.agents,
         skills=plugin.skills,
@@ -590,7 +638,8 @@ async def install_plugin(
             has_agents=plugin.has_agents,
             has_skills=plugin.has_skills,
             has_hooks=plugin.has_hooks,
-            connector_type=plugin.connector_type, has_mcp=plugin.has_mcp
+            connector_type=plugin.connector_type, has_mcp=plugin.has_mcp,
+                **_record_fields(plugin)
         )
     except ValueError as e:
         logger.warning(f"Plugin install failed for {request.plugin_id}: {e}")
@@ -643,7 +692,8 @@ async def install_plugins_batch(
             has_agents=p.has_agents,
             has_skills=p.has_skills,
             has_hooks=p.has_hooks,
-            connector_type=p.connector_type, has_mcp=p.has_mcp
+            connector_type=p.connector_type, has_mcp=p.has_mcp,
+                **_record_fields(p)
         )
         for p in plugins
     ]
@@ -672,12 +722,19 @@ async def uninstall_plugin(
 @router.post("/{plugin_id:path}/enable", status_code=status.HTTP_200_OK)
 async def enable_plugin(
     plugin_id: str,
+    request: Optional[PluginEnableRequest] = None,
     token: str = Depends(require_admin)
 ):
-    """Enable a plugin globally - Admin only"""
+    """Enable a plugin globally - Admin only.
+
+    For an agent-authored plugin this is also the owner's approval, and it must
+    name the ``content_hash`` of the version that was reviewed; a plugin that
+    changed since is refused with 409.
+    """
     service = get_plugin_service()
+    extra = {"content_hash": request.content_hash} if request and request.content_hash else {}
     try:
-        success = await run_sync(service.enable_plugin, plugin_id)
+        success = await run_sync(service.enable_plugin, plugin_id, **extra)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     if not success:

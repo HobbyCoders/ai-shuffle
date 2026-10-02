@@ -26,6 +26,20 @@ Key concepts:
 - **Owner-only management:** Installing, uninstalling, updating and enabling/disabling plugins requires the owner
 - **Read-only hooks:** Plugin-contributed hooks are discoverable but not editable through the hooks UI
 
+In the app, plugins are managed in **Settings > Plugins**. Older "Manage plugins" links open that section.
+
+## AI-authored plugins
+
+When you ask an agent for a plugin in a code session, it can save one with the `save_plugin` tool. Like `save_skill`, the tool asks for permission in Ask mode and is not available in chat sessions or background research.
+
+- The plugin is written in the Agent Plugins layout to `~/.fluid/plugins/cache/authored/<name>/<version>/` and appears at once in **Settings > Plugins** as `<name>@authored`, marked **Needs review**.
+- It stays off until you open it, check what it adds (each skill, command, agent and MCP server, with the server's command line or URL), and choose **Approve and enable**. That approval covers only the version you reviewed, identified by a hash of its files.
+- Any later edit or new version stops it loading until you review it again. Disabling it withdraws the approval.
+- If the session ran on another device of your network, the draft reaches every device's Settings, the same way saved skills do. Approving, disabling or uninstalling it on one device applies on all of them. A device turns the plugin on only when its own copy has the hash you approved.
+- Authored plugins can contain skills, slash commands, subagents and MCP servers. They cannot contain hooks, and MCP server `env` values must be `${VAR}` references, so no secret is written into a plugin.
+
+Through the API, enabling an authored plugin needs the reviewed hash: `POST /api/v1/plugins/{plugin_id}/enable` with `{"content_hash": "<content_hash from the plugin's details>"}`. A plugin that changed since returns 409.
+
 ## Official connector runtimes
 
 Official apps such as Webhook, Discord Bot and Gmail appear in the `shuffle-connectors` marketplace. Their source snapshots ship with AI Shuffle and its application updates; **no GitHub account or private-repository access is needed** to install them. The normal application access/licensing rules still apply. This does not change access to third-party git marketplaces.
@@ -48,9 +62,19 @@ A plugin can contribute any combination of:
 
 Each plugin in the API response includes boolean flags indicating which capabilities it provides: `has_hooks`, `has_commands`, `has_agents`, `has_skills`, `has_mcp`.
 
+Responses also carry:
+
+- `format`: `claude` (Claude Code), `agent-plugins` (Agent Plugins / OpenAI) or `shuffle` (official connector runtimes).
+- `trust`: `official`, `marketplace` or `authored`.
+- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason` when it does not load. LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
+
+These fields are absent from workers that predate them.
+
 ## Plugin Structure
 
-A plugin is a directory containing a `.claude-plugin/plugin.json` manifest file. The manifest defines the plugin's metadata and declares its contributions.
+AI Shuffle reads two package formats and keeps each on disk as it was published.
+
+**Claude Code.** A directory with an optional `.claude-plugin/plugin.json` manifest (only `name` is required). The manifest defines the plugin's metadata and declares its contributions.
 
 ```
 my-plugin/
@@ -74,9 +98,22 @@ The `plugin.json` manifest includes:
 - **version** -- Semantic version string
 - **scope** -- Installation scope
 
+**Agent Plugins / OpenAI (ChatGPT and Codex).** A root `plugin.json` (or the older `.codex-plugin/plugin.json`) with `skills/` and `mcp.json`. Display metadata under `extensions["com.openai"].interface` (`displayName`, `shortDescription`, `logo`) is shown in the plugin list. Commands and agents can be declared under `extensions["ai.shuffle"]`.
+
+```
+my-plugin/
+├── plugin.json            # Agent Plugins manifest
+├── skills/
+│   └── <name>/SKILL.md
+├── mcp.json               # MCP servers
+└── .app.json              # ChatGPT-hosted apps (listed, not run)
+```
+
+`${CLAUDE_PLUGIN_ROOT}` and `${PLUGIN_ROOT}` both expand to the plugin's folder. `${CLAUDE_PLUGIN_DATA}` and `${PLUGIN_DATA}` both expand to `~/.fluid/plugins/data/<name>@<marketplace>`, which is kept across plugin updates.
+
 ## Marketplaces
 
-Plugins are distributed through marketplaces, which are git repositories containing one or more plugins.
+Plugins are distributed through marketplaces, which are git repositories containing one or more plugins. A marketplace lists its plugins in `.claude-plugin/marketplace.json` (Claude Code) or `.agents/plugins/marketplace.json` (Agent Plugins / OpenAI). In the second format, `source.path` and `source.url` entries are supported; npm (`source.package`) entries are skipped for now.
 
 ### List Marketplaces
 

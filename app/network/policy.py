@@ -91,7 +91,6 @@ _LOCAL_SETTING_PATTERNS = [
         r"^port$|^host$|^advertise_url",
         r"^tunnel_",
         r"^openai_billing_",
-        r"^fal_billing_api_key$",
         r"^openrouter_billing_key:",
         r"^oauth_state",
     )
@@ -184,6 +183,14 @@ _register(Collection(
     fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "created_at", "updated_at"),
     json_fields=("config", "mcp_tools"), resource="agents", priority=20,
     notes="Profiles and their MCP definitions."))
+
+_register(Collection(
+    name="assistant", table="assistant_account", keys=("id",),
+    fields=("id", "agent_id", "enabled", "paused", "sources", "introduction", "home_session_id",
+            "home_device_id", "home_created_at", "created_at", "updated_at"),
+    json_fields=("sources", "introduction"), resource="assistant", priority=21,
+    notes="The owner's one assistant: its agent, research switches and which session is its home. "
+          "Research runs, events and source watermarks stay on the worker that owns the home."))
 
 _register(Collection(
     name="model_providers", table="model_providers", keys=("id",),
@@ -302,11 +309,12 @@ _register(Collection(
             "parent_session_id", "fork_point_message_index", "owner_device_id", "launched_model",
             "first_model", "project_v2_id", "branch", "placement", "provider_id", "model", "effort",
             "permission_mode", "context_window", "workspace_project_ids", "fast", "mode", "hidden",
-            "is_worker", "pr_number", "pr_url", "pr_state"),
+            "is_worker", "pr_number", "pr_url", "pr_state", "work_ms", "work_started_at"),
     json_fields=("placement", "workspace_project_ids"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
-                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream"),
+                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
+                  "workspace_facts"),
     notes="Session catalog. Owner-ordered: only the owner device publishes."))
 
 _register(Collection(

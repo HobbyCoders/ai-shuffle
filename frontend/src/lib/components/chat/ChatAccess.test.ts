@@ -98,30 +98,38 @@ describe('private-access recovery and live invalidations', () => {
   expect(m.get).not.toHaveBeenCalled();
   expect(screen.queryByRole('alert')).toBeNull();
  });
- it.each(['code', 'chat', 'voice', null])('does not request local grants for a remote %s session', async (mode) => {
-  m.get.mockResolvedValue({mode, is_remote: true});
+ it.each(['code', 'chat', 'voice', null])('shows a remote %s session\'s owner-side requests through this worker', async (mode) => {
+  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode, is_remote: true, device_name: 'Owner PC'} : snapshot);
+  snapshot = {...empty(), vault_available: true,
+   requests: [{id: 'r1', kind: 'folder', purpose: 'Read the notes', expires_at: 9999999999}],
+   saved_connections: [{id: 'c1', label: 'NAS', target: 'root@10.0.0.2:22', fingerprint: '', kind: 'machine'}]};
   render(ChatAccess, {sessionId: 'remote'}); await flush();
-  await vi.advanceTimersByTimeAsync(300_000);
+  expect(accessCalls().map(([url]) => url)).toEqual(['/chat-access/remote']);
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  expect(screen.getByText('Folder on Owner PC')).toBeTruthy();
+  expect(screen.getByText(/Encrypted on Owner PC/)).toBeTruthy();
+  // The owner's change notice arrives as a scoped invalidation on this worker.
   resourceSync.invalidate(['chat-access:remote']); await vi.advanceTimersByTimeAsync(100);
-  expect(accessCalls()).toHaveLength(0);
-  expect(screen.queryByRole('alert')).toBeNull();
-  expect(screen.queryByLabelText('Temporary access in this conversation')).toBeNull();
+  expect(accessCalls()).toHaveLength(2);
  });
- it('rechecks ownership when a remote session is adopted and clears private state when moved away', async () => {
+ it('rechecks where access lives when a session moves between devices', async () => {
   let remote = true;
-  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode: 'code', is_remote: remote} : snapshot);
+  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode: 'code', is_remote: remote, device_name: remote ? 'Owner PC' : null} : snapshot);
+  snapshot = {...empty(), vault_available: true, saved_connections: [{id: 'c1', label: 'NAS', target: 'root@10.0.0.2:22', fingerprint: ''}]};
   render(ChatAccess, {sessionId: 's1'}); await flush();
-  expect(accessCalls()).toHaveLength(0);
+  expect(accessCalls()).toHaveLength(1);
+  expect(screen.getByText(/Encrypted on Owner PC/)).toBeTruthy();
   remote = false;
   snapshot = {...empty(), grants:[{id:'g1',label:'Local folder',kind:'folder',target:'folder',expires_at:9999999999,writable:false}]};
   resourceSync.invalidate(['sessions']); await vi.advanceTimersByTimeAsync(100); await tick();
-  expect(accessCalls()).toHaveLength(1);
+  expect(accessCalls()).toHaveLength(2);
   expect(screen.getByText('Local folder')).toBeTruthy();
+  expect(screen.queryByText(/Encrypted on Owner PC/)).toBeNull();
   remote = true;
+  snapshot = empty();
   resourceSync.invalidate(['sessions']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(accessCalls()).toHaveLength(3);
   expect(screen.queryByText('Local folder')).toBeNull();
-  await vi.advanceTimersByTimeAsync(300_000);
-  expect(accessCalls()).toHaveLength(1);
  });
 
  it('does not poll an empty snapshot, wakes on scoped events, and polls pending approvals promptly', async () => {
@@ -158,6 +166,18 @@ describe('private-access recovery and live invalidations', () => {
   expect(screen.getByText(/HTTPS API · changes follow session permission mode/)).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', {name: 'Deny'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: false});
+ });
+ it.each([[true, 'It can change files in the folder.'], [false, 'The folder is read-only to it.']])(
+  'labels a folder grant command as sandboxed, not remote (writable %s)', async (writable, effect) => {
+  snapshot = {...empty(),
+   grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/home/me/notes', expires_at: 9999999999, writable}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'grep -r todo .'}, expires_at: 9999999999}]};
+  const view = render(ChatAccess, {sessionId: 's1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  expect(screen.getByText('Approve this sandboxed command?')).toBeTruthy();
+  expect(screen.queryByText('Approve this remote command?')).toBeNull();
+  expect(view.container.querySelector('pre.pa-mono')!.textContent).toBe('$ grep -r todo .');
+  expect(screen.getByText(`Runs once in an isolated sandbox that sees only this folder and has no network. ${effect}`)).toBeTruthy();
  });
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};

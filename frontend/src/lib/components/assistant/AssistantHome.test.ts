@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
-import type { AssistantState, AssistantSource } from '$lib/api/assistant';
+import { AVATARS, type AssistantState, type AssistantSource } from '$lib/api/assistant';
+import { resourceSync } from '$lib/services/resource-sync';
 
 const mocks = vi.hoisted(() => ({
  getAssistant: vi.fn(), getAgentIdentities: vi.fn(), configureAssistant: vi.fn(), openAssistant: vi.fn(),
- pauseAssistant: vi.fn(), resumeAssistant: vi.fn(), getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(),
+ getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(),
  openSession: vi.fn(), startCallForSession: vi.fn(), isVoiceEnabled: vi.fn(), openFeaturePage: vi.fn(),
- loadSessions: vi.fn(), loadProfiles: vi.fn(),
+ loadSessions: vi.fn(), loadProfiles: vi.fn(), banner: vi.fn(() => 'banner-id'),
 }));
 vi.mock('$lib/api/assistant', async original => ({ ...await original<typeof import('$lib/api/assistant')>(), ...mocks }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession }));
@@ -16,69 +17,108 @@ vi.mock('$lib/api/voice', () => ({ isVoiceEnabled: mocks.isVoiceEnabled }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openFeaturePage: mocks.openFeaturePage } }));
 vi.mock('$lib/stores/app-data.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { profiles: writable([{ id: 'guide', name: 'Guide', is_builtin: false, config: { system_prompt: { content: 'KEEP ME' }, provider_models: { native: 'keep' } } }, { id: 'builtin', name: 'Built-in', is_builtin: true }]), projects: writable([{ id: 'project-1', name: 'My project' }]), appData: { loadSessions: mocks.loadSessions, loadProfiles: mocks.loadProfiles } };
+ return { sessions: writable([]), profiles: writable([{ id: 'guide', name: 'Guide', is_builtin: false, config: { system_prompt: { content: 'KEEP ME' }, provider_models: { native: 'keep' } } }, { id: 'builtin', name: 'Built-in', is_builtin: true }]), projects: writable([{ id: 'project-1', name: 'My project' }]), appData: { loadSessions: mocks.loadSessions, loadProfiles: mocks.loadProfiles } };
 });
+vi.mock('$lib/stores/active-session', async () => {
+ const { writable } = await import('svelte/store');
+ return {
+  activeSession: writable({ sessionId: null, isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] }),
+  streamingSessions: writable(new Map()), backgroundPermissions: writable(new Map()),
+ };
+});
+vi.mock('$lib/stores/notifications', () => ({ notify: { banner: mocks.banner, dismissLive: vi.fn() } }));
+import type { Writable } from 'svelte/store';
 import AssistantHome from './AssistantHome.svelte';
 import { assistantState, agentIdentities } from '$lib/stores/assistant';
+import { sessions } from '$lib/stores/app-data.svelte';
+import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
+const rows = sessions as unknown as Writable<Record<string, unknown>[]>;
+const active = activeSession as unknown as Writable<Record<string, unknown>>;
+const streaming = streamingSessions as unknown as Writable<Map<string, unknown>>;
+const prompts = backgroundPermissions as unknown as Writable<Map<string, { count: number; kind: string }>>;
 const initial = (): AssistantState => ({
- configured: false, agent_id: null, home_session_id: null, enabled: false, paused: false, status: 'unconfigured', agent: null,
+ configured: false, agent_id: null, home_session_id: null, enabled: false, status: 'unconfigured', research_sources: 0, agent: null,
  assistant_name: null, avatar_id: 'robot', avatar_presets: ['robot', 'spark', 'orbit', 'sprout', 'pixel'], introduction: {},
- proactive_guard_ready: true, cost_accounting: 'reported_after_run_not_hard_cap',
- max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5,
- usage: { runs_today: 0, in_flight_runs: 0, reported_cost_today: 0 },
+ proactive_guard_ready: true,
 });
 let server: AssistantState;
 const configured = (patch: Partial<AssistantState> = {}) => {
- server = { ...initial(), configured: true, agent_id: 'guide', home_session_id: 'home', assistant_name: 'Guide', avatar_id: 'orbit', agent: { id: 'guide', name: 'Guide', avatar_id: 'orbit' }, status: 'disabled', ...patch };
+ server = { ...initial(), configured: true, agent_id: 'guide', home_session_id: 'home', assistant_name: 'Guide', avatar_id: 'orbit', agent: { id: 'guide', name: 'Guide', avatar_id: 'orbit' }, status: 'no_sources', ...patch };
 };
 const source: AssistantSource = { id: 'connected', connector_id: 'connected', name: 'My authorized inbox', type: 'gmail', enabled: false, available: true, status: 'connected', trigger_ids: ['new_email'], observation_mode: 'poll_and_events', last_observed_at: null, last_error: null };
 beforeEach(() => {
  vi.clearAllMocks(); server = initial(); assistantState.set(null); agentIdentities.set([]);
+ rows.set([]); streaming.set(new Map()); prompts.set(new Map());
+ active.set({ sessionId: null, isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] });
  mocks.getAssistant.mockImplementation(async () => structuredClone(server));
  mocks.getAgentIdentities.mockResolvedValue([{ id: 'guide', name: 'Guide', avatar_id: 'orbit' }]);
  mocks.getAssistantSources.mockResolvedValue([]); mocks.getAssistantActivity.mockResolvedValue([]);
  mocks.loadSessions.mockResolvedValue(undefined); mocks.loadProfiles.mockResolvedValue(undefined);
  mocks.isVoiceEnabled.mockResolvedValue(true); mocks.openAssistant.mockResolvedValue({ session_id: 'home', home_session_id: 'home' });
- mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: patch.enabled ? 'ready' : 'disabled' }; return structuredClone(server); });
- mocks.pauseAssistant.mockImplementation(async () => { server = { ...server, paused: true, status: 'paused' }; return server; });
- mocks.resumeAssistant.mockImplementation(async () => { server = { ...server, enabled: true, paused: false, status: 'ready' }; return server; });
+ mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: 'no_sources' }; return structuredClone(server); });
  mocks.setAssistantSource.mockImplementation(async (_id, enabled) => ({ ...source, enabled }));
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+async function useMine() {
+ await fireEvent.click(await screen.findByRole('radio', { name: /One of my agents/ }));
+}
 async function choose() {
+ await useMine();
  const select = await screen.findByRole('combobox', { name: 'Assistant agent' });
  await fireEvent.change(select, { target: { value: 'guide' } });
 }
 describe('Assistant home', () => {
- it('starts unconfigured with no ambient call, automatic activation or invented sources', async () => {
+ it('starts unconfigured with no ambient call or invented sources', async () => {
   render(AssistantHome); await choose();
-  expect((screen.getByRole('checkbox', { name: /Enable background research/ }) as HTMLInputElement).checked).toBe(false);
   expect(screen.getByText('No sources connected')).toBeTruthy();
   expect(mocks.configureAssistant).not.toHaveBeenCalled(); expect(mocks.startCallForSession).not.toHaveBeenCalled();
   expect(mocks.openAssistant).not.toHaveBeenCalled();
  });
- it('saves only explicit identity, introduction and finite policy; does not send agent config', async () => {
-  render(AssistantHome); await choose();
-  await fireEvent.input(screen.getByRole('textbox', { name: 'Assistant name' }), { target: { value: 'Dotty' } });
-  await fireEvent.input(screen.getByRole('textbox', { name: 'What should I call you?' }), { target: { value: 'Alex' } });
-  await fireEvent.input(screen.getByRole('textbox', { name: 'Repositories you care about' }), { target: { value: 'owner/one\nowner/two' } });
-  await fireEvent.click(screen.getByRole('button', { name: 'spark avatar' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Save assistant' }));
+ it('defaults to a new dedicated agent named Assistant with a preset avatar', async () => {
+  render(AssistantHome);
+  const name = await screen.findByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement;
+  expect(name.value).toBe('Assistant');
+  expect((screen.getByRole('radio', { name: /A dedicated assistant agent/ }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.queryByRole('combobox', { name: 'Assistant agent' })).toBeNull();
+  const pressed = screen.getAllByRole('button', { pressed: true });
+  expect(pressed).toHaveLength(1);
+  const avatar = pressed[0].getAttribute('aria-label')!.replace(' avatar', '');
+  expect(AVATARS).toContain(avatar);
+  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
   const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toMatchObject({ agent_id: 'guide', assistant_name: 'Dotty', avatar_id: 'spark', enabled: false, paused: true, max_runs_per_day: 12, max_concurrent_runs: 1, timeout_seconds: 180 });
-  expect(patch.introduction).toMatchObject({ preferred_name: 'Alex', github_username: '', repository_refs: ['owner/one', 'owner/two'] });
-  expect(patch).not.toHaveProperty('config'); expect(patch).not.toHaveProperty('model');
-  expect(mocks.setAssistantSource).not.toHaveBeenCalled();
+  expect(patch).toEqual({ create_agent: true, assistant_name: 'Assistant', avatar_id: avatar });
  });
- it('requires an explicit activation choice and keeps context separate from source access', async () => {
+ it('has no introduction form, research switch, limit fields or limit numbers', async () => {
+  render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
+  expect(screen.queryByRole('textbox', { name: 'What should I call you?' })).toBeNull();
+  expect(screen.queryByRole('textbox', { name: 'Repositories you care about' })).toBeNull();
+  expect(screen.queryAllByRole('spinbutton')).toHaveLength(0);
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  expect(screen.queryByText(/background research/i)).toBeNull();
+  expect(screen.queryByText(/12 passes|admission limit/)).toBeNull();
+  expect(screen.getAllByRole('button', { name: / avatar$/ })).toHaveLength(AVATARS.length);
+ });
+ it('reuses the dedicated agent setup already made instead of creating another', async () => {
+  mocks.getAgentIdentities.mockResolvedValue([{ id: 'assistant', name: 'Juniper', avatar_id: 'owl', dedicated: true }]);
+  render(AssistantHome);
+  await waitFor(() => expect((screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement).value).toBe('Juniper'));
+  expect(screen.getByRole('button', { name: 'owl avatar' }).getAttribute('aria-pressed')).toBe('true');
+  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
+  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
+  const patch = mocks.configureAssistant.mock.calls[0][0];
+  expect(patch).toMatchObject({ agent_id: 'assistant', assistant_name: 'Juniper', avatar_id: 'owl' });
+  expect(patch).not.toHaveProperty('create_agent');
+ });
+ it('saves only explicit identity for one of my agents; does not send agent config or limits', async () => {
   render(AssistantHome); await choose();
-  await fireEvent.click(screen.getByRole('checkbox', { name: /Enable background research/ }));
-  await fireEvent.click(screen.getByRole('checkbox', { name: 'My project' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Save & enable research' }));
-  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalled());
-  expect(mocks.configureAssistant.mock.calls[0][0]).toMatchObject({ enabled: true, paused: false, introduction: { project_ids: ['project-1'] } });
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Assistant name' }), { target: { value: 'Dotty' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'spark avatar' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
+  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
+  const patch = mocks.configureAssistant.mock.calls[0][0];
+  expect(patch).toEqual({ agent_id: 'guide', assistant_name: 'Dotty', avatar_id: 'spark' });
   expect(mocks.setAssistantSource).not.toHaveBeenCalled();
  });
  it('reopens the same home and attaches a call only on a deliberate call action', async () => {
@@ -99,53 +139,70 @@ describe('Assistant home', () => {
   await fireEvent.click(screen.getByRole('switch', { name: 'Observe Revoked connection' }));
   expect(mocks.setAssistantSource).toHaveBeenCalledWith('revoked', false);
  });
- it('pauses and resumes background work without cancelling or replacing the home', async () => {
-  configured({ enabled: true, status: 'ready' }); render(AssistantHome);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Pause background' }));
-  await waitFor(() => expect(mocks.pauseAssistant).toHaveBeenCalled());
-  const resume = await screen.findByRole('button', { name: 'Resume background' });
-  await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
-  await fireEvent.click(resume);
-  await waitFor(() => expect(mocks.resumeAssistant).toHaveBeenCalled());
-  expect(mocks.openAssistant).not.toHaveBeenCalled();
- });
- it('shows linked sessions and real reported usage, with a non-hard-cap explanation', async () => {
-  configured({ usage: { runs_today: 2, reported_cost_today: .42, in_flight_runs: 1 } });
+ it('has no research controls or usage; one neutral line names the sources in use', async () => {
+  configured({ enabled: true, status: 'ready', research_sources: 2 });
+  mocks.getAssistantSources.mockResolvedValue([{ ...source, enabled: true }, { ...source, id: 'second', connector_id: 'second', name: 'Second inbox', enabled: true }, { ...source, id: 'third', connector_id: 'third', name: 'Not opted in' }]);
   mocks.getAssistantActivity.mockResolvedValue([{ id: 'run', kind: 'linked', status: 'completed', session_id: 'task', session_title: 'Repository review', agent_name: 'Reviewer', avatar_id: 'pixel', source_ids: [], event_ids: [], cost_usd: .42, error: null, created_at: '2026-09-30T12:00:00Z', ended_at: null }]);
   render(AssistantHome);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Repository review' }));
+  expect(await screen.findByText('Using 2 connected sources.')).toBeTruthy();
+  for (const name of [/Pause/, /Resume/, /Review & enable/]) expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.queryByText(/hard billing cap|runs · last 24 hours|in flight/)).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Repository review' }));
   expect(mocks.openSession).toHaveBeenCalledWith('task');
-  expect(screen.getByText(/not a hard billing cap/)).toBeTruthy();
-  expect(screen.getByText('runs · last 24 hours')).toBeTruthy();
   expect(screen.queryByText(/UTC/)).toBeNull();
  });
- it('does not erase an introduction draft when background state changes', async () => {
-  configured({ introduction: { preferred_name: 'Original', repository_refs: ['owner/repo'] } }); render(AssistantHome);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Edit assistant and introduction' }));
-  const name = screen.getByRole('textbox', { name: 'What should I call you?' }) as HTMLInputElement;
+ it('names the worker that holds the home and runs research when it is another one', async () => {
+  configured({ enabled: true, status: 'ready', runs_here: false, home_worker: { device_id: 'dev_desk', name: 'Desk', is_self: false, online: false } });
+  mocks.getAssistantSources.mockResolvedValue([source]);
+  render(AssistantHome);
+  expect(await screen.findByText(/runs on Desk, which is offline right now/)).toBeTruthy();
+  expect(screen.getByText('gmail · Available on Desk')).toBeTruthy();
+  expect(screen.getByText(/Research runs on Desk, so its activity is listed there/)).toBeTruthy();
+  expect(screen.queryByText(/runs · last 24 hours|hard billing cap/)).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }));
+  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home'));
+ });
+ it('reloads when another worker changes the shared assistant', async () => {
+  configured(); render(AssistantHome);
+  await screen.findByRole('button', { name: 'Open conversation' });
+  const before = mocks.getAssistant.mock.calls.length;
+  server = { ...server, assistant_name: 'Renamed elsewhere', agent: { id: 'guide', name: 'Renamed elsewhere', avatar_id: 'orbit' } };
+  resourceSync.invalidate(['assistant']);
+  await waitFor(() => expect(mocks.getAssistant.mock.calls.length).toBeGreaterThan(before));
+  expect(await screen.findByRole('heading', { name: 'Renamed elsewhere' })).toBeTruthy();
+ });
+ it('says no sources are in use when research is not running', async () => {
+  configured({ status: 'guard_unavailable' }); mocks.getAssistantSources.mockResolvedValue([{ ...source, enabled: true }]);
+  render(AssistantHome);
+  expect(await screen.findByText('No connected sources in use.')).toBeTruthy();
+ });
+ it('does not erase a setup draft when background state changes', async () => {
+  configured(); render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit assistant' }));
+  expect((screen.getByRole('combobox', { name: 'Assistant agent' }) as HTMLSelectElement).value).toBe('guide');
+  const name = screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement;
   await fireEvent.input(name, { target: { value: 'Editing' } });
-  assistantState.update(value => value && { ...value, usage: { ...value.usage, runs_today: 3 } });
+  assistantState.update(value => value && { ...value, status: 'ready', research_sources: 1 });
   expect(name.value).toBe('Editing');
-  expect((screen.getByRole('textbox', { name: 'Repositories you care about' }) as HTMLTextAreaElement).value).toBe('owner/repo');
  });
  it('opens setup for an unconfigured owner when a retry follows a failed first load', async () => {
   mocks.getAssistantSources.mockRejectedValueOnce({ detail: 'Temporarily unavailable' });
   render(AssistantHome);
   await fireEvent.click(await screen.findByRole('button', { name: 'Retry refresh' }));
-  expect(await screen.findByRole('combobox', { name: 'Assistant agent' })).toBeTruthy();
+  expect(await screen.findByRole('textbox', { name: 'Assistant name' })).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
  });
  it('keeps save errors visible with the editable draft intact', async () => {
   mocks.configureAssistant.mockRejectedValue({ detail: 'Agent is unavailable' }); render(AssistantHome); await choose();
-  await fireEvent.click(screen.getByRole('button', { name: 'Save assistant' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Agent is unavailable'));
   expect((screen.getByRole('combobox', { name: 'Assistant agent' }) as HTMLSelectElement).value).toBe('guide');
  });
  it('does not send presentation mutations for a built-in agent', async () => {
-  render(AssistantHome); await screen.findByRole('combobox', { name: 'Assistant agent' });
-  await fireEvent.change(screen.getByRole('combobox', { name: 'Assistant agent' }), { target: { value: 'builtin' } });
+  render(AssistantHome); await useMine();
+  await fireEvent.change(await screen.findByRole('combobox', { name: 'Assistant agent' }), { target: { value: 'builtin' } });
   expect((screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement).disabled).toBe(true);
-  await fireEvent.click(screen.getByRole('button', { name: 'Save assistant' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   const patch = mocks.configureAssistant.mock.calls[0][0];
   expect(patch.agent_id).toBe('builtin'); expect(patch).not.toHaveProperty('assistant_name'); expect(patch).not.toHaveProperty('avatar_id');
  });
@@ -154,5 +211,94 @@ describe('Assistant home', () => {
   const selection = await screen.findByRole('combobox', { name: 'Assistant agent' });
   expect((selection as HTMLSelectElement).value).toBe('guide');
   expect(get(assistantState)?.agent_id).toBe('guide');
+ });
+});
+describe('Assistant home call gate', () => {
+ const startCall = async () => await screen.findByRole('button', { name: 'Start call' }) as HTMLButtonElement;
+ it.each([
+  ['reports running tasks', () => rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]), /finishes working/],
+  ['is streaming on another device', () => streaming.set(new Map([['home', {}]])), /finishes working/],
+  ['waits on a permission or question', () => prompts.set(new Map([['home', { count: 1, kind: 'question' }]])), /finishes working/],
+  ['is the open session and streaming', () => active.set({ sessionId: 'home', isStreaming: true, activeTasks: [], pendingPermissions: [], pendingQuestions: [] }), /finishes working/],
+  ['is parked on background work', () => rows.set([{ id: 'home', status: 'active', parked_task_kind: 'shell' }]), /background tasks finish/],
+ ])('disables Start call with a reason while the home %s', async (_label, arrange, reason) => {
+  configured(); arrange(); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(true);
+  expect(button.title).toMatch(reason);
+  await fireEvent.click(button);
+  expect(mocks.openAssistant).not.toHaveBeenCalled();
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+ });
+ it('re-enables Start call once the home finishes', async () => {
+  configured(); rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(true);
+  rows.set([{ id: 'home', status: 'active', has_running_tasks: false }]);
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await fireEvent.click(button);
+  await waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true }));
+ });
+ it('explains a blocked Start call with a brief banner on a touch screen', async () => {
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
+  configured(); rows.set([{ id: 'home', status: 'active', parked_task_kind: 'agent' }]); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(false);
+  expect(button.getAttribute('aria-disabled')).toBe('true');
+  await fireEvent.click(button);
+  expect(mocks.banner).toHaveBeenCalledWith(button.title, expect.objectContaining({ persist: false }));
+  expect(mocks.openAssistant).not.toHaveBeenCalled();
+ });
+});
+
+describe('About you', () => {
+ const detected = { preferred_name: 'ada', email: 'ada@example.com', projects: ['Shuffle'] };
+ const about = (patch: Partial<AssistantState> = {}) => configured({
+  introduction: { ...detected, github_username: 'ada-gh' }, introduction_detected: detected,
+  introduction_corrected: ['github_username'], suggested_connections: [], ...patch
+ });
+ it('shows what was detected read-only and asks the server to re-detect once loaded', async () => {
+  about(); render(AssistantHome);
+  const list = (await screen.findByRole('heading', { name: 'What your assistant knows' })).closest('section')!;
+  expect(list.textContent).toContain('ada@example.com');
+  expect(list.textContent).toContain('ada-gh· corrected');
+  expect(list.textContent).toContain('Shuffle');
+  expect(list.textContent).toMatch(/RepositoriesNot found/);
+  expect(list.textContent).not.toContain('Notes');
+  expect(list.querySelectorAll('input')).toHaveLength(0);
+  await waitFor(() => expect(mocks.getAssistant).toHaveBeenCalledWith(true));
+ });
+ it('corrects fields; an empty field goes back to the detected value', async () => {
+  about();
+  mocks.configureAssistant.mockImplementation(async patch => ({ ...structuredClone(server), introduction: { ...detected, preferred_name: patch.introduction.preferred_name }, introduction_corrected: ['preferred_name'] }));
+  render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: /Correct/ }));
+  const name = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+  expect(name.value).toBe('');
+  expect(name.placeholder).toBe('ada');
+  expect((screen.getByRole('textbox', { name: 'GitHub username' }) as HTMLInputElement).value).toBe('ada-gh');
+  await fireEvent.input(name, { target: { value: 'Ada Lovelace' } });
+  await fireEvent.input(screen.getByRole('textbox', { name: 'GitHub username' }), { target: { value: '' } });
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Repositories' }), { target: { value: 'ada/one, ada/two' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledWith({ introduction: {
+   preferred_name: 'Ada Lovelace', email: '', github_username: '', repository_refs: ['ada/one', 'ada/two']
+  } }));
+  const section = screen.getByRole('heading', { name: 'What your assistant knows' }).closest('section')!;
+  await waitFor(() => expect(section.textContent).toContain('Ada Lovelace· corrected'));
+  expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull();
+ });
+ it('suggests only the missing connections and links to the existing flows', async () => {
+  about({ suggested_connections: ['gmail', 'github'] }); render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Connect Gmail' }));
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('plugins');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sign in to GitHub' }));
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('settings', 'providers');
+ });
+ it('shows no suggestion cards when nothing is missing', async () => {
+  about(); render(AssistantHome);
+  await screen.findByRole('heading', { name: 'What your assistant knows' });
+  expect(screen.queryByRole('button', { name: 'Connect Gmail' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Sign in to GitHub' })).toBeNull();
  });
 });

@@ -9,13 +9,14 @@
 	import { untrack, type Snippet } from 'svelte';
 	import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { MediaQuery } from 'svelte/reactivity';
-	import { activeView } from '$lib/stores/layout.svelte';
+	import { activeView, pluginsSettingsTarget } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import {
 		git,
 		gitStatus,
+		gitMode,
 		gitPrState,
 		githubFeaturesAvailable,
 		branches as branchStore
@@ -60,7 +61,7 @@
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import { privateAccessTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
+	import { privateAccessTrigger, shouldShowGitPanelTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -139,10 +140,20 @@
 	]);
 
 	// The Build page hosts the agent-config tools under one surface. The
-	// member view types remain as deep-link targets ("Configure agents →",
-	// "Manage plugins") and resolve to BuildPage with the right sub-tab.
-	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
-	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'plugins', 'hooks'];
+	// member view types remain as deep-link targets ("Configure agents →")
+	// and resolve to BuildPage with the right sub-tab.
+	type BuildSub = 'profile' | 'mcp' | 'hooks';
+	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'hooks'];
+	// Plugin management lives in Settings. openFeaturePage('plugins') already
+	// lands on the settings view; a `plugins` view restored from storage opens
+	// Settings > Plugins.
+	const settingsItemId = $derived(
+		$activeView?.type === 'settings'
+			? $activeView.itemId
+			: $activeView?.type === 'plugins'
+				? pluginsSettingsTarget($activeView.itemId)
+				: null
+	);
 	const isBuildView = $derived(
 		$activeView?.type === 'build' || BUILD_SUBS.includes($activeView?.type as BuildSub)
 	);
@@ -257,6 +268,7 @@
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
 		if (isBuildView) return 'Build';
+		if (type === 'plugins') return 'Settings';
 		return viewTitles[type] || '';
 	});
 
@@ -865,7 +877,11 @@
 					viewType: $activeView?.type, hasProject: !!activeProject,
 					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
 					isRemote: activeIsRemote, sessionMode: activeTab.mode
-				}) && $gitStatus?.is_git_repo !== false && !$git.error}
+				}) && shouldShowGitPanelTrigger({
+					isGitRepo: $gitStatus?.is_git_repo !== false,
+					worktreeMode: !!activeWorktreeBranch || $gitMode === 'worktree',
+					error: $git.error
+				})}
 			/>
 		{/key}
 	{/if}
@@ -970,7 +986,7 @@
 					{:else if key === 'project'}
 						<LazyPanel handle={panelForKey('project')} label="Projects" />
 					{:else if key === 'settings'}
-						<LazyPanel handle={panelForKey('settings')} props={{ initialItemId: $activeView?.type === 'settings' ? $activeView.itemId : null }} label="Settings" />
+						<LazyPanel handle={panelForKey('settings')} props={{ initialItemId: settingsItemId }} label="Settings" />
 					{:else if key === 'file-browser'}
 						<LazyPanel handle={panelForKey('file-browser')} label="Files" />
 					{:else if key === 'notes'}

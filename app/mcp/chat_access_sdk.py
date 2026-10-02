@@ -23,13 +23,18 @@ connection details as chat text. The card sends those inputs directly to the
 worker; you receive only a temporary handle, resource kind, permissions and
 expiry. Never try to reveal private inputs.
 Grants expire and are lost on restart. Supported resources are SSH machines,
-Linux folders and HTTPS API services. A service grant holds one API key or token
+Linux or macOS folders and HTTPS API services. A service grant holds one API key or token
 which ChatHttpRequest attaches for you; you never see it, and responses are
 redacted. Do not collect any other secret, because no tool can consume it
 privately.
-Folder grants provide bounded text read/list/write operations, not Bash. Machine
-grants allow commands on that verified SSH target as the approved account; they
-do not grant local worker shell access. Service grants allow HTTPS requests to
+Folder grants provide bounded text read/list/write operations. On a worker
+that supports it, ChatRunCommand on a folder grant runs one shell command in an
+isolated sandbox: the folder is its working directory /work (read-only for a
+read-only grant), it has no network and sees no other worker files, and it is
+stopped after 60 seconds. Otherwise the tool refuses; then use the file tools
+and never look for another way to run local commands. Machine grants allow
+commands on that verified SSH target as the approved account; they do not grant
+local worker shell access. Service grants allow HTTPS requests to
 paths under the granted address with that credential's authority; read-only
 service grants allow GET and HEAD only. Redirects are returned, never followed.
 Machine administration is broad and can
@@ -55,10 +60,9 @@ def create_chat_access_server(session_id: str):
             if operation == "request":
                 result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""))
             elif operation == "resources":
-                snap = await broker.snapshot(session_id)
-                # Pending command/write contents belong to the approval UI.
-                result = {"grants": [{k: g[k] for k in ("id", "kind", "expires_at", "writable")}
-                                     for g in snap["grants"]], "folder_available": snap["folder_available"]}
+                # Grant metadata only: pending command/write contents belong to
+                # the approval UI, saved connections to the access panel.
+                result = await broker.resources(session_id)
             else:
                 result = await broker.run(session_id, args.get("grant_id", ""), operation, args)
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
@@ -69,7 +73,7 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
+    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux or macOS folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
     async def request(args):
         return await invoke("request", args)
 
@@ -89,7 +93,7 @@ def create_chat_access_server(session_id: str):
     async def write(args):
         return await invoke("write", args)
 
-    @tool("ChatRunCommand", "Run a command on a granted SSH machine, never on the local worker. Outside bypass permission mode, waits for one-shot approval in Chat access. Execution timeout 60 seconds; bounded output. Timeout or revocation does not undo remote changes or guarantee detached processes stop.", {"grant_id": str, "command": str})
+    @tool("ChatRunCommand", "Run a command on a granted SSH machine, or for a folder grant in an isolated sandbox on this worker that sees only that folder (as /work), without network. Outside bypass permission mode, waits for one-shot approval in Chat access. Execution timeout 60 seconds; bounded output. Timeout or revocation does not undo changes already made, and on a machine does not guarantee detached processes stop.", {"grant_id": str, "command": str})
     async def command(args):
         return await invoke("command", args)
 

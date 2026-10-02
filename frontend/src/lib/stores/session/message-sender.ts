@@ -134,8 +134,8 @@ export interface MessageSenderDeps {
 	 *  (sendMessage calls itself after worktree creation). */
 	getActiveSession: () => {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
-		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<void>;
-		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
+		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<string | null>;
+		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<boolean>;
 	};
 }
 
@@ -156,16 +156,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// ─── Internal helper for worktree existing branch sessions ──────
 
-	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]) {
+	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
 		const _state = getState();
-		if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
-		if (!_state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
-		if (!_state.worktreeId) { update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
+		if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
+		if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
+		if (!_state.worktreeId) { update(s => ({ ...s, worktreeError: 'Please select an existing worktree' })); return false; }
 
 		// The plain WS query path carries both the device pick and the upload
 		// paths, so an existing-worktree session composes with a device choice
 		// exactly like any other send.
-		await getActiveSession().sendMessage(prompt, {
+		return getActiveSession().sendMessage(prompt, {
 			skipWorktreeSetup: true,
 			pendingUploadPaths,
 		});
@@ -231,6 +231,83 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		});
 	}
 
+	// Shared by every caller of startSessionWithoutPrompt (see there).
+	let promptlessCreate: Promise<string | null> | null = null;
+
+	async function createWithoutPrompt(): Promise<string | null> {
+		if (getState().isRestoringSession && !(await waitForRestore())) {
+			update(s => ({ ...s, error: 'Still loading your previous session — please try again in a moment.' }));
+			return null;
+		}
+		const _state = getState();
+		if (_state.sessionId) return _state.sessionId;
+		if (internal.awaitingNewSession || _state.isCreatingWorktree) {
+			update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
+			return null;
+		}
+		if (_state.deviceIntent) {
+			update(s => ({ ...s, error: `Calls run on this device. Switch the runner to Local to call, or send a message to start on ${_state.deviceIntent!.name}.` }));
+			return null;
+		}
+
+		const creationGen = internal.worktreeCreationGeneration;
+		const adopt = (sessionId: string, extra: Partial<ActiveSessionState> = {}): string | null => {
+			if (creationGen !== internal.worktreeCreationGeneration) return null;
+			update(s => ({ ...s, sessionId, activeTasks: [], error: null, ...extra }));
+			sessionEphemeralCache.remove('__new_chat__');
+			persistSession();
+			// The WebSocket create registers this device on the session and
+			// the first `start` frame starts the feed. No query ran here, so do
+			// both: the call's transcript renders through this feed.
+			wsConn.send({ type: 'watch_session', session_id: sessionId });
+			if (!feedController.isFeeding(sessionId)) feedController.start(sessionId);
+			appData.loadSessions();
+			appData.loadApiUserSessions();
+			return sessionId;
+		};
+
+		if (_state.worktreeIntent === 'worktree' && !(_state.worktreeMode === 'existing' && _state.worktreeId)) {
+			if (_state.worktreeMode === 'existing') {
+				update(s => ({ ...s, worktreeError: 'Please select an available existing worktree before calling.' }));
+				return null;
+			}
+			// Auto names its branch from the first message. A call has none, so
+			// stage a generated name for this create only.
+			const auto = !_state.worktreeBranch;
+			if (auto) {
+				update(s => ({ ...s, worktreeBranch: generateBranchNameLocal('', 'call'), worktreeCreateNewBranch: true }));
+			}
+			const created = await getActiveSession().createWorktree();
+			if (!created) {
+				// Put the chip back to Auto; a navigation already reset it.
+				if (auto && creationGen === internal.worktreeCreationGeneration) {
+					update(s => ({ ...s, worktreeBranch: '', worktreeCreateNewBranch: _state.worktreeCreateNewBranch }));
+				}
+				return null;
+			}
+			return adopt(created, { selectedWorktreeBranch: getState().worktreeBranch || null });
+		}
+
+		const remoteOnly = !_state.project && !!_state.projectV2Id;
+		try {
+			const response = await api.post<{ session_id: string }>('/sessions', {
+				...(remoteOnly
+					? { project_v2_id: _state.projectV2Id }
+					: { project_id: _state.project || undefined }),
+				profile_id: _state.profile || undefined,
+				mode: _state.mode,
+				worktree_id: _state.worktreeIntent === 'worktree' ? _state.worktreeId || undefined : undefined,
+				overrides: buildOverrides(),
+			});
+			return adopt(response.session_id);
+		} catch (error) {
+			if (creationGen !== internal.worktreeCreationGeneration) return null;
+			const err = error as { detail?: string; message?: string };
+			update(s => ({ ...s, error: err.detail || err.message || 'Could not create the session.' }));
+			return null;
+		}
+	}
+
 	return {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
@@ -255,6 +332,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 
 			const _state = getState();
+			// The call button is creating this compose's session right now. A
+			// send here would mint a second one over the WebSocket.
+			if (!_state.sessionId && promptlessCreate) {
+				update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
+				return false;
+			}
 			if (_state.sessionId && isCallActiveFor(_state.sessionId)) {
 				try {
 					await persistVoiceContext(_state.sessionId, voiceContextFor(_state));
@@ -290,16 +373,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
 					return false;
 				}
+				// Report the creator's outcome (#1636). Answering true for a create
+				// that was refused before any request went out left the composer
+				// cleared with the message gone. A navigation during the create
+				// counts as sent: the request is out, and its text must not
+				// reappear in the view the user moved to.
+				const creationGen = internal.worktreeCreationGeneration;
+				let accepted: boolean;
 				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-					await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
 				} else if (_state.worktreeBranch) {
-					await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths)) !== null;
 				} else {
-					await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
-					return true;
+					accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
 				}
+				return accepted || creationGen !== internal.worktreeCreationGeneration;
 			}
 
 			// Backstop: a worktree-intended NEW session must never fall through to
@@ -546,14 +634,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}, 10000));
 		},
 
-		async createWorktree(prompt?: string, pendingUploadPaths?: string[]) {
+		/** Create the staged branch session. Resolves to the new session id once
+		 *  this view adopted it, or null (the reason is in `worktreeError` or
+		 *  `error`, or the user navigated away). With a prompt, null also means
+		 *  the session was created but its first message was refused. */
+		async createWorktree(prompt?: string, pendingUploadPaths?: string[]): Promise<string | null> {
 			const _state = getState();
-			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
-			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return; }
+			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return null; }
+			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return null; }
+			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return null; }
 			if (!_state.project && pendingUploadPaths?.length) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
-				return;
+				return null;
 			}
 
 			const creationGen = internal.worktreeCreationGeneration;
@@ -561,7 +653,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const projectV2Id = _state.projectV2Id;
 			const queryProfileId = _state.profile;
 			const branchName = _state.worktreeBranch;
-			const consumeBranchChoice = composerPreferences.captureNewBranchChoice(
+			// Claimed before the POST so a New Chat opened mid-create does not stage
+			// this one-time choice; consumed on success, released on failure.
+			const branchClaim = composerPreferences.claimBranchChoice(
 				{ projectId, projectV2Id }, branchName, _state.worktreeCreateNewBranch);
 			const remoteOnly = !projectId && !!projectV2Id;
 			const overridesSnapshot = buildOverrides();
@@ -581,6 +675,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					base_branch: _state.worktreeBaseBranch || 'main',
 					profile_id: queryProfileId,
 					create_new_branch: _state.worktreeCreateNewBranch,
+					// No prompt rides this request, so the backend stores these as
+					// the session's run binding (model, permission mode, ...) right
+					// away. A call started on the new session needs them before
+					// any message is sent.
+					overrides: overridesSnapshot,
 					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
 						? pendingUploadPaths
 						: undefined,
@@ -592,7 +691,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				// A successful row consumes the one-time account default, even after
 				// navigation, but never a newer choice or a different owner's pick.
-				if (response.session_id) consumeBranchChoice();
+				if (response.session_id) branchClaim.consume();
 
 				// The pick is spent once the session row carries the ownership —
 				// only on the compose that spent it (see autoCreateWorktree).
@@ -620,7 +719,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
 					}
-					return;
+					return null;
 				}
 
 				update(s => ({
@@ -652,20 +751,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							overrides: overridesSnapshot,
 							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
-						return;
+						return null;
 					}
 
 					// The POST created the session but carried no prompt, so it had no
 					// turn to attach uploads to — this follow-up query is that turn.
 					// Locally the files are already in the checkout and the backend
 					// ignores the list; on a remote target it lifts them into blobs.
-					getActiveSession().sendMessage(prompt, {
+					// Its refusal is the send's refusal: the composer keeps the text.
+					const sent = await getActiveSession().sendMessage(prompt, {
 						skipWorktreeSetup: true,
 						pendingUploadPaths,
 					});
+					if (!sent && creationGen === internal.worktreeCreationGeneration) return null;
 				}
+				return response.session_id;
 			} catch (error) {
-				if (creationGen !== internal.worktreeCreationGeneration) return;
+				if (creationGen !== internal.worktreeCreationGeneration) return null;
 
 				const err = error as { detail?: string; message?: string; status?: number };
 				const rawError = err.detail || err.message || '';
@@ -677,17 +779,49 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					isCreatingWorktree: false,
 					worktreeError: formatted,
 				}));
+				return null;
+			} finally {
+				// No-op after consume; otherwise the choice stays for a retry.
+				branchClaim.release();
 			}
 		},
 
-		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]) {
+		/**
+		 * Create the composed session without a first message and open it in
+		 * this view. The composer's call button uses this, then starts a call on
+		 * the result.
+		 *
+		 * It goes through the same creators a first send does, with the same
+		 * picks: a staged branch through `createWorktree` (so a one-time branch
+		 * choice is spent the same way), Auto through the same request with a
+		 * generated branch name, and everything else through
+		 * `POST /sessions` with the project, agent, lane, legacy worktree and
+		 * run overrides the WebSocket query would carry. The session is created
+		 * on this install: a call can only attach to a conversation owned here,
+		 * so a device pick is refused rather than stranding a session the call
+		 * cannot reach.
+		 *
+		 * Resolves to the session id, or null when nothing was opened: the
+		 * reason is in `error`/`worktreeError`, or the user navigated away.
+		 */
+		startSessionWithoutPrompt(): Promise<string | null> {
+			// One create per compose: a second press (or a second mounted
+			// composer) joins the request already in flight.
+			promptlessCreate ??= createWithoutPrompt().finally(() => { promptlessCreate = null; });
+			return promptlessCreate;
+		},
+
+		/** Resolves false when this view refused or failed the create (the reason
+		 *  is in `worktreeError`), true once the request was accepted or the
+		 *  user navigated away from it. */
+		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
 			prompt = prompt.trim();
 			const _state = getState();
-			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
+			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
 			if (!_state.project && pendingUploadPaths?.length) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
-				return;
+				return false;
 			}
 
 			const queryProfileId = _state.profile;
@@ -832,7 +966,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 						});
 					}
-					return;
+					return true;
 				}
 
 				// Atomic state commit: sessionId + streaming flags land in the
@@ -890,7 +1024,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						wsConn.connect();
 						await waitForConnectionVoid();
 					}
-					return;
+					return true;
 				}
 
 				// Fallback path: backend failed to spawn the query (rare). The
@@ -910,14 +1044,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						project: projectId,
 						overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 					});
-					return;
+					return true;
 				}
 
-				getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
+				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
+				// Refused: the composer takes the text back, so drop its echo.
+				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));
+				return sent;
 			} catch (error) {
 				// User navigation guard — don't surface errors in a session
 				// the user already left.
-				if (creationGen !== internal.worktreeCreationGeneration) return;
+				if (creationGen !== internal.worktreeCreationGeneration) return true;
 
 				const err = error as { detail?: string; message?: string; status?: number };
 				const rawError = err.detail || err.message || '';
@@ -931,6 +1068,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					worktreeError: formatted,
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
+				return false;
 			}
 		},
 

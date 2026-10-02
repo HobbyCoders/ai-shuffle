@@ -154,6 +154,24 @@ describe('switches', () => {
 	});
 });
 
+// Ported from main's MediaToolsSection test (8fc5f1b): the fal.ai balance is
+// read with the ordinary key, so there is no separate Admin billing key.
+describe('fal.ai', () => {
+	it('offers only the ordinary key, with no separate Admin billing key', async () => {
+		await show();
+		await fireEvent.click(screen.getByRole('button', { name: 'Media key, On' }));
+		await flush();
+		const detail = screen.getByRole('heading', { level: 2, name: 'Media key' }).closest('.st-dwrap') as HTMLElement;
+		expect(detail).toBeTruthy();
+		expect(detail.textContent).not.toMatch(/Admin|billing key/i);
+		expect(detail.querySelector('[aria-label="fal.ai billing access"]')).toBeNull();
+		// One key field: replacing the ordinary media key.
+		const secrets = [...detail.querySelectorAll('input[type="password"]')];
+		expect(secrets.map((i) => i.getAttribute('aria-label'))).toEqual(['New fal.ai key']);
+		expect(worker.calls.some((c) => /billing/i.test(c.path))).toBe(false);
+	});
+});
+
 describe('Claude', () => {
 	it('turns Claude off from the header', async () => {
 		await show();

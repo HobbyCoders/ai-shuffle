@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.api import assistant, auth, connectors
 from app.core import assistant_service as service, owner_auth
 from app.core.config import settings
-from app.db import database
+from app.db import assistant as store, database
 from tests.db.test_assistant_store import assistant_fixture
 
 
@@ -47,8 +47,11 @@ def test_safe_unconfigured_http_and_stable_open(client):
     second = client.post("/api/v1/assistant/open")
     assert first.status_code == 200
     assert first.json()["session_id"] == second.json()["session_id"]
-    assert client.post("/api/v1/assistant/resume").json()["enabled"]
-    assert client.post("/api/v1/assistant/pause").json()["paused"]
+    # Older clients still call pause/resume; research has no switch, so
+    # neither changes anything.
+    for path in ("/resume", "/pause"):
+        response = client.post("/api/v1/assistant" + path)
+        assert response.status_code == 200 and response.json()["paused"] is False
 
 
 def test_http_source_explicit_optin_and_activity(client, assistant_fixture):
@@ -120,13 +123,115 @@ def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     assert client.post("/api/v1/assistant/pause", headers={"Origin": "http://evil.example"}).status_code == 403
     client.headers.pop("Origin")
     assert client.post("/api/v1/assistant/pause").status_code == 403
-    assert service.get_state()["enabled"] and not service.get_state()["paused"]
+    assert service.get_state()["agent_id"] == "assistant-agent" and not service.get_state()["paused"]
 
 
 def test_invalid_config_does_not_partially_change_identity(client, assistant_fixture):
-    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "introduction": {"project_ids": ["unknown-project"]}})
-    assert response.status_code == 409
+    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "agent_id": "no-such-agent"})
+    assert response.status_code == 404
     assert database.get_profile("assistant-agent")["name"] == "Helper"
+    assert service.get_state()["agent_id"] == "assistant-agent"
+
+
+def test_minimal_setup_creates_a_dedicated_agent_on_the_text_generation_model(client):
+    database.set_system_setting("text_generation_model", "prov:gen-provider:gen-model")
+    database.set_system_setting("text_generation_effort", "low")
+    created = client.patch("/api/v1/assistant", json={"create_agent": True})
+    assert created.status_code == 200
+    state = created.json()
+    assert state["configured"] and state["assistant_name"] == "Assistant"
+    assert state["avatar_id"] in service.AVATAR_PRESETS and state["agent"]["dedicated"]
+    agent = database.get_profile(state["agent_id"])
+    assert not agent["is_builtin"]
+    assert {k: agent["config"][k] for k in ("model", "provider", "effort", "tool_selection_mode")} == {
+        "model": "gen-model", "provider": "gen-provider", "effort": "low", "tool_selection_mode": "all"}
+    # A built-in guard does not apply: identity edits work on the new agent.
+    renamed = client.patch("/api/v1/assistant", json={"assistant_name": "Juniper", "avatar_id": "owl"})
+    assert renamed.status_code == 200 and renamed.json()["assistant_name"] == "Juniper"
+    assert renamed.json()["avatar_id"] == "owl"
+    # Asking again reuses the same agent rather than making a second one.
+    again = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Juniper"})
+    assert again.json()["agent_id"] == state["agent_id"]
+    assert sum(1 for a in client.get("/api/v1/assistant/agents").json() if a["dedicated"]) == 1
+    assert client.post("/api/v1/assistant/open").status_code == 200
+    assert client.patch("/api/v1/assistant", json={"create_agent": True, "agent_id": state["agent_id"]}).status_code == 409
+
+
+def test_new_agent_takes_the_chosen_name_and_avatar(client):
+    created = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Pip", "avatar_id": "fox"})
+    assert created.status_code == 200
+    agent = database.get_profile(created.json()["agent_id"])
+    assert agent["name"] == "Pip" and agent["config"]["avatar_id"] == "fox"
+    assert agent["id"] == "pip"
+
+
+def test_switches_and_limits_are_accepted_but_ignored(client, assistant_fixture, monkeypatch):
+    monkeypatch.setattr(service, "_guard_version", 1)
+    response = client.patch("/api/v1/assistant", json={
+        "enabled": False, "paused": True,
+        "max_runs_per_day": 100, "max_concurrent_runs": 3, "max_turns": 20, "timeout_seconds": 900,
+        "max_cost_per_run": 50, "max_cost_per_day": 900})
+    assert response.status_code == 200
+    state = response.json()
+    assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+    # The limits stay server-side: not in the response, and admission still
+    # uses the fixed values whatever an older client sent.
+    for body in (state, client.get("/api/v1/assistant").json()):
+        assert not set(store.LIMIT_KEYS) & set(body)
+        assert "usage" not in body and "cost_accounting" not in body
+    assert store.research_limits(store.get_state(service.assistant_id())) == store.RESEARCH_LIMITS
+
+
+def test_activity_rows_leave_out_research_limits(client, assistant_fixture, monkeypatch):
+    from tests.db.test_assistant_store import events
+    monkeypatch.setattr(service, "_guard_version", 1)
+    events()
+    run = store.admit_run(service.assistant_id())
+    assert run["limits"]["max_turns"] == store.RESEARCH_LIMITS["max_turns"]  # Kept server-side.
+    rows = client.get("/api/v1/assistant/activity").json()
+    assert [row["id"] for row in rows] == [run["id"]]
+    assert not {"limits", "deadline_at", "brief"} & set(rows[0])
+
+
+def test_owner_corrects_the_detected_introduction_and_can_restore_it(client, assistant_fixture):
+    service.apply_detection({"preferred_name": "ada", "email": "ada@example.com"}, {"gmail": True, "github": False})
+    response = client.patch("/api/v1/assistant", json={"introduction": {"preferred_name": "Ada Lovelace", "github_username": "ada-gh"}})
+    assert response.status_code == 200
+    state = response.json()
+    assert state["introduction"] == {"preferred_name": "Ada Lovelace", "email": "ada@example.com", "github_username": "ada-gh"}
+    assert state["introduction_detected"] == {"preferred_name": "ada", "email": "ada@example.com"}
+    assert state["introduction_corrected"] == ["github_username", "preferred_name"]
+    restored = client.patch("/api/v1/assistant", json={"introduction": {"preferred_name": "", "github_username": ""}}).json()
+    assert restored["introduction"] == {"preferred_name": "ada", "email": "ada@example.com"}
+    assert restored["introduction_corrected"] == []
+    assert client.patch("/api/v1/assistant", json={"introduction": {"email": "not an address"}}).status_code == 422
+    assert client.patch("/api/v1/assistant", json={"introduction": {"projects": ["typed"]}}).status_code == 422
+
+
+def test_opening_the_page_runs_a_fresh_detection_pass(client, assistant_fixture, monkeypatch):
+    from app.core import assistant_introduction as introductions
+    from app.core.assistant_manager import assistant_manager
+    monkeypatch.setattr(assistant_manager, "_detect_task", None)
+    monkeypatch.setattr(assistant_manager, "_detected_at", None)
+    monkeypatch.setattr(introductions, "github_login", lambda unknown=None: "ada-gh")
+    assert "github_username" not in client.get("/api/v1/assistant").json()["introduction"]
+    state = client.get("/api/v1/assistant?detect=true").json()
+    assert state["introduction"]["github_username"] == "ada-gh"
+    assert state["suggested_connections"] == []
+
+
+def test_research_turns_on_by_itself_with_an_opted_in_source_and_the_guard(client, assistant_fixture, monkeypatch):
+    # An install that had research switched off before this change.
+    store.configure(service.assistant_id(), {"enabled": False, "paused": True})
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "guard_unavailable" and not state["enabled"]
+    monkeypatch.setattr(service, "_guard_version", 1)
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+    assert state["research_sources"] == 1
+    client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False})
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "no_sources" and not state["enabled"] and state["research_sources"] == 0
 
 
 

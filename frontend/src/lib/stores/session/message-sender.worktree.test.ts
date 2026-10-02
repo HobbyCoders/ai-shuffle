@@ -191,7 +191,81 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 	});
 });
 
+describe('remembered existing-branch pick is one-time (#1528)', () => {
+	// The New branch modal creates the branch up front, so it and a branch picked
+	// from the list both send create_new_branch=false. The first session spends it.
+	const created = { kind: 'branch' as const, projectId: 'proj-1', projectV2Id: null,
+		branch: 'live/1528-explicit', baseBranch: 'main', createNew: false };
+	const ok = { session_id: 'wt-c', branch_name: created.branch, base_branch: 'main', worktree_path: '/w', status: 'ok' };
+	const staged = { worktreeBranch: created.branch, worktreeBaseBranch: 'main', worktreeCreateNewBranch: false };
+
+	beforeEach(() => {
+		composerPreferences.set('model', 'preserved-model');
+		composerPreferences.set('checkout', created);
+	});
+
+	it('claims the choice while the POST is in flight and consumes it after success', async () => {
+		let finish!: (value: typeof ok) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, state } = setup(staged);
+		const pending = sender.createWorktree();
+		expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.objectContaining({
+			branch_name: created.branch, create_new_branch: false }));
+		expect(composerPreferences.checkoutClaimed).toBe(true);
+		expect(composerPreferences.current.checkout).toEqual(created);
+		finish(ok);
+		await pending;
+		expect(composerPreferences.checkoutClaimed).toBe(false);
+		expect(composerPreferences.current.checkout).toBeNull();
+		expect(composerPreferences.current.model).toBe('preserved-model');
+		expect(state()).toMatchObject({ sessionId: 'wt-c', worktreeBranch: created.branch });
+	});
+
+	it('keeps the choice and the draft branch when creation fails', async () => {
+		post.mockRejectedValueOnce({ status: 500, detail: 'worktree add failed' });
+		const { sender, state } = setup(staged);
+		await sender.createWorktree();
+		expect(composerPreferences.checkoutClaimed).toBe(false);
+		expect(composerPreferences.current.checkout).toEqual(created);
+		expect(state()).toMatchObject({ sessionId: null, worktreeBranch: created.branch, isCreatingWorktree: false });
+		expect(state().worktreeError).toBeTruthy();
+	});
+
+	it('does not consume the choice for a request on a different branch', async () => {
+		post.mockResolvedValueOnce({ ...ok, branch_name: 'feature/other' });
+		const { sender } = setup({ ...staged, worktreeBranch: 'feature/other' });
+		await sender.createWorktree();
+		expect(composerPreferences.current.checkout).toEqual(created);
+	});
+});
+
 describe('autoCreateWorktree', () => {
+	// #1636: the outcome decides whether the composer keeps the text.
+	it('resolves false for a refusal before any request and for a failed create', async () => {
+		const noProject = setup({ project: '', projectV2Id: null });
+		expect(await noProject.sender.autoCreateWorktree('hi')).toBe(false);
+		expect(noProject.state().worktreeError).toBe('Please select a project');
+		expect(post).not.toHaveBeenCalled();
+
+		post.mockRejectedValueOnce({ status: 500, detail: 'Internal server error' });
+		const failed = setup();
+		expect(await failed.sender.autoCreateWorktree('hi')).toBe(false);
+		expect(failed.state().messages).toEqual([]);
+	});
+
+	it('resolves true once the backend accepted the create', async () => {
+		post.mockResolvedValueOnce({ session_id: 'wt-ok', branch_name: 'b', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		expect(await setup().sender.autoCreateWorktree('hi')).toBe(true);
+	});
+
+	it('resolves false and drops the echo when the fallback first turn is refused', async () => {
+		post.mockResolvedValueOnce({ session_id: 'wt-fb', branch_name: 'b', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: false });
+		const { sender, sendMessage, state } = setup();
+		sendMessage.mockResolvedValueOnce(false);
+		expect(await sender.autoCreateWorktree('hi')).toBe(false);
+		expect(state().messages).toEqual([]);
+	});
+
 	it('commits the new session in one step and opens its feed when the backend started the turn', async () => {
 		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
 		const { sender, deps, state, sendMessage } = setup();

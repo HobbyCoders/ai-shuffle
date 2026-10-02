@@ -381,7 +381,7 @@
 	});
 
 	// --- workspace nav ------------------------------------------------------
-	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
 
 	// Admin gating stays HERE, above the preference layer: WorkspaceNav and the
@@ -399,7 +399,7 @@
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
 		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
 		...(isAdmin
-			? [{ id: 'settings' as const, label: 'Settings', icon: Settings, on: currentType === 'settings' }]
+			? [{ id: 'settings' as const, label: 'Settings', icon: Settings, on: currentType === 'settings' || currentType === 'plugins' }]
 			: [])
 	]);
 

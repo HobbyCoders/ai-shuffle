@@ -44,16 +44,66 @@ CWD_PARAM = (
 
 # Task/Swarm/base prompt — route planned batches through the coordinator.
 SWARM_ROUTING_SUMMARY = (
-    "Use Swarm, when available, for three or more planned subagent tasks or "
-    "known dependency chains. Do not split batches into Task calls; keep Task "
-    "for isolated or adaptive work."
+    "Use Swarm for whole workflows (3+ tasks or dependencies); Task for "
+    "isolated/adaptive work."
+)
+# Task/Swarm — how many workers a job gets. Tool-neutral so the Task
+# description can carry it on a surface without Swarm. The ranges stay far
+# below every configured maximum on purpose: a number near the ceiling reads
+# as a target, and the old "five agents" habit came from an anchor like that.
+DELEGATION_SIZING = (
+    "Size delegation by the work, never by a limit: use one worker per "
+    "genuinely independent unit of work. Prefer fewer, larger assignments "
+    "over many tiny ones; every worker adds a brief, a startup, and an "
+    "integration step. Keep work that shares files or needs sequential "
+    "decisions in one assignment, or run it in order. A small job needs no "
+    "fan-out: do it yourself or use one worker. Typical sizes: a fix or change "
+    "in one area, zero or one worker; a feature across a few separable areas, "
+    "two to five; a large multi-area job, roughly five to fifteen. Go beyond "
+    "fifteen only when the work really has more independent units, such as a "
+    "mechanical sweep over many separate modules. Configured maximums are "
+    "safety ceilings, not targets; never add workers to approach them."
 )
 SWARM_ROUTING = SWARM_ROUTING_SUMMARY + (
-    " Submit the planned workflow in one start call, not smaller waves. "
+    " Do not split batches into Task calls; submit the planned workflow in one "
+    "start call, not smaller waves. "
+    "When the user asks for a swarm, the graph must cover the whole requested "
+    "job, including integration, verification, and review (inside task "
+    "briefs or as a final task), not just a small initial slice. Coverage "
+    "comes from what each task includes, not from the number of tasks. "
+    + DELEGATION_SIZING + " "
+    "Swarm's task maximum is one of those ceilings. max_parallel limits "
+    "concurrent tasks, not total workflow scope; nesting depth limits "
+    "delegation chains, not how many tasks a workflow holds. "
+    "If the work still exceeds a limit after grouping related units, explain "
+    "the limit and the complete staged plan rather than silently dropping "
+    "scope. Add adaptive follow-ups only for genuinely new information or "
+    "decisions. "
     "Task also fits a pair of independent assignments or an adaptive follow-up "
     "whose brief needs your judgment of earlier results. If Swarm is "
     "unavailable or the user explicitly requests individual calls, use Task; "
     "never override a restriction on delegation."
+)
+
+# Task/Swarm/base prompt — session isolation is not Git checkout isolation.
+SUBAGENT_WORKTREE_SUMMARY = (
+    "Isolate coding-worker checkouts; preserve the parent's branch; return commits."
+)
+SUBAGENT_WORKTREE_GUIDANCE = SUBAGENT_WORKTREE_SUMMARY + (
+    " An isolated session is not an isolated Git checkout. Use the host's "
+    "assigned worktree and unique branch for each coding worker; do not "
+    "provision a duplicate. Only on hosts without automatic isolation must "
+    "the parent prepare a dedicated worktree before delegating edits. Preserve "
+    "uncommitted user work and fork the parent's committed HEAD. Include "
+    "scope, prerequisites, verification, and integration target in the brief. "
+    "Workers use their assigned absolute cwd and edit paths, commit scoped "
+    "changes, and return SHAs, checkout/branch, tests, and blockers. Integrate "
+    "reviewed commits into the parent's current bound branch (not automatically "
+    "main), then verify the combined result. Dependent workers integrate "
+    "predecessor commits in their own checkout; dependency reports do not "
+    "transfer code. Serialize integration and overlapping edits. Do not switch "
+    "the parent's branch, copy credentials or dependencies from another "
+    "checkout, remove provisioned worktrees by hand, or bypass a refusal."
 )
 
 # Task/Monitor/base prompt — park instead of holding the turn open.

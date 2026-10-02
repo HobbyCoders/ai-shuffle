@@ -6,6 +6,7 @@ import {
 	diffCounts,
 	isAttentionStatus,
 	isLiveStatus,
+	isTurnLiveStatus,
 	isRemovedDeviceSession,
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
@@ -13,6 +14,7 @@ import {
 	prStateText,
 	sessionModeOf,
 	sessionTimestamp,
+	sessionWorkMs,
 	GIT_STAGE_LABELS,
 	GIT_STAGE_TONES,
 	GIT_STAGE_TIPS,
@@ -437,5 +439,46 @@ describe('runtime status words', () => {
 		expect(isAttentionStatus('await')).toBe(true);
 		expect(isAttentionStatus('working')).toBe(false);
 		expect(isAttentionStatus('done')).toBe(false);
+	});
+});
+
+describe('sessionWorkMs (#1619)', () => {
+	const now = Date.parse('2026-10-01T12:10:00Z');
+
+	it('returns the banked total when no turn is running', () => {
+		expect(sessionWorkMs(session({ work_ms: 90_000 }), now, false)).toBe(90_000);
+		expect(sessionWorkMs(session({ work_ms: 90_000 }), now, true)).toBe(90_000);
+		// Rows from before the field existed read as zero.
+		expect(sessionWorkMs(session({ work_ms: undefined }), now, false)).toBe(0);
+		expect(sessionWorkMs(session({ work_ms: null }), now, false)).toBe(0);
+	});
+
+	it('adds the live interval up to now while the turn runs', () => {
+		const s = session({ work_ms: 60_000, work_started_at: '2026-10-01T12:08:00+00:00' });
+		expect(sessionWorkMs(s, now, true)).toBe(60_000 + 120_000);
+		// A naive stamp is UTC, like every other server timestamp.
+		const naive = session({ work_ms: 0, work_started_at: '2026-10-01T12:09:30' });
+		expect(sessionWorkMs(naive, now, true)).toBe(30_000);
+	});
+
+	it('closes a stale live interval at the last activity, never past it', () => {
+		const s = session({ work_ms: 60_000, work_started_at: '2026-10-01T12:08:00Z' });
+		const lastActivity = Date.parse('2026-10-01T12:09:00Z');
+		expect(sessionWorkMs(s, now, false, lastActivity)).toBe(120_000);
+		// A start after the last activity adds nothing rather than going negative.
+		expect(sessionWorkMs(s, now, false, Date.parse('2026-10-01T12:00:00Z'))).toBe(60_000);
+	});
+
+	it('ignores an unparseable start', () => {
+		expect(sessionWorkMs(session({ work_ms: 5_000, work_started_at: 'nope' }), now, true)).toBe(5_000);
+	});
+
+	it('ticks only while a turn holds the live slot', () => {
+		for (const s of ['working', 'needs_permission', 'has_question', 'await'] as const) {
+			expect(isTurnLiveStatus(s)).toBe(true);
+		}
+		for (const s of ['parked', 'done', 'idle', 'pr', 'pr_merged', 'offline'] as const) {
+			expect(isTurnLiveStatus(s)).toBe(false);
+		}
 	});
 });

@@ -8,10 +8,16 @@ The slow platform suites run when someone asks for them, and before a release.
 - CI Backend: the backend test subset
 - CI JavaScript: the frontend, mobile, tools and browser-mcp packages that changed
 - CI fluid: the fluid unit suite
+- Folder confinement (macOS): the folder and upload confinement tests on a
+  native Mac, only when `app/core/chat_files.py`, `app/core/confined_files.py`
+  or their tests change. It is the one macOS job that runs on pull requests.
 - Cheap jobs inside Android CI, Desktop CI and CI Browser Workspace: the
   Android build and unit tests when APK inputs change, the account hub and
   website tests, the desktop typecheck
   and unit tests, and the browser editor smoke test
+- iOS CI, on PRs that touch `ios/` or `mobile/`: the mobile UI build, then
+  an unsigned iOS Simulator build with the unit and WebKit tests on a macOS
+  runner. It never signs or uploads.
 - The small policy and service checks (artifact policy, desktop source
   update checks, license server, registry, Android Play)
 

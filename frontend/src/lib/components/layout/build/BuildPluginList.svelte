@@ -150,6 +150,23 @@
 		if (id !== 'details') plugins.clearSelectedPlugin();
 	}
 
+	// An agent-authored plugin is enabled only from its review (details) view,
+	// which approves the exact version shown there.
+	let approving = $state(false);
+	async function approveSelected() {
+		const plugin = $selectedPlugin;
+		if (!plugin?.content_hash) return;
+		approving = true;
+		try {
+			await plugins.enablePlugin(plugin.id, plugin.content_hash);
+			await plugins.selectPlugin(plugin.id);
+		} catch {
+			// shown via $pluginsError
+		} finally {
+			approving = false;
+		}
+	}
+
 	async function openDetails(pluginId: string) {
 		previousTab = activeTab;
 		try {
@@ -270,6 +287,8 @@
 			onClose={() => { plugins.clearSelectedPlugin(); activeTab = previousTab; }}
 			onInstall={() => quiet(plugins.installPlugin($selectedPlugin.id))}
 			installing={$pluginInstalling[$selectedPlugin.id] || false}
+			onApprove={approveSelected}
+			{approving}
 		/>
 	{:else}
 		<!-- Toolbar: search left, actions right -->
@@ -333,6 +352,7 @@
 								<h4 class="bpl-name">
 									{p.name}
 									<span class="bpl-badge" class:on={p.enabled}>{p.enabled ? 'Enabled' : 'Disabled'}</span>
+									{#if p.approval === 'pending'}<span class="bpl-badge bpl-badge--update">Needs review</span>{/if}
 									{#if updateLookup.has(p.id)}<span class="bpl-badge bpl-badge--update">Update</span>{/if}
 								</h4>
 								<p class="bpl-desc">{p.description || 'No description available'}</p>
@@ -357,7 +377,7 @@
 									</button>
 								</RowActionMenu>
 								<!-- Enable/disable stays outside the menu — an always-visible control. -->
-								<button class="bpl-act bpl-toggle-act" title={p.enabled ? 'Disable' : 'Enable'} aria-label="{p.enabled ? 'Disable' : 'Enable'} {p.name}" onclick={() => quiet(plugins.togglePlugin(p.id))}>
+								<button class="bpl-act bpl-toggle-act" title={p.enabled ? 'Disable' : p.approval === 'pending' ? 'Review' : 'Enable'} aria-label="{p.enabled ? 'Disable' : p.approval === 'pending' ? 'Review' : 'Enable'} {p.name}" onclick={() => (!p.enabled && p.approval === 'pending' ? openDetails(p.id) : quiet(plugins.togglePlugin(p.id)))}>
 									{#if p.enabled}<ToggleRight size={16} strokeWidth={1.7} />{:else}<ToggleLeft size={16} strokeWidth={1.7} />{/if}
 								</button>
 							</div>

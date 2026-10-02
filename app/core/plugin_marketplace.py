@@ -86,6 +86,10 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
     # Validate derived name (prevent path traversal)
     if not re.match(r'^[\w\-]+$', name):
         raise ValueError(f"Invalid marketplace name: {name[:50]}")
+    # Agent-drafted plugins live under this source name and load only after
+    # review, so a marketplace may not share it (in any letter case).
+    if name.casefold() == "authored":
+        raise ValueError("The marketplace name 'authored' is reserved; pass a different name")
 
     install_location = str(svc.MARKETPLACES_DIR / name)
 

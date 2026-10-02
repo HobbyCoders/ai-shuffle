@@ -156,13 +156,27 @@
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
 
+		// The project catalog loads alongside init: a new chat's remembered
+		// project and branch resolve against it, and the composer holds a send
+		// until it has answered (#1636).
+		const catalogLoad = Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+
 		// Initialize data
 		await activeSession.init();
+		// The layout's explicit New Chat wins over an older backend session
+		// snapshot (see below). Settle that now, not after the loads: until then
+		// the composer was bound to the old session, so a send went there and the
+		// late newChat then wiped it from view (#1636).
+		const layoutNewChatWon = !navigationClaimed && !!$activeSession?.sessionId &&
+			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
+		if (layoutNewChatWon) activeSession.newChat();
+		// Finish the New Chat's remembered project and branch as soon as the
+		// catalog is in, even under text typed while it loaded.
+		const catalogLoaded = catalogLoad.then(() => activeSession.resolveComposerDefaultsAfterCatalog());
 		await Promise.all([
 			appData.loadProfiles(),
 			appData.loadSessions(),
-			appData.loadProjects(),
-			appData.loadClusterProjects(),
+			catalogLoaded,
 			appData.loadApiUserSessions(),
 			loadAllTags()
 		]);
@@ -206,7 +220,7 @@
 		// landing never mounts Assistant only to be replaced a moment later.
 		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
 		const hasDraft = hasComposerDraft($activeSession.draft);
-		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
+		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !layoutNewChatWon && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
 			(!$activeView || ($activeView.type === 'session' && currentViewSessionId === null));
 		if (emptyOwnerLanding) {
 			layout.openFeaturePage('assistant');
@@ -220,11 +234,13 @@
 			} else {
 				handleNewSession();
 			}
-		} else if ($activeView.type === 'session' && currentViewSessionId === null && restoredSessionId) {
+		} else if ($activeView.type === 'session' && currentViewSessionId === null && (restoredSessionId || layoutNewChatWon)) {
 			// Layout says "new chat" but backend has a session — the user explicitly
 			// clicked New Chat (layout persists synchronously) but the async backend
 			// persist may not have completed. Respect the layout's explicit intent.
-			activeSession.newChat();
+			// When that was settled right after init, a session id here is one a
+			// send made during the loads, and it stays.
+			if (!layoutNewChatWon) activeSession.newChat();
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			followRestoredLane();

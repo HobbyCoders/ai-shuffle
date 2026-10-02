@@ -419,7 +419,7 @@ Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for a
 
 When an agent asks for access to a folder on this worker, a machine over SSH, or an HTTPS API service, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write, command or state-changing API request the agent attempts needs a separate approval (unless the session is in Bypass).
 
-**Auth:** Owner only, over HTTPS or from the same machine. Refused (`403`) for agent previews.
+**Auth:** Owner only, and only from the desktop app window, the worker's HTTPS remote access address, or a browser on the machine running a worker the desktop app did not start. Other connections get `403`, including plain `http://` LAN addresses and `X-Forwarded-Proto` headers sent to port 8000 (see [Remote access](/docs/getting-started/remote-access#private-access-details)). Refused (`403`) for agent previews.
 
 ### GET /api/v1/chat-access/{session_id}
 
@@ -465,6 +465,8 @@ Approve or refuse one pending write, command or API request. Body: exactly `{"al
 Forget a saved connection and end any grant that uses it. Returns `{"deleted": true}`.
 
 A request, grant or action that no longer exists returns `409` (`400` when granting).
+
+For a session that runs on another device, these endpoints forward to that device over the worker network, and grants, approvals and saved connections stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved connection or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
 
 ## Browser Panel
 
@@ -606,6 +608,29 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \
   -d '{"message_index": 5}'
 ```
 
+## Create an Empty Session
+
+### POST /api/v1/sessions
+
+Create a session without a first message, on this install. The composer's call button uses it: it creates the conversation from the current picks and then starts a call on it. Send the first message later over the chat WebSocket with the returned `session_id`.
+
+**Auth:** Required
+
+All fields are optional. `project_id` or `project_v2_id` (not both) files the session under a project; with neither it is projectless. `mode` is `code` (default) or `chat`; `voice` is refused with 400. `worktree_id` runs the session in an existing worktree of `project_id`. `overrides` takes the same `model`, `effort`, `permission_mode`, `context_window`, `fast` and `workspace_project_ids` as a query and stores them as the session's run settings. Agent rules match `with-worktree` below.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "proj123",
+    "profile_id": "your-agent-id",
+    "overrides": {"model": "sonnet", "permission_mode": "default"}
+  }'
+```
+
+Returns `{"session_id": "...", "mode": "code"}`.
+
 ## Worktree Sessions
 
 ### POST /api/v1/sessions/with-worktree
@@ -614,7 +639,7 @@ Create a session linked to a git worktree for isolated development.
 
 **Auth:** Required
 
-For an API key with assigned agents, `profile_id` must be one of them (403 otherwise). When it is omitted the key's only agent is used, or 400 if it has several; the project's default agent is not used.
+For an API key with assigned agents, `profile_id` must be one of them (403 otherwise). When it is omitted the key's only agent is used, or 400 if it has several; the project's default agent is not used. With a `prompt`, `overrides` apply to the first turn; without one they are stored as the session's run settings.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \

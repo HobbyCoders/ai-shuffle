@@ -298,3 +298,36 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
                 return None
         return path
     return None
+
+
+def describe_checkout_mismatch(session_row: Dict[str, Any]) -> Optional[str]:
+    """Why a bound checkout that IS on disk was refused, else ``None``.
+
+    The cwd resolvers return ``None`` both when the branch checkout is missing
+    and when its folder exists on another branch. Refusals use this to name the
+    second case instead of reporting a present folder as gone. Pure read: it
+    never switches HEAD or rewrites the checkout row.
+    """
+    branch = _effective_branch(session_row)
+    row = resolve_local_checkout(session_row) if branch else None
+    if not row or not row.get("path"):
+        return None
+    path = checkout_manager._resolve_checkout_path(row["path"])
+    if not os.path.isdir(path):
+        return None
+    try:
+        checkout_manager._require_branch_binding(path, branch)
+    except checkout_manager.WorktreeError:
+        if not checkout_manager._dir_is_worktree(path):
+            # A leftover folder with no .git of its own (e.g. a pruned
+            # worktree's remains) would report the ENCLOSING repo's branch,
+            # and "switch that folder back" would switch that other checkout.
+            # Keep the caller's missing-checkout wording for it.
+            return None
+        actual = checkout_manager.git_service.get_current_branch(path)
+        if actual and actual != branch:
+            return (f"its folder {path} exists but is on branch '{actual}', "
+                    f"not this session's branch '{branch}'")
+        return (f"its folder {path} exists but is not a Git checkout of "
+                f"branch '{branch}' (detached HEAD or not its own working tree)")
+    return None

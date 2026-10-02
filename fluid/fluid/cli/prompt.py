@@ -129,7 +129,7 @@ def mounted_builtin_tools(
 # Code-mode tool names prose may reference (the addendum's surface).
 CODE_MODE_TOOL_NAMES: tuple[str, ...] = (
     "run_python", "list_tools", "search_tools", "read_tool_docs",
-    "save_skill", "delete_skill",
+    "save_skill", "delete_skill", "save_plugin",
 )
 
 # ─── model-family guidance ───────────────────────────────────────────────────
@@ -739,6 +739,9 @@ def _tools_section(p: PromptProfile) -> str | None:
 
         bullets.append(f"- {SWARM_ROUTING_SUMMARY}")
     if "Task" in t:
+        from fluid.tools.fragments import SUBAGENT_WORKTREE_SUMMARY
+
+        bullets.append(f"- {SUBAGENT_WORKTREE_SUMMARY}")
         bullets.append(
             "- A subagent's report is a claim, not a verified fact. For "
             "external side effects it says it performed, verify the handle it "

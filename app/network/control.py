@@ -17,9 +17,12 @@ the mirrored transcript into a new session on an online runner.
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi.encoders import jsonable_encoder
@@ -31,6 +34,13 @@ from app.network import engine, membership, runners, transport
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 20.0
+# Opening a connection (DNS, TCP, TLS) gets this long per address, whatever
+# the action's own timeout.
+CONNECT_TIMEOUT = 10.0
+# When every address failed to connect, try them all once more after a pause:
+# nothing reached the peer, so even a mutation is safe to send again.
+CONNECT_ROUNDS = 2
+CONNECT_RETRY_DELAY = 1.0
 
 # A strict ref name: no leading dash or dot, no "..", "@{", control
 # characters, spaces, path tricks or the characters refs may not contain.
@@ -51,6 +61,16 @@ class ControlRefused(RuntimeError):
     """The owner answered with an error (4xx)."""
 
 
+class InsecureRoute(ControlRefused):
+    """A request that must not travel in the clear has no HTTPS route to the peer."""
+
+
+# Set by the /peer/control endpoint for the request being handled: whether it
+# reached this worker over HTTPS (directly, or through the tunnel's attested
+# loopback listener). Handlers that accept private inputs refuse them otherwise.
+inbound_https: contextvars.ContextVar[bool] = contextvars.ContextVar("control_inbound_https", default=False)
+
+
 # ---------------------------------------------------------------------------
 # Client side (the device whose UI is driving)
 # ---------------------------------------------------------------------------
@@ -69,8 +89,13 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
     return owner
 
 
-async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None) -> Dict[str, Any]:
-    """POST a control action to the owner with a device token."""
+async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None,
+               secure: bool = False) -> Dict[str, Any]:
+    """POST a control action to the owner with a device token.
+
+    ``secure`` sends only to the peer's HTTPS addresses, and raises
+    ``InsecureRoute`` when it has none, for a payload carrying private inputs.
+    """
     ctx = engine.require_context()
     known = ctx.member(device_id)
     if known is not None and known.status != membership.STATUS_ACTIVE:
@@ -87,35 +112,175 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
         transport._links[device_id] = link
     if not link.endpoints:
         raise RunnerUnreachable("The owning worker has no reachable address")
-    async with httpx.AsyncClient(follow_redirects=False) as client:
-        try:
-            await link.authenticate(client, ctx)
-            # DB-backed control payloads contain datetimes (notably session rows).
-            # httpx does not apply FastAPI's response encoding to outgoing JSON.
-            for attempt in range(2):
-                try:
-                    result = await link._request(
-                        client, "POST", f"/api/v1/network/peer/control/{action}",
-                        json_body=jsonable_encoder(body or {}),
-                        **({"timeout": timeout} if timeout is not None else {}),
-                    )
+    if secure and not any(_https(route) for route in link.endpoints):
+        raise InsecureRoute("The owning worker has no HTTPS address")
+    # DB-backed control payloads contain datetimes (notably session rows).
+    # httpx does not apply FastAPI's response encoding to outgoing JSON.
+    payload = jsonable_encoder(body or {})
+    # A long action timeout (a handoff waits up to 600s) must not also be the
+    # time spent waiting on an address that never accepts the connection.
+    capped = transport.connect_timeout.set(CONNECT_TIMEOUT) if transport.connect_timeout.get() is None else None
+    failures: List[BaseException] = []
+    tried: List[str] = []
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            for round_ in range(CONNECT_ROUNDS):
+                if round_:
+                    await asyncio.sleep(CONNECT_RETRY_DELAY)
+                failures.clear()
+                tried = [route for route in link.routes() if not secure or _https(route)]
+                for route in tried:
+                    try:
+                        result = await _post(link, client, ctx, route, action, payload, timeout)
+                    except _RouteFailed as exc:
+                        failures.append(exc.cause)
+                        continue
+                    except transport.PeerError as exc:
+                        raise _refusal(exc) from exc
+                    except httpx.HTTPError as exc:
+                        # The request may have reached the owner: never resend it.
+                        peer, me = await run_sync(_names, ctx, device_id)
+                        what = ("did not answer in time" if isinstance(exc, httpx.TimeoutException)
+                                else "dropped the connection")
+                        raise RunnerUnreachable(
+                            f"{peer} {what} while handling a request from {me}. "
+                            "It may still have been applied; check before retrying.") from exc
+                    transport.note_contact(device_id)
+                    return result
+                # Another round only helps a transient failure to connect (a
+                # DNS or network blip). A route that answered with an error,
+                # such as a tunnel whose worker is down, will answer the same.
+                if not all(_connect_level(f) for f in failures):
                     break
-                except transport.PeerTokenRejected:
-                    # A worker restart invalidates tokens before their advertised
-                    # expiry. A 401 is pre-dispatch, so retrying cannot duplicate
-                    # a mutation. Never retry timeouts or other action failures.
-                    if attempt:
-                        raise
-                    await link.authenticate(client, ctx)
-        except transport.PeerError as exc:
-            message = str(exc)
-            if message.startswith("HTTP 4"):
-                raise ControlRefused(message.split(" ", 2)[-1] if " " in message else message) from exc
-            raise RunnerUnreachable(message) from exc
-        except httpx.HTTPError as exc:
-            raise RunnerUnreachable(f"{type(exc).__name__}") from exc
-    transport.note_contact(device_id)
-    return result
+    finally:
+        if capped is not None:
+            transport.connect_timeout.reset(capped)
+    peer, me = await run_sync(_names, ctx, device_id)
+    raise RunnerUnreachable(_unreachable_message(peer, me, failures, len(tried))) from (
+        failures[-1] if failures else None)
+
+
+def _https(route: str) -> bool:
+    try:
+        return urlsplit(route).scheme == "https"
+    except ValueError:
+        return False
+
+
+def _refusal(exc: "transport.PeerError") -> Exception:
+    """The owner answered the action itself with an error."""
+    message = str(exc)
+    if message.startswith("HTTP 4"):
+        return ControlRefused(message.split(" ", 2)[-1] if " " in message else message)
+    return RunnerUnreachable(message)
+
+
+class _RouteFailed(Exception):
+    """The request did not reach the peer at this address (safe to try another)."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, route: str, action: str,
+                payload: Any, timeout: float | None) -> Dict[str, Any]:
+    """POST the action at one address.
+
+    Raises ``_RouteFailed`` only when nothing was dispatched: authentication
+    failed (it precedes the action), or the connection for the action itself
+    could not be opened. Once the request may have been sent, a timeout or a
+    dropped connection propagates and is final, so a mutation is never
+    applied twice.
+    """
+    try:
+        await link.authenticate(client, ctx, at=route)
+    except transport.PeerError as exc:
+        raise _RouteFailed(exc) from exc
+    for attempt in range(2):
+        try:
+            return await link._request(
+                client, "POST", f"/api/v1/network/peer/control/{action}", json_body=payload, base=route,
+                **({"timeout": timeout} if timeout is not None else {}),
+            )
+        except transport.PeerTokenRejected:
+            # A worker restart invalidates tokens before their advertised
+            # expiry. A 401 is pre-dispatch, so retrying cannot duplicate
+            # a mutation. Never retry timeouts or other action failures.
+            if attempt:
+                raise
+            try:
+                await link.authenticate(client, ctx, at=route)
+            except transport.PeerError as exc:
+                raise _RouteFailed(exc) from exc
+        except transport.CONNECT_ERRORS as exc:
+            raise _RouteFailed(exc) from exc
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _connect_level(exc: BaseException) -> bool:
+    return isinstance(exc, (transport.PeerConnectFailed, *transport.CONNECT_ERRORS))
+
+
+def _route_reason(exc: BaseException) -> str:
+    """A short, user-facing reason one address failed."""
+    if isinstance(exc, transport.PeerError) and exc.__cause__ is not None:
+        exc = exc.__cause__  # authentication wraps the failure of its last attempt
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connection timed out"
+    if isinstance(exc, httpx.ConnectError):
+        text = str(exc).lower()
+        if any(s in text for s in ("name or service", "name resolution", "nodename", "getaddrinfo",
+                                   "no address associated", "errno -2", "errno -3", "errno 11001")):
+            return "address lookup failed"
+        if "refused" in text or "errno 111" in text or "10061" in text:
+            return "connection refused"
+        if "ssl" in text or "certificate" in text or "tls" in text:
+            return "TLS handshake failed"
+        if "unreachable" in text:
+            return "network unreachable"
+        return "connection failed"
+    if isinstance(exc, httpx.TimeoutException):
+        return "no answer in time"
+    if isinstance(exc, httpx.HTTPError):
+        return "connection dropped"
+    if isinstance(exc, transport.PeerError):
+        message = str(exc)
+        if message.startswith("HTTP "):
+            return " ".join(message.split(" ", 2)[:2])  # "HTTP 530": the tunnel is up, the worker is not
+        return message[:80] or "unreachable"
+    return "unexpected answer"
+
+
+def _names(ctx, device_id: str) -> tuple[str, str]:
+    """Display names for the peer and this worker, best effort."""
+    def name(dev: Optional[str], fallback: str) -> str:
+        if not dev:
+            return fallback
+        try:
+            row = store.get_member(dev)
+            if row and row.get("name"):
+                return str(row["name"])
+        except Exception:  # noqa: BLE001 - the message must not fail
+            pass
+        try:
+            member = ctx.member(dev)
+            if member is not None and getattr(member, "name", None):
+                return str(member.name)
+        except Exception:  # noqa: BLE001
+            pass
+        return fallback
+    return name(device_id, "the other worker"), name(getattr(ctx, "device_id", None), "this worker")
+
+
+def _unreachable_message(peer: str, me: str, failures: List[BaseException], routes: int) -> str:
+    reasons: List[str] = []
+    for failure in failures:
+        reason = _route_reason(failure)
+        if reason not in reasons:
+            reasons.append(reason)
+    where = "on its only route" if routes == 1 else f"on all {routes} routes"
+    return f"Couldn't reach {peer} from {me} ({' / '.join(reasons) or 'unreachable'} {where})."
 
 
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
@@ -225,7 +390,19 @@ def _run_settings_handler():
     return handle_run_settings
 
 
+def _chat_access_handler():
+    from app.network.chat_access_routing import handle
+    return handle
+
+
+def _chat_access_changed_handler():
+    from app.network.chat_access_routing import handle_changed
+    return handle_changed
+
+
 _LAZY_HANDLERS = {
+    "chat-access": _chat_access_handler,
+    "chat-access-changed": _chat_access_changed_handler,
     "run-settings": _run_settings_handler,
     "permission-mode": _permission_mode_handler,
     "session-active": _session_active_handler,

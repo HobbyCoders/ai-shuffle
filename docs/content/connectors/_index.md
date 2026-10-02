@@ -62,7 +62,7 @@ Each connector declares what it supports:
 ## Common Setup Steps
 
 1. **Create credentials** on the external platform (bot token, API key, etc.)
-2. **Install the app's runtime**: open **Build > Plugins**, choose the **Apps** filter, open the app and click **Install <app name>** if prompted. Installing needs internet access to PyPI. You can only add a connection after the runtime is installed and enabled.
+2. **Install the app's runtime**: open **Settings > Plugins**, choose the **Apps** filter, open the app and click **Install <app name>** if prompted. Installing needs internet access to PyPI. You can only add a connection after the runtime is installed and enabled.
 3. **Add the connection**: click **Connect account**, fill in the form and click **Create Connector**.
 4. **Add at least one allowed sender** (chat connectors only). Telegram, Discord, WhatsApp, Slack, LINE, Signal, iMessage, Microsoft Teams and BlueBubbles will not start until their allowlist has an entry. Only listed senders or chats can use the bot.
 5. **Assign an agent**: each connection runs as an API user. Messaging connectors and inbound or bidirectional webhooks ask for an **Agent** when you create them, and the new API user gets that agent. To reuse an existing API user instead, pick it under **Advanced settings**; it keeps its own agents, which you manage in **Settings > API**. Without an agent, every incoming message is refused.

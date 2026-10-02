@@ -296,6 +296,9 @@ async def test_folder_write_confirmation_mode_preserves_scope(broker, tmp_path, 
     await asyncio.wait_for(task, 3)
     assert (tmp_path / "ok.txt").read_text() == "written"
     assert not broker.actions
+    # Without the isolated shell a folder grant runs no commands at all.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     for operation, args in [("write", {"path": "../escape", "content": "no"}), ("command", {"command": "no"})]:
         with pytest.raises(AccessDenied):
             await broker.run("chat", grant["id"], operation, args)
@@ -541,7 +544,12 @@ def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
 
 @pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
 @pytest.mark.asyncio
-async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path):
+async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path, monkeypatch):
+    # Without the isolated shell (tests/core/test_chat_shell.py covers it) a
+    # folder command is refused; a host with bubblewrap would otherwise wait
+    # for approval here.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     grant = await broker.create("chat", GrantInput(kind="folder", label="Folder", path=str(tmp_path)))
     with pytest.raises(AccessDenied):
         await broker.run("chat", grant["id"], "command", {"command": "anything"})
@@ -736,8 +744,7 @@ async def test_saved_list_changes_invalidate_every_owner_session(broker, ssh_tar
 
     published.clear()
     monkeypatch.setattr(api, "broker", broker)
-    monkeypatch.setattr(api, "checked", AsyncMock())
-    monkeypatch.setattr(api, "session_owner", owner)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
@@ -791,6 +798,71 @@ async def test_private_inputs_require_secure_transport_and_real_owner(monkeypatc
     await api.checked(request("https", "10.0.0.2", "10.0.0.1"), "chat")
     with pytest.raises(HTTPException):
         await api.checked(request("https", "10.0.0.2", "10.0.0.1", preview=True), "chat")
+
+
+_DESKTOP_TOKEN = "ab" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,scheme,port,peer,host,headers,desktop,accepted", [
+    # The desktop app window carries its per-launch listener token.
+    ("desktop window", "http", 8000, "127.0.0.1", "127.0.0.1:8000",
+     [(b"x-shuffle-desktop-listener", _DESKTOP_TOKEN.encode())], True, True),
+    # A separate browser tab on localhost beside the desktop app has no token.
+    ("chrome on loopback", "http", 8000, "127.0.0.1", "localhost:8000", [], True, False),
+    ("wrong desktop token", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-shuffle-desktop-listener", b"cd" * 32)], True, False),
+    ("loopback without desktop", "http", 8000, "127.0.0.1", "localhost:8000", [], False, True),
+    ("plaintext LAN", "http", 8000, "10.0.0.2", "10.0.0.1:8000", [], False, False),
+    ("LAN forged proto", "http", 8000, "10.0.0.2", "10.0.0.1:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("loopback forged proto", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    # Managed tunnel: cloudflared reaches only the loopback remote listener.
+    ("managed tunnel", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], False, True),
+    ("managed tunnel beside desktop", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], True, True),
+    ("tunnel visitor on http", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"http")], False, False),
+    ("tunnel without proto", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com", [], False, False),
+    ("unknown socket", "http", 9999, "127.0.0.1", "localhost:9999",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("TLS socket", "https", 8443, "10.0.0.2", "worker.example.com", [], False, True),
+])
+async def test_private_access_origins_through_real_ingress(monkeypatch, case, scheme, port, peer,
+                                                           host, headers, desktop, accepted):
+    """Transport trust comes from the accepting socket, never a client header."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.api import chat_access as api
+    from app.core import desktop_listener
+    from app.serve import IngressApplication
+
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "chat"}))
+    monkeypatch.setattr(desktop_listener, "_configured", desktop)
+    monkeypatch.setattr(desktop_listener, "_token", _DESKTOP_TOKEN if desktop else None)
+    seen = []
+
+    async def capture(scope, receive, send):
+        seen.append(scope)
+
+    # A client cannot pre-set the flag: the wrapper recomputes it per socket.
+    await IngressApplication(capture, 8000, 8001)({
+        "type": "http", "scheme": scheme, "method": "GET", "path": "/api/v1/chat-access/chat",
+        "headers": [(b"host", host.encode()), *headers], "server": ("127.0.0.1", port),
+        "client": (peer, 1234), "shuffle.forwarded_https": True, "state": {}}, None, None)
+    request = Request(seen[0])
+    if accepted:
+        assert await api.checked(request, "chat") == {"id": "chat"}, case
+        return
+    with pytest.raises(HTTPException) as error:
+        await api.checked(request, "chat")
+    assert error.value.status_code == 403, case
+    # Actionable for the common case of a browser tab beside the desktop app.
+    assert "desktop app window" in error.value.detail
+    assert "HTTPS remote access address" in error.value.detail
+    api.require_session.assert_not_awaited()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("row", [None, {"mode": "unexpected"}, {"mode": "voice", "owner_device_id": "peer"}])
@@ -856,3 +928,121 @@ async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_targ
         assert "remote:voice" in str(await asyncio.wait_for(task, 3))
         assert commands == ["voice"] and not broker.actions
     broker.revoke("voice", grant_id)
+
+
+def _listing_tools(monkeypatch, broker):
+    """ChatResources over the real owner lookup, a stubbed session row and no UI."""
+    from app.core import chat_vault
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.db import database
+    from app.mcp import chat_access_sdk as sdk
+    from app.network import control
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"mode": "chat", "instance_id": "worker"})
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    monkeypatch.setattr(broker, "_notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sdk, "broker", broker)
+
+    def no_catalog(*args, **kwargs):
+        raise AssertionError("ChatResources must not read the saved-connection catalogue")
+    monkeypatch.setattr(chat_vault, "catalog", no_catalog)
+    return {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_busy(broker, monkeypatch):
+    """#1605: the listing must not queue behind the shared default executor.
+
+    A pending RequestChatAccess waits up to 240 s, and every run_sync caller
+    in the process shares asyncio's default executor. With that executor
+    fully occupied, ChatResources still answers promptly, asks for nothing
+    and leaves the pending request untouched.
+    """
+    import concurrent.futures
+    import json
+    import threading
+
+    tools = _listing_tools(monkeypatch, broker)
+    request_task = asyncio.create_task(
+        tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+    async with asyncio.timeout(3):
+        while not broker.requests:
+            await asyncio.sleep(0.001)
+
+    asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    release = threading.Event()
+    blocker = asyncio.create_task(asyncio.to_thread(release.wait, 30))
+    try:
+        await asyncio.sleep(0.05)  # the blocker now holds the only shared worker
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+        assert not response.get("isError"), response
+        assert json.loads(response["content"][0]["text"]) == {
+            "grants": [], "folder_available": chat_files.available(),
+        }
+        assert not request_task.done() and len(broker.requests) == 1 and not broker.actions
+    finally:
+        release.set()
+        await blocker
+    await broker.decline("chat", next(iter(broker.requests)))
+    assert (await request_task)["isError"]
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_returns_bounded_error_when_owner_lookup_stalls(broker, monkeypatch):
+    import threading
+    from app.db import database
+
+    tools = _listing_tools(monkeypatch, broker)
+    release = threading.Event()
+    monkeypatch.setattr(database, "get_session", lambda sid: release.wait(30) and {"mode": "chat"})
+    monkeypatch.setattr(chat_access, "LISTING_TIMEOUT_SECONDS", 0.2)
+    try:
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 3)
+    finally:
+        release.set()
+    assert response["isError"]
+    text = response["content"][0]["text"]
+    assert "timed out after 0.2 seconds" in text and "No access was requested" in text
+    assert not broker.requests and not broker.actions
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_lists_only_live_grant_metadata(broker, monkeypatch, tmp_path):
+    import json
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    owner = (None, "worker", None)
+    live = chat_access.Grant("a" * 32, "chat", owner, "Private label", "folder",
+                             str(tmp_path), time.time() + 60, writable=True)
+    expired = chat_access.Grant("b" * 32, "chat", owner, "Old", "folder", str(tmp_path), time.time() - 1)
+    other = chat_access.Grant("c" * 32, "other", owner, "Other", "folder", str(tmp_path), time.time() + 60)
+    for grant in (live, expired, other):
+        broker.grants[grant.id] = grant
+    response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    text = response["content"][0]["text"]
+    assert json.loads(text)["grants"] == [
+        {"id": live.id, "kind": "folder", "expires_at": live.expires_at, "writable": True}]
+    assert expired.id not in broker.grants and other.id in broker.grants
+    assert "Private label" not in text and str(tmp_path) not in text
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_logs_stage_timings_at_info_without_details(broker, monkeypatch, tmp_path, caplog):
+    """A prompt listing still leaves a timing line at the default INFO level, so
+    a stall outside the listing can be told apart from one inside it (#1605)."""
+    import logging
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    grant = chat_access.Grant("d" * 32, "chat", (None, "worker", None), "Private label", "folder",
+                              str(tmp_path), time.time() + 60)
+    broker.grants[grant.id] = grant
+    with caplog.at_level(logging.INFO, logger="app.core.chat_access"):
+        await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    lines = [r for r in caplog.records if r.getMessage().startswith("ChatResources listing:")]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    text = lines[0].getMessage()
+    assert "grants=1" in text and "owner_lookup=" in text and "total=" in text
+    assert "Private label" not in text and str(tmp_path) not in text
+    broker.revoke("chat", grant.id)

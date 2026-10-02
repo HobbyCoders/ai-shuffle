@@ -56,7 +56,7 @@ from the source registry in `app/core/usage_sources.py`:
 | Grok subscription billing and settings, each endpoint | 300 seconds |
 | ChatGPT/Codex subscription usage | 300 seconds |
 | OpenAI Admin usage or costs, each endpoint | 900 seconds |
-| fal.ai Admin billing | 300 seconds |
+| fal.ai balance (ordinary API key) | 300 seconds |
 
 All add zero to thirty seconds of jitter. Failures back off exponentially to
 one hour, honoring a longer `Retry-After`. A timed-out attempt is recorded on

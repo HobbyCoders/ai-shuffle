@@ -9,6 +9,7 @@ permission mode.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hmac
 import ipaddress
 import logging
@@ -22,7 +23,7 @@ from typing import Literal
 import asyncssh
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
 
-from app.core import chat_files, chat_services
+from app.core import chat_files, chat_services, chat_shell
 from app.core.chat_files import AccessDenied
 
 # Host-key types tried when pinning, most preferred first. RSA is one key
@@ -132,10 +133,42 @@ class AccessRequest:
         return {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
 
 
-async def session_owner(session_id: str) -> tuple:
+logger = logging.getLogger(__name__)
+
+# ChatResources is a read-only listing that must answer promptly. Its one
+# database read runs on this small pool instead of asyncio's shared default
+# executor, which every ``run_sync``/``to_thread`` caller in the process
+# queues on, and the lookup is bounded so a stall returns a clear error rather
+# than holding the turn until the tool-call ceiling.
+_listing_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="chat-access-list",
+)
+LISTING_TIMEOUT_SECONDS = 15.0
+# Every listing logs its stage timings at INFO (the default production level),
+# so a stall outside this function still shows when the call itself finished;
+# a listing slower than this logs them at WARNING.
+LISTING_SLOW_SECONDS = 2.0
+
+
+async def session_owner(session_id: str, *, executor=None) -> tuple:
     from app.db import database
-    from app.db.async_database import run_sync
-    return owner_from_row(await run_sync(database.get_session, session_id))
+    if executor is None:
+        from app.db.async_database import run_sync
+        return owner_from_row(await run_sync(database.get_session, session_id))
+    row = await asyncio.get_running_loop().run_in_executor(executor, database.get_session, session_id)
+    return owner_from_row(row)
+
+
+def _default_executor_load() -> str:
+    """Thread and queue counts of the loop's shared default executor, for stall logs."""
+    try:
+        pool = getattr(asyncio.get_running_loop(), "_default_executor", None)
+        if pool is None:
+            return "unstarted"
+        return (f"threads={len(pool._threads)} queued={pool._work_queue.qsize()} "
+                f"max={pool._max_workers}")
+    except Exception:  # noqa: BLE001 — diagnostics only
+        return "unknown"
 
 
 def owner_from_row(row: dict | None) -> tuple:
@@ -167,6 +200,51 @@ async def session_bypasses_confirmation(session_id: str) -> bool:
     return permission_mode_for_session_mode(mode, row.get("mode")) == "bypassPermissions"
 
 
+async def publish_change(session_id: str, api_user_id: str | None, *, saved: bool = False) -> None:
+    """Tell this worker's UI for the session's principal to refetch its access panel.
+
+    Saved connections belong to the owner, not the session, and every session's
+    panel lists them: a saved-list change also invalidates the unscoped
+    resource so the owner's panels on other sessions refresh.
+    """
+    resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
+    try:
+        from app.core.global_events import global_events
+        # Root-layout subscribers use the authenticated global socket, not the
+        # legacy session socket below. Publish only an invalidation; snapshots
+        # still enforce private-access policy.
+        from app.core.preference_identity import principal_preference_identity
+        from app.db.async_database import run_sync
+        principal = ({"kind": "api_user", "principal_id": api_user_id}
+                     if api_user_id is not None else {"kind": "admin"})
+        kind, identity = await run_sync(principal_preference_identity, principal)
+        global_events.resources_changed(*resources, user_type=kind, user_id=identity)
+        from app.core.sync_engine import sync_engine
+        await sync_engine._broadcast_user_message(
+            api_user_id or "admin",
+            {"type": "chat_access_changed", "session_id": session_id},
+        )
+    except Exception:
+        logger.debug("Access refresh notification unavailable", exc_info=True)
+
+
+def grant_failure(exc: BaseException) -> tuple[int, str]:
+    """Status and fixed message for a failed grant. Never echoes private inputs."""
+    if isinstance(exc, AccessDenied):
+        return 400, str(exc)
+    if isinstance(exc, asyncssh.PermissionDenied):
+        return 400, "SSH sign-in was rejected. Check the username and password or private key."
+    if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+        return 400, "The SSH host key did not match. Verify the server fingerprint using a trusted source."
+    if isinstance(exc, TimeoutError):
+        return 400, "The SSH connection timed out. Check the server address, port and reachability."
+    if isinstance(exc, (asyncssh.Error, ValueError, OSError)):
+        logger.warning("Chat access connection failed: %s", type(exc).__name__)
+        return 400, "Could not connect. Check the path or SSH address, host-key fingerprint and credentials."
+    logger.warning("Chat access grant failed: %s", type(exc).__name__)
+    return 500, "Private access is unavailable on this worker. Check the worker log before retrying."
+
+
 class Broker:
     def __init__(self):
         self.grants: dict[str, Grant] = {}
@@ -175,37 +253,16 @@ class Broker:
         self._notifications: set[asyncio.Task] = set()
 
     def _notify(self, session_id: str, owner: tuple, *, saved: bool = False) -> None:
-        # Saved connections belong to the owner, not the session, and every
-        # session's panel lists them: a saved-list change also invalidates the
-        # unscoped resource so the owner's panels on other sessions refresh.
-        resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
-
-        async def send():
-            try:
-                from app.core.global_events import global_events
-                # Root-layout subscribers use the authenticated global socket,
-                # not the legacy session socket below. Publish only an
-                # invalidation; snapshots still enforce private-access policy.
-                from app.core.preference_identity import principal_preference_identity
-                from app.db.async_database import run_sync
-                principal = ({"kind": "api_user", "principal_id": owner[2]}
-                             if owner[2] is not None else {"kind": "admin"})
-                kind, identity = await run_sync(principal_preference_identity, principal)
-                global_events.resources_changed(*resources, user_type=kind, user_id=identity)
-                from app.core.sync_engine import sync_engine
-                await sync_engine._broadcast_user_message(
-                    owner[2] or "admin",
-                    {"type": "chat_access_changed", "session_id": session_id},
-                )
-            except Exception:
-                logging.getLogger(__name__).debug("Access refresh notification unavailable", exc_info=True)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # Synchronous shutdown has no connected UI to notify.
-        task = loop.create_task(send())
+        task = loop.create_task(publish_change(session_id, owner[2] if len(owner) > 2 else None, saved=saved))
         self._notifications.add(task)
         task.add_done_callback(self._notifications.discard)
+        # Devices showing this session as a mirror refresh through their own worker.
+        from app.network import chat_access_routing
+        chat_access_routing.notify_watchers(session_id, saved=saved)
 
     async def request(self, session_id: str, kind: str, purpose: str):
         owner = await session_owner(session_id)
@@ -280,6 +337,19 @@ class Broker:
             raise
         finally:
             request.claiming = False
+
+    async def forget(self, session_id: str, connection_id: str):
+        """Delete one of the owner's saved connections and revoke grants that use it."""
+        from app.core import chat_vault
+        from app.db.async_database import run_sync
+        owner = await session_owner(session_id)
+        await run_sync(chat_vault.delete, owner, connection_id)
+        for grant in list(self.grants.values()):
+            if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
+                self.revoke(grant.session_id, grant.id)
+        # Clients no longer poll empty snapshots, so tell every panel of this
+        # owner (on any session) that the saved list changed.
+        self._notify(session_id, owner, saved=True)
 
     async def decline(self, session_id: str, request_id: str):
         await session_owner(session_id)
@@ -454,18 +524,66 @@ class Broker:
             raise AccessDenied("Access expired or ownership changed. Request a new grant.")
         return grant
 
-    async def snapshot(self, session_id: str, row: dict | None = None):
-        # The access API has just loaded and authorized this session row; reuse
-        # it so each panel refresh reads the session once, not twice. Callers
-        # without a row still load it here.
-        owner = owner_from_row(row) if row is not None else await session_owner(session_id)
-        result = []
+    def _live_grants(self, session_id: str, owner: tuple) -> list[Grant]:
+        """This session's usable grants; expired or re-owned ones are revoked."""
+        live = []
         for grant in list(self.grants.values()):
             if grant.session_id == session_id:
                 if grant.revoked or grant.expires_at <= time.time() or grant.owner != owner:
                     self.revoke(session_id, grant.id)
                 else:
-                    result.append(grant.public())
+                    live.append(grant)
+        return live
+
+    async def resources(self, session_id: str) -> dict:
+        """The model-facing grant listing (ChatResources). Never asks the user.
+
+        Unlike ``snapshot`` it skips the saved-connection catalogue, which the
+        tool never returned, so its only blocking step is the session-owner
+        read. That read runs on the listing's own pool under
+        ``LISTING_TIMEOUT_SECONDS``, so neither a pending RequestChatAccess nor
+        a busy shared executor can hold it. Timing logs carry no addresses,
+        labels or credentials.
+        """
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(LISTING_TIMEOUT_SECONDS):
+                owner = await session_owner(session_id, executor=_listing_executor)
+        except TimeoutError:
+            logger.warning(
+                "ChatResources listing timed out: session=%s owner_lookup=%.2fs default_executor=%s",
+                session_id, time.monotonic() - started, _default_executor_load(),
+            )
+            raise AccessDenied(
+                f"Listing access handles timed out after {LISTING_TIMEOUT_SECONDS:g} seconds on this "
+                "worker. No access was requested or changed; try ChatResources again shortly."
+            ) from None
+        except AccessDenied:
+            raise
+        except Exception as exc:
+            logger.warning("ChatResources owner lookup failed: session=%s error=%s",
+                           session_id, type(exc).__name__)
+            raise AccessDenied(
+                "Listing access handles failed: this worker could not read the session. "
+                "No access was requested or changed."
+            ) from None
+        looked_up = time.monotonic()
+        grants = [grant.model_public() for grant in self._live_grants(session_id, owner)]
+        folder_available = chat_files.available()
+        finished = time.monotonic()
+        total = finished - started
+        log = logger.warning if total >= LISTING_SLOW_SECONDS else logger.info
+        log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
+            "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
+            finished - looked_up, total, _default_executor_load())
+        return {"grants": grants, "folder_available": folder_available}
+
+    async def snapshot(self, session_id: str, row: dict | None = None):
+        # The access API has just loaded and authorized this session row; reuse
+        # it so each panel refresh reads the session once, not twice. Callers
+        # without a row still load it here.
+        owner = owner_from_row(row) if row is not None else await session_owner(session_id)
+        result = [grant.public() for grant in self._live_grants(session_id, owner)]
         from app.core import chat_vault, encryption
         from app.db.async_database import run_sync
         saved = await run_sync(chat_vault.catalog, owner, cache_empty=True)
@@ -535,12 +653,18 @@ class Broker:
     async def run(self, session_id: str, grant_id: str, operation: str, arguments: dict):
         grant = await self.get(session_id, grant_id)
         if operation == "command":
-            if grant.kind != "machine":
-                raise AccessDenied("A folder grant cannot run commands. Local worker Bash is unavailable.")
+            if grant.kind not in ("machine", "folder") or (grant.kind == "folder" and grant.root is None):
+                raise AccessDenied("Commands need a machine grant or a folder grant. Local worker Bash is unavailable.")
             command = arguments.get("command")
             if not isinstance(command, str) or not command.strip() or len(command) > 16384 or "\x00" in command:
                 raise AccessDenied("Provide a command of at most 16,384 characters.")
             arguments = {"command": command}
+            if grant.kind == "folder":
+                # Refuse before asking the user to approve a command that cannot run.
+                await chat_shell.ensure_available()
+                # Re-read after the await: revocation closes grant.root.
+                grant = await self.get(session_id, grant_id)
+                await chat_shell.ensure_folder(grant.root)
         elif operation == "http":
             if grant.kind != "service" or grant.origin is None:
                 raise AccessDenied("This operation requires an HTTPS service grant.")
@@ -583,7 +707,13 @@ class Broker:
             await self.approve(grant, operation, arguments)
         await self.get(session_id, grant_id)
         if operation in ("command", "http"):
-            if operation == "command":
+            root = None
+            if operation == "command" and grant.kind == "folder":
+                # Duplicated before any await: revocation closes grant.root, and
+                # a reused descriptor number must never reach the sandbox.
+                root = os.dup(grant.root)
+                work = chat_shell.run(root, grant.writable, arguments["command"])
+            elif operation == "command":
                 work = self.remote_command(grant, arguments["command"])
             else:
                 work = chat_services.perform(grant.origin, grant.header, grant.secret, arguments["method"],
@@ -605,6 +735,8 @@ class Broker:
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 grant.tasks.discard(task)
+                if root is not None:
+                    os.close(root)
         # Bounded synchronous descriptor operations cannot interleave with revoke.
         if operation == "read":
             return {"content": chat_files.read(grant.root, arguments["path"])}

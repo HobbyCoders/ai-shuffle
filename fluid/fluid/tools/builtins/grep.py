@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from fluid.tools.builtins._util import (
     missing_path_note,
     repeat_search_pointer,
     result_digest,
+    rg_prune_globs,
     truncate,
     walk_files,
 )
@@ -60,7 +61,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         f"fallback). Matches are capped at {MAX_MATCHES} by default — a note "
         "tells you when the cap was hit; raise `limit` (up to "
         f"{MAX_LIMIT}) or narrow the pattern to see more. Ignored and hidden "
-        "files are skipped unless no_ignore is set. Matches inside "
+        "files are skipped unless no_ignore is set; heavy directories "
+        "(node_modules, .git, build output, virtualenvs) stay pruned even "
+        "then, so pass a path inside one to search it. Matches inside "
         "credential-pattern files (.env, keys) are withheld and flagged with "
         f"a note;{read_route} when its content is genuinely needed. Finding "
         "nothing is not an error: the result is the header plus the literal "
@@ -206,12 +209,16 @@ def _drop_sensitive_matches(lines: list[str]) -> tuple[list[str], int]:
     kept: list[str] = []
     dropped = 0
     for line in lines:
-        match = _MATCH_LINE_RE.match(line)
-        if match is not None and is_sensitive_path(match.group(1)):
+        if _is_sensitive_match(line, is_sensitive_path):
             dropped += 1
         else:
             kept.append(line)
     return kept, dropped
+
+
+def _is_sensitive_match(line: str, is_sensitive_path) -> bool:
+    match = _MATCH_LINE_RE.match(line)
+    return match is not None and is_sensitive_path(match.group(1))
 
 
 def _sensitive_note(dropped: int) -> list[str]:
@@ -232,22 +239,41 @@ def _absolutize(lines: list[str], run_dir: Path, target: str) -> list[str]:
     rg was told to search is rewritten, so anything else in the stream (and any
     line that is not a match line) passes through untouched.
     """
-    if target == ".":
-        heads = ("./", ".\\")
-    else:
-        heads = (target + ":",)
-    out: list[str] = []
-    for line in lines:
-        for head in heads:
-            if line.startswith(head):
-                rest = line[len(head):]
-                line = (
-                    f"{run_dir}{os.sep}{rest}" if target == "."
-                    else f"{run_dir / target}:{rest}"
-                )
-                break
-        out.append(line)
-    return out
+    return [_absolutize_line(line, run_dir, target) for line in lines]
+
+
+def _absolutize_line(line: str, run_dir: Path, target: str) -> str:
+    """:func:`_absolutize` for one line."""
+    heads = ("./", ".\\") if target == "." else (target + ":",)
+    for head in heads:
+        if line.startswith(head):
+            rest = line[len(head):]
+            return (
+                f"{run_dir}{os.sep}{rest}" if target == "."
+                else f"{run_dir / target}:{rest}"
+            )
+    return line
+
+
+async def _byte_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
+    """Yield ``\\n``-separated lines from ``stream`` as they arrive.
+
+    Reads fixed-size chunks rather than ``readline()``: a match in a minified
+    file can be one line of up to ``--max-filesize``, past StreamReader's
+    64KB line limit.
+    """
+    pending: list[bytes] = []
+    while chunk := await stream.read(65536):
+        *done, rest = chunk.split(b"\n")
+        if done:
+            done[0] = b"".join([*pending, done[0]])
+            pending.clear()
+            for line in done:
+                yield line
+        if rest:
+            pending.append(rest)
+    if pending:
+        yield b"".join(pending)
 
 
 async def _ripgrep(
@@ -256,16 +282,22 @@ async def _ripgrep(
     head = _header("rg", root)
     # ``--max-count`` is a PER-FILE bound, so it cannot enforce the global cap
     # on its own — a thousand files each return up to ``limit`` lines. It stays
-    # as a cheap per-file bound; the global slice happens below.
+    # as a cheap per-file bound; the global cap is enforced on the stream below.
     args = [
         rg, "-n", "--no-heading", "--color=never",
         "--max-count", str(limit),
         "--max-filesize", _MAX_FILESIZE,
     ]
-    if no_ignore:
-        args.append("-uu")
     if glob:
         args += ["--glob", glob]
+    if no_ignore:
+        # -uu turns off ignore files and hidden-file skipping; the heavy
+        # directories stay pruned, exactly as the Python fallback prunes them,
+        # so no_ignore does not mean "search .git and node_modules too". The
+        # excludes go after the caller's glob because the last matching glob
+        # wins: `src/**` also matches src/__pycache__/ and would re-include it.
+        args.append("-uu")
+        args += rg_prune_globs()
     # rg matches ``--glob`` values against paths relative to its OWN working
     # directory, NOT the search target. Handing it an absolute root while the
     # process sat in an ancestor directory anchored `frontend/src/**` at that
@@ -277,43 +309,75 @@ async def _ripgrep(
     # ``--`` so a pattern starting with '-' is not parsed as a flag.
     args += ["--", pattern, target]
 
+    from fluid.tools.hardening import is_sensitive_path
+
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(run_dir),
     )
+    # stderr drains alongside stdout so a chatty rg cannot fill its pipe and
+    # stall before stdout reaches EOF.
+    stderr_task = asyncio.ensure_future(proc.stderr.read())
+    lines: list[str] = []
+    dropped = 0
+    capped = False
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=RG_TIMEOUT_S)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.kill()
-        with contextlib.suppress(Exception):
+        async with (
+            asyncio.timeout(RG_TIMEOUT_S),
+            contextlib.aclosing(_byte_lines(proc.stdout)) as stream,
+        ):
+            # Matches are filtered as they stream in, and rg is stopped as soon
+            # as one more than ``limit`` has been kept: the rest of the tree is
+            # never searched and the output never sits in memory.
+            async for raw in stream:
+                if not raw:
+                    continue
+                line = _absolutize_line(raw.decode(errors="replace"), run_dir, target)
+                if _is_sensitive_match(line, is_sensitive_path):
+                    dropped += 1
+                elif len(lines) < limit:
+                    lines.append(line)
+                else:
+                    capped = True
+                    break
+            if capped:
+                _kill(proc)
             await proc.wait()
+            stderr = await stderr_task
+    except TimeoutError:
         return ToolOutcome(
             text=f"{head}\nsearch timed out after {RG_TIMEOUT_S:g}s", is_error=True
         )
+    finally:
+        if proc.returncode is None:
+            _kill(proc)
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        if not stderr_task.done():
+            stderr_task.cancel()
 
     # rg: 0 = matches, 1 = no matches, >=2 = real error (bad regex, bad path).
-    if (proc.returncode or 0) >= 2:
+    # A run stopped at the cap was killed by us, so its exit status says
+    # nothing about the search.
+    if not capped and (proc.returncode or 0) >= 2:
         detail = stderr.decode(errors="replace").strip() or f"rg exited {proc.returncode}"
         return ToolOutcome(text=f"{head}\nrg error: {truncate(detail, 4000)}", is_error=True)
 
-    lines = stdout.decode(errors="replace").split("\n")
-    while lines and not lines[-1]:
-        lines.pop()
-    lines = _absolutize(lines, run_dir, target)
-    lines, dropped = _drop_sensitive_matches(lines)
-    total = len(lines)
     notes: list[str] = _sensitive_note(dropped)
-    if total > limit:
-        lines = lines[:limit]
+    if capped:
         notes.append(
-            f"[showing first {limit} of {total} matches — "
+            f"[search truncated: match cap {limit} reached — "
             "pass a higher limit or narrow the pattern]"
         )
     text = truncate("\n".join(lines)).rstrip("\n")
     return ToolOutcome(text="\n".join([head, text or "(no matches)", *notes]))
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.kill()
 
 
 def _pure_python_grep(

@@ -116,17 +116,13 @@ async def test_grep_rg_branch_passes_negation_through(tmp_path, monkeypatch) -> 
 
     from fluid.tools.builtins import grep as grep_mod
 
+    from tests.unit.test_grep_engine_edges import FakeRgProc
+
     seen: list[list[str]] = []
-
-    class _Proc:
-        returncode = 1
-
-        async def communicate(self):
-            return b"", b""
 
     async def fake_exec(*args, **kwargs):
         seen.append(list(args))
-        return _Proc()
+        return FakeRgProc(returncode=1)
 
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
     monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)

@@ -1,40 +1,66 @@
 /** Owner-only assistant controls over the existing unified agents and sessions. */
 import { api } from './client';
+import avatarIds from '$lib/components/assistant/avatars/avatars.json';
 
-export const AVATARS = ['robot', 'spark', 'orbit', 'sprout', 'pixel'] as const;
-export type AvatarId = typeof AVATARS[number];
-export interface AgentIdentity { id: string; name: string; avatar_id: AvatarId }
+/** An avatar preset id: a file name in components/assistant/avatars. */
+export type AvatarId = string;
+/** The preset order, from avatars.json (the backend allowlist is checked against it). */
+export const AVATARS: readonly AvatarId[] = avatarIds;
+/** `dedicated` marks the agent Assistant setup created for itself. */
+export interface AgentIdentity { id: string; name: string; avatar_id: AvatarId; dedicated?: boolean }
+export const DEFAULT_ASSISTANT_NAME = 'Assistant';
+export const randomAvatar = (): AvatarId => AVATARS[Math.floor(Math.random() * AVATARS.length)];
+/**
+ * What the assistant knows about its owner. The server detects it from the
+ * install (account, Gmail connector, gh CLI, project checkouts); the owner
+ * can correct a field, and an empty correction goes back to the detected value.
+ */
 export interface AssistantIntroduction {
  preferred_name?: string;
+ email?: string;
  github_username?: string;
  repository_refs?: string[];
+ /** Project names; detected only. */
+ projects?: string[];
+ /** Only in introductions saved before detection. */
  project_ids?: string[];
  notes?: string;
 }
-export interface AssistantLimits {
- max_runs_per_day: number;
- max_concurrent_runs: number;
- max_turns: number;
- timeout_seconds: number;
- max_cost_per_run: number;
- max_cost_per_day: number;
-}
-export interface AssistantState extends AssistantLimits {
+export type IntroductionCorrection = Partial<Pick<AssistantIntroduction, 'preferred_name' | 'email' | 'github_username' | 'repository_refs'>>;
+/** Connections the assistant page suggests when this worker has none. */
+export type SuggestedConnection = 'gmail' | 'github';
+/**
+ * Background research has no owner controls: the server runs it whenever an
+ * agent is set, its safety guard is up and a source is opted in (`ready`).
+ * `enabled` mirrors that. Research limits are server-side only and are not
+ * in this response. A run that finds something posts a brief into the home
+ * conversation.
+ */
+export interface AssistantState {
  agent_id: string | null;
  home_session_id: string | null;
  configured: boolean;
  enabled: boolean;
- paused: boolean;
- status: 'unconfigured' | 'agent_unavailable' | 'disabled' | 'paused' | 'guard_unavailable' | 'ready';
+ status: 'unconfigured' | 'agent_unavailable' | 'guard_unavailable' | 'no_sources' | 'ready';
+ /** Opted-in sources research may read. */
+ research_sources: number;
  agent: AgentIdentity | null;
  assistant_name: string | null;
  avatar_id: AvatarId;
  avatar_presets: AvatarId[];
+ /** Detected values with the owner's corrections applied. */
  introduction: AssistantIntroduction;
+ introduction_detected?: AssistantIntroduction;
+ /** Fields the owner corrected. */
+ introduction_corrected?: (keyof AssistantIntroduction)[];
+ suggested_connections?: SuggestedConnection[];
  proactive_guard_ready: boolean;
- cost_accounting: string;
- usage: { runs_today: number; reported_cost_today: number; in_flight_runs: number };
+ /** False when the home conversation (and research) lives on another worker. */
+ runs_here?: boolean;
+ /** The worker that owns the home; null before a home exists or off-network. */
+ home_worker?: AssistantWorker | null;
 }
+export interface AssistantWorker { device_id: string | null; name: string; is_self: boolean; online: boolean }
 export interface AssistantSource {
  id: string; connector_id: string; name: string; type: string;
  enabled: boolean; available: boolean; status: string; trigger_ids: string[];
@@ -47,15 +73,14 @@ export interface AssistantActivity {
  source_ids: string[]; event_ids: string[]; cost_usd: number;
  error: string | null; created_at: string; ended_at: string | null;
 }
-export type AssistantPatch = Partial<AssistantLimits & {
- agent_id: string; assistant_name: string; avatar_id: AvatarId;
- enabled: boolean; paused: boolean; introduction: AssistantIntroduction;
+export type AssistantPatch = Partial<{
+ agent_id: string; create_agent: boolean; assistant_name: string; avatar_id: AvatarId;
+ introduction: IntroductionCorrection;
 }>;
-export const getAssistant = () => api.get<AssistantState>('/assistant');
+/** `detect` asks the server to re-read the owner's details first (briefly). */
+export const getAssistant = (detect = false) => api.get<AssistantState>(detect ? '/assistant?detect=true' : '/assistant');
 export const configureAssistant = (patch: AssistantPatch) => api.patch<AssistantState>('/assistant', patch);
 export const openAssistant = () => api.post<{ session_id: string; home_session_id: string }>('/assistant/open');
-export const pauseAssistant = () => api.post<AssistantState>('/assistant/pause');
-export const resumeAssistant = () => api.post<AssistantState>('/assistant/resume');
 export const getAssistantSources = () => api.get<AssistantSource[]>('/assistant/sources');
 export const setAssistantSource = (id: string, enabled: boolean) => api.patch<AssistantSource>(`/assistant/sources/${encodeURIComponent(id)}`, { enabled });
 export const getAssistantActivity = () => api.get<AssistantActivity[]>('/assistant/activity?limit=50');

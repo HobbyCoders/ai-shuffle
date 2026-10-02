@@ -348,6 +348,12 @@ def _on_applied(touched) -> None:
             plugins_sync.apply_desired(plugin_ids)
         except Exception:  # noqa: BLE001
             logger.warning("Applying plugin state failed", exc_info=True)
+    if any(c in ("assistant", "sessions") for c, _r, _o in touched):
+        try:
+            from app.core import assistant_service
+            assistant_service.on_network_applied(touched)
+        except Exception:  # noqa: BLE001
+            logger.warning("Applying assistant state failed", exc_info=True)
     presence_ids = [r for c, r, _ in touched if c == "presence"]
     if presence_ids:
         try:

@@ -79,6 +79,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    USAGE_PROVIDER_KEY,
     capture_usage_identity,
     schedule_context_usage_capture,
     log_captured_cli_stderr,
@@ -637,7 +638,10 @@ async def execute_query(
 
     # Execute query and collect response
     response_text = []
-    metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
+    metadata = {
+        "usage_settlement_key": await capture_usage_identity(session_id),
+        USAGE_PROVIDER_KEY: getattr(options, "aih_provider_id", None),
+    }
     sdk_session_id = None
     sdk_link_persisted = False
 
@@ -1280,7 +1284,10 @@ async def stream_query(
 
         # Execute query
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-        metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
+        metadata = {
+            "usage_settlement_key": await capture_usage_identity(session_id),
+            USAGE_PROVIDER_KEY: getattr(options, "aih_provider_id", None),
+        }
         sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
         # Persist-on-init guard (see stream_to_websocket): write the SDK session id
         # to the sessions row the moment it's captured so a mid-turn crash can't
@@ -2543,7 +2550,10 @@ async def _stream_to_websocket_impl(
                 "_cross_turn": True,
             }
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-        metadata = {"usage_settlement_key": await capture_usage_identity(session_id)}
+        metadata = {
+            "usage_settlement_key": await capture_usage_identity(session_id),
+            USAGE_PROVIDER_KEY: getattr(options, "aih_provider_id", None),
+        }
         interrupted = False
         # Last `model` value emitted via a `model_info` system note THIS turn.
         # Seeded from the init frame so init + first AssistantMessage with

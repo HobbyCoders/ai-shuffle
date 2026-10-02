@@ -521,8 +521,41 @@ async function loadApiUserSessionsInternal() {
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
+// ─── Project Catalog Readiness ───────────────────────────────────────────────
+
+/**
+ * A new chat's remembered project and branch resolve against BOTH halves of
+ * the project catalog (this worker's /projects and the shared /cluster/projects).
+ * Before both have answered once, a cluster-linked pick resolves to no local
+ * project and no branch, so a send in that window would go out on an
+ * auto-named branch (#1636). A failed load still counts as answered, so a
+ * held send never waits forever; `projectCatalogFailed` says it fell short.
+ */
+const _catalogAnswered = { projects: false, cluster: false };
+const _catalogFailures = { projects: false, cluster: false };
+let _catalogWaiters: (() => void)[] = [];
+
+function settleCatalogHalf(half: 'projects' | 'cluster', ok: boolean) {
+	_catalogAnswered[half] = true;
+	_catalogFailures[half] = !ok;
+	if (!_catalogAnswered.projects || !_catalogAnswered.cluster) return;
+	const waiters = _catalogWaiters;
+	_catalogWaiters = [];
+	for (const resolve of waiters) resolve();
+}
+
 export const appData = {
 	get current() { return _state; },
+
+	/** Both halves of the project catalog have answered at least once. */
+	get projectCatalogLoaded() { return _catalogAnswered.projects && _catalogAnswered.cluster; },
+	/** The latest load of either catalog half failed. */
+	get projectCatalogFailed() { return _catalogFailures.projects || _catalogFailures.cluster; },
+	/** Resolves once both catalog halves have answered (immediately if they have). */
+	whenProjectCatalogLoaded(): Promise<void> {
+		if (appData.projectCatalogLoaded) return Promise.resolve();
+		return new Promise(resolve => { _catalogWaiters.push(resolve); });
+	},
 
 	subscribe,
 
@@ -573,8 +606,10 @@ export const appData = {
 		try {
 			const projects = await api.get<Project[]>('/projects');
 			_update(s => ({ ...s, projects }));
+			settleCatalogHalf('projects', true);
 		} catch (e) {
 			console.error('Failed to load projects:', e);
+			settleCatalogHalf('projects', false);
 		}
 	},
 
@@ -582,8 +617,10 @@ export const appData = {
 		try {
 			const result = await listClusterProjects();
 			_update(s => ({ ...s, clusterProjects: result.projects }));
+			settleCatalogHalf('cluster', true);
 		} catch (e) {
 			console.error('Failed to load cluster projects:', e);
+			settleCatalogHalf('cluster', false);
 		}
 	},
 

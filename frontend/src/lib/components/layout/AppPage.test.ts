@@ -8,7 +8,7 @@ import type { ViewType } from '$lib/stores/layout.svelte';
 type ActiveView = { type: ViewType; sessionId?: string | null };
 
 const mocks = vi.hoisted(() => ({
- init: vi.fn(), newChat: vi.fn(), destroy: vi.fn(), reconcileSessionMode: vi.fn(), validateSelectedProfile: vi.fn(),
+ init: vi.fn(), newChat: vi.fn(), resolveComposerDefaultsAfterCatalog: vi.fn(), destroy: vi.fn(), reconcileSessionMode: vi.fn(), validateSelectedProfile: vi.fn(),
  load: vi.fn(), openFeaturePage: vi.fn(), openChat: vi.fn(), openSession: vi.fn(), initGlobalStt: vi.fn(),
 }));
 vi.mock('$lib/stores/auth.svelte', async () => {
@@ -104,6 +104,31 @@ describe('AppPage initial Assistant landing', () => {
  it('retains explicit new-chat intent over an older backend session snapshot', async () => {
   active.set({ sessionId: 'old-work', draft: '', project: null }); await boot();
   expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
+ });
+ // #1636: until this settles, the composer shows New Chat while a send goes to
+ // the old session, then the late newChat wipes it from view.
+ it('settles explicit new-chat intent before the startup loads finish', async () => {
+  let release!: () => void; mocks.load.mockReturnValue(new Promise<void>(resolve => { release = resolve; }));
+  active.set({ sessionId: 'old-work', draft: '', project: null }); render(AppPage, { shell });
+  await waitFor(() => expect(mocks.newChat).toHaveBeenCalledOnce());
+  expect(mocks.load).toHaveBeenCalled(); expect(mocks.initGlobalStt).not.toHaveBeenCalled();
+  // A send during the loads creates a session; finishing startup keeps it.
+  active.set({ sessionId: 'sent-during-load', draft: '', project: null });
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
+  expect(get(active).sessionId).toBe('sent-during-load');
+  // The remembered project and branch resolve against the loaded catalog.
+  expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce();
+ });
+ // #1636 review: the composer holds a send until the catalog answers, so the
+ // catalog starts loading alongside init instead of after it.
+ it('starts the project catalog load alongside init', async () => {
+  let finishInit!: () => void; mocks.init.mockReturnValue(new Promise<void>(resolve => { finishInit = resolve; }));
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2));
+  expect(mocks.resolveComposerDefaultsAfterCatalog).not.toHaveBeenCalled();
+  finishInit(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce();
  });
  it('does not replace another feature destination', async () => {
   views.set({ type: 'profile' }); await boot();

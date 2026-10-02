@@ -63,9 +63,9 @@ def _get_allowed_origins() -> Set[str]:
     Returns normalized origin strings (scheme + host + port, no trailing slash).
     """
     origins = set()
-    # Same list as the CORS middleware: CORS_ORIGINS plus the Android app's
-    # bundled-UI origin (whose requests are Bearer-authenticated and therefore
-    # CSRF-exempt anyway; this keeps the two allow-lists consistent).
+    # Same list as the CORS middleware: CORS_ORIGINS plus the Android and iOS
+    # apps' bundled-UI origins (whose requests are Bearer-authenticated and
+    # therefore CSRF-exempt anyway; this keeps the two allow-lists consistent).
     for raw in configured_origins():
         raw = raw.strip()
         if not raw or raw == "*":

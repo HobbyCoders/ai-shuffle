@@ -304,6 +304,9 @@ class Settings(BaseSettings):
     # HTTP/WebSocket APIs, authenticated with a Bearer paired-session token, so
     # this origin is always allowed for CORS regardless of `cors_origins`.
     mobile_app_origin: str = "https://appassets.androidplatform.net"
+    # The iOS app does the same from its own URL scheme (WKURLSchemeHandler in
+    # ios/AIShuffle/Web/BundleSchemeHandler.swift), under the same rules.
+    mobile_ios_app_origin: str = "aishuffle://app"
 
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development

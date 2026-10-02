@@ -39,6 +39,11 @@ _waiters: Dict[str, Set[Tuple[object, object]]] = {}
 _lock = threading.Lock()
 _listener_registered = False
 
+# session_id -> number of await_interaction calls blocked on the user right now.
+# The first one pauses the session's working-time clock, the last one out
+# resumes it (sessions.work_ms, #1619).
+_blocked: Dict[str, int] = {}
+
 
 def _on_gateway_tick(session_id: str) -> None:
     """Gateway global listener — runs on the LISTEN thread; must be cheap and
@@ -153,6 +158,40 @@ def notify_changed(session_id: str) -> None:
     spawn_detached(asyncio.to_thread(_notify_session_blocking, session_id))
 
 
+def _blocked_delta(session_id: str, delta: int) -> int:
+    """Adjust the session's blocked-waiter count; returns the new count."""
+    with _lock:
+        count = max(0, _blocked.get(session_id, 0) + delta)
+        if count:
+            _blocked[session_id] = count
+        else:
+            _blocked.pop(session_id, None)
+        return count
+
+
+async def _set_work_paused(session_id: str, paused: bool) -> None:
+    """Pause or resume the session's working-time clock and push the change.
+
+    Time a turn spends blocked on the user is not working time (owner
+    decision, 2026-10-01). Best-effort: bookkeeping must never break the
+    prompt round-trip, and the device push is fire-and-forget.
+    """
+    try:
+        from app.db import turns
+
+        fn = turns.pause_session_work if paused else turns.resume_session_work
+        if not await asyncio.to_thread(fn, session_id):
+            return
+        from app.core.session_runtime import _broadcast_work_time
+
+        spawn_detached(_broadcast_work_time(session_id))
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "interaction_wait: work-time %s failed for %s",
+            "pause" if paused else "resume", session_id, exc_info=True,
+        )
+
+
 async def await_interaction(
     interaction_id: str,
     session_id: str,
@@ -169,7 +208,12 @@ async def await_interaction(
     from app.db import interactions
 
     event = register_waiter(session_id)
+    first_blocked = _blocked_delta(session_id, +1) == 1
     try:
+        # The turn is now blocked on the user: stop its working-time clock
+        # until the last pending prompt resolves.
+        if first_blocked:
+            await _set_work_paused(session_id, True)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + ttl_seconds
         while True:
@@ -188,3 +232,7 @@ async def await_interaction(
             event.clear()
     finally:
         unregister_waiter(session_id, event)
+        if _blocked_delta(session_id, -1) == 0:
+            # Shielded so a cancelled waiter still reopens the clock; the
+            # resume is a no-op once the turn has left the live slot.
+            await asyncio.shield(_set_work_paused(session_id, False))

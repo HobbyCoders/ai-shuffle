@@ -75,6 +75,7 @@ import json
 import logging
 import math
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
@@ -299,7 +300,8 @@ class HarnessAdapter(ProviderAdapter):
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
         self._provider_kind: Optional[str] = None
-        # "# Workspace facts" card, rendered ONCE per session (cached prefix).
+        # "# Workspace facts" card: the session's persisted snapshot (cached
+        # prefix), see ``_build_workspace_card``.
         self._workspace_card: Optional[str] = None
         # Everything a prompt recompile needs (the Task roster refresh, see
         # ``_refresh_task_roster``) — captured at connect, never rebuilt.
@@ -827,8 +829,9 @@ class HarnessAdapter(ProviderAdapter):
             # git-backed environment block (subprocess + rglob) and runs the
             # agent discovery walk again — all synchronous disk/process IO,
             # so it runs off the loop.
-            # The "# Workspace facts" card: probed once here, byte-stable for
-            # the rest of the session (it lives in the cached prefix).
+            # The "# Workspace facts" card: probed on the session's first
+            # connect and persisted; every later connect reuses those bytes
+            # (it lives in the cached prefix).
             self._workspace_card = await asyncio.to_thread(
                 self._build_workspace_card, options
             )
@@ -1496,16 +1499,34 @@ class HarnessAdapter(ProviderAdapter):
     def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
         """The "# Workspace facts" card for this native session, or None.
 
-        Native legs only. Runs the cheap probes in
-        :func:`app.core.environment.workspace_facts_card` and mints the
+        Native legs only. The card is a per-session snapshot: the first
+        connect runs the cheap probes in
+        :func:`app.core.environment.workspace_facts_card`, mints the
         session-scoped preview-access URL (:mod:`app.core.preview_access`)
-        that lets the agent browser open this worker's own UI. An API key's
-        session gets no URL: the grant would sign it in as the owner. Never
-        raises.
+        that lets the agent browser open this worker's own UI, and persists
+        the rendered text on the session row. Every later connect — a
+        cold-evicted park coming back, a worker restart, another worker on
+        the same database — reuses those exact bytes
+        (:func:`_reusable_workspace_snapshot`). Re-probing there put the
+        session's own setup work (``npm ci`` turning "MISSING in frontend"
+        into "installed") into the system prefix and cost a full uncached
+        prompt on the next call (#1237). Fresh facts belong in turn receipts.
+
+        An API key's session gets no URL: the grant would sign it in as the
+        owner. Blocking DB reads/writes: runs off the loop. Never raises.
         """
         if self._is_delegated:
             return None
+        cwd = options.cwd or "."
         try:
+            session_id = self._resolve_app_session_id()
+            now = time.time()
+            if session_id:
+                snapshot = _load_workspace_snapshot(session_id)
+                card = _reusable_workspace_snapshot(snapshot, cwd, now)
+                if card is not None:
+                    return card
+
             from app.core.config import settings
             from app.core.environment import workspace_facts_card
             from app.core import preview_access
@@ -1513,20 +1534,31 @@ class HarnessAdapter(ProviderAdapter):
 
             browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
             preview_url = None
-            session_id = self._resolve_app_session_id()
+            preview_expires_at = None
             if session_id and browser_host and self._session_runs_as_owner(session_id):
                 try:
+                    token, expires = preview_access.session_token_with_expiry(session_id)
                     preview_url = preview_access.preview_url(
-                        session_id, browser_host, int(settings.port)
+                        session_id, browser_host, int(settings.port), token=token,
                     )
+                    preview_expires_at = expires
                 except Exception:  # noqa: BLE001 — the card still renders
                     logger.warning("[HarnessAdapter] preview access mint failed", exc_info=True)
-            return workspace_facts_card(
-                options.cwd or ".",
+            card = workspace_facts_card(
+                cwd,
                 browser_host=browser_host,
                 app_port=int(settings.port),
                 preview_url=preview_url,
             )
+            if session_id:
+                _store_workspace_snapshot(session_id, {
+                    "v": _WORKSPACE_SNAPSHOT_VERSION,
+                    "card": card,
+                    "cwd": cwd,
+                    "preview_expires_at": preview_expires_at,
+                    "captured_at": int(now),
+                })
+            return card
         except Exception:  # noqa: BLE001 — a card never fails a session
             logger.warning("[HarnessAdapter] workspace facts card failed", exc_info=True)
             return None
@@ -3101,18 +3133,22 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "ProviderRetry":
             # The engine is about to re-send the same request after an empty
-            # provider response. Never terminal; the UI folds consecutive
-            # attempts into one card that counts up.
-            return [SystemMessage(
-                subtype="provider_retry",
-                data={
-                    "attempt": event.attempt,
-                    "max_attempts": event.max_attempts,
-                    "reason": event.reason,
-                    "delay_seconds": event.delay_seconds,
-                    "model": getattr(event, "model", None),
-                },
-            )]
+            # provider response or a dropped connection. Never terminal; the UI
+            # folds consecutive attempts into one card that counts up.
+            data = {
+                "attempt": event.attempt,
+                "max_attempts": event.max_attempts,
+                "reason": event.reason,
+                "delay_seconds": event.delay_seconds,
+                "model": getattr(event, "model", None),
+            }
+            cause = getattr(event, "cause", None)
+            if cause:
+                data["cause"] = cause
+            lowered = getattr(event, "lowered_effort", None)
+            if lowered:
+                data["lowered_effort"] = lowered
+            return [SystemMessage(subtype="provider_retry", data=data)]
 
         if cls == "ProviderAlive":
             # fluid: the provider accepted this model call and its stream is
@@ -6575,6 +6611,73 @@ def _monitor_budget_seconds() -> Optional[int]:
     except Exception:  # noqa: BLE001 — a settings hiccup must not break connect
         return None
     return budget if budget > 0 else None
+
+
+# "# Workspace facts" snapshot persistence (see
+# ``HarnessAdapter._build_workspace_card``). Bumped only if the stored shape
+# changes; a snapshot of another version is re-rendered once.
+_WORKSPACE_SNAPSHOT_VERSION = 1
+#: A frozen card whose preview-access URL dies within this many seconds is
+#: rendered again on the next connect instead of handing the agent a dead
+#: link. The token lives 18-24h (``preview_access.session_token``), so a
+#: long session pays at most one prefix change per day for it.
+_WORKSPACE_PREVIEW_RENEW_MARGIN = 3600
+
+
+def _load_workspace_snapshot(session_id: str) -> Optional[Dict[str, Any]]:
+    """The session row's persisted card snapshot, or None. Blocking DB read;
+    a missing column or database is "no snapshot", never an error."""
+    try:
+        from app.db import database
+
+        return database.get_session_workspace_facts(session_id)
+    except Exception:  # noqa: BLE001 — render fresh instead
+        logger.debug("[HarnessAdapter] workspace facts snapshot read failed", exc_info=True)
+        return None
+
+
+def _store_workspace_snapshot(session_id: str, snapshot: Dict[str, Any]) -> None:
+    """Persist ``snapshot`` on the session row. Blocking DB write; a failure
+    leaves the card in place for this connection and only costs the next
+    reconnect a fresh render."""
+    try:
+        from app.db import database
+
+        database.set_session_workspace_facts(session_id, snapshot)
+    except Exception:  # noqa: BLE001 — the card is already rendered
+        logger.debug("[HarnessAdapter] workspace facts snapshot write failed", exc_info=True)
+
+
+def _reusable_workspace_snapshot(
+    snapshot: Optional[Dict[str, Any]], cwd: str, now: float,
+) -> Optional[str]:
+    """The persisted card's exact text when it can be reused, else None.
+
+    Reused unless: there is no snapshot (first connect) or it is malformed;
+    it was rendered for a different working directory (the prompt's
+    environment section names the cwd, so that prefix has changed anyway
+    and the probes describe another checkout); or the preview-access URL it
+    quotes is expired or about to be. Filesystem changes since the first
+    connect are deliberately NOT a reason: the card is a session-start
+    baseline and says so.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("v") != _WORKSPACE_SNAPSHOT_VERSION:
+        return None
+    card = snapshot.get("card")
+    if not isinstance(card, str) or not card:
+        return None
+    if snapshot.get("cwd") != cwd:
+        return None
+    expires = snapshot.get("preview_expires_at")
+    if expires is not None:
+        try:
+            if float(expires) - now <= _WORKSPACE_PREVIEW_RENEW_MARGIN:
+                return None
+        except (TypeError, ValueError):
+            return None
+    return card
 
 
 # Capabilities NativeLoop wires onto every native session itself (mirrors

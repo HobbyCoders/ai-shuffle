@@ -121,6 +121,23 @@ describe('voice transcript alongside a working chat agent', () => {
 		expect(state.messages[0].streaming).toBe(true);
 		expect(state.messages[1].streaming).toBe(false);
 	});
+
+	it('a research brief posted between turns is a closed bubble that never touches the live turn', () => {
+		const state = fold([
+			ev('turn.started', { turn_id: 'work', profile_id: 'coding' }),
+			ev('assistant.text_delta', { turn_id: 'work', text: 'Working' }),
+			ev('turn.started', { turn_id: 'brief-1' }),
+			ev('message.assistant', { turn_id: 'brief-1', content: '**From background research**\n\nInvoice due Friday.' }),
+			ev('turn.completed', { turn_id: 'brief-1' }),
+		]);
+		expect(state.liveTurnId).toBe('work');
+		expect(state.isStreaming).toBe(true);
+		const brief = state.messages.at(-1);
+		expect(brief?.role).toBe('assistant');
+		expect(brief?.content).toContain('Invoice due Friday.');
+		expect(brief?.streaming).toBe(false);
+		expect(state.messages[0].streaming).toBe(true);
+	});
 });
 
 // ─── Turn lifecycle ─────────────────────────────────────────────────────────
@@ -1829,6 +1846,89 @@ describe('system + unknown events', () => {
 		expect(s.messages).toHaveLength(1);
 		expect(s.messages[0].id).toBe('pr1'); // same card, not a second one
 		expect(s.messages[0].systemData).toMatchObject({ attempt: 2, max_attempts: 10 });
+	});
+
+	it('a provider_retry retires the tool card a truncated response left open', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('tool.use', { tool_use_id: 'done', name: 'Read', input: { file_path: 'a' } }),
+			ev('tool.result', { tool_use_id: 'done', content_preview: 'ok' }),
+			ev('tool.input_delta', { tool_use_id: 'cut', partial_json: '{"code":', name: 'run_python' }),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 3, reason: 'truncated stream from provider' },
+			}),
+		]);
+		const cut = s.messages.find((m) => m.toolId === 'cut');
+		expect(cut).toMatchObject({ toolStatus: 'error', streaming: false });
+		// A call that closed and ran keeps its own status.
+		expect(s.messages.find((m) => m.toolId === 'done')?.toolStatus).toBe('complete');
+	});
+
+	describe('connection-drop retry', () => {
+		const droppedTurn = () => [
+			ev('turn.started'),
+			ev('message.user', { content: 'go' }),
+			ev('assistant.text_delta', { text: 'Before the tools.' }),
+			ev('tool.use', { tool_use_id: 'done', name: 'Read', input: { file_path: 'a' } }),
+			ev('tool.result', { tool_use_id: 'done', content_preview: 'ok' }),
+			// The attempt that drops: text, a finished call, an unfinished one.
+			ev('assistant.text_delta', { text: 'Partial answer' }),
+			ev('tool.use', { tool_use_id: 'closed', name: 'Bash', input: { command: 'ls' } }),
+			ev('tool.input_delta', { tool_use_id: 'cut', partial_json: '{"code":', name: 'run_python' }),
+			ev('system.note', {
+				id: 'pr1',
+				subtype: 'provider_retry',
+				data: { attempt: 1, max_attempts: 2, cause: 'connection_dropped' },
+			}),
+			ev('tool.result', { tool_use_id: 'closed', is_error: true, content_preview: 'Tool not executed' }),
+		];
+
+		it('moves the dropped attempt onto its card and keeps earlier output', () => {
+			const s = fold([...droppedTurn(), ev('assistant.text_delta', { text: 'Full answer' })]);
+			const texts = s.messages.filter((m) => m.role === 'assistant' && m.type === 'text');
+			expect(texts.map((m) => m.content)).toEqual(['Before the tools.', 'Full answer']);
+			expect(s.messages.some((m) => m.toolId === 'closed' || m.toolId === 'cut')).toBe(false);
+			expect(s.messages.find((m) => m.toolId === 'done')?.toolStatus).toBe('complete');
+			const card = s.messages.find((m) => m.systemSubtype === 'provider_retry');
+			expect(card?.systemData).toMatchObject({
+				cause: 'connection_dropped',
+				settled: true,
+				superseded: { text: 'Partial answer', tools: ['Bash', 'run_python'] },
+			});
+		});
+
+		it('folds the same way live and on a replay from scratch', () => {
+			const events = [...droppedTurn(), ev('assistant.text_delta', { text: 'Full answer' })];
+			const live = events.reduce((state, event) => reduceAll([event], state), reduceAll([]));
+			expect(live.messages).toEqual(reduceAll(events).messages);
+		});
+
+		it('keeps every dropped attempt when the card counts up in place', () => {
+			const s = fold([
+				ev('turn.started'),
+				ev('assistant.text_delta', { text: 'First try' }),
+				ev('system.note', {
+					id: 'pr1',
+					subtype: 'provider_retry',
+					data: { attempt: 1, max_attempts: 2, cause: 'connection_dropped' },
+				}),
+				// The second attempt streams only encrypted reasoning, then drops.
+				ev('system.note', {
+					id: 'pr2',
+					subtype: 'provider_retry',
+					data: { attempt: 2, max_attempts: 2, cause: 'connection_dropped', lowered_effort: 'high' },
+				}),
+			]);
+			const cards = s.messages.filter((m) => m.systemSubtype === 'provider_retry');
+			expect(cards).toHaveLength(1);
+			expect(cards[0].systemData).toMatchObject({
+				attempt: 2,
+				lowered_effort: 'high',
+				superseded: { text: 'First try', tools: [] },
+			});
+		});
 	});
 
 	it('a provider_retry after an unrelated message appends a new card', () => {

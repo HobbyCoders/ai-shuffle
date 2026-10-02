@@ -34,8 +34,8 @@ def upstream(monkeypatch):
             body = {"data": {"total_credits": 10, "total_usage": 4}}
         elif path.endswith("/key"):
             body = {"data": {"usage": 1.5, "limit": 10}}
-        elif path.endswith("/account/billing"):
-            body = {"credits": {"current_balance": 7, "currency": "USD"}}
+        elif path.endswith("/billing/user_balance"):
+            body = 7
         elif path.endswith("/billing"):
             body = {"config": {"creditUsagePercent": 12}}
         elif path.endswith("/settings"):
@@ -89,8 +89,16 @@ def test_subscription_endpoints_are_labeled_unofficial():
         source = usage_sources.SOURCES[source_id]
         assert source.subscription_specific
         assert source.public()["support_label"] == "Unofficial, subscription-specific endpoint"
-    for source_id in ("openai_admin", "openrouter_key", "openrouter_credits", "fal_billing"):
+    for source_id in ("openai_admin", "openrouter_key", "openrouter_credits"):
         assert usage_sources.SOURCES[source_id].support == usage_sources.DOCUMENTED
+
+
+def test_fal_balance_uses_the_ordinary_key_endpoint_and_says_it_is_undocumented():
+    source = usage_sources.SOURCES["fal_billing"]
+    assert [e.url for e in source.endpoints] == ["https://rest.alpha.fal.ai/billing/user_balance"]
+    assert source.support == usage_sources.UNDOCUMENTED
+    assert source.public()["support_label"] == "Undocumented endpoint"
+    assert "Admin" not in source.credential
 
 
 def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
@@ -126,7 +134,7 @@ def test_polled_sources_follow_the_registry(row, expected):
 
 @pytest.mark.parametrize("url", [
     "https://api.openai.com/v1/dashboard/billing/credit_grants",
-    "https://rest.alpha.fal.ai/billing/user_balance",
+    "https://api.fal.ai/v1/account/billing?expand=credits",
     "https://api.fal.ai/v1/account/billing",
 ])
 def test_unregistered_endpoints_are_refused(url):
@@ -167,7 +175,7 @@ async def test_full_poll_only_requests_registered_endpoints(upstream, monkeypatc
     _openrouter()
     db.create_model_provider("xai-row", "xAI", "xai", "https://api.x.ai/v1", auth_token="xai-key")
     db.create_model_provider("custom-openai", "Proxy", "openai", "https://proxy.example/v1", auth_token="k")
-    db.set_system_setting("fal_billing_api_key", "fal-admin")
+    db.set_system_setting("fal_api_key", "fal-media-key")
     await ProviderUsageMonitor().poll_once()
 
     registered = []
@@ -192,13 +200,13 @@ def _raw(snapshot_id):
 
 @pytest.mark.asyncio
 async def test_denied_fal_key_is_not_reprobed_until_resaved(upstream):
-    db.set_system_setting("fal_billing_api_key", "fal-admin")
-    upstream["status"]["api.fal.ai"] = 403
+    db.set_system_setting("fal_api_key", "fal-media-key")
+    upstream["status"]["rest.alpha.fal.ai"] = 403
     monitor = ProviderUsageMonitor()
     await monitor._poll_fal()
-    assert hosts(upstream) == ["api.fal.ai"]
+    assert hosts(upstream) == ["rest.alpha.fal.ai"]
     assert _raw("fal-ai")["usage_error"] == "billing_access_denied"
-    assert "fal-admin" not in str(_raw("fal-ai"))
+    assert "fal-media-key" not in str(_raw("fal-ai"))
 
     for _ in range(3):
         await monitor._poll_fal()
@@ -206,9 +214,9 @@ async def test_denied_fal_key_is_not_reprobed_until_resaved(upstream):
     assert len(upstream["requests"]) == 1 and upstream["claims"] == 1
 
     # Re-saving the same key bumps the credential revision and probes again.
-    db.set_system_setting("fal_billing_api_key", "fal-admin")
-    await usage_budget.resume_authentication(provider_usage.FAL_BILLING_URL, {"Authorization": "Key fal-admin"})
-    upstream["status"]["api.fal.ai"] = 200
+    db.set_system_setting("fal_api_key", "fal-media-key")
+    await usage_budget.resume_authentication(provider_usage.FAL_BALANCE_URL, {"Authorization": "Key fal-media-key"})
+    upstream["status"]["rest.alpha.fal.ai"] = 200
     await monitor._poll_fal()
     assert len(upstream["requests"]) == 2
     snapshot = next(s for s in db.get_all_provider_usage_snapshots() if s["provider_id"] == "fal-ai")

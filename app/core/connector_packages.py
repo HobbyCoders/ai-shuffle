@@ -208,7 +208,13 @@ def info(kind: str) -> PluginInfo:
                       description=f"Official {kind} connector runtime", version=(state or {}).get("release", CATALOG["release"]),
                       scope="user", install_path=str(root() / kind), enabled=bool(state and state.get("enabled")),
                       installed_at=datetime.fromisoformat(state["installed_at"]) if state else None,
-                      connector_type=kind)
+                      connector_type=kind, format="shuffle", trust="official",
+                      components=_components(kind))
+
+
+def _components(kind: str) -> list[dict]:
+    """A connector runtime is one component of the Shuffle connector format."""
+    return [{"kind": "connector_runtime", "name": kind, "support": "loaded", "reason": "", "detail": ""}]
 
 
 def installed() -> list[PluginInfo]:
@@ -218,7 +224,8 @@ def installed() -> list[PluginInfo]:
 def available() -> list[AvailablePlugin]:
     return [AvailablePlugin(id=package_id(kind), name=_DISPLAY_NAMES.get(kind, kind), marketplace=MARKETPLACE,
                             marketplace_path="", description=f"Official {kind} connector runtime",
-                            installed=bool(record(kind)), enabled=info(kind).enabled, connector_type=kind)
+                            installed=bool(record(kind)), enabled=info(kind).enabled, connector_type=kind,
+                            format="shuffle", components=_components(kind))
             for kind in CATALOG["packages"]]
 
 

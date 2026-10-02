@@ -504,7 +504,7 @@ app.add_middleware(CSRFProtectionMiddleware)
 
 # CORS middleware - configure origins via CORS_ORIGINS environment variable
 # Use "*" only for development; in production, specify exact origins
-# CORS_ORIGINS plus the Android app's bundled-UI origin (see app/core/cors.py).
+# CORS_ORIGINS plus the Android and iOS apps' bundled-UI origins (see app/core/cors.py).
 cors_origins = configured_origins()
 
 # If "*" is in the list, we need to handle it specially

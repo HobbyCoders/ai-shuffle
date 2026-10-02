@@ -303,6 +303,34 @@ async def test_provider_retry_translates_to_a_system_note():
 
 
 @pytest.mark.asyncio
+async def test_connection_drop_retry_carries_its_cause_to_the_ui():
+    """A reconnect after a dropped provider connection keeps its cause, which
+    the UI uses to show it while it runs (empty-response retries stay hidden)."""
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.ProviderRetry(
+            session_id=SID, attempt=1, max_attempts=2,
+            reason="provider connection dropped before the response finished; reconnecting",
+            delay_seconds=1.0, model="gpt-6.1-sol", cause="connection_dropped",
+        ),
+        lm.ProviderRetry(
+            session_id=SID, attempt=2, max_attempts=2,
+            reason="provider cut a long response twice; reconnecting with lower effort (high)",
+            delay_seconds=2.0, model="gpt-6.1-sol", cause="connection_dropped",
+            lowered_effort="high",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=3),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    first, second = [e for e in got if isinstance(e, SystemMessage)
+                     and e.subtype == "provider_retry"]
+    assert first.data["cause"] == "connection_dropped"
+    assert first.data["attempt"] == 1 and first.data["max_attempts"] == 2
+    assert "lowered_effort" not in first.data
+    assert second.data["lowered_effort"] == "high"
+
+
+@pytest.mark.asyncio
 async def test_steer_submits_the_op_and_its_receipt_reaches_the_stream():
     """A queued message handed to the running turn goes out as a fluid Steer
     carrying the queue row's id, and fluid's delivery receipt mirrors into the
@@ -7590,7 +7618,7 @@ def test_skill_store_pair_is_documented_before_native_loop_registers_it(tmp_path
     assert registry.get("save_skill") is None
     from fluid.codemode.session import register_code_mode_tools, skill_store_tool_specs
     specs = skill_store_tool_specs()
-    assert set(specs) == {"save_skill", "delete_skill"}
+    assert set(specs) == {"save_skill", "delete_skill", "save_plugin"}
     register_code_mode_tools(registry, codemode)
     for name, spec in specs.items():
         assert registry.get(name) == spec
@@ -7706,6 +7734,130 @@ async def test_native_connect_renders_the_card_once_and_reuses_it(monkeypatch, a
     assert adapter._workspace_card and adapter._workspace_card in system
     # It is the recompile input too, so a roster refresh reuses the same bytes.
     assert adapter._prompt_inputs["workspace_card"] == adapter._workspace_card
+
+
+def _env_sections(compiled):
+    return [section.text for section in compiled.sections if section.kind == "environment"]
+
+
+class _SystemLoop(_CapturingLoop):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.system = kwargs.get("system")
+        self.system_sections = kwargs.get("system_sections")
+
+
+def _insert_session_row(conn, session_id):
+    conn.execute("INSERT INTO sessions (id, title) VALUES (?, ?)", (session_id, "t"))
+    conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_cold_reconnect_reuses_the_persisted_workspace_card(
+    monkeypatch, agent_workspace, mock_db,
+):
+    """#1237: a session ran `npm ci`, was idle-evicted, and the rebuilt
+    runtime re-probed the card ("MISSING in frontend" became "installed"),
+    changing the system prefix and costing a fully uncached call. The rebuild
+    (a fresh adapter, as after cold eviction or a worker restart) must reuse
+    the first connect's bytes even though the probe now answers differently."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.environment import workspace_facts_card
+    from app.db import database
+
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.9.8.7")
+    _insert_session_row(mock_db, "agents-session")
+    frontend = agent_workspace / "frontend"
+    frontend.mkdir()
+    (frontend / "package.json").write_text("{}", encoding="utf-8")
+    (frontend / "package-lock.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ha, "NativeLoop", _SystemLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    first = ha.HarnessAdapter()
+    await first.connect(_agents_options(agent_workspace))
+    first_system = first._engine.system
+    first_env = _env_sections(first._engine.system_sections)
+    assert "MISSING in frontend" in first._workspace_card
+    assert first._workspace_card in first_system
+    stored = database.get_session_workspace_facts("agents-session")
+    assert stored and stored["card"] == first._workspace_card
+    assert stored["cwd"] == str(agent_workspace)
+
+    # The agent runs `npm ci`; then the runtime is evicted and rebuilt.
+    (frontend / "node_modules" / ".bin").mkdir(parents=True)
+    fresh = workspace_facts_card(str(agent_workspace), browser_host="10.9.8.7")
+    assert "MISSING in frontend" not in fresh  # the probe really changed
+
+    rebuilt = ha.HarnessAdapter()
+    options = _agents_options(agent_workspace)
+    options.resume_session_id = "ses_x"
+    await rebuilt.connect(options)
+    assert rebuilt._workspace_card == first._workspace_card
+    assert _env_sections(rebuilt._engine.system_sections) == first_env
+    assert rebuilt._engine.system == first_system
+
+
+def test_workspace_snapshot_reuse_rules():
+    """The snapshot is reused verbatim unless it belongs to another checkout,
+    another stored shape, or quotes a preview URL that is about to die."""
+    import app.core.provider.harness_adapter as ha
+
+    now = 1_000_000.0
+    snap = {"v": ha._WORKSPACE_SNAPSHOT_VERSION, "card": "# Workspace facts\n- x",
+            "cwd": "/w", "preview_expires_at": None, "captured_at": int(now)}
+    assert ha._reusable_workspace_snapshot(snap, "/w", now) == snap["card"]
+    assert ha._reusable_workspace_snapshot(None, "/w", now) is None
+    assert ha._reusable_workspace_snapshot(snap, "/other", now) is None
+    assert ha._reusable_workspace_snapshot({**snap, "v": 0}, "/w", now) is None
+    assert ha._reusable_workspace_snapshot({**snap, "card": ""}, "/w", now) is None
+    live = {**snap, "preview_expires_at": now + 18 * 3600}
+    assert ha._reusable_workspace_snapshot(live, "/w", now) == snap["card"]
+    dying = {**snap, "preview_expires_at": now + ha._WORKSPACE_PREVIEW_RENEW_MARGIN - 1}
+    assert ha._reusable_workspace_snapshot(dying, "/w", now) is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_card_rerenders_once_its_preview_url_expires(
+    monkeypatch, agent_workspace, mock_db,
+):
+    """A frozen card must not hand the agent a dead preview link forever: a
+    reconnect after the token's expiry renders (and persists) a new card;
+    before that, crossing a token window does not move the bytes."""
+    import app.core.provider.harness_adapter as ha
+    from app.core import preview_access
+    from app.db import database
+
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.9.8.7")
+    _insert_session_row(mock_db, "agents-session")
+    # Only an ai-shuffle checkout's card quotes the preview URL.
+    (agent_workspace / "app").mkdir()
+    (agent_workspace / "app" / "preview.py").write_text("", encoding="utf-8")
+    (agent_workspace / "fluid").mkdir()
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    clock = {"now": 1_800_000_000.0}
+    fake_time = types.SimpleNamespace(time=lambda: clock["now"])
+    monkeypatch.setattr(ha, "time", fake_time)
+    monkeypatch.setattr(preview_access, "time", fake_time)
+
+    first = ha.HarnessAdapter()
+    await first.connect(_agents_options(agent_workspace))
+    stored = database.get_session_workspace_facts("agents-session")
+    assert stored["preview_expires_at"] == preview_access.session_token_with_expiry(
+        "agents-session", now=clock["now"])[1]
+    assert preview_access.REDIRECT_PATH in first._workspace_card
+
+    clock["now"] += preview_access.STABLE_WINDOW + 60  # new token window, old token alive
+    again = ha.HarnessAdapter()
+    await again.connect(_agents_options(agent_workspace))
+    assert again._workspace_card == first._workspace_card
+
+    clock["now"] = stored["preview_expires_at"] + 1  # token dead: re-render
+    later = ha.HarnessAdapter()
+    await later.connect(_agents_options(agent_workspace))
+    assert later._workspace_card != first._workspace_card
+    assert database.get_session_workspace_facts("agents-session")["card"] == later._workspace_card
 
 
 def _roster_contract(with_reviewer):

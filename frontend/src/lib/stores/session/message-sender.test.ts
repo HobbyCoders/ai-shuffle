@@ -94,8 +94,8 @@ function makeDeps(initial: ActiveSessionState) {
 		resetReconnectAttempts: vi.fn(),
 	};
 
-	const autoCreateWorktree = vi.fn(async () => {});
-	const createWorktree = vi.fn(async () => {});
+	const autoCreateWorktree = vi.fn(async () => true);
+	const createWorktree = vi.fn(async (): Promise<string | null> => null);
 	const innerSendMessage = vi.fn(async () => true);
 
 	const deps: MessageSenderDeps = {
@@ -224,6 +224,39 @@ describe('message-sender worktree send backstop', () => {
 		expect(autoCreateWorktree).toHaveBeenCalledTimes(1);
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(0);
+	});
+
+	// #1636: a refused first worktree send must hand the text back to the
+	// composer (false), never report it as sent.
+	it.each([
+		['the existing-worktree send', { worktreeMode: 'existing' as const, worktreeId: 'wt-1' }],
+		['the staged-branch create', { worktreeBranch: 'live/1528-explicit' }],
+		['the auto-named create', { worktreeBranch: '' }],
+	])('reports a refusal of %s as not sent', async (_label, selection) => {
+		const { deps, autoCreateWorktree, createWorktree } = makeDeps(baseState({
+			worktreeIntent: 'worktree', sessionId: null, messages: [], ...selection,
+		}));
+		autoCreateWorktree.mockResolvedValueOnce(false);
+		createWorktree.mockResolvedValueOnce(null);
+		deps.getActiveSession = () => ({ sendMessage: vi.fn(async () => false), createWorktree, autoCreateWorktree });
+		expect(await createMessageSender(deps).sendMessage('keep me')).toBe(false);
+	});
+
+	it('reports an existing-worktree send without a profile as refused, with the reason in the composer banner', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			worktreeIntent: 'worktree', sessionId: null, messages: [], profile: '',
+			worktreeMode: 'existing', worktreeId: 'wt-1',
+		}));
+		expect(await createMessageSender(deps).sendMessage('keep me')).toBe(false);
+		expect(getState().worktreeError).toBe('Please select a profile');
+	});
+
+	it('counts a staged-branch create as sent when the user navigated away during it', async () => {
+		const { deps, internal, createWorktree } = makeDeps(baseState({
+			worktreeIntent: 'worktree', sessionId: null, messages: [], worktreeBranch: 'live/1528-explicit',
+		}));
+		createWorktree.mockImplementationOnce(async () => { internal.worktreeCreationGeneration++; return null; });
+		expect(await createMessageSender(deps).sendMessage('mine')).toBe(true);
 	});
 
 	it('still sends a normal local first message over WS', async () => {
@@ -783,6 +816,19 @@ describe('createWorktree remote-only compose', () => {
 		expect(body.project_id).toBe('proj-1');
 		expect(body.project_v2_id).toBeUndefined();
 		expect(body.pending_upload_paths).toEqual(['/tmp/upload.txt']);
+	});
+
+	// #1636: the created session's first message can still be refused (no
+	// connection); the send reports that so the composer keeps the text.
+	it('resolves null when the first message on the created session is refused', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			project: 'proj-1', worktreeBranch: 'feat/x', worktreeIntent: 'worktree',
+		}));
+		const inner = deps.getActiveSession().sendMessage as ReturnType<typeof vi.fn>;
+		inner.mockResolvedValueOnce(false);
+		expect(await createMessageSender(deps).createWorktree('hello')).toBeNull();
+		expect(inner).toHaveBeenCalledWith('hello', expect.objectContaining({ skipWorktreeSetup: true }));
+		expect(getState().sessionId).toBe('ses-wt');
 	});
 });
 

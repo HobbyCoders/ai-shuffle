@@ -505,6 +505,10 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
     transport.note_contact(device_id)
 
     def _work():
+        if engine.outbox_held():
+            # A peer we may be unable to dial just showed what it holds of our
+            # stream (#1621). Before a flush, so the flush can publish.
+            transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
         if body.flush:
             engine.scan_all(strict=True)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
@@ -565,6 +569,10 @@ async def peer_control(action: str, request: Request, device_id: str = Depends(t
         raise HTTPException(400, "Body must be an object")
     if not control.known_action(action):
         raise HTTPException(404, "Unknown control action")
+    # Only the real scheme or the tunnel listener's attestation counts, as for
+    # the private-access UI; a forwarded-proto header on the LAN does not.
+    secure = control.inbound_https.set(
+        request.url.scheme == "https" or request.scope.get("shuffle.forwarded_https") is True)
     try:
         return await control.handle(action, body, from_device=device_id)
     except control.UnknownControlAction:
@@ -579,6 +587,8 @@ async def peer_control(action: str, request: Request, device_id: str = Depends(t
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    finally:
+        control.inbound_https.reset(secure)
 
 
 @router.post("/sessions/{session_id}/fork-here", status_code=status.HTTP_201_CREATED)

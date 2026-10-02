@@ -169,8 +169,16 @@ export const layout = {
 		}));
 	},
 
-	/** Navigate to a feature page, optionally deep-linking to an item id. */
+	/**
+	 * Navigate to a feature page, optionally deep-linking to an item id.
+	 * Plugins live in Settings: `plugins` (a "Manage plugins" link, with an
+	 * optional plugin id or `connection:<type>`) opens Settings > Plugins.
+	 */
 	openFeaturePage(type: Exclude<ViewType, 'session'>, itemId?: string | null) {
+		if (type === 'plugins') {
+			type = 'settings';
+			itemId = pluginsSettingsTarget(itemId);
+		}
 		_update((s) => ({
 			...s,
 			activeView: { type, sessionId: null, itemId: itemId ?? null }
@@ -235,3 +243,16 @@ preferenceSync.register('layout', {
   _notifyAndPersist();
  }
 });
+
+/**
+ * The encoded Settings target (see settings/navigation encodeTarget) for a
+ * plugins deep link. Inlined here because navigation imports this store.
+ */
+export function pluginsSettingsTarget(itemId?: string | null): string {
+	const params = new URLSearchParams({ category: 'plugins' });
+	if (itemId) {
+		const known = itemId.startsWith('connection:') || itemId.startsWith('plugin:') || itemId === 'explore';
+		params.set('item', known ? itemId : `plugin:${itemId}`);
+	}
+	return params.toString();
+}

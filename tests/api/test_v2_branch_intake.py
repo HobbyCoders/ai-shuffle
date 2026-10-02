@@ -179,6 +179,36 @@ async def test_spawn_materializes_deterministic_checkout_and_submits_worktree_tu
     assert resp.query_started is True
 
 
+async def test_promptless_create_stores_the_composer_picks_as_run_binding(monkeypatch):
+    """No prompt means no first turn to persist the composer's model and
+    permission mode, so the create stores them (the call button relies on it).
+    With a prompt the turn persists them and the create leaves them alone."""
+    m = _wire_v2(monkeypatch)
+    binding = MagicMock()
+    monkeypatch.setattr(worktree_api.database, "set_session_run_binding", binding)
+    overrides = {"model": "opus", "permission_mode": "acceptEdits", "fast": False}
+
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(overrides=overrides),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    binding.assert_called_once()
+    assert binding.call_args.args[0] == resp.session_id
+    assert binding.call_args.kwargs["model"] == "opus"
+    assert binding.call_args.kwargs["permission_mode"] == "acceptEdits"
+    assert binding.call_args.kwargs["fast"] is False
+    m["submit"].assert_not_called()
+
+    binding.reset_mock()
+    await worktree_api._create_v2_branch_session(
+        body=_body(branch_name="feature/y", prompt="go", overrides=overrides),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    binding.assert_not_called()
+
+
 async def test_default_profile_falls_back_to_project_then_first(monkeypatch):
     """No explicit profile → project default → first profile."""
     m = _wire_v2(monkeypatch)

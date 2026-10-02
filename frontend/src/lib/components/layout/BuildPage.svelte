@@ -22,12 +22,12 @@
 	/**
 	 * BuildPage — the unified "Build" surface (Studio-v2 design).
 	 *
-	 * One page that hosts the agent-configuration tools (Agents / MCP / Plugins /
-	 * Hooks) under a single heading + underline sub-nav. Each section renders a
+	 * One page that hosts the agent-configuration tools (Agents / MCP / Hooks)
+	 * under a single heading + underline sub-nav. Plugins live in Settings. Each section renders a
 	 * purpose-built, *header-less* UI so nothing stacks.
 	 *
 	 * Every section is now native: a card grid for Agents and compact `.lrow`
-	 * lists for MCP / Plugins / Hooks (each reuses its card's data + editor and
+	 * lists for MCP / Hooks (each reuses its card's data + editor and
 	 * only replaces the list view). The editor takes the full canvas via
 	 * onDetailChange, which hides this page's heading + sub-nav.
 	 *
@@ -35,7 +35,7 @@
 	 */
 	import { untrack, onMount } from 'svelte';
 	import { buildPreference, type BuildSub } from '$lib/stores/build-preference.svelte';
-	import { Users, Server, Puzzle, Webhook } from 'lucide-svelte';
+	import { Users, Server, Webhook } from 'lucide-svelte';
 	import { appData, profiles } from '$lib/stores/app-data.svelte';
 	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
 	import { hooks, projectHooks } from '$lib/stores/hooks.svelte';
@@ -57,16 +57,13 @@
 		mcp: createLazyComponent('build:mcp', () =>
 			import('$lib/components/deck/cards/McpManagerCard.svelte')
 		),
-		plugins: createLazyComponent('build:plugins', () =>
-			import('$lib/components/plugins/PluginsHub.svelte')
-		),
 		hooks: createLazyComponent('build:hooks', () =>
 			import('$lib/components/deck/cards/HooksCard.svelte')
 		)
 	};
 
 	interface Props {
-		/** Deep-link target (e.g. "Configure agents →", "Manage plugins"). */
+		/** Deep-link target (e.g. "Configure agents →"). */
 		requestedSub?: BuildSub;
 		/** One-shot deep-link item id (agent) to open in its editor. */
 		requestedItemId?: string | null;
@@ -76,12 +73,11 @@
 	const items: { id: BuildSub; label: string; icon: typeof Users }[] = [
 		{ id: 'profile', label: 'Agents', icon: Users },
 		{ id: 'mcp', label: 'MCP Servers', icon: Server },
-		{ id: 'plugins', label: 'Plugins', icon: Puzzle },
 		{ id: 'hooks', label: 'Hooks', icon: Webhook }
 	];
 
 	// Every section is now a native, header-less UI (scroll inside the page body).
-	const NATIVE = new Set<BuildSub>(['profile', 'mcp', 'plugins', 'hooks']);
+	const NATIVE = new Set<BuildSub>(['profile', 'mcp', 'hooks']);
 
 	let sub = $state<BuildSub>(untrack(() => requestedSub ?? buildPreference.current));
 	// True while a section shows a full-canvas detail/editor (e.g. profile form),
@@ -140,7 +136,6 @@
 	const counts = $derived<Record<BuildSub, number>>({
 		profile: ($profiles ?? []).length,
 		mcp: ($globalMcpServers ?? []).length,
-		plugins: 0,
 		hooks: ($projectHooks ?? []).length
 	});
 </script>
@@ -189,8 +184,6 @@
 					label="MCP Servers"
 					props={{ embedded: true, initialSelectedId: requestedItemId, onDetailChange: setDetail }}
 				/>
-			{:else if sub === 'plugins'}
-				<LazyPanel handle={SUB_PANELS.plugins} props={{ initialSelectedId: requestedItemId }} label="Plugins" />
 			{:else if sub === 'hooks'}
 				<LazyPanel
 					handle={SUB_PANELS.hooks}

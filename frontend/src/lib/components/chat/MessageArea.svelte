@@ -24,7 +24,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
-	import { agentDelivery } from '$lib/utils/agent-delivery';
+	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
@@ -60,6 +60,7 @@
 		initialWindowStart,
 		isLiveTailIndex,
 		scrollTopPreservingBottom,
+		settleSkippedTurns,
 		shouldExpandOnScroll,
 		turnTopsFromVisibility,
 		windowStartForItem,
@@ -365,6 +366,9 @@
 		)
 	);
 
+	// Worker task names for attributed agent messages, keyed by session id.
+	const agentNames = $derived(agentSenderNames($activeSession.messages, $activeSession.activeTasks ?? []));
+
 	// --- Transcript grouping ---
 	// The turn-aware work-log builder lives in $lib/utils/work-log so it can be
 	// reasoned about (and tested) without a DOM. This component only decides
@@ -661,6 +665,7 @@
 	}
 
 	function handleTurnIntersect(entries: IntersectionObserverEntry[]) {
+		const reported = new Set<string>();
 		for (const entry of entries) {
 			const id = (entry.target as HTMLElement).dataset.userTurnId;
 			if (!id) continue;
@@ -671,7 +676,9 @@
 				turnVisibility.get(id)
 			);
 			if (next) turnVisibility.set(id, next);
+			reported.add(id);
 		}
+		settleSkippedTurns(turnNavigationIds, turnVisibility, reported);
 		updateCurrentTurnIndex();
 	}
 
@@ -1753,7 +1760,7 @@
 	});
 </script>
 
-<div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2} class:has-long-turn-nav={turnNavigationItems.length > 30}>
+<div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
 <!-- role="log" is a polite live region. aria-busy while a reply streams keeps
      screen readers from announcing every streamed token; the settled turn is
      read once the stream ends. -->
@@ -1954,7 +1961,14 @@
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
 	{#if delivery}
-		<ToolUseMessage name="Agent message" input={{ label: delivery.sender }} result={delivery.content} status="complete" />
+		{@const sender = agentSender(delivery, agentNames)}
+		<ToolUseMessage
+			name="Agent message"
+			input={sender.id ? { label: sender.name, session: sender.id } : { label: sender.name }}
+			previewTitle={sender.id ? `${sender.name} (session ${sender.id})` : undefined}
+			result={delivery.content}
+			status="complete"
+		/>
 	{:else if message.type === 'command'}
 		<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
 		<CommandMessage
@@ -2147,14 +2161,10 @@
 		}
 	}
 
-	@media (min-width: 640px) and (pointer: fine) {
-		.has-long-turn-nav .chat-column {
-			width: calc(100% - 64px);
-			margin-left: max(64px, calc((100% - 768px) / 2));
-		}
-	}
+	/* Compact and touch layouts use TurnNavigator's narrower rail; keep the
+	   text clear of it. */
 	@media (max-width: 639px), (pointer: coarse) {
-		.has-long-turn-nav .chat-column { padding-top: 64px; }
+		.has-turn-nav .chat-column { padding-left: 28px; }
 	}
 
 	/* ── Hydration skeleton (S3) ──────────────────────────────────────────

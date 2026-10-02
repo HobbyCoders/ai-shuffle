@@ -4,7 +4,10 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
-	let { sessionId, request, savedConnections, vaultAvailable, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number }; savedConnections: Saved[]; vaultAvailable: boolean; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, owner = null, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; onComplete: () => void } = $props();
+	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
+	const where = $derived(owner ?? 'this worker');
+	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
 	const machine = untrack(() => request.kind === 'machine');
 	const service = untrack(() => request.kind === 'service');
 	// Credentials are saved for SSH machines and HTTPS services; offer only the
@@ -176,7 +179,7 @@
 				<p class="pa-hint">Sent as “{authHeader.trim() || 'header'}: {authScheme.trim() ? `${authScheme.trim()} ` : ''}•••”. Leave the scheme empty for keys such as X-API-Key.</p>
 				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow this session’s permission mode; otherwise only GET and HEAD.</small></label>
 			{:else}
-				<label class="pa-field"><span>Folder on this worker</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
+				<label class="pa-field"><span>Folder on {where}</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
 				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Writes follow this session’s permission mode; bypass skips repeat approvals.</small></label>
 			{/if}
 
@@ -190,9 +193,9 @@
 			<p class="pa-note">
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path stroke-linecap="round" d="M8 11V7a4 4 0 118 0v4" /></svg>
 				<span>
-					{#if machine}Sent only to this worker, never to the model or chat history. Commands run with this account’s authority and follow this session’s permission mode. Bypass skips repeat approvals after you grant access.
-					{:else if service}Sent only to this worker, never to the model or chat history. HTTPS with a trusted certificate only; requests stay under this address, redirects are not followed, and the model can use this credential’s full authority there.
-					{:else}Sent only to this worker. Linux file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
+					{#if machine}{sentTo}, never to the model or chat history. Commands run with this account’s authority and follow this session’s permission mode. Bypass skips repeat approvals after you grant access.
+					{:else if service}{sentTo}, never to the model or chat history. HTTPS with a trusted certificate only; requests stay under this address, redirects are not followed, and the model can use this credential’s full authority there.
+					{:else}{sentTo}. Kernel file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
 				</span>
 			</p>
 		</div>
@@ -202,7 +205,7 @@
 				<label class="pa-option" class:disabled={!vaultAvailable}>
 					<input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} />
 					<strong>Save this connection</strong>
-					<small>{vaultAvailable ? 'Encrypted on this worker for future requests. Access still needs approval each time.' : 'Secure storage is locked or unavailable. Temporary access still works.'}</small>
+					<small>{vaultAvailable ? `Encrypted on ${where} for future requests. Access still needs approval each time.` : 'Secure storage is locked or unavailable. Temporary access still works.'}</small>
 				</label>
 			{/if}
 			<div class="pa-actions">
