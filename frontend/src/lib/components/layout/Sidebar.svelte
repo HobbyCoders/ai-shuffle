@@ -813,11 +813,14 @@
 	/* Sticky top block --------------------------------------------------------
 	   Header row + New session, above the scroll region. The separator is drawn
 	   on ::after so it can cross-fade in without ever changing the block's
-	   height: a border appearing on scroll would shift every row below it. */
+	   height: a border appearing on scroll would shift every row below it.
+	   No z-index on the block itself: that would make it a stacking context
+	   and trap its popovers (notifications, update tooltip) below the
+	   sidebar's resize handle. Only the scroll fade needs lifting over the
+	   cards, whose hover actions go up to z-index 5. */
 	.sb-top {
 		position: relative;
 		flex: none;
-		z-index: 5;
 		padding: 0 6px;
 		background: var(--sidebar);
 	}
@@ -828,6 +831,7 @@
 		right: 0;
 		top: 100%;
 		height: 20px;
+		z-index: 6;
 		pointer-events: none;
 		background:
 			linear-gradient(var(--sidebar-border), var(--sidebar-border)) top / 100% 1px no-repeat,
