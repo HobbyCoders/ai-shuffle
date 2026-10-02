@@ -1,9 +1,33 @@
 {
 	"available": [
 		{
+			"components": [
+				{
+					"detail": "",
+					"kind": "skill",
+					"name": "lint",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "review",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "agent",
+					"name": "reviewer",
+					"reason": "",
+					"support": "loaded"
+				}
+			],
 			"connector_type": null,
 			"description": "Review helpers",
 			"enabled": true,
+			"format": "claude",
 			"has_agents": true,
 			"has_commands": true,
 			"has_hooks": true,
@@ -16,9 +40,19 @@
 			"name": "toolkit"
 		},
 		{
+			"components": [
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "hello",
+					"reason": "",
+					"support": "loaded"
+				}
+			],
 			"connector_type": null,
 			"description": "Not installed yet",
 			"enabled": false,
+			"format": "claude",
 			"has_agents": false,
 			"has_commands": true,
 			"has_hooks": false,
@@ -33,12 +67,24 @@
 	],
 	"details_available": {
 		"agents": [],
+		"approval": null,
 		"commands": [
 			"hello"
 		],
+		"components": [
+			{
+				"detail": "",
+				"kind": "command",
+				"name": "hello",
+				"reason": "",
+				"support": "loaded"
+			}
+		],
 		"connector_type": null,
+		"content_hash": null,
 		"description": "Not installed yet",
 		"enabled": false,
+		"format": "claude",
 		"has_agents": false,
 		"has_commands": true,
 		"has_hooks": false,
@@ -52,18 +98,45 @@
 		"readme": null,
 		"scope": "marketplace",
 		"skills": [],
+		"trust": "marketplace",
 		"version": "available"
 	},
 	"details_installed": {
 		"agents": [
 			"reviewer"
 		],
+		"approval": null,
 		"commands": [
 			"review"
 		],
+		"components": [
+			{
+				"detail": "",
+				"kind": "skill",
+				"name": "lint",
+				"reason": "",
+				"support": "loaded"
+			},
+			{
+				"detail": "",
+				"kind": "command",
+				"name": "review",
+				"reason": "",
+				"support": "loaded"
+			},
+			{
+				"detail": "",
+				"kind": "agent",
+				"name": "reviewer",
+				"reason": "",
+				"support": "loaded"
+			}
+		],
 		"connector_type": null,
+		"content_hash": null,
 		"description": "Review helpers",
 		"enabled": true,
+		"format": "claude",
 		"has_agents": true,
 		"has_commands": true,
 		"has_hooks": true,
@@ -79,6 +152,7 @@
 		"skills": [
 			"lint"
 		],
+		"trust": "marketplace",
 		"version": "1.2.0"
 	},
 	"file_based_agents": [
@@ -98,9 +172,35 @@
 	],
 	"installed": [
 		{
+			"approval": null,
+			"components": [
+				{
+					"detail": "",
+					"kind": "skill",
+					"name": "lint",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "review",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "agent",
+					"name": "reviewer",
+					"reason": "",
+					"support": "loaded"
+				}
+			],
 			"connector_type": null,
+			"content_hash": null,
 			"description": "Review helpers",
 			"enabled": true,
+			"format": "claude",
 			"has_agents": true,
 			"has_commands": true,
 			"has_hooks": true,
@@ -112,6 +212,7 @@
 			"marketplace": "mp",
 			"name": "toolkit",
 			"scope": "user",
+			"trust": "marketplace",
 			"version": "1.2.0"
 		}
 	],

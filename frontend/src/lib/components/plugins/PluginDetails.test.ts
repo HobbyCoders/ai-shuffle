@@ -47,6 +47,60 @@ describe('PluginDetails with backend payloads', () => {
 		expect(page.getByText('lint')).toBeTruthy();
 	});
 
+	it('lists components this app does not run, with the reason, and nothing when all load', () => {
+		const loaded = render(PluginDetails, { props: { plugin: installedDetails } });
+		expect(loaded.queryByTestId('plugin-not-loaded')).toBeNull();
+		cleanup();
+
+		const plugin: PluginDetailsType = {
+			...installedDetails,
+			format: 'agent-plugins',
+			components: [
+				{ kind: 'skill', name: 'lint', support: 'loaded', reason: '' },
+				{ kind: 'app', name: 'drive', support: 'unsupported', reason: 'hosted by ChatGPT; it cannot run outside it' },
+				{ kind: 'user_config', name: 'api_token', support: 'needs_config', reason: 'asks for settings this app does not collect yet' }
+			]
+		};
+		const page = render(PluginDetails, { props: { plugin } });
+		const block = page.getByTestId('plugin-not-loaded');
+		expect(block.textContent).toContain('App drive: hosted by ChatGPT; it cannot run outside it');
+		expect(block.textContent).toContain('Settings api_token: asks for settings this app does not collect yet');
+		expect(block.textContent).not.toContain('lint');
+	});
+
+	it('asks for review of an agent-authored plugin, listing every component and its command line', async () => {
+		const onApprove = vi.fn();
+		const authored: PluginDetailsType = {
+			...installedDetails,
+			id: 'release-notes@authored',
+			marketplace: 'authored',
+			version: '0.1.0',
+			enabled: false,
+			trust: 'authored',
+			approval: 'pending',
+			content_hash: 'sha256:abc',
+			components: [
+				{ kind: 'skill', name: 'draft-notes', support: 'loaded', reason: '', detail: '' },
+				{ kind: 'mcp_server', name: 'changelog', support: 'loaded', reason: '', detail: 'python srv.py' }
+			]
+		};
+		const page = render(PluginDetails, { props: { plugin: authored, onApprove } });
+		const review = page.getByTestId('plugin-review');
+		expect(review.textContent).toContain('version 0.1.0');
+		expect(review.textContent).toContain('skill draft-notes');
+		expect(review.textContent).toContain('MCP server changelog: python srv.py');
+		await fireEvent.click(page.getByRole('button', { name: 'Approve and enable' }));
+		expect(onApprove).toHaveBeenCalledOnce();
+		cleanup();
+
+		const approved = render(PluginDetails, { props: { plugin: { ...authored, approval: 'approved', enabled: true }, onApprove } });
+		expect(approved.queryByTestId('plugin-review')).toBeNull();
+		cleanup();
+
+		const marketplace = render(PluginDetails, { props: { plugin: installedDetails, onApprove } });
+		expect(marketplace.queryByTestId('plugin-review')).toBeNull();
+	});
+
 	it('shows a marketplace plugin with an install action and no install date', async () => {
 		const onInstall = vi.fn();
 		const page = render(PluginDetails, { props: { plugin: marketplaceDetails, onInstall } });

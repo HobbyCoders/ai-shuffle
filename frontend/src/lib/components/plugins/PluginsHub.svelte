@@ -13,7 +13,7 @@
 	import BuildPluginList from '$lib/components/layout/build/BuildPluginList.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 
-	type Entry = { id: string; name: string; description: string; kind: 'connection' | 'package'; installed: boolean; enabled: boolean; type?: ConnectorTypeInfo; count: number };
+	type Entry = { id: string; name: string; description: string; kind: 'connection' | 'package'; installed: boolean; enabled: boolean; type?: ConnectorTypeInfo; count: number; review?: boolean };
 	let query = $state('');
 	let tab = $state<'all' | 'connections' | 'skills'>('all');
 	let connections: Connector[] = $state([]);
@@ -45,7 +45,7 @@
 			type: t, count: connections.filter(c => c.type === t.type).length })),
 		...[...installed, ...available.filter(p => !installed.some(i => i.id === p.id))].filter(p => !p.connector_type).map(p => ({ id: p.id, name: p.name,
 			description: p.description, kind: 'package' as const, installed: installed.some(i => i.id === p.id), enabled: installed.find(i => i.id === p.id)?.enabled ?? false,
-			count: 0 }))
+			count: 0, review: installed.find(i => i.id === p.id)?.approval === 'pending' }))
 	]);
 	const filtered = $derived(entries.filter(p => (tab === 'all' || (tab === 'connections' ? p.kind === 'connection' : p.kind === 'package')) &&
 		`${p.name} ${p.description}`.toLowerCase().includes(query.trim().toLowerCase())));
@@ -120,6 +120,19 @@
 		try { runtimeRefs = await api.get(`/plugins/runtime/${encodeURIComponent(id)}/connections`); }
 		catch (e: any) { error = e.detail || 'Could not load plugin dependencies.'; runtimeRefs = []; }
 	}
+	let approving = $state(false);
+	async function approve() {
+		const plugin = details;
+		if (!plugin?.content_hash) return;
+		approving = true; error = '';
+		try {
+			await enablePlugin(plugin.id, plugin.content_hash);
+			await load();
+			const fresh = await getPluginDetails(plugin.id);
+			if (selected?.id === fresh.id) details = fresh;
+		} catch (e: any) { error = e.detail || e.message || 'Could not enable plugin.'; }
+		finally { approving = false; }
+	}
 	function back() { selected = null; details = null; manage = false; void load(); }
 </script>
 
@@ -158,7 +171,7 @@
 			{#key `${selected.id}:${selectedApp?.installed}`}<ConnectorManager typeFilter={selected.type.type} onChanged={() => { void load(); if (selected?.type?.plugin_id) void loadReferences(selected.type.plugin_id); }} />{/key}
 		{/if}
 	{:else if selected && details}
-		<PluginDetails plugin={details} onClose={back} onInstall={() => { if (selected) void add(selected); }} installing={busy === selected.id} />
+		<PluginDetails plugin={details} onClose={back} onInstall={() => { if (selected) void add(selected); }} installing={busy === selected.id} onApprove={$isAdmin ? approve : undefined} {approving} />
 	{:else if selected}
 		<p role="status">{busy ? 'Loading plugin…' : 'Plugin details are unavailable.'}</p>
 	{:else}
@@ -188,7 +201,7 @@
 			{#each filtered as entry (entry.id)}
 				{@const Icon = entry.type ? (icons[entry.type.type] || MessageCircle) : Package}
 				<article class="plugin-row">
-					<button class="entry" onclick={() => open(entry)}><span class="plugin-icon"><Icon size={23} /></span><span class="entry-copy"><strong>{entry.name}</strong><span>{entry.description}</span><small>{entry.kind === 'connection' ? (entry.count ? `${entry.count} connection${entry.count === 1 ? '' : 's'}` : entry.installed ? (entry.enabled ? 'Installed' : 'Disabled') : 'Official plugin') : entry.installed ? (entry.enabled ? 'Installed' : 'Disabled') : 'Marketplace plugin'}</small></span></button>
+					<button class="entry" onclick={() => open(entry)}><span class="plugin-icon"><Icon size={23} /></span><span class="entry-copy"><strong>{entry.name}</strong><span>{entry.description}</span><small>{entry.kind === 'connection' ? (entry.count ? `${entry.count} connection${entry.count === 1 ? '' : 's'}` : entry.installed ? (entry.enabled ? 'Installed' : 'Disabled') : 'Official plugin') : entry.review ? 'Needs review' : entry.installed ? (entry.enabled ? 'Installed' : 'Disabled') : 'Marketplace plugin'}</small></span></button>
 					{#if $isAdmin}<button class="add" aria-label={`${entry.installed || entry.count ? 'Manage' : 'Install'} ${entry.name}`} disabled={!!busy} onclick={() => add(entry)}>{#if busy === entry.id}<span>…</span>{:else if entry.installed}<Settings size={17} />{:else}<Plus size={20} />{/if}</button>{/if}
 				</article>
 			{/each}
