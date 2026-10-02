@@ -440,7 +440,7 @@
 		};
 		// An agent carries no model, provider, permission mode or effort: a chat
 		// picks those when it starts, and internal one-shot generation reads the
-		// text-generation setting under Settings → Providers.
+		// text-generation setting under Settings > Default models.
 		//
 		// Subagent runtime map — the ONE model binding an agent still owns, used
 		// when another agent dispatches it as a Task subagent. Blank values mean
@@ -497,7 +497,7 @@
 		// `ai_tools` and `app_config_tools` are no longer independent switches (T5):
 		// the AI-tools and app-config groups are permitted through the one picker,
 		// so the editor stops writing either field. Computer use is a GLOBAL
-		// toggle (Settings → Chat & Input), so nothing is written per-agent here.
+		// toggle (Settings > Security), so nothing is written per-agent here.
 
 		// The configured prompt IS the base (ruling A12) — always the custom
 		// shape. Env/instructions/security are compiled in at runtime by fluid,

@@ -2,7 +2,7 @@
  * Shared computer-use status store.
  *
  * Polls `/api/v1/computer-use/status` and exposes live state consumed by the
- * global toggle (Settings → Chat & Input) and the "AI Shuffle is controlling
+ * global toggle (Settings > Security) and the "AI Shuffle is controlling
  * your screen" toast. There is exactly ONE poller per app instance: the
  * store is a module singleton and `start()`/`stop()` are ref-counted, so any
  * number of session views share a single timer.

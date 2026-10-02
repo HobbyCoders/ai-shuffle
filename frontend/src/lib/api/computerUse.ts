@@ -1,7 +1,7 @@
 /**
  * Computer-use API client.
  *
- * Backs the global toggle (Settings → Chat & Input) and the live status the
+ * Backs the global toggle (Settings > Security) and the live status the
  * UI's indicators consume. The host stop endpoint releases active desktop
  * control without requiring the user to find the chat that owns it.
  */

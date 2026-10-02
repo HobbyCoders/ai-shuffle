@@ -193,7 +193,7 @@ describe('setup wizard v2', () => {
 		const group = screen.getByRole('radiogroup', { name: 'Claude Code mode' });
 		expect(group.textContent).toContain('Claude subscription');
 		expect(group.textContent).toContain('Anthropic API key');
-		expect(screen.getByText(/Settings > Providers > Claude Code mode/)).toBeTruthy();
+		expect(screen.getByText(/Settings > Providers > Claude\b/)).toBeTruthy();
 		expect([...group.querySelectorAll('input')].some((i) => (i as HTMLInputElement).checked)).toBe(false);
 	});
 

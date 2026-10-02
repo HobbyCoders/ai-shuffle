@@ -27,7 +27,7 @@
 	 * button is not here on any viewport: it sits at the top-right of the box,
 	 * inside ChatInput's input area.
 	 *
-	 * Computer use is a GLOBAL toggle (Settings → Chat & Input), not a composer
+	 * Computer use is a GLOBAL toggle (Settings > Security), not a composer
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
 	 * session is the Stop button's job.
 	 */

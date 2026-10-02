@@ -4,7 +4,7 @@
 	 * (the stock Claude Code CLI, signed in by the owner) or an Anthropic API
 	 * key, with the advice to use a key for anything that runs unattended.
 	 * The choice is stored on the worker (`PUT /settings/claude-auth`), the same
-	 * setting as Settings > Providers > Claude Code mode, with the same names.
+	 * setting as Settings > Providers > Claude, with the same names.
 	 */
 	import { untrack } from 'svelte';
 	import { ExternalLink, KeyRound, Loader2, SquareTerminal } from 'lucide-svelte';
@@ -67,7 +67,7 @@
 		</p>
 	</div>
 
-	<p class="text-xs text-muted-foreground">You can change this later in Settings > Providers > Claude Code mode. AI Shuffle never switches modes on its own, and never falls back to another credential.</p>
+	<p class="text-xs text-muted-foreground">You can change this later in Settings > Providers > Claude. AI Shuffle never switches modes on its own, and never falls back to another credential.</p>
 
 	{#if error}<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{error}</div>{/if}
 
