@@ -28,19 +28,20 @@ import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 
 const view = activeView as unknown as ReturnType<typeof writable<{ type: string }>>;
 const lines = [
-	{ timestamp: '2026-10-01T14:40:01.120Z', level: 'INFO', logger_name: 'app.api.sessions', message: 'POST /turns 202' },
+	// Newest first, as GET /logs sends them.
+	{
+		timestamp: '2026-10-01T14:42:03.340Z',
+		level: 'INFO',
+		logger_name: 'app.api.sessions',
+		message: 'GET /sessions 200'
+	},
 	{
 		timestamp: '2026-10-01T14:41:02.230Z',
 		level: 'ERROR',
 		logger_name: 'app.providers.grok',
 		message: 'Token refresh failed: 401'
 	},
-	{
-		timestamp: '2026-10-01T14:42:03.340Z',
-		level: 'INFO',
-		logger_name: 'app.api.sessions',
-		message: 'GET /sessions 200'
-	}
+	{ timestamp: '2026-10-01T14:40:01.120Z', level: 'INFO', logger_name: 'app.api.sessions', message: 'POST /turns 202' }
 ];
 let model: LogsModel;
 
@@ -176,7 +177,7 @@ describe('entries', () => {
 		await mount();
 		const first = Array.from(document.querySelectorAll('[data-settings-item]'))[2] as HTMLElement;
 		await fireEvent.click(first);
-		vi.mocked(api.get).mockResolvedValue({ lines: lines.slice(1), total: 12409, returned: 2, levels: [] });
+		vi.mocked(api.get).mockResolvedValue({ lines: lines.slice(0, 2), total: 12409, returned: 2, levels: [] });
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(screen.getAllByText('POST /turns 202').length).toBeGreaterThan(0);
 		expect(screen.getByRole('heading', { level: 2, name: 'Info' })).toBeTruthy();

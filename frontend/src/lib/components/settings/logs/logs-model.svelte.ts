@@ -153,7 +153,8 @@ export class LogsModel {
 			if (this.appliedSearch) params.set('search', this.appliedSearch);
 			const data = await api.get<LogsResponse>(`/logs?${params.toString()}`);
 			if (seq !== this.#seq) return;
-			this.entries = withIds(data.lines).reverse();
+			// The server sends newest first already.
+			this.entries = withIds(data.lines);
 			this.total = data.total;
 			this.returned = data.returned;
 			if (data.levels.length > 0) this.levels = data.levels;
