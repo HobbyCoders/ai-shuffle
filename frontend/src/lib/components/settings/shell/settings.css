@@ -240,6 +240,12 @@
 .settings-shell[data-mid] {
 	--st-index-width: 190px;
 }
+.settings-shell[data-mid] .st-search kbd {
+	display: none;
+}
+.settings-shell[data-mid] .st-search input {
+	padding-right: 10px;
+}
 
 /* ---------- stacked (phone app, or the shell is 600px or less) ---------- */
 .settings-shell[data-stacked] {

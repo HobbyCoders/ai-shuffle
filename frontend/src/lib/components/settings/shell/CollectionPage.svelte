@@ -88,7 +88,7 @@
 <div class="st-coll" bind:this={el} style:--st-list-width="{width}px">
 	<ListDivider bind:width {containerWidth} />
 	<div class="st-lcol">
-		<header class="st-lhead">
+		<div class="st-lhead">
 			<div class="st-lh-top">
 				<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => settingsNav.back()}>
 					<ChevronLeft />
@@ -115,7 +115,7 @@
 					<input type="search" bind:value={filter} {placeholder} autocomplete="off" />
 				</label>
 			{/if}
-		</header>
+		</div>
 		<div class="st-lscroll st-scroll" data-settings-list>
 			{@render list()}
 		</div>

@@ -99,7 +99,7 @@
 		</button>
 		<SavedTick />
 	</div>
-	<header class="st-dh">
+	<div class="st-dh">
 		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} {status} ring="bg" />{/if}
 		<div class="st-dh-main">
 			<div class="st-dhn">
@@ -116,7 +116,7 @@
 		{#if primary}
 			<fieldset class="st-dha" disabled={access.readOnly}>{@render primary()}</fieldset>
 		{/if}
-	</header>
+	</div>
 	<FactsStrip {facts} />
 	{@render banner?.()}
 	{#if showTabs}

@@ -29,13 +29,13 @@
 
 <div class="st-pscroll st-scroll">
 	<div class="st-page">
-		<header class="st-page-h">
+		<div class="st-page-h">
 			<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => settingsNav.back()}>
 				<ChevronLeft />
 			</button>
 			<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
 			<SavedTick />
-		</header>
+		</div>
 		{@render children()}
 	</div>
 </div>
