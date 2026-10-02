@@ -18,9 +18,9 @@ afterEach(cleanup);
 
 it('uses a startup snapshot, follows remote updates/reset, and saves explicit tab clicks', async () => {
  const adapter = mocks.adapters.get('build_subtab')!;
- adapter.apply('plugins');
+ adapter.apply('mcp');
  const page = render(BuildPage);
- expect(page.getByRole('button',{name:'Plugins'}).getAttribute('aria-current')).toBe('page');
+ expect(page.getByRole('button',{name:'MCP Servers'}).getAttribute('aria-current')).toBe('page');
  flushSync(() => adapter.apply('hooks'));
  expect(page.getByRole('button',{name:'Hooks'}).getAttribute('aria-current')).toBe('page');
  expect(mocks.save).not.toHaveBeenCalled();
@@ -31,6 +31,14 @@ it('uses a startup snapshot, follows remote updates/reset, and saves explicit ta
  flushSync(() => adapter.apply(undefined));
  expect(page.getByRole('button',{name:'Agents'}).getAttribute('aria-current')).toBe('page');
  expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it('has no Plugins tab, and a remembered Plugins tab falls back to Agents (plugins moved to Settings)', () => {
+ mocks.adapters.get('build_subtab')!.apply('plugins');
+ expect(buildPreference.current).toBe('profile');
+ const page = render(BuildPage);
+ expect(page.queryByRole('button',{name:'Plugins'})).toBeNull();
+ expect(page.getByRole('button',{name:'Agents'}).getAttribute('aria-current')).toBe('page');
 });
 
 it('keeps unsaved editor contents mounted while another device changes the remembered tab', async () => {

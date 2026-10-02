@@ -128,7 +128,7 @@ def test_reading_never_rewrites_ids_state_or_connector_records(svc, monkeypatch)
     assert connector.connector_type == "gmail"
     assert (connector.format, connector.trust) == ("shuffle", "official")
     assert connector.components == [
-        {"kind": "connector_runtime", "name": "gmail", "support": "loaded", "reason": ""},
+        {"kind": "connector_runtime", "name": "gmail", "support": "loaded", "reason": "", "detail": ""},
     ]
 
 

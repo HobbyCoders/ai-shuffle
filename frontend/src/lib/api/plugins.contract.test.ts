@@ -36,12 +36,13 @@ function keysOf<T>() {
 const PLUGIN_INFO_KEYS = keysOf<PluginInfo>()([
 	'id', 'name', 'marketplace', 'description', 'version', 'scope', 'install_path', 'installed_at',
 	'enabled', 'has_commands', 'has_agents', 'has_skills', 'has_hooks', 'has_mcp', 'connector_type',
-	'format', 'trust', 'components'
+	'format', 'trust', 'components', 'approval', 'content_hash'
 ]);
 const DETAILS_KEYS = keysOf<PluginDetails>()([
 	'id', 'name', 'marketplace', 'description', 'version', 'scope', 'install_path', 'installed_at',
 	'enabled', 'has_commands', 'has_agents', 'has_skills', 'has_hooks', 'has_mcp', 'connector_type',
-	'format', 'trust', 'components', 'commands', 'agents', 'skills', 'readme'
+	'format', 'trust', 'components', 'approval', 'content_hash', 'commands', 'agents', 'skills',
+	'readme'
 ]);
 const AVAILABLE_KEYS = keysOf<AvailablePlugin>()([
 	'id', 'name', 'marketplace', 'marketplace_path', 'description', 'has_commands', 'has_agents',

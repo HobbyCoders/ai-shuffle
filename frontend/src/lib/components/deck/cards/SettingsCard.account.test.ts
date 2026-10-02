@@ -101,13 +101,12 @@ describe('Account settings', () => {
   expect(within(again).getByRole('button', { name: 'Account' }).classList.contains('on')).toBe(true);
  });
 
- it('omits Downloads and Plugins from settings', async () => {
+ it('omits Downloads; Plugins is its own section, not an Open Plugins shortcut (#1610)', async () => {
   render(SettingsCard);
   await screen.findByDisplayValue('/workspace/projects');
   expect(screen.queryByRole('button', { name: 'Downloads' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Plugins' })).toBeNull();
   expect(screen.queryByText('Open Plugins')).toBeNull();
-  for (const name of ['Account', 'Chat & Input', 'Voice', 'Providers', 'API', 'System', 'Logs']) {
+  for (const name of ['Account', 'Chat & Input', 'Voice', 'Providers', 'Plugins', 'API', 'System', 'Logs']) {
    expect(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('button', { name })).toBeTruthy();
   }
  });

@@ -7618,7 +7618,7 @@ def test_skill_store_pair_is_documented_before_native_loop_registers_it(tmp_path
     assert registry.get("save_skill") is None
     from fluid.codemode.session import register_code_mode_tools, skill_store_tool_specs
     specs = skill_store_tool_specs()
-    assert set(specs) == {"save_skill", "delete_skill"}
+    assert set(specs) == {"save_skill", "delete_skill", "save_plugin"}
     register_code_mode_tools(registry, codemode)
     for name, spec in specs.items():
         assert registry.get(name) == spec

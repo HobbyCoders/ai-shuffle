@@ -817,6 +817,48 @@ def skill_store_tool_specs() -> dict[str, ToolSpec]:
             risk="write",
             source=SKILLS_SOURCE,
         ),
+        "save_plugin": ToolSpec(
+            name="save_plugin",
+            description=(
+                "Save a plugin (Agent Plugins format) to the owner's local "
+                "plugin source when they ask for one. It is listed in "
+                "Settings > Plugins at once but stays off until the owner "
+                "reviews and enables that exact version; changing it later "
+                "needs a new version and a new review. Prose skills, slash "
+                "commands, subagents and MCP servers only (no hooks). MCP "
+                "env values must be ${VAR} references, never secrets."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "lowercase-hyphenated plugin name"},
+                    "version": {"type": "string", "description": "semver like 0.1.0; bump it to change a saved plugin"},
+                    "description": {"type": "string"},
+                    "skills": {
+                        "type": "array",
+                        "description": "[{name, description, body}] — body is the SKILL.md text",
+                        "items": {"type": "object"},
+                    },
+                    "commands": {
+                        "type": "array",
+                        "description": "[{name, description?, body}] — slash command prompts",
+                        "items": {"type": "object"},
+                    },
+                    "agents": {
+                        "type": "array",
+                        "description": "[{name, description, body}] — subagent system prompts",
+                        "items": {"type": "object"},
+                    },
+                    "mcp_servers": {
+                        "type": "object",
+                        "description": "{name: {command, args?, env?} | {url}}",
+                    },
+                },
+                "required": ["name"],
+            },
+            risk="write",
+            source=SKILLS_SOURCE,
+        ),
     }
 
 
@@ -978,6 +1020,31 @@ def register_code_mode_tools(
             return ToolOutcome(text=f"skill {name!r} deleted")
         return ToolOutcome(text=f"no such skill: {name!r}", is_error=True)
 
+    async def _save_plugin(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        from fluid.context.plugin_authoring import PluginDraftError, save_authored_plugin
+
+        try:
+            saved = save_authored_plugin(input)
+        except PluginDraftError as exc:
+            return ToolOutcome(text=f"plugin not saved: {exc}", is_error=True)
+        except OSError as exc:
+            return ToolOutcome(text=f"plugin not saved: {type(exc).__name__}", is_error=True)
+        listed = ", ".join(saved.components)
+        if saved.unchanged:
+            return ToolOutcome(text=(
+                f"plugin {saved.id} version {saved.version} is already saved with "
+                f"this content ({listed}). It loads once the owner has enabled it."
+            ))
+        return ToolOutcome(text=(
+            f"plugin {saved.id} version {saved.version} saved ({listed}). It is "
+            "listed in Settings > Plugins and stays off until the owner reviews "
+            "and enables this version."
+        ))
+
     specs = skill_store_tool_specs()
     registry.register_builtin(specs["save_skill"], _save_skill)
     registry.register_builtin(specs["delete_skill"], _delete_skill)
+    # Same gate as save_skill: kernel-projected, write risk (Ask prompts),
+    # denied in chat and proactive lanes by the host. The write only drafts;
+    # loading needs the owner's approval of the exact content.
+    registry.register_builtin(specs["save_plugin"], _save_plugin)

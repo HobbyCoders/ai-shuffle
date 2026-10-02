@@ -80,7 +80,7 @@ The bot only responds in servers or channels you list. The guided setup in Step 
 
 AI Shuffle offers a **guided setup** that discovers the servers and channels your bot can see, so you can pick them from a list instead of copying IDs by hand. (Step 5 is only needed if you prefer to enter IDs manually.)
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Discord Bot**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Discord Bot**.
 2. Click **Install Discord Bot** if prompted, then click **Connect account**.
 3. Enter a **Connector Name** and paste the **Bot Token** from Step 2. To choose an existing **API User** instead of auto-creating one, open **Advanced settings**.
 4. Click **Validate**. AI Shuffle logs into Discord with the token and confirms the bot identity ("Authenticated as ...") along with how many servers it can see.
@@ -142,7 +142,7 @@ Your agent can use about 45 actions across messages, embeds, polls, files, react
 ### Bot is offline in Discord
 
 - **Invalid token.** If the token was regenerated in the Developer Portal, the old token no longer works. Update the connector configuration with the new token.
-- **Connector not enabled.** Check **Build > Plugins > Discord Bot** to ensure the connection is activated and shows a "Connected" status.
+- **Connector not enabled.** Check **Settings > Plugins > Discord Bot** to ensure the connection is activated and shows a "Connected" status.
 - **Rate limit or session limit.** Discord limits bots to one active Gateway session per token (by default). Ensure no other instance is running with the same token.
 
 ### "Missing Access" or 403 errors

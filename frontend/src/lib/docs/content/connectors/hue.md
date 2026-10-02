@@ -82,7 +82,7 @@ You should see JSON objects describing your lights, rooms, and scenes.
 
 ### 4. Create the Hue connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Philips Hue**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Philips Hue**.
 2. Click **Install Philips Hue** if prompted, then click **Connect account**.
 3. Fill in **Bridge IP Address** and **API Key (Username)**.
 4. Click **Create Connector**.

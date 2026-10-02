@@ -50,7 +50,7 @@
 		hideGlobalStt = false
 	}: Props = $props();
 
-	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
 	const buildActive = $derived(currentType ? BUILD_MEMBERS.includes(currentType) : false);
 
@@ -63,7 +63,9 @@
 		project: 'Projects',
 		docs: 'Docs',
 		stats: 'Stats',
-		settings: 'Settings'
+		settings: 'Settings',
+		// Plugin management lives in Settings.
+		plugins: 'Settings'
 	};
 	// In a chat, the mobile bar shows the chat name (the old PageHeader title row
 	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's

@@ -3,18 +3,21 @@
 		{
 			"components": [
 				{
+					"detail": "",
 					"kind": "skill",
 					"name": "lint",
 					"reason": "",
 					"support": "loaded"
 				},
 				{
+					"detail": "",
 					"kind": "command",
 					"name": "review",
 					"reason": "",
 					"support": "loaded"
 				},
 				{
+					"detail": "",
 					"kind": "agent",
 					"name": "reviewer",
 					"reason": "",
@@ -39,6 +42,7 @@
 		{
 			"components": [
 				{
+					"detail": "",
 					"kind": "command",
 					"name": "hello",
 					"reason": "",
@@ -63,11 +67,13 @@
 	],
 	"details_available": {
 		"agents": [],
+		"approval": null,
 		"commands": [
 			"hello"
 		],
 		"components": [
 			{
+				"detail": "",
 				"kind": "command",
 				"name": "hello",
 				"reason": "",
@@ -75,6 +81,7 @@
 			}
 		],
 		"connector_type": null,
+		"content_hash": null,
 		"description": "Not installed yet",
 		"enabled": false,
 		"format": "claude",
@@ -98,23 +105,27 @@
 		"agents": [
 			"reviewer"
 		],
+		"approval": null,
 		"commands": [
 			"review"
 		],
 		"components": [
 			{
+				"detail": "",
 				"kind": "skill",
 				"name": "lint",
 				"reason": "",
 				"support": "loaded"
 			},
 			{
+				"detail": "",
 				"kind": "command",
 				"name": "review",
 				"reason": "",
 				"support": "loaded"
 			},
 			{
+				"detail": "",
 				"kind": "agent",
 				"name": "reviewer",
 				"reason": "",
@@ -122,6 +133,7 @@
 			}
 		],
 		"connector_type": null,
+		"content_hash": null,
 		"description": "Review helpers",
 		"enabled": true,
 		"format": "claude",
@@ -160,20 +172,24 @@
 	],
 	"installed": [
 		{
+			"approval": null,
 			"components": [
 				{
+					"detail": "",
 					"kind": "skill",
 					"name": "lint",
 					"reason": "",
 					"support": "loaded"
 				},
 				{
+					"detail": "",
 					"kind": "command",
 					"name": "review",
 					"reason": "",
 					"support": "loaded"
 				},
 				{
+					"detail": "",
 					"kind": "agent",
 					"name": "reviewer",
 					"reason": "",
@@ -181,6 +197,7 @@
 				}
 			],
 			"connector_type": null,
+			"content_hash": null,
 			"description": "Review helpers",
 			"enabled": true,
 			"format": "claude",

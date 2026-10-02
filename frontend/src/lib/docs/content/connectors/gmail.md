@@ -57,7 +57,7 @@ Before creating credentials, you need to configure the OAuth consent screen:
 
 ### 4. Open the Gmail app in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Gmail**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Gmail**.
 2. Click **Install Gmail** if prompted, then click **Connect account**.
 3. Click **Google app setup (administrator)**. Note the **Authorized redirect URI** shown there. It has the form `https://<your-host>/api/v1/connectors/oauth/google/callback` (or a `localhost` address).
 

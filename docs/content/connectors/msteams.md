@@ -136,7 +136,7 @@ Setting up the Teams connector involves registering an application in Azure Acti
 
 ### Step 7: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Microsoft Teams**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Microsoft Teams**.
 2. Click **Install Microsoft Teams** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Application (Client) ID**: The Application (client) ID from Step 1

@@ -43,6 +43,10 @@ LSP servers, output styles, ChatGPT apps, userConfig, dependencies) is listed
 on the plugin's :class:`~fluid.context.plugin_formats.PluginRecord` with its
 support status, and not loaded here.
 
+Plugins from the ``authored`` source (written by the ``save_plugin`` tool) load
+only as the exact content the owner approved
+(:func:`fluid.context.plugin_authoring.is_approved`).
+
 Nothing here raises: a broken plugin is skipped with a ``logging`` warning and
 never takes the rest of discovery down with it (CE11).
 """
@@ -51,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +67,8 @@ from fluid.context.settings_stack import (
     mcp_toggles,
 )
 from fluid.context.instructions import Command, Skill
+from fluid.tools.child_env import is_app_secret
+from fluid.context.plugin_authoring import AUTHORED_SOURCE, is_approved
 from fluid.context.plugin_formats import (  # noqa: F401 — re-exported API
     FORMAT_AGENT_PLUGINS,
     FORMAT_CLAUDE,
@@ -206,6 +213,25 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
     return None
 
 
+def _authored_source(marketplace: str, *, home: Path | None = None) -> bool:
+    """Whether ``marketplace`` reaches the authored drafts folder.
+
+    Windows and macOS open ``cache/Authored`` as ``cache/authored``, and
+    Windows drops trailing dots and spaces, so an ``enabledPlugins`` key such
+    as ``x@Authored`` would otherwise load an unreviewed draft. Compare the
+    folders themselves, and treat an error as authored (fail closed).
+    """
+    if marketplace.casefold().rstrip(". ") == AUTHORED_SOURCE:
+        return True
+    home = plugins_home() if home is None else home
+    authored = home / "cache" / AUTHORED_SOURCE
+    candidate = home / "cache" / marketplace
+    try:
+        return authored.exists() and candidate.exists() and os.path.samefile(authored, candidate)
+    except OSError:
+        return True
+
+
 def plugin_data_dir(name: str, marketplace: str, *, home: Path | None = None) -> Path:
     """The stable per-plugin data folder ``${CLAUDE_PLUGIN_DATA}``/``${PLUGIN_DATA}``
     point at: ``~/.fluid/plugins/data/<name>@<marketplace>``. It survives plugin
@@ -226,6 +252,7 @@ def _mcp_servers_for(
     fmt: str = FORMAT_CLAUDE,
     servers: dict[str, Any] | None = None,
     data_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     declared = raw_mcp_servers(root, manifest, fmt) if servers is None else servers
@@ -239,7 +266,7 @@ def _mcp_servers_for(
             log.debug("MCP server %r disabled by settings", name)
             continue
         expanded = substitute_vars(
-            raw, plugin_root=root, project_dir=project_dir, plugin_data=data_dir
+            raw, plugin_root=root, project_dir=project_dir, plugin_data=data_dir, env=env
         )
         normalized = normalize_mcp_server(str(name), expanded)
         if normalized is None:
@@ -286,6 +313,15 @@ def load_plugin(
         )
         return None
     root, version = resolved
+    authored = _authored_source(marketplace, home=home)
+    if authored and not is_approved(name, root, home=home):
+        # An agent-written plugin loads only as the exact content the owner
+        # approved; a new or edited version waits for review (fail closed).
+        log.warning(
+            "authored plugin %s@%s (version %s) is not approved — skipping",
+            name, marketplace, root.name,
+        )
+        return None
     record = read_plugin(root, name=name, source=marketplace, version=version)
     skipped = [f"{c.kind}:{c.name}" for c in record.unsupported()]
     if skipped:
@@ -308,6 +344,9 @@ def load_plugin(
             fmt=record.format,
             servers=record.mcp_servers,
             data_dir=data_dir,
+            # An agent-written plugin's ${VAR} references never expand to
+            # the host app's own secrets (admin password, database settings).
+            env={k: v for k, v in os.environ.items() if not is_app_secret(k)} if authored else None,
         ),
         format=record.format,
         components=record.components,

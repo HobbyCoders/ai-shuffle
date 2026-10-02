@@ -53,6 +53,7 @@ class PluginComponentResponse(BaseModel):
     name: str
     support: str  # loaded | unsupported | needs_config
     reason: str = ""
+    detail: str = ""  # an MCP server's command line or URL, for review
 
 
 class PluginResponse(BaseModel):
@@ -77,6 +78,9 @@ class PluginResponse(BaseModel):
     format: Optional[str] = None
     trust: Optional[str] = None
     components: List[PluginComponentResponse] = Field(default_factory=list)
+    # Authored plugins only: review state and the hash an approval pins.
+    approval: Optional[str] = None
+    content_hash: Optional[str] = None
 
 
 def _record_fields(plugin) -> dict:
@@ -90,6 +94,8 @@ def _record_fields(plugin) -> dict:
         "format": text("format"),
         "trust": text("trust"),
         "components": components if isinstance(components, list) else [],
+        "approval": text("approval"),
+        "content_hash": text("content_hash"),
     }
 
 
@@ -118,6 +124,13 @@ class AvailablePluginResponse(BaseModel):
     enabled: bool
     format: Optional[str] = None
     components: List[PluginComponentResponse] = Field(default_factory=list)
+
+
+class PluginEnableRequest(BaseModel):
+    """Optional body for enabling a plugin."""
+    content_hash: Optional[str] = Field(
+        None, description="For an authored plugin: the content hash of the reviewed version"
+    )
 
 
 class PluginInstallRequest(BaseModel):
@@ -709,12 +722,19 @@ async def uninstall_plugin(
 @router.post("/{plugin_id:path}/enable", status_code=status.HTTP_200_OK)
 async def enable_plugin(
     plugin_id: str,
+    request: Optional[PluginEnableRequest] = None,
     token: str = Depends(require_admin)
 ):
-    """Enable a plugin globally - Admin only"""
+    """Enable a plugin globally - Admin only.
+
+    For an agent-authored plugin this is also the owner's approval, and it must
+    name the ``content_hash`` of the version that was reviewed; a plugin that
+    changed since is refused with 409.
+    """
     service = get_plugin_service()
+    extra = {"content_hash": request.content_hash} if request and request.content_hash else {}
     try:
-        success = await run_sync(service.enable_plugin, plugin_id)
+        success = await run_sync(service.enable_plugin, plugin_id, **extra)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     if not success:

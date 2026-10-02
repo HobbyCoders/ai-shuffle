@@ -129,7 +129,7 @@ def mounted_builtin_tools(
 # Code-mode tool names prose may reference (the addendum's surface).
 CODE_MODE_TOOL_NAMES: tuple[str, ...] = (
     "run_python", "list_tools", "search_tools", "read_tool_docs",
-    "save_skill", "delete_skill",
+    "save_skill", "delete_skill", "save_plugin",
 )
 
 # ─── model-family guidance ───────────────────────────────────────────────────

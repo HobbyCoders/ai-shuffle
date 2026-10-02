@@ -111,6 +111,9 @@ class PluginComponent:
     support: str = SUPPORT_LOADED
     reason: str = ""
     path: str | None = None
+    # What a reviewer needs to see before it runs: an MCP server's command
+    # line or URL (never its env). Empty for other kinds.
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +121,7 @@ class PluginComponent:
             "name": self.name,
             "support": self.support,
             "reason": self.reason,
+            "detail": self.detail,
         }
 
 
@@ -475,6 +479,32 @@ def mcp_server_support(cfg: Any) -> tuple[str, str]:
     return SUPPORT_LOADED, ""
 
 
+def mcp_server_detail(cfg: Any, limit: int = 2000) -> str:
+    """The command line or URL of a raw server entry, for review.
+
+    Environment entries are listed only when their value is a ``${VAR}``
+    reference (which variable the server is handed); a literal value is shown
+    as ``…`` so a secret written into a package never reaches the UI. A cut
+    text ends in ``…`` so a reviewer knows there is more than they see.
+    """
+    if not isinstance(cfg, dict):
+        return ""
+    if isinstance(cfg.get("url"), str):
+        text = cfg["url"]
+    else:
+        args = cfg.get("args")
+        parts = [cfg.get("command")] + (list(args) if isinstance(args, list) else [])
+        text = " ".join(str(p) for p in parts if isinstance(p, (str, int, float)))
+    env = cfg.get("env")
+    if isinstance(env, dict) and env:
+        shown = [
+            f"{k}={v}" if isinstance(v, str) and _VAR_RE.fullmatch(v) else f"{k}=…"
+            for k, v in env.items()
+        ]
+        text = f"{text} (env: {', '.join(shown)})"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def normalize_mcp_server(name: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     """Map a plugin-format server entry onto fluid's client config shape.
 
@@ -670,6 +700,7 @@ def read_plugin(
         support, reason = mcp_server_support(cfg)
         components.append(PluginComponent(
             kind="mcp_server", name=server_name, support=support, reason=reason,
+            detail=mcp_server_detail(cfg),
         ))
     components += _hook_components(root, manifest)
     components += _app_components(root, manifest)

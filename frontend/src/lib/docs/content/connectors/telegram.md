@@ -74,7 +74,7 @@ You can also temporarily set up a command handler that replies with the current 
 
 ### Step 4: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Telegram**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Telegram**.
 2. Click **Install Telegram** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the token from BotFather
@@ -135,7 +135,7 @@ Your agent can use 19 actions: send, edit, delete and forward messages, reaction
 ### Bot is not responding to messages
 
 - **Check the bot token.** Verify that the token in AI Shuffle matches the one from BotFather exactly. Regenerate the token with `/token` in BotFather if needed.
-- **Check connector status.** In the AI Shuffle UI, verify the Telegram connection shows as "Connected" under **Build > Plugins > Telegram**.
+- **Check connector status.** In the AI Shuffle UI, verify the Telegram connection shows as "Connected" under **Settings > Plugins > Telegram**.
 - **Check allowed chat IDs.** Make sure the chat you are messaging from is in the list. Use the `getUpdates` method to confirm the correct chat ID.
 - **Check the backend logs.** The connector uses Telegram long-polling, so the backend must be running and able to reach `api.telegram.org`. Look for polling errors in the logs and confirm the connector shows as "Connected".
 

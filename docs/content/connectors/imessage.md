@@ -42,7 +42,7 @@ This launches the RPC process (it reads requests on stdin). Press Ctrl-C to exit
 
 ### 3. Create the iMessage connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **iMessage**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **iMessage**.
 2. Click **Install iMessage** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **CLI Path** (optional): Path to the `imsg` binary. Defaults to `imsg`.
@@ -105,7 +105,7 @@ Your agent can use 5 actions: send message, send tapback reaction, list chats, g
 
 ### Responses are not being sent back
 
-- **Check connector activation.** Verify the connection is activated under **Build > Plugins > iMessage**.
+- **Check connector activation.** Verify the connection is activated under **Settings > Plugins > iMessage**.
 - **Check macOS permissions.** Ensure the process running the AI Shuffle backend (and `imsg`) has the macOS permissions it needs to control Messages and access your data. You may have to grant these the first time `imsg rpc` runs.
 - **Check the `service` setting.** If sends fail, try setting `service` to `imessage` or `sms` explicitly instead of `auto`.
 - **Review AI Shuffle logs.** Check the backend logs for error messages related to the iMessage connector and the `imsg` RPC subprocess.

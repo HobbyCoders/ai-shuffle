@@ -26,6 +26,20 @@ Key concepts:
 - **Owner-only management:** Installing, uninstalling, updating and enabling/disabling plugins requires the owner
 - **Read-only hooks:** Plugin-contributed hooks are discoverable but not editable through the hooks UI
 
+In the app, plugins are managed in **Settings > Plugins**. Older "Manage plugins" links open that section.
+
+## AI-authored plugins
+
+When you ask an agent for a plugin in a code session, it can save one with the `save_plugin` tool. Like `save_skill`, the tool asks for permission in Ask mode and is not available in chat sessions or background research.
+
+- The plugin is written in the Agent Plugins layout to `~/.fluid/plugins/cache/authored/<name>/<version>/` and appears at once in **Settings > Plugins** as `<name>@authored`, marked **Needs review**.
+- It stays off until you open it, check what it adds (each skill, command, agent and MCP server, with the server's command line or URL), and choose **Approve and enable**. That approval covers only the version you reviewed, identified by a hash of its files.
+- Any later edit or new version stops it loading until you review it again. Disabling it withdraws the approval.
+- If the session ran on another device of your network, the draft reaches every device's Settings, the same way saved skills do. Approving, disabling or uninstalling it on one device applies on all of them. A device turns the plugin on only when its own copy has the hash you approved.
+- Authored plugins can contain skills, slash commands, subagents and MCP servers. They cannot contain hooks, and MCP server `env` values must be `${VAR}` references, so no secret is written into a plugin.
+
+Through the API, enabling an authored plugin needs the reviewed hash: `POST /api/v1/plugins/{plugin_id}/enable` with `{"content_hash": "<content_hash from the plugin's details>"}`. A plugin that changed since returns 409.
+
 ## Official connector runtimes
 
 Official apps such as Webhook, Discord Bot and Gmail appear in the `shuffle-connectors` marketplace. Their source snapshots ship with AI Shuffle and its application updates; **no GitHub account or private-repository access is needed** to install them. The normal application access/licensing rules still apply. This does not change access to third-party git marketplaces.
