@@ -10,7 +10,6 @@ vi.mock('$lib/stores/providers.svelte', () => ({ providers: {
 	fetchProviderModels: mocks.fetchModels, refreshProviders: mocks.refresh, loadIntegrations: mocks.integrations
 } }));
 vi.mock('$lib/api/runtime', () => ({ apiBase: () => '/api/v1', withAuth: (init: RequestInit) => init }));
-vi.mock('../../AIToolsSettings.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 import OpenAiKeyFlow from './OpenAiKeyFlow.svelte';
 import GrokKeyFlow from './GrokKeyFlow.svelte';
