@@ -67,17 +67,14 @@
 	{#snippet primary()}
 		{#if pending}
 			<InlineConfirm
+				label="Approve"
 				question="IDs match?"
-				confirmLabel="Approve"
 				tone="primary"
+				variant="primary"
 				disabled={blocked || expired}
 				bind:armed={() => requests.isArmed(device, true), (v) => (v ? requests.arm(device, true) : requests.disarm())}
 				onConfirm={() => requests.decide()}
-			>
-				{#snippet trigger(arm)}
-					<button type="button" class="st-btn primary" disabled={blocked || expired} onclick={arm}>Approve</button>
-				{/snippet}
-			</InlineConfirm>
+			/>
 		{/if}
 	{/snippet}
 	{#snippet banner()}
