@@ -62,7 +62,7 @@
 		{ label: 'Source', value: 'Official' }
 	]);
 
-	const status = $derived(entry?.failing ? 'err' : installed ? (enabled ? 'ok' : 'off') : count ? 'ok' : undefined);
+	const status = $derived(entry?.failing ? 'err' : installed ? (enabled ? 'ok' : 'off') : count ? 'ok' : 'standby');
 	const statusText = $derived(
 		entry?.failing
 			? 'Account error'

@@ -103,7 +103,7 @@
 		{ label: 'Scope', value: installed ? plugin?.scope : null }
 	]);
 
-	const status = $derived(needsReview ? 'warn' : installed ? (enabled ? 'ok' : 'off') : undefined);
+	const status = $derived(needsReview ? 'warn' : installed ? (enabled ? 'ok' : 'off') : 'standby');
 	const statusText = $derived(
 		needsReview ? 'Needs review' : installed ? (enabled ? 'Enabled' : 'Disabled') : 'Not installed'
 	);
