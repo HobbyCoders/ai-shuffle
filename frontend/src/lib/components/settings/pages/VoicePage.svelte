@@ -177,7 +177,7 @@
 		<SettingRow id="voice.dictationModel">
 			<LinkValue
 				label={dictationModel}
-				target={{ category: 'models', item: 'dictation' }}
+				target={{ category: 'models', item: 'dict' }}
 				ariaLabel="Dictation model: {dictationModel}. Open in Default models"
 			/>
 		</SettingRow>
@@ -244,7 +244,7 @@
 			{:else if effectiveProvider}
 				<LinkValue
 					label={effectiveProvider.name}
-					target={{ category: 'providers', item: effectiveProvider.id }}
+					target={{ category: 'providers', item: `mp:${effectiveProvider.id}` }}
 					ariaLabel="Calls run on {effectiveProvider.name}. Open in Providers"
 				/>
 			{:else}
