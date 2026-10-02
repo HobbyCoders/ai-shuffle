@@ -161,6 +161,11 @@ def _install_resource_hook() -> None:
     def emit(resource, scope, arguments, before, result):
         original(resource, scope, arguments, before, result)
         collections = policy.collections_for_resource(resource)
+        if resource == "sessions":
+            # Shared sidebar membership publishes at its explicit writer;
+            # title/cost/runtime changes must still wake only the catalog.
+            # The periodic full pass covers membership held at startup.
+            collections = [c for c in collections if c.name != "session_active"]
         if collections:
             # Every registered session mutation names one ``session_id`` and
             # writes only that session's rows, except ``delete_session``, which

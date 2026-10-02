@@ -13,7 +13,7 @@ AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It run
 ### Chat Interface
 A real-time chat workspace for the model and provider you choose. Features include:
 - Streaming responses with tool use visualization
-- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you settle them, which moves them to Settled
+- Session management with search, tags, and an Active group: sessions you're working in stay in Active until you settle them, which moves them to Settled. You can settle or reopen a session from any online worker, even if its execution worker is offline; membership syncs when workers reconnect. This does not stop running work or move the session. Update all workers to use this behavior across the network.
 - Session forking to branch conversations
 - Git worktree integration for isolated development
 - File sharing and media generation

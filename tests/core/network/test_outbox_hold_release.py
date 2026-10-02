@@ -19,7 +19,7 @@ from tests.core.network.harness import converge, exchange, owner_pref, set_owner
 from tests.core.network.test_control import _new_session
 from tests.core.network.test_ownership_revocation import Network, _network
 from tests.core.network.test_peer_plane_errors import _pref_ops
-from tests.core.network.test_session_active_control import connect_owner, settle
+from tests.core.network.test_session_active_control import connect_owner
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +144,9 @@ async def test_peer_settle_during_startup_hold_is_signed_and_reaches_the_mirror(
         engine.hold_outbox(True)
     with b.active():
         store.touch_member(a.device_id, endpoints=[served.base_url])
-        result = await settle("startup-settle", False)
+        # Keep exercising the older peer-control protocol. New UIs write
+        # shared membership locally and no longer need to contact the owner.
+        result = await session_active.set_remote(a.device_id, "startup-settle", False)
         assert bool(result["is_active"]) is False
         assert bool(database.get_session("startup-settle")["is_active"]) is False
     assert engine.outbox_held() is False

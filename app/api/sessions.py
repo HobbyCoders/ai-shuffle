@@ -1822,19 +1822,26 @@ async def set_session_active(
     existing = await require_session(request, session_id)
 
     from app.network import control, engine, session_active
-    owner = control.owner_of(existing)
-    if owner is not None:
+    if engine.context() is not None:
         try:
-            return await session_active.set_remote(owner, session_id, payload.is_active, payload.archived)
+            if payload.archived is None:
+                # Settle/reopen is shared membership: any worker commits it,
+                # even while the session's execution owner is offline.
+                return await session_active.set_shared(session_id, payload.is_active)
+            # Archive/restore changes the owner's session status, so it still
+            # rides the owner-authoritative path.
+            owner = control.owner_of(existing)
+            if owner is not None:
+                await session_active.set_remote(owner, session_id, payload.is_active, payload.archived)
+                # Keep this worker's shared membership in step so a stale local
+                # record cannot project the old value onto the archived mirror.
+                return await session_active.set_shared(session_id, False if payload.archived else payload.is_active)
+            await session_active.set_local(session_id, payload.is_active, payload.archived)
+            return await run_sync(database.get_session, session_id)
         except control.RunnerUnreachable as exc:
             raise HTTPException(503, str(exc)) from exc
         except control.ControlRefused as exc:
             raise HTTPException(409, str(exc)) from exc
-    ctx = engine.context()
-    if ctx is not None:
-        try:
-            await session_active.set_local(session_id, payload.is_active, payload.archived)
-            return await run_sync(database.get_session, session_id)
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:

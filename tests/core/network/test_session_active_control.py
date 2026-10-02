@@ -1,4 +1,4 @@
-"""Settlement must change the owner, not only a replicated session row."""
+"""Sidebar membership works offline and converges independently of its owner."""
 import httpx
 import pytest
 from starlette.requests import Request
@@ -31,7 +31,7 @@ async def settle(session_id, active):
     )
 
 
-async def test_remote_settlement_updates_owner_and_mirror_before_return(workers, monkeypatch):
+async def test_shared_settlement_updates_mirror_then_owner_on_sync(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = connect_owner(monkeypatch, a)
     with a.active():
@@ -49,7 +49,9 @@ async def test_remote_settlement_updates_owner_and_mirror_before_return(workers,
             result = await settle("settle-remote", active)
             assert bool(result["is_active"]) is active
             assert bool(database.get_session("settle-remote")["is_active"]) is active
-            assert engine.scan_all() == 0  # viewing/scanning a mirror cannot republish it
+            # Only shared membership travels from the viewer, never ownership.
+            engine.scan_all()
+        converge([a, b])
         with a.active():
             assert bool(database.get_session("settle-remote")["is_active"]) is active
             # A later unrelated owner update cannot resurrect stale membership.
@@ -60,23 +62,41 @@ async def test_remote_settlement_updates_owner_and_mirror_before_return(workers,
             assert bool(database.get_session("settle-remote")["is_active"]) is active
 
 
-async def test_remote_settlement_offline_does_not_modify_mirror(workers):
+async def test_remote_settlement_offline_updates_mirror_and_reconciles(workers, monkeypatch):
+    from unittest.mock import AsyncMock
+
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
     join(a, b)
     _new_session(a, "offline-settle", "On owner")
     converge([a, b])
+    call = AsyncMock(side_effect=AssertionError("Sidebar edits must not call the execution owner"))
+    monkeypatch.setattr(control, "call", call)
     with b.active():
         store.touch_member(a.device_id, endpoints=[])
         transport._links.clear()
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as error:
-            await settle("offline-settle", False)
-        assert error.value.status_code == 503
-        # Name the worker to bring back, not the transport failure (#1621).
-        assert error.value.detail.startswith("A, the worker that runs this session, can't be reached")
+        before = database.get_session("offline-settle")
+        result = await settle("offline-settle", False)
+        assert bool(result["is_active"]) is False
+        assert bool(database.get_session("offline-settle")["is_active"]) is False
+        for field in ("owner_device_id", "instance_id", "placement", "status", "updated_at"):
+            assert result[field] == before[field]
+        # Sidebar filtering reads the projected row, not an in-memory override.
+        assert not database.get_sessions(active_only=True)
+    call.assert_not_called()
+    with a.active():
         assert bool(database.get_session("offline-settle")["is_active"]) is True
+        # Owner publishes stale is_active before it learns about the offline edit.
+        database.update_session("offline-settle", title="Owner restarted")
+        engine.scan_all()
+    converge([a, b])
+    for worker in (a, b):
+        with worker.active():
+            row = database.get_session("offline-settle")
+            assert bool(row["is_active"]) is False
+            assert row["title"] == "Owner restarted"
+            assert row["owner_device_id"] == a.device_id
 
 
 async def test_reversed_responses_cannot_restore_old_membership(workers, monkeypatch):
@@ -95,15 +115,18 @@ async def test_reversed_responses_cannot_restore_old_membership(workers, monkeyp
     with b.active():
         assert engine.apply_batch([second["envelope"]]).pending == 1
         engine.apply_batch([first["envelope"]])
+    # Shared membership precedes each legacy owner reply in the same stream.
+    converge([a, b])
+    with b.active():
         assert bool(database.get_session("reverse-active")["is_active"]) is True
         monkeypatch.setattr(control, "call", AsyncMock(return_value=first))
         row = await session_active.set_remote(a.device_id, "reverse-active", False)
         assert bool(row["is_active"]) is True
 
 
-async def test_remote_settlement_owner_error_is_not_called_unreachable(workers, monkeypatch):
+async def test_legacy_owner_error_is_not_called_unreachable(workers, monkeypatch):
     """#1621: an owner that answers 500 was reached; keep that distinct from offline."""
-    from fastapi import HTTPException
+    from app.network import session_active
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
@@ -116,11 +139,10 @@ async def test_remote_settlement_owner_error_is_not_called_unreachable(workers, 
 
     with b.active():
         monkeypatch.setattr(control, "call", failing_call)
-        with pytest.raises(HTTPException) as error:
-            await settle("error-settle", False)
-        assert error.value.status_code == 503
-        assert error.value.detail.startswith("A, the worker that runs this session, hit an error")
-        assert "can't be reached" not in error.value.detail
+        with pytest.raises(control.RunnerUnreachable) as error:
+            await session_active.set_remote(a.device_id, "error-settle", False)
+        assert str(error.value).startswith("A, the worker that runs this session, hit an error")
+        assert "can't be reached" not in str(error.value)
         assert bool(database.get_session("error-settle")["is_active"]) is True
 
 
@@ -207,12 +229,19 @@ async def test_remote_archive_and_restore_update_owner_and_mirror(workers, monke
     converge([a, b])
     with b.active():
         store.touch_member(a.device_id, endpoints=[served.base_url])
+        # A shared reopen leaves a local membership record saying Active; the
+        # archive must not let it project back onto the archived mirror.
+        await api.set_session_active(
+            Request({"type": "http", "headers": []}), "archive-remote",
+            api.SessionActiveUpdate(is_active=True), token="admin",
+        )
         result = await api.set_session_active(
             Request({"type": "http", "headers": []}), "archive-remote",
             api.SessionActiveUpdate(is_active=True, archived=True), token="admin",
         )
         # Archiving always leaves Active, whatever is_active asked for.
         assert result["status"] == "archived" and not result["is_active"]
+        assert not database.get_session("archive-remote")["is_active"]
     with a.active():
         assert database.get_session("archive-remote")["status"] == "archived"
     with b.active():

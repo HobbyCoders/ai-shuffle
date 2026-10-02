@@ -1611,7 +1611,13 @@ def set_session_active(
 ) -> Optional[SessionRow]:
     """Set the is_active flag (and optionally the archive state) for a session
     and return the updated session. Archiving always leaves Active; restoring
-    only touches a row that is actually archived."""
+    only touches a row that is actually archived.
+
+    On a networked worker a plain membership change is shared sidebar state,
+    committed independently of execution ownership."""
+    from app.network import engine, session_active
+    if archived is None and engine.context() is not None:
+        return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
