@@ -10,6 +10,12 @@ Each worker reconciles its user-scope installation against that table:
 install what is desired and missing, enable or disable to match, uninstall
 what a tombstone removed. Project-scope plugins live with the checkout and
 stay local.
+
+Agent-authored plugins (``<name>@authored``) are not part of this table:
+their drafts and the owner's content-pinned approvals travel as memory
+records instead (see :mod:`app.network.authored_plugins`). An enabled flag
+alone cannot carry an approval, and no worker can install one from a
+marketplace.
 """
 from __future__ import annotations
 
@@ -28,6 +34,13 @@ def _service():
     return get_plugin_service()
 
 
+def _authored(plugin_id: str) -> bool:
+    """Any spelling of the authored source, as the loader matches it on
+    case-insensitive file systems (``Authored``, ``authored.``)."""
+    source = plugin_id.rpartition("@")[2]
+    return "@" in plugin_id and source.strip().rstrip(". ").lower() == "authored"
+
+
 def _installed() -> Dict[str, dict]:
     try:
         service = _service()
@@ -35,6 +48,8 @@ def _installed() -> Dict[str, dict]:
         out = {}
         for plugin in service.get_installed_plugins():
             if getattr(plugin, "scope", "user") not in ("user", "global", None):
+                continue
+            if _authored(plugin.id):
                 continue
             out[plugin.id] = {"version": plugin.version, "enabled": bool(enabled.get(plugin.id, plugin.enabled))}
         return out
@@ -94,6 +109,8 @@ def apply_desired(record_ids: Iterable[str]) -> int:
                        tuple(ids))
         rows = {r["id"]: dict(r) for r in cursor.fetchall()}
     for plugin_id in ids:
+        if _authored(plugin_id):
+            continue  # never installed or enabled from this table
         row = rows.get(plugin_id)
         try:
             if row is None:

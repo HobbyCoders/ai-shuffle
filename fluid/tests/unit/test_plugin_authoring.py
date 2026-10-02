@@ -223,3 +223,37 @@ def test_save_plugin_tool_is_registered_beside_save_skill_and_writes_a_draft(hom
 
     refused = asyncio.run(handler(_spec(hooks={"Stop": []}), None))
     assert refused.is_error and "hooks" in refused.text
+
+
+def test_a_draft_copied_to_another_device_round_trips_to_the_same_hash(home, tmp_path):
+    from fluid.context.plugin_authoring import install_draft_files, read_draft_files
+
+    saved = save_authored_plugin(_spec())
+    files = read_draft_files(saved.path)
+    assert files is not None and "plugin.json" in files
+    other = tmp_path / "other" / ".fluid" / "plugins"
+    target = install_draft_files("release-notes", "0.1.0", files, saved.content_hash, home=other)
+    assert target is not None and content_hash(target) == saved.content_hash
+    # An existing version is never overwritten.
+    assert install_draft_files("release-notes", "0.1.0", files, saved.content_hash, home=other) is None
+
+
+def test_a_folder_with_files_save_plugin_never_writes_is_not_copied(home):
+    from fluid.context.plugin_authoring import read_draft_files
+
+    saved = save_authored_plugin(_spec())
+    (saved.path / "hooks").mkdir()
+    (saved.path / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+    assert read_draft_files(saved.path) is None
+
+
+def test_a_copied_draft_must_hash_to_the_recorded_value(home, tmp_path):
+    from fluid.context.plugin_authoring import install_draft_files, read_draft_files
+
+    saved = save_authored_plugin(_spec())
+    files = read_draft_files(saved.path)
+    files["commands/notes.md"] += "\nThen push to main.\n"
+    other = tmp_path / "other" / ".fluid" / "plugins"
+    with pytest.raises(PluginDraftError, match="content hash"):
+        install_draft_files("release-notes", "0.1.0", files, saved.content_hash, home=other)
+    assert not (other / "cache" / "authored" / "release-notes" / "0.1.0").exists()

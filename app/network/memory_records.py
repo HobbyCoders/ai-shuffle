@@ -102,6 +102,12 @@ def publish(*, ctx=None) -> int:
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
     refresh_from_files(ctx=ctx)
+    try:
+        from app.network import authored_plugins
+        with get_db() as conn:
+            authored_plugins.refresh_from_files(conn.cursor())
+    except Exception:  # noqa: BLE001 - drafts must not stop facts and skills
+        log.warning("Publishing authored plugin drafts failed", exc_info=True)
     return engine.scan_collection("memory", ctx=ctx)
 
 
@@ -114,6 +120,14 @@ def apply_to_files(ids: list[str], *, ctx=None) -> int:
         cur = conn.cursor()
         cur.execute("SELECT * FROM network_memory_records WHERE id IN (%s)" % ",".join(["%s"] * len(ids)), tuple(ids))
         records = list(cur.fetchall())
+    from app.network import authored_plugins
+    authored = [r for r in records if authored_plugins.is_record(r["id"])]
+    if authored:
+        try:
+            applied += authored_plugins.apply_records(authored)
+        except Exception:  # noqa: BLE001 - drafts must not stop facts and skills
+            log.exception("Applying authored plugin records failed")
+    records = [r for r in records if not authored_plugins.is_record(r["id"])]
     from fluid.codemode.skills import atomic_write_text
     for record in records:
         rid = record["id"]

@@ -140,12 +140,14 @@ def details(svc, plugin_id: str) -> Optional[PluginDetails]:
     )
 
 
-def enable(svc, plugin_id: str, content_hash: Optional[str]) -> bool:
+def enable(svc, plugin_id: str, content_hash: Optional[str], *, share: bool = True) -> bool:
     """Approve the reviewed content and enable the plugin.
 
     ``content_hash`` is the hash the owner was shown; a mismatch (a newer
     version or an edit since) is refused, so approval always covers exactly
-    what was reviewed.
+    what was reviewed. With ``share`` (the owner's own action, not one
+    copied from another device) the approval is recorded for the other
+    devices of the network, which apply it only to identical content.
     """
     from fluid.context.plugin_formats import content_hash as hash_tree
 
@@ -165,20 +167,29 @@ def enable(svc, plugin_id: str, content_hash: Optional[str]) -> bool:
         "hash": digest,
         "approvedAt": datetime.now(timezone.utc).isoformat(),
     }
-    if not _write_approvals(svc, approvals):
+    if not _write_approvals(svc, approvals) or not _set_enabled(svc, plugin_id, True):
         return False
-    return _set_enabled(svc, plugin_id, True)
+    if share:
+        from app.network import authored_plugins
+        authored_plugins.share_approval(plugin_id, root.name, digest)
+    return True
 
 
-def disable(svc, plugin_id: str) -> bool:
+def disable(svc, plugin_id: str, *, share: bool = True) -> bool:
+    """Turn the plugin off and drop its approval, here and (with ``share``) on every device."""
     svc._check_files_replaceable(_approvals_file(svc), svc.SETTINGS_FILE)
     approvals = _approvals(svc, for_update=True)
     if approvals.pop(plugin_id, None) is not None and not _write_approvals(svc, approvals):
         return False
-    return _set_enabled(svc, plugin_id, False)
+    done = _set_enabled(svc, plugin_id, False)
+    if share:
+        # After the local change, so a failure here never leaves this device on.
+        from app.network import authored_plugins
+        authored_plugins.withdraw(plugin_id)
+    return done
 
 
-def uninstall(svc, plugin_id: str) -> bool:
+def uninstall(svc, plugin_id: str, *, share: bool = True) -> bool:
     name = plugin_id.rpartition("@")[0]
     folder = _base(svc) / name
     if not _plain(name) or not folder.is_dir() or folder.is_symlink():
@@ -193,6 +204,9 @@ def uninstall(svc, plugin_id: str) -> bool:
         del enabled[plugin_id]
         svc._write_json_file(svc.SETTINGS_FILE, settings)
     shutil.rmtree(folder, ignore_errors=True)
+    if share:
+        from app.network import authored_plugins
+        authored_plugins.withdraw(plugin_id, uninstall=True)
     return not folder.exists()
 
 

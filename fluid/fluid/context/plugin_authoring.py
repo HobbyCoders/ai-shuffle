@@ -367,3 +367,134 @@ def save_authored_plugin(spec: dict[str, Any], *, home: Path | None = None) -> S
         id=f"{name}@{AUTHORED_SOURCE}", name=name, version=version, path=target,
         content_hash=digest, components=loaded or components,
     )
+
+
+# ─── drafts copied between devices ───────────────────────────────────────────
+#
+# A session can run on a different device than the one whose Settings the
+# owner reviews in, so the app copies drafts between the devices of a network
+# (see ``app.network.authored_plugins``). A copied draft passes the same
+# checks ``save_plugin`` applies and only ever has the files it writes.
+
+_DRAFT_FILE_RE = re.compile(
+    r"^(?:plugin\.json|mcp\.json"
+    r"|skills/[a-z0-9][a-z0-9-]{0,62}/SKILL\.md"
+    r"|(?:commands|agents)/[a-z0-9][a-z0-9-]{0,62}\.md)$"
+)
+MAX_DRAFT_FILES = 3 * MAX_COMPONENTS + 2
+_MANIFEST_KEYS = {"name", "version", "description", "author", "skills", "mcpServers", "extensions"}
+_SHUFFLE_KEYS = {"authored": True, "commands": "./commands/", "agents": "./agents/"}
+
+
+def read_draft_files(root: Path) -> dict[str, str] | None:
+    """A saved draft as ``{relpath: text}``.
+
+    ``None`` when the folder holds anything ``save_plugin`` never writes (a
+    symlink, another file, text that is not UTF-8), so only drafts that look
+    exactly like the tool's output leave this device.
+    """
+    files: dict[str, str] = {}
+    try:
+        if not root.is_dir() or root.is_symlink():
+            return None
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            base = Path(dirpath)
+            for entry in dirnames + filenames:
+                if (base / entry).is_symlink():
+                    return None
+            for entry in filenames:
+                rel = (base / entry).relative_to(root).as_posix()
+                if not _DRAFT_FILE_RE.match(rel) or len(files) >= MAX_DRAFT_FILES:
+                    return None
+                files[rel] = (base / entry).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return files
+
+
+def check_draft_files(name: str, version: str, files: Any) -> None:
+    """Refuse a copied draft that ``save_plugin`` could not have written.
+
+    Raises :class:`PluginDraftError`. Checks the file names, the size, the
+    manifest (no hooks, nothing pointing outside the plugin) and every MCP
+    server with the same rules as a new draft.
+    """
+    _name(name, "name")
+    if not isinstance(version, str) or not _VERSION_RE.match(version):
+        raise PluginDraftError("version must look like 1.2.3")
+    if not isinstance(files, dict) or not files or len(files) > MAX_DRAFT_FILES:
+        raise PluginDraftError("the draft has no files or too many")
+    total = 0
+    for rel, text in files.items():
+        if not isinstance(rel, str) or not _DRAFT_FILE_RE.match(rel):
+            raise PluginDraftError(f"unexpected file {rel!r}")
+        if not isinstance(text, str) or "\0" in text:
+            raise PluginDraftError(f"{rel} is not text")
+        total += len(text.encode("utf-8"))
+    if total > MAX_TOTAL_BYTES:
+        raise PluginDraftError(f"the plugin is {total} bytes; the limit is {MAX_TOTAL_BYTES}")
+    try:
+        manifest = json.loads(files.get("plugin.json") or "")
+    except json.JSONDecodeError as exc:
+        raise PluginDraftError("plugin.json is not JSON") from exc
+    if not isinstance(manifest, dict) or set(manifest) - _MANIFEST_KEYS:
+        raise PluginDraftError("plugin.json has fields save_plugin never writes")
+    if manifest.get("name") != name or manifest.get("version") != version:
+        raise PluginDraftError("plugin.json names a different plugin or version")
+    if manifest.get("skills", "./skills/") != "./skills/":
+        raise PluginDraftError("plugin.json points skills elsewhere")
+    if manifest.get("mcpServers", "./mcp.json") != "./mcp.json":
+        raise PluginDraftError("plugin.json points MCP servers elsewhere")
+    extensions = manifest.get("extensions", {})
+    if not isinstance(extensions, dict) or set(extensions) - {SHUFFLE_EXTENSION}:
+        raise PluginDraftError("plugin.json has extensions save_plugin never writes")
+    shuffle = extensions.get(SHUFFLE_EXTENSION, {})
+    if not isinstance(shuffle, dict) or any(
+        key not in _SHUFFLE_KEYS or value != _SHUFFLE_KEYS[key] for key, value in shuffle.items()
+    ):
+        raise PluginDraftError("plugin.json has extension settings save_plugin never writes")
+    if "mcp.json" in files:
+        try:
+            servers = json.loads(files["mcp.json"]).get("mcpServers")
+        except (json.JSONDecodeError, AttributeError) as exc:
+            raise PluginDraftError("mcp.json is not a server list") from exc
+        if not isinstance(servers, dict) or len(servers) > MAX_SERVERS:
+            raise PluginDraftError("mcp.json is not a server list")
+        checked = {_name(k, "MCP server name"): _server(k, v) for k, v in servers.items()}
+        refs = _host_secret_refs(checked) | _host_secret_refs(servers)
+        if refs:
+            raise PluginDraftError(f"MCP servers may not reference the app's own secrets {sorted(refs)}")
+
+
+def install_draft_files(
+    name: str, version: str, files: dict[str, str], expected_hash: str, *, home: Path | None = None,
+) -> Path | None:
+    """Write a draft copied from another device as ``<name>/<version>``.
+
+    Returns the new folder, or ``None`` when that version already exists here
+    (it is never overwritten). Raises :class:`PluginDraftError` when the draft
+    fails :func:`check_draft_files` or its files do not hash to
+    ``expected_hash``, the hash the owner's approval will be pinned to.
+    """
+    check_draft_files(name, version, files)
+    base = authored_dir(home) / name
+    target = base / version
+    if target.exists():
+        return None
+    base.mkdir(parents=True, exist_ok=True)
+    if base.is_symlink() or not base.resolve().is_relative_to(authored_dir(home).resolve()):
+        raise PluginDraftError("the authored plugin folder is not a plain folder")
+    staging_root = (plugins_home() if home is None else home) / "cache" / ".authored-staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f"{name}-{version}-", dir=staging_root))
+    try:
+        _write_tree(staging, files)
+        if content_hash(staging) != expected_hash:
+            raise PluginDraftError("the copied draft does not match its content hash")
+        if target.exists():
+            return None
+        os.replace(staging, target)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return target
