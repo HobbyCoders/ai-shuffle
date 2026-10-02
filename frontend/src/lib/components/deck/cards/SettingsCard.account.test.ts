@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn() }));
 const workspace = vi.hoisted(() => ({ get: vi.fn(), validate: vi.fn(), save: vi.fn() }));
@@ -82,6 +82,23 @@ describe('Account settings', () => {
   openSettingsTab('license');
   await waitFor(() => expect(license.classList.contains('on')).toBe(true));
   if (!hadAnimate) delete proto.animate;
+ });
+
+ it('opens the tab a deep link names, then clears the link (Assistant "Sign in to GitHub")', async () => {
+  const proto = Element.prototype as unknown as { animate?: unknown };
+  const hadAnimate = 'animate' in proto;
+  if (!hadAnimate) proto.animate = () => ({ cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() });
+  onTestFinished(() => { if (!hadAnimate) delete proto.animate; });
+  const { layout } = await import('$lib/stores/layout.svelte');
+  const clear = vi.spyOn(layout, 'clearFeatureItemId');
+  render(SettingsCard, { initialTab: 'providers' });
+  const nav = await screen.findByRole('navigation', { name: 'Settings sections' });
+  await waitFor(() => expect(within(nav).getByRole('button', { name: 'Providers' }).classList.contains('on')).toBe(true));
+  expect(clear).toHaveBeenCalled();
+  cleanup();
+  render(SettingsCard, { initialTab: 'not-a-tab' });
+  const again = await screen.findByRole('navigation', { name: 'Settings sections' });
+  expect(within(again).getByRole('button', { name: 'Account' }).classList.contains('on')).toBe(true);
  });
 
  it('omits Downloads and Plugins from settings', async () => {
