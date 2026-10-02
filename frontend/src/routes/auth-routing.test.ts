@@ -17,7 +17,7 @@ vi.mock('$lib/services/globalStt', () => ({ initGlobalStt: () => () => {} }));
 vi.mock('$lib/services/keyboard', () => ({ registerShortcut: () => ({ unregister() {} }) }));
 vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { set: vi.fn() } }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: {
-	...writable({ sessionId: null }), init: mocks.init, destroy: mocks.destroy, newChat: vi.fn(),
+	...writable({ sessionId: null }), init: mocks.init, destroy: mocks.destroy, newChat: vi.fn(), resolveComposerDefaultsAfterCatalog: vi.fn(),
 	validateSelectedProfile: vi.fn(), reconcileSessionMode: vi.fn()
 } }));
 vi.mock('$lib/stores/app-data.svelte', () => ({

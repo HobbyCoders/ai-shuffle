@@ -26,7 +26,7 @@
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
-	import { profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
@@ -131,6 +131,13 @@
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
 	let messageSent = false;
+	// A new chat's remembered project and branch resolve against the project
+	// catalog. A send before it answers is held with the text in place (#1636).
+	let heldForCatalog = $state(false);
+	// After a hold that ended without a usable catalog, the next send is the
+	// user's answer and goes out as composed.
+	let catalogHoldWaived = false;
+	const CATALOG_HOLD_MS = 10_000;
 	const initialSessionId = $activeSession.sessionId;
 
 	// Get the draft value as JSON string (preserves file chips)
@@ -538,7 +545,10 @@
 
 	// Handle form submission
 	async function handleSubmit() {
-		if (!ownsComposer()) return;
+		if (!ownsComposer() || heldForCatalog) return;
+		if (composerMode !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
+			if (!(await holdForProjectCatalog())) return;
+		}
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
@@ -571,6 +581,32 @@
 
 		// Send the message
 		sendMessage(messageToSend);
+	}
+
+	/**
+	 * Hold a send until the project catalog answers, so a new chat's
+	 * remembered project and branch are in place first (#1636). The text stays
+	 * in the composer throughout. True when the send may go on.
+	 */
+	async function holdForProjectCatalog(): Promise<boolean> {
+		const navigation = getInitGeneration();
+		heldForCatalog = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const loaded = await Promise.race([
+			appData.whenProjectCatalogLoaded().then(() => true),
+			new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), CATALOG_HOLD_MS); }),
+		]);
+		clearTimeout(timer);
+		heldForCatalog = false;
+		// The view moved on: the text stays with the view it was typed in.
+		if (!ownsComposer() || getInitGeneration() !== navigation || get(activeSession).sessionId) return false;
+		if (loaded) activeSession.resolveComposerDefaultsAfterCatalog();
+		if (!loaded || appData.projectCatalogFailed) {
+			catalogHoldWaived = true;
+			notify("Projects didn't load, so your usual project and branch may not be set. Check them, then send again.", { severity: 'warning' });
+			return false;
+		}
+		return true;
 	}
 
 	/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
@@ -618,6 +654,15 @@
 		// typed prompt or uploaded attachments — we repopulate the editor.
 		const sendingSessionId = $activeSession.sessionId;
 		const sendingNavigation = getInitGeneration();
+		// A refusal names its reason by setting the error or worktree banner. One
+		// already showing from an earlier attempt is not that reason, so watch
+		// for either to be set during this send.
+		const reasonAtSend = { error: $activeSession.error, worktreeError: $activeSession.worktreeError };
+		const reasonSet = { error: false, worktreeError: false };
+		const stopWatchingReason = activeSession.subscribe(s => {
+			if (s.error !== reasonAtSend.error) reasonSet.error = true;
+			if (s.worktreeError !== reasonAtSend.worktreeError) reasonSet.worktreeError = true;
+		});
 		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
 		const priorUploadedFiles = uploadedFiles;
@@ -644,8 +689,10 @@
 				return;
 			}
 			// Every refusal names its reason in the session's error or worktree
-			// banner; this covers one that does not.
-			if (!get(activeSession).error && !get(activeSession).worktreeError) {
+			// banner; this covers one that does not, including one that left an
+			// earlier attempt's banner standing.
+			const now = get(activeSession);
+			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
 				notify('Message not sent. Try again.', { severity: 'warning' });
 			}
 			// A slow create can fail after the user started a new message: put
@@ -700,6 +747,8 @@
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
+		} finally {
+			stopWatchingReason();
 		}
 	}
 
@@ -1113,9 +1162,10 @@
 					     including with a draft. Send can queue that draft independently.
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
-						{#if $activeSession.isCreatingWorktree}
-							<!-- Creating worktree - show spinner -->
-							<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree..." aria-label="Creating worktree">
+						{#if $activeSession.isCreatingWorktree || heldForCatalog}
+							<!-- Creating worktree, or a send held for the project catalog - show spinner -->
+							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
+							<button type="button" class="send-btn creating-worktree" disabled title={heldForCatalog ? 'Loading projects…' : 'Creating worktree...'} aria-label={heldForCatalog ? 'Loading projects…' : 'Creating worktree'}>
 								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 								</svg>

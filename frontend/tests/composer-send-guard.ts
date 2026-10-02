@@ -12,12 +12,14 @@ import '../src/app.css';
 //   ?checkout=auto     no remembered checkout: the branch is named on send
 //   ?ws=down           the WebSocket never opens
 //   ?hold=sessions     the startup session-list load waits for fixtureRelease()
-//   ?hold=projects     the startup project-catalog load waits for fixtureRelease()
+//   ?hold=projects     the startup project-catalog load (both halves) waits for fixtureRelease()
+//   ?cluster=1         the remembered project is cluster-linked (shared UUID)
 const params = new URLSearchParams(location.search);
 const OLD = 'old-session';
 const CREATED = 'created-session';
 const PROJECT = 'shuffle-scratch';
 const BRANCH = 'live/1528-explicit';
+const REPO = params.has('cluster') ? 'repo-uuid' : null;
 
 localStorage.clear();
 sessionStorage.clear();
@@ -25,9 +27,9 @@ localStorage.setItem('ai-shuffle-layout', JSON.stringify({ activeView: { type: '
 localStorage.setItem('ai-shuffle.sessionMode', 'code');
 const checkout = params.get('checkout') === 'auto' ? null : params.get('checkout') === 'existing'
 	? { kind: 'existing', projectId: PROJECT, projectV2Id: null, worktreeId: 'wt-1', branch: BRANCH }
-	: { kind: 'branch', projectId: PROJECT, projectV2Id: null, branch: BRANCH, baseBranch: 'main', createNew: false };
+	: { kind: 'branch', projectId: PROJECT, projectV2Id: REPO, branch: BRANCH, baseBranch: 'main', createNew: false };
 const picks: Record<string, unknown> = {
-	profile: 'claude-code', project: { projectId: PROJECT, projectV2Id: null }, worktreeIntent: 'worktree', checkout,
+	profile: 'claude-code', project: { projectId: PROJECT, projectV2Id: REPO }, worktreeIntent: 'worktree', checkout,
 };
 for (const [key, value] of Object.entries(picks)) localStorage.setItem(`ai-shuffle-composer:${key}`, JSON.stringify(value));
 
@@ -54,7 +56,11 @@ window.fetch = async (input, init) => {
 			worktreeIntent: 'worktree', worktreeBranch: BRANCH, worktreeMode: 'new',
 		} });
 	}
-	if (path.endsWith('/cluster/projects')) return json({ projects: [] });
+	if (path.endsWith('/cluster/projects')) {
+		await hold('projects');
+		return json({ projects: REPO ? [{ project_v2_id: REPO, origin: 'git@example:shuffle-scratch', name: PROJECT,
+			local_project_id: PROJECT, remote_only: false, eligible: [] }] : [] });
+	}
 	if (path.endsWith('/projects')) {
 		await hold('projects');
 		return json([{ id: PROJECT, name: PROJECT, path: `/p/${PROJECT}` }]);

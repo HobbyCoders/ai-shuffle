@@ -41,24 +41,42 @@ async function open(query, width = 1280, height = 800) {
 try {
 	for (const [width, height] of [[1280, 800], [390, 844]]) {
 		const size = `${width}x${height}`;
-		{
-			// Before the project catalog is in, the restored New Chat has no
-			// project yet: the send is held back with the reason and the text
-			// stays. Nothing may go to the older session the server remembered.
-			const { page, errors, session, creates, queries, send, editorText } = await open('?hold=projects', width, height);
-			await page.waitForFunction(() => window.fixtureRequests.some(r => r.path.endsWith('/projects')));
+		for (const query of ['?hold=projects', '?hold=projects&cluster=1']) {
+			// Before the project catalog is in, the restored New Chat's remembered
+			// project and branch are not resolved yet (a cluster-linked one has
+			// only its shared id). The send is held with the text in place and a
+			// loading state, then goes out on the remembered branch once the
+			// catalog answers. Nothing may go to the older session the server
+			// remembered, or out on an auto-named branch.
+			const cluster = query.includes('cluster');
+			const { page, errors, session, creates, queries, send, editorText } = await open(query, width, height);
+			await page.waitForFunction(() => window.fixtureRequests.some(r => r.path.endsWith('/cluster/projects')));
 			assert.equal((await session()).sessionId, null, 'the New Chat view is not bound to the old session');
+			assert.equal((await session()).worktreeBranch, '', 'the remembered branch waits for the catalog');
 			await send();
-			await page.waitForFunction(() => window.fixtureNotices().includes('Select a project first.'));
-			await page.evaluate(() => window.fixtureRelease());
-			await page.waitForTimeout(500);
-			assert.equal((await editorText()).trim(), PROMPT, 'the text stays');
-			assert.deepEqual(await creates(), []);
+			await page.getByRole('button', { name: 'Loading projects…' }).waitFor();
+			await page.waitForTimeout(300);
+			assert.equal((await editorText()).trim(), PROMPT, 'the held text stays');
+			assert.deepEqual(await creates(), [], 'nothing is created while the catalog loads');
 			assert.deepEqual(await queries(), [], 'nothing went to the old session');
-			assert.equal((await session()).sessionId, null);
-			await page.screenshot({ path: `${output}/catalog-loading-${size}.png` });
+			await page.screenshot({ path: `${output}/catalog-loading${cluster ? '-cluster' : ''}-${size}.png` });
+			await page.evaluate(() => window.fixtureRelease());
+			await page.waitForFunction(() => window.fixtureFrames.some(f => f.type === 'query'));
+			const created = await creates();
+			assert.equal(created.length, 1, 'one create request');
+			assert.equal(created[0].body.branch_name, 'live/1528-explicit', 'the remembered branch, not an auto-named one');
+			// A cluster-linked pick resolves to this worker's clone of it.
+			assert.equal(created[0].body.project_id, 'shuffle-scratch', 'the remembered project, resolved to its local clone');
+			const sent = await queries();
+			assert.equal(sent.length, 1);
+			assert.equal(sent[0].session_id, 'created-session');
+			assert.equal(sent[0].prompt, PROMPT);
+			await page.waitForTimeout(300);
+			assert.equal((await session()).sessionId, 'created-session');
+			assert.equal((await editorText()).trim(), '');
+			await page.screenshot({ path: `${output}/catalog-sent${cluster ? '-cluster' : ''}-${size}.png` });
 			assert.deepEqual(errors, []);
-			console.log(`PASS ${size}: a send before the project catalog loads keeps the text and says why`);
+			console.log(`PASS ${size}: a send before the ${cluster ? 'cluster-linked ' : ''}project catalog loads is held, then goes out on the remembered branch`);
 			await page.close();
 		}
 		{

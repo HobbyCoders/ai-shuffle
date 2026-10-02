@@ -156,6 +156,11 @@
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
 
+		// The project catalog loads alongside init: a new chat's remembered
+		// project and branch resolve against it, and the composer holds a send
+		// until it has answered (#1636).
+		const catalogLoad = Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+
 		// Initialize data
 		await activeSession.init();
 		// The layout's explicit New Chat wins over an older backend session
@@ -165,10 +170,9 @@
 		const layoutNewChatWon = !navigationClaimed && !!$activeSession?.sessionId &&
 			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
 		if (layoutNewChatWon) activeSession.newChat();
-		// That New Chat's remembered project and branch resolve against the
-		// project catalog, so apply them as soon as it is in.
-		const catalogLoaded = Promise.all([appData.loadProjects(), appData.loadClusterProjects()])
-			.then(() => { if (layoutNewChatWon) activeSession.applyComposerDefaults(); });
+		// Finish the New Chat's remembered project and branch as soon as the
+		// catalog is in, even under text typed while it loaded.
+		const catalogLoaded = catalogLoad.then(() => activeSession.resolveComposerDefaultsAfterCatalog());
 		await Promise.all([
 			appData.loadProfiles(),
 			appData.loadSessions(),
