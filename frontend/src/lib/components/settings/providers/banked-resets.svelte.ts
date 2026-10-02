@@ -49,7 +49,7 @@ export class BankedResets {
 	outcomeMessage = $state<string | null>(null);
 	liveMessage = $state('Loading banked resets…');
 
-	#pendingAttempt: { creditId: string; idempotencyKey: string } | null = null;
+	#pendingAttempt = $state<{ creditId: string; idempotencyKey: string } | null>(null);
 	#provider: () => ModelProvider;
 
 	constructor(provider: () => ModelProvider) {
@@ -58,6 +58,11 @@ export class BankedResets {
 
 	get isGrok(): boolean {
 		return isGrokSubscription(this.#provider());
+	}
+
+	/** A failed Use of this credit is waiting to be retried with the same key. */
+	retryPending(creditId: string): boolean {
+		return this.#pendingAttempt?.creditId === creditId && this.consumingCreditId !== creditId;
 	}
 
 	get consumeActive(): boolean {
