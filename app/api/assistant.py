@@ -67,10 +67,11 @@ class Configuration(BaseModel):
     timeout_seconds: Optional[int] = Field(None, ge=30, le=900)
     max_cost_per_run: Optional[float] = Field(None, gt=0, le=100, allow_inf_nan=False)
     max_cost_per_day: Optional[float] = Field(None, gt=0, le=1000, allow_inf_nan=False)
-    # The limits and the introduction are still validated so an older client
-    # gets the same errors, then ignored: research runs under the fixed
-    # store.RESEARCH_LIMITS, and setup no longer collects an introduction.
-    # A stored introduction is kept and still read by build_role_context.
+    # enabled, paused, the limits and the introduction are still validated so
+    # an older client gets the same errors, then ignored: research is
+    # automatic (store.research_allowed) under the fixed store.RESEARCH_LIMITS,
+    # and setup no longer collects an introduction. A stored introduction is
+    # kept and still read by build_role_context.
     introduction: Optional[Introduction] = None
     assistant_name: Optional[str] = Field(None, min_length=1, max_length=80)
     avatar_id: Optional[str] = None
@@ -129,7 +130,7 @@ async def configure_assistant(body: Configuration):
         for key, value in changes["introduction"].items():
             if value is None:
                 raise HTTPException(422, f"introduction.{key} cannot be null")
-    for key in (*store.LIMIT_KEYS, "introduction"):
+    for key in (*store.LIMIT_KEYS, "introduction", "enabled", "paused"):
         changes.pop(key, None)
     if changes.get("create_agent") is False:
         changes.pop("create_agent")
@@ -145,22 +146,12 @@ async def open_assistant():
     return {"session_id": session["id"], "home_session_id": session["id"], "session": session}
 
 
+# Older clients still call these. Research has no owner switch any more, so
+# both return the current state and change nothing.
 @router.post("/pause")
-async def pause_assistant():
-    state = await _value_error_call(service.configure, {"paused": True})
-    await assistant_manager.cancel_invalid_runs()
-    assistant_manager.notify()
-    return state
-
-
 @router.post("/resume")
-async def resume_assistant():
-    state = await run_sync(service.get_state)
-    if not state["configured"]:
-        raise HTTPException(409, "Choose an assistant agent before enabling it")
-    state = await _value_error_call(service.configure, {"enabled": True, "paused": False})
-    assistant_manager.notify()
-    return state
+async def pause_or_resume_assistant():
+    return await run_sync(service.get_state)
 
 
 @router.get("/sources")

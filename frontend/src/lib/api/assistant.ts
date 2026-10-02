@@ -17,30 +17,26 @@ export interface AssistantIntroduction {
  project_ids?: string[];
  notes?: string;
 }
-/** Fixed server-side (RESEARCH_LIMITS in app/db/assistant.py); read-only here. */
-export interface AssistantLimits {
- max_runs_per_day: number;
- max_concurrent_runs: number;
- max_turns: number;
- timeout_seconds: number;
- max_cost_per_run: number;
- max_cost_per_day: number;
-}
-export interface AssistantState extends AssistantLimits {
+/**
+ * Background research has no owner controls: the server runs it whenever an
+ * agent is set, its safety guard is up and a source is opted in (`ready`).
+ * `enabled` mirrors that; the server still returns legacy limit and usage
+ * fields for older clients, and this UI ignores them.
+ */
+export interface AssistantState {
  agent_id: string | null;
  home_session_id: string | null;
  configured: boolean;
  enabled: boolean;
- paused: boolean;
- status: 'unconfigured' | 'agent_unavailable' | 'disabled' | 'paused' | 'guard_unavailable' | 'ready';
+ status: 'unconfigured' | 'agent_unavailable' | 'guard_unavailable' | 'no_sources' | 'ready';
+ /** Opted-in sources research may read. */
+ research_sources: number;
  agent: AgentIdentity | null;
  assistant_name: string | null;
  avatar_id: AvatarId;
  avatar_presets: AvatarId[];
  introduction: AssistantIntroduction;
  proactive_guard_ready: boolean;
- cost_accounting: string;
- usage: { runs_today: number; reported_cost_today: number; in_flight_runs: number };
 }
 export interface AssistantSource {
  id: string; connector_id: string; name: string; type: string;
@@ -56,13 +52,10 @@ export interface AssistantActivity {
 }
 export type AssistantPatch = Partial<{
  agent_id: string; create_agent: boolean; assistant_name: string; avatar_id: AvatarId;
- enabled: boolean; paused: boolean;
 }>;
 export const getAssistant = () => api.get<AssistantState>('/assistant');
 export const configureAssistant = (patch: AssistantPatch) => api.patch<AssistantState>('/assistant', patch);
 export const openAssistant = () => api.post<{ session_id: string; home_session_id: string }>('/assistant/open');
-export const pauseAssistant = () => api.post<AssistantState>('/assistant/pause');
-export const resumeAssistant = () => api.post<AssistantState>('/assistant/resume');
 export const getAssistantSources = () => api.get<AssistantSource[]>('/assistant/sources');
 export const setAssistantSource = (id: string, enabled: boolean) => api.patch<AssistantSource>(`/assistant/sources/${encodeURIComponent(id)}`, { enabled });
 export const getAssistantActivity = () => api.get<AssistantActivity[]>('/assistant/activity?limit=50');

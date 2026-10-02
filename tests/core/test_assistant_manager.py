@@ -183,7 +183,7 @@ async def test_polling_overflow_does_not_acknowledge_unqueued_mail(producer):
 
 
 @pytest.mark.asyncio
-async def test_guard_missing_provider_pause_and_stop_fail_closed(producer, assistant_fixture, monkeypatch):
+async def test_guard_missing_provider_opt_out_and_stop_fail_closed(producer, assistant_fixture, monkeypatch):
     events()
     manager = module.AssistantManager()
     await manager.run_once()
@@ -193,10 +193,11 @@ async def test_guard_missing_provider_pause_and_stop_fail_closed(producer, assis
     await manager.run_once()
     assert store.get_activity(service.assistant_id()) == []
     monkeypatch.setattr(module, "provider_blocker", lambda _: None)
-    service.configure({"paused": True})
+    service.set_source("conn-mail", False)
     await manager.run_once()
     assert store.get_activity(service.assistant_id()) == []
-    service.configure({"paused": False})
+    service.set_source("conn-mail", True)
+    events(message_id="after-opt-in")
     home_turn = turns.enqueue_turn(assistant_fixture["id"], "user", prompt="Stopped")
     turns.settle_turn(home_turn["id"], "aborted", stop_reason="user_stopped")
     await manager.run_once()
@@ -204,13 +205,13 @@ async def test_guard_missing_provider_pause_and_stop_fail_closed(producer, assis
 
 
 @pytest.mark.asyncio
-async def test_pause_revocation_and_deadline_abort_queue_without_restart(producer):
+async def test_revocation_aborts_queue_without_restart(producer):
     service.register_proactive_guard(1)
     manager = module.AssistantManager()
     events()
     await manager.run_once()
     run = store.get_activity(service.assistant_id())[0]
-    service.configure({"paused": True})
+    service.set_source("conn-mail", False)
     await manager.cancel_invalid_runs()
     assert turns.get_turn(run["turn_id"])["state"] == "aborted"
     assert store.get_run(run["id"])["status"] == "cancelled"
@@ -464,7 +465,7 @@ async def test_deadline_and_revocation_cancel_queued_research(producer):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revocation", ["pause", "source", "shutdown"])
+@pytest.mark.parametrize("revocation", ["agent", "source", "shutdown"])
 async def test_cancel_after_completion_preserves_outcome_and_reported_cost(producer, revocation):
     service.register_proactive_guard(1)
     manager = module.AssistantManager()
@@ -476,8 +477,8 @@ async def test_cancel_after_completion_preserves_outcome_and_reported_cost(produ
     if revocation == "shutdown":
         await manager.shutdown()
     else:
-        if revocation == "pause":
-            service.configure({"paused": True})
+        if revocation == "agent":
+            service.configure({"agent_id": None})
         else:
             service.set_source("conn-mail", False)
         await manager.cancel_invalid_runs()
@@ -499,11 +500,11 @@ async def test_live_cancellation_keeps_admission_until_turn_settles(producer):
     run = store.get_activity(service.assistant_id())[0]
     lease = runs.claim_run(run["session_id"], service.assistant_id(), 60)
     turns.start_turn(run["turn_id"], run_id=lease["id"])
-    service.configure({"paused": True})
+    service.set_source("conn-mail", False)
     await manager.cancel_invalid_runs()
     assert store.get_run(run["id"])["status"] == "cancelling"
     assert turns.get_turn(run["turn_id"])["state"] == "interrupting"
-    service.configure({"paused": False})
+    service.set_source("conn-mail", True)
     events(message_id="next")
     assert store.admit_run(service.assistant_id()) is None
     turns.settle_turn(run["turn_id"], "aborted")
@@ -545,7 +546,7 @@ async def test_cancelling_run_past_deadline_is_not_reinterrupted(producer, monke
     run = store.get_activity(service.assistant_id())[0]
     lease = runs.claim_run(run["session_id"], service.assistant_id(), 60)
     turns.start_turn(run["turn_id"], run_id=lease["id"])
-    service.configure({"paused": True})
+    service.set_source("conn-mail", False)
     await manager.cancel_invalid_runs()
     assert store.get_run(run["id"])["status"] == "cancelling"
     with get_db() as conn:

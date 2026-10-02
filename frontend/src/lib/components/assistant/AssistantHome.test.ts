@@ -5,7 +5,7 @@ import { AVATARS, type AssistantState, type AssistantSource } from '$lib/api/ass
 
 const mocks = vi.hoisted(() => ({
  getAssistant: vi.fn(), getAgentIdentities: vi.fn(), configureAssistant: vi.fn(), openAssistant: vi.fn(),
- pauseAssistant: vi.fn(), resumeAssistant: vi.fn(), getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(),
+ getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(),
  openSession: vi.fn(), startCallForSession: vi.fn(), isVoiceEnabled: vi.fn(), openFeaturePage: vi.fn(),
  loadSessions: vi.fn(), loadProfiles: vi.fn(),
 }));
@@ -21,15 +21,13 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 import AssistantHome from './AssistantHome.svelte';
 import { assistantState, agentIdentities } from '$lib/stores/assistant';
 const initial = (): AssistantState => ({
- configured: false, agent_id: null, home_session_id: null, enabled: false, paused: false, status: 'unconfigured', agent: null,
+ configured: false, agent_id: null, home_session_id: null, enabled: false, status: 'unconfigured', research_sources: 0, agent: null,
  assistant_name: null, avatar_id: 'robot', avatar_presets: ['robot', 'spark', 'orbit', 'sprout', 'pixel'], introduction: {},
- proactive_guard_ready: true, cost_accounting: 'reported_after_run_not_hard_cap',
- max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5,
- usage: { runs_today: 0, in_flight_runs: 0, reported_cost_today: 0 },
+ proactive_guard_ready: true,
 });
 let server: AssistantState;
 const configured = (patch: Partial<AssistantState> = {}) => {
- server = { ...initial(), configured: true, agent_id: 'guide', home_session_id: 'home', assistant_name: 'Guide', avatar_id: 'orbit', agent: { id: 'guide', name: 'Guide', avatar_id: 'orbit' }, status: 'disabled', ...patch };
+ server = { ...initial(), configured: true, agent_id: 'guide', home_session_id: 'home', assistant_name: 'Guide', avatar_id: 'orbit', agent: { id: 'guide', name: 'Guide', avatar_id: 'orbit' }, status: 'no_sources', ...patch };
 };
 const source: AssistantSource = { id: 'connected', connector_id: 'connected', name: 'My authorized inbox', type: 'gmail', enabled: false, available: true, status: 'connected', trigger_ids: ['new_email'], observation_mode: 'poll_and_events', last_observed_at: null, last_error: null };
 beforeEach(() => {
@@ -39,9 +37,7 @@ beforeEach(() => {
  mocks.getAssistantSources.mockResolvedValue([]); mocks.getAssistantActivity.mockResolvedValue([]);
  mocks.loadSessions.mockResolvedValue(undefined); mocks.loadProfiles.mockResolvedValue(undefined);
  mocks.isVoiceEnabled.mockResolvedValue(true); mocks.openAssistant.mockResolvedValue({ session_id: 'home', home_session_id: 'home' });
- mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: patch.enabled ? 'ready' : 'disabled' }; return structuredClone(server); });
- mocks.pauseAssistant.mockImplementation(async () => { server = { ...server, paused: true, status: 'paused' }; return server; });
- mocks.resumeAssistant.mockImplementation(async () => { server = { ...server, enabled: true, paused: false, status: 'ready' }; return server; });
+ mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: 'no_sources' }; return structuredClone(server); });
  mocks.setAssistantSource.mockImplementation(async (_id, enabled) => ({ ...source, enabled }));
 });
 afterEach(cleanup);
@@ -55,9 +51,8 @@ async function choose() {
  await fireEvent.change(select, { target: { value: 'guide' } });
 }
 describe('Assistant home', () => {
- it('starts unconfigured with no ambient call, automatic activation or invented sources', async () => {
+ it('starts unconfigured with no ambient call or invented sources', async () => {
   render(AssistantHome); await choose();
-  expect((screen.getByRole('checkbox', { name: /Enable background research/ }) as HTMLInputElement).checked).toBe(false);
   expect(screen.getByText('No sources connected')).toBeTruthy();
   expect(mocks.configureAssistant).not.toHaveBeenCalled(); expect(mocks.startCallForSession).not.toHaveBeenCalled();
   expect(mocks.openAssistant).not.toHaveBeenCalled();
@@ -75,14 +70,15 @@ describe('Assistant home', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
   const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toEqual({ create_agent: true, assistant_name: 'Assistant', avatar_id: avatar, enabled: false, paused: true });
+  expect(patch).toEqual({ create_agent: true, assistant_name: 'Assistant', avatar_id: avatar });
  });
- it('has no introduction form, limit fields or limit numbers', async () => {
+ it('has no introduction form, research switch, limit fields or limit numbers', async () => {
   render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
   expect(screen.queryByRole('textbox', { name: 'What should I call you?' })).toBeNull();
   expect(screen.queryByRole('textbox', { name: 'Repositories you care about' })).toBeNull();
   expect(screen.queryAllByRole('spinbutton')).toHaveLength(0);
-  expect(screen.getByText('Lets your assistant look into opted-in sources while you’re away.')).toBeTruthy();
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  expect(screen.queryByText(/background research/i)).toBeNull();
   expect(screen.queryByText(/12 passes|admission limit/)).toBeNull();
   expect(screen.getAllByRole('button', { name: / avatar$/ })).toHaveLength(AVATARS.length);
  });
@@ -104,15 +100,7 @@ describe('Assistant home', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
   const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toEqual({ agent_id: 'guide', assistant_name: 'Dotty', avatar_id: 'spark', enabled: false, paused: true });
-  expect(mocks.setAssistantSource).not.toHaveBeenCalled();
- });
- it('requires an explicit activation choice and does not opt in any source', async () => {
-  render(AssistantHome); await choose();
-  await fireEvent.click(screen.getByRole('checkbox', { name: /Enable background research/ }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Save & enable research' }));
-  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalled());
-  expect(mocks.configureAssistant.mock.calls[0][0]).toMatchObject({ enabled: true, paused: false });
+  expect(patch).toEqual({ agent_id: 'guide', assistant_name: 'Dotty', avatar_id: 'spark' });
   expect(mocks.setAssistantSource).not.toHaveBeenCalled();
  });
  it('reopens the same home and attaches a call only on a deliberate call action', async () => {
@@ -133,25 +121,22 @@ describe('Assistant home', () => {
   await fireEvent.click(screen.getByRole('switch', { name: 'Observe Revoked connection' }));
   expect(mocks.setAssistantSource).toHaveBeenCalledWith('revoked', false);
  });
- it('pauses and resumes background work without cancelling or replacing the home', async () => {
-  configured({ enabled: true, status: 'ready' }); render(AssistantHome);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Pause background' }));
-  await waitFor(() => expect(mocks.pauseAssistant).toHaveBeenCalled());
-  const resume = await screen.findByRole('button', { name: 'Resume background' });
-  await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
-  await fireEvent.click(resume);
-  await waitFor(() => expect(mocks.resumeAssistant).toHaveBeenCalled());
-  expect(mocks.openAssistant).not.toHaveBeenCalled();
- });
- it('shows linked sessions and real reported usage, with a non-hard-cap explanation', async () => {
-  configured({ usage: { runs_today: 2, reported_cost_today: .42, in_flight_runs: 1 } });
+ it('has no research controls or usage; one neutral line names the sources in use', async () => {
+  configured({ enabled: true, status: 'ready', research_sources: 2 });
+  mocks.getAssistantSources.mockResolvedValue([{ ...source, enabled: true }, { ...source, id: 'second', connector_id: 'second', name: 'Second inbox', enabled: true }, { ...source, id: 'third', connector_id: 'third', name: 'Not opted in' }]);
   mocks.getAssistantActivity.mockResolvedValue([{ id: 'run', kind: 'linked', status: 'completed', session_id: 'task', session_title: 'Repository review', agent_name: 'Reviewer', avatar_id: 'pixel', source_ids: [], event_ids: [], cost_usd: .42, error: null, created_at: '2026-09-30T12:00:00Z', ended_at: null }]);
   render(AssistantHome);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Repository review' }));
+  expect(await screen.findByText('Using 2 connected sources.')).toBeTruthy();
+  for (const name of [/Pause/, /Resume/, /Review & enable/]) expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.queryByText(/hard billing cap|runs · last 24 hours|in flight/)).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Repository review' }));
   expect(mocks.openSession).toHaveBeenCalledWith('task');
-  expect(screen.getByText(/not a hard billing cap/)).toBeTruthy();
-  expect(screen.getByText('runs · last 24 hours')).toBeTruthy();
   expect(screen.queryByText(/UTC/)).toBeNull();
+ });
+ it('says no sources are in use when research is not running', async () => {
+  configured({ status: 'guard_unavailable' }); mocks.getAssistantSources.mockResolvedValue([{ ...source, enabled: true }]);
+  render(AssistantHome);
+  expect(await screen.findByText('No connected sources in use.')).toBeTruthy();
  });
  it('does not erase a setup draft when background state changes', async () => {
   configured(); render(AssistantHome);
@@ -159,7 +144,7 @@ describe('Assistant home', () => {
   expect((screen.getByRole('combobox', { name: 'Assistant agent' }) as HTMLSelectElement).value).toBe('guide');
   const name = screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement;
   await fireEvent.input(name, { target: { value: 'Editing' } });
-  assistantState.update(value => value && { ...value, usage: { ...value.usage, runs_today: 3 } });
+  assistantState.update(value => value && { ...value, status: 'ready', research_sources: 1 });
   expect(name.value).toBe('Editing');
  });
  it('opens setup for an unconfigured owner when a retry follows a failed first load', async () => {

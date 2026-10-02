@@ -50,7 +50,7 @@ def test_live_home_agent_switch_refused(assistant_fixture):
     assert service.get_state()["agent_id"] == "assistant-agent"
 
 
-def test_proactive_provenance_pause_revoke_and_forgery(assistant_fixture):
+def test_proactive_provenance_revoke_and_forgery(assistant_fixture):
     events()
     run = store.admit_run(service.assistant_id())
     marker = service.proactive_metadata(run)
@@ -59,10 +59,15 @@ def test_proactive_provenance_pause_revoke_and_forgery(assistant_fixture):
         service.assert_proactive_allowed(dict(marker, source_ids=["forged"]))
     with pytest.raises(ValueError, match="Invalid"):
         service.assert_proactive_allowed(dict(marker, read_only=False))
-    service.configure({"paused": True})
-    with pytest.raises(ValueError, match="paused"):
+    # A legacy pause no longer revokes; removing the agent does.
+    service.configure({"paused": True, "enabled": False})
+    store.configure(service.assistant_id(), {"paused": True, "enabled": False})
+    assert service.assert_proactive_allowed(marker)["id"] == run["id"]
+    service.configure({"agent_id": None})
+    with pytest.raises(ValueError, match="missing its agent"):
         service.assert_proactive_allowed(marker)
-    service.configure({"paused": False})
+    service.configure({"agent_id": "assistant-agent"})
+    assert service.assert_proactive_allowed(marker)["id"] == run["id"]
     database.update_connector("conn-mail", is_active=False)
     with pytest.raises(ValueError, match="grant"):
         service.assert_proactive_allowed(marker)

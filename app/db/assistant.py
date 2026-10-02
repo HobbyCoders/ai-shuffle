@@ -19,8 +19,8 @@ from app.db.base import get_db, row_to_dict, column_exists
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "owl", "fox", "cat", "bear", "ghost", "cloud",
                   "moon", "sun", "bolt", "gem", "drop")
-# Background research limits. Setup no longer asks the owner for these; this
-# is the one place they are set. They are the values setup used to suggest:
+# Background research tuning. Owners never set these: this is the one place
+# they live, and every run is admitted under exactly these values:
 #   max_runs_per_day     12    research runs in any rolling 24 hours
 #   max_concurrent_runs   1    runs in progress at once
 #   max_turns             3    agent turns inside one run
@@ -28,9 +28,9 @@ AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
 #   max_cost_per_run    1.0    USD reserved before a run is admitted
 #   max_cost_per_day    5.0    USD reserved/reported over the 24-hour window
 # The dollar figures are admission checks against costs reported after each
-# run, not provider billing caps. A row saved before this change keeps any
-# stricter value its owner chose (see research_limits); a looser stored value
-# is capped here. The columns stay so older rows and workers keep working.
+# run, not provider billing caps. Values an owner saved in older releases are
+# ignored. The columns, and the enabled/paused columns, stay only so older
+# rows and workers keep working; research_allowed() is the on/off rule.
 RESEARCH_LIMITS = dict(max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
                        timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0)
 LIMIT_KEYS = tuple(RESEARCH_LIMITS)
@@ -105,11 +105,19 @@ def create_schema(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
 
 
-def research_limits(state):
-    """The limits a run is admitted under: the stricter of stored and fixed."""
-    state = state or {}
-    return {key: min(value, state[key]) if state.get(key) is not None else value
-            for key, value in RESEARCH_LIMITS.items()}
+def research_limits(state=None):
+    """The limits a run is admitted under. Stored per-row values are ignored."""
+    return dict(RESEARCH_LIMITS)
+
+
+def research_allowed(state):
+    """Background research is automatic once an agent is set.
+
+    The owner's only control is which sources are opted in, and every
+    observation and admission also requires a trusted opted-in source. The
+    legacy enabled/paused columns no longer switch research off.
+    """
+    return bool(state and state.get("agent_id"))
 
 
 def _parse(row):
@@ -246,7 +254,7 @@ def record_observations(assistant_id, connector_id, observations, watermark=None
     """
     with get_db() as conn:
         state = lock_state(conn, assistant_id)
-        if not state or not state["enabled"] or state["paused"] or not trusted_source(conn, state, connector_id):
+        if not research_allowed(state) or not trusted_source(conn, state, connector_id):
             return []
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) AS n FROM assistant_events WHERE assistant_id=%s AND status='pending'", (assistant_id,))
@@ -364,7 +372,7 @@ def admit_run(assistant_id):
     """Coalesce <=10 events under the install mutex and reserve finite budgets."""
     with get_db() as conn:
         state = lock_state(conn, assistant_id)
-        if not state or not state["enabled"] or state["paused"] or not state["agent_id"] or not state["home_session_id"]:
+        if not research_allowed(state) or not state["home_session_id"]:
             return None
         limits = research_limits(state)
         cursor = conn.cursor()

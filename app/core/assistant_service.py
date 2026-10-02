@@ -54,18 +54,23 @@ def get_state():
     state["assistant_name"] = agent["name"] if agent else None
     state["avatar_id"] = state["agent"]["avatar_id"] if agent else "robot"
     state["avatar_presets"] = list(AVATAR_PRESETS)
+    # Research has no owner switch: it runs whenever an agent is set, the
+    # server guard is up and at least one source is opted in. "enabled" and
+    # "paused" are reported for older clients and derived from that rule.
+    sources = [s for s in store.get_sources(assistant_id()) if s["enabled"]] if agent else []
+    state["research_sources"] = len(sources)
     if not state["configured"]:
         state["status"] = "unconfigured"
     elif not agent:
         state["status"] = "agent_unavailable"
-    elif not state["enabled"]:
-        state["status"] = "disabled"
-    elif state["paused"]:
-        state["status"] = "paused"
     elif not proactive_guard_available():
         state["status"] = "guard_unavailable"
+    elif not sources:
+        state["status"] = "no_sources"
     else:
         state["status"] = "ready"
+    state["enabled"] = state["status"] == "ready"
+    state["paused"] = False
     state["proactive_guard_ready"] = proactive_guard_available()
     state["cost_accounting"] = "reported_after_run_not_hard_cap"
     state["usage"] = store.get_usage(assistant_id())
@@ -131,6 +136,9 @@ def configure(changes):
     name = changes.pop("assistant_name", None)
     avatar = changes.pop("avatar_id", None)
     create_agent = changes.pop("create_agent", False)
+    # Owners no longer switch research on or off; see store.research_allowed.
+    changes.pop("enabled", None)
+    changes.pop("paused", None)
     if create_agent and changes.get("agent_id"):
         raise ValueError("Choose an existing agent or a new assistant agent, not both")
     introduction = changes.get("introduction")
@@ -148,10 +156,6 @@ def configure(changes):
         profile = row_to_dict(cursor.fetchone())
         if agent_id and not profile:
             raise ValueError("Assistant agent does not exist")
-        if "agent_id" in changes and agent_id is None:
-            changes["enabled"] = False
-        if changes.get("enabled") and not agent_id:
-            raise ValueError("Choose an assistant agent before enabling it")
         if agent_id and agent_id != current["agent_id"] and current["home_session_id"]:
             cursor.execute("SELECT id FROM turns WHERE session_id=%s AND state NOT IN ('completed','aborted','parked') LIMIT 1", (current["home_session_id"],))
             if cursor.fetchone():
@@ -371,11 +375,11 @@ def assert_proactive_allowed(metadata, session_id=None):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM assistant_state WHERE id=%s", (assistant_id(),))
         state = store._parse(cursor.fetchone())
-        if not state or not state["enabled"] or state["paused"] or not state["agent_id"]:
-            raise ValueError("Assistant is disabled, paused or missing its agent")
+        if not store.research_allowed(state):
+            raise ValueError("Assistant is missing its agent")
         cursor.execute("SELECT id FROM agents WHERE id=%s", (state["agent_id"],))
         if not cursor.fetchone() or state["agent_id"] != run["agent_id"]:
-            raise ValueError("Assistant is disabled, paused or missing its agent")
+            raise ValueError("Assistant is missing its agent")
         if state["home_session_id"] != run["home_session_id"] or state["runner_id"] != assistant_id():
             raise ValueError("Assistant placement changed")
         for source_id in run["source_ids"]:

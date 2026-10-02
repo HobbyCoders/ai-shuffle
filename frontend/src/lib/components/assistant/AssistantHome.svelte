@@ -1,8 +1,8 @@
 <script lang="ts">
  /** Assistant is a home for one existing agent, not a new conversation mode. */
  import { onMount } from 'svelte';
- import { ArrowUpRight, MessageSquare, AudioLines, Pause, Play, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight } from 'lucide-svelte';
- import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, pauseAssistant, resumeAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId } from '$lib/api/assistant';
+ import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight } from 'lucide-svelte';
+ import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId } from '$lib/api/assistant';
  import { assistantState, agentIdentities, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
  import { appData, profiles } from '$lib/stores/app-data.svelte';
  import { layout } from '$lib/stores/layout.svelte';
@@ -27,7 +27,6 @@
  let sources = $state<AssistantSource[]>([]);
  let activity = $state<AssistantActivity[]>([]);
  let editing = $state(false);
- let activating = $state(false);
  // 'dedicated' is the agent setup creates (or already created) for the
  // assistant; 'mine' is any existing agent the owner picks instead.
  let agentChoice = $state<'dedicated' | 'mine'>('dedicated');
@@ -41,7 +40,11 @@
  const identityEditable = $derived(agentChoice === 'dedicated' || (!!chosenAgent && !chosenAgent.is_builtin));
  const canSave = $derived(agentChoice === 'dedicated' || !!agentId);
  const hasAgent = $derived(!!assistant?.agent);
- const statusText = $derived(!assistant ? '' : ({ unconfigured: 'Not set up', agent_unavailable: 'Agent unavailable', disabled: 'Background off', paused: 'Background paused', guard_unavailable: 'Research unavailable', ready: 'Background enabled' }[assistant.status]));
+ const statusText = $derived(!assistant ? '' : !assistant.configured ? 'Not set up' : assistant.status === 'agent_unavailable' ? 'Agent unavailable' : 'Ready');
+ // Research is automatic; the only owner-facing line is which sources it uses.
+ // Counted from the live source list so an opt-in shows up without a reload.
+ const inUse = $derived(!assistant || ['unconfigured', 'agent_unavailable', 'guard_unavailable'].includes(assistant.status) ? 0 : sources.filter(s => s.enabled && s.available).length);
+ const presenceText = $derived(inUse ? `Using ${inUse} connected ${inUse === 1 ? 'source' : 'sources'}.` : 'No connected sources in use.');
  const optedIn = $derived(sources.filter(s => s.enabled).length);
 
  let loaded = false;
@@ -82,7 +85,7 @@
   if (kind === 'dedicated') selectDedicated();
   else if (agentId) selectAgent();
  }
- function beginEdit(activate = false) {
+ function beginEdit() {
   if (!assistant) return;
   if (assistant.agent_id) {
    agentChoice = assistant.agent?.dedicated ? 'dedicated' : 'mine';
@@ -93,7 +96,7 @@
    agentChoice = 'dedicated'; agentId = '';
    selectDedicated();
   }
-  activating = activate; editing = true; error = ''; notice = '';
+  editing = true; error = ''; notice = '';
  }
  async function act(key: string, operation: () => Promise<void>) {
   if (busy) return;
@@ -109,14 +112,12 @@
   await act('save', async () => {
    const patch: AssistantPatch = {
     ...(created ? { create_agent: true } : { agent_id: target }),
-    ...(created || assistant?.agent_id !== target ? { enabled: false, paused: true } : {}),
-    ...(identityEditable ? { assistant_name: assistantName.trim() || DEFAULT_ASSISTANT_NAME, avatar_id: avatar } : {}),
-    ...(activating ? { enabled: true, paused: false } : {})
+    ...(identityEditable ? { assistant_name: assistantName.trim() || DEFAULT_ASSISTANT_NAME, avatar_id: avatar } : {})
    };
    const next = await configureAssistant(patch);
    if (!current()) return;
    acceptAssistant(next); editing = false;
-   notice = activating ? 'Background research enabled. Only your opted-in sources can be observed.' : created ? 'Assistant created. Open the conversation whenever you’re ready.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
+   notice = created ? 'Assistant created. Open the conversation whenever you’re ready.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
    await appData.loadProfiles();
    await load();
   });
@@ -131,8 +132,6 @@
    if (voice) await startCallForSession(home.session_id, { attach: true });
   });
  }
- function pause() { void act('pause', async () => { const next = await pauseAssistant(); if (current()) { acceptAssistant(next); notice = 'Background research paused. Your conversation is still available.'; await load(); } }); }
- function resume() { void act('resume', async () => { const next = await resumeAssistant(); if (current()) { acceptAssistant(next); notice = 'Background research resumed with your opted-in sources.'; await load(); } }); }
  function toggleSource(source: AssistantSource) {
   void act(source.id, async () => { const next = await setAssistantSource(source.connector_id, !source.enabled); if (current()) sources = sources.map(s => s.id === next.id ? next : s); });
  }
@@ -149,9 +148,9 @@
  {:else if assistant}
   <header class="hero">
    <div class="portrait"><AgentAvatar avatar={editing && identityEditable ? avatar : assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
-   <div class="hero-copy"><div class="status" class:enabled={assistant.status === 'ready'}><span aria-hidden="true"></span>{statusText}</div>
+   <div class="hero-copy"><div class="status" class:enabled={assistant.configured && assistant.status !== 'agent_unavailable'}><span aria-hidden="true"></span>{statusText}</div>
     <h1>{hasAgent ? assistant.assistant_name : 'A familiar face. A lasting conversation.'}</h1>
-    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access and limits you control.` : 'Give it a name and a face. It gets one lasting conversation, and you can change any of this later.'}</p>
+    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access you control.` : 'Give it a name and a face. It gets one lasting conversation, and you can change any of this later.'}</p>
     {#if hasAgent && !editing}
      <div class="hero-actions"><button class="primary" disabled={!!busy} onclick={() => conversation()}><MessageSquare size={17} />{busy === 'open' ? 'Opening…' : 'Open conversation'}<ArrowUpRight size={16} /></button>
       {#if voiceEnabled}<button class="secondary" disabled={!!busy} onclick={() => conversation(true)}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}
@@ -181,25 +180,19 @@
       {#if chosenAgent?.is_builtin}<p class="micro">Built-in identity is protected. Create a custom agent in Agents to give it a new name and avatar.</p>{/if}
      {/if}
 
-     {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research</strong><small>Lets your assistant look into opted-in sources while you’re away.</small></span></label>{/if}
-     <div class="form-actions"><button type="submit" class="primary" disabled={!canSave || !!busy}>{busy === 'save' ? 'Saving…' : activating ? 'Save & enable research' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
+     <div class="form-actions"><button type="submit" class="primary" disabled={!canSave || !!busy}>{busy === 'save' ? 'Saving…' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
     </fieldset>
    </form>
   {:else if assistant.configured}
    <div class="overview">
     <section class="research-panel" aria-label="Background research status">
      <div class="section-heading"><div><span class="eyebrow">PRESENCE</span><h2>While you’re away</h2></div><ShieldCheck size={20} /></div>
-     <p class="muted">{assistant.status === 'ready' ? `Watching ${optedIn} opted-in ${optedIn === 1 ? 'source' : 'sources'}. Background work is read-only.` : assistant.status === 'guard_unavailable' ? 'Research cannot run until the server’s read-only safety guard is available.' : 'Background research is off. You can still talk, plan and coordinate work in your conversation.'}</p>
-     <div class="usage-grid"><div><strong>{assistant.usage.runs_today}</strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}</strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>reported · last 24 hours</small></div></div>
-     <p class="micro">Costs are reported after runs, not a hard billing cap.</p>
+     <p class="muted">{presenceText}</p>
      <div class="panel-actions">
-      {#if assistant.enabled && !assistant.paused}<button class="secondary" disabled={!!busy} onclick={pause}><Pause size={15} />{busy === 'pause' ? 'Pausing…' : 'Pause background'} </button>
-      {:else if assistant.enabled && assistant.paused}<button class="secondary" disabled={!!busy || !hasAgent} onclick={resume}><Play size={15} />{busy === 'resume' ? 'Resuming…' : 'Resume background'}</button>
-      {:else}<button class="secondary" disabled={!!busy || !hasAgent} onclick={() => beginEdit(true)}><Play size={15} />Review & enable</button>{/if}
       <button class="text-button" disabled={!!busy} onclick={() => beginEdit()}>Edit setup<ChevronRight size={14} /></button>
      </div>
     </section>
-    <section class="identity-note"><AgentAvatar avatar={assistant.avatar_id} size={48} /><h2>Same agent.<br />More continuity.</h2><p class="muted">Your instructions, models, tools and permissions stay in Agents. Home adds a lasting conversation and optional read-only research with fixed limits.</p><button class="text-button" onclick={() => layout.openFeaturePage('profile', assistant.agent_id)}>Open agent settings<ArrowUpRight size={15} /></button></section>
+    <section class="identity-note"><AgentAvatar avatar={assistant.avatar_id} size={48} /><h2>Same agent.<br />More continuity.</h2><p class="muted">Your instructions, models, tools and permissions stay in Agents. Home adds a lasting conversation and read-only research on the sources you opt in.</p><button class="text-button" onclick={() => layout.openFeaturePage('profile', assistant.agent_id)}>Open agent settings<ArrowUpRight size={15} /></button></section>
    </div>
   {/if}
 
@@ -248,9 +241,6 @@
  .research-panel { padding:26px; }
  .identity-note { padding:26px; border-left:1px solid var(--border); background:color-mix(in oklch,var(--primary) 3%,var(--background)); }
  .identity-note h2 { font-family:var(--font-display); font-size:25px; font-weight:400; margin-top:16px; }
- .usage-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:24px 0 18px; }
- .usage-grid strong { font-size:22px; letter-spacing:-.04em; font-weight:500; white-space:nowrap; }
- .usage-grid small { display:block; margin-top:5px; font-size:10px; line-height:1.6; color:var(--muted-foreground); }
  .panel-actions { margin-top:20px; flex-wrap:wrap; }
  .section { padding-top:34px; margin-top:30px; border-top:1px solid var(--border); }
  .count { display:inline-block; border:1px solid var(--border); color:var(--muted-foreground); border-radius:5px; padding:2px 6px; font-family:var(--font-mono); font-size:10px; vertical-align:middle; margin-left:6px; }
@@ -292,11 +282,6 @@
  .choice strong { display:block; font-size:12px; font-weight:550; }
  .choice small { display:block; margin-top:6px; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
  .avatar-picker button.selected,.avatar-picker button:hover:not(:disabled) { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 6%,transparent); color:var(--foreground); }
- .check-label { flex-direction:row; align-items:center; gap:12px; min-height:44px; font-weight:400; }
- .check-label input { width:18px; height:18px; min-height:0; padding:0; accent-color:var(--primary); flex:none; }
- .activation { padding:16px; border-radius:8px; background:var(--background); border:1px solid var(--border); margin-top:22px; }
- .activation strong { font-size:12px; font-weight:500; }
- .activation small { display:block; color:var(--muted-foreground); font-size:11px; margin-top:6px; line-height:1.6; }
  .form-actions { margin-top:24px; }
  .message { display:flex; align-items:center; gap:10px; padding:14px 16px; border:1px solid var(--border); background:var(--card); color:var(--foreground); border-radius:8px; font-size:12px; line-height:1.7; margin:14px 0; }
  .message :global(svg) { flex:none; color:var(--primary); }
@@ -309,6 +294,6 @@
  @keyframes spin { to { transform:rotate(360deg); } } @keyframes pulse { to { opacity:.4; } }
  @media(min-width:800px) { .hero { animation:arrive .35s ease-out; } @keyframes arrive { from { opacity:0; transform:translateY(8px); } } }
  @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .agent-choices { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
- @media(max-width:430px) { .avatar-picker { gap:4px; } .usage-grid { gap:8px; } .usage-grid strong { font-size:20px; } .usage-grid small { font-size:10px; } .empty { padding:18px; } }
+ @media(max-width:430px) { .avatar-picker { gap:4px; } .empty { padding:18px; } }
  @media(prefers-reduced-motion:reduce) { .hero,.skeleton,:global(.spin) { animation:none!important; } button,.source-toggle>span:first-child::after { transition:none; } }
 </style>

@@ -224,7 +224,7 @@ class AssistantManager:
             self._observer_wake.clear()
             try:
                 state = await run_sync(store.get_state, service.assistant_id())
-                if state and state["enabled"] and not state["paused"] and not await run_sync(service.session_stopped, state["home_session_id"]):
+                if store.research_allowed(state) and not await run_sync(service.session_stopped, state["home_session_id"]):
                     await self._observe()
                     self._wake.set()
             except Exception:
@@ -328,7 +328,7 @@ class AssistantManager:
 
     @staticmethod
     def _source_allowed(state, connector_id):
-        if not state or not state["enabled"] or state["paused"]:
+        if not store.research_allowed(state):
             return False
         with get_db() as conn:
             return bool(store.trusted_source(conn, state, connector_id))
@@ -383,7 +383,7 @@ class AssistantManager:
         async with self._pass_lock:
             await self._reconcile_runs()
             state = await run_sync(store.get_state, service.assistant_id())
-            if self._stopping or not state or not state["enabled"] or state["paused"] or not state["agent_id"]:
+            if self._stopping or not store.research_allowed(state):
                 return
             if await run_sync(service.session_stopped, state["home_session_id"]):
                 return

@@ -47,8 +47,11 @@ def test_safe_unconfigured_http_and_stable_open(client):
     second = client.post("/api/v1/assistant/open")
     assert first.status_code == 200
     assert first.json()["session_id"] == second.json()["session_id"]
-    assert client.post("/api/v1/assistant/resume").json()["enabled"]
-    assert client.post("/api/v1/assistant/pause").json()["paused"]
+    # Older clients still call pause/resume; research has no switch, so
+    # neither changes anything.
+    for path in ("/resume", "/pause"):
+        response = client.post("/api/v1/assistant" + path)
+        assert response.status_code == 200 and response.json()["paused"] is False
 
 
 def test_http_source_explicit_optin_and_activity(client, assistant_fixture):
@@ -120,7 +123,7 @@ def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     assert client.post("/api/v1/assistant/pause", headers={"Origin": "http://evil.example"}).status_code == 403
     client.headers.pop("Origin")
     assert client.post("/api/v1/assistant/pause").status_code == 403
-    assert service.get_state()["enabled"] and not service.get_state()["paused"]
+    assert service.get_state()["agent_id"] == "assistant-agent" and not service.get_state()["paused"]
 
 
 def test_invalid_config_does_not_partially_change_identity(client, assistant_fixture):
@@ -162,15 +165,32 @@ def test_new_agent_takes_the_chosen_name_and_avatar(client):
     assert agent["id"] == "pip"
 
 
-def test_limits_and_introduction_are_accepted_but_ignored(client, assistant_fixture):
+def test_switches_limits_and_introduction_are_accepted_but_ignored(client, assistant_fixture, monkeypatch):
+    monkeypatch.setattr(service, "_guard_version", 1)
     service.configure({"introduction": {"preferred_name": "Ada"}})
     response = client.patch("/api/v1/assistant", json={
+        "enabled": False, "paused": True,
         "max_runs_per_day": 100, "max_concurrent_runs": 3, "max_turns": 20, "timeout_seconds": 900,
         "max_cost_per_run": 50, "max_cost_per_day": 900, "introduction": {"preferred_name": "Mallory"}})
     assert response.status_code == 200
     state = response.json()
     assert {k: state[k] for k in store.LIMIT_KEYS} == store.RESEARCH_LIMITS
     assert state["introduction"]["preferred_name"] == "Ada"
+    assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+
+
+def test_research_turns_on_by_itself_with_an_opted_in_source_and_the_guard(client, assistant_fixture, monkeypatch):
+    # An install that had research switched off before this change.
+    store.configure(service.assistant_id(), {"enabled": False, "paused": True})
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "guard_unavailable" and not state["enabled"]
+    monkeypatch.setattr(service, "_guard_version", 1)
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+    assert state["research_sources"] == 1
+    client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False})
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "no_sources" and not state["enabled"] and state["research_sources"] == 0
 
 
 
