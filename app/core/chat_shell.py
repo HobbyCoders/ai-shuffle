@@ -13,6 +13,10 @@ PostgreSQL socket) is a route out that the network namespace does not close. It
 also refuses io_uring, which could open sockets past the filter, and the kernel
 keyring calls.
 
+Before each command a bounded walk refuses a folder holding a hard link to a
+file outside it, which the bind would otherwise expose; afterwards, setuid and
+setgid bits the command set in a writable folder are cleared.
+
 Limits apply inside the sandbox before the command starts: wall time and CPU
 time, address space, file size, open files and processes. A read-only grant is
 bound read-only.
@@ -30,6 +34,7 @@ import os
 import platform
 import shlex
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -57,6 +62,11 @@ _SYSTEM_LINK_DIRS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 # /etc/alternatives holds Debian's tool symlinks (awk, editor, ...); the others
 # are what the dynamic loader and localtime() read. Nothing else from /etc.
 _SYSTEM_FILES = ("/etc/ld.so.cache", "/etc/localtime", "/etc/alternatives")
+# Bounds of the per-command walk that looks for hard links (see check_folder).
+SCAN_ENTRIES = 100_000
+SCAN_SECONDS = 10.0
+SCAN_DEPTH = 256
+_SETID = stat.S_ISUID | stat.S_ISGID
 _FAILURE_TTL = 60.0
 _SELFTEST_TIMEOUT = 15.0
 
@@ -337,6 +347,132 @@ def mounts_below(path: str, mountinfo: str) -> bool:
     return False
 
 
+def _walk(fd: int):
+    """Yield ``(path, dir_fd, name, lstat)`` for every entry below the folder
+    ``fd`` names, without following links or leaving its filesystem.
+
+    Bounded by ``SCAN_ENTRIES``, ``SCAN_SECONDS`` and ``SCAN_DEPTH``; going past
+    a bound, an unreadable directory, another device or a directory swapped
+    while it is opened raises ``AccessDenied``. Skipping any of them could hide
+    a hard link the sandbox would reach.
+    """
+    deadline = time.monotonic() + SCAN_SECONDS
+    count = 0
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    stack: list[tuple[int, str, list[str]]] = []
+    current: tuple[int, str] | None = (os.open(".", flags, dir_fd=fd), "")
+    try:
+        device = os.fstat(current[0]).st_dev
+        while current is not None or stack:
+            if current is not None:
+                stack.append((*current, []))
+                current = None
+                if len(stack) > SCAN_DEPTH:
+                    raise AccessDenied(f"This folder nests deeper than {SCAN_DEPTH} levels, so the isolated "
+                                       "shell cannot check it for hard links. Grant a smaller folder.")
+                with os.scandir(stack[-1][0]) as entries:
+                    stack[-1][2].extend(entry.name for entry in entries)
+            dir_fd, prefix, names = stack[-1]
+            if not names:
+                os.close(stack.pop()[0])
+                continue
+            name = names.pop()
+            count += 1
+            if count > SCAN_ENTRIES or time.monotonic() > deadline:
+                raise AccessDenied(f"This folder is too large to check for hard links before an isolated "
+                                   f"command (at most {SCAN_ENTRIES:,} entries in {SCAN_SECONDS:g} seconds). "
+                                   "Grant a smaller folder.")
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if info.st_dev != device:
+                raise AccessDenied("This folder contains another mount; the isolated shell does not run there.")
+            path = prefix + name
+            yield path, dir_fd, name, info
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(name, flags, dir_fd=dir_fd)
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    os.close(child)
+                    raise AccessDenied("The folder changed during the hard-link check; try again.")
+                current = (child, path + "/")
+    finally:
+        for dir_fd, _prefix, _names in stack:
+            os.close(dir_fd)
+        if current is not None:
+            os.close(current[0])
+
+
+def check_folder(fd: int) -> frozenset:
+    """Refuse a folder the sandbox must not see, before any command runs there.
+
+    A hard link inside the folder to a file elsewhere on the same filesystem
+    would let the sandbox read and write that file through the bind (the file
+    tools refuse multiply linked files; bwrap cannot). A file counts as linked
+    from outside when the folder holds fewer of its links than ``st_nlink``.
+    Returns the setuid and setgid regular files already present, so
+    ``strip_new_setid`` leaves them alone.
+    """
+    if nested_mounts(fd):
+        raise AccessDenied("This folder contains another mount or was removed; the isolated shell "
+                           "does not run there.")
+    links: dict[tuple[int, int], list] = {}
+    setid = set()
+    try:
+        for path, _dir_fd, _name, info in _walk(fd):
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_nlink > 1:
+                links.setdefault((info.st_dev, info.st_ino), [info.st_nlink, 0, path])[1] += 1
+            if info.st_mode & _SETID:
+                setid.add((info.st_dev, info.st_ino, info.st_ctime_ns))
+    except OSError as exc:
+        raise AccessDenied(f"The isolated shell could not check this folder for hard links "
+                           f"({errno.errorcode.get(exc.errno, 'error')}); it does not run there.") from None
+    outside = sorted(path for total, found, path in links.values() if found < total)
+    if outside:
+        raise AccessDenied(f"This folder holds {len(outside)} file(s) hard-linked to files outside it "
+                           f"(first: {outside[0]!r}), which the isolated shell could reach. Remove those "
+                           "links or replace them with copies; the shell does not run here until then.")
+    return frozenset(setid)
+
+
+def strip_new_setid(fd: int, before: frozenset) -> None:
+    """Clear setuid and setgid bits a command set in a writable folder. They
+    are inert inside the sandbox (nosuid binds), but the host would honour
+    them. Files that had them before the command keep them."""
+    try:
+        for _path, dir_fd, name, info in _walk(fd):
+            if (stat.S_ISREG(info.st_mode) and info.st_mode & _SETID
+                    and (info.st_dev, info.st_ino, info.st_ctime_ns) not in before):
+                handle = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+                try:
+                    current = os.fstat(handle)
+                    if stat.S_ISREG(current.st_mode) and current.st_ino == info.st_ino:
+                        os.chmod(f"/proc/self/fd/{handle}", stat.S_IMODE(current.st_mode) & ~_SETID)
+                finally:
+                    os.close(handle)
+    except (OSError, AccessDenied) as exc:
+        logger.warning("Isolated folder shell could not clear setuid bits after a command: %s", exc)
+
+
+async def _on_duplicate(function, fd: int, *args):
+    """``function(own, *args)`` in a thread, on a private duplicate of ``fd``:
+    a caller cancelled mid-walk closes ``fd``, and the thread must never walk
+    whatever reuses that number."""
+    own = os.dup(fd)
+
+    def call():
+        try:
+            return function(own, *args)
+        finally:
+            os.close(own)
+    return await asyncio.to_thread(call)
+
+
+async def ensure_folder(fd: int) -> None:
+    """``check_folder`` for the broker, so a refused folder never gets an approval card."""
+    await _on_duplicate(check_folder, fd)
+
+
 async def _drain(stream) -> tuple[str, bool]:
     kept = bytearray()
     truncated = False
@@ -352,9 +488,8 @@ async def run(fd: int, writable: bool, command: str) -> dict:
     ``fd`` and keeps it open until this returns."""
     global _running
     await ensure_available()
-    if await asyncio.to_thread(nested_mounts, fd):
-        raise AccessDenied("This folder contains another mount or was removed; the isolated shell "
-                           "does not run there.")
+    # Checked again after approval: the folder may have changed while the card waited.
+    setid = await _on_duplicate(check_folder, fd)
     bwrap = _bwrap()
     if not bwrap:
         raise AccessDenied("bubblewrap is no longer available on this worker.")
@@ -390,3 +525,6 @@ async def run(fd: int, writable: bool, command: str) -> dict:
             except ProcessLookupError:
                 pass
             await process.wait()
+        if process is not None and writable:
+            # bwrap has exited and its pid namespace with it.
+            await _on_duplicate(strip_new_setid, fd, setid)

@@ -625,6 +625,9 @@ class Broker:
             if grant.kind == "folder":
                 # Refuse before asking the user to approve a command that cannot run.
                 await chat_shell.ensure_available()
+                # Re-read after the await: revocation closes grant.root.
+                grant = await self.get(session_id, grant_id)
+                await chat_shell.ensure_folder(grant.root)
         elif operation == "http":
             if grant.kind != "service" or grant.origin is None:
                 raise AccessDenied("This operation requires an HTTPS service grant.")

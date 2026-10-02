@@ -197,6 +197,7 @@ def fake_sandbox(monkeypatch):
         seen.append((fd, writable, command))
         return {"exit_code": 0, "stdout": "ran", "stderr": "", "truncated": False}
     monkeypatch.setattr(chat_shell, "ensure_available", AsyncMock())
+    monkeypatch.setattr(chat_shell, "ensure_folder", AsyncMock())
     monkeypatch.setattr(chat_shell, "run", run)
     return seen
 
@@ -239,6 +240,7 @@ async def test_folder_command_in_bypass_runs_without_card(broker, fake_sandbox, 
 async def test_revocation_stops_running_folder_command(broker, monkeypatch, tmp_path):
     monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": "bypassPermissions"})
     monkeypatch.setattr(chat_shell, "ensure_available", AsyncMock())
+    monkeypatch.setattr(chat_shell, "ensure_folder", AsyncMock())
     started, stopped, held = asyncio.Event(), asyncio.Event(), []
 
     async def run(fd, writable, command):
@@ -362,6 +364,126 @@ async def test_concurrency_is_bounded(stand_in, monkeypatch):
         await chat_shell.run(stand_in, True, "pass")
 
 
+# ── hard links and setuid bits (Linux, no bwrap needed) ─────────────────────
+
+
+@pytest.fixture
+def linked(tmp_path):
+    """A folder, a file outside it, and an open descriptor for the folder."""
+    folder = tmp_path / "grant"
+    (folder / "sub").mkdir(parents=True)
+    (tmp_path / "secret").write_text("host secret")
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    yield folder, tmp_path / "secret", fd
+    os.close(fd)
+
+
+@linux
+@pytest.mark.parametrize("where", ["top.txt", "sub/deep.txt"])
+def test_hard_link_to_a_file_outside_the_folder_is_refused(linked, where):
+    folder, secret, fd = linked
+    os.link(secret, folder / where)
+    with pytest.raises(AccessDenied, match=rf"1 file\(s\) hard-linked to files outside it \(first: '{where}'\)"):
+        chat_shell.check_folder(fd)
+
+
+@linux
+def test_hard_links_wholly_inside_the_folder_are_allowed(linked):
+    folder, _secret, fd = linked
+    (folder / "a").write_text("a")
+    os.link(folder / "a", folder / "sub" / "b")
+    os.link(folder / "a", folder / "c")
+    assert chat_shell.check_folder(fd) == frozenset()
+    os.link(folder / "a", folder.parent / "d")  # a third link, outside
+    with pytest.raises(AccessDenied, match="hard-linked to files outside"):
+        chat_shell.check_folder(fd)
+
+
+@linux
+@pytest.mark.parametrize("bound, value", [("SCAN_ENTRIES", 3), ("SCAN_SECONDS", -1.0), ("SCAN_DEPTH", 1)])
+def test_hard_link_check_refuses_past_its_bounds(linked, monkeypatch, bound, value):
+    folder, _secret, fd = linked
+    for name in "abcd":
+        (folder / "sub" / name).write_text(name)
+    monkeypatch.setattr(chat_shell, bound, value)
+    before = set(os.listdir("/proc/self/fd"))
+    with pytest.raises(AccessDenied, match="too large|nests deeper"):
+        chat_shell.check_folder(fd)
+    assert set(os.listdir("/proc/self/fd")) == before
+
+
+@linux
+@pytest.mark.skipif(sys.platform == "linux" and os.geteuid() == 0, reason="root reads any directory")
+def test_unreadable_directory_fails_the_check_closed(linked):
+    folder, _secret, fd = linked
+    (folder / "sub").chmod(0)
+    try:
+        with pytest.raises(AccessDenied, match="could not check this folder"):
+            chat_shell.check_folder(fd)
+    finally:
+        (folder / "sub").chmod(0o755)
+
+
+@linux
+def test_walk_closes_every_descriptor(linked):
+    folder, _secret, fd = linked
+    for depth in range(5):
+        (folder / "sub" / ("d" * (depth + 1))).mkdir()
+    before = set(os.listdir("/proc/self/fd"))
+    chat_shell.check_folder(fd)
+    assert set(os.listdir("/proc/self/fd")) == before
+
+
+@linux
+def test_only_new_setid_bits_are_cleared(linked):
+    folder, _secret, fd = linked
+    old, new, plain = folder / "old", folder / "sub" / "new", folder / "plain"
+    for path in (old, new, plain):
+        path.write_text("#!/bin/sh\n")
+    old.chmod(0o4755)
+    before = chat_shell.check_folder(fd)
+    new.chmod(0o6755)
+    plain.chmod(0o700)
+    chat_shell.strip_new_setid(fd, before)
+    assert (old.stat().st_mode & 0o7777, new.stat().st_mode & 0o7777) == (0o4755, 0o755)
+    assert plain.stat().st_mode & 0o7777 == 0o700
+
+
+@linux
+@pytest.mark.asyncio
+async def test_hard_link_is_refused_before_any_approval(broker, linked, monkeypatch):
+    folder, secret, fd = linked
+    os.link(secret, folder / "alias")
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": "default"})
+    monkeypatch.setattr(chat_shell, "ensure_available", AsyncMock())
+    run = AsyncMock()
+    monkeypatch.setattr(chat_shell, "run", run)
+    grant = Grant("g", "chat", ("local", "worker"), "Files", "folder", str(folder), time.time() + 600,
+                  writable=True, root=os.dup(fd))
+    broker.grants[grant.id] = grant
+    with pytest.raises(AccessDenied, match="hard-linked"):
+        await broker.run("chat", grant.id, "command", {"command": "cat alias"})
+    assert not broker.actions and not run.called
+    broker.revoke("chat", grant.id)
+
+
+@linux
+@pytest.mark.asyncio
+async def test_run_rechecks_links_after_approval_and_strips_setid(stand_in, tmp_path):
+    marker, target = tmp_path / "ran", tmp_path / "tool"
+    target.write_text("x")
+    command = (f"import os; open({str(marker)!r}, 'w').close(); "
+               f"os.chmod({str(target)!r}, 0o4755)")
+    result = await chat_shell.run(stand_in, True, command)
+    assert result["exit_code"] == 0 and marker.exists()
+    assert target.stat().st_mode & 0o7777 == 0o755
+    marker.unlink()
+    os.link(target, tmp_path.parent / f"{tmp_path.name}-outside")
+    with pytest.raises(AccessDenied, match=r"outside it \(first: 'tool'\)"):
+        await chat_shell.run(stand_in, True, command)
+    assert not marker.exists() and chat_shell._running == 0
+
+
 # ── the real sandbox ─────────────────────────────────────────────────────────
 
 
@@ -447,6 +569,33 @@ async def test_real_symlinks_resolve_inside_the_sandbox(grant_dir, tmp_path):
     # A link planted inside resolves inside too; the host file it names is untouched.
     await shell(fd, f"ln -s {outside}/secret planted; echo changed > planted")
     assert (outside / "secret").read_text() == "host secret"
+
+
+@sandbox
+@pytest.mark.asyncio
+async def test_real_hard_link_to_a_host_file_is_refused(grant_dir, tmp_path):
+    folder, fd = grant_dir
+    secret = tmp_path / "outside" / "secret"
+    os.link(secret, folder / "alias")
+    for writable in (True, False):
+        with pytest.raises(AccessDenied, match="hard-linked to files outside it"):
+            await shell(fd, "cat alias; echo changed > alias", writable=writable)
+    assert secret.read_text() == "host secret"
+    # Links the sandbox makes stay inside /work (another mount gives EXDEV),
+    # and links wholly inside the folder do not block the next command.
+    (folder / "alias").unlink()
+    result = await shell(fd, "echo a > a; ln a b; ln a /tmp/c; ln /usr/bin/env env")
+    assert result["exit_code"] != 0 and sorted(p.name for p in folder.iterdir()) == ["a", "b"]
+    assert (await shell(fd, "cat b"))["stdout"] == "a\n"
+
+
+@sandbox
+@pytest.mark.asyncio
+async def test_real_setuid_bits_do_not_reach_the_host(grant_dir):
+    folder, fd = grant_dir
+    result = await shell(fd, "cp /bin/sh tool; chmod 6755 tool; stat -c %a tool")
+    assert result["stdout"] == "6755\n"
+    assert (folder / "tool").stat().st_mode & 0o7777 == 0o755
 
 
 @sandbox
