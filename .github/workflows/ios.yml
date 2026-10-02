@@ -66,18 +66,25 @@ jobs:
                           print(device["udid"]); sys.exit(0)
           ')"
           if [ -z "$udid" ]; then echo '::error::No available iPhone simulator'; exit 1; fi
+          # Disable lengthy simulator diagnostics collection after failures; retain the xcresult failure
+          # messages.
+          status=0
           xcodebuild test -quiet \
             -project AIShuffle.xcodeproj -scheme AIShuffle \
             -destination "id=$udid" \
             -derivedDataPath build/DerivedData \
             -resultBundlePath build/Tests.xcresult \
-            CODE_SIGNING_ALLOWED=NO
-          # -quiet hides per-test lines; print the counts and fail if none ran.
-          xcrun xcresulttool get test-results summary --path build/Tests.xcresult > build/summary.json
+            -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=NO || status=$?
+          # -quiet hides per-test lines; print the counts and failures, and fail if too few ran.
+          xcrun xcresulttool get test-results summary --path build/Tests.xcresult > build/summary.json || exit 1
           python3 - <<'PY'
           import json
           summary = json.load(open("build/summary.json"))
           print({key: summary.get(key) for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests")})
+          for failure in summary.get("testFailures", []):
+              print("FAILED", failure.get("testIdentifierString"), "-", failure.get("failureText"))
           assert summary.get("result") == "Passed" and summary.get("failedTests") == 0, "iOS tests did not pass"
           assert summary.get("passedTests", 0) >= 20, "Fewer iOS tests ran than expected"
           PY
+          exit "$status"
