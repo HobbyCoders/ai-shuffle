@@ -6,7 +6,12 @@ files under ``/usr`` and the Python prefix, a private ``/proc``, ``/dev`` and a
 small ``/tmp``. Nothing else of the worker is visible: no home directory, data
 directory, credentials, ``/etc/passwd`` or other processes. It runs in new user,
 pid, network, ipc, uts and cgroup namespaces with no network at all, cannot
-create further user namespaces, and dies with the worker.
+create further user namespaces, and dies with the worker. A seccomp filter
+refuses Unix-domain sockets other than connected stream pairs, because a
+listening socket inside the folder (a ``/tmp`` grant can hold the worker's own
+PostgreSQL socket) is a route out that the network namespace does not close. It
+also refuses io_uring, which could open sockets past the filter, and the kernel
+keyring calls.
 
 Limits apply inside the sandbox before the command starts: wall time and CPU
 time, address space, file size, open files and processes. A read-only grant is
@@ -14,21 +19,24 @@ bound read-only.
 
 There is no fallback. Without Linux, bubblewrap with the options used here,
 permission to create user namespaces, a non-root worker, or a passing self-test,
-every command is refused. The kernel namespaces are the boundary; no seccomp
-filter is loaded (same as the code-mode sandbox in fluid.codemode.os_sandbox).
+every command is refused.
 """
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
+import platform
 import shlex
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 
 from app.core.chat_files import LIMIT, AccessDenied
 
@@ -43,7 +51,7 @@ PROCESSES = 64
 TMP_BYTES = 64 * 1024 * 1024
 MAX_RUNNING = 4
 MOUNT_POINT = "/work"
-REQUIRED_OPTIONS = ("--bind-fd", "--ro-bind-fd", "--size", "--disable-userns")
+REQUIRED_OPTIONS = ("--bind-fd", "--ro-bind-fd", "--size", "--disable-userns", "--seccomp")
 
 _SYSTEM_LINK_DIRS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 # /etc/alternatives holds Debian's tool symlinks (awk, editor, ...); the others
@@ -70,6 +78,66 @@ for key, value in zip(("CPU", "AS", "FSIZE", "NOFILE", "NPROC", "CORE"), map(int
 os.execv("/bin/sh", ["sh", "-c", sys.argv[7]])
 """
 
+# seccomp: the audit architecture and the syscall numbers the filter names.
+_SECCOMP_ARCH = {
+    "x86_64": (0xC000003E, {"socket": 41, "socketpair": 53, "add_key": 248, "request_key": 249,
+                            "keyctl": 250, "io_uring_setup": 425}),
+    "aarch64": (0xC00000B7, {"socket": 198, "socketpair": 199, "add_key": 217, "request_key": 218,
+                             "keyctl": 219, "io_uring_setup": 425}),
+}
+_ALLOWED_FAMILIES = (2, 10)  # AF_INET, AF_INET6: only the sandbox's own loopback exists
+_SOCK_STREAM, _SOCK_TYPE_MASK = 1, 0xF
+_RET_ALLOW, _RET_KILL_PROCESS = 0x7FFF0000, 0x80000000
+_RET_DENY = 0x00050000 | errno.EPERM
+
+
+def seccomp_filter(machine: str | None = None) -> bytes:
+    """The compiled classic BPF program bwrap's ``--seccomp`` loads.
+
+    Syscalls through another ABI are refused (32-bit compat kills the process,
+    x32 fails with EPERM), so socketcall and renumbered calls cannot slip past. ``socket`` is allowed only
+    for IPv4/IPv6; ``socketpair`` only for stream pairs, which are connected at
+    birth and cannot reach a path (a datagram pair could ``sendto`` one).
+    """
+    arch, nr = _SECCOMP_ARCH[machine or platform.machine()]
+    ld, jeq, jge, and_, ret = 0x20, 0x15, 0x35, 0x54, 0x06
+    code: list[tuple] = [(ld, 0, 0, 4), (jeq, 0, "kill", arch), (ld, 0, 0, 0)]
+    if arch == _SECCOMP_ARCH["x86_64"][0]:
+        code.append((jge, "deny", 0, 0x40000000))  # x32 ABI
+    code += [(jeq, "socket", 0, nr["socket"]), (jeq, "pair", 0, nr["socketpair"])]
+    code += [(jeq, "deny", 0, nr[name]) for name in ("add_key", "request_key", "keyctl", "io_uring_setup")]
+    code.append((ret, 0, 0, _RET_ALLOW))
+    labels = {"socket": len(code)}
+    code.append((ld, 0, 0, 16))  # args[0] low word: the address family
+    code += [(jeq, "allow", 0, family) for family in _ALLOWED_FAMILIES]
+    code.append((ret, 0, 0, _RET_DENY))
+    labels["pair"] = len(code)
+    code += [(ld, 0, 0, 24), (and_, 0, 0, _SOCK_TYPE_MASK), (jeq, "allow", "deny", _SOCK_STREAM)]
+    labels.update(allow=len(code), deny=len(code) + 1, kill=len(code) + 2)
+    code += [(ret, 0, 0, _RET_ALLOW), (ret, 0, 0, _RET_DENY), (ret, 0, 0, _RET_KILL_PROCESS)]
+    out = bytearray()
+    for at, (op, jt, jf, k) in enumerate(code):
+        jt, jf = (labels[j] - at - 1 if isinstance(j, str) else j for j in (jt, jf))
+        out += struct.pack("=HBBI", op, jt, jf, k)
+    return bytes(out)
+
+
+@contextmanager
+def _seccomp_fd():
+    """A pipe holding the filter, for ``--seccomp``; bwrap reads it to EOF."""
+    program = seccomp_filter()
+    read, write = os.pipe()
+    try:
+        try:
+            if os.write(write, program) != len(program):  # far below the atomic pipe size
+                raise OSError("short write of the seccomp filter")
+        finally:
+            os.close(write)
+        yield read
+    finally:
+        os.close(read)
+
+
 _lock = threading.Lock()
 _result: tuple[bool, str, float] | None = None
 _running = 0
@@ -91,10 +159,11 @@ def _too_broad(path: str) -> bool:
     return path == "/" or (home not in ("", "/") and (path == home or home.startswith(path.rstrip("/") + "/")))
 
 
-def build_argv(bwrap: str, fd: int, writable: bool, command: str) -> list[str]:
+def build_argv(bwrap: str, fd: int, writable: bool, command: str, seccomp_fd: int) -> list[str]:
     """The full argv: bwrap, then the in-sandbox launcher, then the command."""
     argv = [bwrap, "--unshare-all", "--unshare-user", "--disable-userns",
-            "--die-with-parent", "--new-session", "--ro-bind", "/usr", "/usr"]
+            "--die-with-parent", "--new-session", "--seccomp", str(seccomp_fd),
+            "--ro-bind", "/usr", "/usr"]
     for path in _SYSTEM_LINK_DIRS:
         if os.path.islink(path):
             argv += ["--symlink", os.readlink(path), path]
@@ -125,6 +194,8 @@ def _preconditions() -> tuple[str | None, str]:
         # A root worker's sandbox user maps to host root: files it creates in
         # the folder would be root-owned, setuid included.
         return None, "the worker runs as root"
+    if platform.machine() not in _SECCOMP_ARCH:
+        return None, f"no seccomp filter for {platform.machine() or 'this architecture'}"
     bwrap = _bwrap()
     if not bwrap:
         return None, "bubblewrap (bwrap) is not installed"
@@ -136,8 +207,13 @@ def _preconditions() -> tuple[str | None, str]:
     missing = [option for option in REQUIRED_OPTIONS if option not in text]
     if missing:
         return None, f"bwrap lacks {', '.join(missing)}"
-    if any(_too_broad(root) for root in _python_roots()):
+    roots = _python_roots()
+    if any(_too_broad(root) for root in roots):
         return None, "the Python prefix is / or a home directory"
+    from app.core.config import settings
+    private = os.path.realpath(settings.effective_data_dir)
+    if any(private == root or private.startswith(root.rstrip("/") + "/") for root in roots):
+        return None, "the Python prefix contains the worker's data directory"
     return bwrap, ""
 
 
@@ -176,15 +252,19 @@ def _probe(bwrap: str) -> tuple[bool, str]:
             ("test \"$(ls /proc | grep -c '^[0-9]')\" -le 8", "the pid namespace is not private"),
             ("! (echo x > /usr/.chat-shell-probe) 2>/dev/null", "/usr is writable"),
             ("(true)", "the sandbox cannot start a process"),
+            (f"! {shlex.quote(os.path.realpath(sys.executable))} -I -S -c "
+             "'import socket; socket.socket(socket.AF_UNIX)' 2>/dev/null",
+             "Unix sockets are not blocked"),
             ("echo ok > probe", "the granted folder is not writable"),
         ]
         script = "".join(f"{check} || {{ echo {shlex.quote('self-test: ' + failure)} >&2; exit 3; }}\n"
                          for check, failure in checks) + "echo ok\n"
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            out = subprocess.run(build_argv(bwrap, fd, True, script), capture_output=True, text=True,
-                                 env=sandbox_env(), pass_fds=(fd,), stdin=subprocess.DEVNULL,
-                                 timeout=_SELFTEST_TIMEOUT)
+            with _seccomp_fd() as seccomp:
+                out = subprocess.run(build_argv(bwrap, fd, True, script, seccomp), capture_output=True,
+                                     text=True, env=sandbox_env(), pass_fds=(fd, seccomp),
+                                     stdin=subprocess.DEVNULL, timeout=_SELFTEST_TIMEOUT)
         except subprocess.TimeoutExpired:
             return False, "self-test timed out"
         except OSError as exc:
@@ -283,10 +363,11 @@ async def run(fd: int, writable: bool, command: str) -> dict:
     _running += 1
     process = None
     try:
-        process = await asyncio.create_subprocess_exec(
-            *build_argv(bwrap, fd, writable, command), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=sandbox_env(),
-            pass_fds=(fd,), start_new_session=True)
+        with _seccomp_fd() as seccomp:
+            process = await asyncio.create_subprocess_exec(
+                *build_argv(bwrap, fd, writable, command, seccomp), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=sandbox_env(),
+                pass_fds=(fd, seccomp), start_new_session=True)
         try:
             async with asyncio.timeout(TIMEOUT_SECONDS):
                 stdout, stderr = await asyncio.gather(_drain(process.stdout), _drain(process.stderr))

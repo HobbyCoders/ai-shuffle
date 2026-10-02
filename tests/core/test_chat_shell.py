@@ -6,8 +6,10 @@ namespaces. They skip elsewhere, except that CHAT_SHELL_REQUIRE_SANDBOX=1 (set
 by the CI step that installs bubblewrap) turns a missing sandbox into a failure.
 """
 import asyncio
+import errno
 import os
 import socket
+import struct
 import sys
 import time
 from unittest.mock import AsyncMock
@@ -63,19 +65,89 @@ def test_preconditions_refuse_root_worker(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="geteuid is POSIX")
+def test_preconditions_refuse_an_architecture_without_a_filter(monkeypatch):
+    monkeypatch.setattr(chat_shell.sys, "platform", "linux")
+    monkeypatch.setattr(chat_shell.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(chat_shell.platform, "machine", lambda: "riscv64")
+    assert chat_shell._preconditions() == (None, "no seccomp filter for riscv64")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="geteuid is POSIX")
 @pytest.mark.parametrize("help_text, reason", [
     (None, "bubblewrap (bwrap) is not installed"),
-    ("--bind --ro-bind --size --disable-userns", "bwrap lacks --bind-fd, --ro-bind-fd"),
+    ("--bind --ro-bind --size --disable-userns --seccomp", "bwrap lacks --bind-fd, --ro-bind-fd"),
+    ("--bind-fd --ro-bind-fd --size --disable-userns", "bwrap lacks --seccomp"),
 ])
 def test_preconditions_refuse_missing_or_old_bwrap(monkeypatch, help_text, reason):
     monkeypatch.setattr(chat_shell.sys, "platform", "linux")
     monkeypatch.setattr(chat_shell.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(chat_shell.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(chat_shell, "_bwrap", lambda: None if help_text is None else "/usr/bin/bwrap")
 
     class Done:
         stdout, stderr = help_text or "", ""
     monkeypatch.setattr(chat_shell.subprocess, "run", lambda *a, **k: Done())
     assert chat_shell._preconditions() == (None, reason)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="geteuid is POSIX")
+@pytest.mark.parametrize("data_dir, refused", [
+    ("/opt/python/var/data", True), ("/opt/python", True), ("/opt/python-data", False), ("/data", False)])
+def test_preconditions_refuse_a_python_prefix_holding_the_data_dir(monkeypatch, data_dir, refused):
+    """The prefix is bound read-only into the sandbox; the worker's private data
+    must never come with it (the same rule as for folder grants)."""
+    from app.core.config import settings
+    monkeypatch.setattr(chat_shell.sys, "platform", "linux")
+    monkeypatch.setattr(chat_shell.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(chat_shell.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(chat_shell, "_bwrap", lambda: "/usr/bin/bwrap")
+    monkeypatch.setattr(chat_shell, "_python_roots", lambda: ["/opt/python"])
+    monkeypatch.setattr(chat_shell.os.path, "realpath", lambda path: str(path))
+    monkeypatch.setattr(type(settings), "effective_data_dir", property(lambda self: data_dir))
+
+    class Done:
+        stdout, stderr = " ".join(chat_shell.REQUIRED_OPTIONS), ""
+    monkeypatch.setattr(chat_shell.subprocess, "run", lambda *a, **k: Done())
+    expected = (None, "the Python prefix contains the worker's data directory") if refused else ("/usr/bin/bwrap", "")
+    assert chat_shell._preconditions() == expected
+
+
+def run_filter(program: bytes, arch: int, nr: int, args=(0, 0)) -> int:
+    """Evaluate the classic BPF seccomp program on one syscall."""
+    data = struct.pack("=iIQ6Q", nr, arch, 0, *args, 0, 0, 0, 0)
+    code = [struct.unpack_from("=HBBI", program, i) for i in range(0, len(program), 8)]
+    pc, acc = 0, 0
+    while True:
+        op, jt, jf, k = code[pc]
+        if op == 0x20:
+            acc = struct.unpack_from("=I", data, k)[0]
+        elif op == 0x54:
+            acc &= k
+        elif op in (0x15, 0x35):
+            pc += jt if (acc == k if op == 0x15 else acc >= k) else jf
+        elif op == 0x06:
+            return k
+        else:
+            raise AssertionError(f"unexpected opcode {op:#x}")
+        pc += 1
+
+
+@pytest.mark.parametrize("machine", sorted(chat_shell._SECCOMP_ARCH))
+def test_seccomp_filter_blocks_unix_sockets_io_uring_and_foreign_abis(machine):
+    program = chat_shell.seccomp_filter(machine)
+    arch, nr = chat_shell._SECCOMP_ARCH[machine]
+    allow, deny = 0x7FFF0000, 0x00050000 | errno.EPERM
+    for family, verdict in ((2, allow), (10, allow), (1, deny),  # Linux AF_INET, AF_INET6, AF_UNIX
+                            (16, deny), (17, deny), (40, deny), (0x100000001, deny)):  # netlink, packet, vsock
+        assert run_filter(program, arch, nr["socket"], (family, 1)) == verdict, family
+    for kind, verdict in ((1, allow), (1 | 0o4000 | 0o2000000, allow), (2, deny), (5, deny)):
+        assert run_filter(program, arch, nr["socketpair"], (1, kind)) == verdict, kind
+    for name in ("io_uring_setup", "keyctl", "add_key", "request_key"):
+        assert run_filter(program, arch, nr[name]) == deny, name
+    assert run_filter(program, arch, 0) == allow
+    assert run_filter(program, 0x40000003, 102) == 0x80000000  # i386 socketcall
+    if machine == "x86_64":
+        assert run_filter(program, arch, 0x40000000 | 41, (1, 1)) == deny  # x32 socket
 
 
 def test_self_test_failure_is_retried_after_ttl_and_pass_is_cached(monkeypatch):
@@ -194,8 +266,10 @@ async def test_revocation_stops_running_folder_command(broker, monkeypatch, tmp_
 def test_argv_isolates_and_binds_only_the_descriptor(monkeypatch):
     monkeypatch.setattr(chat_shell, "_python_roots", lambda: ["/opt/python"])
     for writable, option in ((True, "--bind-fd"), (False, "--ro-bind-fd")):
-        argv = chat_shell.build_argv("/usr/bin/bwrap", 9, writable, "echo hi")
+        argv = chat_shell.build_argv("/usr/bin/bwrap", 9, writable, "echo hi", 11)
         assert argv[:4] == ["/usr/bin/bwrap", "--unshare-all", "--unshare-user", "--disable-userns"]
+        at = argv.index("--seccomp")
+        assert argv[at + 1] == "11" and at < argv.index("--")
         assert not {"--share-net", "--bind", "--dev-bind", "--bind-try"} & set(argv)
         at = argv.index(option)
         assert argv[at + 1:at + 3] == ["9", "/work"]
@@ -231,7 +305,8 @@ def stand_in(monkeypatch, tmp_path):
     monkeypatch.setattr(chat_shell, "ensure_available", AsyncMock())
     monkeypatch.setattr(chat_shell, "nested_mounts", lambda fd: False)
     monkeypatch.setattr(chat_shell, "_bwrap", lambda: "/stand-in")
-    monkeypatch.setattr(chat_shell, "build_argv", lambda bwrap, fd, writable, command: [sys.executable, "-c", command])
+    monkeypatch.setattr(chat_shell, "build_argv",
+                        lambda bwrap, fd, writable, command, seccomp_fd: [sys.executable, "-c", command])
     fd = os.open(tmp_path, os.O_RDONLY)
     yield fd
     os.close(fd)
@@ -434,6 +509,48 @@ async def test_real_no_network_even_to_worker_loopback(grant_dir):
     assert [line.split()[0] for line in out[:2]] == ["blocked", "blocked"], result
     # No IPv4 route at all, and every IPv6 route is on loopback.
     assert out[2:] == ["1", "0"], result
+
+
+@sandbox
+@pytest.mark.asyncio
+async def test_real_no_unix_socket_reaches_a_host_listener(grant_dir):
+    """A listening socket inside the folder (a /tmp grant can hold the worker's
+    own PostgreSQL socket) is a route out that the network namespace does not
+    close. Neither a stream connect nor a datagram sent by path may reach it."""
+    folder, fd = grant_dir
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stream.bind(str(folder / "stream.sock"))
+    stream.listen(1)
+    stream.setblocking(False)
+    datagram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    datagram.bind(str(folder / "dgram.sock"))
+    datagram.setblocking(False)
+    (folder / "probe.py").write_text(
+        "import socket\n"
+        "def attempt(make, act):\n"
+        "    try:\n"
+        "        act(make())\n"
+        "        print('reached')\n"
+        "    except OSError as e:\n"
+        "        print('blocked', type(e).__name__)\n"
+        "attempt(lambda: socket.socket(socket.AF_UNIX, socket.SOCK_STREAM), lambda s: s.connect('stream.sock'))\n"
+        "attempt(lambda: socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM), lambda s: s.sendto(b'x', 'dgram.sock'))\n"
+        "attempt(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)[0], lambda s: s.sendto(b'x', 'dgram.sock'))\n"
+        "attempt(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)[0], lambda s: None)\n"
+        "a, b = socket.socketpair()\n"  # stream pairs stay usable (asyncio's self-pipe needs one)
+        "a.sendall(b'ok'); print('pair', b.recv(2).decode())\n")
+    try:
+        result = await shell(fd, f"{PYTHON} -I -S probe.py")
+        with pytest.raises(BlockingIOError):
+            stream.accept()
+        with pytest.raises(BlockingIOError):
+            datagram.recv(16)
+    finally:
+        stream.close()
+        datagram.close()
+    out = result["stdout"].splitlines()
+    assert [line.split()[0] for line in out[:4]] == ["blocked"] * 4, result
+    assert out[4:] == ["pair ok"], result
 
 
 @sandbox
