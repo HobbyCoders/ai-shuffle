@@ -63,6 +63,16 @@ Local use, Tailscale, and pairing with a direct HTTPS address you manage yoursel
 
 To stop remote access for a worker, disconnect it from your account in **Settings → Providers → Devices**, and revoke any phone or browser you no longer use there. Deleting your HobbyCoders account (at hobbycoders.com/delete-account) also removes every tunnel and DNS entry for your workers.
 
+## Private access details
+
+When an agent asks for a folder, an SSH machine or an API key, you enter the details in a private access card. The worker accepts them only over a connection it can vouch for:
+
+- the AI Shuffle desktop app window;
+- this worker's remote access address (`https://shuffle-<id>.hobbycoders.com`), from the Android app or a remote browser;
+- a browser at `localhost` on the machine running the worker, when you started it without the desktop app and outside Docker.
+
+Anything else gets "Private access is not available on this connection". That includes plain `http://` addresses on your LAN or tailnet, a browser tab on `localhost` while the desktop app runs the worker, and a reverse proxy in front of port 8000, whose forwarded headers are ignored. Open the chat in the desktop app window or at the remote access address instead.
+
 ## What not to do
 
 - Do not forward port 8000 from your router, and do not put AI Shuffle's port behind a public reverse proxy. The web interface controls agents that can run commands on your server.

@@ -185,3 +185,42 @@ def test_fast_forward_preserves_ignored_local_files(repositories, tmp_path):
     with pytest.raises(ValueError, match="merge failed"):
         import_checkout(target, destination, state)
     assert (destination / "ignored" / "mine").read_text() == "local ignored content"
+
+
+def _commit(path, name, content):
+    target = path / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    git(path, "add", name)
+    git(path, "commit", "-m", f"add {name}")
+
+
+PUBLIC_PEM = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\n-----END PUBLIC KEY-----\n"
+PRIVATE_PEM = "EXAMPLE-PEM-PRIVATE-KEY-FIXTURE\n"
+
+
+def test_tracked_public_key_does_not_block_resume(tmp_path):
+    from app.core.checkout_transfer import _preflight
+    repo = tmp_path / "repo"
+    git(tmp_path, "init", "-b", "main", str(repo))
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.com")
+    _commit(repo, "ci/release-public-key.pem", PUBLIC_PEM)
+    _commit(repo, "build/cert.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    _preflight(repo)
+
+
+@pytest.mark.parametrize("name,content", [
+    ("deploy/server.pem", PRIVATE_PEM),
+    ("id_ed25519.key", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\n"),
+    ("config/.env", "TOKEN=secret\n"),
+])
+def test_private_credentials_still_block_resume(tmp_path, name, content):
+    from app.core.checkout_transfer import _preflight
+    repo = tmp_path / "repo"
+    git(tmp_path, "init", "-b", "main", str(repo))
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.com")
+    _commit(repo, name, content)
+    with pytest.raises(ValueError, match="Credential file"):
+        _preflight(repo)
