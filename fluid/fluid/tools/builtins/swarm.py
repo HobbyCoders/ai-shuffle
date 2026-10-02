@@ -17,8 +17,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Start, inspect, or cancel a bounded multi-agent workflow. "
         + routing +
         "Declare the complete planned tasks and their depends_on IDs in one "
-        "start call (1..64 tasks; max_parallel is 1..64 and defaults to the "
-        "task count). " + SUBAGENT_WORKTREE_GUIDANCE + " " +
+        "start call. The schema accepts at most 64 tasks; that is a ceiling, "
+        "not a target. Omit max_parallel to run every dependency-ready task "
+        "at once, or set it lower to throttle. " + SUBAGENT_WORKTREE_GUIDANCE + " " +
         "The scheduler launches ready tasks up to max_parallel, hands bounded "
         "dependency results to successors, blocks successors of failed tasks, "
         "and sends one workflow completion wake instead of waking the parent "

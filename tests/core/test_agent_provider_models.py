@@ -209,7 +209,7 @@ def test_task_contract_states_the_configured_worker_limits(mock_db, monkeypatch)
 
     assert "at most 37 live workers per root session tree" in description
     assert "at most 23 concurrent workers per parent session" in description
-    assert "nesting depth of 4 levels" in description
+    assert "agent-invokes-agent nesting at most 4 levels deep" in description
     # A disabled per-provider limit is not invented.
     assert "per provider" not in description
     # Built from configuration only, so the prefix is byte-stable across turns.
@@ -220,6 +220,38 @@ def test_task_contract_states_the_configured_worker_limits(mock_db, monkeypatch)
     description = build_task_contract("caller", None).description
     assert "no separate per-parent concurrency limit" in description
     assert "at most 6 concurrent workers per provider" in description
+
+
+def test_task_contract_limits_are_ceilings_after_sizing_guidance(mock_db, monkeypatch):
+    """Issue #1606: the real numbers must read as safety ceilings, never as a
+    worker count to plan for. The sizing rules come first and set the count;
+    the limits follow, framed as ceilings that are not targets."""
+    import re
+
+    from app.core import config as cfg
+    from app.db import database
+    from fluid.tools.fragments import DELEGATION_SIZING
+
+    database.create_profile("caller", "Caller", None, {"model": "opus"})
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+    monkeypatch.setattr(cfg.settings, "task_tool_max_workers", 64)
+    monkeypatch.setattr(cfg.settings, "subagent_max_concurrent_per_session", 48)
+    monkeypatch.setattr(cfg.settings, "task_tool_max_depth", 5)
+    monkeypatch.setattr(cfg.settings, "task_worker_max_per_provider", 0)
+
+    description = build_task_contract("caller", None).description
+
+    assert DELEGATION_SIZING in description
+    assert "Host safety ceilings (from configuration):" in description
+    assert "not targets or a recommended worker count" in description
+    assert description.index(DELEGATION_SIZING) < description.index("Host safety ceilings")
+    # Each configured number appears once, and only as a bound ("at most N").
+    for value in ("64", "48"):
+        assert len(re.findall(rf"\b{value}\b", description)) == 1
+        assert re.search(rf"\bat most {value}\b", description)
+    for phrase in ("up to 64", "use 64", "spin up", "aim for", "as many as",
+                   "recommended number", "you can run"):
+        assert phrase not in description.lower()
 
 
 def test_contract_documents_the_sync_result_shape(mock_db):

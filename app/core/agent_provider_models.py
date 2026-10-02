@@ -398,9 +398,10 @@ def resolve_subagent(
 def host_worker_limits_text() -> str:
     """The configured worker limits, stated with their actual values.
 
-    SWARM_ROUTING says only that the host caps live workers and nesting depth,
-    which left models guessing the numbers (and reading the depth default as a
-    five-agent Swarm cap). The values come from settings, not runtime state, so
+    SWARM_ROUTING says only that the host has limits, which left models
+    guessing the numbers (and reading the depth default as a five-agent Swarm
+    cap). The text frames them as safety ceilings, never a recommended worker
+    count. The values come from settings, not runtime state, so
     the Task description stays byte-identical across turns until the
     configuration changes. Each read mirrors how task_dispatch interprets the
     setting: 0 falls back to the default for depth and the root budget, and
@@ -425,14 +426,17 @@ def host_worker_limits_text() -> str:
             if per_parent > 0
             else "no separate per-parent concurrency limit"
         ),
-        f"nesting depth of {max_depth} levels of agent-invokes-agent",
+        f"agent-invokes-agent nesting at most {max_depth} levels deep",
     ]
     if per_provider > 0:
         parts.append(f"at most {per_provider} concurrent workers per provider")
+    # Stated as ceilings so a model reading "64" does not plan 64 workers;
+    # the sizing guidance in SWARM_ROUTING, just before this, sets the count.
     return (
-        "Configured worker limits on this host: " + "; ".join(parts) + ". "
-        "These cap concurrency and delegation depth, not the number of tasks "
-        "a Swarm may declare (up to 64)."
+        "Host safety ceilings (from configuration): " + "; ".join(parts) + ". "
+        "They protect the host and are not targets or a recommended worker "
+        "count; they cap concurrency and delegation depth, not how many tasks "
+        "a Swarm may declare."
     )
 
 
