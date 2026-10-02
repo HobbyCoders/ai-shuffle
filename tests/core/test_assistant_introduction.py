@@ -46,7 +46,7 @@ def test_detect_reads_admin_projects_checkout_remotes_github_and_email(monkeypat
     remotes = {str(tmp_path / "shuffle"): "ada/shuffle", str(tmp_path / "copy"): "ada/shuffle",
                str(tmp_path / "elsewhere"): "someone/else"}
     monkeypatch.setattr(github_service, "get_repo_from_remote", lambda path: remotes.get(path))
-    monkeypatch.setattr(introductions, "github_login", lambda: "ada-gh")
+    monkeypatch.setattr(introductions, "github_login", lambda unknown=None: "ada-gh")
     found = introductions.detect(runner, ["", "not an address", "ada@example.com"])
     assert found == {"preferred_name": "ada", "github_username": "ada-gh", "email": "ada@example.com",
                      "projects": ["Shuffle"], "repository_refs": ["ada/shuffle"]}
@@ -144,3 +144,71 @@ def test_dedicated_agent_gets_default_tools_and_every_enabled_plugin(monkeypatch
     options, _ = build_options_from_profile(agent, session_id=home["id"])
     assert {"type": "local", "path": str(plugin_dir)} in (options.plugins or [])
     assert mcp_config._build_plugins_list(config.get("enabled_plugins"), config.get("setting_sources")) == options.plugins
+
+
+def test_a_source_that_cannot_answer_keeps_its_last_value():
+    stored = introductions.with_detected({}, {"preferred_name": "ada-account", "github_username": "ada-gh",
+                                              "email": "ada@example.com"})
+    # gh offline, the hub unreachable (admin fallback found) and Gmail still starting.
+    after = introductions.with_detected(stored, {"preferred_name": "admin"},
+                                        unknown={"github_username", "preferred_name", "email"})
+    assert after == stored
+    # A source that answered "nothing" does drop the value.
+    assert introductions.with_detected(stored, {})["detected"] == {}
+    # Nothing earlier to keep: the fallback is used.
+    fallback = introductions.with_detected({}, {"preferred_name": "admin"}, unknown={"preferred_name"})
+    assert introductions.effective(fallback) == {"preferred_name": "admin"}
+
+
+def test_detect_reports_sources_that_could_not_answer(monkeypatch):
+    from app.core import auth
+    monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
+    monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda probe=None: True)
+    monkeypatch.setattr(auth.auth_service, "github_login", lambda: None)  # gh api user failed
+
+    def broken(runner):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(introductions, "projects_and_repositories", broken)
+    unknown = set()
+    assert introductions.detect(service.assistant_id(), [""], unknown) == {}
+    assert unknown == {"github_username", "email", "projects", "repository_refs"}
+
+
+def test_repositories_are_sorted_and_worktrees_do_not_crowd_them_out(monkeypatch, tmp_path):
+    from app.core.github_service import github_service
+    runner = service.assistant_id()
+    remotes = {}
+    for name in ("zeta", "alpha", "mid"):
+        project = projects_v2.upsert_project("git:" + name, name=name)
+        base = str(tmp_path / name)
+        checkouts.upsert_checkout(project["id"], runner, base)
+        remotes[base] = "ada/" + name
+        for n in range(introductions.MAX_ITEMS * 2):
+            worktree = str(tmp_path / f"{name}-wt{n}")
+            checkouts.upsert_checkout(project["id"], runner, worktree, branch=f"wt{n}")
+            remotes[worktree] = "ada/" + name
+    monkeypatch.setattr(github_service, "get_repo_from_remote", lambda path: remotes.get(path))
+    repositories = introductions.projects_and_repositories(runner)[1]
+    assert repositories == ["ada/alpha", "ada/mid", "ada/zeta"]
+    # Touching a checkout (which bumps updated_at) does not reorder them.
+    checkouts.upsert_checkout(projects_v2.upsert_project("git:zeta", name="zeta")["id"], runner, str(tmp_path / "zeta"))
+    assert introductions.projects_and_repositories(runner)[1] == repositories
+
+
+async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assistant_fixture, monkeypatch):
+    from app.core import auth
+    service.apply_detection({"github_username": "ada-gh"}, {"gmail": True, "github": True})
+    monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
+    monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda probe=None: True)
+    monkeypatch.setattr(auth.auth_service, "github_login", lambda: None)
+    await AssistantManager().detect_owner()
+    state = service.get_state()
+    assert state["introduction"]["github_username"] == "ada-gh"
+    assert "github" not in state["suggested_connections"]
+
+
+async def test_no_detection_without_an_assistant_running_here(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("detected without an assistant")
+    monkeypatch.setattr(introductions, "detect", unexpected)
+    await AssistantManager().detect_owner()

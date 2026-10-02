@@ -76,10 +76,20 @@ def correct(stored, changes):
     return {"detected": detected, "corrections": corrections}
 
 
-def with_detected(stored, detected):
-    """The stored introduction after a detection pass (corrections untouched)."""
-    _old, corrections = split(stored)
-    return {"detected": {k: v for k, v in detected.items() if not _empty(v)}, "corrections": corrections}
+def with_detected(stored, detected, unknown=()):
+    """The stored introduction after a detection pass (corrections untouched).
+
+    ``unknown`` names fields whose source could not answer this pass (gh or
+    the account hub unreachable, Gmail not started yet). Those keep their last
+    detected value, so a blip neither drops a field from the role context nor
+    publishes a change.
+    """
+    old, corrections = split(stored)
+    fresh = {k: v for k, v in detected.items() if not _empty(v)}
+    for key in unknown:
+        if not _empty(old.get(key)):
+            fresh[key] = old[key]
+    return {"detected": fresh, "corrections": corrections}
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +104,12 @@ def _clean_text(value, limit=80):
     return value[:limit] or None
 
 
-def owner_name():
-    """The linked Shuffle account's username, else the local admin username."""
+def owner_name(unknown=None):
+    """The linked Shuffle account's username, else the local admin username.
+
+    When the account is linked but the hub cannot answer, the field goes into
+    ``unknown`` so the last detected name is kept instead of the admin's.
+    """
     try:
         from app.core import owner_auth, account_hub
         binding = owner_auth.linked_binding()
@@ -105,6 +119,8 @@ def owner_name():
                 return name
     except Exception:  # noqa: BLE001 - the hub may be unreachable; fall back
         logger.debug("Assistant: account username unavailable", exc_info=True)
+        if unknown is not None:
+            unknown.add("preferred_name")
     try:
         from app.db import database
         return _clean_text((database.get_admin() or {}).get("username"))
@@ -112,8 +128,12 @@ def owner_name():
         return None
 
 
-def github_login():
-    """The gh CLI's signed-in login, or None when gh is absent or signed out."""
+def github_login(unknown=None):
+    """The gh CLI's signed-in login, or None when gh is absent or signed out.
+
+    Signed in but ``gh api user`` failed (offline, rate limited) puts the
+    field in ``unknown``: the owner is signed in, the login just isn't known.
+    """
     try:
         from app.core.auth import auth_service, is_github_authenticated_cached
         if not is_github_authenticated_cached(auth_service.is_github_authenticated):
@@ -121,7 +141,11 @@ def github_login():
         login = auth_service.github_login()
     except Exception:  # noqa: BLE001
         return None
-    return login if login and GITHUB_LOGIN.fullmatch(login) else None
+    if login and GITHUB_LOGIN.fullmatch(login):
+        return login
+    if unknown is not None:
+        unknown.add("github_username")
+    return None
 
 
 def projects_and_repositories(runner_id):
@@ -132,7 +156,11 @@ def projects_and_repositories(runner_id):
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM projects_v2 ORDER BY created_at DESC, id ASC LIMIT %s", (MAX_ITEMS,))
         names = [_clean_text(row["name"], 120) for row in cursor.fetchall()]
-        cursor.execute("SELECT path FROM checkouts WHERE runner_id=%s AND status='active' ORDER BY updated_at DESC, id ASC LIMIT %s",
+        # Base checkouts only: worktrees share their base's remote and would
+        # crowd other repositories out of the limit. Ordered by path, not by
+        # updated_at, which every checkout write bumps.
+        cursor.execute("SELECT path FROM checkouts WHERE runner_id=%s AND status='active' "
+                       "AND (branch IS NULL OR branch = '') ORDER BY path ASC, id ASC LIMIT %s",
                        (runner_id, MAX_ITEMS * 2))
         paths = [row["path"] for row in cursor.fetchall()]
     repositories = []
@@ -142,7 +170,9 @@ def projects_and_repositories(runner_id):
             repositories.append(repo)
         if len(repositories) >= MAX_ITEMS:
             break
-    return [n for n in names if n], repositories
+    # Sorted: the role context is part of the system prompt and must not
+    # change (or publish) just because the checkouts were read in another order.
+    return [n for n in names if n], sorted(repositories, key=str.lower)
 
 
 def owner_gmail_connectors(runner_id):
@@ -165,12 +195,22 @@ def clean_email(value):
     return value if value and EMAIL.fullmatch(value) else None
 
 
-def detect(runner_id, emails=()):
-    """Everything detection found. ``emails`` come from running connectors."""
-    found = {"preferred_name": owner_name(), "github_username": github_login()}
+def detect(runner_id, emails=(), unknown=None):
+    """Everything detection found. ``emails`` come from running connectors.
+
+    Fields whose source could not answer this pass are added to ``unknown``
+    (see with_detected); a source that answered "nothing" is just left out.
+    """
+    unknown = set() if unknown is None else unknown
+    found = {"preferred_name": owner_name(unknown), "github_username": github_login(unknown)}
     found["email"] = next((e for e in (clean_email(v) for v in emails) if e), None)
+    if emails and not found["email"]:
+        # A connected Gmail connector that has not reported its address yet
+        # (still starting after a restart, or reconnecting).
+        unknown.add("email")
     try:
         found["projects"], found["repository_refs"] = projects_and_repositories(runner_id)
     except Exception:  # noqa: BLE001
         logger.warning("Assistant: could not read projects for the owner introduction", exc_info=True)
+        unknown.update(("projects", "repository_refs"))
     return {k: v for k, v in found.items() if not _empty(v)}

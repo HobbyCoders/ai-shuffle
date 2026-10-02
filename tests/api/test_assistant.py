@@ -197,7 +197,7 @@ def test_opening_the_page_runs_a_fresh_detection_pass(client, assistant_fixture,
     from app.core.assistant_manager import assistant_manager
     monkeypatch.setattr(assistant_manager, "_detect_task", None)
     monkeypatch.setattr(assistant_manager, "_detected_at", None)
-    monkeypatch.setattr(introductions, "github_login", lambda: "ada-gh")
+    monkeypatch.setattr(introductions, "github_login", lambda unknown=None: "ada-gh")
     assert "github_username" not in client.get("/api/v1/assistant").json()["introduction"]
     state = client.get("/api/v1/assistant?detect=true").json()
     assert state["introduction"]["github_username"] == "ada-gh"

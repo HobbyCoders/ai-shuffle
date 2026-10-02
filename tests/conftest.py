@@ -484,7 +484,7 @@ def _no_gh_in_owner_detection(monkeypatch):
     """
     from app.core import assistant_introduction
 
-    monkeypatch.setattr(assistant_introduction, "github_login", lambda: None)
+    monkeypatch.setattr(assistant_introduction, "github_login", lambda unknown=None: None)
 
 
 @pytest.fixture(autouse=True)

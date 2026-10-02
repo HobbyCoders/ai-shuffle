@@ -823,12 +823,26 @@ def build_role_context(session_id):
     return ""
 
 
-def apply_detection(detected, connections):
+def detection_wanted():
+    """True when this worker should run owner detection at all.
+
+    Only a configured assistant that runs here (or has no home yet) uses it;
+    everywhere else a pass would shell out to gh and git for nothing.
+    """
+    with get_db() as conn:
+        account = store.get_account(conn)
+        if not account or not account.get("agent_id"):
+            return False
+        return _home_kind(account, _session(conn.cursor(), account.get("home_session_id"))) in (None, "self")
+
+
+def apply_detection(detected, connections, unknown=()):
     """Store a detection pass (see assistant_introduction); True when it wrote.
 
     Every worker remembers which connections it found, for its own page. Only
     the worker that runs the assistant writes the introduction, and only when
-    something changed, so idle passes never publish to the network.
+    something changed, so idle passes never publish to the network. Fields in
+    ``unknown`` keep their last detected value.
     """
     global _connections
     _connections = dict(connections)
@@ -839,7 +853,7 @@ def apply_detection(detected, connections):
         if _home_kind(account, _session(conn.cursor(), account.get("home_session_id"))) not in (None, "self"):
             return False
         stored = account.get("introduction") or {}
-        updated = introductions.with_detected(stored, detected)
+        updated = introductions.with_detected(stored, detected, unknown)
         if updated == stored:
             return False
         _project(conn, store.write_account(conn, {"introduction": updated}))

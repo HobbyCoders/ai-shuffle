@@ -253,6 +253,8 @@ class AssistantManager:
         from app.core import assistant_introduction as introductions
         from app.core.connectors.manager import connector_manager
         try:
+            if not await run_sync(service.detection_wanted):
+                return
             runner = service.assistant_id()
             gmail = await run_sync(introductions.owner_gmail_connectors, runner)
             emails = []
@@ -260,9 +262,12 @@ class AssistantManager:
                 instance = await connector_manager.get_running_connector(connector_id)
                 # Set when the connector connected (users.getProfile); no mail is read.
                 emails.append(getattr(instance, "_email_address", "") if instance is not None else "")
-            detected = await run_sync(introductions.detect, runner, emails)
-            connections = {"gmail": bool(gmail), "github": bool(detected.get("github_username"))}
-            await run_sync(service.apply_detection, detected, connections)
+            unknown = set()
+            detected = await run_sync(introductions.detect, runner, emails, unknown)
+            # Signed in to gh but its login could not be read is still signed in.
+            github = bool(detected.get("github_username")) or "github_username" in unknown
+            connections = {"gmail": bool(gmail), "github": github}
+            await run_sync(service.apply_detection, detected, connections, unknown)
         except Exception:
             logger.warning("Assistant owner detection failed", exc_info=True)
 
