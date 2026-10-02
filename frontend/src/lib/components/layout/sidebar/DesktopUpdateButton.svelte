@@ -5,10 +5,16 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import { notify } from '$lib/stores/notifications';
 
-	type Worker = { device_id: string; device_name: string; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null };
-	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; workers: { device_id: string; device_name: string; status: string; message: string }[] };
-	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; workers: Worker[]; operation?: Operation | null };
-	type Receipt = { results: { device_name: string; accepted: boolean; reason: string }[] };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean };
+	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
+	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
+	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
+	// unknown: an included worker whose state cannot be trusted; restart waits for it.
+	type Role = 'excluded' | 'preparing' | 'available' | 'staged' | 'unknown';
+	type Receipt = { results: { device_id?: string; device_name: string; accepted: boolean | null; reason: string }[] };
+	// Older container supervisors leave "Application update is running." on an
+	// idle status after an install; a message like that does not fit idle.
+	const IN_PROGRESS = /\b(?:update is running|checking|downloading|building|preparing|installing)\b/i;
 	const tooltipId = $props.id();
 	const completionKey = 'application-update-completed';
 	// Poll quickly only while something is moving: a request just sent, a
@@ -18,15 +24,20 @@
 	const IDLE_POLL_MS = 60_000;
 	// The desktop updater picks a request up on its next 30 s report.
 	const REQUEST_WATCH_MS = 45_000;
+	// A completion older than this is history: a fresh browser must not pop it.
+	const CELEBRATE_WINDOW_S = 10 * 60;
 	let snapshot = $state<Snapshot | null>(null);
 	let pending = $state(false);
 	let installRequested = $state(false);
 	let requestError = $state('');
 	let receipt = $state('');
 	let celebration = $state<'none' | 'complete' | 'leaving'>('none');
+	// Reasons workers gave for refusing the last request, by device id.
+	let refusals = $state<Record<string, string>>({});
 	let tipOpen = $state(false);
 	let tipPosition = $state({ top: 0, left: 0 });
 	let acknowledged = '';
+	let watched = '';
 	let active = false;
 	let reading = false;
 	let finishTimer: ReturnType<typeof setTimeout> | undefined;
@@ -36,24 +47,60 @@
 	const operation = $derived(snapshot?.operation);
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
-	const eligible = $derived(snapshot?.workers.filter(w => w.supported && w.online && w.allow_updates &&
-		!(w.version && w.running_version && (w.running_version.startsWith(w.version) || w.version.startsWith(w.running_version)))) ?? []);
-	const downloading = $derived(eligible.some(w => ['checking', 'downloading'].includes(w.phase)));
-	const available = $derived(eligible.some(w => ['available', 'error'].includes(w.phase) && !!w.version));
-	const ready = $derived(!available && !downloading && eligible.some(w => w.phase === 'ready'));
+	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...classify(worker, snapshot!.update_all_workers) })) ?? []);
+	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
+	const downloading = $derived(targets.some(row => row.role === 'preparing'));
+	const available = $derived(targets.some(row => row.role === 'available'));
+	const staged = $derived(targets.filter(row => row.role === 'staged').length);
+	const unknown = $derived(targets.filter(row => row.role === 'unknown'));
+	// Restart is offered only once EVERY included worker is staged, never on the first one.
+	const ready = $derived(staged > 0 && !downloading && !available && !unknown.length);
+	const held = $derived(staged > 0 && !downloading && !available && unknown.length
+		? `Restart waits for ${unknown.map(row => `${row.worker.device_name} (${row.label})`).join(', ')}.` : '');
 	// Release notes travel in the signed manifest; show the offered update's.
-	const offered = $derived(eligible.find(w => ['available', 'downloading', 'ready'].includes(w.phase) && !!w.notes?.trim()));
+	const offered = $derived(targets.find(row => row.role !== 'unknown' && !!row.worker.notes?.trim())?.worker);
 	const operationError = $derived(operation?.phase === 'error' ? 'Update startup could not be confirmed. Check the affected workers before retrying.' : '');
-	const error = $derived(requestError || operationError || eligible.find(w => w.error)?.error || '');
+	const error = $derived(requestError || operationError || targets.find(row => row.worker.error)?.worker.error || held);
 	const visible = $derived(!!snapshot?.allow_updates && (waiting || celebrating || ready || available || downloading || !!receipt || !!error));
 	const busy = $derived(pending || downloading || waiting || celebrating);
 	const action = $derived(ready ? 'Update and restart' : available ? 'Download update' : 'Check for updates');
 	const scope = $derived(snapshot?.update_all_workers ? 'All online workers' : 'Current worker');
-	const reports = $derived(operation && (waiting || celebrating || operationError)
-		? operation.workers.map(w => `${w.device_name}: ${w.message}`).join('; ')
-		: snapshot?.workers.map(w => `${w.device_name}: ${w.reason || w.error || w.message || w.phase}`).join('; ') ?? '');
+	const showOperation = $derived(!!operation && (waiting || celebrating || !!operationError));
+	const reports = $derived(showOperation
+		? operation!.workers.map(w => `${w.device_name}: ${w.message}`).join('; ')
+		: rows.map(row => `${row.worker.device_name}: ${row.label}`).join('; '));
 	const headline = $derived(celebrating ? 'Update complete' : waiting ? 'Waiting on all workers to finish startup' : error ? 'Update needs attention' : busy ? 'Preparing updates…' : action);
-	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${error || receipt || (busy ? 'Preparing updates…' : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.')} ${reports}`);
+	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
+	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
+	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
+
+	function classify(w: Worker, all: boolean): { role: Role; label: string } {
+		// A peer read only to verify an earlier all-worker install is outside a current-worker update.
+		if (!all && w.is_self === false) return { role: 'excluded', label: 'Not in scope; current worker only' };
+		if (!w.online) return { role: 'excluded', label: w.reason || 'Offline; not included' };
+		// A failed status read is not proof the worker sits this update out.
+		if (w.phase === 'unknown') return { role: 'unknown', label: 'Status unavailable' };
+		if (!w.supported) return { role: 'excluded', label: w.reason || 'No application updater; not included' };
+		if (!w.allow_updates) return { role: 'excluded', label: 'Updates disabled on this worker; not included' };
+		if (w.version && w.running_version && (w.running_version.startsWith(w.version) || w.version.startsWith(w.running_version))) {
+			return { role: 'excluded', label: 'Already up to date' };
+		}
+		// Queued but not yet taken (a desktop takes requests on its 30 s report).
+		if (w.request_pending && w.phase !== 'ready') return { role: 'preparing', label: 'Request queued; waiting for the updater' };
+		// A worker that refused the last request and is not preparing or staged
+		// would be left behind; restart waits until a new request reaches it.
+		const refused = refusals[w.device_id];
+		if (refused && !['checking', 'downloading', 'ready', 'image-required'].includes(w.phase)) return { role: 'unknown', label: `Refused: ${refused}` };
+		switch (w.phase) {
+			case 'checking': return { role: 'preparing', label: 'Checking for updates…' };
+			case 'downloading': return { role: 'preparing', label: `${w.message || 'Downloading update…'}${typeof w.percent === 'number' ? ` ${Math.round(w.percent)}%` : ''}` };
+			case 'ready': return { role: 'staged', label: w.error ? `Staged, awaiting restart. ${w.error}` : 'Staged, awaiting restart' };
+			case 'available': return w.version ? { role: 'available', label: 'Update available; not downloaded' } : { role: 'excluded', label: 'No update offered' };
+			case 'error': return w.version ? { role: 'available', label: w.error || 'Download failed; retry' } : { role: 'unknown', label: w.error || 'Update check failed' };
+			case 'image-required': return { role: 'excluded', label: w.message || 'Needs a new Docker image; not included' };
+			default: return { role: 'excluded', label: (w.message && !IN_PROGRESS.test(w.message) ? w.message : '') || 'No update offered' };
+		}
+	}
 
 	function showTip(event: MouseEvent | FocusEvent) {
 		const rect = (event.currentTarget as HTMLButtonElement).getBoundingClientRect();
@@ -63,11 +110,19 @@
 	function applySnapshot(next: Snapshot) {
 		snapshot = next;
 		if (!pending) installRequested = false;
-		if (next.operation?.phase !== 'complete') return;
-		receipt = ''; requestError = '';
-		if (acknowledged === next.operation.id) return;
-		acknowledged = next.operation.id;
+		const done = next.operation;
+		if (done?.phase === 'waiting') watched = done.id;
+		if (done?.phase !== 'complete') return;
+		receipt = ''; requestError = ''; refusals = {};
+		if (acknowledged === done.id) return;
+		acknowledged = done.id;
 		try { localStorage.setItem(completionKey, acknowledged); } catch { /* Still dedupe within this mount. */ }
+		// Celebrate only the install this view watched finish, or one that just
+		// finished (the app restarted into it). Never replay an older completion
+		// while a newer update is staged or being prepared.
+		const recent = watched === done.id || (typeof done.completed_at === 'number' && typeof next.server_time === 'number'
+			&& next.server_time - done.completed_at < CELEBRATE_WINDOW_S);
+		if (!recent || staged || available || downloading) return;
 		clearTimeout(finishTimer); clearTimeout(hideTimer);
 		celebration = 'complete';
 		finishTimer = setTimeout(() => { celebration = 'leaving'; }, 1850);
@@ -137,14 +192,17 @@
 		if (busy || !snapshot?.allow_updates) return;
 		const requestedAction = ready ? 'install' : available ? 'download' : 'check';
 		watchUntil = Date.now() + REQUEST_WATCH_MS;
-		pending = true; installRequested = requestedAction === 'install'; requestError = ''; receipt = '';
+		pending = true; installRequested = requestedAction === 'install'; requestError = ''; receipt = ''; refusals = {};
 		try {
 			const result = await api.post<Receipt>('/settings/application-updates', { action: requestedAction });
 			if (!active) return;
-			receipt = result.results.map(w => `${w.device_name}: ${w.reason}`).join('; ');
+			// Keep only refusals: accepted work shows up in each worker's live phase.
+			const refused = result.results.filter(w => !w.accepted);
+			receipt = refused.map(w => `${w.device_name}: ${w.reason}`).join('; ');
+			refusals = Object.fromEntries(refused.filter(w => w.device_id).map(w => [w.device_id!, w.reason]));
 			if (!result.results.some(w => w.accepted)) installRequested = false;
 			if (announce) {
-				const message = `${scope}. ${receipt}${requestedAction === 'download' ? ' When preparation finishes, choose Update and restart to install.' : ''}`;
+				const message = `${scope}. ${result.results.map(w => `${w.device_name}: ${w.reason}`).join('; ')}${requestedAction === 'download' ? ' When preparation finishes, choose Update and restart to install.' : ''}`;
 				if (result.results.some(w => !w.accepted)) notify.warning(message, { title: 'Update needs attention', persist: false });
 				else notify.info(message, { title: 'Update requested', persist: false });
 			}
@@ -179,11 +237,17 @@
 		{#if tipOpen}
 			<div class="update-tooltip" id={tooltipId} role="tooltip" style:top={`${tipPosition.top}px`} style:left={`${tipPosition.left}px`}>
 				<strong>{headline}</strong>
-				{#if operation && (waiting || celebrating || operationError)}
+				{#if operation && showOperation}
 					{#each operation.workers as worker (worker.device_id)}
 						<div class="worker-row"><span>{worker.device_name}</span><span class:verified={worker.status === 'verified'}>{worker.message}</span></div>
 					{/each}
-				{:else}<span>{status}</span>{/if}
+				{:else}
+					<span>{scope}: {summary}</span>
+					{#each rows as row (row.worker.device_id)}
+						<div class="worker-row"><span>{row.worker.device_name}</span><span class:verified={row.role === 'staged'}>{row.label}</span></div>
+					{/each}
+					{#if receipt}<p>Last request: {receipt}</p>{/if}
+				{/if}
 				{#if offered && !waiting && !celebrating}
 					<div class="release-notes">
 						<strong>What's new{offered.release ? ` in ${offered.release}` : ''}</strong>

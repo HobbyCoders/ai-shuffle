@@ -19,6 +19,7 @@ import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '..
 import { apiBase } from '$lib/api/runtime';
 import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
+import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -161,6 +162,12 @@ export interface V2SessionState {
 	speculativelySettledCardIds: string[];
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
 	speculativelySettledTaskIds: string[];
+	/** Seq of the last event that ended a model attempt's streamed output: a
+	 *  turn start, a user message, a tool result, a provider retry. Messages
+	 *  created after it are the current attempt's output, which a
+	 *  connection-drop retry folds into its card (see foldDroppedAttempt).
+	 *  Optional so a cached state from before the field reads as 0. */
+	attemptStartSeq?: number;
 }
 
 export function initialState(): V2SessionState {
@@ -189,6 +196,7 @@ export function initialState(): V2SessionState {
 		mayHaveRunningSubagents: false,
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
+		attemptStartSeq: 0,
 	};
 }
 
@@ -409,6 +417,91 @@ function settleRetryCards(messages: ChatMessage[], present = true): ChatMessage[
 		return { ...m, systemData: { ...(data ?? {}), settled: true } };
 	});
 	return touched ? out : messages;
+}
+
+/** A tool card that only ever saw argument deltas: its call never closed. */
+function isAbandonedToolCard(m: ChatMessage): boolean {
+	return (
+		m.type === 'tool_use' &&
+		m.toolStatus === 'running' &&
+		m.toolInput === undefined &&
+		m.partialToolInput !== undefined
+	);
+}
+
+/**
+ * Retire the tool cards a re-sent request abandoned.
+ *
+ * A `provider_retry` means the engine dropped the last response and is sending
+ * the same request again. A card that got argument deltas but never its
+ * `tool.use` belonged to that response: the call never closed, never ran, and
+ * the new response gives its calls new ids. Left alone it would spin until the
+ * turn ends.
+ */
+function retireAbandonedToolCards(messages: ChatMessage[]): ChatMessage[] {
+	if (!messages.some(isAbandonedToolCard)) return messages;
+	return messages.map((m) =>
+		isAbandonedToolCard(m) ? { ...m, streaming: false, toolStatus: 'error' as const } : m
+	);
+}
+
+/** Mark `seq` as the end of a model attempt's streamed output. */
+function markAttemptBoundary(state: V2SessionState, seq: number): V2SessionState {
+	return state.attemptStartSeq === seq ? state : { ...state, attemptStartSeq: seq };
+}
+
+/** What a dropped attempt had streamed, kept on its retry card. */
+interface SupersededAttempt {
+	text: string;
+	tools: string[];
+}
+
+/**
+ * Take a dropped attempt's output out of the transcript.
+ *
+ * A connection-drop retry re-sends the request, so the text, thinking and
+ * tool cards the dropped attempt streamed are superseded by the reply that
+ * follows. They are removed from `messages` and returned, to be kept on the
+ * retry card as a collapsed "Response interrupted — retried" row. Everything
+ * here comes from persisted events, so a replay folds the same messages.
+ */
+function foldDroppedAttempt(state: V2SessionState): {
+	state: V2SessionState;
+	superseded: SupersededAttempt | null;
+} {
+	const since = state.attemptStartSeq ?? 0;
+	const dropped = (m: ChatMessage): boolean => {
+		if (m.role !== 'assistant') return false;
+		if (m.type !== 'text' && m.type !== 'thinking' && m.type !== 'tool_use' && m.type) return false;
+		const origin = state.messageOriginSeq.get(m.id);
+		return origin !== undefined && origin > since;
+	};
+	if (!state.messages.some(dropped)) return { state, superseded: null };
+	const text: string[] = [];
+	const tools: string[] = [];
+	const kept = state.messages.filter((m) => {
+		if (!dropped(m)) return true;
+		if (m.type === 'tool_use') tools.push(m.toolName || 'tool');
+		else if (m.type !== 'thinking' && m.content?.trim()) text.push(m.content.trim());
+		return false;
+	});
+	return {
+		state: { ...closeOpen(state), messages: kept },
+		superseded: { text: text.join('\n\n'), tools },
+	};
+}
+
+function mergeSuperseded(
+	earlier: unknown,
+	later: SupersededAttempt | null
+): SupersededAttempt | null {
+	const prev = earlier as SupersededAttempt | undefined;
+	if (!prev) return later;
+	if (!later) return prev;
+	return {
+		text: [prev.text, later.text].filter(Boolean).join('\n\n'),
+		tools: [...(prev.tools ?? []), ...later.tools],
+	};
 }
 
 /** systemData of a `provider_retry` card, or undefined for any other message. */
@@ -741,6 +834,34 @@ function parseUsageNum(raw: string): number | string | undefined {
 	return Number.isFinite(n) && String(n) === t ? n : t;
 }
 
+const TASK_NOTIFICATION_BLOCK = /<task-notification>[\s\S]*?<\/task-notification>/g;
+
+/** One `agent_message` item per delivered peer message, rendered the same way
+ *  as a live delivery receipt. `sole`: these are the event's only items, so a
+ *  single one keeps the event id. */
+function appendAgentDeliveries(
+	state: V2SessionState,
+	deliveries: AgentDelivery[],
+	eventId: string,
+	stamp: string,
+	seq: number,
+	sole: boolean
+): V2SessionState {
+	let next = state;
+	deliveries.forEach((delivery, i) => {
+		next = appendMessage(next, {
+			id: sole && deliveries.length === 1 ? eventId : `${eventId}-am-${i}`,
+			role: 'system',
+			type: 'system',
+			content: delivery.content,
+			systemSubtype: 'agent_message',
+			systemData: { sender: delivery.sender, content: delivery.content, delivery: 'held' },
+			timestamp: stamp || undefined,
+		}, seq);
+	});
+	return next;
+}
+
 /** Parse one `<task-notification>` block into `systemData` for a system card. */
 function parseTaskNotification(block: string): Record<string, unknown> {
 	const usage: Record<string, number | string> = {};
@@ -895,6 +1016,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				...state,
 				messages,
 				mayHaveLiveRetry,
+				attemptStartSeq: seq,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -1174,6 +1296,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {
+			state = markAttemptBoundary(state, seq);
 			const content = str(event.content);
 
 			// Background-task wake turns persist their synthesized prompt as a
@@ -1202,6 +1325,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						};
 						next = appendMessage(next, msg, seq);
 					});
+					// Peer messages held while parked ride the same wake, after its
+					// notifications (turn_scheduler::_unpark_prompt).
+					const held = heldAgentDeliveries(content.replace(TASK_NOTIFICATION_BLOCK, ''));
+					if (held) next = appendAgentDeliveries(next, held, event.id, notifStamp, seq, false);
 					// A pump card arms "ok"-ack suppression for the live turn; a purely
 					// own notification (or nothing pumped) clears any stale watch.
 					return anyPump
@@ -1209,6 +1336,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						: { ...next, pendingPumpAck: null, pumpAckBuffer: '' };
 				}
 				// substring present but no complete block parsed → safe fallback.
+			}
+
+			// A wake that delivers peer messages held while the session was parked
+			// (a promotion, or an urgent message after held ones) records them inside
+			// a harness <system-reminder>. Show one attributed agent message per peer
+			// and never the reminder itself (#1618).
+			if (content.includes('<system-reminder>')) {
+				const held = heldAgentDeliveries(content);
+				if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true);
 			}
 
 			// A real typed message (wake-turn notifications returned above): the
@@ -1540,6 +1676,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'tool.result': {
+			// Results come after a model attempt completed: the next one starts here.
+			state = markAttemptBoundary(state, seq);
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);
@@ -1939,7 +2077,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					liveProvider: provider || null,
 				};
 			}
-			const data = obj(event.data);
+			let data = obj(event.data);
 			// `provider_retry` arrives once per attempt while the engine
 			// re-sends an empty completion — up to ten of them in a row. They
 			// must read as ONE card counting 1 → 2 → 3, not ten stacked
@@ -1954,15 +2092,29 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// the same way: it records a turn that already ended, so the next
 			// turn's retries append beside it instead of rewriting history.
 			if (str(event.subtype) === 'provider_retry') {
+				// A connection-drop retry supersedes what the dropped attempt
+				// streamed: it moves onto this card, collapsed.
+				let superseded: SupersededAttempt | null = null;
+				if (data?.cause === 'connection_dropped') {
+					const folded = foldDroppedAttempt(state);
+					state = folded.state;
+					superseded = folded.superseded;
+				}
+				const retired = retireAbandonedToolCards(state.messages);
+				if (retired !== state.messages) state = { ...state, messages: retired };
 				const last = state.messages[state.messages.length - 1];
 				const lastData = last?.systemData as Record<string, unknown> | undefined;
 				const lastFinished = !!(lastData?.exhausted || lastData?.settled);
-				if (
-					last &&
+				const inPlace =
+					!!last &&
 					last.type === 'system' &&
 					last.systemSubtype === 'provider_retry' &&
-					!lastFinished
-				) {
+					!lastFinished;
+				const merged = mergeSuperseded(inPlace ? lastData?.superseded : undefined, superseded);
+				if (merged && data) data = { ...data, superseded: merged };
+				// The next attempt's output starts after this note.
+				state = markAttemptBoundary(state, seq);
+				if (inPlace) {
 					const messages = state.messages.slice();
 					messages[messages.length - 1] = {
 						...last,

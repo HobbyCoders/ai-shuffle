@@ -116,6 +116,22 @@
 		}
 	}
 
+	/**
+	 * Render at <body>. The composer mounts this modal from its chip row, which
+	 * paints below the editor row (chip row z 10 < input area z 20), so the
+	 * modal's own z-index only competed inside that row and the editor covered
+	 * the dialog. Reparenting escapes every ancestor stacking context and
+	 * containing block. (Same idiom as ConfirmDialog and MediaLightbox.)
+	 */
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
+	}
+
 	function handleInputKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter' && branchName.trim() && !loading) {
 			e.preventDefault();
@@ -127,7 +143,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="create-branch-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
+	<div use:portal class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="create-branch-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
 		<button class="modal-backdrop-close" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="modal">
 			<!-- Close button -->

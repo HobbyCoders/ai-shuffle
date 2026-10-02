@@ -1122,6 +1122,9 @@ export const activeSession = {
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
 
+	/** Create the composed session with no first message (the call button). */
+	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),
+
 	// ── Pending Messages (delegated to message-sender) ─────────────
 
 	removeQueuedMessage: (id: string) => messageSender.removeQueuedMessage(id),

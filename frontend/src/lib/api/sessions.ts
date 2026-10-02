@@ -58,6 +58,12 @@ export interface Session {
 	pr_number?: number | null;
 	pr_url?: string | null;
 	pr_state?: 'open' | 'merged' | 'closed' | null;
+	/** Banked working time (ms): the sum of every finished turn's live
+	 *  interval. Idle gaps between turns never count. */
+	work_ms?: number | null;
+	/** Start of the turn running now, null when none is. The card adds the
+	 *  live interval to `work_ms` while the turn runs. */
+	work_started_at?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

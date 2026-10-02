@@ -439,6 +439,9 @@ def dispatch_env(monkeypatch, tmp_path):
     from app.core import project_resolver
     from app.db import database as db
 
+    monkeypatch.setattr(db, "get_profile", lambda pid: {
+        "id": pid, "config": {"allowed_tools": ["Read", "Grep"]},
+    })
     created = {}
     updates = []
     branch_updates = []
@@ -1706,7 +1709,10 @@ class TestWorkerWakesItsCaller:
     ):
         from app.db import database as db
 
-        monkeypatch.setattr(db, "get_session", lambda sid: None)
+        # Delete after admission: a missing caller now correctly refuses launch.
+        dispatch_env.tm.on_wait = lambda sid: monkeypatch.setattr(
+            db, "get_session", lambda sid: None,
+        )
 
         outcome = _dispatch_bg()
 

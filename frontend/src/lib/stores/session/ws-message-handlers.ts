@@ -172,6 +172,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'pr_state',
 	'parked_task_kind',
 	'has_running_tasks',
+	'work_ms',
+	'work_started_at',
 ]);
 
 /**

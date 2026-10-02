@@ -10,12 +10,12 @@
 	 * competing for the same pixel.
 	 *
 	 * Active card (three lines):
-	 *   L1  glyph · title · elapsed
+	 *   L1  glyph · title · total working time
 	 *   L2  project · status word · PR state · diffstat
 	 *   L3  device icon · branch
 	 *
 	 * Settled row (compact, two lines):
-	 *   L1  glyph · title · age
+	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
@@ -54,6 +54,8 @@
 		diffCounts,
 		isAttentionStatus,
 		isLiveStatus,
+		isTurnLiveStatus,
+		sessionWorkMs,
 		formatElapsed,
 		formatAge,
 		deviceLabel,
@@ -109,9 +111,19 @@
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
+	// Only a turn holding the live slot ticks; a parked turn's interval has
+	// ended, so its timer takes the plain style, not the live accent.
+	const turnLive = $derived(isTurnLiveStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
-	const elapsed = $derived(Math.max(0, now - lastActivity));
-	const timer = $derived(live ? formatElapsed(elapsed) : formatAge(elapsed));
+	// Every row shows the session's total working time, which survives
+	// Done/Parked and settling. A settled row that is idle keeps its age in
+	// the hover title, where it used to be the visible value.
+	const timer = $derived(formatElapsed(sessionWorkMs(session, now, turnLive, lastActivity)));
+	const timerTitle = $derived.by(() => {
+		if (!compact || live) return 'Total working time';
+		const age = formatAge(Math.max(0, now - lastActivity));
+		return `Total working time · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
+	});
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
@@ -289,8 +301,14 @@
 			// Desktop moves to a fresh composer. On mobile, keep the current
 			// session and drawer open so settling does not navigate the user away.
 			if (settling && active && !platform.isMobile) onSettled?.();
-		} catch {
-			notify('Failed to update session', { severity: 'error' });
+		} catch (err) {
+			// The server says why (owner offline, owner still syncing); pass that
+			// on so the toast tells the user what to do instead of a bare failure.
+			const detail = (err as { detail?: unknown } | null)?.detail;
+			const reason = typeof detail === 'string' ? detail.trim() : '';
+			notify(reason ? `Failed to update session: ${reason}` : 'Failed to update session', {
+				severity: 'error'
+			});
 		}
 	}
 
@@ -529,7 +547,7 @@
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
-				<span class="timer" class:live>{timer}</span>
+				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
 			</span>
 
 			{#if !compact}

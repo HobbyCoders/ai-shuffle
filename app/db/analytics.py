@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, logger
@@ -21,6 +21,36 @@ def _interval_date_expressions() -> Dict[str, str]:
         "week": sql_strftime("%Y-W%W", "u.created_at"),
         "month": sql_strftime("%Y-%m", "u.created_at"),
     }
+
+
+def _created_at_range(
+    column: str, start_date: Optional[str], end_date: Optional[str]
+) -> tuple[str, List[Any]]:
+    """Inclusive YYYY-MM-DD range filter on a timestamp column, as SQL + params.
+
+    Compares the raw column against day boundaries (``>= start``,
+    ``< end + 1 day``) instead of casting it with ``::date``, so PostgreSQL can
+    serve the Stats date range from ``idx_usage_log_created``; the cast form
+    forces a sequential scan of the whole ledger. The days are the same: a bare
+    'YYYY-MM-DD' compared with a timestamptz is midnight in the session time
+    zone, as is the ``::date`` cast. An end date that does not parse keeps the
+    cast form rather than guessing a boundary.
+    """
+    sql = ""
+    params: List[Any] = []
+    if start_date:
+        sql += f" AND {column} >= %s"
+        params.append(start_date)
+    if end_date:
+        try:
+            next_day = datetime.strptime(end_date, "%Y-%m-%d").date() + timedelta(days=1)
+        except ValueError:
+            sql += f" AND {sql_date(column)} <= %s"
+            params.append(end_date)
+        else:
+            sql += f" AND {column} < %s"
+            params.append(next_day.isoformat())
+    return sql, params
 
 
 def _to_iso(value: Any) -> Any:
@@ -132,6 +162,9 @@ def log_usage(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     usage_estimated: bool = False,
+    provider_id: Optional[str] = None,
+    provider_type: Optional[str] = None,
+    billing: Optional[str] = None,
 ):
     """Log usage for tracking.
 
@@ -142,17 +175,22 @@ def log_usage(
     ``usage_estimated`` marks a turn whose token counts the harness guessed
     (the provider reported no usage, or the reply was interrupted). The
     amounts are booked all the same; the flag only labels them.
+
+    ``provider_id``/``provider_type``/``billing`` attribute the row to the
+    provider leg that served it (see ``app.core.usage_attribution``).
     """
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out,
                                       cache_read_tokens, cache_creation_tokens,
-                                      cost_usd, duration_ms, usage_estimated)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                      cost_usd, duration_ms, usage_estimated,
+                                      provider_id, provider_type, billing)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, model, tokens_in, tokens_out,
              cache_read_tokens or 0, cache_creation_tokens or 0,
-             cost_usd, duration_ms, bool(usage_estimated))
+             cost_usd, duration_ms, bool(usage_estimated),
+             provider_id, provider_type, billing)
         )
 
     # Update in-memory usage cache (avoids DB re-read on next load)
@@ -166,7 +204,7 @@ def settle_turn_usage(
     session_id: str, settlement_key: str, *, profile_id=None, model=None,
     tokens_in=0, tokens_out=0, cache_read_tokens=0, cache_creation_tokens=0,
     cost_usd=0, duration_ms=0, model_calls=0, turn_increment=0,
-    usage_estimated=False,
+    usage_estimated=False, provider_id=None, provider_type=None, billing=None,
 ) -> bool:
     """Claim an execution attempt and book its ledger/counters in one commit.
 
@@ -177,6 +215,9 @@ def settle_turn_usage(
     ``usage_estimated`` rides the ledger row only: the session counters and
     every budget add the estimated amounts like any other (owner decision);
     the flag marks the turn as an estimate in the usage displays.
+
+    ``provider_id``/``provider_type``/``billing`` ride the ledger row only and
+    attribute it to the provider leg that served the turn.
     """
     from app.db.sessions import update_session
 
@@ -187,12 +228,13 @@ def settle_turn_usage(
         cursor.execute(
             "INSERT INTO usage_log (settlement_key, session_id, profile_id, model, "
             "tokens_in, tokens_out, cache_read_tokens, cache_creation_tokens, "
-            "cost_usd, duration_ms, usage_estimated) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "cost_usd, duration_ms, usage_estimated, provider_id, provider_type, billing) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (settlement_key) DO NOTHING RETURNING id",
             (settlement_key, session_id, profile_id, model, tokens_in or 0,
              tokens_out or 0, cache_read_tokens or 0, cache_creation_tokens or 0,
-             cost_usd or 0, duration_ms or 0, bool(usage_estimated)),
+             cost_usd or 0, duration_ms or 0, bool(usage_estimated),
+             provider_id, provider_type, billing),
         )
         if cursor.fetchone() is None:
             return False
@@ -302,19 +344,11 @@ def get_analytics_usage_stats(
     Returns:
         Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
     """
-    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build date filter clause
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("ul.created_at", start_date, end_date)
 
         # Add user filter if specified
         user_filter = ""
@@ -373,19 +407,11 @@ def get_analytics_cost_breakdown(
     Returns:
         List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
     """
-    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build date filter clause
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("ul.created_at", start_date, end_date)
 
         # Add user filter if specified
         user_filter = ""
@@ -492,19 +518,11 @@ def get_analytics_usage_trends(
     Returns:
         List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
     """
-    _date_expr = sql_date("u.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build filter clauses
-        date_filter = ""
-        params = []
-        if start_date:
-            date_filter += f" AND {_date_expr} >= %s"
-            params.append(start_date)
-        if end_date:
-            date_filter += f" AND {_date_expr} <= %s"
-            params.append(end_date)
+        date_filter, params = _created_at_range("u.created_at", start_date, end_date)
 
         # User filter for API users (join with sessions to get api_user_id)
         user_filter = ""
@@ -633,3 +651,209 @@ def get_analytics_top_sessions(
                 "usage_estimated": bool(row["usage_estimated"]),
             })
         return result
+
+
+# ============================================================================
+# Per-provider breakdown
+# ============================================================================
+
+#: Breakdown key of the native/delegated Claude leg.
+CLAUDE_PROVIDER_KEY = "claude"
+#: Breakdown key of rows that name no provider and belong to no session
+#: (one-shot generation booked before provider attribution existed).
+UNATTRIBUTED_PROVIDER_KEY = "unattributed"
+
+#: The provider a usage row is attributed to. Rows booked with attribution
+#: carry it; older rows fall back to their session's CURRENT binding (counted
+#: as ``inferred``), and older session-less rows are unattributed.
+_PROVIDER_KEY_SQL = f"""CASE
+    WHEN ul.provider_type IS NOT NULL
+        THEN COALESCE(ul.provider_id, '{CLAUDE_PROVIDER_KEY}')
+    WHEN s.id IS NOT NULL
+        THEN COALESCE(s.provider_id, '{CLAUDE_PROVIDER_KEY}')
+    ELSE '{UNATTRIBUTED_PROVIDER_KEY}'
+END"""
+
+
+class ProviderUsageEntry(TypedDict, total=False):
+    """Usage booked on one provider leg (optionally on one day)."""
+    key: str
+    name: str
+    provider_type: Optional[str]
+    billing: str
+    total_tokens_in: int
+    total_tokens_out: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    total_cost_usd: float
+    cost_status: str
+    query_count: int
+    estimated_query_count: int
+    unpriced_query_count: int
+    subscription_query_count: int
+    api_query_count: int
+    inferred_query_count: int
+    date: str
+
+
+def _provider_display_name(key: str, name: Optional[str]) -> str:
+    if key == CLAUDE_PROVIDER_KEY:
+        return "Claude"
+    if key == UNATTRIBUTED_PROVIDER_KEY:
+        return "Unattributed"
+    return name or "Deleted provider"
+
+
+def get_analytics_provider_breakdown(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    by_date: bool = False,
+) -> List[ProviderUsageEntry]:
+    """Usage per provider leg for a date range (inclusive, YYYY-MM-DD).
+
+    ``by_date`` splits each provider into one entry per day (the CSV export).
+    Token and cost sums cover every booked turn. Three things are reported
+    next to them rather than folded into a number:
+
+    * ``billing``: whether the provider is paid per token or by subscription
+      (a subscription's cost is an API-price estimate, not a bill);
+    * ``cost_status``: ``unknown`` when no turn had a price (the model is in
+      no price table, so the cost is missing rather than zero), ``partial``
+      when some turns lacked one;
+    * ``inferred_query_count``: turns booked before attribution existed,
+      attributed from the session's current provider binding.
+    """
+    from app.core.usage_attribution import claude_billing, provider_billing
+
+    date_expr = sql_date("ul.created_at")
+    where, params = _created_at_range("ul.created_at", start_date, end_date)
+    if api_user_id:
+        where += " AND s.api_user_id = %s"
+        params.append(api_user_id)
+
+    inner_day = f", {date_expr} AS day" if by_date else ""
+    outer_day = ", t.day AS day" if by_date else ""
+    group_day = ", t.day" if by_date else ""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT
+                t.pkey AS key{outer_day},
+                mp.name AS provider_name,
+                mp.provider_type AS current_type,
+                mp.auth_mode AS current_auth_mode,
+                MAX(t.provider_type) AS recorded_type,
+                COALESCE(SUM(t.tokens_in), 0) AS total_tokens_in,
+                COALESCE(SUM(t.tokens_out), 0) AS total_tokens_out,
+                COALESCE(SUM(t.cache_read), 0) AS cache_read_tokens,
+                COALESCE(SUM(t.cache_creation), 0) AS cache_creation_tokens,
+                COALESCE(SUM(t.cost), 0) AS total_cost_usd,
+                COUNT(*) AS query_count,
+                COALESCE(SUM(t.estimated), 0) AS estimated_query_count,
+                COALESCE(SUM(t.unpriced), 0) AS unpriced_query_count,
+                COALESCE(SUM(t.sub), 0) AS subscription_query_count,
+                COALESCE(SUM(t.api), 0) AS api_query_count,
+                COALESCE(SUM(t.inferred), 0) AS inferred_query_count
+            FROM (
+                SELECT
+                    {_PROVIDER_KEY_SQL} AS pkey{inner_day},
+                    ul.provider_type AS provider_type,
+                    COALESCE(ul.tokens_in, 0) AS tokens_in,
+                    COALESCE(ul.tokens_out, 0) AS tokens_out,
+                    COALESCE(ul.cache_read_tokens, 0) AS cache_read,
+                    COALESCE(ul.cache_creation_tokens, 0) AS cache_creation,
+                    COALESCE(ul.cost_usd, 0) AS cost,
+                    CASE WHEN ul.usage_estimated THEN 1 ELSE 0 END AS estimated,
+                    CASE WHEN COALESCE(ul.cost_usd, 0) = 0
+                          AND COALESCE(ul.tokens_in, 0) + COALESCE(ul.tokens_out, 0)
+                              + COALESCE(ul.cache_read_tokens, 0)
+                              + COALESCE(ul.cache_creation_tokens, 0) > 0
+                         THEN 1 ELSE 0 END AS unpriced,
+                    CASE WHEN ul.billing = 'subscription' THEN 1 ELSE 0 END AS sub,
+                    CASE WHEN ul.billing = 'api' THEN 1 ELSE 0 END AS api,
+                    CASE WHEN ul.provider_type IS NULL AND s.id IS NOT NULL
+                         THEN 1 ELSE 0 END AS inferred
+                FROM usage_log ul
+                LEFT JOIN sessions s ON ul.session_id = s.id
+                WHERE 1=1 {where}
+            ) t
+            LEFT JOIN model_providers mp ON mp.id = t.pkey
+            GROUP BY t.pkey{group_day}, mp.name, mp.provider_type, mp.auth_mode
+        """, params)
+        rows = cursor.fetchall()
+
+    claude_bill: Optional[str] = None
+    claude_bill_read = False
+    result: List[ProviderUsageEntry] = []
+    for row in rows:
+        key = str(row["key"])
+        query_count = int(row["query_count"] or 0)
+        sub = int(row["subscription_query_count"] or 0)
+        api = int(row["api_query_count"] or 0)
+        unpriced = int(row["unpriced_query_count"] or 0)
+
+        # Rows with no recorded billing (the inferred ones, or rows booked
+        # while a provider lookup failed) take the provider's CURRENT billing.
+        unbilled = query_count - sub - api
+        if unbilled > 0:
+            current: Optional[str] = None
+            if key == CLAUDE_PROVIDER_KEY:
+                if not claude_bill_read:
+                    claude_bill, claude_bill_read = claude_billing(), True
+                current = claude_bill
+            elif row["current_type"]:
+                current = provider_billing(row["current_type"], row["current_auth_mode"])
+            if current == "subscription":
+                sub += unbilled
+            elif current == "api":
+                api += unbilled
+
+        if sub and api:
+            billing = "mixed"
+        elif sub:
+            billing = "subscription"
+        elif api:
+            billing = "api"
+        else:
+            billing = "unknown"
+
+        if unpriced == 0:
+            cost_status = "estimated"
+        elif unpriced >= query_count:
+            cost_status = "unknown"
+        else:
+            cost_status = "partial"
+
+        if key == CLAUDE_PROVIDER_KEY:
+            provider_type: Optional[str] = CLAUDE_PROVIDER_KEY
+        else:
+            provider_type = row["current_type"] or row["recorded_type"]
+
+        entry: ProviderUsageEntry = {
+            "key": key,
+            "name": _provider_display_name(key, row["provider_name"]),
+            "provider_type": provider_type,
+            "billing": billing,
+            "total_tokens_in": int(row["total_tokens_in"] or 0),
+            "total_tokens_out": int(row["total_tokens_out"] or 0),
+            "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+            "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+            "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
+            "cost_status": cost_status,
+            "query_count": query_count,
+            "estimated_query_count": int(row["estimated_query_count"] or 0),
+            "unpriced_query_count": unpriced,
+            "subscription_query_count": sub,
+            "api_query_count": api,
+            "inferred_query_count": int(row["inferred_query_count"] or 0),
+        }
+        if by_date:
+            entry["date"] = _to_iso(row["day"])
+        result.append(entry)
+
+    if by_date:
+        result.sort(key=lambda e: (e["date"], -e["total_cost_usd"], e["name"]))
+    else:
+        result.sort(key=lambda e: (-e["total_cost_usd"], -e["query_count"], e["name"]))
+    return result

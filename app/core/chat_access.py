@@ -9,6 +9,7 @@ permission mode.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hmac
 import ipaddress
 import logging
@@ -132,10 +133,42 @@ class AccessRequest:
         return {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
 
 
-async def session_owner(session_id: str) -> tuple:
+logger = logging.getLogger(__name__)
+
+# ChatResources is a read-only listing that must answer promptly. Its one
+# database read runs on this small pool instead of asyncio's shared default
+# executor, which every ``run_sync``/``to_thread`` caller in the process
+# queues on, and the lookup is bounded so a stall returns a clear error rather
+# than holding the turn until the tool-call ceiling.
+_listing_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="chat-access-list",
+)
+LISTING_TIMEOUT_SECONDS = 15.0
+# Every listing logs its stage timings at INFO (the default production level),
+# so a stall outside this function still shows when the call itself finished;
+# a listing slower than this logs them at WARNING.
+LISTING_SLOW_SECONDS = 2.0
+
+
+async def session_owner(session_id: str, *, executor=None) -> tuple:
     from app.db import database
-    from app.db.async_database import run_sync
-    return owner_from_row(await run_sync(database.get_session, session_id))
+    if executor is None:
+        from app.db.async_database import run_sync
+        return owner_from_row(await run_sync(database.get_session, session_id))
+    row = await asyncio.get_running_loop().run_in_executor(executor, database.get_session, session_id)
+    return owner_from_row(row)
+
+
+def _default_executor_load() -> str:
+    """Thread and queue counts of the loop's shared default executor, for stall logs."""
+    try:
+        pool = getattr(asyncio.get_running_loop(), "_default_executor", None)
+        if pool is None:
+            return "unstarted"
+        return (f"threads={len(pool._threads)} queued={pool._work_queue.qsize()} "
+                f"max={pool._max_workers}")
+    except Exception:  # noqa: BLE001 — diagnostics only
+        return "unknown"
 
 
 def owner_from_row(row: dict | None) -> tuple:
@@ -454,18 +487,66 @@ class Broker:
             raise AccessDenied("Access expired or ownership changed. Request a new grant.")
         return grant
 
-    async def snapshot(self, session_id: str, row: dict | None = None):
-        # The access API has just loaded and authorized this session row; reuse
-        # it so each panel refresh reads the session once, not twice. Callers
-        # without a row still load it here.
-        owner = owner_from_row(row) if row is not None else await session_owner(session_id)
-        result = []
+    def _live_grants(self, session_id: str, owner: tuple) -> list[Grant]:
+        """This session's usable grants; expired or re-owned ones are revoked."""
+        live = []
         for grant in list(self.grants.values()):
             if grant.session_id == session_id:
                 if grant.revoked or grant.expires_at <= time.time() or grant.owner != owner:
                     self.revoke(session_id, grant.id)
                 else:
-                    result.append(grant.public())
+                    live.append(grant)
+        return live
+
+    async def resources(self, session_id: str) -> dict:
+        """The model-facing grant listing (ChatResources). Never asks the user.
+
+        Unlike ``snapshot`` it skips the saved-connection catalogue, which the
+        tool never returned, so its only blocking step is the session-owner
+        read. That read runs on the listing's own pool under
+        ``LISTING_TIMEOUT_SECONDS``, so neither a pending RequestChatAccess nor
+        a busy shared executor can hold it. Timing logs carry no addresses,
+        labels or credentials.
+        """
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(LISTING_TIMEOUT_SECONDS):
+                owner = await session_owner(session_id, executor=_listing_executor)
+        except TimeoutError:
+            logger.warning(
+                "ChatResources listing timed out: session=%s owner_lookup=%.2fs default_executor=%s",
+                session_id, time.monotonic() - started, _default_executor_load(),
+            )
+            raise AccessDenied(
+                f"Listing access handles timed out after {LISTING_TIMEOUT_SECONDS:g} seconds on this "
+                "worker. No access was requested or changed; try ChatResources again shortly."
+            ) from None
+        except AccessDenied:
+            raise
+        except Exception as exc:
+            logger.warning("ChatResources owner lookup failed: session=%s error=%s",
+                           session_id, type(exc).__name__)
+            raise AccessDenied(
+                "Listing access handles failed: this worker could not read the session. "
+                "No access was requested or changed."
+            ) from None
+        looked_up = time.monotonic()
+        grants = [grant.model_public() for grant in self._live_grants(session_id, owner)]
+        folder_available = chat_files.available()
+        finished = time.monotonic()
+        total = finished - started
+        log = logger.warning if total >= LISTING_SLOW_SECONDS else logger.info
+        log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
+            "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
+            finished - looked_up, total, _default_executor_load())
+        return {"grants": grants, "folder_available": folder_available}
+
+    async def snapshot(self, session_id: str, row: dict | None = None):
+        # The access API has just loaded and authorized this session row; reuse
+        # it so each panel refresh reads the session once, not twice. Callers
+        # without a row still load it here.
+        owner = owner_from_row(row) if row is not None else await session_owner(session_id)
+        result = [grant.public() for grant in self._live_grants(session_id, owner)]
         from app.core import chat_vault, encryption
         from app.db.async_database import run_sync
         saved = await run_sync(chat_vault.catalog, owner, cache_empty=True)

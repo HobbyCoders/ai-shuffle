@@ -264,6 +264,21 @@ describe('SessionCard actions', () => {
 		expect(mocks.toastPush).toHaveBeenCalledWith('Failed to update session', { severity: 'error' });
 	});
 
+	it('names the server reason when a settle is refused (#1621)', async () => {
+		mocks.setSessionActive.mockRejectedValueOnce({
+			status: 503,
+			detail: "DesktopWorker, the worker that runs this session, can't be reached right now. Try again once it is back online.",
+		});
+		renderCard({ is_active: true }, { active: true });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(mocks.toastPush).toHaveBeenCalledWith(
+			"Failed to update session: DesktopWorker, the worker that runs this session, can't be reached right now. Try again once it is back online.",
+			{ severity: 'error' },
+		);
+	});
+
 	it("doesn't fire onSettled when a background session is settled", async () => {
 		const { onSettled } = renderCard({ is_active: true }, { active: false });
 
@@ -307,11 +322,96 @@ describe('SessionCard actions', () => {
 		// The sidebar resolves each row's last-activity time once when it builds
 		// the list; the card must not parse `updated_at` again on every tick.
 		const { container } = renderCard(
-			{ updated_at: 'not-a-date' },
-			{ timestamp: Date.parse('2026-08-20T12:05:00Z'), status: 'working' }
+			{ updated_at: 'not-a-date', is_active: false },
+			{ timestamp: Date.parse('2026-08-20T12:03:00Z'), compact: true, status: 'idle' }
 		);
 
-		expect(container.querySelector('.timer')?.textContent).toBe('1m 00s');
+		expect(container.querySelector('.timer')?.getAttribute('title')).toBe(
+			'Total working time · last activity 3m ago'
+		);
+	});
+
+	// Owner decision 2026-10-01: settled rows show the cumulative total too,
+	// with the idle age kept in the hover title.
+	it('shows the working total on an idle settled row, with its age in the title', () => {
+		const { container } = renderCard(
+			{ is_active: false, work_ms: 754_000, work_started_at: null },
+			{ timestamp: Date.parse('2026-08-20T09:06:00Z'), compact: true, status: 'idle' }
+		);
+
+		const timer = container.querySelector('.timer');
+		expect(timer?.textContent).toBe('12m 34s');
+		expect(timer?.getAttribute('title')).toBe('Total working time · last activity 3h ago');
+		expect(timer?.classList.contains('live')).toBe(false);
+	});
+
+	it('gives a parked card the plain timer style, not the live accent', () => {
+		const parked = renderCard({ work_ms: 90_000, work_started_at: null }, { status: 'parked' });
+		expect(parked.container.querySelector('.timer')?.classList.contains('live')).toBe(false);
+
+		const working = renderCard(
+			{ work_ms: 0, work_started_at: '2026-08-20T12:05:00Z' },
+			{ status: 'working' }
+		);
+		expect(working.container.querySelector('.timer')?.classList.contains('live')).toBe(true);
+	});
+
+	// ── #1619: total working time, not time since the last activity ─────
+	it('shows the banked working total on a done card instead of its age', () => {
+		const { container } = renderCard({ work_ms: 754_000 }, { status: 'done' });
+
+		const timer = container.querySelector('.timer');
+		expect(timer?.textContent).toBe('12m 34s');
+		expect(timer?.getAttribute('title')).toBe('Total working time');
+	});
+
+	it('adds the running turn to the banked total while it works', () => {
+		// Banked 1h earlier, the current turn started 2m before `now`.
+		const { container } = renderCard(
+			{ work_ms: 3_600_000, work_started_at: '2026-08-20T12:04:00Z' },
+			{ status: 'working' }
+		);
+
+		expect(container.querySelector('.timer')?.textContent).toBe('1h 02m');
+	});
+
+	it('keeps the total when the session parks and grows it on the next turn', async () => {
+		const { container, rerender } = renderCard(
+			{ work_ms: 90_000, work_started_at: null },
+			{ status: 'parked' }
+		);
+		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+
+		// An hour of idle wall-clock later the parked total has not moved.
+		await rerender({ now: Date.parse('2026-08-20T13:06:00Z') } as never);
+		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+
+		// A wake turn starts: the total resumes from the banked value.
+		await rerender({
+			session: session({ work_ms: 90_000, work_started_at: '2026-08-20T13:05:30Z' }) as never,
+			status: 'working',
+		} as never);
+		expect(container.querySelector('.timer')?.textContent).toBe('2m 00s');
+	});
+
+	it('closes a stale live interval at the last activity once the turn is done', () => {
+		// The done frame arrived before the row update that banks the turn:
+		// the interval ends at the last activity and does not keep growing.
+		const { container } = renderCard(
+			{ work_ms: 60_000, work_started_at: '2026-08-20T12:04:00Z' },
+			{ status: 'done', timestamp: Date.parse('2026-08-20T12:05:00Z'), now: Date.parse('2026-08-20T14:00:00Z') }
+		);
+
+		expect(container.querySelector('.timer')?.textContent).toBe('2m 00s');
+	});
+
+	it('shows the working total on a settled row while its turn runs', () => {
+		const { container } = renderCard(
+			{ is_active: false, work_ms: 30_000, work_started_at: '2026-08-20T12:05:50Z' },
+			{ compact: true, status: 'working' }
+		);
+
+		expect(container.querySelector('.timer')?.textContent).toBe('40s');
 	});
 
 	it('follows the parent when the open-card id is controlled', async () => {

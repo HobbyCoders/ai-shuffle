@@ -356,7 +356,7 @@ def worker_dispatch_env(monkeypatch):
     thread spies instead of payloads: what is under test here is WHERE the
     dispatch's DB work runs, not what it writes.
     """
-    from app.core import project_resolver, provider_agent as pa
+    from app.core import project_resolver, provider_agent as pa, worker_checkout
     from app.core import turn_manager as tm_mod
     from app.core import turn_scheduler as ts_mod
     from app.db import database as db
@@ -366,7 +366,14 @@ def worker_dispatch_env(monkeypatch):
         "worktree_branch": "feat/x", "worktree_path": "/repo/feat-x",
     })
     provider_spy = _ThreadSpy(lambda pid, include_token=False: {"name": "OpenAI"})
+    # The parent/project is intentionally fictitious. Stub the Git producer
+    # here; real Git and durable binding are covered by test_worker_checkout.
+    checkout_spy = _ThreadSpy(lambda row, sid, pid, tools: worker_checkout.WorkerCheckout(
+        path="/repo/isolated-worker", branch=f"task/{sid}", base_commit="a" * 40,
+        project_v2_id="project-v2", parent_branch="feat/x",
+    ))
     create_session_spy = _ThreadSpy(lambda **kw: {"id": kw.get("session_id")})
+    bind_branch_spy = _ThreadSpy(lambda *args: None)
     update_session_spy = _ThreadSpy(lambda sid, **kw: None)
     submit_threads = []
 
@@ -382,7 +389,9 @@ def worker_dispatch_env(monkeypatch):
 
     monkeypatch.setattr(db, "get_session", get_session_spy)
     monkeypatch.setattr(db, "get_model_provider", provider_spy)
+    monkeypatch.setattr(worker_checkout, "prepare_worker_checkout", checkout_spy)
     monkeypatch.setattr(db, "create_session", create_session_spy)
+    monkeypatch.setattr(db, "set_session_branch", bind_branch_spy)
     monkeypatch.setattr(db, "update_session", update_session_spy)
     monkeypatch.setattr(ts_mod, "on_task_terminal", _on_task_terminal)
     monkeypatch.setattr(tm_mod, "submit_async", _submit_async)
@@ -395,7 +404,9 @@ def worker_dispatch_env(monkeypatch):
     class _Env:
         get_session = get_session_spy
         get_model_provider = provider_spy
+        prepare_checkout = checkout_spy
         create_session = create_session_spy
+        bind_branch = bind_branch_spy
         update_session = update_session_spy
         submits = submit_threads
 
@@ -405,11 +416,11 @@ def worker_dispatch_env(monkeypatch):
 async def test_worker_dispatch_prologue_runs_off_the_loop_in_one_hop(
     worker_dispatch_env, monkeypatch, loop_thread
 ):
-    """Worker dispatch's prologue is three contiguous blocking calls — the
-    parent-session inheritance read, the provider-name lookup (a DB read of its
-    own that the scanner cannot see) and the worker-session INSERT. They share
-    ONE hop off the loop. LOOP-AFFINITY SPLIT: the durable turn submit stays on
-    the loop, where its scheduler kick can be scheduled."""
+    """Inheritance reads, Git setup, INSERT and branch binding share one hop.
+
+    LOOP-AFFINITY SPLIT: the durable turn submit stays on the loop, where its
+    scheduler kick can be scheduled. Checkout setup must never block the loop.
+    """
     from app.core import provider_agent as pa
 
     monkeypatch.setattr(pa, "final_turn_outcome", lambda sid: {
@@ -429,12 +440,37 @@ async def test_worker_dispatch_prologue_runs_off_the_loop_in_one_hop(
     env = worker_dispatch_env
     prologue = (
         env.get_session.threads + env.get_model_provider.threads
-        + env.create_session.threads
+        + env.prepare_checkout.threads + env.create_session.threads
+        + env.bind_branch.threads
     )
+    assert env.prepare_checkout.threads, "checkout setup never ran"
+    assert env.bind_branch.threads, "worker branch binding never ran"
     assert prologue, "the prologue never ran"
     assert loop_thread not in prologue
     assert len(set(prologue)) == 1, "the prologue was split across thread hops"
     assert env.submits == [loop_thread]
+
+
+async def test_worker_checkout_refusal_is_off_loop_and_prevents_launch(
+    worker_dispatch_env, monkeypatch, loop_thread
+):
+    from app.core import provider_agent as pa, worker_checkout
+
+    def refuse(*args):
+        raise worker_checkout.WorkerCheckoutError("checkout provisioning refused")
+
+    checkout_spy = _ThreadSpy(refuse)
+    monkeypatch.setattr(worker_checkout, "prepare_worker_checkout", checkout_spy)
+    outcome = await pa.dispatch_worker(
+        parent_session_id="parent-1", profile_id="default",
+        provider_id="prov-openai", model_id="gpt-5.5", prompt="do the thing",
+    )
+    assert not outcome.ok
+    assert "checkout provisioning refused" in outcome.error
+    assert checkout_spy.threads and loop_thread not in checkout_spy.threads
+    assert worker_dispatch_env.create_session.threads == []
+    assert worker_dispatch_env.bind_branch.threads == []
+    assert worker_dispatch_env.submits == []
 
 
 async def test_worker_failure_status_write_is_off_the_loop_and_still_lands(

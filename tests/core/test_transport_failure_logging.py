@@ -10,6 +10,7 @@ from app.core import error_log_handler
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import SessionOptions
 from app.db import error_logs
+import fluid.engine.native as native
 from fluid.engine.native import NativeLoop
 from fluid.events import ErrorEvent, Usage, UserTurn
 from fluid.providers._retry import RetryPolicy
@@ -26,6 +27,7 @@ async def test_transport_failure_has_app_session_and_engine_turn(monkeypatch):
             raise httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)")
 
     rows = []
+    monkeypatch.setattr(native, "_empty_retry_delay", lambda attempt: 0.0)
     monkeypatch.setattr(error_logs, "record_error", lambda **row: rows.append(row))
     monkeypatch.setattr(error_log_handler, "_capture_level", lambda: logging.WARNING)
     handler = error_log_handler.ErrorLogDBHandler()
@@ -46,10 +48,13 @@ async def test_transport_failure_has_app_session_and_engine_turn(monkeypatch):
                 await asyncio.wait_for(loop.wait_turn(), 5)
                 events = loop.bus.log(loop.session_id)
                 failures = [e for e in events if isinstance(e, Usage) and "transport_failure" in e.raw]
-                assert len(failures) == 1
+                # The drop left no closed tool call, so the request was re-sent
+                # within the reconnect budget; every attempt dropped the same way.
+                attempts = 1 + native.TRANSPORT_DROP_MAX_RETRIES
+                assert len(failures) == attempts
                 assert any(isinstance(e, ErrorEvent) for e in events)
-                assert len(calls) == 1
-                usage_event = failures[0]
+                assert len(calls) == attempts
+                usage_event = failures[-1]
                 translated = adapter._translate(usage_event)
                 assert translated[0].usage["transport_failure"] == usage_event.raw["transport_failure"]
                 assert len(rows) == 1
