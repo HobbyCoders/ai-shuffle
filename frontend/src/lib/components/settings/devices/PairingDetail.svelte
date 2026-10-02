@@ -35,6 +35,11 @@
 		runner: 'Run the command on the worker set up for this shared database. No address is embedded.'
 	};
 
+	/** Host and port only, so the fact fits ("http://10.0.0.5:8000/" -> "10.0.0.5:8000"). */
+	function bareAddress(url: string | null | undefined): string | null {
+		return url ? url.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '') : null;
+	}
+
 	const grant = $derived(item.grant);
 	const link = $derived(pairing.link(item));
 	const kindOptions = $derived(pairing.kinds.map((k) => ({ value: k, label: KIND_LABEL[k] })));
@@ -69,7 +74,7 @@
 				{ label: 'Uses left', value: '1' },
 				{
 					label: 'Address',
-					value: item.kind === 'runner' ? null : grant.grant.endpoint_url || item.endpointUrl || null,
+					value: item.kind === 'runner' ? null : bareAddress(grant.grant.endpoint_url || item.endpointUrl),
 					mono: true
 				},
 				{ label: 'Expires in', value: pairing.countdown(item), mono: true }
