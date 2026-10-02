@@ -195,9 +195,11 @@ final class WebKitTests: XCTestCase {
         }
         let root = try XCTUnwrap(BundleAssets.root)
         for auto in [false, true] {
-            for features in ["'noopener'", "''"] {
+            for features in ["'noopener'", "''", "'fresh'"] {
                 let recorder = Recorder()
-                let webView = WKWebView(frame: .zero, configuration: ChatWebController.configuration(rules: nil, root: root))
+                let configuration = ChatWebController.configuration(rules: nil, root: root)
+                if features == "'fresh'" { configuration.preferences.javaScriptCanOpenWindowsAutomatically = auto }
+                let webView = WKWebView(frame: .zero, configuration: configuration)
                 webView.uiDelegate = recorder
                 show(webView)
                 webView.load(URLRequest(url: MobileUI.indexURL))
@@ -205,7 +207,7 @@ final class WebKitTests: XCTestCase {
                 webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = auto
                 let result = try await evaluate(webView, "return String(window.open('https://docs.example/p', '_blank', \(features)))")
                 try await Task.sleep(nanoseconds: 1_000_000_000)
-                print("DIAG auto=\(auto) features=\(features) result=\(result) calls=\(recorder.calls)")
+                XCTFail("DIAG auto=\(auto) features=\(features) result=\(result) calls=\(recorder.calls)")
             }
         }
     }
