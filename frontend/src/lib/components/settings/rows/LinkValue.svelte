@@ -2,7 +2,9 @@
 	/**
 	 * LinkValue: a value that opens where the setting really lives ("OpenAI API
 	 * key ›"). With `target` it moves Settings there; or pass `onclick`.
-	 * Never disabled by read-only mode: it only navigates.
+	 * Never disabled by read-only mode: it only navigates. It is a
+	 * role="button" span, not a <button>, so DetailPane's read-only
+	 * <fieldset disabled> leaves it usable.
 	 */
 	import { ChevronRight } from 'lucide-svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -25,9 +27,22 @@
 	}
 </script>
 
-<button type="button" class="st-vlink" class:st-mono={mono} aria-label={ariaLabel} onclick={go}>
+<span
+	role="button"
+	tabindex="0"
+	class="st-vlink"
+	class:st-mono={mono}
+	aria-label={ariaLabel}
+	onclick={go}
+	onkeydown={(e) => {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			go();
+		}
+	}}
+>
 	<span>{label}</span><ChevronRight />
-</button>
+</span>
 
 <style>
 	.st-vlink {
@@ -42,6 +57,8 @@
 		border-radius: var(--st-radius-sm);
 		white-space: nowrap;
 		min-width: 0;
+		cursor: pointer;
+		user-select: none;
 	}
 	.st-vlink > span {
 		overflow: hidden;
