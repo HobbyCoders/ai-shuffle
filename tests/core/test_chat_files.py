@@ -27,6 +27,8 @@ class DarwinBackendTests(unittest.TestCase):
         release = tuple(int(n) for n in platform.mac_ver()[0].split(".")[:2])
         if release >= (15, 4):
             self.assertTrue(flags & files._RESOLVE_BENEATH)
+        if release >= (26, 0):
+            self.assertTrue(flags & files._UNIQUE)
 
     def test_unenforced_flag_fails_closed(self):
         # A kernel that ignores O_NOFOLLOW_ANY must disable folders, not fall back.
@@ -159,6 +161,27 @@ class ChatFileFenceTests(unittest.TestCase):
                 self.assertTrue(raced)
                 self.assertEqual(error.exception.errno, errno.EXDEV)
                 self.assertFalse((moved / "deeper" / "new").exists())
+
+    @unittest.skipUnless(DARWIN, "macOS kernel link checks")
+    def test_kernel_refuses_links_before_userspace_checks(self):
+        (self.root / "sub").mkdir()
+        (self.root / "sub" / "file").write_text("inside")
+        os.link(self.outside, self.root / "hard")
+        (self.root / "leaf").symlink_to("sub/file")
+        (self.root / "inner").symlink_to("sub", target_is_directory=True)
+        cases = [("leaf", errno.ELOOP), ("inner/file", errno.ELOOP)]
+        if files._darwin_flags() & files._UNIQUE:
+            cases.append(("hard", None))
+        for path, code in cases:
+            with self.subTest(path=path), self.assertRaises(OSError) as error:
+                os.close(files.confined_open(self.fd, path, os.O_RDONLY | os.O_NONBLOCK))
+            if code is not None:
+                self.assertEqual(error.exception.errno, code)
+        # A new name next to a dangling link is still created exclusively.
+        (self.root / "dangling").symlink_to(self.base / "absent")
+        with self.assertRaises(FileExistsError):
+            files.confined_open(self.fd, "dangling", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.assertFalse((self.base / "absent").exists())
 
     @unittest.skipUnless(DARWIN, "macOS resolves one component per openat")
     def test_component_swapped_to_symlink_during_walk_is_refused(self):

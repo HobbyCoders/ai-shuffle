@@ -44,6 +44,7 @@ def confined_open(root: int, path: str, flags: int, mode: int = 0) -> int:
 # XNU <sys/fcntl.h>; Python does not export these on every version.
 _NOFOLLOW_ANY = 0x20000000  # macOS 11: refuse a symlink in any path component
 _RESOLVE_BENEATH = 0x00001000  # macOS 15.4: refuse resolving above the dirfd
+_UNIQUE = 0x00002000  # macOS 26: refuse a file with more than one hard link
 _F_GETPATH = 50
 
 
@@ -92,6 +93,8 @@ def _darwin_flags() -> int | None:
             base = os.path.realpath(temp)
             os.mkdir(os.path.join(base, "d"))
             open(os.path.join(base, "d", "f"), "xb").close()
+            os.link(os.path.join(base, "d", "f"), os.path.join(base, "d", "h"))
+            open(os.path.join(base, "d", "g"), "xb").close()
             os.symlink("d", os.path.join(base, "l"))
             fds = []
             def opened(*args, **kwargs):
@@ -113,12 +116,20 @@ def _darwin_flags() -> int | None:
                 flags = _NOFOLLOW_ANY
                 try:
                     inner = opened("d", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=top)
+                    try:
+                        opened("..", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=inner)
+                    except OSError:
+                        flags |= _RESOLVE_BENEATH
                 except OSError:
-                    return flags
+                    pass
                 try:
-                    opened("..", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=inner)
+                    opened("d/g", os.O_RDONLY | _UNIQUE, dir_fd=top)
+                    try:
+                        opened("d/h", os.O_RDONLY | _UNIQUE, dir_fd=top)
+                    except OSError:
+                        flags |= _UNIQUE
                 except OSError:
-                    flags |= _RESOLVE_BENEATH
+                    pass
                 return flags
             finally:
                 for fd in fds:
@@ -132,15 +143,22 @@ def _darwin_open(root: int, path: str, flags: int, mode: int = 0) -> int:
 
     Each openat resolves a single name with O_NOFOLLOW_ANY (and
     O_RESOLVE_BENEATH where the kernel enforces it), so no symlink or ".." is
-    followed. macOS has no RESOLVE_NO_XDEV, so every opened component must
+    followed. XNU rejects O_NOFOLLOW alongside O_NOFOLLOW_ANY, which already
+    covers the last component. Existing files are opened with O_UNIQUE where
+    enforced, so the kernel refuses hard links. macOS has no RESOLVE_NO_XDEV, so every opened component must
     report the root's device and mount point; that also refuses APFS
     firmlinks into another volume. Last, the kernel's path for the result must
     lie under the root's current path, which catches a directory moved out of
     the root during the walk.
     """
-    extra = _darwin_flags()
-    if extra is None:
+    supported = _darwin_flags()
+    if supported is None:
         raise AccessDenied("Folder access is unavailable on this worker; no unsafe fallback is used.")
+    extra = supported & (_NOFOLLOW_ANY | _RESOLVE_BENEATH)
+    flags &= ~os.O_NOFOLLOW
+    if supported & _UNIQUE and not flags & (os.O_CREAT | os.O_DIRECTORY):
+        # O_CREAT would report a hard-linked name as ENOTCAPABLE, not EEXIST.
+        flags |= _UNIQUE
     names = parts(path) if path != "." else ["."]
     expected = _mount(root)
     base = _fd_path(root)
@@ -148,7 +166,7 @@ def _darwin_open(root: int, path: str, flags: int, mode: int = 0) -> int:
     try:
         for index, name in enumerate(names):
             step = flags if index == len(names) - 1 else os.O_RDONLY | os.O_DIRECTORY
-            child = os.open(name, step | extra | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=fd)
+            child = os.open(name, step | extra | os.O_CLOEXEC, mode, dir_fd=fd)
             if fd != root:
                 os.close(fd)
             fd = child
