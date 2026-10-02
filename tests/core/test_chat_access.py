@@ -296,6 +296,9 @@ async def test_folder_write_confirmation_mode_preserves_scope(broker, tmp_path, 
     await asyncio.wait_for(task, 3)
     assert (tmp_path / "ok.txt").read_text() == "written"
     assert not broker.actions
+    # Without the isolated shell a folder grant runs no commands at all.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     for operation, args in [("write", {"path": "../escape", "content": "no"}), ("command", {"command": "no"})]:
         with pytest.raises(AccessDenied):
             await broker.run("chat", grant["id"], operation, args)
