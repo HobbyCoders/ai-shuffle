@@ -508,10 +508,18 @@ def isolate_fluid_skills_dir(monkeypatch, tmp_path):
     ``settings.effective_data_dir/fluid/skills`` (i.e. the live ~/.ai-shuffle),
     so merely running tests would pollute real user data. Point it at tmp_path;
     monkeypatch restores the original value after each test.
+
+    Prose skills replicate from ``~/.fluid/skills``; they follow the pinned
+    root to a sibling folder, so the network harness gets one per worker and
+    no test publishes (or deletes) the developer's real skills.
     """
+    from pathlib import Path
+    from app.core import fluid_memory
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "fluid-skills"))
+    monkeypatch.setattr(fluid_memory, "prose_skills_root",
+                        lambda: Path(settings.fluid_skills_dir).parent / "prose-skills")
     yield
 
 

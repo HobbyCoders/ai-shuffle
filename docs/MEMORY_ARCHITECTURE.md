@@ -83,6 +83,9 @@ reported as an empty completion.
 existing memory collection. The committed local file is the durable source for
 retrying publication, so a crash between a save and a publish does not lose the
 save. A local receipt does not claim that an offline worker has received it.
+User-level prose skill folders (`~/.fluid/skills/<name>/SKILL.md`) travel in
+the same collection through `app/network/prose_skills.py`; they are
+instructions, not memory, and docs/network/README.md describes their rules.
 
 Snapshots carry ownership, origin IDs, revisions, causal clocks, expiry and
 explicit deletion state. They include archived records. An entry's absence from

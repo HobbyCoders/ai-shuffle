@@ -43,6 +43,7 @@ original plan.
 | `app/network/ownership.py` | Which device fires an automation or holds a connector. |
 | `app/network/usage_budget.py` | Shared provider usage request budgets coordinated by the founder; see [usage-budgets.md](usage-budgets.md) for outage and upgrade behavior. |
 | `app/network/memory_records.py` | Facts and skills as records. |
+| `app/network/prose_skills.py` | Prose skill folders (`~/.fluid/skills/<name>/SKILL.md` plus small text files) as `prose_skill` records in the memory collection. |
 | `app/network/plugins_sync.py` | Desired plugin state. |
 | `app/network/blobs.py` | Content-addressed bytes for artifacts and note attachments. |
 | `app/network/peer_files.py` | Signed, encrypted 2 MiB file parts at `/peer/blob/{hash}/parts/{index}`. |
@@ -219,6 +220,22 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
 - **The journal stays local.** Facts (`memories.json`) and skills sync; the
   episodic journal is each worker's synthesizer input, and syncing it would make
   every worker consolidate the same episodes twice.
+- **Prose skills sync from `~/.fluid/skills`, not the data dir.** That is the
+  only global directory fluid's skill discovery and the delegated leg's
+  "# More skills" list read, so it is the source of truth; a data-dir copy
+  would need mirroring back to be seen. (Docker keeps it on the
+  `fluid-settings` volume.) Each `<name>/` folder is one `prose-skill:<name>`
+  record and the folder is the unit of last-writer-wins. A record carries
+  SKILL.md and UTF-8 text files with safe names up to three levels deep, at
+  most 64 KiB each, 32 files and 256 KiB per folder. Binary or oversized
+  extras stay local and are never touched by a remote change. A folder whose
+  SKILL.md or totals break a limit is held: neither published nor deleted.
+  A local manifest (`<data_dir>/fluid/prose_skills_sync.json`) records each
+  folder's state at its last publish or apply, so a peer's record that has
+  reached the database but not the disk is never reverted or deleted, an
+  unpublished local edit is never overwritten (it publishes next and wins),
+  and a missing root is not a mass deletion. Older builds ignore the
+  `prose_skill` kind.
 - **Remote turns are forwarded, not streamed back.** The owner enqueues the turn
   and its events return through the transcript mirror rather than a proxied SSE
   stream; the effect for the user is the same and no proxying of long-lived
@@ -267,4 +284,5 @@ its own database, data directory and identity:
 | Certificate, revocation, key-wrap and device-token refusals (a challenge is spendable only by its device) | `test_verification_refusals.py` |
 | A session an API key places on another worker keeps its owner | `test_remote_session_api_owner.py` |
 | Facts, skills, plugins, blobs, owners | `test_collections.py` |
+| Prose skill folders | `test_prose_skills_sync.py` |
 | Shared-database cluster migration | `test_migrate.py` |
