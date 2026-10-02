@@ -419,7 +419,7 @@ Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for a
 
 When an agent asks for access to a folder on this worker, a machine over SSH, or an HTTPS API service, the owner answers here. Access is temporary, lasts until it expires or the worker restarts, and each write, command or state-changing API request the agent attempts needs a separate approval (unless the session is in Bypass).
 
-**Auth:** Owner only, over HTTPS or from the same machine. Refused (`403`) for agent previews.
+**Auth:** Owner only, and only from the desktop app window, the worker's HTTPS remote access address, or a browser on the machine running a worker the desktop app did not start. Other connections get `403`, including plain `http://` LAN addresses and `X-Forwarded-Proto` headers sent to port 8000 (see [Remote access](/docs/getting-started/remote-access#private-access-details)). Refused (`403`) for agent previews.
 
 ### GET /api/v1/chat-access/{session_id}
 
@@ -465,6 +465,8 @@ Approve or refuse one pending write, command or API request. Body: exactly `{"al
 Forget a saved connection and end any grant that uses it. Returns `{"deleted": true}`.
 
 A request, grant or action that no longer exists returns `409` (`400` when granting).
+
+For a session that runs on another device, these endpoints forward to that device over the worker network, and grants, approvals and saved connections stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved connection or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
 
 ## Browser Panel
 

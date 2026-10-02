@@ -984,7 +984,11 @@
 					{:else if key === 'settings'}
 						<LazyPanel
 							handle={panelForKey('settings')}
-							props={{ requestedTab: settingsRequestedTab, requestedItemId: settingsRequestedItemId }}
+							props={{
+								requestedTab: settingsRequestedTab,
+								requestedItemId: settingsRequestedItemId,
+								initialTab: $activeView?.type === 'settings' ? $activeView.itemId : null
+							}}
 							label="Settings"
 						/>
 					{:else if key === 'file-browser'}

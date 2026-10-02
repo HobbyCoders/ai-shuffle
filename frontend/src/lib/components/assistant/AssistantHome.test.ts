@@ -250,3 +250,55 @@ describe('Assistant home call gate', () => {
   expect(mocks.openAssistant).not.toHaveBeenCalled();
  });
 });
+
+describe('About you', () => {
+ const detected = { preferred_name: 'ada', email: 'ada@example.com', projects: ['Shuffle'] };
+ const about = (patch: Partial<AssistantState> = {}) => configured({
+  introduction: { ...detected, github_username: 'ada-gh' }, introduction_detected: detected,
+  introduction_corrected: ['github_username'], suggested_connections: [], ...patch
+ });
+ it('shows what was detected read-only and asks the server to re-detect once loaded', async () => {
+  about(); render(AssistantHome);
+  const list = (await screen.findByRole('heading', { name: 'What your assistant knows' })).closest('section')!;
+  expect(list.textContent).toContain('ada@example.com');
+  expect(list.textContent).toContain('ada-gh· corrected');
+  expect(list.textContent).toContain('Shuffle');
+  expect(list.textContent).toMatch(/RepositoriesNot found/);
+  expect(list.textContent).not.toContain('Notes');
+  expect(list.querySelectorAll('input')).toHaveLength(0);
+  await waitFor(() => expect(mocks.getAssistant).toHaveBeenCalledWith(true));
+ });
+ it('corrects fields; an empty field goes back to the detected value', async () => {
+  about();
+  mocks.configureAssistant.mockImplementation(async patch => ({ ...structuredClone(server), introduction: { ...detected, preferred_name: patch.introduction.preferred_name }, introduction_corrected: ['preferred_name'] }));
+  render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: /Correct/ }));
+  const name = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+  expect(name.value).toBe('');
+  expect(name.placeholder).toBe('ada');
+  expect((screen.getByRole('textbox', { name: 'GitHub username' }) as HTMLInputElement).value).toBe('ada-gh');
+  await fireEvent.input(name, { target: { value: 'Ada Lovelace' } });
+  await fireEvent.input(screen.getByRole('textbox', { name: 'GitHub username' }), { target: { value: '' } });
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Repositories' }), { target: { value: 'ada/one, ada/two' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledWith({ introduction: {
+   preferred_name: 'Ada Lovelace', email: '', github_username: '', repository_refs: ['ada/one', 'ada/two']
+  } }));
+  const section = screen.getByRole('heading', { name: 'What your assistant knows' }).closest('section')!;
+  await waitFor(() => expect(section.textContent).toContain('Ada Lovelace· corrected'));
+  expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull();
+ });
+ it('suggests only the missing connections and links to the existing flows', async () => {
+  about({ suggested_connections: ['gmail', 'github'] }); render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Connect Gmail' }));
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('plugins');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sign in to GitHub' }));
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('settings', 'providers');
+ });
+ it('shows no suggestion cards when nothing is missing', async () => {
+  about(); render(AssistantHome);
+  await screen.findByRole('heading', { name: 'What your assistant knows' });
+  expect(screen.queryByRole('button', { name: 'Connect Gmail' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Sign in to GitHub' })).toBeNull();
+ });
+});

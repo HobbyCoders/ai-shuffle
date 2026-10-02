@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <path class="shape" d="m10 12 14 10h16l14-10-4 24-18 16-18-16Z" />
+  <path class="eyes" d="M25 31v3m14-3v3" />
+  <path class="eyes" d="M30 42h4" />
+</svg>

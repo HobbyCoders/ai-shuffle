@@ -11,6 +11,7 @@
 	 * - System: System prompt (admin)
 	 */
 	import { onMount, untrack } from 'svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
 	import './settings/settings-layout.css';
@@ -49,8 +50,10 @@
 		requestedTab?: string;
 		/** One-shot item to open in that tab (a plugin or connector id). */
 		requestedItemId?: string | null;
+		/** Tab named by openFeaturePage('settings', '<tab>'); opened once, then cleared. */
+		initialTab?: string | null;
 	}
-	let { requestedTab, requestedItemId = null }: Props = $props();
+	let { requestedTab, requestedItemId = null, initialTab = null }: Props = $props();
 
 	// The plugin hub is its own chunk; Settings loads it only when opened.
 	const PluginsPanel = createLazyComponent('settings:plugins', () =>
@@ -85,6 +88,16 @@
 				]
 			: [])
 	]);
+
+	// Deep link: openFeaturePage('settings', '<tab>') opens that tab, once.
+	$effect(() => {
+		const tab = initialTab;
+		if (!tab) return;
+		untrack(() => {
+			if (settingsTabs.some((item) => item.id === tab && !item.heading)) activeTab = tab as Tab;
+			layout.clearFeatureItemId();
+		});
+	});
 
 	let error = $state('');
 

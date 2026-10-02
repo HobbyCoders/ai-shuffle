@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <circle class="shape" cx="17" cy="17" r="7" />
+  <circle class="shape" cx="47" cy="17" r="7" />
+  <circle class="shape" cx="32" cy="35" r="20" />
+  <ellipse class="ring" cx="32" cy="43" rx="8" ry="6" />
+  <path class="eyes" d="M25 30v3m14-3v3" />
+  <path class="eyes" d="M30 41h4" />
+</svg>

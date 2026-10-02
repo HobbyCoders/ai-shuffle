@@ -21,8 +21,10 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
-# The frontend mirror is AVATARS in frontend/src/lib/api/assistant.ts, drawn in
-# AgentAvatar.svelte; tests/api/test_assistant_avatars.py keeps the three in step.
+# The source of truth is frontend/src/lib/components/assistant/avatars/: one
+# SVG per avatar and avatars.json for the order. The backend ships without the
+# frontend sources, so this copy stays here; tests/api/test_assistant_avatars.py
+# fails if it drifts from the manifest.
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "owl", "fox", "cat", "bear", "ghost", "cloud",
                   "moon", "sun", "bolt", "gem", "drop")
@@ -105,6 +107,11 @@ def create_schema(cursor):
                         ("limits", "JSONB NOT NULL DEFAULT '{}'")):
         if not column_exists(cursor, "assistant_runs", column):
             cursor.execute(f"ALTER TABLE assistant_runs ADD COLUMN {column} {ddl}")
+    # Home-conversation brief for a completed research run: NULL until decided,
+    # then 'posted' or 'none'. Runs from before briefs existed never get one.
+    if not column_exists(cursor, "assistant_runs", "brief"):
+        cursor.execute("ALTER TABLE assistant_runs ADD COLUMN brief TEXT")
+        cursor.execute("UPDATE assistant_runs SET brief='none'")
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_events (
         id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
         source_id TEXT NOT NULL, event_type TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -496,6 +503,35 @@ def admit_run(assistant_id):
             cursor.execute("UPDATE assistant_events SET status='admitted',run_id=%s WHERE id=%s AND status='pending'", (run_id, event["id"]))
         run["events"] = eligible
         return run
+
+
+# A completed run's brief is only posted while it is fresh; one the home could
+# not take in time (a long turn, a restart) is dropped rather than posted late.
+BRIEF_WINDOW = timedelta(hours=24)
+
+
+def pending_briefs(assistant_id, limit=5):
+    """Completed research runs whose brief has not been decided yet."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status='completed' "
+                       "AND brief IS NULL AND session_id IS NOT NULL AND ended_at >= %s ORDER BY ended_at,id LIMIT %s",
+                       (assistant_id, (now() - BRIEF_WINDOW).isoformat(), limit))
+        return [_parse(row) for row in cursor.fetchall()]
+
+
+def decide_brief(run_id, brief):
+    """Claim an undecided brief as ``brief`` ('posted' or 'none'); False when already decided."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE assistant_runs SET brief=%s WHERE id=%s AND brief IS NULL RETURNING id", (brief, run_id))
+        return cursor.fetchone() is not None
+
+
+def release_brief(run_id):
+    """Undo a 'posted' claim whose post failed, so the next pass retries it."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_runs SET brief=NULL WHERE id=%s AND brief='posted'", (run_id,))
 
 
 def bind_run_session(run_id, session_id):

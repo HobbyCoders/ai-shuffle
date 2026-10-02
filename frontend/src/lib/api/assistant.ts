@@ -1,27 +1,40 @@
 /** Owner-only assistant controls over the existing unified agents and sessions. */
 import { api } from './client';
+import avatarIds from '$lib/components/assistant/avatars/avatars.json';
 
-export const AVATARS = [
- 'robot', 'spark', 'orbit', 'sprout', 'pixel', 'owl', 'fox', 'cat',
- 'bear', 'ghost', 'cloud', 'moon', 'sun', 'bolt', 'gem', 'drop'
-] as const;
-export type AvatarId = typeof AVATARS[number];
+/** An avatar preset id: a file name in components/assistant/avatars. */
+export type AvatarId = string;
+/** The preset order, from avatars.json (the backend allowlist is checked against it). */
+export const AVATARS: readonly AvatarId[] = avatarIds;
 /** `dedicated` marks the agent Assistant setup created for itself. */
 export interface AgentIdentity { id: string; name: string; avatar_id: AvatarId; dedicated?: boolean }
 export const DEFAULT_ASSISTANT_NAME = 'Assistant';
 export const randomAvatar = (): AvatarId => AVATARS[Math.floor(Math.random() * AVATARS.length)];
+/**
+ * What the assistant knows about its owner. The server detects it from the
+ * install (account, Gmail connector, gh CLI, project checkouts); the owner
+ * can correct a field, and an empty correction goes back to the detected value.
+ */
 export interface AssistantIntroduction {
  preferred_name?: string;
+ email?: string;
  github_username?: string;
  repository_refs?: string[];
+ /** Project names; detected only. */
+ projects?: string[];
+ /** Only in introductions saved before detection. */
  project_ids?: string[];
  notes?: string;
 }
+export type IntroductionCorrection = Partial<Pick<AssistantIntroduction, 'preferred_name' | 'email' | 'github_username' | 'repository_refs'>>;
+/** Connections the assistant page suggests when this worker has none. */
+export type SuggestedConnection = 'gmail' | 'github';
 /**
  * Background research has no owner controls: the server runs it whenever an
  * agent is set, its safety guard is up and a source is opted in (`ready`).
- * `enabled` mirrors that; the server still returns legacy limit and usage
- * fields for older clients, and this UI ignores them.
+ * `enabled` mirrors that. Research limits are server-side only and are not
+ * in this response. A run that finds something posts a brief into the home
+ * conversation.
  */
 export interface AssistantState {
  agent_id: string | null;
@@ -35,7 +48,12 @@ export interface AssistantState {
  assistant_name: string | null;
  avatar_id: AvatarId;
  avatar_presets: AvatarId[];
+ /** Detected values with the owner's corrections applied. */
  introduction: AssistantIntroduction;
+ introduction_detected?: AssistantIntroduction;
+ /** Fields the owner corrected. */
+ introduction_corrected?: (keyof AssistantIntroduction)[];
+ suggested_connections?: SuggestedConnection[];
  proactive_guard_ready: boolean;
  /** False when the home conversation (and research) lives on another worker. */
  runs_here?: boolean;
@@ -57,8 +75,10 @@ export interface AssistantActivity {
 }
 export type AssistantPatch = Partial<{
  agent_id: string; create_agent: boolean; assistant_name: string; avatar_id: AvatarId;
+ introduction: IntroductionCorrection;
 }>;
-export const getAssistant = () => api.get<AssistantState>('/assistant');
+/** `detect` asks the server to re-read the owner's details first (briefly). */
+export const getAssistant = (detect = false) => api.get<AssistantState>(detect ? '/assistant?detect=true' : '/assistant');
 export const configureAssistant = (patch: AssistantPatch) => api.patch<AssistantState>('/assistant', patch);
 export const openAssistant = () => api.post<{ session_id: string; home_session_id: string }>('/assistant/open');
 export const getAssistantSources = () => api.get<AssistantSource[]>('/assistant/sources');

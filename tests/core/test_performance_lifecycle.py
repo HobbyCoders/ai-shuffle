@@ -141,10 +141,17 @@ async def test_access_endpoint_still_refuses_unsupported_session_from_loaded_row
     from app.api import chat_access as api
     from app.core import chat_access, chat_vault
     from app.db import database
+    from app.network import chat_access_routing as routing
     from app.network import control
-    catalog = []
+    catalog, forwarded = [], []
     monkeypatch.setattr(chat_vault, "catalog", lambda *args, **kwargs: catalog.append(args) or [])
     monkeypatch.setattr(control, "owner_of", lambda row: row.get("owner_device_id"))
+
+    async def forward(owner, session_id, operation, payload=None, **_):
+        forwarded.append((owner, session_id, operation))
+        return dict(routing.EMPTY_SNAPSHOT)
+
+    monkeypatch.setattr(routing, "forward", forward)
     rows = {"unknown-mode": {"mode": "unexpected"}, "mirrored": {"mode": "chat", "owner_device_id": "peer"}}
     monkeypatch.setattr(database, "get_session", lambda session_id: rows[session_id])
     monkeypatch.setattr(api, "broker", chat_access.Broker())
@@ -152,8 +159,10 @@ async def test_access_endpoint_still_refuses_unsupported_session_from_loaded_row
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
     async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
-        for session_id in rows:
-            assert (await client.get(f"/api/v1/chat-access/{session_id}")).status_code == 409
+        assert (await client.get("/api/v1/chat-access/unknown-mode")).status_code == 409
+        # A mirrored session's access lives on its owner: forwarded, never served from this vault.
+        assert (await client.get("/api/v1/chat-access/mirrored")).status_code == 200
+    assert forwarded == [("peer", "mirrored", "snapshot")]
     assert catalog == []
 
 

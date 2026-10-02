@@ -121,6 +121,23 @@ describe('voice transcript alongside a working chat agent', () => {
 		expect(state.messages[0].streaming).toBe(true);
 		expect(state.messages[1].streaming).toBe(false);
 	});
+
+	it('a research brief posted between turns is a closed bubble that never touches the live turn', () => {
+		const state = fold([
+			ev('turn.started', { turn_id: 'work', profile_id: 'coding' }),
+			ev('assistant.text_delta', { turn_id: 'work', text: 'Working' }),
+			ev('turn.started', { turn_id: 'brief-1' }),
+			ev('message.assistant', { turn_id: 'brief-1', content: '**From background research**\n\nInvoice due Friday.' }),
+			ev('turn.completed', { turn_id: 'brief-1' }),
+		]);
+		expect(state.liveTurnId).toBe('work');
+		expect(state.isStreaming).toBe(true);
+		const brief = state.messages.at(-1);
+		expect(brief?.role).toBe('assistant');
+		expect(brief?.content).toContain('Invoice due Friday.');
+		expect(brief?.streaming).toBe(false);
+		expect(state.messages[0].streaming).toBe(true);
+	});
 });
 
 // ─── Turn lifecycle ─────────────────────────────────────────────────────────

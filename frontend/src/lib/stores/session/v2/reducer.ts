@@ -979,8 +979,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 	// Voice transcripts use synthetic turns for persistence, not execution.
 	// They can arrive while a chat turn is streaming or parked on agents:
 	// their lifecycle must never replace its Stop target or settle its tasks.
-	const voiceTranscript = str(event.turn_id).startsWith('voice-');
-	if (voiceTranscript && ['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
+	// Briefs the backend posts between turns (`brief-` turns, e.g. background
+	// research results in the assistant home) are persisted the same way.
+	const turnId = str(event.turn_id);
+	const syntheticTranscript = turnId.startsWith('voice-') || turnId.startsWith('brief-');
+	if (syntheticTranscript &&['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
 		return state;
 	}
 
@@ -1501,7 +1504,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		// ── Closed assistant message (never merges/opens a stream) ───────
 		case 'message.assistant': {
 			const content = str(event.content);
-			if (voiceTranscript) {
+			if (syntheticTranscript) {
 				// Speech is a separate closed bubble, not the end (or recovery) of
 				// the backend's current text/thinking stream.
 				return appendMessage(state, {

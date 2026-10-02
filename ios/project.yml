@@ -1,0 +1,75 @@
+# XcodeGen spec. Generate the project with `xcodegen generate` in ios/; the
+# .xcodeproj is not checked in. No Apple account or signing team is needed to
+# build for the iOS Simulator.
+name: AIShuffle
+options:
+  bundleIdPrefix: com.hobbycoders
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # The pre-build check reads ios/mobile-ui, which is not a declared input.
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+targets:
+  AIShuffle:
+    type: application
+    platform: iOS
+    sources:
+      - path: AIShuffle
+      # The app's own copy of the mobile UI (scripts/sync-mobile-ui.sh), kept
+      # as a folder so it lands in the app bundle as mobile-ui/.
+      - path: mobile-ui
+        type: folder
+        optional: true
+        buildPhase: resources
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: AI Shuffle
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSMicrophoneUsageDescription: Voice calls in chat use the microphone.
+        NSCameraUsageDescription: Take a photo to attach to a chat message.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hobbycoders.aishuffle
+        PRODUCT_NAME: AIShuffle
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+    preBuildScripts:
+      - name: Require the bundled mobile UI
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ ! -f "${SRCROOT}/mobile-ui/index.html" ]; then
+            echo "error: ios/mobile-ui/index.html is missing. Run ios/scripts/sync-mobile-ui.sh first."
+            exit 1
+          fi
+  AIShuffleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AIShuffleTests
+    dependencies:
+      - target: AIShuffle
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: com.hobbycoders.aishuffle.tests
+schemes:
+  AIShuffle:
+    build:
+      targets:
+        AIShuffle: all
+        AIShuffleTests: [test]
+    test:
+      targets:
+        - AIShuffleTests

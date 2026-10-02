@@ -1,8 +1,8 @@
 <script lang="ts">
  /** Assistant is a home for one existing agent, not a new conversation mode. */
  import { onMount } from 'svelte';
- import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight } from 'lucide-svelte';
- import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId } from '$lib/api/assistant';
+ import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight, Mail, Github } from 'lucide-svelte';
+ import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId, type AssistantIntroduction } from '$lib/api/assistant';
  import { assistantState, agentIdentities, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
  import { appData, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
  import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -51,6 +51,19 @@
  const optedIn = $derived(sources.filter(s => s.enabled).length);
  // Set when the home conversation, and with it background research, lives on another worker.
  const remoteHome = $derived(assistant?.home_worker && !assistant.home_worker.is_self ? assistant.home_worker : null);
+ // What the assistant knows about the owner: detected by the server, correctable here.
+ type AboutField = 'preferred_name' | 'email' | 'github_username' | 'repository_refs';
+ const aboutRows: { key: keyof AssistantIntroduction; label: string }[] = [
+  { key: 'preferred_name', label: 'Name' }, { key: 'email', label: 'Email' }, { key: 'github_username', label: 'GitHub' },
+  { key: 'repository_refs', label: 'Repositories' }, { key: 'projects', label: 'Projects' }, { key: 'notes', label: 'Notes' }
+ ];
+ const aboutValue = (intro: AssistantIntroduction | undefined, key: keyof AssistantIntroduction) => {
+  const value = intro?.[key];
+  return Array.isArray(value) ? value.join(', ') : (value ?? '');
+ };
+ let correcting = $state(false);
+ let corrections = $state<Record<AboutField, string>>({ preferred_name: '', email: '', github_username: '', repository_refs: '' });
+ const suggestions = $derived(assistant?.suggested_connections ?? []);
 
  // Same gate as the composer's call button: a call starts only once the home
  // conversation is ready or finished. Without the transcript loaded, the
@@ -85,7 +98,8 @@
  }
  onMount(() => {
   touch = prefersTouch();
-  void load();
+  // Then re-read the owner's details, so a connection made elsewhere shows up.
+  void load().then(() => { if (current() && !editing) return refreshAssistant(true); }).catch(() => {});
   void isVoiceEnabled().then(enabled => { if (current()) voiceEnabled = enabled; });
   const tick = setInterval(() => { if (document.visibilityState === 'visible' && !busy && !editing) void load(); }, 15000);
   // Another worker changed the shared assistant (setup, switches, which worker holds the home).
@@ -141,6 +155,8 @@
    notice = created ? 'Assistant created. Open the conversation whenever you’re ready.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
    await appData.loadProfiles();
    await load();
+   // The server reads the owner's details for a new assistant; show them.
+   if (current()) void refreshAssistant(true).catch(() => {});
   });
  }
  function conversation(voice = false) {
@@ -156,6 +172,25 @@
  function startCall() {
   if (callBlocked) { if (touch) explainBlockedCall(callBlocked); return; }
   conversation(true);
+ }
+ function beginCorrect() {
+  const intro = assistant?.introduction;
+  const corrected = new Set(assistant?.introduction_corrected ?? []);
+  // Only corrected fields start filled; the rest show what was found as a placeholder.
+  const start = (key: AboutField) => corrected.has(key) ? aboutValue(intro, key) : '';
+  corrections = { preferred_name: start('preferred_name'), email: start('email'), github_username: start('github_username'), repository_refs: start('repository_refs') };
+  correcting = true; error = ''; notice = '';
+ }
+ async function saveCorrections(event: SubmitEvent) {
+  event.preventDefault();
+  await act('about', async () => {
+   const next = await configureAssistant({ introduction: {
+    preferred_name: corrections.preferred_name.trim(), email: corrections.email.trim(), github_username: corrections.github_username.trim(),
+    repository_refs: corrections.repository_refs.split(/[\s,]+/).filter(Boolean)
+   } });
+   if (!current()) return;
+   acceptAssistant(next); correcting = false;
+  });
  }
  function toggleSource(source: AssistantSource) {
   void act(source.id, async () => { const next = await setAssistantSource(source.connector_id, !source.enabled); if (current()) sources = sources.map(s => s.id === next.id ? next : s); });
@@ -224,6 +259,37 @@
    </div>
   {/if}
 
+  {#if assistant.configured && !editing}
+   <section class="section" aria-labelledby="about-heading">
+    <div class="section-heading"><div><span class="eyebrow">ABOUT YOU</span><h2 id="about-heading">What your assistant knows</h2></div>{#if !correcting}<button class="text-button" disabled={!!busy} onclick={beginCorrect}>Correct<ChevronRight size={14} /></button>{/if}</div>
+    {#if correcting}
+     <form class="about-form" onsubmit={saveCorrections}>
+      <fieldset disabled={!!busy}>
+       <label>Name<input maxlength="80" bind:value={corrections.preferred_name} placeholder={aboutValue(assistant.introduction_detected, 'preferred_name')} /></label>
+       <label>Email<input type="email" maxlength="254" bind:value={corrections.email} placeholder={aboutValue(assistant.introduction_detected, 'email')} /></label>
+       <label>GitHub username<input maxlength="39" bind:value={corrections.github_username} placeholder={aboutValue(assistant.introduction_detected, 'github_username')} /></label>
+       <label>Repositories<input bind:value={corrections.repository_refs} placeholder={aboutValue(assistant.introduction_detected, 'repository_refs') || 'owner/repository'} /></label>
+       <p class="micro">Leave a field empty to use what was found.</p>
+       <div class="form-actions"><button type="submit" class="primary">{busy === 'about' ? 'Saving…' : 'Save'}<Check size={16} /></button><button type="button" class="secondary" onclick={() => correcting = false}>Cancel</button></div>
+      </fieldset>
+     </form>
+    {:else}
+     <dl class="about-list">
+      {#each aboutRows as row (row.key)}
+       {#if row.key !== 'notes' || assistant.introduction.notes}
+        <div><dt>{row.label}</dt><dd class:missing={!aboutValue(assistant.introduction, row.key)}>{aboutValue(assistant.introduction, row.key) || 'Not found'}{#if assistant.introduction_corrected?.includes(row.key)}<small class="corrected">· corrected</small>{/if}</dd></div>
+       {/if}
+      {/each}
+     </dl>
+    {/if}
+    {#if suggestions.length}
+     <ul class="suggestions">
+      {#if suggestions.includes('gmail')}<li><Mail size={19} /><div class="source-copy"><strong>Gmail</strong><p>Adds your email address.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('plugins')}>Connect Gmail<ArrowUpRight size={14} /></button></li>{/if}
+      {#if suggestions.includes('github')}<li><Github size={19} /><div class="source-copy"><strong>GitHub</strong><p>Adds your GitHub username.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('settings', 'providers')}>Sign in to GitHub<ArrowUpRight size={14} /></button></li>{/if}
+     </ul>
+    {/if}
+   </section>
+  {/if}
   <section class="sources section" aria-labelledby="sources-heading"><div class="section-heading"><div><span class="eyebrow">EXPLICIT ACCESS</span><h2 id="sources-heading">Opted-in sources <span class="count">{optedIn}</span></h2></div><button class="text-button" onclick={() => layout.openFeaturePage('plugins')}>Manage connections<ArrowUpRight size={14} /></button></div><p class="muted">Only authorized connections on {remoteHome ? `${remoteHome.name}, where research runs,` : 'this worker'} can be enabled. Opting in permits read-only background observation, never action on instructions found in a source.</p>
    {#if !sources.length}<div class="empty"><ShieldCheck size={24} /><div><strong>No sources connected</strong><p>Connect a service in Settings → Plugins, then return here to opt in. Your assistant works without background sources.</p></div></div>
    {:else}<ul class="source-list">{#each sources as source (source.id)}<li><div class="source-icon"><ShieldCheck size={19} /></div><div class="source-copy"><strong>{source.name}</strong><p>{source.type} · {source.available ? `Available on ${remoteHome ? remoteHome.name : 'this worker'}` : 'Unavailable · check connection, grant and agent access'}</p>{#if source.last_observed_at}<small>Last observed {when(source.last_observed_at)}</small>{/if}{#if source.last_error}<p class="source-error">{source.last_error}</p>{/if}</div><button class="source-toggle" role="switch" aria-checked={source.enabled} aria-label={`Observe ${source.name}`} disabled={!!busy || (!source.available && !source.enabled) || !assistant.configured} onclick={() => toggleSource(source)}><span aria-hidden="true"></span><span>{busy === source.id ? 'Saving…' : source.enabled ? 'On' : 'Off'}</span></button></li>{/each}</ul>{/if}
@@ -311,6 +377,13 @@
  .choice small { display:block; margin-top:6px; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
  .avatar-picker button.selected,.avatar-picker button:hover:not(:disabled) { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 6%,transparent); color:var(--foreground); }
  .form-actions { margin-top:24px; }
+ .about-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 24px; margin:18px 0 0; }
+ .about-list dt { font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--muted-foreground); }
+ .about-list dd { margin:4px 0 0; font-size:13px; overflow-wrap:anywhere; }
+ .about-list dd.missing,.about-list small { color:var(--muted-foreground); }
+ .about-list .corrected { margin-left:.4em; }
+ .about-form { max-width:520px; }
+ .suggestions li> :global(svg) { flex:none; color:var(--primary); }
  .message { display:flex; align-items:center; gap:10px; padding:14px 16px; border:1px solid var(--border); background:var(--card); color:var(--foreground); border-radius:8px; font-size:12px; line-height:1.7; margin:14px 0; }
  .message :global(svg) { flex:none; color:var(--primary); }
  .message.error { border-color:var(--destructive); flex-wrap:wrap; }
@@ -321,7 +394,7 @@
  :global(.spin) { animation:spin 1s linear infinite; }
  @keyframes spin { to { transform:rotate(360deg); } } @keyframes pulse { to { opacity:.4; } }
  @media(min-width:800px) { .hero { animation:arrive .35s ease-out; } @keyframes arrive { from { opacity:0; transform:translateY(8px); } } }
- @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .agent-choices { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
+ @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .agent-choices,.about-list { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
  @media(max-width:430px) { .avatar-picker { gap:4px; } .empty { padding:18px; } }
  @media(prefers-reduced-motion:reduce) { .hero,.skeleton,:global(.spin) { animation:none!important; } button,.source-toggle>span:first-child::after { transition:none; } }
 </style>
