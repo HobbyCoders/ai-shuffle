@@ -212,13 +212,13 @@
 		-webkit-overflow-scrolling: touch; touch-action: pan-y; color: var(--foreground); outline: none;
 	}
 	.controls-panel > :global(*) { flex-shrink: 0; }
-	.model-control { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; padding: 0 2px 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+	.model-control { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; padding: 0 2px 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
 	.model-control strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.83rem; font-weight: 600; text-align: right; }
 	.control-label, .setting-label { font-size: 0.72rem; font-weight: 500; line-height: 1.4; color: var(--muted-foreground); }
 	.setting-label { display: flex; justify-content: space-between; align-items: center; margin: 0 2px 6px; }
 	.setting-label small { font: inherit; }
 	.effort-choices, .access-choices { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; padding: 3px; border: 1px solid var(--border-subtle); border-radius: 11px; background: var(--card); }
-	.quick-choice { min-width: 0; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 0.7rem; line-height: 1.25; cursor: pointer; transition: background 140ms ease, color 140ms ease; }
+	.quick-choice { min-width: 0; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 0.8rem; line-height: 1.25; cursor: pointer; transition: background 140ms ease, color 140ms ease; }
 	.quick-choice[aria-pressed='true'] { background: color-mix(in oklch, var(--primary) 11%, var(--card)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent); color: var(--primary); font-weight: 600; }
 	.setting-description { min-height: 2.6em; margin: 6px 2px 0; font-size: 0.68rem; line-height: 1.3; color: var(--muted-foreground); }
 	.fast-row { display: flex; align-items: center; gap: 12px; padding: 0 2px; flex-shrink: 0; }

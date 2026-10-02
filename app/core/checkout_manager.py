@@ -537,8 +537,9 @@ def _ensure_branch_checkout(
     *,
     base_branch: Optional[str] = None,
     create_new_branch: bool = False,
+    provision_runtime: bool = True,
 ) -> Optional[str]:
-    """Resolve (materializing if needed) the (project, runner, branch) checkout."""
+    """Resolve a branch checkout; workers can opt out of shared runtime links."""
     # A branch checkout requires a materialized base checkout to `git worktree add`
     # from. No base here → not materializable (return None; caller may 409/fallback).
     # Pass the row so a missing base can lazily self-seed before the worktree.
@@ -648,7 +649,8 @@ def _ensure_branch_checkout(
     # run in it. Best-effort by contract: a failure here degrades the worktree,
     # it does not invalidate it.
     try:
-        provisioning = provision_worktree_runtime(base_path, dest_str)
+        provisioning = (provision_worktree_runtime(base_path, dest_str)
+                        if provision_runtime else {"skipped": ["isolated worker runtime"]})
         # Said out loud on one line, because the alternative is somebody
         # spending ten minutes deciding whether a build failure is their code.
         logger.info(
@@ -1447,6 +1449,7 @@ def ensure_checkout(
     *,
     base_branch: Optional[str] = None,
     create_new_branch: bool = False,
+    provision_runtime: bool = True,
 ) -> Optional[str]:
     """Lazily materialize (or resolve) a checkout for a project_v2 on this runner.
 
@@ -1461,6 +1464,8 @@ def ensure_checkout(
             ``base_branch`` (new-session compose). When ``False`` (default) an
             unknown branch is recovered from origin or, failing that, reported as
             not-materializable rather than fabricated.
+        provision_runtime: when False, do not share dependencies or built assets
+            from the base checkout. Coding workers need independent runtimes.
 
     Returns the absolute checkout path, or ``None`` when it is not materializable
     on this device (no base checkout here and none self-seeded, or a branch that
@@ -1489,6 +1494,7 @@ def ensure_checkout(
             branch,
             base_branch=base_branch,
             create_new_branch=create_new_branch,
+            provision_runtime=provision_runtime,
         )
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)

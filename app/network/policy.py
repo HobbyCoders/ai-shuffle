@@ -305,7 +305,8 @@ _register(Collection(
     json_fields=("placement", "workspace_project_ids"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
-                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream"),
+                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
+                  "workspace_facts"),
     notes="Session catalog. Owner-ordered: only the owner device publishes."))
 
 _register(Collection(

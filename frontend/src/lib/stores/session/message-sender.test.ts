@@ -95,7 +95,7 @@ function makeDeps(initial: ActiveSessionState) {
 	};
 
 	const autoCreateWorktree = vi.fn(async () => {});
-	const createWorktree = vi.fn(async () => {});
+	const createWorktree = vi.fn(async (): Promise<string | null> => null);
 	const innerSendMessage = vi.fn(async () => true);
 
 	const deps: MessageSenderDeps = {

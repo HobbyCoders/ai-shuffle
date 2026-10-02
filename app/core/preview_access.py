@@ -71,13 +71,13 @@ KEY_FILE = "preview-access.key"
 #: without outliving the day.
 DEFAULT_TTL = 24 * 3600
 #: The harness's URL lands in the cached prompt prefix (the "# Workspace
-#: facts" card), and every reconnect re-renders that card: an idle-evicted
-#: client coming back after a park, a worker restart. A token whose expiry
-#: is "now + TTL" differs on every render, so each reconnect changed the
-#: system prompt and threw away the provider's prompt cache. The harness
-#: therefore rounds the expiry DOWN to this window: every render inside one
-#: window yields the same bytes, and a token never outlives ``DEFAULT_TTL``
-#: (it lives between ``DEFAULT_TTL - STABLE_WINDOW`` and ``DEFAULT_TTL``).
+#: facts" card). The harness persists that card and reuses it on reconnect,
+#: re-rendering only when the quoted token is about to expire or no snapshot
+#: could be stored. A token whose expiry is "now + TTL" would differ on every
+#: such render, so the expiry is rounded DOWN to this window: every render
+#: inside one window yields the same bytes, and a token never outlives
+#: ``DEFAULT_TTL`` (it lives between ``DEFAULT_TTL - STABLE_WINDOW`` and
+#: ``DEFAULT_TTL``).
 STABLE_WINDOW = 6 * 3600
 _VERSION = "v1"
 
@@ -195,11 +195,20 @@ def session_token(session_id: str, *, now: float | None = None) -> str:
     The boundary is rounded DOWN from ``now + DEFAULT_TTL``, so the token is
     never valid for longer than :func:`mint`'s default would be.
     """
+    return session_token_with_expiry(session_id, now=now)[0]
+
+
+def session_token_with_expiry(session_id: str, *, now: float | None = None) -> tuple[str, int]:
+    """:func:`session_token` plus the expiry (epoch seconds) it carries.
+
+    The harness records the expiry next to the persisted "# Workspace facts"
+    card, which quotes the token, so a reconnect can tell when the frozen
+    card's URL has stopped working and must be rendered again."""
     if not session_id or not isinstance(session_id, str):
         raise ValueError("A session id is required to mint preview access")
     current = now if now is not None else time.time()
     expires = (int(current) + DEFAULT_TTL) // STABLE_WINDOW * STABLE_WINDOW
-    return _token(session_id, expires)
+    return _token(session_id, expires), expires
 
 
 def _session_exists(session_id: str) -> bool:

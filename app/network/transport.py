@@ -86,6 +86,21 @@ class PeerTokenRejected(PeerError):
     """The peer rejected authentication before dispatching the action."""
 
 
+# Failures while opening the connection (DNS, TCP connect, TLS handshake).
+# No HTTP request was sent, so the peer saw nothing and the request can be
+# tried on another address, even a mutation.
+CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+class PeerConnectFailed(PeerError):
+    """No address accepted a connection; no request reached the peer."""
+
+
+# Longest detail kept from a peer's error response. Refusals pass through a
+# second worker before reaching the UI, so this must fit a full sentence.
+ERROR_DETAIL_LIMIT = 300
+
+
 class PeerLink:
     """One peer: endpoint candidates, a cached token, and an HTTP client.
 
@@ -128,15 +143,18 @@ class PeerLink:
             self.token = None
 
     async def _request(self, client: httpx.AsyncClient, method: str, path: str, *, json_body=None,
-                       params=None, auth: bool = True, timeout: float = REQUEST_TIMEOUT) -> Any:
-        if self.base_url is None:
+                       params=None, auth: bool = True, timeout: float = REQUEST_TIMEOUT,
+                       base: str | None = None) -> Any:
+        """One request to the peer, at ``base`` or else the address in use."""
+        base = base or self.base_url
+        if base is None:
             raise PeerError("no endpoint")
         headers = {"Accept": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer " + (self.token or "")
         seconds = 120 if path == "/api/v1/network/peer/state" else timeout
         connect = connect_timeout.get()
-        response = await client.request(method, self.base_url + path, json=json_body, params=params,
+        response = await client.request(method, base + path, json=json_body, params=params,
                                         headers=headers,
                                         timeout=httpx.Timeout(seconds, connect=min(seconds, connect))
                                         if connect else seconds)
@@ -146,44 +164,75 @@ class PeerLink:
         if response.status_code >= 400:
             detail = ""
             try:
-                detail = str(response.json().get("detail", ""))[:120]
+                detail = str(response.json().get("detail", ""))[:ERROR_DETAIL_LIMIT]
             except Exception:  # noqa: BLE001
                 pass
             raise PeerError(f"HTTP {response.status_code} {detail}".strip())
         return response.json()
 
-    async def authenticate(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> None:
-        if self.token and self.token_expires - 30 > time.time():
+    def routes(self) -> list[str]:
+        """The dial addresses in the order to try them.
+
+        The address the last successful authentication used comes first: the
+        sync loop re-authenticates there every few minutes and exchanges over
+        it every pass, so it is the one known to work.
+        """
+        first = [self.base_url] if self.base_url and self.base_url in self.endpoints else []
+        return first + [e for e in self.endpoints if e not in first]
+
+    async def authenticate(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *,
+                           at: str | None = None) -> None:
+        """Get a device token, trying each address in turn.
+
+        With ``at``, authenticate at that address only (and use it from then
+        on); a failure there leaves the address and token in use untouched.
+        Raises ``PeerConnectFailed`` when no candidate accepted a connection.
+        """
+        if self.token and self.token_expires - 30 > time.time() and at in (None, self.base_url):
             return
-        candidates = [self.base_url] if self.base_url else []
-        candidates += [e for e in self.endpoints if e != self.base_url]
-        last: str | None = None
+        if at is not None:
+            candidates = [at.rstrip("/")]
+        else:
+            candidates = [self.base_url] if self.base_url else []
+            candidates += [e for e in self.endpoints if e != self.base_url]
+        last: BaseException | None = None
+        connect_only = True
         for endpoint in candidates:
-            self.base_url = endpoint.rstrip("/")
+            endpoint = endpoint.rstrip("/")
             try:
-                challenge = await self._request(client, "POST", "/api/v1/network/peer/auth/challenge",
-                                                json_body={"device_id": ctx.device_id}, auth=False)
-                signature = tokens.sign_challenge(ctx.identity.signing_private, challenge["challenge"], self.device_id)
-                result = await self._request(client, "POST", "/api/v1/network/peer/auth/token", json_body={
-                    "device_id": ctx.device_id,
-                    "challenge": challenge["challenge"],
-                    "signature": signature,
-                    "incarnation": ctx.identity.incarnation,
-                    **(await asyncio.to_thread(_description)),
-                    "version": settings.version,
-                    "platform": identity_mod.platform_name(),
-                }, auth=False)
-                if result.get("device_id") != self.device_id or result.get("network_id") != ctx.network_id:
-                    raise PeerError("endpoint answered for another device")
-                self.token = result["token"]
-                self.token_expires = float(result.get("expires_at") or (time.time() + tokens.TOKEN_TTL_SECONDS))
-                return
+                token, expires = await self._issue_token(client, ctx, endpoint)
             except (httpx.HTTPError, PeerError, KeyError, ValueError, TypeError) as exc:
-                last = f"{type(exc).__name__}: {exc}"[:200]
-                self.token = None
+                last = exc
+                connect_only = connect_only and isinstance(exc, CONNECT_ERRORS)
                 continue
-        self.base_url = None
-        raise PeerError(last or "unreachable")
+            self.base_url, self.token, self.token_expires = endpoint, token, expires
+            return
+        if at is None:
+            self.base_url = None
+            self.token = None
+        message = f"{type(last).__name__}: {last}"[:200] if last is not None else "unreachable"
+        if last is not None and connect_only:
+            raise PeerConnectFailed(message) from last
+        raise PeerError(message) from last
+
+    async def _issue_token(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                           endpoint: str) -> tuple[str, float]:
+        """Challenge-response at ``endpoint``; checks it answers as this peer."""
+        challenge = await self._request(client, "POST", "/api/v1/network/peer/auth/challenge",
+                                        json_body={"device_id": ctx.device_id}, auth=False, base=endpoint)
+        signature = tokens.sign_challenge(ctx.identity.signing_private, challenge["challenge"], self.device_id)
+        result = await self._request(client, "POST", "/api/v1/network/peer/auth/token", json_body={
+            "device_id": ctx.device_id,
+            "challenge": challenge["challenge"],
+            "signature": signature,
+            "incarnation": ctx.identity.incarnation,
+            **(await asyncio.to_thread(_description)),
+            "version": settings.version,
+            "platform": identity_mod.platform_name(),
+        }, auth=False, base=endpoint)
+        if result.get("device_id") != self.device_id or result.get("network_id") != ctx.network_id:
+            raise PeerError("endpoint answered for another device")
+        return result["token"], float(result.get("expires_at") or (time.time() + tokens.TOKEN_TTL_SECONDS))
 
     async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
         async with self._sync_lock:

@@ -46,8 +46,8 @@ def local_action(action, request_id):
         reason = "A newer runtime release is required"
     elif action == "download" and state["phase"] == "ready":
         reason = "Already staged; ready to restart"
-    elif action == "download" and state["phase"] not in ("available", "error"):
-        reason = "No application update available; current version left running"
+    elif action == "download" and state["phase"] not in ("idle", "available", "error"):
+        reason = f"Cannot download while the updater is {state['phase']}"
     elif action == "install" and state["phase"] != "ready":
         reason = "No staged update; current version left running"
     if action == "install" and not reason:
@@ -59,7 +59,13 @@ def local_action(action, request_id):
             updates.enqueue(action)
         except ValueError as exc:
             reason = str(exc)
-    result = {"accepted": reason is None, "reason": reason or "Request queued", "phase": state["phase"],
+    queued = "Request queued"
+    if action == "download" and state["phase"] == "idle":
+        # Peers check on their own only once a day, so a fanned-out download
+        # usually finds one that has not seen the new revision yet. The updater
+        # checks first and downloads only if the check finds an update.
+        queued = "Checking for an update to download"
+    result = {"accepted": reason is None, "reason": reason or queued, "phase": state["phase"],
               "version": state.get("version")}
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
@@ -89,11 +95,19 @@ async def _remote(row, body):
         result = await asyncio.wait_for(control.call(row["device_id"], "application-update", body, timeout=3), timeout=5)
         if not isinstance(result, dict):
             raise ValueError("Invalid peer update response")
-        fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error")
+        fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
+                  "request_pending")
         return {key: result[key] for key in fields if key in result}
-    except Exception:
-        return {"accepted": None, "reason": "Worker unavailable or does not support application updates",
+    except control.ControlRefused:
+        # The peer answered and declined (an older build without the updater
+        # endpoint answers 404): it is definitively outside this update.
+        return {"accepted": None, "reason": "Worker declined application updates; not included",
                 "supported": False, "phase": "unsupported"}
+    except Exception:
+        # "unknown", not "unsupported": an online worker whose status cannot be
+        # read may still be preparing, so it must never count as excluded.
+        return {"accepted": None, "reason": "Worker unavailable or does not support application updates",
+                "supported": False, "phase": "unknown"}
 
 
 def _peer_entry(device_id):
@@ -114,7 +128,8 @@ async def _peer_status_for(device_id, *, fresh):
     entry = _peer_entry(device_id)
     value = entry["value"]
     if not fresh and value is not None:
-        ttl = PEER_STATUS_BUSY_TTL if value.get("phase") in ("checking", "downloading") else PEER_STATUS_TTL
+        busy = value.get("phase") in ("checking", "downloading") or value.get("request_pending")
+        ttl = PEER_STATUS_BUSY_TTL if busy else PEER_STATUS_TTL
         if time.monotonic() - entry["at"] < ttl:
             return value
     if entry["task"] is None:
@@ -149,8 +164,12 @@ async def snapshot():
         rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"]
                                           if not row["is_self"] and (local["update_all_workers"] or row["device_id"] in tracked))))
     # Only return display fields, never peer endpoints/certificates.
-    fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason")
+    fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
+              "request_pending")
+    # server_time lets a browser judge how recent a completion is without
+    # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": local["update_all_workers"],
+            "server_time": time.time(),
             "operation": await run_sync(progress.observe, operation, rows),
             "workers": [{key: row.get(key) for key in fields} for row in rows]}
 
