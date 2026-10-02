@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
+const streamed = vi.hoisted(() => ({ close: vi.fn(), muteInput: vi.fn(), muteOutput: vi.fn(), sendText: vi.fn() }));
+vi.mock('./voiceAudioStream', () => ({ openVoiceAudioStream: vi.fn(async () => streamed) }));
 import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
@@ -19,6 +21,7 @@ class Peer extends EventTarget {
 beforeEach(async () => {
 	await hangup();
 	vi.clearAllMocks();
+	streamed.sendText.mockResolvedValue(true);
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	channel = Object.assign(new EventTarget(), { send: vi.fn(), readyState: 'open', close: vi.fn() });
 	track = { enabled: true, stop: vi.fn() };
@@ -33,6 +36,24 @@ afterEach(async () => { await hangup(); vi.restoreAllMocks(); vi.unstubAllGlobal
 const start = () => startCall('owner', { client_secret: 'test', model: 'test-model' });
 
 describe('voice owner lifecycle', () => {
+ it('uses the live streaming owner for attachments and gates microphone mute on that transport', async () => {
+  await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+  expect(sendVoiceText('other', 'Wrong owner')).toBe(false);
+  toggleMic();
+  expect(track.enabled).toBe(false);
+  expect(streamed.muteInput).toHaveBeenLastCalledWith(true);
+  expect(await sendVoiceText('owner', 'Inspect /workspace/uploads/report.pdf')).toBe(true);
+  expect(streamed.sendText).toHaveBeenCalledWith('Inspect /workspace/uploads/report.pdf');
+  expect(channel.send).not.toHaveBeenCalled();
+  toggleMic();
+  expect(track.enabled).toBe(true);
+  expect(streamed.muteInput).toHaveBeenLastCalledWith(false);
+ });
+ it('reports unsupported PersonaPlex text accurately without losing the draft', async () => {
+  await startCall('owner', { client_secret: 'test', model: 'fal-ai/personaplex/realtime' });
+  expect(() => sendVoiceText('owner', 'Keep me')).toThrow('does not support text or attachments');
+  expect(streamed.sendText).not.toHaveBeenCalled();
+ });
  it('attaches ordinary audio to the same conversation using the returned credential, without a second mint', async () => {
   api.prepareConversationCall.mockResolvedValue({ session_id: 'owner', client_secret: 'attached', model: 'test-model' });
   await startCallForSession('owner', { attach: true });

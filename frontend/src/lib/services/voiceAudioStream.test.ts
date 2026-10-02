@@ -18,7 +18,7 @@ class Context {
  createBufferSource() { return { connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(), buffer: null, onended: null }; }
 }
 class Worklet {
- port: any = {}; disconnect = vi.fn(); connect = vi.fn();
+ port: any = { postMessage: vi.fn() }; disconnect = vi.fn(); connect = vi.fn();
  constructor() { nodes.push(this); }
 }
 class Socket {
@@ -42,13 +42,57 @@ afterEach(() => vi.unstubAllGlobals());
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('admits typed attachment references only after the server acknowledges them', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const sent = stream.sendText('Inspect /workspace/uploads/report.pdf');
+  const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
+  expect(event).toMatchObject({ type: 'input_text', text: 'Inspect /workspace/uploads/report.pdf' });
+  let settled = false; void sent.then(() => { settled = true; });
+  await Promise.resolve(); expect(settled).toBe(false);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'text.accepted', id: event.id }) });
+  expect(await sent).toBe(true);
+  await stream.close();
+ });
+ it('keeps rejected messages and pending messages on disconnect', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const rejected = stream.sendText('Keep this');
+  const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'text.rejected', id: event.id, message: 'Backend busy. Keep your draft.' }) });
+  await expect(rejected).rejects.toThrow('Backend busy');
+  const pending = stream.sendText('Still here');
+  await stream.close(); expect(await pending).toBe(false);
+ });
+ it('drops queued speech during mute and across a fast unmute, while text remains usable', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const pcm = new Int16Array([12000]).buffer;
+  stream.muteInput(true);
+  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
+  nodes[0].port.onmessage({ data: { pcm, generation: 1 } });
+  expect(sockets[0].send).not.toHaveBeenCalled();
+  const text = stream.sendText('Typed while muted');
+  const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'text.accepted', id: event.id }) });
+  expect(await text).toBe(true);
+  sockets[0].send.mockClear();
+  stream.muteInput(false);
+  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
+  nodes[0].port.onmessage({ data: { pcm, generation: 1 } });
+  expect(sockets[0].send).not.toHaveBeenCalled();
+  nodes[0].port.onmessage({ data: { pcm, generation: 2 } });
+  expect(sockets[0].send).toHaveBeenCalledExactlyOnceWith(pcm);
+  expect(nodes[0].port.postMessage.mock.calls.map(([m]: any[]) => m)).toEqual([
+   { type: 'mute', muted: true, generation: 1 }, { type: 'mute', muted: false, generation: 2 }
+  ]);
+  await stream.close();
+ });
+
  it('starts only after provider readiness, sends PCM and receives captions/audio', async () => {
   const callbacks = handlers();
   const stream = await openVoiceAudioStream('session-1', {} as MediaStream, callbacks, new AbortController().signal);
   expect(sockets[0].url).toBe('ws://localhost/api/v1/voice/sessions/session-1/audio');
   expect(contexts[0].audioWorklet.addModule).toHaveBeenCalledWith('/voice-pcm.js');
   const pcm = new Int16Array([100, -100]).buffer;
-  nodes[0].port.onmessage({ data: pcm });
+  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
   expect(sockets[0].send).toHaveBeenCalledWith(pcm);
   sockets[0].onmessage({ data: JSON.stringify({ type: 'caption', id: 'u1', role: 'user', delta: 'Hi' }) });
   expect(callbacks.caption).toHaveBeenCalledWith('u1', 'user', 'Hi');
@@ -76,7 +120,7 @@ describe('voice PCM stream', () => {
   const callbacks = handlers();
   const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
   sockets[0].bufferedAmount = 200000;
-  nodes[0].port.onmessage({ data: new Int16Array(1920).buffer });
+  nodes[0].port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
   expect(sockets[0].send).not.toHaveBeenCalled();
   expect(callbacks.closed).toHaveBeenCalledWith('Voice upload fell behind. Start the call again.');
   await stream.close();

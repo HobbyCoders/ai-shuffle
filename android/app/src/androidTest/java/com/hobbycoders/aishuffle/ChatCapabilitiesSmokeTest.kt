@@ -126,7 +126,8 @@ class ChatCapabilitiesSmokeTest {
                     web(activity).evaluateJavascript("""
                         location.origin === '${server.baseUrl}' && location.pathname.startsWith('${MobileUi.PATH}') &&
                         window.__SHUFFLE_MOBILE__?.token === 'fixture-cookie' &&
-                        typeof window.shuffleFileSave?.postMessage === 'function'
+                        typeof window.shuffleFileSave?.postMessage === 'function' &&
+                        typeof window.shuffleFileSave?.onmessage === 'function'
                     """.trimIndent()) { ready = it == "true" }
                 }
                 ready

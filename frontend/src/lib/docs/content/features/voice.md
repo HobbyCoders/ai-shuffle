@@ -24,6 +24,10 @@ Select **Voice** in the session mode switcher and press **Start a voice call** o
 
 During a call, the call dock shows connection and speaking state, elapsed time, and controls to stop the call, mute your mic, or mute the agent's audio. Realtime calls can also show a worker count and an estimated call spend; GPT Live and PersonaPlex do not show those Realtime indicators. GPT Live waits for you to speak unless opening words are configured.
 
+Mic mute stops outgoing microphone frames and discards partial buffered samples on streaming calls; it does not retract audio or tasks already sent before you muted. Muting the agent's audio only silences playback, not your microphone. Typed messages can still be sent while your mic is muted.
+
+During a GPT Live app call, you can send composer text and attachments to the same chat model without ending the call. The composer waits for the voice server to accept the request before clearing your draft. Rejected or unconfirmed requests retain the draft; check the conversation before retrying an unconfirmed send. PersonaPlex has no text/attachment delegation in this integration: end its call to send your draft in chat.
+
 Hanging up ends the audio connection. Realtime workers and GPT Live tasks already submitted to the chat can continue; stop the work separately if you want to cancel it.
 
 ## How the engines differ

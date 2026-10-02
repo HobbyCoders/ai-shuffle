@@ -23,6 +23,7 @@ from app.core.voice_prompts import LIVE_INSTRUCTIONS, DELEGATION_INSTRUCTIONS, P
 
 logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 48_000
+MAX_TEXT_BYTES = 16_000
 MAX_CONNECTIONS = 4
 calls: dict[str, VoiceStream] = {}
 _workers: set[asyncio.Task] = set()
@@ -370,6 +371,45 @@ class VoiceStream:
                         await self.websocket.send_bytes(audio)
                 await self.caption("assistant", event.get("text") or "")
 
+    async def receive_text(self, raw: str):
+        """Admit user input only, never browser-supplied provider/tool events."""
+        import re
+        # JSON escaping may expand each text byte to a six-byte \uXXXX escape.
+        if len(raw.encode("utf-8")) > MAX_TEXT_BYTES * 6 + 512:
+            raise ValueError("Voice text frame is too large.")
+        event = json.loads(raw)
+        if (not isinstance(event, dict) or set(event) != {"type", "id", "text"}
+                or event["type"] != "input_text" or not isinstance(event["id"], str)
+                or not re.fullmatch(r"[a-zA-Z0-9-]{1,80}", event["id"])
+                or not isinstance(event["text"], str)):
+            raise ValueError("Only PCM audio frames or user text are accepted.")
+        text, identity = event["text"].strip(), event["id"]
+        async def reject(message):
+            await self.emit({"type": "text.rejected", "id": identity, "message": message})
+        if not text or len(event["text"].encode("utf-8")) > MAX_TEXT_BYTES:
+            await reject("Voice messages must contain text and be at most 16,000 bytes. Your draft has been kept.")
+            return
+        if not self.is_live or (self.options["delegation_type"] == "responses" and not self.config.get("conversation_surface")):
+            await reject("This voice engine does not support text or attachments. End the call to send your draft in chat.")
+            return
+        key = "typed-" + identity
+        if key not in self.delegations:
+            if len(_workers) >= 8 or len(self.delegations) >= 200:
+                await reject("The voice backend is busy. Keep your draft and try again shortly.")
+                return
+            # Typed requests reuse the existing same-session delegation
+            # path, not a guessed provider text event or a second conversation.
+            await self.flush()
+            await self.caption("user", "\n\nTyped message:\n" + text)
+            await self.flush()  # Durable admission before acknowledging/dispatching.
+            entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+            self.delegated_seq = self.transcript_seq
+            self.delegations.add(key)
+            self.delegation_task = asyncio.create_task(self.run_delegation(None, entries))
+            _workers.add(self.delegation_task)
+            self.delegation_task.add_done_callback(_workers.discard)
+        await self.emit({"type": "text.accepted", "id": identity})
+
     async def receive_browser(self):
         import msgpack
         audio_bytes = 0
@@ -380,8 +420,8 @@ class VoiceStream:
                 return
             data = message.get("bytes")
             if data is None:
-                # Provider events (including tool results) are server-owned.
-                raise ValueError("Only PCM audio frames are accepted.")
+                await self.receive_text(message.get("text") or "")
+                continue
             if not data or len(data) > MAX_FRAME_BYTES or len(data) % 2:
                 raise ValueError("Invalid PCM audio frame.")
             if audio_bytes == 0:

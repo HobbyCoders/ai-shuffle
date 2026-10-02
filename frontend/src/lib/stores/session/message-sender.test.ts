@@ -153,6 +153,14 @@ describe('remembered worker on send', () => {
 });
 
 describe('message-sender voice ownership', () => {
+	it('awaits streaming admission and retains the draft on an explicit rejection', async () => {
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		voice.sendVoiceText.mockRejectedValueOnce(new Error('This voice engine does not support text or attachments.'));
+		const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+		expect(await createMessageSender(deps).sendMessage('Read this', { pendingUploadPaths: ['/workspace/uploads/file.txt'] })).toBe(false);
+		expect(getState().error).toContain('does not support');
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
 	it('preserves attachment paths in the owning voice conversation', async () => {
 		voice.isCallActiveFor.mockReturnValueOnce(true);
 		const { deps, wsConn } = makeDeps(baseState({ sessionId: 'owner' }));

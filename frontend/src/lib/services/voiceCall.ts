@@ -631,6 +631,7 @@ async function reconnect(): Promise<void> {
 // ============================================================================
 
 function applyMicMuted(muted: boolean): void {
+	audioStream?.muteInput(muted);
 	micStream?.getAudioTracks().forEach((t) => {
 		t.enabled = !muted;
 	});
@@ -695,6 +696,7 @@ export async function startCall(
 			return;
 		}
 		micStream = acquired;
+		applyMicMuted(get(voiceCallState).micMuted);
 		if (usesAudioStream(cred.model)) {
 			const { openVoiceAudioStream } = await import('./voiceAudioStream');
 			if (myGeneration !== generation) return;
@@ -713,6 +715,7 @@ export async function startCall(
 			}, audioAbort.signal);
 			if (myGeneration !== generation) { await stream.close(); return; }
 			audioStream = stream;
+			applyMicMuted(get(voiceCallState).micMuted);
 			startLevelMonitor(acquired);
 			patch({ status: 'live', startedAt: Date.now() });
 			return;
@@ -899,9 +902,14 @@ function scheduleTypedResponse(): void {
 	}
 }
 
-export function sendVoiceText(owner: string, text: string): boolean {
+export function sendVoiceText(owner: string, text: string): boolean | Promise<boolean> {
 	const state = get(voiceCallState);
-	if (state.sessionId !== owner || state.status !== 'live' || !text.trim() || connection?.dc.readyState !== 'open') return false;
+	if (state.sessionId !== owner || state.status !== 'live' || !text.trim()) return false;
+	if (audioStream) {
+		if (state.model !== 'gpt-live-1') throw new Error('This voice engine does not support text or attachments. End the call to send your draft in chat.');
+		return audioStream.sendText(text);
+	}
+	if (connection?.dc.readyState !== 'open') return false;
 	try {
 		connection.dc.send(JSON.stringify({
 			type: 'conversation.item.create',

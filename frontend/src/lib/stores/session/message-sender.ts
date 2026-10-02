@@ -349,9 +349,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				if (paths?.length) {
 					prompt += '\n\nAttached file references (ask a worker to inspect these files):\n' + paths.map(path => JSON.stringify(path)).join('\n');
 				}
-				const sent = sendVoiceText(_state.sessionId, prompt);
-				if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
-				return sent;
+				try {
+					// Streaming calls acknowledge admission before the composer clears
+					// its draft; WebRTC retains its existing local-transport result.
+					const sent = await sendVoiceText(_state.sessionId, prompt);
+					if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
+					return sent;
+				} catch (error) {
+					update(s => s.sessionId === _state.sessionId ? { ...s, error: error instanceof Error ? error.message : 'Could not send to the voice call. Your draft has been kept.' } : s);
+					return false;
+				}
 			}
 
 			// A first send from an unbound compose spends the new-chat compose

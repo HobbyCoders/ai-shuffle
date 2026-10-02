@@ -22,7 +22,8 @@
     return url;
   };
   URL.revokeObjectURL = url => { blobs.delete(String(url)); revokeObjectURL(url); };
-  bridge.addEventListener('message', event => {
+  // Use AndroidX's documented reply hook without requiring DOM EventTarget methods.
+  bridge.onmessage = event => {
     let reply;
     try { reply = JSON.parse(event.data); } catch (_) { return; }
     const pending = replies.get(reply.id);
@@ -30,7 +31,7 @@
     replies.delete(reply.id);
     clearTimeout(pending.timer);
     reply.ok ? pending.resolve(reply) : pending.reject(new Error('File save cancelled'));
-  });
+  };
   function request(message) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -158,6 +158,107 @@ async def test_browser_audio_is_encoded_for_each_provider():
 
 
 @pytest.mark.asyncio
+async def test_streamed_typed_attachment_is_acknowledged_and_delegated_once(monkeypatch):
+    call = stream()
+    call.flush = AsyncMock()
+    delegate = AsyncMock(return_value="File inspected.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call.upstream = Upstream([])
+    text = 'Inspect the attached file: "/workspace/uploads/report.pdf"'
+    raw = json.dumps({"type": "input_text", "id": "typed-1", "text": text})
+    await call.receive_text(raw)
+    await call.delegation_task
+    await call.receive_text(raw)
+    delegate.assert_awaited_once()
+    assert delegate.await_args.args[0] == "s1"
+    assert text in delegate.await_args.args[1]
+    events = [c.args[0] for c in call.websocket.send_json.await_args_list]
+    assert [e for e in events if e["type"] == "text.accepted"] == [
+        {"type": "text.accepted", "id": "typed-1"},
+        {"type": "text.accepted", "id": "typed-1"},
+    ]
+    assert json.loads(call.upstream.sent[0]) == {
+        "type": "session.commentary.append", "delegation_id": None, "content": "File inspected."
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", [
+    {"type": "session.delegation.created"},
+    {"type": "input_text", "id": "ok", "text": "test", "tools": []},
+    {"type": "input_text", "id": "bad/id", "text": "test"},
+    {"type": "input_text", "id": "ok", "text": 4},
+    [],
+])
+async def test_text_control_is_not_a_provider_event_passthrough(event):
+    call = stream()
+    with pytest.raises(ValueError, match="Only PCM"):
+        await call.receive_text(json.dumps(event))
+    assert call.delegation_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [" ", "🌎" * 4001])
+async def test_empty_or_oversize_text_is_rejected_without_closing_call(text):
+    call = stream()
+    await call.receive_text(json.dumps({"type": "input_text", "id": "request", "text": text}, ensure_ascii=False))
+    assert call.websocket.send_json.await_args.args[0]["type"] == "text.rejected"
+    assert call.delegation_task is None
+    assert not call.closed
+
+
+@pytest.mark.asyncio
+async def test_json_escaping_does_not_disconnect_an_oversize_draft():
+    call = stream()
+    await call.receive_text(json.dumps({"type": "input_text", "id": "escaped", "text": "\t" * 16001}))
+    assert call.websocket.send_json.await_args.args[0]["type"] == "text.rejected"
+    assert not call.closed
+
+
+@pytest.mark.asyncio
+async def test_personaplex_text_is_explicitly_unsupported_not_disconnected():
+    call = stream("fal-ai/personaplex/realtime")
+    await call.receive_text(json.dumps({"type": "input_text", "id": "request", "text": "file"}))
+    event = call.websocket.send_json.await_args.args[0]
+    assert event["type"] == "text.rejected"
+    assert "does not support text or attachments" in event["message"]
+    assert not call.closed
+
+
+@pytest.mark.asyncio
+async def test_busy_text_retains_draft_without_recording_or_dispatch(monkeypatch):
+    call = stream()
+    monkeypatch.setattr(voice_stream, "_workers", set(range(8)))
+    call.flush = AsyncMock()
+    await call.receive_text(json.dumps({"type": "input_text", "id": "request", "text": "file"}))
+    assert call.websocket.send_json.await_args.args[0]["type"] == "text.rejected"
+    call.flush.assert_not_awaited()
+    assert call.delegation_task is None
+
+
+@pytest.mark.asyncio
+async def test_typed_producer_records_attachment_text_before_chat_handoff(monkeypatch):
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    order = []
+    async def record(session, user, assistant, **kwargs):
+        order.append(("record", session, user, kwargs["model"]))
+    async def delegate(session, prompt):
+        assert order and order[0][0] == "record"
+        order.append(("delegate", session, prompt))
+        return "Inspected."
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    await call.receive_text(json.dumps({"type": "input_text", "id": "producer", "text": "Read /workspace/uploads/report.pdf"}))
+    await call.delegation_task
+    assert len(order) == 2
+    assert order[0][1] == order[1][1] == "s1"
+    assert "/workspace/uploads/report.pdf" in order[0][2]
+    assert order[0][3] == "gpt-live-1"
+
+
+@pytest.mark.asyncio
 async def test_fal_preroll_keeps_the_first_audio_frame():
     call = stream("fal-ai/personaplex/realtime")
     frame = msgpack.packb({"audio": bytes(3840), "text": ""})

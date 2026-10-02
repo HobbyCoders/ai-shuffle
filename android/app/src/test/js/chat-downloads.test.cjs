@@ -40,7 +40,7 @@ const script = fs.readFileSync(path.join(__dirname, '../../main/assets/chat-down
 
 function fixture(rejectType, options = {}) {
   const messages = [], handlers = {}, urls = new Map();
-  let sequence = 0, receiver;
+  let sequence = 0;
   class Anchor {
     constructor(href, download = 'fixture.txt') { this.href = href; this.download = download; }
     hasAttribute(name) { return name === 'download' && this.download !== null; }
@@ -54,11 +54,12 @@ function fixture(rejectType, options = {}) {
   window.top = window;
   if (options.runtime) window.__SHUFFLE_MOBILE__ = options.runtime;
   window.shuffleFileSave = {
-    addEventListener(type, listener) { receiver = listener; },
+    // AndroidX injects a plain object, not an EventTarget.
+    onmessage: null,
     postMessage(raw) {
       const message = JSON.parse(raw); messages.push(message);
       if (message.type === 'abort') return;
-      queueMicrotask(() => receiver({data: JSON.stringify({id: message.id, ok: message.type !== rejectType})}));
+      queueMicrotask(() => window.shuffleFileSave.onmessage({data: JSON.stringify({id: message.id, ok: message.type !== rejectType})}));
     }
   };
   const context = vm.createContext({window, URL: FixtureURL, Blob, HTMLAnchorElement: Anchor, Element: Anchor,
