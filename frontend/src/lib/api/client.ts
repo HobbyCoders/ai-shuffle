@@ -336,7 +336,7 @@ export interface AuthStatus {
 
 export interface AgentGateStatus {
 	ready: boolean;
-	mode: 'subscription' | 'api_key' | null;
+	mode: 'subscription' | 'api_key' | 'off' | null;
 	claude_credential_ready: boolean;
 	reason?: string | null;
 	license_allows_runs?: boolean;
