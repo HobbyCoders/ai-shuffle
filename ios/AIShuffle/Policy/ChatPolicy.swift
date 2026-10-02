@@ -33,6 +33,9 @@ enum ChatPolicy {
         guard let url else { return .cancel }
         if let worker = workerURL(base: base, url: url) { return .workerFile(worker) }
         if MobileUI.isAssetOrigin(url) { return .allow }
+        // Chat HTML previews render in a sandboxed srcdoc frame (frontend HtmlPreview.svelte).
+        // Android's shouldOverrideUrlLoading never sees that load; WebKit asks, so allow it for frames only.
+        if !mainFrame, url.absoluteString == "about:srcdoc" { return .allow }
         if mainFrame, userInitiated, url.scheme?.lowercased() == "https", url.host != nil { return .openExternally(url) }
         return .cancel
     }

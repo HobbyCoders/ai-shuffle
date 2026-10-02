@@ -121,6 +121,30 @@ final class WebKitTests: XCTestCase {
         XCTAssertFalse(filtered.contains("aishuffle://app.evil/blocked.png"), "\(filtered)")
     }
 
+    /// Chat HTML previews are sandboxed srcdoc frames; the app's navigation delegate must let them render.
+    func testChatControllerRendersSandboxedHtmlPreviewFrames() async throws {
+        let root = try XCTUnwrap(BundleAssets.root)
+        let server = Server(id: "t", name: "t", baseUrl: "https://worker.invalid", apiKey: "k", deviceId: "d")
+        let controller = ChatWebController(server: server, rules: try await compile(server.baseUrl), root: root) { true }
+        show(controller.webView)
+        controller.loadIndex()
+        let loaded = try await waitUntil(30) { !controller.webView.isLoading && MobileUI.isAssetOrigin(controller.webView.url) }
+        XCTAssertTrue(loaded, "The chat controller did not load the bundled UI")
+        _ = try await evaluate(controller.webView, """
+            window.__previewMessages = [];
+            addEventListener('message', (event) => window.__previewMessages.push(String(event.data)));
+            const frame = document.createElement('iframe');
+            frame.setAttribute('sandbox', 'allow-scripts');
+            frame.srcdoc = '<script>parent.postMessage("preview-ran", "*")<' + '/script>';
+            document.body.appendChild(frame);
+            return true;
+            """)
+        let ran = try await waitUntil(10) {
+            try await self.evaluate(controller.webView, "return window.__previewMessages.includes('preview-ran')") == "true"
+        }
+        XCTAssertTrue(ran, "A sandboxed srcdoc preview frame did not run")
+    }
+
     func testSchemeHandlerRefusesWritesAndUnknownPaths() async throws {
         let root = try XCTUnwrap(BundleAssets.root)
         let webView = WKWebView(frame: .zero, configuration: ChatWebController.configuration(rules: nil, root: root))

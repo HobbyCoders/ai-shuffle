@@ -123,6 +123,10 @@ final class ChatPolicyTests: XCTestCase {
         XCTAssertEqual(decide("javascript:alert(1)"), .cancel)
         XCTAssertEqual(decide("aishuffle://other/x"), .cancel)
         XCTAssertEqual(decide("about:blank"), .cancel)
+        // HTML previews: a sandboxed srcdoc frame, never the chat document itself.
+        XCTAssertEqual(decide("about:srcdoc", main: false, tap: false), .allow)
+        XCTAssertEqual(decide("about:srcdoc"), .cancel)
+        XCTAssertEqual(decide("about:blank", main: false), .cancel)
         XCTAssertEqual(decide(nil), .cancel)
     }
 
