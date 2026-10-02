@@ -287,6 +287,8 @@ async def test_session_mutations_publish_without_shared_reads_and_reconcile_exte
             assert passes[0][2] == passes[29][2] != passes[30][2]
             assert all(not any("SELECT * FROM agents" in sql for sql in passes[i][1])
                        for i in range(1, 30))
+            assert all(not any("SELECT * FROM network_session_active" in sql for sql in passes[i][1])
+                       for i in range(1, 30))
             assert any("SELECT * FROM agents" in sql for sql in passes[30][1])
             assert memory.call_count == plugins.call_count == 2
     finally:
