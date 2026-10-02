@@ -472,8 +472,8 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
 
     ``mode`` is ``subscription``, ``api_key`` or ``off`` (Claude turned off on
     this worker); ``explicit`` is false only before startup has recorded the
-    default. ``cli`` is what `claude auth
-    status` reports (account shown only when signed in); ``api_key`` says
+    default. ``cli`` is what `claude auth status` reports (account shown only
+    when signed in); ``api_key`` says
     whether a key is stored and its last four characters; ``gate`` is the
     credential gate (``ready``, ``reason``, ``license_allows_runs``...).
     """
