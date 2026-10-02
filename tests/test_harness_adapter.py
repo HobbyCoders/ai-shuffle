@@ -303,6 +303,34 @@ async def test_provider_retry_translates_to_a_system_note():
 
 
 @pytest.mark.asyncio
+async def test_connection_drop_retry_carries_its_cause_to_the_ui():
+    """A reconnect after a dropped provider connection keeps its cause, which
+    the UI uses to show it while it runs (empty-response retries stay hidden)."""
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.ProviderRetry(
+            session_id=SID, attempt=1, max_attempts=2,
+            reason="provider connection dropped before the response finished; reconnecting",
+            delay_seconds=1.0, model="gpt-6.1-sol", cause="connection_dropped",
+        ),
+        lm.ProviderRetry(
+            session_id=SID, attempt=2, max_attempts=2,
+            reason="provider cut a long response twice; reconnecting with lower effort (high)",
+            delay_seconds=2.0, model="gpt-6.1-sol", cause="connection_dropped",
+            lowered_effort="high",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=3),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    first, second = [e for e in got if isinstance(e, SystemMessage)
+                     and e.subtype == "provider_retry"]
+    assert first.data["cause"] == "connection_dropped"
+    assert first.data["attempt"] == 1 and first.data["max_attempts"] == 2
+    assert "lowered_effort" not in first.data
+    assert second.data["lowered_effort"] == "high"
+
+
+@pytest.mark.asyncio
 async def test_steer_submits_the_op_and_its_receipt_reaches_the_stream():
     """A queued message handed to the running turn goes out as a fluid Steer
     carrying the queue row's id, and fluid's delivery receipt mirrors into the

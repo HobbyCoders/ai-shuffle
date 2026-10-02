@@ -161,6 +161,12 @@ export interface V2SessionState {
 	speculativelySettledCardIds: string[];
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
 	speculativelySettledTaskIds: string[];
+	/** Seq of the last event that ended a model attempt's streamed output: a
+	 *  turn start, a user message, a tool result, a provider retry. Messages
+	 *  created after it are the current attempt's output, which a
+	 *  connection-drop retry folds into its card (see foldDroppedAttempt).
+	 *  Optional so a cached state from before the field reads as 0. */
+	attemptStartSeq?: number;
 }
 
 export function initialState(): V2SessionState {
@@ -189,6 +195,7 @@ export function initialState(): V2SessionState {
 		mayHaveRunningSubagents: false,
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
+		attemptStartSeq: 0,
 	};
 }
 
@@ -409,6 +416,91 @@ function settleRetryCards(messages: ChatMessage[], present = true): ChatMessage[
 		return { ...m, systemData: { ...(data ?? {}), settled: true } };
 	});
 	return touched ? out : messages;
+}
+
+/** A tool card that only ever saw argument deltas: its call never closed. */
+function isAbandonedToolCard(m: ChatMessage): boolean {
+	return (
+		m.type === 'tool_use' &&
+		m.toolStatus === 'running' &&
+		m.toolInput === undefined &&
+		m.partialToolInput !== undefined
+	);
+}
+
+/**
+ * Retire the tool cards a re-sent request abandoned.
+ *
+ * A `provider_retry` means the engine dropped the last response and is sending
+ * the same request again. A card that got argument deltas but never its
+ * `tool.use` belonged to that response: the call never closed, never ran, and
+ * the new response gives its calls new ids. Left alone it would spin until the
+ * turn ends.
+ */
+function retireAbandonedToolCards(messages: ChatMessage[]): ChatMessage[] {
+	if (!messages.some(isAbandonedToolCard)) return messages;
+	return messages.map((m) =>
+		isAbandonedToolCard(m) ? { ...m, streaming: false, toolStatus: 'error' as const } : m
+	);
+}
+
+/** Mark `seq` as the end of a model attempt's streamed output. */
+function markAttemptBoundary(state: V2SessionState, seq: number): V2SessionState {
+	return state.attemptStartSeq === seq ? state : { ...state, attemptStartSeq: seq };
+}
+
+/** What a dropped attempt had streamed, kept on its retry card. */
+interface SupersededAttempt {
+	text: string;
+	tools: string[];
+}
+
+/**
+ * Take a dropped attempt's output out of the transcript.
+ *
+ * A connection-drop retry re-sends the request, so the text, thinking and
+ * tool cards the dropped attempt streamed are superseded by the reply that
+ * follows. They are removed from `messages` and returned, to be kept on the
+ * retry card as a collapsed "Response interrupted — retried" row. Everything
+ * here comes from persisted events, so a replay folds the same messages.
+ */
+function foldDroppedAttempt(state: V2SessionState): {
+	state: V2SessionState;
+	superseded: SupersededAttempt | null;
+} {
+	const since = state.attemptStartSeq ?? 0;
+	const dropped = (m: ChatMessage): boolean => {
+		if (m.role !== 'assistant') return false;
+		if (m.type !== 'text' && m.type !== 'thinking' && m.type !== 'tool_use' && m.type) return false;
+		const origin = state.messageOriginSeq.get(m.id);
+		return origin !== undefined && origin > since;
+	};
+	if (!state.messages.some(dropped)) return { state, superseded: null };
+	const text: string[] = [];
+	const tools: string[] = [];
+	const kept = state.messages.filter((m) => {
+		if (!dropped(m)) return true;
+		if (m.type === 'tool_use') tools.push(m.toolName || 'tool');
+		else if (m.type !== 'thinking' && m.content?.trim()) text.push(m.content.trim());
+		return false;
+	});
+	return {
+		state: { ...closeOpen(state), messages: kept },
+		superseded: { text: text.join('\n\n'), tools },
+	};
+}
+
+function mergeSuperseded(
+	earlier: unknown,
+	later: SupersededAttempt | null
+): SupersededAttempt | null {
+	const prev = earlier as SupersededAttempt | undefined;
+	if (!prev) return later;
+	if (!later) return prev;
+	return {
+		text: [prev.text, later.text].filter(Boolean).join('\n\n'),
+		tools: [...(prev.tools ?? []), ...later.tools],
+	};
 }
 
 /** systemData of a `provider_retry` card, or undefined for any other message. */
@@ -895,6 +987,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				...state,
 				messages,
 				mayHaveLiveRetry,
+				attemptStartSeq: seq,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -1174,6 +1267,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {
+			state = markAttemptBoundary(state, seq);
 			const content = str(event.content);
 
 			// Background-task wake turns persist their synthesized prompt as a
@@ -1540,6 +1634,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'tool.result': {
+			// Results come after a model attempt completed: the next one starts here.
+			state = markAttemptBoundary(state, seq);
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);
@@ -1939,7 +2035,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					liveProvider: provider || null,
 				};
 			}
-			const data = obj(event.data);
+			let data = obj(event.data);
 			// `provider_retry` arrives once per attempt while the engine
 			// re-sends an empty completion — up to ten of them in a row. They
 			// must read as ONE card counting 1 → 2 → 3, not ten stacked
@@ -1954,15 +2050,29 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// the same way: it records a turn that already ended, so the next
 			// turn's retries append beside it instead of rewriting history.
 			if (str(event.subtype) === 'provider_retry') {
+				// A connection-drop retry supersedes what the dropped attempt
+				// streamed: it moves onto this card, collapsed.
+				let superseded: SupersededAttempt | null = null;
+				if (data?.cause === 'connection_dropped') {
+					const folded = foldDroppedAttempt(state);
+					state = folded.state;
+					superseded = folded.superseded;
+				}
+				const retired = retireAbandonedToolCards(state.messages);
+				if (retired !== state.messages) state = { ...state, messages: retired };
 				const last = state.messages[state.messages.length - 1];
 				const lastData = last?.systemData as Record<string, unknown> | undefined;
 				const lastFinished = !!(lastData?.exhausted || lastData?.settled);
-				if (
-					last &&
+				const inPlace =
+					!!last &&
 					last.type === 'system' &&
 					last.systemSubtype === 'provider_retry' &&
-					!lastFinished
-				) {
+					!lastFinished;
+				const merged = mergeSuperseded(inPlace ? lastData?.superseded : undefined, superseded);
+				if (merged && data) data = { ...data, superseded: merged };
+				// The next attempt's output starts after this note.
+				state = markAttemptBoundary(state, seq);
+				if (inPlace) {
 					const messages = state.messages.slice();
 					messages[messages.length - 1] = {
 						...last,
