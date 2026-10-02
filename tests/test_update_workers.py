@@ -23,6 +23,10 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
     fleet._peer_status.clear()
+    # Refusals and discovery times are module state: one test's must not hold another's restart.
+    fleet._refusals.clear()
+    fleet._discovery.clear()
+    monkeypatch.setattr(fleet, "_refusals_at", 0.0)
     rows = [{"device_id": "self", "device_name": "Local", "is_self": True, "online": True},
             {"device_id": "peer", "device_name": "Peer", "is_self": False, "online": True},
             {"device_id": "offline", "device_name": "Offline", "is_self": False, "online": False}]
@@ -495,3 +499,160 @@ def test_idle_status_drops_a_message_that_claims_work_in_progress(container):
     assert updates.status()["message"] == "Update ready. Choose Update and restart."
     status("downloading", message="Building frontend…")
     assert updates.status()["message"] == "Building frontend…"
+
+
+def _never_checked_peer(remote, peer):
+    """A container peer on A that has not read its feed since the desktop found B."""
+    actions = []
+
+    async def call(_device, _kind, body, **kwargs):
+        if body["operation"] == "status":
+            return dict(peer)
+        actions.append(body["action"])
+        if body["action"] == "download":
+            peer["phase"] = "checking"
+        if body["action"] == "install":
+            peer["phase"] = "idle"
+        return {"accepted": True, "reason": "Request queued"}
+
+    remote.side_effect = call
+    return actions
+
+
+def test_never_checked_peer_is_downloaded_before_anything_installs(setup):
+    # #1623: the desktop staged B while Unraid sat idle on A with no check since
+    # container start. Restart was offered and Unraid was never asked to download.
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "idle", "version": None,
+            "running_version": A, "checked_at": time.time() - 3600}
+    actions = _never_checked_peer(remote, peer)
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A,
+                              "checkedAt": "2099-01-01T00:00:00Z"})
+
+    async def scenario():
+        state = await fleet.snapshot(fresh=True)
+        rows = {row["device_id"]: row for row in state["workers"]}
+        assert rows["peer"]["role"] == "available"
+        assert rows["peer"]["label"] == fleet.NOT_CHECKED
+        assert rows["self"]["role"] == "staged"
+        assert state["plan"]["action"] == "download" and not state["plan"]["ready"]
+        # An install click while the peer is behind downloads on the peer only.
+        held = await fleet.dispatch("install")
+        assert held["sent"] == "download" and "nothing was installed" in held["held"]
+        assert [row["device_id"] for row in held["results"]] == ["peer"]
+        assert actions[-1] == "download"
+        assert "install" not in actions and updates._desktop_request is None
+        assert fleet.progress.load() is None  # no install was begun
+        state = await fleet.snapshot(fresh=True)
+        assert state["plan"]["preparing"] and not state["plan"]["ready"]
+        # The peer stages B: now, and only now, install fans out to both.
+        peer.update(phase="ready", version=B[:12], checked_at=time.time())
+        state = await fleet.snapshot(fresh=True)
+        assert state["plan"]["ready"] and state["plan"]["action"] == "install"
+        done = await fleet.dispatch("install")
+        assert done["sent"] == "install"
+        assert [row["device_id"] for row in done["results"]] == ["peer", "offline", "self"]
+        assert actions[-1] == "install"
+        assert updates._desktop_request["action"] == "install"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change,role", [
+    ({"checked_at": None}, "available"),                 # never reported a check
+    ({"checked_at": 10.0}, "available"),                 # checked before the desktop found B
+    ({"checked_at": 4_000_000_000.0}, "excluded"),       # checked after and found nothing
+    ({"running_version": B}, "excluded"),                # already runs the offered build
+    ({"channel": "stable"}, "excluded"),                 # a different channel
+])
+def test_not_checked_rule(change, role):
+    offers = [{"version": B[:12], "channel": "edge", "checked_at": 1_000.0}]
+    row = {"device_id": "peer", "device_name": "Peer", "is_self": False, "online": True, "supported": True,
+           "allow_updates": True, "phase": "idle", "version": None, "running_version": A, "channel": "edge",
+           "checked_at": 1.0, **change}
+    assert fleet.classify(row, True, offers)["role"] == role
+    assert fleet.classify(row, True, [])["role"] == "excluded"
+
+
+def test_discovery_checks_a_behind_peer_at_most_once_per_interval(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "idle", "version": None,
+            "running_version": A, "checked_at": None}
+    actions = _never_checked_peer(remote, peer)
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A,
+                              "checkedAt": "2099-01-01T00:00:00Z"})
+
+    async def scenario():
+        for _ in range(3):
+            await fleet.snapshot(fresh=True)
+            await asyncio.gather(*fleet._discovery_tasks)
+        assert actions == ["check"]
+        # Ten minutes on: the peer still has not checked, so it is asked again.
+        fleet._discovery["peer"] -= fleet.DISCOVERY_SECONDS + 1
+        await fleet.snapshot(fresh=True)
+        await asyncio.gather(*fleet._discovery_tasks)
+        assert actions == ["check", "check"]
+    asyncio.run(scenario())
+
+
+def test_discovery_waits_while_an_install_is_verified(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "idle", "version": None,
+            "running_version": A, "checked_at": None}
+    actions = _never_checked_peer(remote, peer)
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A})
+    fleet.progress.begin("verifying", [{"device_id": "peer", "device_name": "Peer"}])
+
+    async def scenario():
+        await fleet.snapshot()
+        assert not fleet._discovery_tasks
+    asyncio.run(scenario())
+    assert actions == []
+
+
+def test_refusals_hold_restart_until_a_later_install_completes(setup):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "available", "version": B[:12],
+            "running_version": A, "checked_at": time.time()}
+
+    async def call(_device, _kind, body, **kwargs):
+        if body["operation"] == "status":
+            return dict(peer)
+        return {"accepted": False, "reason": "Busy with active sessions; retry when finished"}
+
+    remote.side_effect = call
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A})
+
+    async def scenario():
+        await fleet.dispatch("download")
+        assert fleet._refusals["peer"] == "Busy with active sessions; retry when finished"
+        peer["phase"] = "idle"
+        state = await fleet.snapshot(fresh=True)
+        row = next(row for row in state["workers"] if row["device_id"] == "peer")
+        assert row["role"] == "unknown" and row["label"].startswith("Refused: Busy")
+        assert state["refusals"] == fleet._refusals
+    asyncio.run(scenario())
+
+
+def test_container_status_reports_when_the_feed_was_checked(setup, monkeypatch, tmp_path):
+    import json
+    import os
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(tmp_path))
+    (tmp_path / "status.json").write_text(json.dumps({"phase": "idle", "checked_at": 1234.5}))
+    assert updates.status()["checked_at"] == 1234.5
+    # Older supervisors do not say; an idle file's time stands in.
+    (tmp_path / "status.json").write_text(json.dumps({"phase": "idle"}))
+    os.utime(tmp_path / "status.json", (99.0, 99.0))
+    assert updates.status()["checked_at"] == 99.0
+    (tmp_path / "status.json").write_text(json.dumps({"phase": "downloading"}))
+    assert updates.status()["checked_at"] is None
+
+
+def test_desktop_bridge_converts_the_shells_check_time(setup):
+    updates.desktop_exchange({"phase": "idle", "checkedAt": "1970-01-01T00:16:40Z"})
+    assert updates.status()["checked_at"] == 1000.0
+    updates.desktop_exchange({"phase": "idle", "checkedAt": "not a time"})
+    assert updates.status()["checked_at"] is None
