@@ -51,6 +51,38 @@ export interface TopSession {
 	usage_estimated: boolean;
 }
 
+/** How a provider is paid for. A subscription's cost is the app's API-price
+ *  estimate of the same usage, not money billed per token. */
+export type ProviderBilling = 'subscription' | 'api' | 'mixed' | 'unknown';
+
+/** Whether a provider's cost is known: `unknown` means no turn had a price
+ *  (the model is in no price table), so the cost is missing, not zero. */
+export type ProviderCostStatus = 'estimated' | 'partial' | 'unknown';
+
+/** Usage booked on one provider over the selected range (GET /analytics/providers). */
+export interface ProviderUsage {
+	/** A model-provider id, `claude` (native Claude), or `unattributed`. */
+	key: string;
+	name: string;
+	provider_type: string | null;
+	billing: ProviderBilling;
+	total_tokens_in: number;
+	total_tokens_out: number;
+	cache_read_tokens: number;
+	cache_creation_tokens: number;
+	total_cost_usd: number;
+	cost_status: ProviderCostStatus;
+	query_count: number;
+	estimated_query_count: number;
+	/** Turns with tokens but no price. */
+	unpriced_query_count: number;
+	subscription_query_count: number;
+	api_query_count: number;
+	/** Turns booked before per-provider tracking, attributed from their
+	 *  session's current provider. */
+	inferred_query_count: number;
+}
+
 // ============================================================================
 // Backend response types (for transformation)
 // ============================================================================
@@ -201,10 +233,19 @@ export async function getTopSessions(startDate: string, endDate: string, limit: 
 }
 
 /**
- * Export analytics data as CSV
+ * Get usage per provider for a date range
+ */
+export async function getProviderBreakdown(startDate: string, endDate: string): Promise<ProviderUsage[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	const response = await api.get<{ items: ProviderUsage[] }>(`/analytics/providers?${params.toString()}`);
+	return response.items ?? [];
+}
+
+/**
+ * Export usage per provider (daily rows plus range totals) as CSV
  */
 export async function exportAnalyticsCSV(startDate: string, endDate: string): Promise<void> {
 	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
-	await fetchAndDownload(`/analytics/export?${params.toString()}`, `analytics-${startDate}-to-${endDate}.csv`);
+	await fetchAndDownload(`/analytics/export?${params.toString()}`, `usage-by-provider-${startDate}-to-${endDate}.csv`);
 }
 

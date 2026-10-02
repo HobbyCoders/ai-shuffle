@@ -797,6 +797,12 @@ def _run_column_migrations(cursor):
                 "ALTER TABLE usage_log ADD COLUMN usage_estimated BOOLEAN DEFAULT FALSE"
             )
             migrations_applied.append("usage_log.usage_estimated")
+        # Per-provider attribution for the Stats breakdown. Older rows stay
+        # NULL; the breakdown attributes them from the session's binding.
+        for column in ("provider_id", "provider_type", "billing"):
+            if not column_exists(cursor, "usage_log", column):
+                cursor.execute(f"ALTER TABLE usage_log ADD COLUMN {column} TEXT")
+                migrations_applied.append(f"usage_log.{column}")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
@@ -2967,12 +2973,18 @@ def init_database():
     logger.info("Database initialized successfully")
 
 
+#: Days of ``usage_log`` the maintenance pass keeps. The Stats page's longest
+#: range is 90 days; owner decision 2026-10-01: keep 400, delete older.
+USAGE_LOG_RETENTION_DAYS = 400
+
+
 def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     """Run periodic database maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
     - PostgreSQL: ANALYZE, VACUUM ANALYZE
     - Cleanup of unbounded log tables (older than 7 days)
+    - Cleanup of the usage ledger (older than USAGE_LOG_RETENTION_DAYS)
 
     Args:
         skip_vacuum: If True, skip the VACUUM step. Used when sessions are
@@ -2985,6 +2997,9 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     from datetime import timedelta
     results = {}
     cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    cutoff_usage = (
+        datetime.now(timezone.utc) - timedelta(days=USAGE_LOG_RETENTION_DAYS)
+    ).isoformat()
     # Notifications are user-facing history (the bell), not debug logs — keep them
     # longer than the 7-day log cutoff, but still bound growth (errors auto-persist).
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -3002,8 +3017,11 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             results["analyze"] = f"error: {e}"
 
         # 2. Cleanup unbounded log tables (older than 7 days).
+        # ``usage_log`` is NOT one of them: it is the usage ledger behind the
+        # Stats page's 30/90-day ranges and the per-turn cost footers, and
+        # pruning it at 7 days made every longer range silently report one
+        # week of usage. It has its own, much longer cutoff just below.
         log_tables = {
-            "usage_log": "created_at",
             "audit_log": "created_at",
             "sync_log": "created_at",
             "connector_event_log": "created_at",
@@ -3016,6 +3034,18 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
                 results[f"cleaned_{table}"] = cleaned
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
+
+        # Usage ledger retention: bounded, but well past the longest Stats
+        # range, so a year-over-year look still has data.
+        try:
+            with _savepoint(cursor, "sp_maint_usage_log"):
+                cursor.execute(
+                    "DELETE FROM usage_log WHERE created_at < %s", (cutoff_usage,)
+                )
+                cleaned = cursor.rowcount
+            results["cleaned_usage_log"] = cleaned
+        except Exception as e:
+            results["cleaned_usage_log"] = f"error: {e}"
 
         # 2a. Cross-install carrier tables (D5/D8). Both are transport, not
         # history: a terminal git_op has already been executed and its result
@@ -3264,6 +3294,7 @@ from app.db.analytics import (  # noqa: F401
     get_analytics_cost_breakdown,
     get_analytics_usage_trends,
     get_analytics_top_sessions,
+    get_analytics_provider_breakdown,
 )
 
 from app.db.api_users import (  # noqa: F401

@@ -394,7 +394,18 @@ def create_postgres_schema(cursor) -> None:
             -- still count toward budgets; the flag only marks them as
             -- estimates in the usage displays. Same guarded ADD COLUMN in
             -- database._run_column_migrations for existing installs.
-            usage_estimated BOOLEAN DEFAULT FALSE
+            usage_estimated BOOLEAN DEFAULT FALSE,
+            -- Which provider leg served the turn, captured when it is booked
+            -- (app/core/usage_attribution.py). ``provider_type`` is 'claude'
+            -- for the native/delegated Claude leg (``provider_id`` NULL),
+            -- otherwise the model_providers row's type; ``billing`` is
+            -- 'subscription' or 'api'. NULL on rows booked before this
+            -- existed: the Stats provider breakdown attributes those from the
+            -- session's binding instead. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            provider_id TEXT,
+            provider_type TEXT,
+            billing TEXT
         )
     """)
 
