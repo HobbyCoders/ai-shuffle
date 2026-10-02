@@ -1,7 +1,12 @@
-"""Descriptor-relative folder operations. No shell, path resolution, or link following."""
+"""Descriptor-relative folder operations. No shell, path resolution, or link following.
+
+Linux uses openat2. macOS walks each component with openat and kernel
+no-symlink flags, refusing mount and firmlink crossings. Other hosts fail closed.
+"""
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import platform
 import stat
@@ -17,6 +22,8 @@ class AccessDenied(ValueError):
 
 
 def confined_open(root: int, path: str, flags: int, mode: int = 0) -> int:
+    if platform.system() == "Darwin":
+        return _darwin_open(root, path, flags, mode)
     # Linux openat2, on the architectures where its syscall number is 437.
     # Unlike a prefix check or O_NOFOLLOW alone, this also blocks bind mounts
     # and kernel magic links. There is deliberately no weaker fallback.
@@ -34,8 +41,133 @@ def confined_open(root: int, path: str, flags: int, mode: int = 0) -> int:
     return fd
 
 
+# XNU <sys/fcntl.h>; Python does not export these on every version.
+_NOFOLLOW_ANY = 0x20000000  # macOS 11: refuse a symlink in any path component
+_RESOLVE_BENEATH = 0x00001000  # macOS 15.4: refuse resolving above the dirfd
+_F_GETPATH = 50
+
+
+class _StatFS(ctypes.Structure):
+    # struct statfs with 64-bit inodes: the only layout on arm64 and the
+    # fstatfs$INODE64 layout on x86_64. The probe checks it against "/".
+    _fields_ = [("bsize", ctypes.c_uint32), ("iosize", ctypes.c_int32),
+                ("blocks", ctypes.c_uint64), ("bfree", ctypes.c_uint64),
+                ("bavail", ctypes.c_uint64), ("files", ctypes.c_uint64),
+                ("ffree", ctypes.c_uint64), ("fsid", ctypes.c_int32 * 2),
+                ("owner", ctypes.c_uint32), ("type", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32), ("fssubtype", ctypes.c_uint32),
+                ("fstypename", ctypes.c_char * 16), ("mntonname", ctypes.c_char * 1024),
+                ("mntfromname", ctypes.c_char * 1024), ("flags_ext", ctypes.c_uint32),
+                ("reserved", ctypes.c_uint32 * 7)]
+
+
+def _mount(fd: int) -> tuple[int, bytes]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    fstatfs = getattr(libc, "fstatfs" if platform.machine() == "arm64" else "fstatfs$INODE64")
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(_StatFS)]
+    info = _StatFS()
+    if fstatfs(fd, ctypes.byref(info)) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return os.fstat(fd).st_dev, info.mntonname
+
+
+def _fd_path(fd: int) -> bytes:
+    import fcntl
+    return fcntl.fcntl(fd, _F_GETPATH, bytes(1024)).split(b"\0", 1)[0]
+
+
+@lru_cache(maxsize=1)
+def _darwin_flags() -> int | None:
+    """Open flags the running kernel enforces, or None to refuse all folder IO.
+
+    An older kernel may ignore an unknown flag bit, so each one is proven on
+    a scratch tree rather than trusted from its value.
+    """
+    import tempfile
+    if platform.machine() not in ("arm64", "x86_64"):
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as temp:
+            base = os.path.realpath(temp)
+            os.mkdir(os.path.join(base, "d"))
+            open(os.path.join(base, "d", "f"), "xb").close()
+            os.symlink("d", os.path.join(base, "l"))
+            fds = []
+            def opened(*args, **kwargs):
+                fds.append(os.open(*args, **kwargs))
+                return fds[-1]
+            try:
+                top = opened(base, os.O_RDONLY | os.O_DIRECTORY)
+                slash = opened("/", os.O_RDONLY | os.O_DIRECTORY)
+                if (_fd_path(top) != os.fsencode(base) or _mount(slash)[1] != b"/"
+                        or _mount(top)[0] != os.stat(base).st_dev):
+                    return None
+                opened("d/f", os.O_RDONLY | _NOFOLLOW_ANY, dir_fd=top)
+                try:
+                    opened("l/f", os.O_RDONLY | _NOFOLLOW_ANY, dir_fd=top)
+                    return None
+                except OSError as error:
+                    if error.errno != errno.ELOOP:
+                        return None
+                flags = _NOFOLLOW_ANY
+                try:
+                    inner = opened("d", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=top)
+                except OSError:
+                    return flags
+                try:
+                    opened("..", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=inner)
+                except OSError:
+                    flags |= _RESOLVE_BENEATH
+                return flags
+            finally:
+                for fd in fds:
+                    os.close(fd)
+    except (OSError, AttributeError):
+        return None
+
+
+def _darwin_open(root: int, path: str, flags: int, mode: int = 0) -> int:
+    """Walk one name at a time from a held directory descriptor.
+
+    Each openat resolves a single name with O_NOFOLLOW_ANY (and
+    O_RESOLVE_BENEATH where the kernel enforces it), so no symlink or ".." is
+    followed. macOS has no RESOLVE_NO_XDEV, so every opened component must
+    report the root's device and mount point; that also refuses APFS
+    firmlinks into another volume. Last, the kernel's path for the result must
+    lie under the root's current path, which catches a directory moved out of
+    the root during the walk.
+    """
+    extra = _darwin_flags()
+    if extra is None:
+        raise AccessDenied("Folder access is unavailable on this worker; no unsafe fallback is used.")
+    names = parts(path) if path != "." else ["."]
+    expected = _mount(root)
+    base = _fd_path(root)
+    fd = root
+    try:
+        for index, name in enumerate(names):
+            step = flags if index == len(names) - 1 else os.O_RDONLY | os.O_DIRECTORY
+            child = os.open(name, step | extra | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=fd)
+            if fd != root:
+                os.close(fd)
+            fd = child
+            if _mount(fd) != expected:
+                raise OSError(errno.EXDEV, "Folder access cannot cross a mount or firmlink.")
+        current = _fd_path(fd)
+        if current != base and not current.startswith(base.rstrip(b"/") + b"/"):
+            raise OSError(errno.EXDEV, "The path resolved outside the folder.")
+        return fd
+    except BaseException:
+        if fd != root:
+            os.close(fd)
+        raise
+
+
 @lru_cache(maxsize=1)
 def available() -> bool:
+    if platform.system() == "Darwin":
+        return _darwin_flags() is not None
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64"):
         return False
     root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)

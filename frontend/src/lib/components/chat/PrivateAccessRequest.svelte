@@ -192,7 +192,7 @@
 				<span>
 					{#if machine}Sent only to this worker, never to the model or chat history. Commands run with this account’s authority and follow this session’s permission mode. Bypass skips repeat approvals after you grant access.
 					{:else if service}Sent only to this worker, never to the model or chat history. HTTPS with a trusted certificate only; requests stay under this address, redirects are not followed, and the model can use this credential’s full authority there.
-					{:else}Sent only to this worker. Linux file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
+					{:else}Sent only to this worker. Kernel file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
 				</span>
 			</p>
 		</div>
