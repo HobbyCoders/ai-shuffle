@@ -17,9 +17,12 @@
 		onClose?: () => void;
 		onInstall?: () => void;
 		installing?: boolean;
+		/** Agent-authored plugins: approve the reviewed version and enable it. */
+		onApprove?: () => void;
+		approving?: boolean;
 	}
 
-	let { plugin, onClose, onInstall, installing = false }: Props = $props();
+	let { plugin, onClose, onInstall, installing = false, onApprove, approving = false }: Props = $props();
 
 	const isAvailable = $derived(plugin.scope === 'marketplace');
 
@@ -46,6 +49,7 @@
 		dependency: 'Dependencies'
 	};
 	const componentLabel = (kind: string) => COMPONENT_LABELS[kind] ?? kind;
+	const needsReview = $derived(plugin.trust === 'authored' && plugin.approval === 'pending');
 
 	// Format install date
 	function formatDate(dateStr: string): string {
@@ -255,6 +259,25 @@
 	</div>
 
 	{#if plugin.connector_type}<p>Connector runtime · {plugin.connector_type}</p>{/if}
+	{#if needsReview}
+		<div class="plugin-detail-install-info plugin-detail-review" data-testid="plugin-review">
+			<h4 class="plugin-detail-install-label">Written by an agent. Review before enabling.</h4>
+			<p class="plugin-detail-review-note">Enabling approves version {plugin.version} as listed here. Any later change needs a new review.</p>
+			<ul class="plugin-detail-not-loaded">
+				{#each plugin.components ?? [] as component (component.kind + ':' + component.name)}
+					<li><strong>{componentLabel(component.kind)} {component.name}</strong>{#if component.detail}: <code>{component.detail}</code>{/if}</li>
+				{/each}
+			</ul>
+			{#if onApprove}
+				<div class="plugin-detail-actions">
+					<button class="card-btn-primary" onclick={onApprove} disabled={approving || !plugin.content_hash}>
+						{#if approving}<span class="card-spinner card-spinner--small"></span>{/if}
+						Approve and enable
+					</button>
+				</div>
+			{/if}
+		</div>
+	{/if}
 	<!-- Feature badges -->
 	{#if hasCommands || hasAgents || hasSkills || hasHooks}
 		<div class="plugin-detail-features">
@@ -753,6 +776,21 @@
 		color: var(--text-primary, var(--foreground));
 		word-break: break-all;
 		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+	}
+
+	.plugin-detail-review {
+		margin: 0 0 var(--space-4, 16px);
+	}
+
+	.plugin-detail-review-note {
+		margin: 0 0 var(--space-2, 8px);
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.plugin-detail-review code {
+		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+		word-break: break-all;
 	}
 
 	.plugin-detail-not-loaded {

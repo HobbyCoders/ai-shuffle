@@ -64,7 +64,7 @@ The refresh token is long-lived and does not expire under normal use. The connec
 
 ### 5. Create the Spotify connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Spotify**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Spotify**.
 2. Click **Install Spotify** if prompted, then click **Connect account**.
 3. Fill in **Client ID**, **Client Secret** and **Refresh Token**.
 4. Click **Create Connector**.

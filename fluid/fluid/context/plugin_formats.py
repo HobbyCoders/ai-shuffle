@@ -111,6 +111,9 @@ class PluginComponent:
     support: str = SUPPORT_LOADED
     reason: str = ""
     path: str | None = None
+    # What a reviewer needs to see before it runs: an MCP server's command
+    # line or URL (never its env). Empty for other kinds.
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +121,7 @@ class PluginComponent:
             "name": self.name,
             "support": self.support,
             "reason": self.reason,
+            "detail": self.detail,
         }
 
 
@@ -475,6 +479,18 @@ def mcp_server_support(cfg: Any) -> tuple[str, str]:
     return SUPPORT_LOADED, ""
 
 
+def mcp_server_detail(cfg: Any, limit: int = 300) -> str:
+    """The command line or URL of a raw server entry, for review (no env)."""
+    if not isinstance(cfg, dict):
+        return ""
+    if isinstance(cfg.get("url"), str):
+        text = cfg["url"]
+    else:
+        parts = [cfg.get("command")] + list(cfg.get("args") or [])
+        text = " ".join(str(p) for p in parts if isinstance(p, (str, int, float)))
+    return text[:limit]
+
+
 def normalize_mcp_server(name: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     """Map a plugin-format server entry onto fluid's client config shape.
 
@@ -670,6 +686,7 @@ def read_plugin(
         support, reason = mcp_server_support(cfg)
         components.append(PluginComponent(
             kind="mcp_server", name=server_name, support=support, reason=reason,
+            detail=mcp_server_detail(cfg),
         ))
     components += _hook_components(root, manifest)
     components += _app_components(root, manifest)

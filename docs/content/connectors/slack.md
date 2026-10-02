@@ -97,7 +97,7 @@ Alternatively, you can right-click a channel, select **Copy link**, and extract 
 
 ### Step 6: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Slack**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Slack**.
 2. Click **Install Slack** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the `xoxb-` token from Step 3

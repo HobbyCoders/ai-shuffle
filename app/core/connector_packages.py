@@ -214,7 +214,7 @@ def info(kind: str) -> PluginInfo:
 
 def _components(kind: str) -> list[dict]:
     """A connector runtime is one component of the Shuffle connector format."""
-    return [{"kind": "connector_runtime", "name": kind, "support": "loaded", "reason": ""}]
+    return [{"kind": "connector_runtime", "name": kind, "support": "loaded", "reason": "", "detail": ""}]
 
 
 def installed() -> list[PluginInfo]:

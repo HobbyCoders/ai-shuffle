@@ -43,6 +43,10 @@ LSP servers, output styles, ChatGPT apps, userConfig, dependencies) is listed
 on the plugin's :class:`~fluid.context.plugin_formats.PluginRecord` with its
 support status, and not loaded here.
 
+Plugins from the ``authored`` source (written by the ``save_plugin`` tool) load
+only as the exact content the owner approved
+(:func:`fluid.context.plugin_authoring.is_approved`).
+
 Nothing here raises: a broken plugin is skipped with a ``logging`` warning and
 never takes the rest of discovery down with it (CE11).
 """
@@ -62,6 +66,7 @@ from fluid.context.settings_stack import (
     mcp_toggles,
 )
 from fluid.context.instructions import Command, Skill
+from fluid.context.plugin_authoring import AUTHORED_SOURCE, is_approved
 from fluid.context.plugin_formats import (  # noqa: F401 — re-exported API
     FORMAT_AGENT_PLUGINS,
     FORMAT_CLAUDE,
@@ -286,6 +291,14 @@ def load_plugin(
         )
         return None
     root, version = resolved
+    if marketplace == AUTHORED_SOURCE and not is_approved(name, root, home=home):
+        # An agent-written plugin loads only as the exact content the owner
+        # approved; a new or edited version waits for review (fail closed).
+        log.warning(
+            "authored plugin %s@%s (version %s) is not approved — skipping",
+            name, marketplace, root.name,
+        )
+        return None
     record = read_plugin(root, name=name, source=marketplace, version=version)
     skipped = [f"{c.kind}:{c.name}" for c in record.unsupported()]
     if skipped:

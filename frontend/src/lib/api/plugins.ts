@@ -37,6 +37,8 @@ export interface PluginComponent {
 	name: string;
 	support: string;
 	reason: string;
+	/** An MCP server's command line or URL, so it can be reviewed before it runs. */
+	detail?: string;
 }
 
 export interface PluginInfo {
@@ -61,6 +63,10 @@ export interface PluginInfo {
 	/** "official", "marketplace" or "authored". */
 	trust?: string | null;
 	components?: PluginComponent[];
+	/** Agent-authored plugins only: "pending" until the owner approves this exact content. */
+	approval?: string | null;
+	/** Agent-authored plugins only: the hash an approval pins. */
+	content_hash?: string | null;
 }
 
 /**
@@ -227,8 +233,12 @@ export async function uninstallPlugin(pluginId: string): Promise<void> {
 /**
  * Enable a plugin globally
  */
-export async function enablePlugin(pluginId: string): Promise<void> {
-	await api.post<void>(`/plugins/${encodeURIComponent(pluginId)}/enable`);
+export async function enablePlugin(pluginId: string, contentHash?: string | null): Promise<void> {
+	// An agent-authored plugin is approved by enabling it, pinned to the hash
+	// of the version that was reviewed.
+	const path = `/plugins/${encodeURIComponent(pluginId)}/enable`;
+	if (contentHash) await api.post<void>(path, { content_hash: contentHash });
+	else await api.post<void>(path);
 }
 
 /**

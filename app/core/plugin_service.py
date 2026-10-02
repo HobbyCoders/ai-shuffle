@@ -42,6 +42,7 @@ from app.core import plugin_marketplace as _mp_mod
 from app.core import plugin_install as _inst_mod
 from app.core import plugin_hooks as _hooks_mod
 from app.core import plugin_updates as _upd_mod
+from app.core import plugin_authored as _authored_mod
 
 logger = logging.getLogger(__name__)
 
@@ -732,6 +733,7 @@ class PluginService:
 
         from app.core import connector_packages
         plugins.extend(connector_packages.installed())
+        plugins.extend(_authored_mod.list_authored(self, enabled_plugins))
         return plugins
 
     def get_plugin_details(self, plugin_id: str) -> Optional[PluginDetails]:
@@ -740,6 +742,8 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.details(kind)
+        if _authored_mod.is_authored(plugin_id):
+            return _authored_mod.details(self, plugin_id)
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         enabled_plugins = settings.get("enabledPlugins", {})
@@ -940,18 +944,27 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.uninstall(kind)
+        if _authored_mod.is_authored(plugin_id):
+            return _authored_mod.uninstall(self, plugin_id)
         return _inst_mod.uninstall_plugin(self, plugin_id)
 
     # =========================================================================
     # Plugin Enable/Disable
     # =========================================================================
 
-    def enable_plugin(self, plugin_id: str) -> bool:
-        """Enable a plugin globally"""
+    def enable_plugin(self, plugin_id: str, content_hash: Optional[str] = None) -> bool:
+        """Enable a plugin globally.
+
+        An authored plugin is approved at the same time, pinned to
+        ``content_hash`` (the hash of the version the owner reviewed); see
+        :mod:`app.core.plugin_authored`.
+        """
         from app.core import connector_packages
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, True)
+        if _authored_mod.is_authored(plugin_id):
+            return _authored_mod.enable(self, plugin_id, content_hash)
         settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
@@ -964,6 +977,8 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.set_enabled(kind, False)
+        if _authored_mod.is_authored(plugin_id):
+            return _authored_mod.disable(self, plugin_id)
         settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}

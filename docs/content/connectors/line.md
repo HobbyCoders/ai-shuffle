@@ -76,7 +76,7 @@ By default, LINE Official Accounts send automatic greeting and away messages. Tu
 
 ### Step 7: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **LINE**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **LINE**.
 2. Click **Install LINE** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Channel Access Token**: Paste the token from Step 4

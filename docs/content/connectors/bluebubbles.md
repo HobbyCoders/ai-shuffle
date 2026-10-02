@@ -83,7 +83,7 @@ curl "http://YOUR_BLUEBUBBLES_URL:1234/api/v1/chat?password=YOUR_PASSWORD&limit=
 
 ### 5. Create the BlueBubbles connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **BlueBubbles**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **BlueBubbles**.
 2. Click **Install BlueBubbles** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Server URL**: Full URL of the BlueBubbles server including port (e.g., `http://192.168.1.50:1234`)

@@ -62,7 +62,7 @@ curl http://homeassistant.local:8123/api/states \
 
 ### 4. Create the Home Assistant connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Home Assistant**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Home Assistant**.
 2. Click **Install Home Assistant** if prompted, then click **Connect account**.
 3. Fill in **Home Assistant URL** (e.g., `http://homeassistant.local:8123`) and **Long-Lived Access Token**.
 4. Optionally set **Entity Filter** to limit which entities the connector monitors. It is a comma-separated list of entity-id prefixes, such as `light.,switch.,climate.,lock.,sensor.`; only entities whose ID starts with one of the prefixes are tracked. You can also tune how often states are polled with **Poll Interval (seconds)** (defaults to `60`).

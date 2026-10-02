@@ -10,7 +10,7 @@
 	 * - API: Rate limits + API users (admin)
 	 * - System: System prompt (admin)
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
 	import './settings/settings-layout.css';
@@ -26,7 +26,9 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines, BadgeCheck } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines, BadgeCheck, Puzzle } from 'lucide-svelte';
+	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
+	import { createLazyComponent } from '$lib/components/deck/lazy/lazy-component';
 	import { OPEN_SETTINGS_TAB_EVENT } from '$lib/api/account';
 
 	// Sub-components
@@ -42,8 +44,21 @@
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
+	interface Props {
+		/** Deep-link target tab, e.g. `plugins` from a "Manage plugins" link. */
+		requestedTab?: string;
+		/** One-shot item to open in that tab (a plugin or connector id). */
+		requestedItemId?: string | null;
+	}
+	let { requestedTab, requestedItemId = null }: Props = $props();
+
+	// The plugin hub is its own chunk; Settings loads it only when opened.
+	const PluginsPanel = createLazyComponent('settings:plugins', () =>
+		import('$lib/components/plugins/PluginsHub.svelte')
+	);
+
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'license' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'plugins' | 'license' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -59,6 +74,7 @@
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
 		{ id: 'voice', label: 'Voice', icon: AudioLines },
 		{ id: 'providers', label: 'Providers', icon: KeyRound },
+		{ id: 'plugins', label: 'Plugins', icon: Puzzle },
 		{ id: 'license', label: 'License', icon: BadgeCheck },
 		...($isAdmin
 			? [
@@ -71,6 +87,14 @@
 	]);
 
 	let error = $state('');
+
+	// Honor deep links (the old Build → Plugins links now land here).
+	$effect(() => {
+		const tab = requestedTab;
+		if (tab && untrack(() => settingsTabs).some((item) => item.id === tab && !item.heading)) {
+			activeTab = tab as Tab;
+		}
+	});
 
 	// Workspace state
 	let workspaceConfig: WorkspaceConfig | null = $state(null);
@@ -337,6 +361,13 @@
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}
+					</div>
+				{/if}
+
+				<!-- PLUGINS -->
+				{#if activeTab === 'plugins'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<LazyPanel handle={PluginsPanel} props={{ initialSelectedId: requestedItemId }} label="Plugins" />
 					</div>
 				{/if}
 

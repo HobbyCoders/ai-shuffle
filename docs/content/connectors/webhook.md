@@ -32,7 +32,7 @@ Decide which mode fits your integration:
 
 ### 2. Create the Webhook connector
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **Webhook**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Webhook**.
 2. Click **Install Webhook** if prompted, then click **Connect account**.
 3. Fill in the fields for your mode (see the [Configuration Reference](#configuration-reference)). For `inbound` or `bidirectional` mode, choose the **Agent** that handles incoming payloads. To get event notifications, open **Advanced settings** and tick the events under **Session notifications**.
 4. Click **Create Connector**.

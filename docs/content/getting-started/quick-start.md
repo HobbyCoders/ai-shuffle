@@ -47,7 +47,7 @@ To receive messages from Telegram, Discord, etc.:
 
 1. Navigate to the connector's setup guide in these docs
 2. Create the bot/app on the platform
-3. Open **Build > Plugins > Apps** in AI Shuffle and choose the platform
+3. Open **Settings > Plugins > Apps** in AI Shuffle and choose the platform
 4. Install it if asked, click **Connect account**, enter credentials, choose the **Agent** that answers its messages and click **Create Connector**
 5. Chat connectors need at least one allowed sender. Add yours, then turn on **Activate** to start receiving messages
 

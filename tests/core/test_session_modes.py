@@ -238,6 +238,9 @@ def test_chat_mode_denies_the_code_mode_kernel_by_name():
         assert name in (access.disallowed or [])
         assert tool_permitted(name, access.allowed, access.disallowed) is False
     assert "run_python" in CHAT_MODE_DENIED_TOOLS
+    # save_plugin rides the same kernel-projected source as save_skill, so it
+    # needs the same deny (#1610).
+    assert {"save_skill", "save_plugin"} <= set(CHAT_MODE_DENIED_TOOLS)
 
 
 @pytest.mark.parametrize("mode", ["code", "voice", None])

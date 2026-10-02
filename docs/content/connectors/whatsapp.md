@@ -78,7 +78,7 @@ Temporary tokens expire after 24 hours. For production use:
 
 ### Step 6: Configure the Connector in AI Shuffle
 
-1. Open the AI Shuffle web UI and go to **Build > Plugins**, choose the **Apps** filter and open **WhatsApp**.
+1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **WhatsApp**.
 2. Click **Install WhatsApp** if prompted, then click **Connect account**.
 3. Fill in the configuration fields:
    - **Phone Number ID**: The phone number ID from Step 3

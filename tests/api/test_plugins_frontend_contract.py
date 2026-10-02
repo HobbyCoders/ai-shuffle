@@ -35,7 +35,7 @@ FIXED_TIME = "2026-01-02T03:04:05"
 PLUGIN_INFO_KEYS = {
     "id", "name", "marketplace", "description", "version", "scope", "install_path",
     "installed_at", "enabled", "has_commands", "has_agents", "has_skills", "has_hooks",
-    "has_mcp", "connector_type", "format", "trust", "components",
+    "has_mcp", "connector_type", "format", "trust", "components", "approval", "content_hash",
 }
 EXPECTED_KEYS = {
     "marketplace_sync": {"status", "marketplace_id"},
@@ -158,7 +158,7 @@ def test_response_keys_match_the_frontend_types(client, tmp_path):
         ("skill", "lint", "loaded"), ("command", "review", "loaded"), ("agent", "reviewer", "loaded"),
     }
     for component in installed["components"]:
-        assert set(component) == {"kind", "name", "support", "reason"}
+        assert set(component) == {"kind", "name", "support", "reason", "detail"}
 
 
 def test_shared_frontend_fixture_matches_live_responses(client, tmp_path):

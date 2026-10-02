@@ -347,13 +347,16 @@ export const plugins = {
 	/**
 	 * Enable a plugin globally
 	 */
-	async enablePlugin(pluginId: string): Promise<void> {
+	async enablePlugin(pluginId: string, contentHash?: string | null): Promise<void> {
 		try {
-			await pluginsApi.enablePlugin(pluginId);
+			if (contentHash) await pluginsApi.enablePlugin(pluginId, contentHash);
+			else await pluginsApi.enablePlugin(pluginId);
 			_update((state) => ({
 				...state,
 				installed: state.installed.map((p) =>
-					p.id === pluginId ? { ...p, enabled: true } : p
+					p.id === pluginId
+						? { ...p, enabled: true, ...(p.approval ? { approval: 'approved' } : {}) }
+						: p
 				)
 			}));
 		} catch (e) {

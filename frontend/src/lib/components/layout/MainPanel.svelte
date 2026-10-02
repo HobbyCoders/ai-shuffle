@@ -140,10 +140,16 @@
 	]);
 
 	// The Build page hosts the agent-config tools under one surface. The
-	// member view types remain as deep-link targets ("Configure agents →",
-	// "Manage plugins") and resolve to BuildPage with the right sub-tab.
-	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
-	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'plugins', 'hooks'];
+	// member view types remain as deep-link targets ("Configure agents →")
+	// and resolve to BuildPage with the right sub-tab.
+	type BuildSub = 'profile' | 'mcp' | 'hooks';
+	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'hooks'];
+	// Plugin management lives in Settings; the `plugins` view type ("Manage
+	// plugins" links) opens Settings on its Plugins tab.
+	const settingsRequestedTab = $derived($activeView?.type === 'plugins' ? 'plugins' : undefined);
+	const settingsRequestedItemId = $derived(
+		$activeView?.type === 'plugins' ? ($activeView.itemId ?? null) : null
+	);
 	const isBuildView = $derived(
 		$activeView?.type === 'build' || BUILD_SUBS.includes($activeView?.type as BuildSub)
 	);
@@ -258,6 +264,7 @@
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
 		if (isBuildView) return 'Build';
+		if (type === 'plugins') return 'Settings';
 		return viewTitles[type] || '';
 	});
 
@@ -975,7 +982,11 @@
 					{:else if key === 'project'}
 						<LazyPanel handle={panelForKey('project')} label="Projects" />
 					{:else if key === 'settings'}
-						<LazyPanel handle={panelForKey('settings')} label="Settings" />
+						<LazyPanel
+							handle={panelForKey('settings')}
+							props={{ requestedTab: settingsRequestedTab, requestedItemId: settingsRequestedItemId }}
+							label="Settings"
+						/>
 					{:else if key === 'file-browser'}
 						<LazyPanel handle={panelForKey('file-browser')} label="Files" />
 					{:else if key === 'notes'}

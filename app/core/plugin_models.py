@@ -103,6 +103,10 @@ class PluginInfo(DictMixin):
     format: Optional[str] = None
     trust: Optional[str] = None
     components: List[Dict[str, Any]] = field(default_factory=list)
+    # Authored plugins only: "pending" until the owner approves the content
+    # with this hash, then "approved".
+    approval: Optional[str] = None
+    content_hash: Optional[str] = None
 
 
 @dataclass

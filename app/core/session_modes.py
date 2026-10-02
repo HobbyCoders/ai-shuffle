@@ -109,7 +109,7 @@ CHAT_MODE_READ_TOOLS = frozenset({"Read", "mcp__attachments__Read"})
 # mode session for this lane at all; this list is the belt for that braces, and
 # it deliberately leaves the three read-only surface tools alone so a
 # mis-wired build degrades visibly instead of granting a kernel silently.
-CHAT_MODE_DENIED_TOOLS: List[str] = ["run_python", "save_skill", "delete_skill"]
+CHAT_MODE_DENIED_TOOLS: List[str] = ["run_python", "save_skill", "delete_skill", "save_plugin"]
 
 # ``Read``'s own parameter is ``file_path`` (fluid's read tool schema). The
 # aliases are read defensively — a relayed or re-serialized tool call that spelt
@@ -371,7 +371,7 @@ PROACTIVE_DENIED_TOOLS = [
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
     "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "Skill", "ToolSearch",
     "run_python", "list_tools", "search_tools", "read_tool_docs",
-    "save_skill", "delete_skill",
+    "save_skill", "delete_skill", "save_plugin",
 ]
 
 
