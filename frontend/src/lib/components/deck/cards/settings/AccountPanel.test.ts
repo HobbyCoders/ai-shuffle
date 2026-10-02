@@ -256,8 +256,8 @@ it('explains a tunnel_limit refusal and links to Settings > License', async () =
 	const message = 'Remote access is off: this account already uses its one remote connection. Remote access for more workers needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. Local use is not affected.';
 	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
 		refusal: { code: 'tunnel_limit', limit: 1, used: 1, licensed: false, message } });
-	const opened = vi.fn();
-	window.addEventListener('shuffle-open-settings-tab', opened);
+	const { layout } = await import('$lib/stores/layout.svelte');
+	const opened = vi.spyOn(layout, 'openFeaturePage');
 	render(AccountPanel);
 	const alert = await screen.findByRole('alert');
 	expect(alert.textContent).toContain('needs an AI Shuffle license');
@@ -267,9 +267,9 @@ it('explains a tunnel_limit refusal and links to Settings > License', async () =
 	// The message shows once, not again as a plain error.
 	expect(screen.getAllByText(message)).toHaveLength(1);
 	await fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings > License' }));
-	expect(opened).toHaveBeenCalledTimes(1);
-	expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ tab: 'license' });
-	window.removeEventListener('shuffle-open-settings-tab', opened);
+	// openSettingsTab('license') now opens Settings > System at the license row.
+	expect(opened).toHaveBeenCalledExactlyOnceWith('settings', 'category=system&anchor=system.license');
+	opened.mockRestore();
 });
 
 it('points to Settings > License in words during setup, where there is no Settings card', async () => {

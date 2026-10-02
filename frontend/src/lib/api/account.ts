@@ -13,6 +13,7 @@
  */
 
 import { api } from './client';
+import { openSettingsForLegacyTab } from '$lib/settings/navigation.svelte';
 
 export const ACCOUNT_CHANGED_EVENT = 'shuffle-account-changed';
 
@@ -68,11 +69,13 @@ export interface TunnelLimitRefusal {
 	message: string;
 }
 
-/** Asks an open Settings card to show one of its tabs, e.g. `license`. */
-export const OPEN_SETTINGS_TAB_EVENT = 'shuffle-open-settings-tab';
-
+/**
+ * Opens Settings at one of the old tab names (`license`, `api`, ...).
+ * Kept as a shim: new code calls `openSettings(target)` from
+ * `$lib/settings/navigation.svelte`. Unknown names do nothing.
+ */
 export function openSettingsTab(tab: string) {
-	if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_TAB_EVENT, { detail: { tab } }));
+	openSettingsForLegacyTab(tab);
 }
 
 export interface AccountWorker {
