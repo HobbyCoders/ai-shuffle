@@ -124,11 +124,24 @@ describe('Assistant home', () => {
  it('reopens the same home and attaches a call only on a deliberate call action', async () => {
   configured(); render(AssistantHome);
   await fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }));
-  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home'));
+  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home', undefined));
   expect(mocks.startCallForSession).not.toHaveBeenCalled();
   await fireEvent.click(screen.getByRole('button', { name: 'Start call' }));
   await waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true }));
   expect(mocks.openAssistant).toHaveBeenCalledTimes(2);
+ });
+ it('uses the returned worker-local session when the home is absent from ordinary lists', async () => {
+  configured({ home_session_id: null });
+  const home = { id: 'local-home', hidden: true, title: 'Guide', mode: null };
+  mocks.openAssistant.mockImplementation(async () => {
+   server = { ...server, home_session_id: home.id };
+   return { session_id: home.id, home_session_id: home.id, session: home };
+  });
+  render(AssistantHome);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }));
+  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith(home.id, home));
+  expect(get(assistantState)?.home_session_id).toBe(home.id);
+  expect(screen.getByText(/each worker keeps its own persistent conversation/)).toBeTruthy();
  });
  it('only offers sources from the backend catalog and lets an unavailable opted-in source be revoked', async () => {
   configured(); mocks.getAssistantSources.mockResolvedValue([source, { ...source, id: 'revoked', connector_id: 'revoked', name: 'Revoked connection', available: false, enabled: true }]);
@@ -160,7 +173,7 @@ describe('Assistant home', () => {
   expect(screen.getByText(/Research runs on Desk, so its activity is listed there/)).toBeTruthy();
   expect(screen.queryByText(/runs · last 24 hours|hard billing cap/)).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }));
-  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home'));
+  await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith('home', undefined));
  });
  it('reloads when another worker changes the shared assistant', async () => {
   configured(); render(AssistantHome);

@@ -1,11 +1,10 @@
 """Durable owner assistant configuration, observation inbox and linked activity.
 
-There is one assistant per owner, not one per worker. ``assistant_account``
-holds the owner's configuration and names the one home conversation; it syncs
-between workers as the ``assistant`` network collection. ``assistant_state``
-is this worker's runner row: the account view it runs under (projected by
-``assistant_service.reconcile``) plus its own limits. Runs, events and source
-watermarks stay on the worker that runs research.
+The synced ``assistant_account`` holds shared identity and source opt-ins.
+``assistant_state`` holds this worker's persistent home, limits and runner
+configuration. Conversations are not elected across workers. Runs, events
+and source watermarks stay on the worker that runs research. Legacy home
+columns in ``assistant_account`` are retained for upgrade compatibility.
 
 The runner row is also the per-install admission mutex. A guarded UPDATE
 locks it on PostgreSQL (and serializes writers in the SQLite test shim). No
@@ -216,6 +215,18 @@ def write_account(conn, changes):
     cursor.execute("UPDATE assistant_account SET " + ", ".join(key + "=%s" for key in changes) +
                    ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), ACCOUNT_ID))
     return _parse(cursor.fetchone())
+
+
+def assert_can_settle(conn, session_id):
+    """Persistent assistant homes never enter the ordinary Settled group.
+
+    Run inside the mutation transaction, including peer control requests.
+    The account check covers a legacy shared home before local reconciliation.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM assistant_state WHERE home_session_id=%s UNION ALL SELECT 1 FROM assistant_account WHERE home_session_id=%s LIMIT 1", (session_id, session_id))
+    if cursor.fetchone():
+        raise PermissionError("Your personal assistant is a persistent conversation and cannot be settled")
 
 
 def project(conn, assistant_id, values, sources):

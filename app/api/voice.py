@@ -950,9 +950,11 @@ async def create_voice_session(
 
 def _check_attachable_conversation(row):
     from app.core.config import settings
+    from app.core.assistant_service import is_primary_session
     if (row.get("instance_id") != settings.effective_instance_id
             or row.get("is_worker") or row.get("parent_session_id")
-            or row.get("hidden") or row.get("status") == "archived"):
+            or (row.get("hidden") and not is_primary_session(row["id"]))
+            or row.get("status") == "archived"):
         raise HTTPException(404, "Conversation is not eligible for call attachment.")
     from app.db import turns
     turn = turns.get_live_turn(row["id"]) or turns.get_latest_turn(row["id"]) or {}

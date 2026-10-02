@@ -56,6 +56,9 @@ def write_shared(session_id: str, active: bool) -> Optional[dict]:
         cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         if cur.fetchone() is None:
             return None
+        if not active:
+            from app.db.assistant import assert_can_settle
+            assert_can_settle(conn, session_id)
         _record_active(cur, session_id, active)
         cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
         row = dict(cur.fetchone())
@@ -91,6 +94,9 @@ def _write(session_id: str, active: bool, *, archived: Optional[bool] = None,
             raise LookupError("Unknown session")
         if control.owner_of(dict(row)) is not None:
             raise PermissionError("This worker does not own the session")
+        if archived or not active:
+            from app.db.assistant import assert_can_settle
+            assert_can_settle(conn, session_id)
         # Older peers still ask the execution owner. Write the shared record
         # too so their edits participate in the same conflict order.
         active = False if archived else active

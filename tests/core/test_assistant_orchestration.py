@@ -9,6 +9,12 @@ from tests.core.test_session_orchestration import chat
 from tests.core.test_send_steering import _Adapter, _pooled, _live_runtime
 
 
+def test_hidden_home_still_accepts_voice_attachment(assistant_fixture):
+    from app.api.voice import _check_attachable_conversation
+    assert assistant_fixture["hidden"]
+    _check_attachable_conversation(assistant_fixture)
+
+
 def test_start_links_normal_session_without_replacing_agent(assistant_fixture):
     home = assistant_fixture["id"]
     database.set_session_active(home, True)

@@ -43,6 +43,7 @@
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
+	import { assistantState } from '$lib/stores/assistant';
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -115,6 +116,7 @@
 		onSettled
 	}: Props = $props();
 
+	const persistentAssistant = $derived($assistantState?.home_session_id === session.id);
 	const live = $derived(isLiveStatus(status));
 	// Only a turn holding the live slot ticks; a parked turn's interval has
 	// ended, so its timer takes the plain style, not the live accent.
@@ -336,6 +338,7 @@
 	}
 
 	async function commitAction(action: CardAction = primaryAction) {
+		if (persistentAssistant) return;
 		setActionsOpen(false);
 		const id = session.id;
 		const wasActive = !!session.is_active;
@@ -648,6 +651,9 @@
 		aria-hidden={swipeLayout && !actionsOpen ? 'true' : undefined}
 		inert={swipeLayout && !actionsOpen}
 	>
+		{#if persistentAssistant}
+			<span title="Persistent assistant conversation">Persistent</span>
+		{:else}
 		{#each actions as action (action)}
 			<button
 				class="row-action state-toggle"
@@ -669,6 +675,7 @@
 				{#if swipeLayout && (!compact || actions.length > 1)}<span class="row-action-label" aria-hidden="true">{ACTION_META[action].label}</span>{/if}
 			</button>
 		{/each}
+		{/if}
 	</span>
 </div>
 

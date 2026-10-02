@@ -1749,7 +1749,9 @@ class TestConversationAttachment:
         assert response.status_code == 200, response.text
         assert response.json()["session_id"] == home["id"]
         assert response.json()["model"] == "gpt-live-1" and response.json()["client_secret"] == ""
-        assert len(db.get_sessions()) == 1 and service.open_home()["id"] == home["id"]
+        assert db.get_sessions() == []  # Persistent homes use the Assistant entry, not ordinary cards.
+        assert len(db.get_sessions(include_hidden=True)) == 1
+        assert service.open_home()["id"] == home["id"]
         binding = json.loads(db.get_session(home["id"])["voice_config"])
         assert binding["conversation_surface"] is True
         assert binding["provider_id"] == "prov-openai"

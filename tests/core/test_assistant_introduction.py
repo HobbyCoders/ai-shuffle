@@ -93,12 +93,15 @@ def test_connection_suggestions_follow_the_last_pass(assistant_fixture, monkeypa
     assert service.get_state()["suggested_connections"] == ["github"]
 
 
-def test_only_the_worker_that_runs_the_assistant_writes_detection(assistant_fixture, monkeypatch):
-    monkeypatch.setattr(service, "_home_kind", lambda account, home: "remote")
-    monkeypatch.setattr(service, "_publish", lambda: pytest.fail("a non-runner published detection"))
-    assert service.apply_detection({"preferred_name": "elsewhere"}, {"gmail": False, "github": False}) is False
-    assert "preferred_name" not in (store.get_account().get("introduction") or {}).get("detected", {})
-    assert service.get_state()["suggested_connections"] == []
+def test_each_configured_worker_detects_locally_and_publishes_only_changes(assistant_fixture, monkeypatch):
+    published = []
+    monkeypatch.setattr(service, "_publish", lambda: published.append(True))
+    assert service.detection_wanted()
+    assert service.apply_detection({"preferred_name": "local-owner"}, {"gmail": False, "github": False})
+    assert store.get_account()["introduction"]["detected"]["preferred_name"] == "local-owner"
+    assert service.get_state()["suggested_connections"] == ["gmail", "github"]
+    assert not service.apply_detection({"preferred_name": "local-owner"}, {"gmail": False, "github": False})
+    assert published == [True]
 
 
 def test_nothing_is_written_before_setup(monkeypatch):

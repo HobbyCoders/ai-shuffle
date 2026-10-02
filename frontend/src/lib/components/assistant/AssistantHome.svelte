@@ -165,7 +165,9 @@
    if (!current()) return;
    await appData.loadSessions();
    if (!current()) return;
-   openSession(home.session_id);
+   await refreshAssistant();
+   if (!current()) return;
+   openSession(home.session_id, home.session);
    if (voice) await startCallForSession(home.session_id, { attach: true });
   });
  }
@@ -210,7 +212,7 @@
    <div class="portrait"><AgentAvatar avatar={editing && identityEditable ? avatar : assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
    <div class="hero-copy"><div class="status" class:enabled={assistant.configured && assistant.status !== 'agent_unavailable'}><span aria-hidden="true"></span>{statusText}</div>
     <h1>{hasAgent ? assistant.assistant_name : 'A familiar face. A lasting conversation.'}</h1>
-    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access you control.` : 'Give it a name and a face. It gets one lasting conversation, and you can change any of this later.'}</p>
+    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off on this worker. Your assistant’s name, agent and avatar sync across workers; each worker keeps its own persistent conversation, with access you control.` : 'Give it a name and a face. Each worker gets its own lasting conversation, with the same name, agent and avatar. You can change any of this later.'}</p>
     {#if hasAgent && !editing}
      <div class="hero-actions"><button class="primary" disabled={!!busy} onclick={() => conversation()}><MessageSquare size={17} />{busy === 'open' ? 'Opening…' : 'Open conversation'}<ArrowUpRight size={16} /></button>
       {#if voiceEnabled}<button class="secondary" class:blocked={!!callBlocked} disabled={!!busy || (!!callBlocked && !touch)} aria-disabled={callBlocked ? 'true' : undefined} title={callBlocked ?? undefined} onclick={startCall}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}

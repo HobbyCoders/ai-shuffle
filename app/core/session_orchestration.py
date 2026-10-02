@@ -31,9 +31,12 @@ def _text(data, key, limit):
 def _local_top_level(row):
     from app.core.config import settings
     from app.network.runners import self_device_id
-    return bool(row and row.get("instance_id") == settings.effective_instance_id
+    from app.core.assistant_service import is_primary_session
+    # Assistant homes are list-hidden, not command/delegated sessions.
+    visible = row and (not row.get("hidden") or is_primary_session(row["id"]))
+    return bool(visible and row.get("instance_id") == settings.effective_instance_id
                 and row.get("owner_device_id") in (None, self_device_id())
-                and row.get("is_active") and not row.get("hidden")
+                and row.get("is_active")
                 and not row.get("is_worker") and not row.get("parent_session_id")
                 and row.get("status") != "archived" and row.get("mode") != "voice")
 

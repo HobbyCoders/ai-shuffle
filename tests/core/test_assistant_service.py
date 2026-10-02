@@ -33,6 +33,14 @@ def test_stable_home_identity_and_onboarding_preserve_agent(assistant_fixture):
     assert service.get_state()["introduction"]["notes"] == "Likes concise updates"
 
 
+def test_persistent_home_cannot_settle_but_regular_sessions_can(assistant_fixture):
+    with pytest.raises(PermissionError, match="persistent"):
+        database.set_session_active(assistant_fixture["id"], False)
+    assert database.get_session(assistant_fixture["id"])["is_active"]
+    ordinary = database.create_session("ordinary", "assistant-agent", is_active=True)
+    assert not database.set_session_active(ordinary["id"], False)["is_active"]
+
+
 def test_changing_agent_preserves_home_not_prompt(assistant_fixture):
     database.create_profile("specialist", "Specialist", None, {"prompt": "Other prompt"})
     service.configure({"agent_id": "specialist"})

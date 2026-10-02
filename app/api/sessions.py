@@ -1847,7 +1847,10 @@ async def set_session_active(
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    session = await run_sync(database.set_session_active, session_id, payload.is_active, payload.archived)
+    try:
+        session = await run_sync(database.set_session_active, session_id, payload.is_active, payload.archived)
+    except PermissionError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not session:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

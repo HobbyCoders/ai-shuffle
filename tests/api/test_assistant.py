@@ -3,7 +3,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api import assistant, auth, connectors
+from app.api import assistant, auth, connectors, sessions
 from app.core import assistant_service as service, owner_auth
 from app.core.config import settings
 from app.db import assistant as store, database
@@ -27,6 +27,7 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(assistant.router)
     app.include_router(connectors.router)
+    app.include_router(sessions.router)
     with TestClient(LocalListener(app), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 43210), headers={"Origin": "http://127.0.0.1:8000"}) as value:
         yield value
 
@@ -52,6 +53,18 @@ def test_safe_unconfigured_http_and_stable_open(client):
     for path in ("/resume", "/pause"):
         response = client.post("/api/v1/assistant" + path)
         assert response.status_code == 200 and response.json()["paused"] is False
+
+
+def test_http_home_is_persistent_and_not_an_ordinary_card(client, assistant_fixture):
+    sid = assistant_fixture["id"]
+    result = client.patch(f"/api/v1/sessions/{sid}/active", json={"is_active": False})
+    assert result.status_code == 409
+    assert "persistent" in result.json()["detail"]
+    assert database.get_session(sid)["is_active"]
+    assert sid not in {row["id"] for row in database.get_sessions()}
+    ordinary = database.create_session("ordinary-api", "assistant-agent", is_active=True)
+    response = client.patch(f"/api/v1/sessions/{ordinary['id']}/active", json={"is_active": False})
+    assert response.status_code == 200 and not response.json()["is_active"]
 
 
 def test_http_source_explicit_optin_and_activity(client, assistant_fixture):

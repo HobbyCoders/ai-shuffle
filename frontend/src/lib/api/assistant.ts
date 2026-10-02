@@ -1,5 +1,5 @@
 /** Owner-only assistant controls over the existing unified agents and sessions. */
-import { api } from './client';
+import { api, type Session } from './client';
 import avatarIds from '$lib/components/assistant/avatars/avatars.json';
 
 /** An avatar preset id: a file name in components/assistant/avatars. */
@@ -80,7 +80,7 @@ export type AssistantPatch = Partial<{
 /** `detect` asks the server to re-read the owner's details first (briefly). */
 export const getAssistant = (detect = false) => api.get<AssistantState>(detect ? '/assistant?detect=true' : '/assistant');
 export const configureAssistant = (patch: AssistantPatch) => api.patch<AssistantState>('/assistant', patch);
-export const openAssistant = () => api.post<{ session_id: string; home_session_id: string }>('/assistant/open');
+export const openAssistant = () => api.post<{ session_id: string; home_session_id: string; session?: Session }>('/assistant/open');
 export const getAssistantSources = () => api.get<AssistantSource[]>('/assistant/sources');
 export const setAssistantSource = (id: string, enabled: boolean) => api.patch<AssistantSource>(`/assistant/sources/${encodeURIComponent(id)}`, { enabled });
 export const getAssistantActivity = () => api.get<AssistantActivity[]>('/assistant/activity?limit=50');

@@ -134,7 +134,7 @@
 	// all derive from `sidebarSessions`, so a row excluded here is absent from
 	// every one of them.
 	const sidebarSessions = $derived(
-		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys))
+		$sessions.filter((s) => s.id !== $assistantState?.home_session_id && isVisibleSidebarSession(s, liveKeys))
 	);
 
 	// User-wide run and task updates own sidebar state, not transcript replay.

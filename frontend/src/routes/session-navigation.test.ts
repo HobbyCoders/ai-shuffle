@@ -35,8 +35,8 @@ import { layout } from '$lib/stores/layout.svelte';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
-import { api } from '$lib/api/client';
-import { openSessionLink } from '$lib/services/session-navigation';
+import { api, type Session } from '$lib/api/client';
+import { openSession, openSessionLink } from '$lib/services/session-navigation';
 import { resourceSync } from '$lib/services/resource-sync';
 
 beforeEach(() => {
@@ -80,6 +80,26 @@ describe('page session refresh scheduling', () => {
 });
 
 describe('Swarm session navigation through the actual active-session store', () => {
+	it('opens a list-hidden assistant using the returned binding, without a worktree setup intent', () => {
+		const home: Session = {
+			id: 'assistant-home', title: 'My assistant', hidden: true, mode: 'code',
+			profile_id: 'test', status: 'completed', is_active: true,
+			project_id: null, project_v2_id: null,
+			total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0,
+			cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0,
+			turn_count: 0, tags: [], parent_session_id: null,
+			fork_point_message_index: null, has_forks: false,
+			created_at: '2026-10-02T00:00:00Z', updated_at: '2026-10-02T00:00:00Z',
+		};
+		expect(appData.current.sessions.some(row => row.id === home.id)).toBe(false);
+		openSession(home.id, home);
+		expect(activeSession.current.sessionId).toBe(home.id);
+		expect(activeSession.current.title).toBe(home.title);
+		expect(activeSession.current.worktreeIntent).toBe('local');
+		expect(activeSession.current.worktreeId).toBeNull();
+		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: home.id });
+		expect(appMode.current).toBe('code');
+	});
 	it('selects a child absent from the sidebar list and starts that child feed on click', async () => {
 		render(Page);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
