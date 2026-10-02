@@ -1,8 +1,9 @@
 /**
  * General: Appearance, Conversation, Thinking and tools, Region.
  *
- * F0 ships Appearance and Region as the worked example (GeneralPage.svelte
- * renders a `<SettingRow id>` for each entry here). Slice A adds the rest.
+ * GeneralPage.svelte renders one `<SettingRow id>` per entry. Defaults match
+ * the stores (chatPreferences, theme, timezonePreference) so the modified edge
+ * and reset follow them.
  */
 import type { SettingEntry } from '../types';
 
@@ -21,6 +22,87 @@ export const entries: SettingEntry[] = [
 		label: 'Theme style',
 		keywords: ['preset', 'colors', 'palette', 'swatches'],
 		default: ''
+	},
+	{
+		id: 'general.suggestReply',
+		category: 'general',
+		section: 'Conversation',
+		label: 'Suggest next reply',
+		hint: 'Uses an extra model call',
+		keywords: ['reply suggestions', 'next response', 'draft'],
+		default: false
+	},
+	{
+		id: 'general.autoScroll',
+		category: 'general',
+		section: 'Conversation',
+		label: 'Auto-scroll on new messages',
+		keywords: ['scroll', 'follow'],
+		default: true
+	},
+	{
+		id: 'general.timestamps',
+		category: 'general',
+		section: 'Conversation',
+		label: 'Show timestamps',
+		keywords: ['message time', 'clock', 'date'],
+		default: false
+	},
+	{
+		id: 'general.compact',
+		category: 'general',
+		section: 'Conversation',
+		label: 'Compact message view',
+		keywords: ['density', 'spacing'],
+		default: false
+	},
+	{
+		id: 'general.showThinking',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Show thinking blocks',
+		keywords: ['reasoning'],
+		default: true
+	},
+	{
+		id: 'general.expandThinking',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Expand thinking by default',
+		keywords: ['reasoning', 'collapse'],
+		default: false
+	},
+	{
+		id: 'general.thinkingSummary',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Show thinking summary',
+		keywords: ['reasoning', 'preview'],
+		default: true
+	},
+	{
+		id: 'general.expandTools',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Expand tool calls by default',
+		keywords: ['tool results', 'collapse'],
+		default: false
+	},
+	{
+		id: 'general.groupTools',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Group tool calls',
+		keywords: ['tool results', 'collapse'],
+		default: true
+	},
+	{
+		id: 'general.expandTodos',
+		category: 'general',
+		section: 'Thinking and tools',
+		label: 'Expand todo list by default',
+		keywords: ['tasks', 'checklist'],
+		default: true
 	},
 	{
 		id: 'general.timezone',

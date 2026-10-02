@@ -2,14 +2,16 @@
 	/**
 	 * General: Appearance, Conversation, Thinking and tools, Region.
 	 *
-	 * F0 builds Appearance and Region on the real stores as the worked example
-	 * of the pattern: one registry entry (entries/general.ts) per
-	 * `<SettingRow id>`, the control saves through its store, then
-	 * `flashSaved()`. Slice A adds Conversation and Thinking and tools.
+	 * One registry entry (entries/general.ts) per `<SettingRow id>`. Every
+	 * control saves through its store (theme, chatPreferences,
+	 * timezonePreference), then `flashSaved()`. The chat preferences sync to
+	 * the server through preferenceSync, so a change made elsewhere arrives
+	 * through the same store.
 	 */
 	import { onMount } from 'svelte';
 	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -17,6 +19,8 @@
 	import Segmented from '../rows/Segmented.svelte';
 	import SelectField, { type SelectGroup } from '../rows/SelectField.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
+	import Switch from '../rows/Switch.svelte';
+	import { getEntry } from '$lib/settings/registry';
 	import ThemeStyleGrid from './editors/ThemeStyleGrid.svelte';
 
 	type ThemeChoice = 'light' | 'dark' | 'system';
@@ -83,6 +87,7 @@
 
 	onMount(() => {
 		void timezonePreference.load();
+		void chatPreferences.load();
 	});
 
 	function setTheme(next: ThemeChoice) {
@@ -93,6 +98,35 @@
 	function setPreset(id: string) {
 		theme.setPreset(id || null);
 		flashSaved();
+	}
+
+	type ChatKey = keyof ChatPreferences;
+	/** Row id -> chat preference it edits, in page order per group. */
+	const CONVERSATION: [string, ChatKey][] = [
+		['general.suggestReply', 'suggestNextResponse'],
+		['general.autoScroll', 'autoScrollOnNewMessage'],
+		['general.timestamps', 'showMessageTimestamps'],
+		['general.compact', 'compactMessageView']
+	];
+	const THINKING: [string, ChatKey][] = [
+		['general.showThinking', 'showThinkingBlocks'],
+		['general.expandThinking', 'thinkingStartExpanded'],
+		['general.thinkingSummary', 'showThinkingSummary'],
+		['general.expandTools', 'toolsStartExpanded'],
+		['general.groupTools', 'groupToolCalls'],
+		['general.expandTodos', 'todosStartExpanded']
+	];
+	/** Only meaningful while thinking blocks show. */
+	const NEEDS_THINKING = new Set<ChatKey>(['thinkingStartExpanded', 'showThinkingSummary']);
+
+	function setChat(key: ChatKey, value: boolean) {
+		chatPreferences.updatePreference(key, value);
+		flashSaved();
+	}
+
+	function resetChat(id: string, key: ChatKey) {
+		const fallback = getEntry(id)?.default;
+		if (typeof fallback === 'boolean') setChat(key, fallback);
 	}
 
 	function setTimezone(tz: string) {
@@ -115,12 +149,29 @@
 			<ExpandToggle value={presetLabel} bind:open={styleOpen} />
 		</SettingRow>
 	</RowGroup>
+	<RowGroup title="Conversation">
+		{#each CONVERSATION as [id, key] (id)}
+			{@render chatRow(id, key)}
+		{/each}
+	</RowGroup>
+	<RowGroup title="Thinking and tools">
+		{#each THINKING as [id, key] (id)}
+			{@render chatRow(id, key)}
+		{/each}
+	</RowGroup>
 	<RowGroup title="Region">
 		<SettingRow id="general.timezone" value={$timezonePreference} onReset={() => setTimezone('local')}>
 			<SelectField value={$timezonePreference} groups={TIME_ZONES} onchange={setTimezone} />
 		</SettingRow>
 	</RowGroup>
 </PreferencePage>
+
+{#snippet chatRow(id: string, key: ChatKey)}
+	{@const off = NEEDS_THINKING.has(key) && !$chatPreferences.showThinkingBlocks}
+	<SettingRow {id} value={$chatPreferences[key]} onReset={() => resetChat(id, key)} dim={off}>
+		<Switch checked={$chatPreferences[key]} disabled={off} onchange={(v) => setChat(key, v)} />
+	</SettingRow>
+{/snippet}
 
 {#snippet styleGrid()}
 	<ThemeStyleGrid value={presetId} {mode} onselect={setPreset} />

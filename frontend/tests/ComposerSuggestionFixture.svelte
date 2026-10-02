@@ -1,6 +1,8 @@
 <script lang="ts">
 	import ChatInput from '../src/lib/components/chat/ChatInput.svelte';
-	import ChatBehaviorSection from '../src/lib/components/deck/cards/settings/ChatBehaviorSection.svelte';
+	import SettingRow from '../src/lib/components/settings/rows/SettingRow.svelte';
+	import Switch from '../src/lib/components/settings/rows/Switch.svelte';
+	import '../src/lib/components/settings/shell/settings.css';
 	import { chatPreferences } from '../src/lib/stores/chatPreferences.svelte';
 </script>
 
@@ -8,7 +10,14 @@
 	<h1>Reply suggestions</h1>
 	<p>Isolated fixture · mocked transports · no model calls</p>
 	<section class="composer"><ChatInput /></section>
-	<section class="settings"><ChatBehaviorSection chatPrefs={$chatPreferences} /></section>
+	<section class="settings settings-shell">
+		<SettingRow id="general.suggestReply">
+			<Switch
+				checked={$chatPreferences.suggestNextResponse}
+				onchange={(on) => chatPreferences.updatePreference('suggestNextResponse', on)}
+			/>
+		</SettingRow>
+	</section>
 </main>
 
 <style>
@@ -34,58 +43,8 @@
 	}
 
 	.settings {
+		display: block;
 		padding: 12px;
-	}
-
-	:global(.set-group) {
-		margin: 24px 0;
-	}
-
-	:global(.set-grouphead h3) {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-weight: 600;
-	}
-
-	:global(.set-grouphead svg) {
-		width: 18px;
-		height: 18px;
-	}
-
-	:global(.set-row) {
-		display: flex;
-		gap: 20px;
-		justify-content: space-between;
-		align-items: center;
-		padding: 12px 0;
-	}
-
-	:global(.lab p),
-	:global(.set-grouphead p) {
-		color: var(--muted-foreground);
-		font-size: 13px;
-	}
-
-	:global(.switch) {
-		width: 36px;
-		height: 22px;
-		border-radius: 20px;
-		background: var(--muted);
-		display: flex;
-		padding: 3px;
-	}
-
-	:global(.switch i) {
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		background: var(--foreground);
-	}
-
-	:global(.switch.on) {
-		background: var(--primary);
-		justify-content: flex-end;
 	}
 
 	:global(button:focus-visible) {

@@ -1,5 +1,5 @@
 import { cleanup, render } from '@testing-library/svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Component } from 'svelte';
 
 vi.mock('$lib/stores/theme.svelte', async () => {
@@ -18,7 +18,7 @@ vi.mock('$lib/stores/timezonePreference.svelte', async () => {
 
 import { assertCategoryCoverage, coverageLocations } from './testing/coverage';
 import { PREFERENCE_PAGES, COLLECTION_LOADERS, isPreferenceCategory, type CollectionCategory } from '$lib/components/settings/pages/index';
-import { CATEGORY_IDS } from './types';
+import { CATEGORY_IDS, type CategoryId } from './types';
 import { MODULES } from './registry';
 import { settingsNav } from './navigation.svelte';
 
@@ -31,6 +31,21 @@ function el(html: string): HTMLElement {
 }
 
 describe('assertCategoryCoverage', () => {
+	// A fixed General registry, so these harness tests do not follow the real page's rows.
+	const realGeneral = MODULES.general;
+	beforeEach(() => {
+		MODULES.general = {
+			entries: [
+				{ id: 'general.theme', category: 'general', section: 'Appearance', label: 'Theme' },
+				{ id: 'general.themeStyle', category: 'general', section: 'Appearance', label: 'Theme style' },
+				{ id: 'general.timezone', category: 'general', section: 'Region', label: 'Time zone' }
+			]
+		};
+	});
+	afterEach(() => {
+		MODULES.general = realGeneral;
+	});
+
 	it('passes when every entry renders and every anchor is registered', async () => {
 		await expect(
 			assertCategoryCoverage('general', () =>
@@ -87,20 +102,38 @@ describe('assertCategoryCoverage', () => {
 	});
 });
 
+/**
+ * Rows that only show in some states, which this bare render (no data, web
+ * app, defaults) does not reach. Each page's own test renders them.
+ */
+const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
+	voice: { 'voice.hotkey': 'only while global voice input is on' },
+	security: { 'security.runsAs': 'desktop app only' },
+	system: {
+		'system.seats': 'only with a license lease or a full-seats answer',
+		'system.licenseKey': 'only in licensed (non-beta) builds',
+		'system.deactivate': 'only with a license lease'
+	}
+};
+
 describe('every category page matches the registry', () => {
 	for (const category of CATEGORY_IDS) {
 		it(category, async () => {
 			const component: Component = isPreferenceCategory(category)
 				? PREFERENCE_PAGES[category]
 				: (await COLLECTION_LOADERS[category as CollectionCategory]()).default;
-			await assertCategoryCoverage(category, (where) => {
-				// Collections render the place being checked (f0-api.md, Conventions).
-				if (!isPreferenceCategory(category)) {
-					settingsNav.clearSelection(category);
-					settingsNav.go({ category, ...where });
-				}
-				return render(component).container;
-			});
+			await assertCategoryCoverage(
+				category,
+				(where) => {
+					// Collections render the place being checked (f0-api.md, Conventions).
+					if (!isPreferenceCategory(category)) {
+						settingsNav.clearSelection(category);
+						settingsNav.go({ category, ...where });
+					}
+					return render(component).container;
+				},
+				{ skip: CONDITIONAL_ROWS[category] }
+			);
 		});
 	}
 });

@@ -2,7 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: mocks }));
+vi.mock('$lib/settings/navigation.svelte', () => nav);
 import LicenseBanner from './LicenseBanner.svelte';
 
 beforeEach(() => vi.resetAllMocks());
@@ -26,7 +28,9 @@ it('stays silent in beta and when the license is fine', async () => {
 it('shows a dismissible warning during payment grace', async () => {
 	mocks.get.mockResolvedValue(licensed({ severity: 'warning', message: 'Your last payment failed.' }));
 	render(LicenseBanner);
-	expect((await screen.findByRole('status')).textContent).toContain('Your last payment failed. See Settings > License.');
+	expect((await screen.findByRole('status')).textContent).toContain('Your last payment failed.');
+	await fireEvent.click(screen.getByRole('button', { name: 'Open license' }));
+	expect(nav.openSettings).toHaveBeenCalledWith({ category: 'system', anchor: 'system.license' });
 	await fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
 	expect(screen.queryByRole('status')).toBeNull();
 });

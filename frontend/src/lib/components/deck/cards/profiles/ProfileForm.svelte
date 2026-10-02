@@ -285,7 +285,7 @@
 		</div>
 
 	{:else if activeTab === 'tools'}
-		<!-- Computer use is a GLOBAL toggle (Settings → Chat & Input), not agent
+		<!-- Computer use is a GLOBAL toggle (Settings > Security), not agent
 		     configuration: the picker's computer-use group follows that toggle. -->
 		<ProfileToolConfig
 			{toolSelectionMode}
