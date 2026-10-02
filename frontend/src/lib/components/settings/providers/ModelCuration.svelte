@@ -133,7 +133,11 @@
 	const title = $derived(mode === 'setup' ? 'Models' : 'Offered in pickers');
 	const count = $derived(rows.length ? `${checked} of ${rows.length}` : undefined);
 	const setupHint = $derived(
-		loading ? 'Fetching models' : source === 'preset' ? 'Preset catalog, pick what to offer' : `Fetched ${rows.length} ${rows.length === 1 ? 'model' : 'models'}, pick what to offer`
+		loading
+			? 'Fetching models'
+			: source === 'preset'
+				? 'Preset catalog, pick what to offer'
+				: `Fetched ${rows.length} ${rows.length === 1 ? 'model' : 'models'}, pick what to offer`
 	);
 </script>
 
@@ -166,13 +170,7 @@
 			<div class="pv-mlist">
 				{#each shown as r (r.id)}
 					<label class="pv-mrow">
-						<input
-							type="checkbox"
-							class="pv-chk"
-							checked={r.checked}
-							disabled={saving}
-							onchange={() => toggle(r.id)}
-						/>
+						<input type="checkbox" class="pv-chk" checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
 						<span class="id">{r.id}</span>
 						{#if r.label && r.label !== r.id}<span class="lbl">{r.label}</span>{:else}<span></span>{/if}
 					</label>
@@ -195,7 +193,9 @@
 	</div>
 	{#if mode === 'setup'}
 		<div class="pv-acts">
-			<button type="button" class="st-btn ghost" disabled={saving || loading} onclick={() => onDone?.()}>Choose later</button>
+			<button type="button" class="st-btn ghost" disabled={saving || loading} onclick={() => onDone?.()}
+				>Choose later</button
+			>
 			<button type="button" class="st-btn primary" disabled={saving || loading || checked === 0} onclick={useSelected}>
 				{saving ? 'Saving' : `Use selected${checked ? ` (${checked})` : ''}`}
 			</button>

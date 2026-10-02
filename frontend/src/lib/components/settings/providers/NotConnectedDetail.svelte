@@ -14,7 +14,13 @@
 	let { provider }: Props = $props();
 	const kinds = $derived(kindsOf(provider.id));
 	const models = $derived(
-		provider.claude ? 'Built in' : provider.media ? 'Media models' : provider.id === 'openrouter' ? 'Hundreds' : 'From the key'
+		provider.claude
+			? 'Built in'
+			: provider.media
+				? 'Media models'
+				: provider.id === 'openrouter'
+					? 'Hundreds'
+					: 'From the key'
 	);
 </script>
 

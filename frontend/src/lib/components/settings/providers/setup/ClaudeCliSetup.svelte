@@ -67,7 +67,9 @@
 {:else if signedIn}
 	<div class="pv-card">
 		<div class="pv-flow">
-			<span class="status" role="status"><StatusDot tone="ok" />CLI signed in{cli.status.email ? ` as ${cli.status.email}` : ''}</span>
+			<span class="status" role="status"
+				><StatusDot tone="ok" />CLI signed in{cli.status.email ? ` as ${cli.status.email}` : ''}</span
+			>
 		</div>
 	</div>
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
@@ -85,16 +87,25 @@
 	<RowGroup title="Sign in">
 		{#if !cli.status.installed}
 			<SettingRow label="Claude Code CLI" hint="Not installed on this worker">
-				<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}><RefreshCw />Check again</button>
+				<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
+					><RefreshCw />Check again</button
+				>
 			</SettingRow>
 		{:else if canUseTerminal}
 			<SettingRow label="Claude Code CLI" hint="Your own Claude account">
-				<button type="button" class="st-btn primary" onclick={() => cli.startLogin()}><SquareTerminal />Start sign-in</button>
+				<button type="button" class="st-btn primary" onclick={() => cli.startLogin()}
+					><SquareTerminal />Start sign-in</button
+				>
 			</SettingRow>
 		{/if}
 		{#if cli.status.installed}
-			<SettingRow label={canUseTerminal ? 'Or on the host' : 'Run on the host'} hint={cli.status.login.surface === 'docker' ? 'Unraid: the Terminal button' : undefined}>
-				<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}><RefreshCw />Check again</button>
+			<SettingRow
+				label={canUseTerminal ? 'Or on the host' : 'Run on the host'}
+				hint={cli.status.login.surface === 'docker' ? 'Unraid: the Terminal button' : undefined}
+			>
+				<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
+					><RefreshCw />Check again</button
+				>
 			</SettingRow>
 			<div class="cmd"><CodeBlock code={cli.hostCommand} prompt /></div>
 		{/if}

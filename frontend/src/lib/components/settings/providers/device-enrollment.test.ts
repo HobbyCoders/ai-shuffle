@@ -49,12 +49,27 @@ import { DeviceEnrollment } from './device-enrollment.svelte';
 const DEVICE = { user_code: 'ABCD-1234', verification_uri: 'https://example.test/verify' };
 
 const KINDS = [
-	{ kind: 'codex' as const, start: 'codexDeviceStart' as const, poll: 'codexDevicePoll' as const, type: 'chatgpt', base: 'https://chatgpt.com/backend-api/codex', name: 'ChatGPT' },
-	{ kind: 'xai' as const, start: 'xaiDeviceStart' as const, poll: 'xaiDevicePoll' as const, type: 'grok', base: 'https://api.x.ai/v1', name: 'Grok' }
+	{
+		kind: 'codex' as const,
+		start: 'codexDeviceStart' as const,
+		poll: 'codexDevicePoll' as const,
+		type: 'chatgpt',
+		base: 'https://chatgpt.com/backend-api/codex',
+		name: 'ChatGPT'
+	},
+	{
+		kind: 'xai' as const,
+		start: 'xaiDeviceStart' as const,
+		poll: 'xaiDevicePoll' as const,
+		type: 'grok',
+		base: 'https://api.x.ai/v1',
+		name: 'Grok'
+	}
 ];
 
 beforeEach(() => {
-	for (const [key, value] of Object.entries(mocks)) if (typeof value === 'function') (value as ReturnType<typeof vi.fn>).mockReset();
+	for (const [key, value] of Object.entries(mocks))
+		if (typeof value === 'function') (value as ReturnType<typeof vi.fn>).mockReset();
 	mocks.storeProviders = [];
 	for (const k of KINDS) {
 		mocks[k.start].mockResolvedValue(DEVICE);
@@ -70,22 +85,25 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe.each(KINDS)('$name sign-in', ({ kind, start, poll, type, base, name }) => {
-	it.each([null, 'prov-9'])('keeps the original row and ownership after prop updates (%s)', async (existingProviderId) => {
-		mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
-		const onCancel = vi.fn();
-		const { findByText, rerender } = render(DeviceCodeSetup, { kind, existingProviderId, onCancel });
-		await findByText('Cancel');
-		await rerender({ kind, existingProviderId: existingProviderId ? null : 'prov-other', onCancel });
-		await fireEvent.click(await findByText('Cancel'));
-		await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
-		expect(mocks[start]).toHaveBeenCalledExactlyOnceWith(existingProviderId ?? 'draft-1');
-		if (existingProviderId) {
-			expect(mocks.createModelProvider).not.toHaveBeenCalled();
-			expect(mocks.deleteModelProvider).not.toHaveBeenCalled();
-		} else {
-			expect(mocks.deleteModelProvider).toHaveBeenCalledExactlyOnceWith('draft-1');
+	it.each([null, 'prov-9'])(
+		'keeps the original row and ownership after prop updates (%s)',
+		async (existingProviderId) => {
+			mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
+			const onCancel = vi.fn();
+			const { findByText, rerender } = render(DeviceCodeSetup, { kind, existingProviderId, onCancel });
+			await findByText('Cancel');
+			await rerender({ kind, existingProviderId: existingProviderId ? null : 'prov-other', onCancel });
+			await fireEvent.click(await findByText('Cancel'));
+			await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
+			expect(mocks[start]).toHaveBeenCalledExactlyOnceWith(existingProviderId ?? 'draft-1');
+			if (existingProviderId) {
+				expect(mocks.createModelProvider).not.toHaveBeenCalled();
+				expect(mocks.deleteModelProvider).not.toHaveBeenCalled();
+			} else {
+				expect(mocks.deleteModelProvider).toHaveBeenCalledExactlyOnceWith('draft-1');
+			}
 		}
-	});
+	);
 
 	it('draft mode creates the placeholder row with the fixed endpoint, then starts', async () => {
 		mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
@@ -193,7 +211,10 @@ describe('clipboard', () => {
 	});
 
 	it.each(['missing', 'blocked'])('copies the sign-in code when the clipboard API is %s', async (mode) => {
-		vi.stubGlobal('navigator', mode === 'missing' ? {} : { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('blocked')) } });
+		vi.stubGlobal(
+			'navigator',
+			mode === 'missing' ? {} : { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('blocked')) } }
+		);
 		const exec = vi.fn(() => {
 			expect((document.activeElement as HTMLTextAreaElement).value).toBe(DEVICE.user_code);
 			return true;

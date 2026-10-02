@@ -94,10 +94,10 @@ export class ClaudeCliLogin {
 			const next = await getClaudeCliStatus(refresh);
 			if (this.#disposed) return;
 			const prev = this.status;
-			const changed = prev !== null && (prev.signed_in !== next.signed_in
-				|| !!prev.relogin_notice !== !!next.relogin_notice);
-			const accountChanged = prev !== null && (prev.signed_in !== next.signed_in
-				|| (prev.plan ?? null) !== (next.plan ?? null));
+			const changed =
+				prev !== null && (prev.signed_in !== next.signed_in || !!prev.relogin_notice !== !!next.relogin_notice);
+			const accountChanged =
+				prev !== null && (prev.signed_in !== next.signed_in || (prev.plan ?? null) !== (next.plan ?? null));
 			this.status = next;
 			// The app-wide gates and the upgrade notice read /auth/status.
 			if (changed) auth.checkAuth().catch(() => {});

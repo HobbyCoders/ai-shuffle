@@ -37,11 +37,7 @@
 {#if s}
 	<RowGroup title="This hour">
 		<SettingRow label="Unattended, this worker" hint={s.applies ? undefined : 'Loop guard not active'}>
-			<Meter
-				used={s.usage.install_last_hour}
-				cap={s.install_turns_per_hour}
-				label="Unattended turns this hour"
-			/>
+			<Meter used={s.usage.install_last_hour} cap={s.install_turns_per_hour} label="Unattended turns this hour" />
 		</SettingRow>
 	</RowGroup>
 {/if}

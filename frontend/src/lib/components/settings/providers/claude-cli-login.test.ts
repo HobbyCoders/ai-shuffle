@@ -3,19 +3,50 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), hydrate: vi.fn(), checkAuth: vi.fn() }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get, post: mocks.post },
-	getErrorMessage: (cause: { detail?: string; message?: string }, fallback: string) => cause?.detail ?? cause?.message ?? fallback
+	getErrorMessage: (cause: { detail?: string; message?: string }, fallback: string) =>
+		cause?.detail ?? cause?.message ?? fallback
 }));
 vi.mock('$lib/constants/models.svelte', () => ({ hydrateModelRegistry: mocks.hydrate }));
 vi.mock('$lib/stores/auth.svelte', () => ({ auth: { checkAuth: mocks.checkAuth } }));
 
 import { ClaudeCliLogin } from './claude-cli-login.svelte';
 
-const login = { surface: 'docker', terminal: true, command: 'claude auth login', logout_command: 'claude auth logout', status_command: 'claude auth status', docker_command: 'docker exec -it -u appuser <container> claude auth login' };
+const login = {
+	surface: 'docker',
+	terminal: true,
+	command: 'claude auth login',
+	logout_command: 'claude auth logout',
+	status_command: 'claude auth status',
+	docker_command: 'docker exec -it -u appuser <container> claude auth login'
+};
 const status = (over = {}) => ({
-	installed: true, signed_in: false, auth_method: 'none', auth_method_label: null, email: null, org_name: null, plan: null,
-	api_provider: null, cli_version: '2.1.285', binary_path: '/home/appuser/.local/bin/claude', error: null, checked_at: 0, login, ...over
+	installed: true,
+	signed_in: false,
+	auth_method: 'none',
+	auth_method_label: null,
+	email: null,
+	org_name: null,
+	plan: null,
+	api_provider: null,
+	cli_version: '2.1.285',
+	binary_path: '/home/appuser/.local/bin/claude',
+	error: null,
+	checked_at: 0,
+	login,
+	...over
 });
-const idle = { supported: true, active: false, running: false, exit_code: null, succeeded: null, output: '', offset: 0, reset: false, url: null, error: null };
+const idle = {
+	supported: true,
+	active: false,
+	running: false,
+	exit_code: null,
+	succeeded: null,
+	output: '',
+	offset: 0,
+	reset: false,
+	url: null,
+	error: null
+};
 
 beforeEach(() => {
 	vi.resetAllMocks();
@@ -39,12 +70,22 @@ describe('ClaudeCliLogin', () => {
 	it('runs the login, appends output, passes the code and reloads when the CLI exits', async () => {
 		const onStatus = vi.fn();
 		mocks.get.mockImplementation(async (path: string) => {
-			if (path.startsWith('/auth/claude/cli-login')) return { ...idle, active: true, running: false, succeeded: true, output: 'Login successful\n', offset: 90 };
+			if (path.startsWith('/auth/claude/cli-login'))
+				return { ...idle, active: true, running: false, succeeded: true, output: 'Login successful\n', offset: 90 };
 			return status({ signed_in: path.includes('refresh') });
 		});
 		mocks.post.mockImplementation(async (path: string) => {
-			if (path === '/auth/claude/cli-login/start') return { ...idle, active: true, running: true, output: 'Open this link\n', offset: 14, url: 'https://claude.ai/oauth' };
-			if (path === '/auth/claude/cli-login/input') return { ...idle, active: true, running: true, output: 'code ok\n', offset: 22 };
+			if (path === '/auth/claude/cli-login/start')
+				return {
+					...idle,
+					active: true,
+					running: true,
+					output: 'Open this link\n',
+					offset: 14,
+					url: 'https://claude.ai/oauth'
+				};
+			if (path === '/auth/claude/cli-login/input')
+				return { ...idle, active: true, running: true, output: 'code ok\n', offset: 22 };
 			return idle;
 		});
 		const cli = new ClaudeCliLogin({ onStatus });
@@ -82,7 +123,9 @@ describe('ClaudeCliLogin', () => {
 
 	it('resumes a login still running from before a reload', async () => {
 		mocks.get.mockImplementation(async (path: string) =>
-			path.startsWith('/auth/claude/cli-login') ? { ...idle, active: true, running: true, output: 'waiting', offset: 7 } : status()
+			path.startsWith('/auth/claude/cli-login')
+				? { ...idle, active: true, running: true, output: 'waiting', offset: 7 }
+				: status()
 		);
 		const cli = new ClaudeCliLogin();
 		await cli.init(() => true);

@@ -46,7 +46,9 @@
 		{#if s.enabled}
 			<SettingRow
 				id="providers.loopSession"
-				hint={s.session_turns_per_hour === s.defaults.session_turns_per_hour ? undefined : `Default ${s.defaults.session_turns_per_hour}`}
+				hint={s.session_turns_per_hour === s.defaults.session_turns_per_hour
+					? undefined
+					: `Default ${s.defaults.session_turns_per_hour}`}
 				value={s.session_turns_per_hour}
 				defaultValue={s.defaults.session_turns_per_hour}
 				onReset={() => guard.save({ session_turns_per_hour: s.defaults.session_turns_per_hour })}
@@ -62,7 +64,9 @@
 			</SettingRow>
 			<SettingRow
 				id="providers.loopWorker"
-				hint={s.install_turns_per_hour === s.defaults.install_turns_per_hour ? undefined : `Default ${s.defaults.install_turns_per_hour}`}
+				hint={s.install_turns_per_hour === s.defaults.install_turns_per_hour
+					? undefined
+					: `Default ${s.defaults.install_turns_per_hour}`}
 				value={s.install_turns_per_hour}
 				defaultValue={s.defaults.install_turns_per_hour}
 				onReset={() => guard.save({ install_turns_per_hour: s.defaults.install_turns_per_hour })}
@@ -98,8 +102,18 @@
 	<RowGroup title="Waiting for you" count={s.held.length} id="providers-held">
 		{#each s.held as turn (turn.id)}
 			<SettingRow label={heldTitle(turn.source, turn.held_at)} hint={promptHint(turn.prompt)}>
-				<button type="button" class="st-btn primary sm" disabled={guard.busy} onclick={() => guard.act(turn.id, 'confirm')}>Confirm</button>
-				<button type="button" class="st-btn ghost sm" disabled={guard.busy} onclick={() => guard.act(turn.id, 'dismiss')}>Dismiss</button>
+				<button
+					type="button"
+					class="st-btn primary sm"
+					disabled={guard.busy}
+					onclick={() => guard.act(turn.id, 'confirm')}>Confirm</button
+				>
+				<button
+					type="button"
+					class="st-btn ghost sm"
+					disabled={guard.busy}
+					onclick={() => guard.act(turn.id, 'dismiss')}>Dismiss</button
+				>
 			</SettingRow>
 		{:else}
 			<SettingRow label="No held turns" />

@@ -11,7 +11,11 @@
 
 	let { provider }: Props = $props();
 	const selected = $derived(settingsNav.selectedItem('providers') === provider.item);
-	const kinds = $derived(kindsOf(provider.id).map((k) => k.label).join(', '));
+	const kinds = $derived(
+		kindsOf(provider.id)
+			.map((k) => k.label)
+			.join(', ')
+	);
 </script>
 
 <button

@@ -27,7 +27,9 @@
 	let { draft, provider }: Props = $props();
 
 	/** Claude has no other credential: the new one becomes the active one. */
-	const claudeFirst = $derived(!!provider?.claude && !provider.credentials.some((c) => !c.draft && c.status !== 'warn'));
+	const claudeFirst = $derived(
+		!!provider?.claude && !provider.credentials.some((c) => !c.draft && c.status !== 'warn')
+	);
 
 	const subtitle = $derived(
 		provider?.draft
@@ -55,37 +57,44 @@
 
 <DetailPane name={draft.name} badge="Draft" status="busy" statusText="Setting up" {subtitle} item={draft.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" status="busy" />{/snippet}
-	
-		{#if draft.flavor === 'device'}
-			{#if draft.step === 'models' && draft.rowId}
-				<ModelCuration mode="setup" providerId={draft.rowId} onDone={() => finish(rowItem(draft.rowId!))} />
-			{:else if draft.step === 'run'}
-				<RowGroup title="Sign in" bare>
-					<DeviceCodeSetup
-						kind={provider.id === 'openai' ? 'codex' : 'xai'}
-						draftRowId={draft.rowId}
-						onRow={(id) => id && id !== draft.rowId && providerDrafts.update(draft.item, { rowId: id, ownsRow: true })}
-						onConnected={(id) => providerDrafts.update(draft.item, { rowId: id, ownsRow: false, step: 'models' })}
-						onCancel={cancel}
-					/>
-				</RowGroup>
-			{:else}
-				<RowGroup title="Sign in">
-					<SettingRow label={provider.id === 'openai' ? 'Sign in with ChatGPT' : 'Sign in with SuperGrok'} hint="No key needed">
-						<button type="button" class="st-btn primary" onclick={() => providerDrafts.update(draft.item, { step: 'run' })}>
-							Start sign-in
-						</button>
-					</SettingRow>
-				</RowGroup>
-				<div class="pv-acts"><button type="button" class="st-btn ghost" onclick={cancel}>Cancel</button></div>
-			{/if}
-		{:else if draft.flavor === 'cli'}
-			<ClaudeCliSetup makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
-		{:else if draft.flavor === 'gateway'}
-			<GatewaySetup {draft} onFinish={finish} onCancel={cancel} />
-		{:else if draft.flavor === 'fal'}
-			<FalKeySetup onFinish={finish} onCancel={cancel} />
+
+	{#if draft.flavor === 'device'}
+		{#if draft.step === 'models' && draft.rowId}
+			<ModelCuration mode="setup" providerId={draft.rowId} onDone={() => finish(rowItem(draft.rowId!))} />
+		{:else if draft.step === 'run'}
+			<RowGroup title="Sign in" bare>
+				<DeviceCodeSetup
+					kind={provider.id === 'openai' ? 'codex' : 'xai'}
+					draftRowId={draft.rowId}
+					onRow={(id) => id && id !== draft.rowId && providerDrafts.update(draft.item, { rowId: id, ownsRow: true })}
+					onConnected={(id) => providerDrafts.update(draft.item, { rowId: id, ownsRow: false, step: 'models' })}
+					onCancel={cancel}
+				/>
+			</RowGroup>
 		{:else}
-			<KeySetup {draft} makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
+			<RowGroup title="Sign in">
+				<SettingRow
+					label={provider.id === 'openai' ? 'Sign in with ChatGPT' : 'Sign in with SuperGrok'}
+					hint="No key needed"
+				>
+					<button
+						type="button"
+						class="st-btn primary"
+						onclick={() => providerDrafts.update(draft.item, { step: 'run' })}
+					>
+						Start sign-in
+					</button>
+				</SettingRow>
+			</RowGroup>
+			<div class="pv-acts"><button type="button" class="st-btn ghost" onclick={cancel}>Cancel</button></div>
 		{/if}
+	{:else if draft.flavor === 'cli'}
+		<ClaudeCliSetup makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
+	{:else if draft.flavor === 'gateway'}
+		<GatewaySetup {draft} onFinish={finish} onCancel={cancel} />
+	{:else if draft.flavor === 'fal'}
+		<FalKeySetup onFinish={finish} onCancel={cancel} />
+	{:else}
+		<KeySetup {draft} makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
+	{/if}
 </DetailPane>

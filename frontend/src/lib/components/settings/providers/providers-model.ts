@@ -244,15 +244,23 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 		const account = [cli.email, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
 		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : subActive ? 'ok' : 'standby';
 		const statusText = !ready
-			? cli.installed === false ? 'CLI not installed' : 'Not signed in'
-			: mode === 'off' ? 'Off' : subActive ? 'Active for Claude' : 'Standby';
+			? cli.installed === false
+				? 'CLI not installed'
+				: 'Not signed in'
+			: mode === 'off'
+				? 'Off'
+				: subActive
+					? 'Active for Claude'
+					: 'Standby';
 		out.push({
 			item: CLAUDE_SUB_ITEM,
 			providerId: 'claude',
 			flavor: 'cli',
 			name: plan ? `Claude ${plan} subscription` : 'Claude subscription',
 			kind: 'Subscription',
-			summary: ready ? [account || 'Signed in', subActive ? '' : statusText.toLowerCase()].filter(Boolean).join(', ') : statusText,
+			summary: ready
+				? [account || 'Signed in', subActive ? '' : statusText.toLowerCase()].filter(Boolean).join(', ')
+				: statusText,
 			status,
 			statusText,
 			on: subActive && ready,
@@ -294,9 +302,14 @@ export function claudePlan(plan: string | null | undefined): string | null {
 
 /** A subscription plan as the worker reports it ("pro", "supergrok_heavy") for display: "Pro", "SuperGrok Heavy". */
 export function planLabel(plan: string | null | undefined): string | null {
-	const words = (plan ?? '').trim().split(/[\s_-]+/).filter(Boolean);
+	const words = (plan ?? '')
+		.trim()
+		.split(/[\s_-]+/)
+		.filter(Boolean);
 	if (!words.length) return null;
-	return words.map((w) => (w.toLowerCase() === 'supergrok' ? 'SuperGrok' : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
+	return words
+		.map((w) => (w.toLowerCase() === 'supergrok' ? 'SuperGrok' : w.charAt(0).toUpperCase() + w.slice(1)))
+		.join(' ');
 }
 
 /** One model_providers row as a credential. */
@@ -308,7 +321,13 @@ export function rowCredential(row: ModelProvider): CredentialView {
 	if (flavor === 'device') {
 		const signedIn = !!row.codex_access_token_set && !row.needs_reauth;
 		const status: StatusTone = !row.enabled ? 'off' : signedIn ? 'ok' : 'warn';
-		const statusText = row.needs_reauth ? 'Reconnect needed' : !row.codex_access_token_set ? 'Not signed in' : row.enabled ? 'On' : 'Off';
+		const statusText = row.needs_reauth
+			? 'Reconnect needed'
+			: !row.codex_access_token_set
+				? 'Not signed in'
+				: row.enabled
+					? 'On'
+					: 'Off';
 		return {
 			item: rowItem(row.id),
 			providerId,
@@ -532,10 +551,18 @@ export function draftName(providerId: ProviderId, flavor: CredentialFlavor, exis
 }
 
 /** Fixed endpoints of the API-key providers. */
-export const KEY_CONFIG: Record<'openai' | 'grok' | 'openrouter', { name: string; provider_type: string; base_url: string; placeholder: string }> = {
+export const KEY_CONFIG: Record<
+	'openai' | 'grok' | 'openrouter',
+	{ name: string; provider_type: string; base_url: string; placeholder: string }
+> = {
 	openai: { name: 'OpenAI', provider_type: 'openai', base_url: 'https://api.openai.com/v1', placeholder: 'sk-…' },
 	grok: { name: 'Grok', provider_type: 'xai', base_url: 'https://api.x.ai/v1', placeholder: 'xai-…' },
-	openrouter: { name: 'OpenRouter', provider_type: 'openrouter', base_url: 'https://openrouter.ai/api', placeholder: 'sk-or-…' }
+	openrouter: {
+		name: 'OpenRouter',
+		provider_type: 'openrouter',
+		base_url: 'https://openrouter.ai/api',
+		placeholder: 'sk-or-…'
+	}
 };
 
 // ============================================================================
@@ -546,7 +573,11 @@ export const KEY_CONFIG: Record<'openai' | 'grok' | 'openrouter', { name: string
 export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: StatusTone; text: string } {
 	if (!claude) return { status: 'off', text: 'Loading' };
 	if (claude.mode === 'off') return { status: 'off', text: 'Off, not in the picker' };
-	const ready = claude.gate ? claude.gate.claude_credential_ready : claude.mode === 'subscription' ? !!claude.cli.signed_in : claude.api_key.set;
+	const ready = claude.gate
+		? claude.gate.claude_credential_ready
+		: claude.mode === 'subscription'
+			? !!claude.cli.signed_in
+			: claude.api_key.set;
 	if (!ready) return { status: 'warn', text: 'Not ready' };
 	return { status: 'ok', text: claude.mode === 'subscription' ? 'Runs on subscription' : 'Runs on API key' };
 }
@@ -563,5 +594,8 @@ export function attentionCount(views: ProviderView[]): number {
 /** Rows whose Responses provider can run GenerateNativeImage. */
 export function supportsNativeImages(row: ModelProvider | undefined): boolean {
 	if (!row?.enabled) return false;
-	return ['openai', 'chatgpt', 'xai', 'grok'].includes(row.provider_type) || ['chatgpt', 'grok'].includes(row.auth_mode ?? '');
+	return (
+		['openai', 'chatgpt', 'xai', 'grok'].includes(row.provider_type) ||
+		['chatgpt', 'grok'].includes(row.auth_mode ?? '')
+	);
 }

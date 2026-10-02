@@ -30,7 +30,8 @@
 <div class="pv-card">
 	<div class="pv-flow" aria-label="Claude Code sign-in terminal" role="group">
 		<div class="pv-flow-head">Running <span class="st-mono">claude auth login</span> on this worker</div>
-		<pre bind:this={outputEl} class="pv-term" data-testid="claude-cli-terminal"><span class="p">$ </span>claude auth login
+		<pre bind:this={outputEl} class="pv-term" data-testid="claude-cli-terminal"><span class="p"
+				>$ </span>claude auth login
 {cli.output || 'Starting…'}</pre>
 		{#if cli.url}
 			<div>
@@ -52,7 +53,12 @@
 						if (e.key === 'Enter') void cli.sendCode();
 					}}
 				/>
-				<button type="button" class="st-btn primary" disabled={!cli.code.trim() || cli.sending} onclick={() => cli.sendCode()}>Send</button>
+				<button
+					type="button"
+					class="st-btn primary"
+					disabled={!cli.code.trim() || cli.sending}
+					onclick={() => cli.sendCode()}>Send</button
+				>
 				<button type="button" class="st-btn ghost" onclick={close}>Stop</button>
 			</div>
 		{:else}

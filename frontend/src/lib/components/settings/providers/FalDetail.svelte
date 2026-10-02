@@ -104,7 +104,15 @@
 			<ValueText mono tone="fg" value={s.falKeyMasked || 'Stored'} />
 		</SettingRow>
 		<SettingRow id="providers.falKey">
-			<TextField bind:value={key} type="password" mono placeholder="New fal.ai key" width={180} disabled={saving} label="New fal.ai key" />
+			<TextField
+				bind:value={key}
+				type="password"
+				mono
+				placeholder="New fal.ai key"
+				width={180}
+				disabled={saving}
+				label="New fal.ai key"
+			/>
 			<button type="button" class="st-btn" disabled={saving || !key.trim()} onclick={save}>Save</button>
 		</SettingRow>
 	</RowGroup>

@@ -61,9 +61,7 @@ describe('grouping', () => {
 	});
 
 	it('counts the credentials that are on; independent rows can all be on', () => {
-		const views = buildProviders(
-			input({ rows: [chatgptRow(), row({ id: 'k1' }), row({ id: 'k2', enabled: false })] })
-		);
+		const views = buildProviders(input({ rows: [chatgptRow(), row({ id: 'k1' }), row({ id: 'k2', enabled: false })] }));
 		const openai = byId(views, 'openai');
 		expect(openai.onCount).toBe(2);
 		expect(openai.credentials.map((c) => [c.switchable, c.on])).toEqual([
@@ -76,7 +74,13 @@ describe('grouping', () => {
 	it('marks an expired subscription for attention without taking it off its switch', () => {
 		const views = buildProviders(input({ rows: [grokRow()] }));
 		const sub = byId(views, 'grok').credentials[0];
-		expect(sub).toMatchObject({ status: 'warn', statusText: 'Reconnect needed', on: false, enabled: true, attention: true });
+		expect(sub).toMatchObject({
+			status: 'warn',
+			statusText: 'Reconnect needed',
+			on: false,
+			enabled: true,
+			attention: true
+		});
 		expect(attentionCount(views)).toBe(1);
 	});
 
@@ -143,13 +147,29 @@ describe('Claude', () => {
 	it('shows the selected credential even when it is not ready', () => {
 		const summary = claudeSummary({
 			mode: 'subscription',
-			cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
+			cli: {
+				installed: true,
+				signed_in: false,
+				email: null,
+				org_name: null,
+				plan: null,
+				auth_method_label: null,
+				error: null
+			},
 			api_key: { set: false, last4: null },
-			gate: { ready: false, mode: 'subscription', claude_credential_ready: false, reason: 'Sign in', license_allows_runs: true }
+			gate: {
+				ready: false,
+				mode: 'subscription',
+				claude_credential_ready: false,
+				reason: 'Sign in',
+				license_allows_runs: true
+			}
 		});
 		const views = buildProviders(input({ claude: summary }));
 		const claude = byId(views, 'claude');
-		expect(claude.credentials.map((c) => [c.item, c.status, c.statusText])).toEqual([[CLAUDE_SUB_ITEM, 'warn', 'Not signed in']]);
+		expect(claude.credentials.map((c) => [c.item, c.status, c.statusText])).toEqual([
+			[CLAUDE_SUB_ITEM, 'warn', 'Not signed in']
+		]);
 		expect(attentionCount(views)).toBe(1);
 		expect(claudeHeaderStatus(summary).status).toBe('warn');
 	});
@@ -157,7 +177,15 @@ describe('Claude', () => {
 	it('is not connected when off with nothing signed in or stored', () => {
 		const summary = claudeSummary({
 			mode: 'off',
-			cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
+			cli: {
+				installed: true,
+				signed_in: false,
+				email: null,
+				org_name: null,
+				plan: null,
+				auth_method_label: null,
+				error: null
+			},
 			api_key: { set: false, last4: null }
 		});
 		const { notConnected } = splitProviders(buildProviders(input({ claude: summary })));

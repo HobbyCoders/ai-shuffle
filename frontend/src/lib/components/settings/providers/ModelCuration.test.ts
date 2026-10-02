@@ -25,7 +25,8 @@ vi.mock('$lib/stores/providers.svelte', async () => {
 		providers: {
 			current: { providers: [], claude: null },
 			fetchProviderModels: api.fetchProviderModels,
-			saveProvider: (data: Parameters<typeof api.updateModelProvider>[1], id: string) => api.updateModelProvider(id, data),
+			saveProvider: (data: Parameters<typeof api.updateModelProvider>[1], id: string) =>
+				api.updateModelProvider(id, data),
 			refreshProviders: mocks.refresh,
 			setAnthropicKey: mocks.setAnthropicKey,
 			loadClaude: mocks.loadClaude
@@ -46,10 +47,24 @@ const raw = {
 	default_reasoning_level: null,
 	reasoning_capabilities: { version: 1 as const, effort_levels: [], default_effort: null, mandatory: true }
 };
-const stale = { supported_parameters: ['reasoning'], supported_reasoning_levels: ['high'], default_reasoning_level: 'high' };
-const entry = (id: string, metadata: Partial<ProviderModelEntry> = raw): ProviderModelEntry => ({ id, label: id, ...metadata });
+const stale = {
+	supported_parameters: ['reasoning'],
+	supported_reasoning_levels: ['high'],
+	default_reasoning_level: 'high'
+};
+const entry = (id: string, metadata: Partial<ProviderModelEntry> = raw): ProviderModelEntry => ({
+	id,
+	label: id,
+	...metadata
+});
 const router = (models: ProviderModelEntry[]): ModelProvider =>
-	row({ id: 'router', name: 'OpenRouter API key', provider_type: 'openrouter', base_url: 'https://openrouter.ai/api', models });
+	row({
+		id: 'router',
+		name: 'OpenRouter API key',
+		provider_type: 'openrouter',
+		base_url: 'https://openrouter.ai/api',
+		models
+	});
 const saved = () => mocks.patch.mock.calls.at(-1)![1].models;
 const toggle = async (id: string) => {
 	await fireEvent.click(await screen.findByRole('checkbox', { name: id }));
@@ -84,7 +99,10 @@ describe('Models tab', () => {
 	});
 
 	it('keeps missing raw fields from storage while replacing the fresh ones', async () => {
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [{ id: 'partial', label: 'partial', supported_reasoning_levels: [] }, entry('toggle')] });
+		mocks.post.mockResolvedValue({
+			source: 'upstream',
+			models: [{ id: 'partial', label: 'partial', supported_reasoning_levels: [] }, entry('toggle')]
+		});
 		render(ModelCuration, { row: router([entry('partial', stale)]) });
 		await toggle('toggle');
 		expect(saved()[0]).toEqual({ ...entry('partial', stale), supported_reasoning_levels: [] });
@@ -116,7 +134,11 @@ describe('Models tab', () => {
 	});
 
 	it('explains a media model the filter finds in the hidden list', async () => {
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('chat')], hidden: [{ id: 'gpt-image-2', label: 'GPT Image 2', media_kind: 'image' }] });
+		mocks.post.mockResolvedValue({
+			source: 'upstream',
+			models: [entry('chat')],
+			hidden: [{ id: 'gpt-image-2', label: 'GPT Image 2', media_kind: 'image' }]
+		});
 		render(ModelCuration, { row: router([]) });
 		await screen.findByRole('checkbox', { name: 'chat' });
 		await fireEvent.input(screen.getByLabelText('Filter models'), { target: { value: 'image' } });
@@ -127,7 +149,13 @@ describe('Models tab', () => {
 
 describe('adding an API key', () => {
 	const catalog = [
-		{ id: 'model-a', label: 'Model A', context_window: 200000, supported_reasoning_levels: ['low', 'high'], default_reasoning_level: 'high' },
+		{
+			id: 'model-a',
+			label: 'Model A',
+			context_window: 200000,
+			supported_reasoning_levels: ['low', 'high'],
+			default_reasoning_level: 'high'
+		},
 		{ id: 'model-b', label: 'Model B' }
 	];
 
@@ -152,7 +180,12 @@ describe('adding an API key', () => {
 		await fireEvent.input(screen.getByLabelText('API key'), { target: { value: ' test-key ' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		await screen.findByRole('checkbox', { name: 'model-a Model A' });
-		expect(mocks.post).toHaveBeenCalledWith('/model-providers', { name, provider_type: type, base_url: base, auth_token: 'test-key' });
+		expect(mocks.post).toHaveBeenCalledWith('/model-providers', {
+			name,
+			provider_type: type,
+			base_url: base,
+			auth_token: 'test-key'
+		});
 		expect(mocks.patch).not.toHaveBeenCalled();
 		expect((screen.getByRole('button', { name: 'Use selected' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.click(screen.getByRole('checkbox', { name: 'model-a Model A' }));
@@ -185,7 +218,9 @@ describe('adding an API key', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		await fireEvent.click(await screen.findByRole('checkbox', { name: 'model-a Model A' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Refresh model list' }));
-		await waitFor(() => expect((screen.getByRole('checkbox', { name: 'model-a Model A' }) as HTMLInputElement).checked).toBe(true));
+		await waitFor(() =>
+			expect((screen.getByRole('checkbox', { name: 'model-a Model A' }) as HTMLInputElement).checked).toBe(true)
+		);
 		mocks.patch.mockRejectedValueOnce(new Error('Save unavailable'));
 		await fireEvent.click(screen.getByRole('button', { name: 'Use selected (1)' }));
 		expect((await screen.findByRole('alert')).textContent).toBe('Save unavailable');

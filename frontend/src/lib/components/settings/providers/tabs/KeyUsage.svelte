@@ -25,7 +25,10 @@
 			hint="Read with this key"
 			help="Refreshes on demand, at most once every five minutes. If this key cannot read account credits, Usage shows its key limit or an unavailable balance, never spending as credit left."
 		>
-			<ValueText tone="fg" value={credits?.credits ? `$${credits.credits.balance_remaining.toFixed(2)}` : 'Not reported yet'} />
+			<ValueText
+				tone="fg"
+				value={credits?.credits ? `$${credits.credits.balance_remaining.toFixed(2)}` : 'Not reported yet'}
+			/>
 		</SettingRow>
 		{#if credits?.configured}
 			<SettingRow label="Legacy management key" hint="Kept, not changed">
@@ -33,7 +36,9 @@
 			</SettingRow>
 		{/if}
 		<SettingRow label="OpenRouter account">
-			<a class="pv-link" href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener noreferrer">Open OpenRouter<ExternalLink /></a>
+			<a class="pv-link" href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener noreferrer"
+				>Open OpenRouter<ExternalLink /></a
+			>
 		</SettingRow>
 	</RowGroup>
 {:else}
@@ -48,7 +53,12 @@
 		</SettingRow>
 		{#if openAI}
 			<SettingRow label="OpenAI Platform">
-				<a class="pv-link" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">
+				<a
+					class="pv-link"
+					href="https://platform.openai.com/settings/organization/billing/overview"
+					target="_blank"
+					rel="noopener noreferrer"
+				>
 					Open billing<ExternalLink />
 				</a>
 			</SettingRow>

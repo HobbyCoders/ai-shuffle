@@ -32,7 +32,13 @@
 			(providers.current.claude?.api_key.last4 ? `sk-ant-…${providers.current.claude.api_key.last4}` : '')
 	);
 	const position = $derived(
-		mode === 'off' ? 'Claude is off' : mode === 'api_key' ? (keySet ? 'Runs every Claude session' : 'Selected, not ready') : 'Standby for Claude'
+		mode === 'off'
+			? 'Claude is off'
+			: mode === 'api_key'
+				? keySet
+					? 'Runs every Claude session'
+					: 'Selected, not ready'
+				: 'Standby for Claude'
 	);
 
 	let replacing = $state(false);
@@ -69,7 +75,15 @@
 
 	const danger = $derived<DangerAction[]>(
 		keySet
-			? [{ label: 'Remove this credential', hint: 'Deletes the stored key', button: 'Remove', question: 'Remove the Anthropic key?', onConfirm: remove }]
+			? [
+					{
+						label: 'Remove this credential',
+						hint: 'Deletes the stored key',
+						button: 'Remove',
+						question: 'Remove the Anthropic key?',
+						onConfirm: remove
+					}
+				]
 			: []
 	);
 </script>
@@ -105,10 +119,23 @@
 				</SettingRow>
 				<SettingRow id="providers.anthropicKey" label={replacing || !keySet ? 'New key' : undefined}>
 					{#if replacing || !keySet}
-						<TextField bind:value={key} type="password" mono placeholder="sk-ant-…" width={200} disabled={saving} label="New Anthropic key" />
+						<TextField
+							bind:value={key}
+							type="password"
+							mono
+							placeholder="sk-ant-…"
+							width={200}
+							disabled={saving}
+							label="New Anthropic key"
+						/>
 						<button type="button" class="st-btn primary" disabled={saving || !key.trim()} onclick={save}>Save</button>
 						{#if keySet}
-							<button type="button" class="st-btn ghost" disabled={saving} onclick={() => ((replacing = false), (key = ''))}>Cancel</button>
+							<button
+								type="button"
+								class="st-btn ghost"
+								disabled={saving}
+								onclick={() => ((replacing = false), (key = ''))}>Cancel</button
+							>
 						{/if}
 					{:else}
 						<button type="button" class="st-btn" onclick={() => (replacing = true)}>Replace</button>
@@ -118,7 +145,9 @@
 			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 			<RowGroup title="Billing">
 				<SettingRow label="Billed"><ValueText tone="fg" value="Per use, Anthropic Console" /></SettingRow>
-				<SettingRow label="Spend limit" hint="Loop guard is off here"><ValueText value="Set in Anthropic Console" /></SettingRow>
+				<SettingRow label="Spend limit" hint="Loop guard is off here"
+					><ValueText value="Set in Anthropic Console" /></SettingRow
+				>
 			</RowGroup>
 		{/if}
 	{/snippet}

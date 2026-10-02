@@ -65,7 +65,9 @@
 		{ label: 'Plan', value: claudePlan(status?.plan ?? summaryCli?.plan) },
 		{
 			label: 'Unattended',
-			value: guard.status?.applies ? `${guard.status.usage.install_last_hour} of ${guard.status.install_turns_per_hour} this hour` : null
+			value: guard.status?.applies
+				? `${guard.status.usage.install_last_hour} of ${guard.status.install_turns_per_hour} this hour`
+				: null
 		},
 		{ label: 'CLI', value: status?.cli_version ?? null, mono: true }
 	]);
@@ -127,7 +129,9 @@
 		{:else if !signedIn && canUseTerminal && status?.installed && !cli.terminalOpen}
 			<button type="button" class="st-btn primary" onclick={startSignIn}><SquareTerminal />Sign in</button>
 		{:else}
-			<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}><RefreshCw />Check again</button>
+			<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
+				><RefreshCw />Check again</button
+			>
 		{/if}
 	{/snippet}
 	{#snippet banner()}
@@ -178,14 +182,18 @@
 						label={canUseTerminal ? 'Or on the host' : 'Run on the host'}
 						hint={status.login.surface === 'docker' ? 'Unraid: the Terminal button' : undefined}
 					>
-						<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}><RefreshCw />Check again</button>
+						<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
+							><RefreshCw />Check again</button
+						>
 					</SettingRow>
 					<div class="cmd"><CodeBlock code={cli.hostCommand} prompt /></div>
 				{/if}
 			</RowGroup>
 			{#if status.error}<p class="pv-msg">{status.error}</p>{/if}
 		{/if}
-		{#if cli.loginError && !cli.terminalOpen && tab === 'Overview'}<p class="pv-msg err" role="alert">{cli.loginError}</p>{/if}
+		{#if cli.loginError && !cli.terminalOpen && tab === 'Overview'}<p class="pv-msg err" role="alert">
+				{cli.loginError}
+			</p>{/if}
 	{/snippet}
 </DetailPane>
 

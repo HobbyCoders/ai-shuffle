@@ -30,7 +30,16 @@ import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
 import { BankedResets } from './banked-resets.svelte';
 import { chatgptRow, grokRow } from './fixtures';
 
-function credit(partial: Partial<{ id: string; reset_type: 'codex_rate_limits' | 'grok_rate_limits' | 'unknown'; status: 'available' | 'redeeming' | 'redeemed' | 'unknown'; expires_at: number | null; title: string | null; description: string | null }> = {}) {
+function credit(
+	partial: Partial<{
+		id: string;
+		reset_type: 'codex_rate_limits' | 'grok_rate_limits' | 'unknown';
+		status: 'available' | 'redeeming' | 'redeemed' | 'unknown';
+		expires_at: number | null;
+		title: string | null;
+		description: string | null;
+	}> = {}
+) {
 	return {
 		id: 'credit-1',
 		reset_type: 'codex_rate_limits' as const,
@@ -109,7 +118,9 @@ describe('inventory', () => {
 	});
 
 	it('retries an initial load failure', async () => {
-		mocks.list.mockRejectedValueOnce(new Error('Inventory unavailable')).mockResolvedValueOnce({ available_count: 0, credits: [] });
+		mocks.list
+			.mockRejectedValueOnce(new Error('Inventory unavailable'))
+			.mockResolvedValueOnce({ available_count: 0, credits: [] });
 		const { getByRole, getByText } = mount();
 		await waitFor(() => expect(getByText('Could not load resets')).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Try again' }));
@@ -118,7 +129,9 @@ describe('inventory', () => {
 	});
 
 	it('keeps prior rows when a refresh fails', async () => {
-		mocks.list.mockResolvedValueOnce({ available_count: 1, credits: [credit()] }).mockRejectedValueOnce(new Error('Refresh failed'));
+		mocks.list
+			.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
+			.mockRejectedValueOnce(new Error('Refresh failed'));
 		const { getByRole, getByText } = mount();
 		await waitFor(() => expect(getByText('Weekly reset')).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Refresh resets' }));
@@ -141,7 +154,10 @@ describe('Use', () => {
 
 	it('sends the chosen credit with a UUID and blocks other actions while busy', async () => {
 		mocks.list
-			.mockResolvedValueOnce({ available_count: 2, credits: [credit({ id: 'first' }), credit({ id: 'second', title: 'Second reset' })] })
+			.mockResolvedValueOnce({
+				available_count: 2,
+				credits: [credit({ id: 'first' }), credit({ id: 'second', title: 'Second reset' })]
+			})
 			.mockResolvedValueOnce({ available_count: 1, credits: [credit({ id: 'first' })] });
 		const consume = deferred<{ outcome: 'reset'; windows_reset: number }>();
 		mocks.consume.mockReturnValue(consume.promise);
@@ -157,8 +173,12 @@ describe('Use', () => {
 	});
 
 	it('reuses the UUID after an ambiguous failure', async () => {
-		mocks.list.mockResolvedValueOnce({ available_count: 1, credits: [credit()] }).mockResolvedValueOnce({ available_count: 0, credits: [] });
-		mocks.consume.mockRejectedValueOnce(new Error('Connection lost')).mockResolvedValueOnce({ outcome: 'reset', windows_reset: 1 });
+		mocks.list
+			.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
+			.mockResolvedValueOnce({ available_count: 0, credits: [] });
+		mocks.consume
+			.mockRejectedValueOnce(new Error('Connection lost'))
+			.mockResolvedValueOnce({ outcome: 'reset', windows_reset: 1 });
 		const { getByRole } = mount();
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
 		await fireEvent.click(getByRole('button', { name: 'Use' }));
@@ -178,7 +198,9 @@ describe('Use', () => {
 		['no_credit', 0, 'This banked reset is no longer available.'],
 		['already_redeemed', 0, 'This banked reset was already used.']
 	] as const)('reports %s and keeps the outcome when the refresh fails', async (outcome, windowsReset, message) => {
-		mocks.list.mockResolvedValueOnce({ available_count: 1, credits: [credit()] }).mockRejectedValueOnce(new Error('Post-use refresh failed'));
+		mocks.list
+			.mockResolvedValueOnce({ available_count: 1, credits: [credit()] })
+			.mockRejectedValueOnce(new Error('Post-use refresh failed'));
 		mocks.consume.mockResolvedValue({ outcome, windows_reset: windowsReset });
 		const { getByRole, getByText } = mount();
 		await waitFor(() => expect(getByRole('button', { name: 'Use' })).toBeTruthy());
@@ -204,7 +226,10 @@ describe('Use', () => {
 describe('Grok', () => {
 	it('uses the Grok inventory, default title and outcome copy', async () => {
 		mocks.listGrok
-			.mockResolvedValueOnce({ available_count: 1, credits: [credit({ reset_type: 'grok_rate_limits', title: null, description: null })] })
+			.mockResolvedValueOnce({
+				available_count: 1,
+				credits: [credit({ reset_type: 'grok_rate_limits', title: null, description: null })]
+			})
 			.mockResolvedValueOnce({ available_count: 0, credits: [] });
 		mocks.consumeGrok.mockResolvedValue({ outcome: 'reset', windows_reset: 1 });
 		const { getByRole, getByText, banked } = mount(grokRow({ needs_reauth: false }));

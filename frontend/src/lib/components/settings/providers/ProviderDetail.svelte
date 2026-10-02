@@ -76,9 +76,7 @@
 					]
 	);
 
-	const credsCount = $derived(
-		provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`
-	);
+	const credsCount = $derived(provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`);
 
 	async function removeAll() {
 		try {
@@ -135,7 +133,12 @@
 	{#if provider.claude}
 		<RowGroup title="Claude Code mode">
 			<SettingRow id="providers.claudeMode">
-				<Segmented options={MODE_OPTIONS} value={mode} disabled={!claude} onchange={(v: ClaudeAuthMode) => changeClaudeMode(v)} />
+				<Segmented
+					options={MODE_OPTIONS}
+					value={mode}
+					disabled={!claude}
+					onchange={(v: ClaudeAuthMode) => changeClaudeMode(v)}
+				/>
 			</SettingRow>
 		</RowGroup>
 	{/if}

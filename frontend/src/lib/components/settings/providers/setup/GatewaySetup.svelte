@@ -83,6 +83,8 @@
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<div class="pv-acts">
 		<button type="button" class="st-btn ghost" disabled={busy} onclick={onCancel}>Cancel</button>
-		<button type="button" class="st-btn primary" disabled={busy} onclick={connect}>{busy ? 'Connecting' : 'Connect'}</button>
+		<button type="button" class="st-btn primary" disabled={busy} onclick={connect}
+			>{busy ? 'Connecting' : 'Connect'}</button
+		>
 	</div>
 {/if}

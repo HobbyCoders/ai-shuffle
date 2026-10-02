@@ -8,7 +8,11 @@
 	import { onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import type { ModelProvider, ModelProviderCreate } from '$lib/api/model-providers';
-	import { getOpenRouterUsage, supportsOpenRouterBilling, type OpenRouterUsageStatus } from '$lib/api/openrouter-billing';
+	import {
+		getOpenRouterUsage,
+		supportsOpenRouterBilling,
+		type OpenRouterUsageStatus
+	} from '$lib/api/openrouter-billing';
 	import { supportsOpenAIBilling } from '$lib/api/openai-billing';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -67,7 +71,10 @@
 					{ label: 'Endpoint', value: hostOf(row.base_url), mono: true },
 					{ label: 'Dialect', value: dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages' },
 					{ label: 'Models', value: `${row.models.length} in picker` },
-					{ label: 'Context', value: row.context_window ? `${Math.round(row.context_window / 1024)}k` : 'Model default' }
+					{
+						label: 'Context',
+						value: row.context_window ? `${Math.round(row.context_window / 1024)}k` : 'Model default'
+					}
 				]
 			: [
 					{ label: 'Key', value: row.auth_token_set ? row.auth_token_masked || 'Stored' : 'None', mono: true },
@@ -183,21 +190,32 @@
 	{#snippet primary()}
 		<span class="onoff">
 			{row.enabled ? 'On' : 'Off'}
-			<Switch checked={row.enabled} label="{credential.name} on" onchange={(v) => setCredentialEnabled(credential, v)} />
+			<Switch
+				checked={row.enabled}
+				label="{credential.name} on"
+				onchange={(v) => setCredentialEnabled(credential, v)}
+			/>
 		</span>
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
 		{:else if tab === 'Usage'}
-			<KeyUsage {credits} openRouter={openRouter} openAI={openAI} />
+			<KeyUsage {credits} {openRouter} {openAI} />
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">
 					<TextField value={row.name} width={220} disabled={saving} onchange={(v) => save({ name: v })} />
 				</SettingRow>
 				<SettingRow label="Endpoint">
-					<TextField value={row.base_url} type="url" mono width={260} disabled={saving} onchange={(v) => save({ base_url: v })} />
+					<TextField
+						value={row.base_url}
+						type="url"
+						mono
+						width={260}
+						disabled={saving}
+						onchange={(v) => save({ base_url: v })}
+					/>
 				</SettingRow>
 				<SettingRow label="Auth token" hint="Blank keeps current">
 					<TextField
@@ -214,7 +232,12 @@
 				</SettingRow>
 				{#if gateway}
 					<SettingRow label="API dialect">
-						<Segmented options={DIALECTS} value={dialect} disabled={saving} onchange={(v: Dialect) => save({ api_dialect: v })} />
+						<Segmented
+							options={DIALECTS}
+							value={dialect}
+							disabled={saving}
+							onchange={(v: Dialect) => save({ api_dialect: v })}
+						/>
 					</SettingRow>
 				{/if}
 				<SettingRow label="Context window" hint="Tokens, blank for auto">

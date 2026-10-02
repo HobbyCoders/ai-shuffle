@@ -42,7 +42,10 @@
 
 <RowGroup title="Allowance">
 	{#each windows as w, i (w.type)}
-		<SettingRow label={i === 0 && w.type === 'seven_day' ? 'Weekly use' : windowLabel(w.type)} hint={resets(w.resets_at)}>
+		<SettingRow
+			label={i === 0 && w.type === 'seven_day' ? 'Weekly use' : windowLabel(w.type)}
+			hint={resets(w.resets_at)}
+		>
 			<Meter used={Math.round(w.utilization)} cap={100} unit="%" label={windowLabel(w.type)} />
 		</SettingRow>
 	{:else}
@@ -78,11 +81,19 @@
 			</SettingRow>
 		{:else}
 			{#each banked.credits as credit (credit.id)}
-				<SettingRow label={banked.title(credit)} hint={creditHint(credit.expires_at, banked.statusLabel(credit))} help={banked.description(credit) ?? undefined}>
+				<SettingRow
+					label={banked.title(credit)}
+					hint={creditHint(credit.expires_at, banked.statusLabel(credit))}
+					help={banked.description(credit) ?? undefined}
+				>
 					{#if banked.canUse(credit)}
 						<InlineConfirm
 							label="Use"
-							confirmLabel={banked.consumingCreditId === credit.id ? 'Using' : banked.retryPending(credit.id) ? 'Try again' : 'Use'}
+							confirmLabel={banked.consumingCreditId === credit.id
+								? 'Using'
+								: banked.retryPending(credit.id)
+									? 'Try again'
+									: 'Use'}
 							question="Can’t be undone"
 							tone="primary"
 							variant="default"

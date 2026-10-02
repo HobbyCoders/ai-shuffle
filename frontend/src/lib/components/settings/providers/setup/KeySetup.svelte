@@ -68,7 +68,10 @@
 			key = '';
 			providerDrafts.update(draft.item, { step: 'models' });
 		} catch (e) {
-			error = getErrorMessage(e, draft.flavor === 'anthropic' ? 'Save failed' : `Could not add ${config?.name ?? 'the'} provider`);
+			error = getErrorMessage(
+				e,
+				draft.flavor === 'anthropic' ? 'Save failed' : `Could not add ${config?.name ?? 'the'} provider`
+			);
 		} finally {
 			busy = false;
 		}

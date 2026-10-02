@@ -96,7 +96,9 @@
 			</div>
 		{:else}
 			<div class="pv-wait" role="status">
-				<span class="pv-spin" aria-hidden="true"></span>{enrollment.phase === 'finishing' ? 'Finishing sign-in' : 'Preparing sign-in'}
+				<span class="pv-spin" aria-hidden="true"></span>{enrollment.phase === 'finishing'
+					? 'Finishing sign-in'
+					: 'Preparing sign-in'}
 			</div>
 		{/if}
 	</div>

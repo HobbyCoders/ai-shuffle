@@ -41,7 +41,11 @@
 	const weekly = $derived(usageEntry?.windows?.find((w) => w.type === 'seven_day') ?? null);
 
 	const position = $derived(
-		!row.enabled ? 'Not in the model picker' : signedIn ? `${row.models.length} models in picker` : 'Sign in again to use it'
+		!row.enabled
+			? 'Not in the model picker'
+			: signedIn
+				? `${row.models.length} models in picker`
+				: 'Sign in again to use it'
 	);
 
 	const facts = $derived([
@@ -99,7 +103,11 @@
 		{/if}
 		<span class="onoff">
 			{row.enabled ? 'On' : 'Off'}
-			<Switch checked={row.enabled} label="{credential.name} on" onchange={(v) => setCredentialEnabled(credential, v)} />
+			<Switch
+				checked={row.enabled}
+				label="{credential.name} on"
+				onchange={(v) => setCredentialEnabled(credential, v)}
+			/>
 		</span>
 	{/snippet}
 	{#snippet children(tab: string | null)}
