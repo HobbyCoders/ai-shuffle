@@ -1,6 +1,7 @@
 """Protocol tests for server-owned Live delegation and fal.ai audio frames."""
 import base64
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -132,6 +133,26 @@ async def test_live_and_fal_output_audio_are_decoded_without_credentials():
         call.websocket.send_bytes.assert_awaited_once_with(pcm)
         for args in call.websocket.send_json.call_args_list:
             assert "secret" not in json.dumps(args.args)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_ending_the_session_is_named_to_the_browser_and_log(caplog):
+    """#1671: a clean provider close used to reach the browser as a bare
+    close, indistinguishable from the user pressing End."""
+    call = stream()
+    with caplog.at_level(logging.INFO, logger="app.core.voice_stream"):
+        await call.report_quiet_end(upstream_ended=True)
+    call.websocket.send_json.assert_awaited_once_with({"type": "ended", "reason": "provider-closed"})
+    assert any("provider ended the session" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_browser_disconnect_is_logged_without_messaging_the_closed_socket(caplog):
+    call = stream()
+    with caplog.at_level(logging.INFO, logger="app.core.voice_stream"):
+        await call.report_quiet_end(upstream_ended=False)
+    call.websocket.send_json.assert_not_awaited()
+    assert any("browser closed the audio connection" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

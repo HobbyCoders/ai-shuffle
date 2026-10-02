@@ -3,7 +3,13 @@ import { get } from 'svelte/store';
 const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
 const streamed = vi.hoisted(() => ({ close: vi.fn(), muteInput: vi.fn(), muteOutput: vi.fn(), sendText: vi.fn() }));
-vi.mock('./voiceAudioStream', () => ({ openVoiceAudioStream: vi.fn(async () => streamed) }));
+const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void } }));
+vi.mock('./voiceAudioStream', () => ({
+	openVoiceAudioStream: vi.fn(async (_session: string, _mic: unknown, handlers: typeof streamHandlers.current) => {
+		streamHandlers.current = handlers;
+		return streamed;
+	}),
+}));
 import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
@@ -140,7 +146,7 @@ describe('voice owner lifecycle', () => {
 		await start();
 		vi.spyOn(window, 'confirm').mockReturnValue(true);
 		expect(await confirmCallReplacement('other')).toBe(true);
-		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner');
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'replaced');
 		expect(track.stop).toHaveBeenCalledTimes(1);
 	});
 	it('reconciles a remotely ended call without minting or restarting it', async () => {
@@ -152,6 +158,31 @@ describe('voice owner lifecycle', () => {
 		expect(api.getVoiceCallState).toHaveBeenCalledTimes(1);
 		expect(api.mintVoiceSecret).not.toHaveBeenCalled();
 		expect(capture).toHaveBeenCalledTimes(1);
+	});
+	// #1671: an unexpected end must never look like the End button.
+	it('reports a provider-ended streamed call as an ending with a notice and its reason', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		streamHandlers.current!.closed('The voice provider ended the call.', 'provider-closed');
+		await vi.waitFor(() => expect(get(voiceCallState).notice).toBe('The voice provider ended the call.'));
+		expect(get(voiceCallState)).toMatchObject({ sessionId: 'owner', status: 'ended', error: null, endReason: 'provider-closed' });
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'provider-closed');
+		expect(console.info).toHaveBeenCalledWith('[voice] call ended:', 'provider-closed');
+	});
+	it('reports a client-side shutdown as an error with its own reason', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		streamHandlers.current!.closed('Voice playback fell behind. Start the call again.', 'playback-backlog');
+		await vi.waitFor(() => expect(get(voiceCallState).error).toBe('Voice playback fell behind. Start the call again.'));
+		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'playback-backlog' });
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'playback-backlog');
+	});
+	it('labels the End button hangup as the user ending the call', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		await hangup();
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'user');
+		expect(get(voiceCallState).endReason).toBe('user');
 	});
 	it('does not resurrect a hung-up call when credential mint resolves late', async () => {
 		let resolve!: (value: { client_secret: string; model: string }) => void;

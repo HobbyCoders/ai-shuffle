@@ -70,6 +70,8 @@ def test_oldest_observation_prefers_per_window_stamps() -> None:
     windows = [{"observed_at": 1_000_000_100}, {"x": 1}, "junk"]
     assert _oldest_observation(1_000_000_500, windows) == 1_000_000_100
     assert _oldest_observation("unparseable", []) == "unparseable"
+    # A real window without its own stamp makes the age unknown (#1661).
+    assert _oldest_observation(1_000_000_500, [*windows, {"utilization": 40}]) is None
 
 
 def test_freshness_units_and_junk() -> None:

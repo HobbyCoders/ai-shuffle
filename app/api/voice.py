@@ -31,6 +31,7 @@ Deliberately small surface:
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -252,6 +253,15 @@ class VoicePreviewRequest(BaseModel):
     """Which voice to synthesise a short sample for."""
     voice: str
     provider_id: Optional[str] = None
+
+
+class VoiceHangupRequest(BaseModel):
+    """Why the client ended the call, for the hangup log line only (#1671)."""
+    reason: Optional[str] = None
+
+
+# Short kebab-case labels only: the reason reaches the log, never free text.
+_HANGUP_REASON = re.compile(r"[a-z][a-z-]{0,39}")
 
 
 class VoiceOkResponse(BaseModel):
@@ -1276,9 +1286,14 @@ def _voice_app_tools(project_id: Optional[str]) -> List[Any]:
 async def hangup_voice_call(
     http_request: Request,
     session_id: str,
+    body: Optional[VoiceHangupRequest] = None,
     token: str = Depends(require_auth),
 ):
     """Detach and stop the session's bridge. ``ok`` even when there was none.
+
+    The optional ``reason`` names what ended the call on the client (the End
+    button, a dropped connection, a playback backlog...). It is only logged,
+    and an unexpected value never fails the hangup.
 
     Tears down ONLY the bridge and the realtime session — dispatched workers
     deliberately survive the call ending. No flag gate: ending a
@@ -1307,9 +1322,16 @@ async def hangup_voice_call(
             exc_info=True,
         )
 
+    raw_reason = body.reason if body else None
+    if raw_reason is None:
+        reason = "unspecified"
+    elif _HANGUP_REASON.fullmatch(raw_reason):
+        reason = raw_reason
+    else:
+        reason = "unrecognized"
     logger.info(
-        "Voice: hangup for session %s (%s)",
-        session_id, "bridge stopped" if stopped else "no live bridge",
+        "Voice: hangup for session %s (%s, reason=%s)",
+        session_id, "bridge stopped" if stopped else "no live bridge", reason,
     )
     return VoiceOkResponse()
 

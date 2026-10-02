@@ -27,6 +27,7 @@ import {
 	selfBucketKey,
 	isBucketStale,
 	bucketObservedAt,
+	bucketHasUndatedWindow,
 	BUCKET_STALE_MS,
 	windowLabel,
 	displayWindows,
@@ -509,8 +510,10 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 			vi.setSystemTime(later);
 			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.3, resets_at: future(), instance_id: 'primary' });
 			// Before: the event set the whole bucket's fetchedAt, hiding the week's age.
+			// The snapshot's windows carry no observed_at, so the week stays undated.
 			expect(selfBucket()!.fetchedAt).toBe(start);
-			expect(bucketObservedAt(selfBucket()!)).toBe(start);
+			expect(selfBucket()!.windows.seven_day.received_at).toBeNull();
+			expect(bucketHasUndatedWindow(selfBucket()!)).toBe(true);
 			expect(isBucketStale(selfBucket()!, later)).toBe(true);
 
 			// The backend's broadcast after the event dates each window itself, so
@@ -538,6 +541,70 @@ describe('rateLimit.applyLiveEvent — routing by instance_id', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('undated legacy windows (#1661)', () => {
+	it('never re-dates a persisted Fable window from reports for other windows', () => {
+		vi.useFakeTimers();
+		try {
+			const start = new Date('2026-01-01T00:00:00Z').getTime();
+			vi.setSystemTime(start);
+			const fableReset = future();
+			// The backend seeded a window persisted by the removed OAuth producer:
+			// no observed_at, unchanged utilization and reset across probes.
+			const fable = { type: 'seven_day_overage_included', utilization: 64, resets_at: fableReset };
+			const snapshotAt = (t: number, generation: number) => ({
+				available: true,
+				windows: [],
+				self_instance_id: 'primary',
+				snapshots: [
+					{
+						instance_id: 'primary', available: true, fetched_at: t, generation,
+						windows: [
+							{ type: 'five_hour', utilization: 70, resets_at: future(), observed_at: t },
+							fable,
+						],
+					},
+				],
+			});
+			rateLimit.applySnapshot(snapshotAt(start, 1));
+			expect(selfBucket()!.windows.seven_day_overage_included.received_at).toBeNull();
+			expect(isBucketStale(selfBucket()!, start)).toBe(true);
+			expect(bucketObservedAt(selfBucket()!)).toBe(start);
+
+			// Repeated five_hour reports and the REST snapshots that follow them
+			// advance fetched_at, but never the Fable window's age.
+			for (let i = 1; i <= 3; i++) {
+				const t = start + i * 60_000;
+				vi.setSystemTime(t);
+				rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.3, resets_at: future(), instance_id: 'primary' });
+				rateLimit.applySnapshot(snapshotAt(t, 1 + i));
+				const bucket = selfBucket()!;
+				expect(bucket.fetchedAt).toBe(t);
+				expect(bucket.windows.seven_day_overage_included.received_at).toBeNull();
+				// The stored value is shown as reported, not inverted.
+				expect(bucket.windows.seven_day_overage_included.utilization).toBe(64);
+				expect(isBucketStale(bucket, t)).toBe(true);
+			}
+
+			// A real Fable report dates it; the bucket is then current.
+			const reported = start + 5 * 60_000;
+			vi.setSystemTime(reported);
+			rateLimit.applyLiveEvent({ rate_limit_type: 'seven_day_overage_included', utilization: 0.4, resets_at: fableReset, instance_id: 'primary' });
+			expect(selfBucket()!.windows.seven_day_overage_included.received_at).toBe(reported);
+			expect(bucketHasUndatedWindow(selfBucket()!)).toBe(false);
+			expect(isBucketStale(selfBucket()!, reported)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('still dates provider windows by their snapshot fetch time', () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'zai', status: 'fresh', fetched_at: 5_000, windows: [{ type: 'five_hour', utilization: 10, resets_at: null }] },
+		] });
+		expect(rateLimit.current.providerBuckets.zai.windows.five_hour.received_at).toBe(5_000);
 	});
 });
 

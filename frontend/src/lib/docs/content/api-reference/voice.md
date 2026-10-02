@@ -184,6 +184,8 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f
 
 End the call and mark the session inactive. Agents the call started keep running. Safe to repeat, and it works even if voice mode was turned off during the call. Returns `{"ok": true}`.
 
+The body is optional. `{"reason": "user"}` names what ended the call, such as `user`, `replaced`, `playback-backlog` or `provider-closed`. The reason is only written to the server log; a value that is not a short lowercase label is logged as `unrecognized` and never fails the request.
+
 **Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
 ```bash

@@ -461,6 +461,22 @@ class VoiceStream:
             self.opening_event_id = event["event_id"]
             await self.send(event)
 
+    async def report_quiet_end(self, *, upstream_ended: bool) -> None:
+        """Say who ended a call that stopped without an error (#1671).
+
+        A provider that closes its session cleanly used to reach the browser as
+        an ordinary close, which the client could not tell apart from the user
+        pressing End. Name the cause in the log and to the browser.
+        """
+        if upstream_ended:
+            logger.info("Voice %s: the provider ended the session", self.session_id)
+            try:
+                await self.emit({"type": "ended", "reason": "provider-closed"})
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+        else:
+            logger.info("Voice %s: the browser closed the audio connection", self.session_id)
+
     async def run(self):
         tasks = []
         url = "wss://api.openai.com/v1/live/sessions" if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
@@ -497,6 +513,7 @@ class VoiceStream:
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()
+                    await self.report_quiet_end(upstream_ended=tasks[1] in done)
         except TimeoutError:
             if budget.expired():
                 from app.core.voice_bridge import registry

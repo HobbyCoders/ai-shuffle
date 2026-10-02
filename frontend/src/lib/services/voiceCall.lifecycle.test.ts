@@ -109,7 +109,7 @@ describe('voice call lifecycle', () => {
 		await hangup();
 
 		expect(get(voiceCallState)).toMatchObject({ sessionId: 'owner', status: 'ended' });
-		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner');
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'user');
 		expect(peers[0].connectionState).toBe('closed');
 		expect(track.stop).toHaveBeenCalledTimes(1);
 		expect(vi.getTimerCount()).toBe(0);
@@ -128,7 +128,7 @@ describe('voice call lifecycle', () => {
 			status: 'error',
 			error: 'The voice connection dropped.'
 		});
-		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner');
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'webrtc-failed');
 		expect(track.stop).toHaveBeenCalledTimes(1);
 		expect(vi.getTimerCount()).toBe(0);
 	});

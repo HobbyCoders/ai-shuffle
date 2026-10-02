@@ -51,13 +51,13 @@ function twoInstallSnapshot() {
 				instance_id: 'primary',
 				device_name: 'Studio',
 				available: true,
-				windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				windows: [{ type: 'five_hour', utilization: 12, resets_at: future(), observed_at: Date.now() }],
 			},
 			{
 				instance_id: 'worker',
 				device_name: 'Worker',
 				available: true,
-				windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
+				windows: [{ type: 'five_hour', utilization: 88, resets_at: future(), observed_at: Date.now() }],
 			},
 		],
 	});

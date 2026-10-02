@@ -75,7 +75,10 @@
 		formatCountdown,
 		formatAsOf,
 		bucketObservedAt,
+		bucketHasUndatedWindow,
 		isBucketStale,
+		windowObservedAtKnown,
+		BUCKET_STALE_MS,
 		parseResetMs,
 		providerStatusAt,
 		resolveBucket,
@@ -354,6 +357,8 @@
 		countdown: string;
 		hasReset: boolean;
 		rolledOver: boolean;
+		/** Per-row report age when it is unknown or stale; null when current. */
+		asOf: string | null;
 	}
 
 	/** Mirror the used-quota thresholds against a remaining-quota value. */
@@ -391,8 +396,28 @@
 				countdown: formatCountdown(usageWindow.resets_at, now),
 				hasReset: usageWindow.resets_at != null,
 				rolledOver: isRolledOver(usageWindow, now),
+				asOf: windowAsOfText(usageWindow, now),
 			};
 		});
+	}
+
+	/**
+	 * A plan row's report age when it should not be read as current: "age
+	 * unknown" for a window with no observation time (persisted before windows
+	 * were dated), or "reported <age>" once it is older than the stale threshold.
+	 * Another window's report never re-dates this one.
+	 */
+	function windowAsOfText(usageWindow: UsageWindow, nowMs: number): string | null {
+		if (!windowObservedAtKnown(usageWindow)) return 'age unknown';
+		if (nowMs - usageWindow.received_at <= BUCKET_STALE_MS) return null;
+		return `reported ${formatAsOf(usageWindow.received_at, nowMs)}`;
+	}
+
+	/** The plan header's "Last reported" text for a stale bucket. */
+	function planStaleText(bucket: UsageBucket, nowMs: number): string {
+		const observedAt = bucketObservedAt(bucket);
+		if (bucketHasUndatedWindow(bucket) || observedAt == null) return 'Last reported · age unknown';
+		return `Last reported ${formatAsOf(observedAt, nowMs)}`;
 	}
 
 	/** "Last reported <age>" for a stale provider row, like the Claude header; null when it is not stale. */
@@ -750,7 +775,7 @@
 							<span class="sec-head-labels">
 								<span class="section-device">{claudeDisplay.name}</span>
 								{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
-									<span class="section-account provider-status usage-as-of">Last reported {formatAsOf(bucketObservedAt(resolvedBucket), now)}</span>
+									<span class="section-account provider-status usage-as-of">{planStaleText(resolvedBucket, now)}</span>
 								{/if}
 								{#if claudeSubtext}
 									<span class="section-account">{claudeSubtext}</span>
@@ -782,6 +807,9 @@
 									<span class="row-label">{item.label}</span>
 									<span class="row-value">
 										<span class="row-reset-inline">
+											{#if item.asOf}
+												<span class="row-as-of">{item.asOf} ·</span>
+											{/if}
 											{#if item.countdown}
 												resets in {item.countdown}
 											{:else if item.rolledOver}
@@ -1198,6 +1226,10 @@
 	.row-reset-inline {
 		font-size: 10.5px;
 		color: var(--muted-foreground);
+	}
+
+	.row-as-of {
+		font-style: italic;
 	}
 
 	.row-pct {

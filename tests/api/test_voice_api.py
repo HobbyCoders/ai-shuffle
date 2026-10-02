@@ -21,6 +21,7 @@ stubbed at ``app.core.voice_bridge._open_sideband``.
 
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -1112,6 +1113,28 @@ class TestVoiceHangup:
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
         ).status_code == 200
         assert bool(db.get_session(SESSION_ID)["is_active"]) is False
+
+    @pytest.mark.parametrize("body,logged", [
+        (None, "reason=unspecified"),
+        ({"reason": "playback-backlog"}, "reason=playback-backlog"),
+        ({"reason": "Bearer sk-not-a-label"}, "reason=unrecognized"),
+    ])
+    def test_hangup_logs_the_client_reason_without_free_text(
+        self, authenticated_client, mock_db, sidebands, caplog, body, logged
+    ):
+        """#1671: the log must tell an End press from an automatic shutdown,
+        and an unexpected reason must never fail the hangup or reach the log."""
+        _enable_voice()
+        _mk_voice_session()
+        with caplog.at_level(logging.INFO, logger="app.api.voice"):
+            resp = authenticated_client.post(
+                f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup",
+                **({"json": body} if body is not None else {}),
+            )
+        assert resp.status_code == 200, resp.text
+        line = next(r.getMessage() for r in caplog.records if "hangup for session" in r.getMessage())
+        assert logged in line
+        assert "sk-not" not in line
 
     def test_hangup_on_a_missing_session_returns_404(self, authenticated_client, mock_db):
         _enable_voice()

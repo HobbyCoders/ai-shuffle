@@ -9,8 +9,20 @@ export interface VoiceAudioStream {
 interface Handlers {
  caption(id: string, role: 'user' | 'assistant', delta: string): void;
  speaking(active: boolean): void;
- closed(message: string | null): void;
+ closed(message: string | null, reason: VoiceStreamEndReason): void;
 }
+/**
+ * Why the stream ended without the client asking it to (#1671). The labels are
+ * logged and sent with the hangup, so they must stay free of call content.
+ */
+export type VoiceStreamEndReason =
+ | 'provider-closed'
+ | 'provider-error'
+ | 'server-closed'
+ | 'connection-dropped'
+ | 'playback-backlog'
+ | 'upload-backlog'
+ | 'invalid-response';
 import workletUrl from './voicePcm.worklet.js?url&no-inline';
 
 /** One bidirectional PCM stream; the server owns provider auth and delegation. */
@@ -24,6 +36,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  let stopped = false;
  let nextPlay = 0;
  let error: string | null = null;
+ let endReason: VoiceStreamEndReason | null = null;
+ const fail = (reason: VoiceStreamEndReason, message: string) => { endReason ??= reason; error ??= message; };
  let micMuted = false, micGeneration = 0;
  const pendingText = new Map<string, { resolve: (sent: boolean) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
  const settlePending = () => {
@@ -66,7 +80,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
      const samples = buffer.getChannelData(0);
      for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
      if (nextPlay - context.currentTime > 2) {
-      error = 'Voice playback fell behind. Start the call again.';
+      fail('playback-backlog', 'Voice playback fell behind. Start the call again.');
       ws.close(); return;
      }
      const node = context.createBufferSource();
@@ -77,8 +91,12 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
      node.onended = () => { node.disconnect(); playing.delete(node); if (!playing.size) handlers.speaking(false); };
      return;
     }
+    let message: ReturnType<typeof JSON.parse>;
+    try { message = JSON.parse(event.data); }
+    catch { fail('invalid-response', 'Invalid voice response.'); ws.close(); return; }
+    // A failing UI handler is a client bug, not a bad server message: it must
+    // never end the call (#1671).
     try {
-     const message = JSON.parse(event.data);
      if (message.type === 'ready') { ready = true; settle(); resolve(); }
      else if (message.type === 'text.accepted' || message.type === 'text.rejected') {
       const pending = pendingText.get(message.id);
@@ -89,15 +107,20 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
       }
      }
      else if (message.type === 'caption') handlers.caption(message.id, message.role, message.delta);
-     else if (message.type === 'error') { error = message.message; ws.close(); }
-    } catch { error = 'Invalid voice response.'; ws.close(); }
+     else if (message.type === 'ended') { fail('provider-closed', 'The voice provider ended the call.'); }
+     else if (message.type === 'error') { fail('provider-error', message.message || 'The voice provider reported an error.'); ws.close(); }
+    } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
    };
-   ws.onerror = () => { error = 'The voice audio connection failed.'; };
+   ws.onerror = () => { error ??= 'The voice audio connection failed.'; };
    ws.onclose = event => {
     settle();
     settlePending();
     if (!ready) reject(new Error(error || event.reason || 'The voice provider rejected the connection.'));
-    else if (!stopped) handlers.closed(error || (event.code !== 1000 ? 'The voice connection dropped.' : null));
+    else if (!stopped) {
+     if (event.code !== 1000) fail('connection-dropped', 'The voice connection dropped.');
+     else fail('server-closed', 'The voice server ended the call.');
+     handlers.closed(error, endReason ?? 'server-closed');
+    }
    };
   });
   if (stopped) throw new Error('Voice connection cancelled.');
@@ -109,7 +132,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
    // reject queued pre-mute frames even after a quick mute/unmute.
    if (socket?.readyState !== WebSocket.OPEN || stopped || micMuted || event.data.generation !== micGeneration) return;
-   if (socket.bufferedAmount > 192000) { error = 'Voice upload fell behind. Start the call again.'; socket.close(); return; }
+   if (socket.bufferedAmount > 192000) { fail('upload-backlog', 'Voice upload fell behind. Start the call again.'); socket.close(); return; }
    socket.send(event.data.pcm);
   };
   return {

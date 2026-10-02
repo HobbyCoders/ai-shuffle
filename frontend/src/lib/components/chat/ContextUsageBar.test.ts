@@ -993,7 +993,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 	it('retains the last Claude reading while a reset awaits another report', async () => {
 		rateLimit.applySnapshot({
 			available: true,
-			windows: [{ type: 'five_hour', utilization: 42, resets_at: past() }],
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: past(), observed_at: Date.now() }],
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
@@ -1008,7 +1008,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		rateLimit.applySnapshot({
 			available: true, windows: [], self_instance_id: 'self',
 			snapshots: [{ instance_id: 'self', available: true, fetched_at: Date.now() - 2 * 86_400_000,
-				windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] }],
+				windows: [{ type: 'five_hour', utilization: 42, resets_at: future(), observed_at: Date.now() - 2 * 86_400_000 }] }],
 		});
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
@@ -1036,6 +1036,30 @@ describe('ContextUsageBar — plan usage limits', () => {
 		await openPopover(container);
 		// The weekly window is still two days old.
 		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
+	});
+
+	it('marks an undated Claude window as age unknown instead of borrowing a newer report (#1661)', async () => {
+		const now = Date.now();
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: now,
+				windows: [
+					{ type: 'five_hour', utilization: 42, resets_at: future(), observed_at: now },
+					// Persisted before windows were dated: no observed_at.
+					{ type: 'seven_day_overage_included', utilization: 64, resets_at: future() },
+				] }],
+		});
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		const header = getByRole('button', { name: /Plan usage limits/ });
+		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported · age unknown');
+		const rows = [...container.querySelectorAll('.popover-row')];
+		const fable = rows.find((row) => row.textContent?.includes('Fable 5 limit'))!;
+		const fiveHour = rows.find((row) => row.textContent?.includes('5-hour limit'))!;
+		expect(fable.querySelector('.row-as-of')?.textContent).toBe('age unknown ·');
+		// The value is shown as reported, not inverted.
+		expect(fable.querySelector('.row-pct')?.textContent).toBe('64% left');
+		expect(fiveHour.querySelector('.row-as-of')).toBeNull();
 	});
 
 	it('keeps a stale provider reading on screen with when it can next refresh', async () => {
@@ -1128,7 +1152,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 					instance_id: 'primary',
 					device_name: 'Studio',
 					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future(), observed_at: Date.now() }],
 				},
 			],
 		});
@@ -1152,7 +1176,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future(), observed_at: Date.now() }],
 				},
 			],
 		});
@@ -1187,7 +1211,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 					instance_id: 'primary',
 					device_name: 'Studio',
 					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future(), observed_at: Date.now() }],
 				},
 			],
 		});
@@ -1208,7 +1232,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 				{
 					instance_id: 'primary',
 					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future(), observed_at: Date.now() }],
 				},
 			],
 		});

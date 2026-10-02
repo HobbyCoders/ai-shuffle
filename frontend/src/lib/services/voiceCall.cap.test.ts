@@ -44,6 +44,7 @@ beforeEach(() => {
 		model: null,
 		agentSpeaking: false,
 		userSpeaking: false,
+		endReason: null,
 	});
 });
 

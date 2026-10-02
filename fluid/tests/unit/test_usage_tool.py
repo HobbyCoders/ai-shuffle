@@ -177,11 +177,53 @@ def test_claude_freshness_follows_the_oldest_window_like_the_panel() -> None:
     assert out["freshness"] == "stale"
     assert out["accounts"][0]["freshness"] == "stale"
     assert out["windows"][1]["observed_at"] == int((now - 1200) * 1000)
-    # Windows persisted before per-window dating fall back to fetched_at.
+    # A window persisted before per-window dating has an unknown age: the
+    # snapshot's fresh fetched_at does not date it.
     legacy = _payload({"available": True, "fetched_at": now - 5,
                        "windows": [{"type": "five_hour", "utilization": 60}]})
-    assert legacy["claude_freshness"] == "fresh"
+    assert legacy["claude_freshness"] == "unknown"
     assert "observed_at" not in legacy["windows"][0]
+    assert legacy["windows"][0]["freshness"] == "unknown"
+
+
+def test_unrelated_reports_never_freshen_an_undated_fable_window() -> None:
+    """#1661: a persisted Fable window without observed_at keeps an unknown
+    age while repeated five_hour reports advance fetched_at, until a real
+    Fable report dates it. Its value is reported as stored, not inverted."""
+    start = time.time() - 600
+    fable = {"type": "seven_day_overage_included", "utilization": 64, "resets_at": None}
+    for step in range(4):
+        t = start + step * 60
+        out = _payload({
+            "available": True,
+            "fetched_at": t,
+            "windows": [
+                {"type": "five_hour", "utilization": 70, "observed_at": int(t * 1000)},
+                fable,
+            ],
+            "snapshots": [{
+                "instance_id": "a", "available": True, "fetched_at": int(t * 1000),
+                "windows": [
+                    {"type": "five_hour", "utilization": 70, "observed_at": int(t * 1000)},
+                    fable,
+                ],
+            }],
+        })
+        assert out["claude_freshness"] == "unknown"
+        assert out["accounts"][0]["freshness"] == "unknown"
+        reported = next(w for w in out["windows"] if w["type"] == fable["type"])
+        assert reported["freshness"] == "unknown"
+        assert reported["remaining_percent"] == 64
+    now = time.time()
+    dated = _payload({
+        "available": True,
+        "fetched_at": now,
+        "windows": [
+            {"type": "five_hour", "utilization": 70, "observed_at": int(now * 1000)},
+            dict(fable, observed_at=int(now * 1000)),
+        ],
+    })
+    assert dated["claude_freshness"] == "fresh"
 
 
 def test_zone_less_reset_is_read_as_utc(monkeypatch) -> None:

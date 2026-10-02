@@ -122,7 +122,54 @@ describe('voice PCM stream', () => {
   sockets[0].bufferedAmount = 200000;
   nodes[0].port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
   expect(sockets[0].send).not.toHaveBeenCalled();
-  expect(callbacks.closed).toHaveBeenCalledWith('Voice upload fell behind. Start the call again.');
+  expect(callbacks.closed).toHaveBeenCalledWith('Voice upload fell behind. Start the call again.', 'upload-backlog');
+  await stream.close();
+ });
+
+ // #1671: every unrequested end names its cause.
+ it('names a provider that ended the session', async () => {
+  const callbacks = handlers();
+  const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'ended', reason: 'provider-closed' }) });
+  sockets[0].onclose({ code: 1000 });
+  expect(callbacks.closed).toHaveBeenCalledExactlyOnceWith('The voice provider ended the call.', 'provider-closed');
+  await stream.close();
+ });
+ it.each([
+  [1000, 'The voice server ended the call.', 'server-closed'],
+  [1006, 'The voice connection dropped.', 'connection-dropped'],
+ ])('never reports an unexplained close (code %i) as a silent end', async (code, message, reason) => {
+  const callbacks = handlers();
+  const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
+  sockets[0].onclose({ code });
+  expect(callbacks.closed).toHaveBeenCalledExactlyOnceWith(message, reason);
+  await stream.close();
+ });
+ it('names a provider error and a playback backlog', async () => {
+  const errored = handlers();
+  const first = await openVoiceAudioStream('s', {} as MediaStream, errored, new AbortController().signal);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'error', message: 'Session expired.' }) });
+  expect(errored.closed).toHaveBeenCalledWith('Session expired.', 'provider-error');
+  await first.close();
+  const behind = handlers();
+  const second = await openVoiceAudioStream('s', {} as MediaStream, behind, new AbortController().signal);
+  sockets[1].onmessage({ data: new Int16Array(24000 * 3).buffer });
+  sockets[1].onmessage({ data: new Int16Array(2).buffer });
+  expect(behind.closed).toHaveBeenCalledWith('Voice playback fell behind. Start the call again.', 'playback-backlog');
+  await second.close();
+ });
+ it('keeps the call up when a UI handler throws on a valid event', async () => {
+  const callbacks = handlers();
+  callbacks.caption.mockImplementation(() => { throw new Error('unmounted view'); });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'caption', id: 'a1', role: 'assistant', delta: 'Hi' }) });
+  expect(sockets[0].close).not.toHaveBeenCalled();
+  expect(callbacks.closed).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalled();
+  sockets[0].onmessage({ data: 'not json' });
+  expect(callbacks.closed).toHaveBeenCalledWith('Invalid voice response.', 'invalid-response');
+  warn.mockRestore();
   await stream.close();
  });
 });

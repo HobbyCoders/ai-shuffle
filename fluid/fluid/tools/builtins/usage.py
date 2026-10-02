@@ -86,6 +86,10 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
     observed_at = _epoch_seconds(raw.get("observed_at"))
     if observed_at is not None:
         window["observed_at"] = raw.get("observed_at")
+    elif source == "claude_subscription":
+        # A Claude window is dated per report; without its own stamp the
+        # reading's age is unknown (the snapshot's fetched_at does not date it).
+        window["freshness"] = "unknown"
     return window
 
 
@@ -109,16 +113,23 @@ def _oldest_observation(fetched_at: Any, windows: Any) -> Any:
 
     One CLI event dates one window, so a snapshot's ``fetched_at`` (moved by
     any window) overstates the others' freshness. The usage panel dates the
-    section by its oldest window; the tool does the same. Windows without
-    their own ``observed_at`` fall back to ``fetched_at``.
+    section by its oldest window; the tool does the same. A window without its
+    own ``observed_at`` (persisted before windows were dated) has an unknown
+    age: it must not borrow ``fetched_at``, which any other window's report
+    advances, so the result is ``None`` (freshness "unknown").
     """
-    fallback = _epoch_seconds(fetched_at)
-    stamps = [
-        observed if (observed := _epoch_seconds(w.get("observed_at"))) is not None else fallback
-        for w in windows or () if isinstance(w, dict)
+    # A row with neither a reading nor a stamp is junk, not an undated window.
+    rows = [
+        w for w in windows or ()
+        if isinstance(w, dict) and ("observed_at" in w or _percent(w.get("utilization")) is not None)
     ]
-    stamps = [s for s in stamps if s is not None]
-    return min(stamps) if stamps else fetched_at
+    if not rows:
+        return fetched_at
+    stamps = [_epoch_seconds(w.get("observed_at")) for w in rows]
+    known = [s for s in stamps if s is not None]
+    if len(known) < len(stamps):
+        return None
+    return min(known)
 
 
 def _freshness(fetched_at: Any, *, available: bool = True) -> str:

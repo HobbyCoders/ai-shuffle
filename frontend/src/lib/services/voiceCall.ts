@@ -38,7 +38,7 @@
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
-import type { VoiceAudioStream } from './voiceAudioStream';
+import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
 let audioAbort: AbortController | null = null;
 
@@ -53,6 +53,18 @@ export type VoiceCallStatus =
 	| 'reconnecting'
 	| 'ended'
 	| 'error';
+
+/**
+ * What ended the call (#1671). Shown nowhere, but logged and sent with the
+ * hangup so an unexpected end can be told apart from the End button.
+ */
+export type VoiceEndReason =
+	| VoiceStreamEndReason
+	| 'user'
+	| 'replaced'
+	| 'call-cap'
+	| 'webrtc-failed'
+	| 'server-ended';
 
 export interface VoiceCaption {
 	/** OpenAI item id when known, else a synthetic key. */
@@ -83,6 +95,8 @@ export interface VoiceCallStoreState {
 	agentSpeaking: boolean;
 	/** True while server VAD hears the user talking. */
 	userSpeaking: boolean;
+	/** Why the last call ended; null while a call is up or none has ended. */
+	endReason: VoiceEndReason | null;
 }
 
 const INITIAL: VoiceCallStoreState = {
@@ -98,6 +112,7 @@ const INITIAL: VoiceCallStoreState = {
 	model: null,
 	agentSpeaking: false,
 	userSpeaking: false,
+	endReason: null,
 };
 
 export const voiceCallState = writable<VoiceCallStoreState>({ ...INITIAL });
@@ -479,7 +494,7 @@ function watchForDrop(conn: Connection, owner: string, epoch: number): void {
 		if (conn.pc.connectionState !== 'failed') return;
 		// teardown() resets the store once its awaits settle; the reason is
 		// written after that, or it would be wiped.
-		const ending = teardown({ notifyBackend: true, status: 'error' });
+		const ending = teardown({ notifyBackend: true, status: 'error', reason: 'webrtc-failed' });
 		const endedGeneration = generation;
 		void ending.then(() => {
 			if (endedGeneration === generation) patch({ sessionId: owner, error: 'The voice connection dropped.' });
@@ -522,7 +537,7 @@ function callCapMessage(e: unknown): string | null {
  * so the "start a new call" the message asks for actually works.
  */
 async function endForCap(sessionIdIn: string | null, message: string): Promise<void> {
-	const ending = teardown({ notifyBackend: true, status: 'ended' });
+	const ending = teardown({ notifyBackend: true, status: 'ended', reason: 'call-cap' });
 	const epoch = generation;
 	await ending;
 	if (epoch === generation) patch({ sessionId: sessionIdIn, notice: message });
@@ -704,12 +719,16 @@ export async function startCall(
 			const stream = await openVoiceAudioStream(sessionIdIn, acquired, {
 				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
 				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
-				closed: message => {
+				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
-					const ending = teardown({ notifyBackend: true, status: message ? 'error' : 'ended' });
+					// The far end hanging up is an ending, not a failure; it
+					// still says so, so it never looks like the End button.
+					const quiet = reason === 'provider-closed' || reason === 'server-closed';
+					const ending = teardown({ notifyBackend: true, status: quiet ? 'ended' : 'error', reason });
 					const endedGeneration = generation;
 					void ending.then(() => {
-						if (endedGeneration === generation) patch({ sessionId: sessionIdIn, error: message });
+						if (endedGeneration !== generation) return;
+						patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
 					});
 				},
 			}, audioAbort.signal);
@@ -810,13 +829,15 @@ export async function startCallForSession(sessionIdIn: string, options: { attach
  * End the call. The session row stays — only the realtime call is torn down
  * (ruling VM12: dispatched agents survive a hangup).
  */
-export async function hangup(): Promise<void> {
-	await teardown({ notifyBackend: true, status: 'ended' });
+export async function hangup(reason: VoiceEndReason = 'user'): Promise<void> {
+	await teardown({ notifyBackend: true, status: 'ended', reason });
 }
 
 async function teardown(opts: {
 	notifyBackend: boolean;
 	status: VoiceCallStatus;
+	/** Set whenever a live call ends; omitted only when nothing was up. */
+	reason?: VoiceEndReason;
 }): Promise<void> {
 	generation++;
 	responseInProgress = false;
@@ -837,11 +858,12 @@ async function teardown(opts: {
 	teardownAudioElement();
 	sessionId = null;
 
-	voiceCallState.set({ ...INITIAL, sessionId: endedSession, status: opts.status });
+	voiceCallState.set({ ...INITIAL, sessionId: endedSession, status: opts.status, endReason: opts.reason ?? null });
+	if (opts.reason) console.info('[voice] call ended:', opts.reason);
 
 	if (opts.notifyBackend && endedSession) {
 		try {
-			await hangupVoiceCall(endedSession);
+			await hangupVoiceCall(endedSession, opts.reason);
 		} catch (e) {
 			console.warn('[voice] hangup notification failed:', e);
 		}
@@ -879,7 +901,7 @@ export async function confirmCallReplacement(nextSessionId: string | null): Prom
 	const current = get(voiceCallState);
 	if (!isCallSurfaceActive(current, current.sessionId) || current.sessionId === nextSessionId) return true;
 	if (typeof window === 'undefined' || !window.confirm('End the current voice call and start another?')) return false;
-	await hangup();
+	await hangup('replaced');
 	return true;
 }
 
@@ -935,7 +957,7 @@ export async function reconcileVoiceCall(): Promise<void> {
 		const remote = await getVoiceCallState(owner);
 		if (epoch !== generation || get(voiceCallState).sessionId !== owner) return;
 		if (remote && !remote.active) {
-			await teardown({ notifyBackend: false, status: 'ended' });
+			await teardown({ notifyBackend: false, status: 'ended', reason: 'server-ended' });
 			patch({ sessionId: owner, notice: 'This voice call has ended.' });
 		}
 	} catch (error) {

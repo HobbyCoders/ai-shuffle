@@ -45,10 +45,13 @@ export interface UsageWindow {
 	resets_at: string | null;
 	/**
 	 * Epoch ms this window was last observed: the live event's arrival, or the
-	 * backend's per-window `observed_at` (falling back to the snapshot's
-	 * `fetched_at`). Staleness is per window, since one event dates one window.
+	 * backend's per-window `observed_at`. Staleness is per window, since one
+	 * event dates one window. `null` = unknown: a Claude window persisted before
+	 * per-window dating (no `observed_at`) must not borrow the snapshot's
+	 * `fetched_at`, which any other window's report advances. Provider windows
+	 * are fetched together, so they fall back to the snapshot's `fetched_at`.
 	 */
-	received_at: number;
+	received_at: number | null;
 	source: 'poll' | 'live';
 }
 
@@ -450,16 +453,28 @@ export function resolveBucketKey(state: RateLimitState, instanceId: string | nul
 	return state.buckets[key] ? key : null;
 }
 
+/** Whether a window's observation time is known (a finite epoch ms). */
+export function windowObservedAtKnown<W extends Pick<UsageWindow, 'received_at'>>(w: W): w is W & { received_at: number } {
+	return typeof w.received_at === 'number' && Number.isFinite(w.received_at);
+}
+
+/** Whether any of the bucket's windows has an unknown observation time. */
+export function bucketHasUndatedWindow(bucket: UsageBucket): boolean {
+	return Object.values(bucket.windows ?? {}).some((w) => !windowObservedAtKnown(w));
+}
+
 /**
- * When the bucket's OLDEST window was last observed (epoch ms), or the bucket's
- * `fetchedAt` when it has no windows. A live event dates only its own window,
- * so the other windows keep their age.
+ * When the bucket's OLDEST dated window was last observed (epoch ms), or the
+ * bucket's `fetchedAt` when it has no dated windows. A live event dates only
+ * its own window, so the other windows keep their age. Undated windows are
+ * reported by `bucketHasUndatedWindow`, never by borrowing `fetchedAt`.
  */
 export function bucketObservedAt(bucket: UsageBucket): number | null {
 	const times = Object.values(bucket.windows ?? {})
-		.map((w) => w.received_at)
-		.filter((t) => typeof t === 'number' && Number.isFinite(t));
-	return times.length > 0 ? Math.min(...times) : bucket.fetchedAt;
+		.filter(windowObservedAtKnown)
+		.map((w) => w.received_at);
+	if (times.length > 0) return Math.min(...times);
+	return bucketHasUndatedWindow(bucket) ? null : bucket.fetchedAt;
 }
 
 /**
@@ -479,6 +494,8 @@ export function providerStatusAt(
 
 /** Whether any of a bucket's windows has aged past `BUCKET_STALE_MS` (needs a refresh). */
 export function isBucketStale(bucket: UsageBucket, now: number): boolean {
+	// An undated window's reading is of unknown age: never present it as fresh.
+	if (bucketHasUndatedWindow(bucket)) return true;
 	const observedAt = bucketObservedAt(bucket);
 	return observedAt != null && now - observedAt > BUCKET_STALE_MS;
 }
@@ -581,21 +598,27 @@ function _legacyFetchedMs(sec: number | null | undefined): number | null {
 
 /**
  * Build a window map from raw snapshot windows. Each window is dated by its own
- * `observed_at`, else by the snapshot's `fetchedAt` (epoch ms), else `now`.
+ * `observed_at`. Without one, a provider window (`perWindowDates: false`, the
+ * whole set fetched together) falls back to the snapshot's `fetchedAt` (epoch
+ * ms), else `now`; a Claude window (`perWindowDates: true`) stays undated,
+ * because its snapshot's `fetched_at` moves whenever any OTHER window reports.
  */
 function _windowsFromSnapshot(
 	raw: SnapshotWindow[] | undefined,
 	now: number,
-	fetchedAt: number | null | undefined = null
+	fetchedAt: number | null | undefined,
+	perWindowDates: boolean
 ): Record<string, UsageWindow> {
 	const windows: Record<string, UsageWindow> = {};
 	for (const w of raw ?? []) {
 		if (!w?.type || typeof w.utilization !== 'number') continue;
+		const observed =
+			typeof w.observed_at === 'number' && Number.isFinite(w.observed_at) ? w.observed_at : null;
 		windows[w.type] = {
 			type: w.type,
 			utilization: _clampPct(w.utilization),
 			resets_at: w.resets_at ?? null,
-			received_at: w.observed_at ?? fetchedAt ?? now,
+			received_at: observed ?? (perWindowDates ? null : (fetchedAt ?? now)),
 			source: 'poll',
 		};
 	}
@@ -704,7 +727,7 @@ export const rateLimit = {
 						providerName: p.provider_name ?? null,
 						providerType: p.provider_type ?? null,
 						planType: p.plan_type ?? null,
-						windows: _windowsFromSnapshot(p.windows, now, p.fetched_at),
+						windows: _windowsFromSnapshot(p.windows, now, p.fetched_at, false),
 						credits: p.credits ?? null,
 						fetchedAt: p.fetched_at ?? null,
 					};
@@ -764,7 +787,7 @@ export const rateLimit = {
 							available: false,
 						};
 					} else {
-						const windows = _windowsFromSnapshot(entry.windows, now, entry.fetched_at);
+						const windows = _windowsFromSnapshot(entry.windows, now, entry.fetched_at, true);
 						// An unchanged generation means nothing changed server-side since
 						// the last snapshot, so a live window received since is newer.
 						if (sameGeneration) {
@@ -842,7 +865,7 @@ export const rateLimit = {
 				// data fields the legacy payload actually carries.
 				bucket = {
 					...(prev ?? {}),
-					windows: _windowsFromSnapshot(snapshot.windows, now, _legacyFetchedMs(snapshot.fetched_at)),
+					windows: _windowsFromSnapshot(snapshot.windows, now, _legacyFetchedMs(snapshot.fetched_at), true),
 					fetchedAt: _legacyFetchedMs(snapshot.fetched_at),
 					available: true,
 					generation: gen ?? null,

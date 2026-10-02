@@ -319,9 +319,14 @@ export function attachVoiceCall(sessionId: string, callId: string): Promise<{ ok
 	);
 }
 
-/** Tell the backend the user ended the call. */
-export function hangupVoiceCall(sessionId: string): Promise<{ ok: boolean } | null> {
-	return optional('hangup', () => api.post<{ ok: boolean }>(`/voice/sessions/${sessionId}/hangup`));
+/**
+ * Tell the backend the call ended. `reason` is a short label (the End button,
+ * a dropped connection...) that only reaches the server log.
+ */
+export function hangupVoiceCall(sessionId: string, reason?: string): Promise<{ ok: boolean } | null> {
+	return optional('hangup', () =>
+		api.post<{ ok: boolean }>(`/voice/sessions/${sessionId}/hangup`, reason ? { reason } : undefined)
+	);
 }
 
 /** Server-side view of the call (unused by the happy path; handy for recovery). */
