@@ -44,6 +44,7 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
+	import CodeBlock from '../rows/CodeBlock.svelte';
 	import { getPluginsModel, pluginItem } from './plugins-model.svelte';
 	import { PACKAGE_ICON, REVIEW_ICON } from './icons';
 	import { renderReadme } from './readme';
@@ -85,7 +86,13 @@
 		if (!value) return null;
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return null;
-		return date.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+		return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+	}
+
+	/** `sha256:9f2ac71e…a9b8c7`: enough to compare, short enough to fit. */
+	function shortHash(hash: string | null | undefined): string {
+		if (!hash) return 'Missing';
+		return hash.length > 28 ? `${hash.slice(0, 19)}…${hash.slice(-6)}` : hash;
 	}
 
 	const version = $derived(plugin?.version ?? entry?.version);
@@ -178,16 +185,18 @@
 			<div data-testid="plugin-review">
 				<RowGroup title="This version">
 					<SettingRow label="Version"><ValueText value={plugin.version} mono /></SettingRow>
-					<SettingRow label="Content hash"><ValueText value={plugin.content_hash ?? 'Missing'} mono /></SettingRow>
-					<SettingRow label="Files">
-						<ValueText value={plugin.install_path} mono />
-					</SettingRow>
+					<SettingRow label="Content hash"><ValueText value={shortHash(plugin.content_hash)} mono /></SettingRow>
+					<SettingRow label="Files" hint={plugin.install_path} hintMono />
 				</RowGroup>
 				<RowGroup title="What it adds" count={plugin.components?.length ?? 0}>
 					{#each plugin.components ?? [] as component (component.kind + ':' + component.name)}
-						<SettingRow label="{componentLabel(component.kind)} {component.name}">
-							{#if component.detail}<ValueText value={component.detail} mono />{/if}
-						</SettingRow>
+						{#snippet commandLine()}
+							<CodeBlock code={component.detail ?? ''} />
+						{/snippet}
+						<SettingRow
+							label="{componentLabel(component.kind)} {component.name}"
+							expanded={component.detail ? commandLine : undefined}
+						/>
 					{:else}
 						<SettingRow label="Nothing listed" />
 					{/each}
@@ -258,7 +267,7 @@
 			</RowGroup>
 			{#if installed}
 				<RowGroup title="Location">
-					<SettingRow label="Install path"><ValueText value={plugin.install_path} mono /></SettingRow>
+					<SettingRow label="Install path" hint={plugin.install_path} hintMono />
 				</RowGroup>
 			{/if}
 		{/if}
@@ -284,6 +293,12 @@
 	}
 	.readme :global(:is(ul, ol)) {
 		padding-left: 20px;
+	}
+	.readme :global(ul) {
+		list-style: disc;
+	}
+	.readme :global(ol) {
+		list-style: decimal;
 	}
 	.readme :global(code) {
 		font-family: var(--st-mono);

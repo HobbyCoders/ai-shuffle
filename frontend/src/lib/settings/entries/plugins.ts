@@ -17,7 +17,7 @@ export const entries: SettingEntry[] = [
 		...SOURCES,
 		id: 'plugins.updates',
 		section: 'Updates',
-		label: 'Updates',
+		label: 'Check for updates',
 		keywords: ['check for updates', 'update all', 'plugin updates', 'upgrade']
 	},
 	{

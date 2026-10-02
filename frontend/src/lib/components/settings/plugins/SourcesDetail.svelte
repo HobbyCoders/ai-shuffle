@@ -30,7 +30,7 @@
 		if (!value) return 'Never synced';
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return 'Unknown';
-		return `Synced ${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+		return `Synced ${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 	}
 
 	function ago(value: string | null | undefined): string {
@@ -155,8 +155,8 @@
 	<div data-setting-anchor="plugins.sources">
 		<RowGroup title="Sources" count={model.marketplaces.length}>
 			{#each model.marketplaces as m (m.id)}
-				<SettingRow label={m.id} hint={synced(m.last_updated)}>
-					<ValueText value={m.url} mono />
+				<SettingRow label={m.id} hint={m.url} hintMono>
+					<ValueText value={synced(m.last_updated)} />
 					<button
 						type="button"
 						class="st-btn icon sm"

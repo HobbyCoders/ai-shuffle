@@ -58,7 +58,7 @@
 	const facts = $derived<Fact[]>([
 		{ label: 'Version', value: installed && info?.plugin_version ? `v${info.plugin_version}` : null, mono: true },
 		{ label: 'Accounts', value: count },
-		{ label: 'Used by', value: usedBy },
+		{ label: 'Used by', value: refs.length ? plural(refs.length, 'connection') : null },
 		{ label: 'Source', value: 'Official' }
 	]);
 
