@@ -251,6 +251,20 @@ def test_ai_tools_key_lookup_failure_is_unavailable(monkeypatch):
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
 
 
+def test_ai_tools_are_unavailable_while_fal_is_off(mock_db, _api_unit_credentials, monkeypatch):
+    from app.api.settings_crypto import set_encrypted_api_key
+    from app.core import fal_credential
+
+    set_encrypted_api_key("fal_api_key", "fal-owner-0123456789abcdefghijklmnop")
+    monkeypatch.setenv("FAL_KEY", "fal-from-env")
+    monkeypatch.setattr(tc, "_ai_tool_definitions", lambda: {})
+    _rows, available = tc.ai_tools()
+    assert available is True
+    fal_credential.set_enabled(False)
+    rows, available = tc.ai_tools()
+    assert available is False and rows and all(r["available"] is False for r in rows)
+
+
 def test_computer_use_tools_availability_error(monkeypatch):
     from app.mcp.computer_use import scaling
 

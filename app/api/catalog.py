@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from app.api.auth import require_auth
 from app.services.fal_catalog import catalog_service
 from app.services.fal_schema import schema_service
-from app.api.settings import get_decrypted_api_key
+from app.core import fal_credential
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def list_models(
     """
     # Auto-refresh if cache is stale
     if catalog_service.is_stale:
-        api_key = get_decrypted_api_key("fal_api_key")
+        api_key = fal_credential.api_key()
         try:
             await catalog_service.refresh(api_key)
         except Exception as e:
@@ -68,7 +68,7 @@ async def get_model_schema(
     ``found: False`` (not an error) when the model has no discoverable schema,
     so callers can fall back to a plain prompt input.
     """
-    api_key = get_decrypted_api_key("fal_api_key")
+    api_key = fal_credential.api_key()
     schema = await schema_service.get_schema(endpoint_id, api_key, force=refresh)
     if not schema:
         return {"found": False, "endpoint_id": endpoint_id}
@@ -98,7 +98,7 @@ async def refresh_catalog(
     already running (the agent's catalog search starts one too) is waited for,
     and its outcome is the answer.
     """
-    api_key = get_decrypted_api_key("fal_api_key")
+    api_key = fal_credential.api_key()
     count, error = await catalog_service.refresh_with_status(api_key)
     if error:
         return JSONResponse(status_code=502, content={

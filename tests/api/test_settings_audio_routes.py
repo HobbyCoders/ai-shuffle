@@ -314,7 +314,7 @@ def test_transcribe_silence_is_200_with_empty_text(c, fal_key, monkeypatch):
 
 
 @pytest.mark.parametrize("status,expected,detail", [
-    (401, 400, "fal.ai API key is invalid. Please update it in Settings > Integrations."),
+    (401, 400, "fal.ai API key is invalid. Please update it in Settings > Providers > fal.ai."),
     (429, 429, "fal.ai rate limit exceeded. Please wait a moment and try again."),
     # Any other upstream answer is a gateway failure: 502, not a fault here.
     (422, 502, "Transcription failed: bad audio"),
@@ -409,6 +409,50 @@ def test_transcribe_without_fal_key_is_400(c, openai_row, monkeypatch):
     r = _transcribe(c)
     assert r.status_code == 400
     assert r.json()["detail"].startswith("fal.ai API key not configured")
+    assert upstream.calls == []
+
+
+def test_transcribe_while_fal_is_off_is_400_and_calls_nothing(c, fal_key, monkeypatch):
+    from app.core import fal_credential
+
+    fal_credential.set_enabled(False)
+    upstream = install(monkeypatch, {**fal_upload_routes(), ("POST", "https://fal.run/"): httpx.Response(200, json={"text": "x"})})
+    r = _transcribe(c)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "fal.ai is off. Turn it on in Settings > Providers > fal.ai."
+    assert upstream.calls == []
+
+
+def test_tts_stream_while_fal_is_off_is_400_and_calls_nothing(c, fal_key, monkeypatch):
+    from app.core import fal_credential
+
+    fal_credential.set_enabled(False)
+    upstream = install(monkeypatch, _fal_tts_routes("fal-ai/kokoro/american-english"))
+    r = c.post(f"{BASE}/tts/stream", json={"text": "hello"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == fal_credential.OFF_MESSAGE
+    assert upstream.calls == []
+
+
+def test_audio_models_mark_fal_models_unavailable_while_off(c, fal_key, openai_row):
+    from app.core import fal_credential
+
+    fal_credential.set_enabled(False)
+    body = c.get(f"{BASE}/integrations/audio/models").json()
+    assert body["fal_configured"] is False and body["openai_configured"] is True
+    for model in body["tts_models"] + body["stt_models"]:
+        assert model["available"] is (model["provider"] == "openai"), model["id"]
+
+
+def test_api_user_gets_the_off_message_not_its_policy_while_off(client, api_user, monkeypatch):
+    from app.core import fal_credential
+
+    database.set_user_credential("audio-user", "fal_api_key", encryption.encrypt_value("fal-user-0123456789abcdefghij"))
+    fal_credential.set_enabled(False)
+    upstream = install(monkeypatch, _fal_tts_routes("fal-ai/kokoro/american-english"))
+    r = client.post(f"{BASE}/tts/stream", json={"text": "hi"}, headers=api_user)
+    assert r.status_code == 400
+    assert r.json()["detail"] == fal_credential.OFF_MESSAGE
     assert upstream.calls == []
 
 

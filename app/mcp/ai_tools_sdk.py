@@ -252,10 +252,17 @@ def _create_audio_gen_tools(worker: NodeWorker) -> list:
 
 
 def _get_fal_api_key() -> Optional[str]:
-    """Resolve the fal.ai API key from the encrypted settings store or env."""
+    """Resolve the fal.ai API key from the encrypted settings store or env.
+
+    None while fal.ai is off (``app.core.fal_credential``): the switch also
+    blocks the ``FAL_KEY`` / ``FAL_API_KEY`` environment fallback.
+    """
+    from app.core import fal_credential
+
     try:
-        from app.api.settings import get_decrypted_api_key
-        key = get_decrypted_api_key("fal_api_key")
+        if not fal_credential.is_enabled():
+            return None
+        key = fal_credential.api_key()
         if key:
             return key
     except Exception:  # noqa: BLE001 - settings store optional in some contexts
@@ -472,6 +479,17 @@ def create_ai_tools_server(
 
     # Normalize tools_dir path (remove trailing separators)
     tools_dir = tools_dir.rstrip("/\\")
+
+    # The worker inherits the host environment. While fal.ai is off, blank any
+    # fal key it would find there so a tool call cannot spend it.
+    from app.core import fal_credential
+
+    try:
+        fal_off = not fal_credential.is_enabled()
+    except Exception:  # noqa: BLE001 - settings store optional in some contexts
+        fal_off = False
+    if fal_off:
+        tool_env = {**(tool_env or {}), **{name: "" for name in fal_credential.ENV_KEYS}}
 
     # Create persistent Node.js worker (started lazily on first tool call)
     worker_script = f"{tools_dir}/dist/worker.js"

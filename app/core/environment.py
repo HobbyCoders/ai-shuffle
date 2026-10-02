@@ -781,12 +781,11 @@ def _build_env_with_ai_tools(
     if not any_image_tools and not any_video_tools and not any_3d_tools and not any_audio_tools:
         return env
 
-    # Resolve fal.ai API key (single provider architecture)
-    if api_user_id:
-        fal_api_key = _resolve_api_credential("fal_api_key", api_user_id)
-        logger.debug(f"Resolved fal.ai credential for API user {api_user_id}")
-    else:
-        fal_api_key = _get_decrypted_api_key("fal_api_key")
+    # Resolve fal.ai API key (single provider architecture). None while
+    # fal.ai is off (Settings > Providers > fal.ai).
+    from app.core import fal_credential
+
+    fal_api_key = fal_credential.api_key(api_user_id)
 
     if fal_api_key:
         env["FAL_KEY"] = fal_api_key

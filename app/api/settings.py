@@ -57,6 +57,9 @@ class IntegrationSettingsResponse(BaseModel):
     fal_api_key_set: bool
     fal_billing_api_key_set: bool = False
     fal_api_key_masked: str
+    # fal.ai on/off (Settings > Providers > fal.ai). Off keeps the key stored
+    # but no fal.ai call spends it. Unset reads as on.
+    fal_enabled: bool = True
     # Anthropic API key — a Claude Code AUTHENTICATION credential. When set, it
     # is injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
     # overrides the connected Claude account (API-key login). When unset, Claude
@@ -226,6 +229,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         single off-loop closure with the query order untouched.
         """
         fal_key = get_decrypted_api_key("fal_api_key")
+        from app.core import fal_credential
+        fal_enabled = fal_credential.is_enabled()
         anthropic_key = get_decrypted_api_key("anthropic_api_key")
         from app.core import claude_auth_mode
         auth_mode = claude_auth_mode.current_mode()
@@ -256,6 +261,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             fal_api_key_set=bool(fal_key),
             fal_billing_api_key_set=bool(database.get_system_setting("fal_billing_api_key")),
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
+            fal_enabled=fal_enabled,
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
             # The explicit mode decides, never the key's mere presence.
@@ -328,6 +334,36 @@ async def remove_fal_api_key(token: str = Depends(require_admin)):
     """
     await run_sync(database.delete_system_setting, "fal_api_key")
     return {"success": True}
+
+
+class FalEnabledRequest(BaseModel):
+    """Turn fal.ai on or off."""
+    enabled: bool
+
+
+class FalEnabledResponse(BaseModel):
+    fal_enabled: bool
+    fal_api_key_set: bool
+
+
+@router.put("/integrations/fal-ai/enabled", response_model=FalEnabledResponse)
+async def set_fal_enabled(request: FalEnabledRequest, token: str = Depends(require_admin)):
+    """
+    Turn fal.ai on or off (admin only).
+
+    Off keeps the stored key but every fal.ai reader (AI tools, dictation and
+    text-to-speech on fal models, fal voice calls, the model catalog) gets no
+    key, including the FAL_KEY / FAL_API_KEY environment fallback. The write
+    announces a settings change to open clients. Takes effect for the next
+    fal.ai call; an open agent session drops its AI tools at its next turn.
+    """
+    from app.core import fal_credential
+
+    def _apply() -> FalEnabledResponse:
+        enabled = fal_credential.set_enabled(request.enabled)
+        return FalEnabledResponse(fal_enabled=enabled, fal_api_key_set=fal_credential.key_stored())
+
+    return await run_sync(_apply)
 
 
 @router.post("/integrations/anthropic", response_model=AnthropicKeyResponse)
