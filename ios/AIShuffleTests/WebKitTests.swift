@@ -180,6 +180,36 @@ final class WebKitTests: XCTestCase {
         XCTAssertTrue(MobileUI.isAssetOrigin(controller.webView.url), "\(String(describing: controller.webView.url))")
     }
 
+    /// TEMPORARY diagnostic: what WebKit hands createWebViewWith for a script window.open.
+    func testDiagnoseWindowOpen() async throws {
+        final class Recorder: NSObject, WKUIDelegate {
+            var calls: [String] = []
+            func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                         for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                let source = action.value(forKey: "sourceFrame") as? WKFrameInfo
+                calls.append("type=\(action.navigationType.rawValue) url=\(action.request.url?.absoluteString ?? "nil") " +
+                             "source=\(source.map { "\($0.isMainFrame) \($0.securityOrigin.protocol)://\($0.securityOrigin.host):\($0.securityOrigin.port)" } ?? "nil") " +
+                             "target=\(action.targetFrame == nil ? "nil" : "set")")
+                return nil
+            }
+        }
+        let root = try XCTUnwrap(BundleAssets.root)
+        for auto in [false, true] {
+            for features in ["'noopener'", "''"] {
+                let recorder = Recorder()
+                let webView = WKWebView(frame: .zero, configuration: ChatWebController.configuration(rules: nil, root: root))
+                webView.uiDelegate = recorder
+                show(webView)
+                webView.load(URLRequest(url: MobileUI.indexURL))
+                _ = try await waitUntil(30) { !webView.isLoading && webView.url != nil }
+                webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = auto
+                let result = try await evaluate(webView, "return String(window.open('https://docs.example/p', '_blank', \(features)))")
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                print("DIAG auto=\(auto) features=\(features) result=\(result) calls=\(recorder.calls)")
+            }
+        }
+    }
+
     /// Closing must actually unload the chat document; about:blank is otherwise refused by the policy.
     func testCloseUnloadsTheChatDocument() async throws {
         let controller = try await loadedController()
