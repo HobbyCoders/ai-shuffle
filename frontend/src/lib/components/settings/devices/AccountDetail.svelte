@@ -104,8 +104,8 @@
 			<InlineBanner tone="warn">
 				<span role="alert">
 					{refusal.message}
-					{refusal.used} of {refusal.limit} remote {refusal.limit === 1 ? 'connection' : 'connections'} in use. This
-					worker still works here and on your network.
+					{refusal.used} of {refusal.limit} remote {refusal.limit === 1 ? 'connection' : 'connections'} in use. This worker
+					still works here and on your network.
 				</span>
 				{#snippet actions()}
 					<button type="button" class="st-btn sm" onclick={openLicense}>Open License</button>
@@ -164,7 +164,10 @@
 		</RowGroup>
 	{:else}
 		<RowGroup title="Profile">
-			<SettingRow label={flow.needsUsername ? 'Choose your username' : 'Username'} hint={editing ? 'Others see this name' : undefined}>
+			<SettingRow
+				label={flow.needsUsername ? 'Choose your username' : 'Username'}
+				hint={editing ? 'Others see this name' : undefined}
+			>
 				{#if editing}
 					<TextField bind:value={flow.usernameInput} maxlength={64} width={180} disabled={flow.savingUsername} />
 					<button
@@ -182,11 +185,19 @@
 					{/if}
 				{:else if profile}
 					<ValueText value="@{profile.account.username}" tone="fg" />
-					<button type="button" class="st-btn icon ghost sm" aria-label="Edit username" title="Edit username" onclick={() => flow.startEdit()}>
+					<button
+						type="button"
+						class="st-btn icon ghost sm"
+						aria-label="Edit username"
+						title="Edit username"
+						onclick={() => flow.startEdit()}
+					>
 						<Pencil />
 					</button>
 				{:else}
-					<ValueText value={flow.loadingProfile ? 'Loading…' : c.profile_ready === false ? 'Finishing connection…' : ''} />
+					<ValueText
+						value={flow.loadingProfile ? 'Loading…' : c.profile_ready === false ? 'Finishing connection…' : ''}
+					/>
 				{/if}
 			</SettingRow>
 			{#if flow.profileError}
@@ -200,7 +211,11 @@
 		</RowGroup>
 		<RowGroup title="Remote access">
 			<SettingRow label="Remote access" hint={refusal ? 'Over the limit: LAN only' : undefined}>
-				<ValueText status={c.status === 'connected' ? 'ok' : refusal ? 'warn' : 'off'} value={remoteShort(flow)} tone="fg" />
+				<ValueText
+					status={c.status === 'connected' ? 'ok' : refusal ? 'warn' : 'off'}
+					value={remoteShort(flow)}
+					tone="fg"
+				/>
 			</SettingRow>
 			{#if flow.browserViaAccount}
 				<SettingRow label="This browser">

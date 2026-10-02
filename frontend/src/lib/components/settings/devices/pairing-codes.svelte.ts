@@ -118,7 +118,8 @@ export class PairingCodes {
 
 	/** Why Create is not possible right now, or ''. */
 	blocker(item: PairingItem): string {
-		if (item.kind === 'worker' && this.endpointsLoaded && this.usableEndpoints.length === 0) return NO_REACHABLE_ADDRESS;
+		if (item.kind === 'worker' && this.endpointsLoaded && this.usableEndpoints.length === 0)
+			return NO_REACHABLE_ADDRESS;
 		return '';
 	}
 

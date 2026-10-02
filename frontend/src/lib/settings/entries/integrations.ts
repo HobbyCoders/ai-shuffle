@@ -30,7 +30,12 @@ const github = { category: 'integrations' as const, item: 'github' };
 export function searchSource(): SearchItem[] {
 	return [
 		{ title: 'GitHub', where: 'Integrations, Accounts', keywords: 'gh git sign in', target: github },
-		{ title: 'Connect GitHub', where: 'Integrations, GitHub', keywords: 'gh personal access token pat web sign-in', target: github },
+		{
+			title: 'Connect GitHub',
+			where: 'Integrations, GitHub',
+			keywords: 'gh personal access token pat web sign-in',
+			target: github
+		},
 		{ title: 'Disconnect GitHub', where: 'Integrations, GitHub', keywords: 'gh sign out logout', target: github },
 		...apiUserItems.flatMap((u) => [
 			{

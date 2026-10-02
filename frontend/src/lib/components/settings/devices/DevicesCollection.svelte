@@ -75,7 +75,10 @@
 	const groups = $derived.by((): { label: string; rows: Row[] }[] => {
 		const acct = accountStatus(model.account);
 		const list: { label: string; rows: Row[] }[] = [
-			{ label: 'Account', rows: [{ id: 'account', name: 'Shuffle account', summary: acct.summary, status: acct.tone, icon: CircleUser }] },
+			{
+				label: 'Account',
+				rows: [{ id: 'account', name: 'Shuffle account', summary: acct.summary, status: acct.tone, icon: CircleUser }]
+			},
 			{
 				label: 'Requests',
 				rows: model.requests.devices.map((d) => {
@@ -85,7 +88,15 @@
 						id: requestId(d),
 						name: d.device_name || 'Unnamed device',
 						summary: pending && expired ? 'Key expired, pair again' : requestStatusText(d),
-						status: d.revoked_at ? 'off' : pending ? (expired ? 'off' : 'warn') : d.confirmation === 'approved' ? 'ok' : 'err',
+						status: d.revoked_at
+							? 'off'
+							: pending
+								? expired
+									? 'off'
+									: 'warn'
+								: d.confirmation === 'approved'
+									? 'ok'
+									: 'err',
 						icon: ShieldQuestion
 					};
 				})
@@ -115,7 +126,11 @@
 							{
 								id: 'self',
 								name: model.workerName,
-								summary: [model.status.platform, model.status.version, NETWORK_STATE_LABELS[model.uiState].toLowerCase()]
+								summary: [
+									model.status.platform,
+									model.status.version,
+									NETWORK_STATE_LABELS[model.uiState].toLowerCase()
+								]
 									.filter(Boolean)
 									.join(', '),
 								status: selfTone[model.uiState],
@@ -130,7 +145,9 @@
 					...model.members.map((m) => ({
 						id: `member:${m.device_id}`,
 						name: m.name,
-						summary: [m.platform, m.online ? 'online' : model.seen(m.last_seen).toLowerCase()].filter(Boolean).join(', '),
+						summary: [m.platform, m.online ? 'online' : model.seen(m.last_seen).toLowerCase()]
+							.filter(Boolean)
+							.join(', '),
 						status: (m.online ? 'ok' : 'off') as StatusTone,
 						icon: Server
 					})),
@@ -203,13 +220,16 @@
 		{#if model.statusError}
 			<InlineBanner tone="warn">
 				<span role="alert">{model.statusError}</span>
-				{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => model.loadStatus()}>Retry</button>{/snippet}
+				{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => model.loadStatus()}>Retry</button
+					>{/snippet}
 			</InlineBanner>
 		{/if}
 		{#if model.workersError}
 			<InlineBanner tone="warn">
 				<span role="alert">Workers: {model.workersError}</span>
-				{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => model.loadWorkers()}>Retry workers</button>{/snippet}
+				{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => model.loadWorkers()}
+						>Retry workers</button
+					>{/snippet}
 			</InlineBanner>
 		{/if}
 		{#if model.clientsError}
@@ -229,7 +249,9 @@
 		{#if model.error}
 			<InlineBanner tone="warn">
 				<span role="alert">{model.error}</span>
-				{#snippet actions()}<button type="button" class="st-btn ghost sm" onclick={() => (model.error = '')}>Dismiss</button>{/snippet}
+				{#snippet actions()}<button type="button" class="st-btn ghost sm" onclick={() => (model.error = '')}
+						>Dismiss</button
+					>{/snippet}
 			</InlineBanner>
 		{/if}
 		{#if model.forbidden}<p class="st-empty">{FORBIDDEN_TEXT}</p>{/if}

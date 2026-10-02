@@ -84,7 +84,13 @@
 			/>
 		</span>
 		{#if model.logger}
-			<button type="button" class="chip" aria-label="Show every logger" title="Show every logger" onclick={() => model.clearLogger()}>
+			<button
+				type="button"
+				class="chip"
+				aria-label="Show every logger"
+				title="Show every logger"
+				onclick={() => model.clearLogger()}
+			>
 				<span>{model.logger}</span><X />
 			</button>
 		{/if}
@@ -116,7 +122,8 @@
 			<p class="st-empty" role="status">Loading logs…</p>
 		{:else if model.shown.length === 0}
 			<p class="st-empty">
-				No logs found.{#if model.level || model.appliedSearch || model.logger} Try other filters.{/if}
+				No logs found.{#if model.level || model.appliedSearch || model.logger}
+					Try other filters.{/if}
 			</p>
 		{:else}
 			{#each model.shown as line (line.id)}

@@ -24,14 +24,74 @@ import { DevicesModel, clientKind } from './devices-model.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 
 const fingerprint = 'abcd-'.repeat(7) + 'abcd';
-const member =(device_id: string, extra: Partial<NetworkMember> = {}): NetworkMember => ({ device_id, name: 'Laptop', kind: 'worker', platform: 'macos', status: 'active', generation: 1, is_self: false, fingerprint, added_by: 'self', created_at: null, last_seen: '2026-09-01T10:00:00Z', endpoints: [], capabilities: {}, version: '1.0', online: true, legacy_instance_id: null, ...extra });
-const install = (id: string, extra: Partial<Install> = {}): Install => ({ id, device_name: 'Shared worker', base_url: null, platform: 'linux', version: '1.0', capabilities: {}, last_seen: null, online: true, approved: true, ...extra });
-const client = (id: string, extra: Partial<PairedClient> = {}): PairedClient => ({ id, device_id: id, device_name: 'My phone', platform: 'android', client_type: 'mobile', scopes: ['controller'], session_expires_at: null, paired_at: '2026-09-01T10:00:00Z', last_seen: null, revoked_at: null, created_at: '', updated_at: '', ...extra });
+const member = (device_id: string, extra: Partial<NetworkMember> = {}): NetworkMember => ({
+	device_id,
+	name: 'Laptop',
+	kind: 'worker',
+	platform: 'macos',
+	status: 'active',
+	generation: 1,
+	is_self: false,
+	fingerprint,
+	added_by: 'self',
+	created_at: null,
+	last_seen: '2026-09-01T10:00:00Z',
+	endpoints: [],
+	capabilities: {},
+	version: '1.0',
+	online: true,
+	legacy_instance_id: null,
+	...extra
+});
+const install = (id: string, extra: Partial<Install> = {}): Install => ({
+	id,
+	device_name: 'Shared worker',
+	base_url: null,
+	platform: 'linux',
+	version: '1.0',
+	capabilities: {},
+	last_seen: null,
+	online: true,
+	approved: true,
+	...extra
+});
+const client = (id: string, extra: Partial<PairedClient> = {}): PairedClient => ({
+	id,
+	device_id: id,
+	device_name: 'My phone',
+	platform: 'android',
+	client_type: 'mobile',
+	scopes: ['controller'],
+	session_expires_at: null,
+	paired_at: '2026-09-01T10:00:00Z',
+	last_seen: null,
+	revoked_at: null,
+	created_at: '',
+	updated_at: '',
+	...extra
+});
 const enrolled = (): NetworkStatus => ({
-	device: { device_id: 'self', fingerprint }, enrolled: true, platform: 'linux', version: '1.0', instance_id: 'self',
-	network: { network_id: 'n', name: 'Home', device_id: 'self', fingerprint, founder_device_id: 'self', generation: 1, key_version: 1, bootstrap_state: 'ready', member_count: 2 },
+	device: { device_id: 'self', fingerprint },
+	enrolled: true,
+	platform: 'linux',
+	version: '1.0',
+	instance_id: 'self',
+	network: {
+		network_id: 'n',
+		name: 'Home',
+		device_id: 'self',
+		fingerprint,
+		founder_device_id: 'self',
+		generation: 1,
+		key_version: 1,
+		bootstrap_state: 'ready',
+		member_count: 2
+	},
 	members: [member('self', { name: 'Desk', is_self: true, platform: 'linux' }), member('laptop')],
-	pending_joins: [], sync: { records: {}, ops: 3, holes: [], peers: [], conflicts: 0 }, recovery: { configured: false, created_at: null, key_version: null }, hub: { linked: false }
+	pending_joins: [],
+	sync: { records: {}, ops: 3, holes: [], peers: [], conflicts: 0 },
+	recovery: { configured: false, created_at: null, key_version: null },
+	hub: { linked: false }
 });
 let status: NetworkStatus;
 let installs: Install[];
@@ -55,14 +115,25 @@ let stop: () => void;
 beforeEach(() => {
 	vi.resetAllMocks();
 	status = enrolled();
-	installs = [install('self', { device_id: 'self', is_self: true, device_name: 'Desk' }), install('laptop', { device_id: 'laptop', device_name: 'Laptop' })];
-	clients = [client('phone'), client('browser', { device_name: 'Work browser', client_type: 'browser', platform: 'linux-browser' })];
+	installs = [
+		install('self', { device_id: 'self', is_self: true, device_name: 'Desk' }),
+		install('laptop', { device_id: 'laptop', device_name: 'Laptop' })
+	];
+	clients = [
+		client('phone'),
+		client('browser', { device_name: 'Work browser', client_type: 'browser', platform: 'linux-browser' })
+	];
 	connection = disconnected;
 	profile = null;
 	api.get.mockImplementation(async (path: string) => reads(path));
 	model = new DevicesModel();
 });
-afterEach(() => { stop?.(); model.reset(); resourceSync.clear(); vi.useRealTimers(); });
+afterEach(() => {
+	stop?.();
+	model.reset();
+	resourceSync.clear();
+	vi.useRealTimers();
+});
 
 async function started() {
 	stop = model.start();
@@ -78,7 +149,11 @@ it('counts workers, phones and browsers in one inventory without advanced data',
 	expect(model.legacyInstalls).toEqual([]);
 	expect(clientKind(model.clients[0])).toBe('Phone');
 	expect(clientKind(model.clients[1])).toBe('Browser');
-	expect(api.get.mock.calls.some(([path]) => ['/cluster/advertise', '/network/conflicts'].includes(path) || path.includes('/secret'))).toBe(false);
+	expect(
+		api.get.mock.calls.some(
+			([path]) => ['/cluster/advertise', '/network/conflicts'].includes(path) || path.includes('/secret')
+		)
+	).toBe(false);
 });
 
 it('explains startup sync that opened saved data', async () => {
@@ -89,7 +164,12 @@ it('explains startup sync that opened saved data', async () => {
 
 it('renames this worker and revokes another worker, with the rotate-keys toast', async () => {
 	api.patch.mockResolvedValue({});
-	api.delete.mockResolvedValue({ device_id: 'laptop', generation: 2, key_version: 2, rotate_provider_keys_recommended: true });
+	api.delete.mockResolvedValue({
+		device_id: 'laptop',
+		generation: 2,
+		key_version: 2,
+		rotate_provider_keys_recommended: true
+	});
 	await started();
 	expect(await model.rename('self', '  Studio desk ')).toBe(true);
 	expect(api.patch).toHaveBeenCalledWith('/network/members/self', { name: 'Studio desk' });
@@ -103,7 +183,28 @@ it('renames this worker and revokes another worker, with the rotate-keys toast',
 });
 
 it('lists devices joining right now, not an approval queue', async () => {
-	status = { ...enrolled(), pending_joins: [{ id: 'j1', status: 'pending', device_id: 'dev_new', name: 'New laptop', platform: 'windows', fingerprint, legacy_instance_id: null, created_at: null, expires_at: null }], hub: { linked: true, registered: true, status: 'active', pending_devices: [{ device_id: 'dev_phone', name: 'Office PC', platform: 'windows', signing_public: 'x' }] } };
+	status = {
+		...enrolled(),
+		pending_joins: [
+			{
+				id: 'j1',
+				status: 'pending',
+				device_id: 'dev_new',
+				name: 'New laptop',
+				platform: 'windows',
+				fingerprint,
+				legacy_instance_id: null,
+				created_at: null,
+				expires_at: null
+			}
+		],
+		hub: {
+			linked: true,
+			registered: true,
+			status: 'active',
+			pending_devices: [{ device_id: 'dev_phone', name: 'Office PC', platform: 'windows', signing_public: 'x' }]
+		}
+	};
 	await started();
 	expect(model.joining).toEqual([
 		{ key: 'join:j1', name: 'New laptop', platform: 'windows', via: 'invite' },
@@ -112,7 +213,26 @@ it('lists devices joining right now, not an approval queue', async () => {
 });
 
 it('waits for an account worker without offering cloud restoration', async () => {
-	status = { device: { device_id: 'self', fingerprint }, enrolled: false, platform: 'linux', version: '1.0', instance_id: 'self', enrollment: null, hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'other', devices: [{ device_id: 'other', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: true } } };
+	status = {
+		device: { device_id: 'self', fingerprint },
+		enrolled: false,
+		platform: 'linux',
+		version: '1.0',
+		instance_id: 'self',
+		enrollment: null,
+		hub: {
+			linked: true,
+			registered: false,
+			status: 'pending',
+			account_network: {
+				network_id: 'n',
+				name: null,
+				founder_device_id: 'other',
+				devices: [{ device_id: 'other', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }],
+				recovery_available: true
+			}
+		}
+	};
 	installs = [];
 	await started();
 	expect(model.waitingOnAccount).toBe(true);
@@ -122,7 +242,13 @@ it('waits for an account worker without offering cloud restoration', async () =>
 });
 
 it('switches to the account settings by itself; only a failed switch retries through adopt', async () => {
-	const account_network = { network_id: 'other', name: null, founder_device_id: 'x', devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: false };
+	const account_network = {
+		network_id: 'other',
+		name: null,
+		founder_device_id: 'x',
+		devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }],
+		recovery_available: false
+	};
 	status = { ...enrolled(), hub: { linked: true, registered: false, status: 'conflict', account_network } };
 	api.post.mockResolvedValue({ adopted: true, status: 'pending' });
 	await started();
@@ -133,7 +259,14 @@ it('switches to the account settings by itself; only a failed switch retries thr
 });
 
 it('keeps separate settings by founding its own network', async () => {
-	status = { device: { device_id: 'self', fingerprint }, enrolled: false, platform: 'linux', version: '1.0', instance_id: 'self', enrollment: null };
+	status = {
+		device: { device_id: 'self', fingerprint },
+		enrolled: false,
+		platform: 'linux',
+		version: '1.0',
+		instance_id: 'self',
+		enrollment: null
+	};
 	installs = [install('self', { is_self: true, device_name: 'Desk' })];
 	api.post.mockResolvedValue({ network: { name: null } });
 	stop = model.start();
@@ -153,7 +286,9 @@ it('revokes a paired client through the client API and drops it', async () => {
 
 it('keeps legacy shared-database installs with allow, revoke, rename and remove', async () => {
 	installs.push(install('pending', { device_name: 'Old runner', approved: false }));
-	api.put.mockImplementation(async (_path: string, body: { approved: boolean }) => install('pending', { device_name: 'Old runner', approved: body.approved }));
+	api.put.mockImplementation(async (_path: string, body: { approved: boolean }) =>
+		install('pending', { device_name: 'Old runner', approved: body.approved })
+	);
 	api.patch.mockResolvedValue(install('pending', { device_name: 'Renamed runner' }));
 	await started();
 	expect(model.total).toBe(5);
@@ -170,21 +305,28 @@ it('keeps legacy shared-database installs with allow, revoke, rename and remove'
 	expect(model.legacyInstalls).toEqual([]);
 });
 
-it.each(['/cluster/installs', '/pairing/clients'])('keeps healthy devices when %s fails and retries that source alone', async (failedPath) => {
-	api.get.mockImplementation(async (path: string) => { if (path === failedPath) throw new Error('Source unavailable'); return reads(path); });
-	stop = model.start();
-	await vi.waitFor(() => expect(model.workersError || model.clientsError).toBe('Source unavailable'));
-	expect(model.status).not.toBeNull();
-	api.get.mockImplementation(async (path: string) => reads(path));
-	if (failedPath === '/cluster/installs') await model.loadWorkers();
-	else await model.loadClients();
-	expect(model.workersError || model.clientsError).toBe('');
-	expect(model.total).toBe(4);
-});
+it.each(['/cluster/installs', '/pairing/clients'])(
+	'keeps healthy devices when %s fails and retries that source alone',
+	async (failedPath) => {
+		api.get.mockImplementation(async (path: string) => {
+			if (path === failedPath) throw new Error('Source unavailable');
+			return reads(path);
+		});
+		stop = model.start();
+		await vi.waitFor(() => expect(model.workersError || model.clientsError).toBe('Source unavailable'));
+		expect(model.status).not.toBeNull();
+		api.get.mockImplementation(async (path: string) => reads(path));
+		if (failedPath === '/cluster/installs') await model.loadWorkers();
+		else await model.loadClients();
+		expect(model.workersError || model.clientsError).toBe('');
+		expect(model.total).toBe(4);
+	}
+);
 
 it('treats refused reads (unapproved device) as forbidden, not errors', async () => {
 	api.get.mockImplementation(async (path: string) => {
-		if (['/network/status', '/cluster/installs', '/pairing/clients'].includes(path)) throw { status: 403, detail: 'Admin only' };
+		if (['/network/status', '/cluster/installs', '/pairing/clients'].includes(path))
+			throw { status: 403, detail: 'Admin only' };
 		return reads(path);
 	});
 	stop = model.start();
@@ -244,27 +386,38 @@ it('merges known local identities and keeps offline account devices', async () =
 	expect(model.linkedRegistration('client:phone')?.id).toBe('account-phone');
 });
 
-it.each(['servers', 'devices'] as const)('revokes an account-only %s registration and refreshes the inventory', async (kind) => {
-	connection = { ...disconnected, signed_in: true, status: 'connected' };
-	profile = { account: { id: 'a', username: 'owner', profile_complete: true }, servers: [{ id: 'offline', name: 'Offline PC', current: false, url: null }], devices: [{ id: 'offline', name: 'Offline phone', platform: 'android' }] };
-	stop = model.start();
-	await vi.waitFor(() => expect(model.accountDevices).toHaveLength(2));
-	const key = kind === 'servers' ? 'account-worker:offline' : 'account-device:offline';
-	api.delete.mockRejectedValueOnce(new Error('Account service unavailable'));
-	expect(await model.revoke(key, 'x')).toBe(false);
-	expect(model.error).toBe('Account service unavailable');
-	expect(model.accountDevices).toHaveLength(2);
-	api.delete.mockResolvedValueOnce({ ok: true });
-	profile = { ...(profile as object), [kind]: [] };
-	expect(await model.revoke(key, 'x')).toBe(true);
-	expect(api.delete).toHaveBeenLastCalledWith(`/mobile/hub/account/${kind}/offline`);
-	expect(model.accountDevices).toHaveLength(1);
-	expect(api.get.mock.calls.filter(([p]) => p === '/mobile/hub/account').length).toBeGreaterThan(1);
-});
+it.each(['servers', 'devices'] as const)(
+	'revokes an account-only %s registration and refreshes the inventory',
+	async (kind) => {
+		connection = { ...disconnected, signed_in: true, status: 'connected' };
+		profile = {
+			account: { id: 'a', username: 'owner', profile_complete: true },
+			servers: [{ id: 'offline', name: 'Offline PC', current: false, url: null }],
+			devices: [{ id: 'offline', name: 'Offline phone', platform: 'android' }]
+		};
+		stop = model.start();
+		await vi.waitFor(() => expect(model.accountDevices).toHaveLength(2));
+		const key = kind === 'servers' ? 'account-worker:offline' : 'account-device:offline';
+		api.delete.mockRejectedValueOnce(new Error('Account service unavailable'));
+		expect(await model.revoke(key, 'x')).toBe(false);
+		expect(model.error).toBe('Account service unavailable');
+		expect(model.accountDevices).toHaveLength(2);
+		api.delete.mockResolvedValueOnce({ ok: true });
+		profile = { ...(profile as object), [kind]: [] };
+		expect(await model.revoke(key, 'x')).toBe(true);
+		expect(api.delete).toHaveBeenLastCalledWith(`/mobile/hub/account/${kind}/offline`);
+		expect(model.accountDevices).toHaveLength(1);
+		expect(api.get.mock.calls.filter(([p]) => p === '/mobile/hub/account').length).toBeGreaterThan(1);
+	}
+);
 
 it('never revokes the current worker registration', async () => {
 	connection = { ...disconnected, signed_in: true, status: 'connected' };
-	profile = { account: { id: 'a', username: 'owner', profile_complete: true }, servers: [{ id: 'me', name: 'Desk', current: true, url: null }], devices: [] };
+	profile = {
+		account: { id: 'a', username: 'owner', profile_complete: true },
+		servers: [{ id: 'me', name: 'Desk', current: true, url: null }],
+		devices: []
+	};
 	stop = model.start();
 	await vi.waitFor(() => expect(model.account.profile).not.toBeNull());
 	expect(await model.revoke('self', 'Desk')).toBe(false);
@@ -278,12 +431,27 @@ it.each(['phone', 'member', 'legacy'] as const)('revokes account then local acce
 	connection = { ...disconnected, signed_in: true, status: 'connected' };
 	profile = {
 		account: { id: 'account', username: 'owner', profile_complete: true },
-		servers: isPhone ? [] : [{ id: 'linked', name: 'Account worker', current: false, url: kind === 'member' ? 'https://laptop.example' : 'https://old.example' }],
+		servers: isPhone
+			? []
+			: [
+					{
+						id: 'linked',
+						name: 'Account worker',
+						current: false,
+						url: kind === 'member' ? 'https://laptop.example' : 'https://old.example'
+					}
+				],
 		devices: isPhone ? [{ id: 'linked', local_device_id: 'phone', name: 'Account phone', platform: 'android' }] : []
 	};
 	const events: string[] = [];
-	api.delete.mockImplementation(async (path: string) => { events.push(path); return { ok: true, rotate_provider_keys_recommended: true }; });
-	api.put.mockImplementation(async (path: string) => { events.push(path); return install('old', { approved: false }); });
+	api.delete.mockImplementation(async (path: string) => {
+		events.push(path);
+		return { ok: true, rotate_provider_keys_recommended: true };
+	});
+	api.put.mockImplementation(async (path: string) => {
+		events.push(path);
+		return install('old', { approved: false });
+	});
 	stop = model.start();
 	await vi.waitFor(() => expect(model.account.profile).not.toBeNull());
 	await vi.waitFor(() => expect(model.workersLoaded && model.clientsLoaded).toBe(true));
@@ -292,13 +460,21 @@ it.each(['phone', 'member', 'legacy'] as const)('revokes account then local acce
 	expect(await model.revoke(key, 'Device')).toBe(true);
 	expect(events).toEqual([
 		`/mobile/hub/account/${isPhone ? 'devices' : 'servers'}/linked`,
-		isPhone ? '/pairing/clients/phone' : kind === 'member' ? '/network/members/laptop' : '/cluster/installs/old/approval'
+		isPhone
+			? '/pairing/clients/phone'
+			: kind === 'member'
+				? '/network/members/laptop'
+				: '/cluster/installs/old/approval'
 	]);
 });
 
 it('stops on account failure and lets local cleanup retry after the account part succeeded', async () => {
 	connection = { ...disconnected, signed_in: true, status: 'connected' };
-	profile = { account: { id: 'account', username: 'owner', profile_complete: true }, servers: [], devices: [{ id: 'linked', local_device_id: 'phone', name: 'Account phone', platform: 'android' }] };
+	profile = {
+		account: { id: 'account', username: 'owner', profile_complete: true },
+		servers: [],
+		devices: [{ id: 'linked', local_device_id: 'phone', name: 'Account phone', platform: 'android' }]
+	};
 	stop = model.start();
 	await vi.waitFor(() => expect(model.linkedRegistration('client:phone')).toBeTruthy());
 	api.delete.mockRejectedValueOnce(new Error('Account service unavailable'));

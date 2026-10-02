@@ -67,7 +67,11 @@
 	facts={grant
 		? [
 				{ label: 'Uses left', value: '1' },
-				{ label: 'Address', value: item.kind === 'runner' ? null : grant.grant.endpoint_url || item.endpointUrl || null, mono: true },
+				{
+					label: 'Address',
+					value: item.kind === 'runner' ? null : grant.grant.endpoint_url || item.endpointUrl || null,
+					mono: true
+				},
 				{ label: 'Expires in', value: pairing.countdown(item), mono: true }
 			]
 		: []}
@@ -103,7 +107,12 @@
 			<InlineBanner tone="warn">
 				<span role="alert">{pairing.endpointError}</span>
 				{#snippet actions()}
-					<button type="button" class="st-btn sm" disabled={pairing.loadingEndpoints} onclick={() => pairing.loadEndpoints()}>
+					<button
+						type="button"
+						class="st-btn sm"
+						disabled={pairing.loadingEndpoints}
+						onclick={() => pairing.loadEndpoints()}
+					>
 						Retry addresses
 					</button>
 				{/snippet}
@@ -159,7 +168,12 @@
 								{#if item.copied === 'link'}<Check />Copied{:else}<Copy />Copy command{/if}
 							</button>
 						{:else if link}
-							<button type="button" class="st-btn sm" aria-label={copyLinkLabel} onclick={() => pairing.copy(item, 'link', link)}>
+							<button
+								type="button"
+								class="st-btn sm"
+								aria-label={copyLinkLabel}
+								onclick={() => pairing.copy(item, 'link', link)}
+							>
 								{#if item.copied === 'link'}<Check />Copied{:else}<Copy />{copyLinkLabel}{/if}
 							</button>
 						{/if}

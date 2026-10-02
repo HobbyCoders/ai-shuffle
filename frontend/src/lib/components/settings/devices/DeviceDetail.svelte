@@ -26,11 +26,15 @@
 
 	let { model, key }: Props = $props();
 
-	const member = $derived(key.startsWith('member:') ? model.members.find((m) => `member:${m.device_id}` === key) : undefined);
+	const member = $derived(
+		key.startsWith('member:') ? model.members.find((m) => `member:${m.device_id}` === key) : undefined
+	);
 	const joining = $derived(model.joining.find((j) => j.key === key));
 	const client = $derived(key.startsWith('client:') ? model.clients.find((c) => `client:${c.id}` === key) : undefined);
 	const account = $derived(model.accountDevices.find((d) => d.key === key));
-	const legacy = $derived(key.startsWith('legacy:') ? model.legacyInstalls.find((i) => `legacy:${i.id}` === key) : undefined);
+	const legacy = $derived(
+		key.startsWith('legacy:') ? model.legacyInstalls.find((i) => `legacy:${i.id}` === key) : undefined
+	);
 	const linked = $derived(model.linkedRegistration(key));
 	const busy = $derived(model.saving !== null);
 
@@ -149,7 +153,13 @@
 {:else if account}
 	<DetailPane
 		name={account.name}
-		icon={account.kind === 'Worker' ? Server : account.kind === 'Phone' ? Smartphone : account.kind === 'Browser' ? Globe : Cloud}
+		icon={account.kind === 'Worker'
+			? Server
+			: account.kind === 'Phone'
+				? Smartphone
+				: account.kind === 'Browser'
+					? Globe
+					: Cloud}
 		status="off"
 		statusText="Availability unknown"
 		badge="On your account"

@@ -130,7 +130,12 @@ export class DevicesModel {
 	get joining(): JoiningDevice[] {
 		const s = this.status;
 		return [
-			...(s?.pending_joins ?? []).map((j) => ({ key: `join:${j.id}`, name: j.name, platform: j.platform, via: 'invite' as const })),
+			...(s?.pending_joins ?? []).map((j) => ({
+				key: `join:${j.id}`,
+				name: j.name,
+				platform: j.platform,
+				via: 'invite' as const
+			})),
 			...(s?.hub?.pending_devices ?? []).map((d) => ({
 				key: `hub:${d.device_id}`,
 				name: d.name || d.device_id,
@@ -141,9 +146,7 @@ export class DevicesModel {
 	}
 	get workerName(): string {
 		return (
-			this.self?.name ??
-			this.installs.find((i) => i.is_self || i.id === this.selfInstallId)?.device_name ??
-			'My worker'
+			this.self?.name ?? this.installs.find((i) => i.is_self || i.id === this.selfInstallId)?.device_name ?? 'My worker'
 		);
 	}
 	get registrations(): AccountDeviceRow[] {
@@ -182,7 +185,9 @@ export class DevicesModel {
 		return this.enrolled && Boolean(s?.hub?.linked) && s?.hub?.status === 'conflict';
 	}
 	get accountWorkers() {
-		return (this.status?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer');
+		return (this.status?.hub?.account_network?.devices ?? []).filter(
+			(d) => d.status === 'active' && d.kind !== 'consumer'
+		);
 	}
 	get allowLegacyRunner(): boolean {
 		return this.workersLoaded && !this.enrolled && this.installs.length > 0;
@@ -249,10 +254,13 @@ export class DevicesModel {
 		if (this.#stopped) return;
 		if (this.#statusTimer) clearTimeout(this.#statusTimer);
 		const busy = this.enrollmentPending || this.waitingOnAccount || this.switchingToAccount || this.joining.length > 0;
-		this.#statusTimer = setTimeout(async () => {
-			if (typeof document === 'undefined' || document.visibilityState === 'visible') await this.loadStatus();
-			this.#scheduleStatus();
-		}, busy ? JOINING_MS : STATUS_MS);
+		this.#statusTimer = setTimeout(
+			async () => {
+				if (typeof document === 'undefined' || document.visibilityState === 'visible') await this.loadStatus();
+				this.#scheduleStatus();
+			},
+			busy ? JOINING_MS : STATUS_MS
+		);
 	}
 
 	async loadAll(): Promise<void> {

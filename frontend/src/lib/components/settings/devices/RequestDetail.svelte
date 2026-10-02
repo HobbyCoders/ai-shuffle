@@ -30,7 +30,15 @@
 	const pending = $derived(open && device.confirmation === 'pending');
 	const blocked = $derived(requests.saving || Boolean(requests.error));
 	const tone = $derived(
-		device.revoked_at ? 'off' : device.confirmation === 'pending' ? (expired ? 'off' : 'warn') : device.confirmation === 'approved' ? 'ok' : 'err'
+		device.revoked_at
+			? 'off'
+			: device.confirmation === 'pending'
+				? expired
+					? 'off'
+					: 'warn'
+				: device.confirmation === 'approved'
+					? 'ok'
+					: 'err'
 	);
 	const expires = $derived(
 		device.api_key_expires_at
@@ -83,30 +91,29 @@
 		{/if}
 	{/snippet}
 
-
 	<RowGroup title="Check the ID">
-			{#snippet actions()}<HelpTip text={APPROVE_HELP} about="Approving devices" />{/snippet}
-			<SettingRow label="ID shown on the device">
-				<ValueText value={device.hub_device_id || device.device_id} mono tone="fg" />
+		{#snippet actions()}<HelpTip text={APPROVE_HELP} about="Approving devices" />{/snippet}
+		<SettingRow label="ID shown on the device">
+			<ValueText value={device.hub_device_id || device.device_id} mono tone="fg" />
+		</SettingRow>
+		<SettingRow label="Approve from" hint="LAN alone cannot approve">
+			<ValueText value="This worker or an approved device" />
+		</SettingRow>
+		{#if device.confirmation === 'denied'}
+			<SettingRow label="Denied for good" hint="Pair a new identity">
+				<ValueText value="Cannot be approved again" />
 			</SettingRow>
-			<SettingRow label="Approve from" hint="LAN alone cannot approve">
-				<ValueText value="This worker or an approved device" />
-			</SettingRow>
-			{#if device.confirmation === 'denied'}
-				<SettingRow label="Denied for good" hint="Pair a new identity">
-					<ValueText value="Cannot be approved again" />
-				</SettingRow>
-			{/if}
-			<SettingRow label="Requests">
-				<button
-					type="button"
-					class="st-btn"
-					disabled={requests.loading || requests.saving}
-					onclick={() => requests.refresh()}
-				>
-					<RefreshCw />{requests.loading ? 'Refreshing…' : 'Refresh requests'}
-				</button>
-			</SettingRow>
+		{/if}
+		<SettingRow label="Requests">
+			<button
+				type="button"
+				class="st-btn"
+				disabled={requests.loading || requests.saving}
+				onclick={() => requests.refresh()}
+			>
+				<RefreshCw />{requests.loading ? 'Refreshing…' : 'Refresh requests'}
+			</button>
+		</SettingRow>
 	</RowGroup>
 </DetailPane>
 

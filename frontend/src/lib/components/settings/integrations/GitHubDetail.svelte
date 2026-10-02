@@ -29,7 +29,13 @@
 	const connected = $derived(flow.authenticated === true);
 	const status = $derived(flow.authenticated === null ? 'standby' : connected ? 'ok' : 'off');
 	const statusText = $derived(
-		flow.authenticated === null ? (flow.busy ? 'Checking' : 'Status unknown') : connected ? 'Connected' : 'Not connected'
+		flow.authenticated === null
+			? flow.busy
+				? 'Checking'
+				: 'Status unknown'
+			: connected
+				? 'Connected'
+				: 'Not connected'
 	);
 </script>
 

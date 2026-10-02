@@ -29,20 +29,37 @@ import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 const view = activeView as unknown as ReturnType<typeof writable<{ type: string }>>;
 const lines = [
 	{ timestamp: '2026-10-01T14:40:01.120Z', level: 'INFO', logger_name: 'app.api.sessions', message: 'POST /turns 202' },
-	{ timestamp: '2026-10-01T14:41:02.230Z', level: 'ERROR', logger_name: 'app.providers.grok', message: 'Token refresh failed: 401' },
-	{ timestamp: '2026-10-01T14:42:03.340Z', level: 'INFO', logger_name: 'app.api.sessions', message: 'GET /sessions 200' }
+	{
+		timestamp: '2026-10-01T14:41:02.230Z',
+		level: 'ERROR',
+		logger_name: 'app.providers.grok',
+		message: 'Token refresh failed: 401'
+	},
+	{
+		timestamp: '2026-10-01T14:42:03.340Z',
+		level: 'INFO',
+		logger_name: 'app.api.sessions',
+		message: 'GET /sessions 200'
+	}
 ];
 let model: LogsModel;
 
 beforeEach(() => {
 	vi.useFakeTimers();
 	settingsNav.reset();
-	vi.mocked(api.get).mockReset().mockResolvedValue({ lines, total: 12408, returned: 3, levels: ['INFO', 'ERROR', 'AUDIT'] });
-	vi.mocked(fetchAndDownload).mockReset().mockResolvedValue(undefined as never);
+	vi.mocked(api.get)
+		.mockReset()
+		.mockResolvedValue({ lines, total: 12408, returned: 3, levels: ['INFO', 'ERROR', 'AUDIT'] });
+	vi.mocked(fetchAndDownload)
+		.mockReset()
+		.mockResolvedValue(undefined as never);
 	view.set({ type: 'settings' });
 	model = new LogsModel();
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => {
+	cleanup();
+	vi.useRealTimers();
+});
 
 async function mount(item?: string) {
 	settingsNav.go({ category: 'logs', ...(item ? { item } : {}) });
@@ -92,7 +109,15 @@ describe('toolbar', () => {
 	it('names the level filter and refetches with the level', async () => {
 		await mount();
 		const select = screen.getByRole('combobox', { name: 'Log level' }) as HTMLSelectElement;
-		expect(Array.from(select.options).map((o) => o.text)).toEqual(['All levels', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', 'AUDIT']);
+		expect(Array.from(select.options).map((o) => o.text)).toEqual([
+			'All levels',
+			'DEBUG',
+			'INFO',
+			'WARNING',
+			'ERROR',
+			'CRITICAL',
+			'AUDIT'
+		]);
 		await fireEvent.change(select, { target: { value: 'ERROR' } });
 		await tick();
 		expect(vi.mocked(api.get).mock.lastCall?.[0]).toBe('/logs?limit=500&level=ERROR');
@@ -167,7 +192,13 @@ describe('helpers', () => {
 	});
 
 	it('maps levels to tones and orders unknown levels last', () => {
-		expect(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'].map(levelTone)).toEqual(['off', 'ok', 'warn', 'err', 'err']);
+		expect(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'].map(levelTone)).toEqual([
+			'off',
+			'ok',
+			'warn',
+			'err',
+			'err'
+		]);
 		expect(sortLevels(['AUDIT', 'INFO'])).toEqual(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', 'AUDIT']);
 	});
 

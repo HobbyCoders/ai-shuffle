@@ -52,7 +52,9 @@
 		...model.projects.map((p) => ({ value: p.id, label: p.name }))
 	]);
 	const tabs = $derived(
-		isDraft ? ['Overview', 'Run', 'Access'] : ['Overview', 'Run', 'Access', { id: 'Sessions', count: sessions.length || '' }]
+		isDraft
+			? ['Overview', 'Run', 'Access']
+			: ['Overview', 'Run', 'Access', { id: 'Sessions', count: sessions.length || '' }]
 	);
 	const revealedKey = $derived(user && model.revealed?.userId === user.id ? model.revealed.key : null);
 
@@ -162,7 +164,12 @@
 					</SettingRow>
 				</RowGroup>
 			{:else if tab === 'Run'}
-				{@render runRows(draft.model, draft.effort, (m) => model.setDraftModel(m), (e) => (draft.effort = e))}
+				{@render runRows(
+					draft.model,
+					draft.effort,
+					(m) => model.setDraftModel(m),
+					(e) => (draft.effort = e)
+				)}
 			{:else if tab === 'Access'}
 				{@render agentRows(draft.profileIds, (pid) => model.toggleDraftProfile(pid))}
 			{/if}
@@ -186,7 +193,10 @@
 		category="integrations"
 		facts={[
 			{ label: 'Created', value: shortDate(user.created_at) },
-			{ label: 'Last used', value: user.last_used_at ? relativeAgo(user.last_used_at) || shortDate(user.last_used_at) : 'Never' },
+			{
+				label: 'Last used',
+				value: user.last_used_at ? relativeAgo(user.last_used_at) || shortDate(user.last_used_at) : 'Never'
+			},
 			{ label: 'Sessions', value: sessions.length },
 			{ label: 'Permissions', value: 'Ask' }
 		]}

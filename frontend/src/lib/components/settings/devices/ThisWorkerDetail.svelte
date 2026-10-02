@@ -27,7 +27,13 @@
 
 	const SYNC_HELP =
 		'Your data stays on your workers. Workers sync while they run; one that was offline catches up when it returns.';
-	const TONE: Record<string, StatusTone> = { ready: 'ok', syncing: 'busy', waiting: 'busy', 'needs-setup': 'warn', offline: 'err' };
+	const TONE: Record<string, StatusTone> = {
+		ready: 'ok',
+		syncing: 'busy',
+		waiting: 'busy',
+		'needs-setup': 'warn',
+		offline: 'err'
+	};
 
 	const join = new JoinFlow({
 		status: () => model.status,
@@ -90,7 +96,8 @@
 		{#if model.enrollmentPending && join.enrollment}
 			<RowGroup title="Network">
 				<SettingRow
-					label="{join.enrollment.status === 'syncing' ? 'Copying settings from' : 'Joining'} {join.enrollment.endpoint_url || 'the inviting worker'}"
+					label="{join.enrollment.status === 'syncing' ? 'Copying settings from' : 'Joining'} {join.enrollment
+						.endpoint_url || 'the inviting worker'}"
 					hint="Finishes when it is online"
 				>
 					<StatusDot tone="busy" />
@@ -173,11 +180,20 @@
 			<SettingRow label="Code"><ValueText value={join.parsed.code || '—'} mono tone="fg" /></SettingRow>
 		{:else}
 			<SettingRow label="Or worker address">
-				<TextField bind:value={join.endpoint} mono width={160} placeholder="http://10.0.0.5:8000" label="Worker address" />
+				<TextField
+					bind:value={join.endpoint}
+					mono
+					width={160}
+					placeholder="http://10.0.0.5:8000"
+					label="Worker address"
+				/>
 				<TextField bind:value={join.code} mono width={130} placeholder="ABCD-EFGH-JKLM" label="Code" />
 			</SettingRow>
 		{/if}
-		<SettingRow label={model.enrolled ? 'Leave this network and join' : 'Join with this invite'} hint={model.enrolled ? 'Invited network wins' : undefined}>
+		<SettingRow
+			label={model.enrolled ? 'Leave this network and join' : 'Join with this invite'}
+			hint={model.enrolled ? 'Invited network wins' : undefined}
+		>
 			{#if model.enrolled}
 				<InlineConfirm
 					question="Leave {network?.name || 'this network'}?"

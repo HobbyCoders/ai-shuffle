@@ -32,7 +32,13 @@ export function requestId(device: WorkerDeviceConfirmation): string {
 
 /** Everything that must be unchanged for an armed decision to still apply. */
 export function requestIdentity(device: WorkerDeviceConfirmation): string {
-	return [device.device_id, device.paired_client_id, device.mobile_record_id, device.confirmation, device.revoked_at ?? ''].join('|');
+	return [
+		device.device_id,
+		device.paired_client_id,
+		device.mobile_record_id,
+		device.confirmation,
+		device.revoked_at ?? ''
+	].join('|');
 }
 
 export function requestExpired(device: WorkerDeviceConfirmation, now = Date.now()): boolean {
@@ -71,7 +77,11 @@ export class DeviceRequests {
 	}
 
 	isArmed(device: WorkerDeviceConfirmation, approved: boolean): boolean {
-		return this.armed !== null && this.armed.approved === approved && requestIdentity(this.armed.device) === requestIdentity(device);
+		return (
+			this.armed !== null &&
+			this.armed.approved === approved &&
+			requestIdentity(this.armed.device) === requestIdentity(device)
+		);
 	}
 
 	arm(device: WorkerDeviceConfirmation, approved: boolean): void {

@@ -8,7 +8,11 @@ import type { ApiUser } from '$lib/api/apiUsers';
 import type { Session } from '$lib/api/sessions';
 
 const apiUsers = vi.hoisted(() => ({
-	getApiUsers: vi.fn(), createApiUser: vi.fn(), updateApiUser: vi.fn(), deleteApiUser: vi.fn(), rotateApiUserKey: vi.fn()
+	getApiUsers: vi.fn(),
+	createApiUser: vi.fn(),
+	updateApiUser: vi.fn(),
+	deleteApiUser: vi.fn(),
+	rotateApiUserKey: vi.fn()
 }));
 vi.mock('$lib/api/apiUsers', () => apiUsers);
 const apiGet = vi.hoisted(() => vi.fn());
@@ -16,12 +20,30 @@ vi.mock('$lib/api/client', () => ({ api: { get: apiGet } }));
 const copyText = vi.hoisted(() => vi.fn());
 vi.mock('$lib/utils/clipboard', () => ({ copyText, COPY_ERROR_MESSAGE: 'Could not copy' }));
 
-import { ApiUsersModel, DRAFT_ID, LOAD_ERROR, NAME_REQUIRED, sessionsFor, sessionLabel, relativeAgo } from './api-users.svelte';
+import {
+	ApiUsersModel,
+	DRAFT_ID,
+	LOAD_ERROR,
+	NAME_REQUIRED,
+	sessionsFor,
+	sessionLabel,
+	relativeAgo
+} from './api-users.svelte';
 
 const user = (over: Partial<ApiUser> = {}): ApiUser => ({
-	id: 'u1', name: 'Discord Bot', username: null, description: 'Server bot', project_id: 'p1',
-	profile_ids: ['a1'], is_active: true, model: null, effort: null,
-	created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', last_used_at: null, ...over
+	id: 'u1',
+	name: 'Discord Bot',
+	username: null,
+	description: 'Server bot',
+	project_id: 'p1',
+	profile_ids: ['a1'],
+	is_active: true,
+	model: null,
+	effort: null,
+	created_at: '2026-01-01T00:00:00Z',
+	updated_at: '2026-01-01T00:00:00Z',
+	last_used_at: null,
+	...over
 });
 
 let model: ApiUsersModel;
@@ -29,12 +51,20 @@ beforeEach(async () => {
 	vi.clearAllMocks();
 	apiUsers.getApiUsers.mockResolvedValue([user()]);
 	apiUsers.createApiUser.mockResolvedValue({ ...user({ id: 'u2', name: 'Phone' }), api_key: 'sk-new-key' });
-	apiUsers.updateApiUser.mockImplementation(async (id: string, body: Partial<ApiUser>) => ({ ...user({ id }), ...body }));
+	apiUsers.updateApiUser.mockImplementation(async (id: string, body: Partial<ApiUser>) => ({
+		...user({ id }),
+		...body
+	}));
 	apiUsers.deleteApiUser.mockResolvedValue(undefined);
 	apiUsers.rotateApiUserKey.mockResolvedValue({ id: 'u1', api_key: 'sk-rotated' });
-	apiGet.mockImplementation(async (path: string) => path === '/agents'
-		? [{ id: 'a1', name: 'Helper' }, { id: 'a2', name: 'Planner' }]
-		: [{ id: 'p1', name: 'Website', path: '/w' }]);
+	apiGet.mockImplementation(async (path: string) =>
+		path === '/agents'
+			? [
+					{ id: 'a1', name: 'Helper' },
+					{ id: 'a2', name: 'Planner' }
+				]
+			: [{ id: 'p1', name: 'Website', path: '/w' }]
+	);
 	copyText.mockResolvedValue(undefined);
 	model = new ApiUsersModel();
 	await model.load();
@@ -86,7 +116,12 @@ describe('draft and create', () => {
 		model.toggleDraftProfile('a2');
 		expect(await model.createDraft()).toBe('u2');
 		expect(apiUsers.createApiUser).toHaveBeenCalledWith({
-			name: 'Phone', description: undefined, project_id: 'p1', profile_ids: ['a2'], model: null, effort: null
+			name: 'Phone',
+			description: undefined,
+			project_id: 'p1',
+			profile_ids: ['a2'],
+			model: null,
+			effort: null
 		});
 		expect(model.draft).toBeNull();
 		expect(model.revealed).toEqual({ userId: 'u2', key: 'sk-new-key' });

@@ -187,7 +187,8 @@ export class GitHubAuthFlow {
 				return;
 			}
 			const status = await this.#readStatus();
-			if (status.authenticated) this.error = 'GitHub is still connected. Check the server’s GitHub environment settings.';
+			if (status.authenticated)
+				this.error = 'GitHub is still connected. Check the server’s GitHub environment settings.';
 			await auth.checkAuth();
 		} catch (e) {
 			this.error = getErrorMessage(e, 'Could not disconnect GitHub.');

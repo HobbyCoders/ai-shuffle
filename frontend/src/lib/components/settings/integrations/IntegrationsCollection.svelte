@@ -60,9 +60,7 @@
 				id: u.id,
 				name: u.name,
 				status: u.is_active ? ('ok' as const) : ('off' as const),
-				summary: u.is_active
-					? `${u.model || 'Agent default'}, ${agents} agent${agents === 1 ? '' : 's'}`
-					: 'Disabled'
+				summary: u.is_active ? `${u.model || 'Agent default'}, ${agents} agent${agents === 1 ? '' : 's'}` : 'Disabled'
 			};
 		})
 	);
@@ -118,7 +116,14 @@
 				/>
 			{/if}
 			{#each shownUsers as row (row.id)}
-				<ListItem id={row.id} name={row.name} icon={Bot} category={CATEGORY} status={row.status} summary={row.summary} />
+				<ListItem
+					id={row.id}
+					name={row.name}
+					icon={Bot}
+					category={CATEGORY}
+					status={row.status}
+					summary={row.summary}
+				/>
 			{/each}
 			{#if model.forbidden}
 				<p class="st-empty">{FORBIDDEN_TEXT}</p>

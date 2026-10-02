@@ -26,7 +26,12 @@ import {
 } from '$lib/api/apiUsers';
 import type { Session } from '$lib/api/sessions';
 import { isForbidden } from '$lib/settings/access.svelte';
-import { EFFORT_OPTIONS, modelEffortOptions, reconcileModelEffort, resolveModelEffort } from '$lib/constants/model-effort';
+import {
+	EFFORT_OPTIONS,
+	modelEffortOptions,
+	reconcileModelEffort,
+	resolveModelEffort
+} from '$lib/constants/model-effort';
 
 export interface ApiProject {
 	id: string;
@@ -240,7 +245,7 @@ export class ApiUsersModel {
 		this.saving[key] = true;
 		try {
 			const updated = await updateApiUser(id, body);
-			this.users = this.users.map((u) => (u.id === id ? { ...u, ...(updated ?? body) } as ApiUser : u));
+			this.users = this.users.map((u) => (u.id === id ? ({ ...u, ...(updated ?? body) } as ApiUser) : u));
 			return true;
 		} catch (e) {
 			this.error = (e as { detail?: string })?.detail || 'Failed to update API user';
@@ -309,4 +314,3 @@ export class ApiUsersModel {
 		clearTimeout(this.#copyTimer);
 	}
 }
-

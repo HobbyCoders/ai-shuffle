@@ -43,5 +43,9 @@ export function accountStatus(flow: AccountFlow): AccountStatus {
 	if (flow.profile) text = `Signed in as ${user}`;
 	else if (flow.refusal) text = 'Signed in, remote access off';
 	else if (c.profile_ready === false) text = 'Signed in, finishing connection';
-	return { tone, text, summary: [user || 'Signed in', remote ? `remote access ${remote}` : ''].filter(Boolean).join(', ') };
+	return {
+		tone,
+		text,
+		summary: [user || 'Signed in', remote ? `remote access ${remote}` : ''].filter(Boolean).join(', ')
+	};
 }

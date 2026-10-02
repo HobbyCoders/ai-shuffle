@@ -18,9 +18,16 @@ import { DeviceRequests, isPendingRequest, requestId, requestStatusText } from '
 
 let devices: WorkerDeviceConfirmation[];
 const device = (extra: Partial<WorkerDeviceConfirmation> = {}): WorkerDeviceConfirmation => ({
-	device_id: 'device/a', hub_device_id: 'phone-origin-id', paired_client_id: 'paired-a', mobile_record_id: 'key-a',
-	device_name: 'My phone', platform: 'android', confirmation: 'pending', revoked_at: null,
-	api_key_expires_at: '2099-01-01T00:00:00Z', ...extra
+	device_id: 'device/a',
+	hub_device_id: 'phone-origin-id',
+	paired_client_id: 'paired-a',
+	mobile_record_id: 'key-a',
+	device_name: 'My phone',
+	platform: 'android',
+	confirmation: 'pending',
+	revoked_at: null,
+	api_key_expires_at: '2099-01-01T00:00:00Z',
+	...extra
 });
 let requests: DeviceRequests;
 
@@ -35,7 +42,10 @@ beforeEach(() => {
 	});
 	requests = new DeviceRequests();
 });
-afterEach(() => { requests.reset(); vi.useRealTimers(); });
+afterEach(() => {
+	requests.reset();
+	vi.useRealTimers();
+});
 
 async function loaded() {
 	requests.start();
@@ -51,7 +61,11 @@ it('reads without caching and approves only with the observed enrollment ids', a
 	expect(api.post).not.toHaveBeenCalled();
 	requests.arm(requests.devices[0], true);
 	await requests.decide();
-	expect(api.post).toHaveBeenCalledExactlyOnceWith('/mobile/hub/devices/device%2Fa/confirmation', { paired_client_id: 'paired-a', mobile_record_id: 'key-a', approved: true });
+	expect(api.post).toHaveBeenCalledExactlyOnceWith('/mobile/hub/devices/device%2Fa/confirmation', {
+		paired_client_id: 'paired-a',
+		mobile_record_id: 'key-a',
+		approved: true
+	});
 	expect(requests.notice).toContain('Approved on this worker');
 	expect(requestStatusText(requests.devices[0])).toBe('Approved');
 	expect(requests.pendingCount).toBe(0);
