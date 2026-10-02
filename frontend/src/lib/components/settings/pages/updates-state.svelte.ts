@@ -7,10 +7,13 @@
  * re-read (`application-update-policy` event).
  *
  * A check posts `{action: 'check'}`, then polls the workers every 2 s for up
- * to 90 s. A worker counts as settled once it has left "checking" after being
- * seen in it, reports an outcome (available, ready, error...), or has stayed
- * idle for 10 s (a check that finished before the first poll). Workers that
- * refused the request show the reason they gave.
+ * to 90 s. A worker that still has the request queued (`request_pending`)
+ * or is "checking" is not settled; otherwise it counts as settled once it has
+ * left "checking" after being seen in it, reports an outcome (available,
+ * ready, error...), or has stayed idle for 10 s (a check that finished before
+ * the first poll). Workers that refused the request show the reason they
+ * gave. The sidebar update button re-reads when the check is sent and when
+ * it ends.
  */
 import { api, getErrorMessage } from '$lib/api/client';
 import { isForbidden } from '$lib/settings/access.svelte';
@@ -32,6 +35,8 @@ export interface UpdateWorker {
 	message?: string | null;
 	error?: string | null;
 	reason?: string | null;
+	/** The check request is queued and the worker has not taken it yet. */
+	request_pending?: boolean;
 }
 
 /** One worker's answer to POST /settings/application-updates {action: 'check'}. */
@@ -57,6 +62,10 @@ export interface UpdateResultRow {
 export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): { tone: StatusTone; text: string } {
 	if (receipt && receipt.accepted === false) return { tone: 'off', text: receipt.reason || 'Not checked' };
 	if (!worker.online) return { tone: 'off', text: 'Offline' };
+	if (worker.request_pending) return { tone: 'busy', text: 'Checking' };
+	if (worker.phase !== 'checking' && sameVersion(worker.version, worker.running_version)) {
+		return { tone: 'ok', text: 'Up to date' };
+	}
 	switch (worker.phase) {
 		case 'checking':
 			return { tone: 'busy', text: 'Checking' };
@@ -69,12 +78,17 @@ export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): {
 		case 'error':
 			return { tone: 'err', text: worker.error || 'Check failed' };
 		case 'image-required':
-			return { tone: 'err', text: 'Needs a new runtime release' };
+			return { tone: 'err', text: worker.message || 'Needs a new Docker image' };
 		case 'unsupported':
 			return { tone: 'off', text: worker.reason || 'Status unavailable' };
 		default:
 			return { tone: 'ok', text: 'Up to date' };
 	}
+}
+
+/** A build's version and the running one match (either may carry a suffix). */
+function sameVersion(version?: string | null, running?: string | null): boolean {
+	return !!version && !!running && (running.startsWith(version) || version.startsWith(running));
 }
 
 export interface UpdatePolicy {
@@ -163,6 +177,7 @@ export class UpdatesState {
 		try {
 			const result = await api.post<{ results: UpdateReceipt[] }>('/settings/application-updates', { action: 'check' });
 			receipts = result?.results ?? [];
+			window.dispatchEvent(new Event(POLICY_EVENT));
 		} catch (cause) {
 			if (!this.#alive || run !== this.#run) return;
 			this.checkError = getErrorMessage(cause, 'Could not check for updates');
@@ -184,31 +199,53 @@ export class UpdatesState {
 			let settled = true;
 			if (snapshot) {
 				const rows: UpdateResultRow[] = [];
-				for (const worker of snapshot.workers) {
-					const receipt = receipts.find((r) =>
-						r.device_id ? r.device_id === worker.device_id : r.device_name === worker.device_name
-					);
-					if (worker.phase === 'checking') seenChecking.add(worker.device_id);
+				// One row per worker that was asked (receipts include refusals for
+				// workers the snapshot no longer lists); without receipts, every worker.
+				const asked: { worker?: UpdateWorker; receipt?: UpdateReceipt }[] = receipts.length
+					? receipts.map((receipt) => ({
+							receipt,
+							worker: snapshot!.workers.find((w) =>
+								receipt.device_id ? w.device_id === receipt.device_id : w.device_name === receipt.device_name
+							)
+						}))
+					: snapshot.workers.map((worker) => ({ worker }));
+				for (const [index, { worker, receipt }] of asked.entries()) {
+					const name = worker?.device_name ?? receipt?.device_name ?? 'Worker';
+					const id = worker?.device_id ?? receipt?.device_id ?? `receipt-${index}`;
+					if (!worker) {
+						rows.push({
+							id,
+							name,
+							...(receipt?.accepted === false
+								? { tone: 'off' as const, text: receipt.reason || 'Not checked' }
+								: { tone: 'off' as const, text: 'Status unavailable' })
+						});
+						continue;
+					}
+					// Queued counts as started: once it is neither queued nor checking, the check ran.
+					if (worker.phase === 'checking' || worker.request_pending) seenChecking.add(worker.device_id);
 					const refused = receipt?.accepted === false || !worker.online;
 					const done =
 						refused ||
 						(worker.phase !== 'checking' &&
+							!worker.request_pending &&
 							(seenChecking.has(worker.device_id) ||
 								OUTCOME_PHASES.has(worker.phase) ||
 								elapsed >= CHECK_IDLE_SETTLE_MS));
 					if (!done) settled = false;
 					const view = done ? describeWorker(worker, receipt) : { tone: 'busy' as const, text: 'Checking' };
-					rows.push({ id: worker.device_id, name: worker.device_name, ...view });
+					rows.push({ id, name, ...view });
 				}
 				this.rows = rows;
 			} else settled = false;
 			if (settled || elapsed >= CHECK_TIMEOUT_MS) {
 				if (!settled && this.rows) {
 					this.rows = this.rows.map((row) =>
-						row.tone === 'busy' && row.text === 'Checking' ? { ...row, tone: 'off', text: 'No answer yet' } : row
+						row.tone === 'busy' && row.text === 'Checking' ? { ...row, tone: 'off', text: 'Still checking' } : row
 					);
 				}
 				this.checking = false;
+				window.dispatchEvent(new Event(POLICY_EVENT));
 				return;
 			}
 			this.#checkTimer = setTimeout(() => void poll(), CHECK_POLL_MS);

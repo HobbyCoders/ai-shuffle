@@ -70,9 +70,55 @@ describe('check for updates', () => {
 		await state.check();
 		await vi.advanceTimersByTimeAsync(CHECK_TIMEOUT_MS + CHECK_POLL_MS);
 		expect(state.checking).toBe(false);
-		expect(state.rows?.[0]).toMatchObject({ tone: 'off', text: 'No answer yet' });
+		expect(state.rows?.[0]).toMatchObject({ tone: 'off', text: 'Still checking' });
 		const polls = transport.get.mock.calls.filter(([p]) => p === '/settings/application-updates/workers').length;
 		expect(polls).toBeLessThanOrEqual(CHECK_TIMEOUT_MS / CHECK_POLL_MS + 2);
+	});
+
+	// Ported from main's ApplicationUpdates test (#1623).
+	it('waits out queued requests, lists every asked worker and pings the sidebar twice', async () => {
+		const events = vi.fn();
+		window.addEventListener('application-update-policy', events);
+		try {
+			await ready();
+			const peer = (phase: string, extra: Record<string, unknown> = {}) => ({ ...self(phase, extra), device_id: 'peer', device_name: 'Unraid' });
+			snapshots = [
+				[self('idle', { request_pending: true }), peer('idle', { request_pending: true })],
+				[self('checking'), peer('idle')],
+				[self('available', { version: 'cccccccccccc', running_version: 'a'.repeat(40) }), peer('idle')]
+			];
+			transport.post.mockResolvedValueOnce({
+				results: [
+					{ device_id: 'peer', device_name: 'Unraid', accepted: true, reason: 'Request queued' },
+					{ device_id: 'off', device_name: 'Laptop', accepted: false, reason: 'Offline; not queued' },
+					{ device_id: 'self', device_name: 'Current worker', accepted: true, reason: 'Request queued' }
+				]
+			});
+			events.mockClear();
+			await state.check();
+			expect(events).toHaveBeenCalledTimes(1);
+			expect(state.checking).toBe(true);
+			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS * 2);
+			expect(state.checking).toBe(false);
+			expect(state.rows?.map((r) => [r.name, r.text])).toEqual([
+				['Unraid', 'Up to date'],
+				['Laptop', 'Offline; not queued'],
+				['Current worker', 'Version cccccccccccc available']
+			]);
+			expect(events).toHaveBeenCalledTimes(2);
+		} finally {
+			window.removeEventListener('application-update-policy', events);
+		}
+	});
+
+	it('keeps waiting on a worker that never takes the request', async () => {
+		await ready();
+		snapshots = [[self('idle', { request_pending: true })]];
+		await state.check();
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(state.checking).toBe(true);
+		await vi.advanceTimersByTimeAsync(CHECK_TIMEOUT_MS);
+		expect(state.rows?.[0]).toMatchObject({ text: 'Still checking' });
 	});
 
 	it('reports a refused request and does not poll', async () => {
@@ -106,7 +152,10 @@ describe('describeWorker', () => {
 	it('names each phase', () => {
 		expect(describeWorker(self('available', { version: '0.8.23' }))).toEqual({ tone: 'warn', text: 'Version 0.8.23 available' });
 		expect(describeWorker(self('ready'))).toEqual({ tone: 'warn', text: 'Update downloaded, ready to install' });
-		expect(describeWorker(self('image-required'))).toEqual({ tone: 'err', text: 'Needs a new runtime release' });
+		expect(describeWorker(self('image-required'))).toEqual({ tone: 'err', text: 'Needs a new Docker image' });
+		expect(describeWorker(self('image-required', { message: 'Pull 0.9' }))).toEqual({ tone: 'err', text: 'Pull 0.9' });
+		expect(describeWorker(self('available', { version: '0.8.23', running_version: '0.8.23+abc' }))).toEqual({ tone: 'ok', text: 'Up to date' });
+		expect(describeWorker(self('idle', { request_pending: true }))).toEqual({ tone: 'busy', text: 'Checking' });
 		expect(describeWorker(self('error', { error: 'Signature mismatch' }))).toEqual({ tone: 'err', text: 'Signature mismatch' });
 		expect(describeWorker(self('downloading', { percent: 41.6 }))).toEqual({ tone: 'busy', text: 'Downloading, 42%' });
 		expect(describeWorker({ ...self('idle'), online: false })).toEqual({ tone: 'off', text: 'Offline' });
