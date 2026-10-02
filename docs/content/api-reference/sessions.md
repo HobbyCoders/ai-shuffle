@@ -549,6 +549,11 @@ Export a session.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `format` | string | "markdown", "json", or "jsonl" (default: markdown) |
+| `share_safe` | boolean | Filter recognized credentials from the export only (default: false). Does not change stored history. |
+
+**Private backup:** The chat header's **Download private backup (.jsonl)** preserves raw history for backup/re-import. It may contain secrets; keep it private. Existing requests without `share_safe=true` retain their original behavior.
+
+**Sharing:** Choose **Export for sharing (.md)** to remove recognized secrets from a separate Markdown download. Review all content before posting: this is defense in depth, not arbitrary-secret detection, and is not a raw backup. Sharing files end in `-share-safe.md` (or `.json`/`.jsonl` for those API formats). Responses include `X-Transcript-Privacy: share-safe` or `private-raw`. Malformed raw JSONL returns `422` for sharing exports, never an unfiltered fallback.
 
 ```bash
 # Export as Markdown (default)
@@ -561,7 +566,12 @@ curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=json" \
   -H "Authorization: Bearer aih_your_key" \
   -o session.json
 
-# Export the raw Claude session history (JSONL)
+# Export for sharing (recognized credentials filtered; review before posting)
+curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=markdown&share_safe=true" \
+  -H "Authorization: Bearer aih_your_key" \
+  -o session-share-safe.md
+
+# Private raw backup (JSONL); may contain secrets, do not share
 curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=jsonl" \
   -H "Authorization: Bearer aih_your_key" \
   -o session.jsonl
@@ -596,6 +606,29 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \
   -d '{"message_index": 5}'
 ```
 
+## Create an Empty Session
+
+### POST /api/v1/sessions
+
+Create a session without a first message, on this install. The composer's call button uses it: it creates the conversation from the current picks and then starts a call on it. Send the first message later over the chat WebSocket with the returned `session_id`.
+
+**Auth:** Required
+
+All fields are optional. `project_id` or `project_v2_id` (not both) files the session under a project; with neither it is projectless. `mode` is `code` (default) or `chat`; `voice` is refused with 400. `worktree_id` runs the session in an existing worktree of `project_id`. `overrides` takes the same `model`, `effort`, `permission_mode`, `context_window`, `fast` and `workspace_project_ids` as a query and stores them as the session's run settings. Agent rules match `with-worktree` below.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sessions \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "proj123",
+    "profile_id": "your-agent-id",
+    "overrides": {"model": "sonnet", "permission_mode": "default"}
+  }'
+```
+
+Returns `{"session_id": "...", "mode": "code"}`.
+
 ## Worktree Sessions
 
 ### POST /api/v1/sessions/with-worktree
@@ -604,7 +637,7 @@ Create a session linked to a git worktree for isolated development.
 
 **Auth:** Required
 
-For an API key with assigned agents, `profile_id` must be one of them (403 otherwise). When it is omitted the key's only agent is used, or 400 if it has several; the project's default agent is not used.
+For an API key with assigned agents, `profile_id` must be one of them (403 otherwise). When it is omitted the key's only agent is used, or 400 if it has several; the project's default agent is not used. With a `prompt`, `overrides` apply to the first turn; without one they are stored as the session's run settings.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \

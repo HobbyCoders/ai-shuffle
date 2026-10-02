@@ -46,6 +46,7 @@
 	let secret = $state('');
 	let useKey = $state(false);
 	let verifyKey = $state(false);
+	let pinCertificate = $state(false);
 	let busy = $state(false);
 	let error = $state('');
 	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
@@ -60,7 +61,7 @@
 		busy = true; error = '';
 		const connection: Record<string, unknown> = service
 			? {kind: 'service', label, minutes, url: serviceUrl.trim(), auth_header: authHeader.trim(),
-				auth_scheme: authScheme.trim(), secret, writable}
+				auth_scheme: authScheme.trim(), secret, writable, fingerprint: pinCertificate ? fingerprint.trim() : ''}
 			: {kind: request.kind, label, minutes, path, writable, host: host.trim(), port, username: username.trim(),
 				fingerprint: verifyKey ? fingerprint.trim() : '', password: useKey ? '' : password,
 				private_key: useKey ? privateKey : '', passphrase: useKey ? passphrase : ''};
@@ -127,7 +128,7 @@
 						{#if service}<small>{saved.writable ? 'Allows changes after approval' : 'Read-only: GET and HEAD'}</small>{/if}
 						{#if saved.fingerprint}
 							<details class="pa-fingerprint">
-								<summary>Host-key fingerprint</summary>
+								<summary>{service ? 'Certificate SHA-256 fingerprint' : 'Host-key fingerprint'}</summary>
 								<code>{saved.fingerprint}</code>
 							</details>
 						{/if}
@@ -160,6 +161,13 @@
 				{/if}
 			{:else if service}
 				<label class="pa-field"><span>Service address</span><input class="card-form-input card-form-input--mono" required type="url" placeholder="https://api.example.com/v1" spellcheck="false" bind:value={serviceUrl} /></label>
+				<label class="pa-option"><input type="checkbox" bind:checked={pinCertificate} /><strong>Trust a specific certificate</strong><small>For a self-signed home server. Normal certificate checks remain the default.</small></label>
+				{#if pinCertificate}
+					<div class="pa-reveal">
+						<label class="pa-field"><span>Certificate SHA-256 fingerprint</span><input class="card-form-input card-form-input--mono" required maxlength="95" pattern={'[0-9A-Fa-f]{64}|([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}'} placeholder="64 hex digits, with or without colons" spellcheck="false" bind:value={fingerprint} /></label>
+						<p class="pa-hint">Verify this fingerprint on the server or through another trusted channel before granting access. Only this exact certificate is accepted; a replacement needs a new approval. Saving the connection also remembers this fingerprint.</p>
+					</div>
+				{/if}
 				<div class="pa-grid">
 					<label class="pa-field"><span>Credential header</span><input class="card-form-input card-form-input--mono" required maxlength="64" spellcheck="false" bind:value={authHeader} /></label>
 					<label class="pa-field"><span>Scheme</span><input class="card-form-input card-form-input--mono" maxlength="32" placeholder="None" spellcheck="false" bind:value={authScheme} /></label>

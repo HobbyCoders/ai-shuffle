@@ -14,7 +14,9 @@ export const gitMode = writable('project');
 export const git = {
 	startBackgroundRefresh() {},
 	stopBackgroundRefresh() {},
-	retryLoad() {},
+	retryLoad() {
+		(window as unknown as { gitPanelRetries: number }).gitPanelRetries = ((window as unknown as { gitPanelRetries?: number }).gitPanelRetries ?? 0) + 1;
+	},
 	loadBranches() {},
 	refreshDiffStats() {},
 	refreshChangedFiles() {}

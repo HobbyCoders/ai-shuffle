@@ -856,3 +856,121 @@ async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_targ
         assert "remote:voice" in str(await asyncio.wait_for(task, 3))
         assert commands == ["voice"] and not broker.actions
     broker.revoke("voice", grant_id)
+
+
+def _listing_tools(monkeypatch, broker):
+    """ChatResources over the real owner lookup, a stubbed session row and no UI."""
+    from app.core import chat_vault
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.db import database
+    from app.mcp import chat_access_sdk as sdk
+    from app.network import control
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"mode": "chat", "instance_id": "worker"})
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    monkeypatch.setattr(broker, "_notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sdk, "broker", broker)
+
+    def no_catalog(*args, **kwargs):
+        raise AssertionError("ChatResources must not read the saved-connection catalogue")
+    monkeypatch.setattr(chat_vault, "catalog", no_catalog)
+    return {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_busy(broker, monkeypatch):
+    """#1605: the listing must not queue behind the shared default executor.
+
+    A pending RequestChatAccess waits up to 240 s, and every run_sync caller
+    in the process shares asyncio's default executor. With that executor
+    fully occupied, ChatResources still answers promptly, asks for nothing
+    and leaves the pending request untouched.
+    """
+    import concurrent.futures
+    import json
+    import threading
+
+    tools = _listing_tools(monkeypatch, broker)
+    request_task = asyncio.create_task(
+        tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+    async with asyncio.timeout(3):
+        while not broker.requests:
+            await asyncio.sleep(0.001)
+
+    asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    release = threading.Event()
+    blocker = asyncio.create_task(asyncio.to_thread(release.wait, 30))
+    try:
+        await asyncio.sleep(0.05)  # the blocker now holds the only shared worker
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+        assert not response.get("isError"), response
+        assert json.loads(response["content"][0]["text"]) == {
+            "grants": [], "folder_available": chat_files.available(),
+        }
+        assert not request_task.done() and len(broker.requests) == 1 and not broker.actions
+    finally:
+        release.set()
+        await blocker
+    await broker.decline("chat", next(iter(broker.requests)))
+    assert (await request_task)["isError"]
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_returns_bounded_error_when_owner_lookup_stalls(broker, monkeypatch):
+    import threading
+    from app.db import database
+
+    tools = _listing_tools(monkeypatch, broker)
+    release = threading.Event()
+    monkeypatch.setattr(database, "get_session", lambda sid: release.wait(30) and {"mode": "chat"})
+    monkeypatch.setattr(chat_access, "LISTING_TIMEOUT_SECONDS", 0.2)
+    try:
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 3)
+    finally:
+        release.set()
+    assert response["isError"]
+    text = response["content"][0]["text"]
+    assert "timed out after 0.2 seconds" in text and "No access was requested" in text
+    assert not broker.requests and not broker.actions
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_lists_only_live_grant_metadata(broker, monkeypatch, tmp_path):
+    import json
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    owner = (None, "worker", None)
+    live = chat_access.Grant("a" * 32, "chat", owner, "Private label", "folder",
+                             str(tmp_path), time.time() + 60, writable=True)
+    expired = chat_access.Grant("b" * 32, "chat", owner, "Old", "folder", str(tmp_path), time.time() - 1)
+    other = chat_access.Grant("c" * 32, "other", owner, "Other", "folder", str(tmp_path), time.time() + 60)
+    for grant in (live, expired, other):
+        broker.grants[grant.id] = grant
+    response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    text = response["content"][0]["text"]
+    assert json.loads(text)["grants"] == [
+        {"id": live.id, "kind": "folder", "expires_at": live.expires_at, "writable": True}]
+    assert expired.id not in broker.grants and other.id in broker.grants
+    assert "Private label" not in text and str(tmp_path) not in text
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_logs_stage_timings_at_info_without_details(broker, monkeypatch, tmp_path, caplog):
+    """A prompt listing still leaves a timing line at the default INFO level, so
+    a stall outside the listing can be told apart from one inside it (#1605)."""
+    import logging
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    grant = chat_access.Grant("d" * 32, "chat", (None, "worker", None), "Private label", "folder",
+                              str(tmp_path), time.time() + 60)
+    broker.grants[grant.id] = grant
+    with caplog.at_level(logging.INFO, logger="app.core.chat_access"):
+        await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    lines = [r for r in caplog.records if r.getMessage().startswith("ChatResources listing:")]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    text = lines[0].getMessage()
+    assert "grants=1" in text and "owner_lookup=" in text and "total=" in text
+    assert "Private label" not in text and str(tmp_path) not in text
+    broker.revoke("chat", grant.id)

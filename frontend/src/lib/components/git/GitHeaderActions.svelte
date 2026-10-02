@@ -25,8 +25,9 @@
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
+	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, Download, X } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X } from 'lucide-svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
@@ -34,7 +35,8 @@
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
-	import { computeHeaderSummary, computePipeline } from '$lib/stores/derived/git-header-summary';
+	import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
+	import { shouldShowGitPanelTrigger } from '$lib/components/layout/git-header-visibility';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
 	import type {
@@ -81,18 +83,18 @@
 		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
-		/** Download the chat transcript. Rendered as a panel row on narrow
-		 *  screens only, where the header has no room for its own icon. */
-		onDownloadChat?: () => void;
-		downloadingChat?: boolean;
+		/** Private backup and sharing exports live in the existing narrow-screen panel. */
+		showChatExports?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, onDownloadChat, downloadingChat = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
-	// work is running.
-	const actionsBusy = $derived(isStreaming || operationInProgress);
+	// work is running. A worktree session whose checkout reads as "not a
+	// repository" keeps its panel (see shouldShowGitPanelTrigger) but nothing
+	// can run against it, so its actions are locked the same way.
+	const actionsBusy = $derived(isStreaming || operationInProgress || !isGitRepo);
 
 	// ── ONE coherent snapshot ────────────────────────────────────────────────
 	// Every value the action decision depends on is read from a SINGLE store
@@ -121,6 +123,7 @@
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
+	const panelTriggerShown = $derived(shouldShowGitPanelTrigger({ isGitRepo, worktreeMode: isWorktreeMode, error }));
 
 	// ── Panel + popover state ────────────────────────────────────────────────
 	// Driven by the shared store so opening the panel closes the profile /
@@ -360,7 +363,9 @@
 	const accessPending = $derived(access?.pending ?? 0);
 
 	// ── What the one header button says ─────────────────────────────────────
-	const summary = $derived(computeHeaderSummary({
+	// An unreadable worktree checkout names its branch (the tab's branch first:
+	// a carried-over placeholder's branch belongs to the previous session).
+	const summary = $derived(!isGitRepo ? computeUnreadableCheckoutSummary(worktreeBranch ?? currentBranch, snapshotPending) : computeHeaderSummary({
 		accessPending,
 		mergeBlocked: mergeBlocked && showShipIt,
 		needsPull,
@@ -492,7 +497,7 @@
 		<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
 			<TriangleAlert size={13} /> Git unavailable · Retry
 		</button>
-	{:else if isGitRepo}
+	{:else if panelTriggerShown}
 	<button
 		class="git-btn trigger tone-{summary.tone}"
 		class:stale={snapshotPending}
@@ -516,7 +521,7 @@
 				{#if deletions > 0}<span class="stat deletions">−{deletions}</span>{/if}
 			</span>
 		{/if}
-		{#if summary.label}<span class="btn-label">{summary.label}</span>{/if}
+		{#if summary.label}<span class="btn-label" class:branch-label={!isGitRepo}>{summary.label}</span>{/if}
 		{#if summary.detail}<span class="btn-detail">{summary.detail}</span>{/if}
 		{#if prIsLastKnown}
 			<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
@@ -575,6 +580,17 @@
 				{/key}
 			{:else}
 				<GitProgressPopover />
+			{#if !isGitRepo}
+				<div class="gp-unreadable">
+					<!-- The head above already says what is wrong; this says what it means. -->
+					{#if snapshotPending}
+						<p class="gp-empty">Git actions appear once it loads.</p>
+					{:else}
+						<p class="gp-empty">Git actions are paused until it can be read again.</p>
+						<button class="gp-review" onclick={() => git.retryLoad()}>Check again</button>
+					{/if}
+				</div>
+			{:else}
 			<!-- Ship It pipeline: one-click commit → push → PR → merge → cleanup -->
 			<div class="gp-pipe" class:blocked={showShipIt && mergeBlocked}>
 				{#if showShipIt && mergeBlocked}<TriangleAlert size={15} strokeWidth={1.6} />{:else}<Rocket size={15} strokeWidth={1.6} />{/if}
@@ -752,10 +768,11 @@
 					<p class="gp-empty">Working tree is clean.</p>
 				{/if}
 			</div>
+			{/if}
 
 			<SwarmDropdown {sessionId} />
 
-			{#if access || onDownloadChat}
+			{#if access || (showChatExports && sessionId)}
 				<div class="gp-foot">
 					{#if access}
 						{@const hasAny = access.pending > 0 || access.active > 0 || access.saved > 0 || access.error}
@@ -776,12 +793,9 @@
 							</button>
 						</div>
 					{/if}
-					{#if onDownloadChat}
+					{#if showChatExports && sessionId}
 						<div class="row-group narrow-only">
-							<button class="row" aria-label="Download chat history" disabled={downloadingChat} onclick={() => leaveForReview(onDownloadChat)}>
-								<Download size={14} strokeWidth={1.5} />
-								<span class="row-text"><span class="row-title">Download chat history</span><span class="row-sub">.jsonl</span></span>
-							</button>
+							<ChatExportActions {sessionId} menu onStart={closePanel} />
 						</div>
 					{/if}
 				</div>
@@ -790,8 +804,9 @@
 		</div>
 	{/if}
 
-	{:else if !isWorktreeMode}
-		<!-- Only non-repo projects can be initialized, not removed branch checkouts. -->
+	{:else}
+		<!-- Only non-repo projects reach here: a worktree or branch session keeps
+		     the panel button above, and its checkout is never initialized. -->
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />
@@ -874,6 +889,16 @@
 
 	.btn-label {
 		line-height: 1;
+	}
+
+	/* A branch name stands in for the git state; keep a long one from
+	   crowding the header. The full name is in the panel head. */
+	.branch-label {
+		max-width: 180px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		/* overflow clips at the line box; 1 would cut descenders. */
+		line-height: 1.3;
 	}
 
 	.project-name {
@@ -1433,6 +1458,17 @@
 		color: var(--subtle-foreground, var(--muted-foreground));
 	}
 
+	.gp-unreadable {
+		display: grid;
+		justify-items: start;
+		gap: 4px;
+		padding: 12px 6px 10px;
+	}
+
+	.gp-unreadable .gp-review {
+		margin-left: 4px;
+	}
+
 	.gp-foot {
 		padding: 6px;
 		border-top: 1px solid var(--border);
@@ -1588,12 +1624,20 @@
 	.sheet-layout .narrow-only {
 		display: grid;
 	}
-	/* Keep room for the session title and download on a phone's single bar.
-	   The icon/tone and accessible name retain the full Git status. */
+	/* Phones keep a short label: the same one desktop shows (or the +/−
+	   numbers), or the branch name for an unreadable checkout. It truncates so
+	   the session title and download keep their room; the dimmer detail drops.
+	   The button's title, accessible name and panel carry the full status. */
 	@media (max-width: 500px) {
-		.sheet-layout .trigger .stat-line,
-		.sheet-layout .trigger .btn-label,
 		.sheet-layout .trigger .btn-detail { display: none; }
+		.sheet-layout .trigger .btn-label {
+			min-width: 0;
+			max-width: min(24vw, 112px);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			/* overflow clips at the line box; 1 would cut descenders. */
+			line-height: 1.3;
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {

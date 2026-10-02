@@ -201,6 +201,87 @@ describe('SystemMessage — provider_retry', () => {
 		expect(container.textContent).toBe('');
 		expect(container.children).toHaveLength(0);
 	});
+
+	it('shows a live reconnect after a dropped connection', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						model: 'gpt-6.1-sol',
+						cause: 'connection_dropped'
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Reconnecting')).toBeTruthy();
+		expect(container.textContent).toContain('attempt 1 of 2');
+		expect(container.textContent).toContain('gpt-6.1-sol');
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('says when the reconnect lowered the effort', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 2,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						lowered_effort: 'high'
+					}
+				})
+			}
+		});
+
+		expect(container.textContent).toContain(
+			'Reconnecting with lower effort after the provider cut a long response'
+		);
+		expect(container.textContent).toContain('high');
+	});
+
+	it('collapses the dropped attempt once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						settled: true,
+						superseded: { text: 'Partial answer', tools: ['Bash'] }
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Response interrupted — retried')).toBeTruthy();
+		const details = container.querySelector('details');
+		expect(details).not.toBeNull();
+		expect(details?.open).toBe(false);
+		expect(container.textContent).toContain('Partial answer');
+		expect(container.textContent).toContain('Not run: Bash');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
+	it('hides a reconnect once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 2, cause: 'connection_dropped', settled: true }
+				})
+			}
+		});
+
+		expect(container.textContent).toBe('');
+	});
 });
 
 describe('SystemMessage — provider_retry exhausted', () => {

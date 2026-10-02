@@ -4,7 +4,8 @@
 	 *
 	 * Matches the mockup `#page-stats`: a Studio page header (eyebrow + serif title +
 	 * accent + date-range segment / refresh / export actions) over a bento dashboard —
-	 * four metric cards, a spend-over-time bar chart, cost-by-profile, and top sessions.
+	 * four metric cards, usage by provider, a spend-over-time bar chart, cost-by-profile,
+	 * and top sessions.
 	 * Reuses the analytics API + all data/state logic; only the surface is new.
 	 * Theme tokens only — never the mockup palette.
 	 */
@@ -15,12 +16,15 @@
 		getCostBreakdown,
 		getUsageTrends,
 		getTopSessions,
+		getProviderBreakdown,
 		exportAnalyticsCSV,
 		type AnalyticsSummary,
 		type CostBreakdownItem,
 		type TrendDataPoint,
-		type TopSession
+		type TopSession,
+		type ProviderUsage
 	} from '$lib/api/client';
+	import { billingLabel, formatCost, formatTokens, providerCostCell, providerTotals } from './statsProviders';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { Download, RefreshCw, Loader2, Zap, DollarSign, MessageSquare, Gauge, ChevronRight } from 'lucide-svelte';
@@ -43,6 +47,8 @@
 	let costBreakdown = $state<CostBreakdownItem[]>([]);
 	let usageTrends = $state<TrendDataPoint[]>([]);
 	let topSessions = $state<TopSession[]>([]);
+	let providers = $state<ProviderUsage[]>([]);
+	let providersFailed = $state(false);
 
 	// Loading states
 	let loading = $state(true);
@@ -79,17 +85,20 @@
 		loading = true;
 
 		try {
-			const [summaryData, breakdownData, trendsData, sessionsData] = await Promise.all([
+			const [summaryData, breakdownData, trendsData, sessionsData, providerData] = await Promise.all([
 				getAnalyticsSummary(startDate, endDate).catch(() => null),
 				getCostBreakdown(startDate, endDate, 'profile').catch(() => []),
 				getUsageTrends(startDate, endDate).catch(() => []),
-				getTopSessions(startDate, endDate, 5).catch(() => [])
+				getTopSessions(startDate, endDate, 5).catch(() => []),
+				getProviderBreakdown(startDate, endDate).catch(() => null)
 			]);
 
 			summary = summaryData;
 			costBreakdown = breakdownData;
 			usageTrends = trendsData;
 			topSessions = sessionsData;
+			providers = providerData ?? [];
+			providersFailed = providerData === null;
 		} catch (e) {
 			error = 'Failed to load analytics data';
 			console.error(e);
@@ -125,19 +134,6 @@
 		onSessionClick?.(sessionId);
 	}
 
-	// Format helpers
-	function formatTokens(n: number): string {
-		if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
-		if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-		return n.toLocaleString();
-	}
-
-	function formatCost(cost: number): string {
-		if (cost >= 100) return '$' + cost.toFixed(0);
-		if (cost >= 1) return '$' + cost.toFixed(2);
-		return '$' + cost.toFixed(4);
-	}
-
 	const PRESETS: { id: PresetRange; label: string }[] = [
 		{ id: '7d', label: '7 days' },
 		{ id: '30d', label: '30 days' },
@@ -152,6 +148,8 @@
 	const hasEstimates = $derived((summary?.estimated_query_count ?? 0) > 0);
 	const maxProfileCost = $derived(Math.max(...costBreakdown.map((d) => d.cost), 0.0001));
 	const maxTopCost = $derived(Math.max(...topSessions.map((s) => s.total_cost_usd), 0.0001));
+	const maxProviderCost = $derived(Math.max(...providers.map((p) => p.total_cost_usd), 0.0001));
+	const provTotals = $derived(providerTotals(providers));
 
 	// Spend-over-time bars: index of the highest-spend day (accented).
 	const maxTrendCost = $derived(Math.max(...usageTrends.map((d) => d.cost), 0.0001));
@@ -188,7 +186,7 @@
 					<button class="st-btn st-btn--icon" onclick={handleRefresh} disabled={refreshing} title="Refresh" aria-label="Refresh">
 						<RefreshCw size={15} strokeWidth={1.9} class={refreshing ? 'st-spin' : ''} />
 					</button>
-					<button class="st-btn st-btn--icon" onclick={handleExport} disabled={exportLoading} title="Export CSV" aria-label="Export CSV">
+					<button class="st-btn st-btn--icon" onclick={handleExport} disabled={exportLoading} title="Export usage by provider (CSV)" aria-label="Export usage by provider as CSV">
 						{#if exportLoading}<Loader2 size={15} class="st-spin" />{:else}<Download size={15} strokeWidth={1.9} />{/if}
 					</button>
 				{/snippet}
@@ -210,6 +208,9 @@
 						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover."><DollarSign size={14} strokeWidth={2} /> Estimated spend {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatCost(summary?.total_cost ?? 0)}</div>
 						<div class="bsub">app estimate across {summary?.session_count ?? 0} sessions</div>
+						{#if provTotals.unpriced > 0}
+							<div class="bsub bsub--warn" title="These turns used a model with no known price; their cost is not in this total.">{provTotals.unpriced} {provTotals.unpriced === 1 ? 'turn has' : 'turns have'} no price</div>
+						{/if}
 					</div>
 
 					<div class="bcard">
@@ -228,6 +229,46 @@
 						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
 						<div class="bsub">mean estimated spend per session</div>
+					</div>
+
+					<!-- Usage by provider (full width) -->
+					<div class="bcard c4 bflex">
+						<div class="blabel">Usage by provider</div>
+						{#if providersFailed}
+							<div class="bempty">Provider breakdown unavailable</div>
+						{:else if providers.length === 0}
+							<div class="bempty">No usage in this range</div>
+						{:else}
+							<div class="prov" role="table" aria-label="Usage by provider">
+								<div class="prov-row prov-head" role="row">
+									<span role="columnheader">Provider</span>
+									<span role="columnheader" class="prov-num">Turns</span>
+									<span role="columnheader" class="prov-num">Tokens</span>
+									<span class="prov-trackcol" aria-hidden="true"></span>
+									<span role="columnheader" class="prov-num">Est. cost</span>
+								</div>
+								{#each providers as p (p.key)}
+									{@const cell = providerCostCell(p)}
+									<div class="prov-row" role="row" data-provider={p.key}>
+										<span class="prov-name" role="cell">
+											<span class="prov-label" title={p.name}>{p.name}</span>
+											<span class="prov-chip" data-billing={p.billing}>{billingLabel(p.billing)}</span>
+											{#if p.estimated_query_count > 0}<UsageEstimatedBadge />{/if}
+										</span>
+										<span class="prov-num prov-turns" role="cell"><span class="prov-mlabel">Turns</span>{p.query_count.toLocaleString()}</span>
+										<span class="prov-num prov-tokens" role="cell" title="{formatTokens(p.total_tokens_in)} in · {formatTokens(p.total_tokens_out)} out · {formatTokens(p.cache_read_tokens)} cache read"><span class="prov-mlabel">Tokens</span>{formatTokens(p.total_tokens_in + p.total_tokens_out)}</span>
+										<span class="prov-track prov-trackcol" aria-hidden="true"><span class="prov-fill" class:sub={p.billing === 'subscription'} style="width:{cell.missing ? 0 : (p.total_cost_usd / maxProviderCost) * 100}%"></span></span>
+										<span class="prov-cost" class:missing={cell.missing} role="cell" title={cell.title}>
+											<span class="prov-cost-val">{cell.text}</span>
+											{#if cell.note}<span class="prov-cost-note">{cell.note}</span>{/if}
+										</span>
+									</div>
+								{/each}
+							</div>
+							{#if provTotals.inferred > 0}
+								<p class="prov-foot">{provTotals.inferred.toLocaleString()} older {provTotals.inferred === 1 ? 'turn was' : 'turns were'} recorded before per-provider tracking and {provTotals.inferred === 1 ? 'is' : 'are'} shown under {provTotals.inferred === 1 ? 'its' : 'their'} session's current provider.</p>
+							{/if}
+						{/if}
 					</div>
 
 					<!-- Spend over time (tall, wide) -->
@@ -369,6 +410,7 @@
 	}
 	.bcard:hover { border-color: color-mix(in oklch, var(--primary) 40%, var(--border)); }
 	.bcard.c2 { grid-column: span 2; }
+	.bcard.c4 { grid-column: 1 / -1; }
 	.bcard.r2 { grid-row: span 2; }
 	.bflex { display: flex; flex-direction: column; }
 
@@ -386,6 +428,7 @@
 		color: var(--foreground); font-variant-numeric: tabular-nums;
 	}
 	.bsub { margin-top: 10px; font-size: 0.75rem; color: var(--muted-foreground); }
+	.bsub--warn { margin-top: 4px; cursor: help; }
 
 	.bempty { margin: auto 0; padding: 18px 0; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem; opacity: 0.7; }
 
@@ -407,6 +450,39 @@
 	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
 	.brk-fill { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 450ms ease; }
 	.brk-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+
+	/* Usage-by-provider rows */
+	.prov { display: flex; flex-direction: column; }
+	.prov-row {
+		display: grid; grid-template-columns: minmax(0, 1.6fr) 64px 76px minmax(60px, 1fr) 128px;
+		align-items: center; gap: 12px; padding: 8px 0;
+		border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+	}
+	.prov-head {
+		border-top: none; padding: 0 0 4px;
+		font-family: var(--font-mono, monospace); font-size: 0.6rem; letter-spacing: 0.08em;
+		text-transform: uppercase; color: var(--muted-foreground);
+	}
+	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.8125rem; color: var(--foreground); }
+	.prov-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.prov-chip {
+		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 0.65rem; font-weight: 600;
+		border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap;
+	}
+	.prov-chip[data-billing='subscription'] { color: var(--primary); border-color: color-mix(in oklch, var(--primary) 40%, transparent); }
+	.prov-chip[data-billing='unknown'] { border-style: dashed; }
+	.prov-num { font-family: var(--font-mono, monospace); font-size: 0.75rem; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
+	.prov-head .prov-num { font-size: 0.6rem; }
+	.prov-mlabel { display: none; }
+	.prov-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
+	.prov-fill { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 450ms ease; }
+	/* Subscription usage priced at API rates: hatched, so it never reads as money spent. */
+	.prov-fill.sub { background: repeating-linear-gradient(135deg, var(--primary) 0 4px, color-mix(in oklch, var(--primary) 45%, transparent) 4px 8px); }
+	.prov-cost { display: flex; flex-direction: column; align-items: flex-end; text-align: right; cursor: help; }
+	.prov-cost-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--foreground); }
+	.prov-cost.missing .prov-cost-val { color: var(--muted-foreground); font-weight: 500; font-style: italic; }
+	.prov-cost-note { font-size: 0.65rem; color: var(--muted-foreground); white-space: nowrap; }
+	.prov-foot { margin: 10px 0 0; font-size: 0.72rem; color: var(--muted-foreground); }
 
 	/* Top-sessions rows */
 	.tops { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
@@ -452,5 +528,17 @@
 		.bignum { font-size: 2rem; }
 		.top-track { display: none; }
 		.top-row { grid-template-columns: 20px minmax(0, 1fr) auto 14px; }
+		/* Provider rows: name and cost on top, turns and tokens beneath. */
+		.prov-head, .prov-trackcol { display: none; }
+		.prov-row {
+			grid-template-columns: auto minmax(0, 1fr) auto;
+			grid-template-areas: 'name name cost' 'turns tokens cost';
+			row-gap: 3px; column-gap: 14px;
+		}
+		.prov-name { grid-area: name; }
+		.prov-turns { grid-area: turns; text-align: left; }
+		.prov-tokens { grid-area: tokens; text-align: left; }
+		.prov-cost { grid-area: cost; }
+		.prov-mlabel { display: inline; margin-right: 4px; }
 	}
 </style>

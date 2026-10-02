@@ -23,9 +23,13 @@
  *  - everything disables under actionsBusy (isStreaming)
  *  - the private-access row reads chatAccessSummary and opens the dialog
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { flushSync, tick } from 'svelte';
+import { exportSession } from '$lib/api/sessions';
+vi.mock('$lib/api/sessions', () => ({ exportSession: vi.fn() }));
 
 // jsdom lacks ResizeObserver; some lucide/layout paths probe for it.
 if (!('ResizeObserver' in globalThis)) {
@@ -255,6 +259,39 @@ afterEach(() => {
 	chatAccessSummary.set(null);
 });
 
+describe('GitHeaderActions chat exports', () => {
+	it('renders both clearly labeled choices in the existing narrow-screen group', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		expect(row('Download private backup (.jsonl)').closest('.narrow-only')).toBeTruthy();
+		expect(row('Export for sharing (.md)').closest('.narrow-only')).toBeTruthy();
+		expect(panel().textContent).toContain('Recognized secrets removed; review before sharing');
+	});
+	it('closes the existing menu and downloads only sharing Markdown', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		await fireEvent.click(row('Export for sharing (.md)'));
+		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'markdown', { shareSafe: true });
+		expect(queryPanel()).toBeNull();
+	});
+	it('closes the existing menu and preserves the raw JSONL action', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ sessionId: 'synthetic-session', showChatExports: true });
+		await openPanel();
+		await fireEvent.click(row('Download private backup (.jsonl)'));
+		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'jsonl');
+		expect(queryPanel()).toBeNull();
+	});
+	it('does not render exports without a session', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ showChatExports: true });
+		await openPanel();
+		expect(queryRow('Export for sharing (.md)')).toBeNull();
+	});
+});
+
 // ── Header button label (priority ladder) ───────────────────────────────────
 
 describe('GitHeaderActions header label', () => {
@@ -322,18 +359,84 @@ describe('GitHeaderActions header label', () => {
 		expect(trigger().textContent).toContain('2 to approve');
 		expect(trigger().textContent).not.toContain('conflicts');
 	});
+
+	// Owner decision on #1615: the phone sheet layout shows a truncated label,
+	// not a bare icon. jsdom ignores media queries, so this guards the rule's
+	// text; tests/verify-git-panel.mjs checks the rendered result at 320–390px.
+	it('keeps a truncated label (not a bare icon) in the phone rule', () => {
+		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/git/GitHeaderActions.svelte'), 'utf8');
+		const phone = source.match(/@media \(max-width: 500px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(phone).toContain('.btn-label');
+		expect(phone).toMatch(/text-overflow:\s*ellipsis/);
+		const hidden = phone.match(/([^{}]*)\{\s*display:\s*none;?\s*\}/)?.[1] ?? '';
+		expect(hidden).not.toMatch(/btn-label|stat-line/);
+	});
 });
 
 // ── Row visibility matrix inside the panel ──────────────────────────────────
 
 describe('GitHeaderActions panel rows', () => {
-	it.each(['branch', 'mode'])('does not offer Init Repo for a removed worktree (%s)', (source) => {
+	// #1615: hiding the button here left only the standalone Swarm button in
+	// the header for a session that is on a worktree.
+	it.each([
+		['branch', 'feature/gone'],
+		['mode', 'Worktree']
+	])('keeps a labelled Git button for an unreadable worktree checkout (%s)', async (source, label) => {
 		setSnapshot({ status: { is_git_repo: false } });
 		if (source === 'mode') mocks.gitMode.set('worktree');
 		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
 		expect(screen.queryByText('Init Repo')).toBeNull();
-		expect(screen.queryByRole('button', { name: /^Git actions:/ })).toBeNull();
 		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
+		expect(trigger().textContent).toContain(label);
+		expect(trigger().textContent).toContain('unavailable');
+		expect(trigger().classList.contains('stale')).toBe(false);
+
+		await openPanel();
+		expect(within(panel()).getByText(/can't be read right now/)).toBeTruthy();
+		expect(within(panel()).getByText('Git actions are paused until it can be read again.')).toBeTruthy();
+		expect(queryRow('Ship It')).toBeNull();
+		expect(queryRow('Commit')).toBeNull();
+		await fireEvent.click(within(panel()).getByRole('button', { name: 'Check again' }));
+		expect(mocks.retryLoad).toHaveBeenCalledOnce();
+	});
+
+	it('names the branch while a placeholder from a non-repository session revalidates', () => {
+		// Switching from a non-repo project to an uncached worktree session
+		// carries the previous "not a repository" status over until the load lands.
+		setSnapshot({ status: { is_git_repo: false }, stale: true, hydrated: false });
+		renderHeader({ isGitRepo: false, worktreeBranch: 'feature/next' });
+		expect(trigger().textContent).toContain('feature/next');
+		expect(trigger().textContent).toContain('checking');
+		expect(trigger().classList.contains('stale')).toBe(true);
+		expect(screen.queryByText('Init Repo')).toBeNull();
+	});
+
+	it('pauses actions while a hydrated worktree reads as unreadable, then restores them', async () => {
+		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 1, saved: 0, error: false, open: vi.fn() });
+		dirtyFeatureBranch();
+		const { rerender } = renderHeader({ worktreeBranch: 'feature/x' });
+		await openPanel();
+		expect(row('Commit').disabled).toBe(false);
+
+		// A status poll reports "not a repository" (an unreadable checkout) while
+		// the earlier diff stats stay in the store.
+		setSnapshot({
+			status: { is_git_repo: false },
+			diffStats: { additions: 5, deletions: 2, files_changed: 1 },
+			changedFiles: [{ file: 'a.ts', status: 'M', category: 'modified', additions: 5, deletions: 2, is_binary: false }]
+		});
+		await rerender({ isGitRepo: false });
+		expect(trigger().textContent).toContain('feature/x');
+		expect(trigger().textContent).not.toContain('+5');
+		expect(queryPanel()).toBeTruthy();
+		expect(queryRow('Commit')).toBeNull();
+		expect(queryRow('Ship It')).toBeNull();
+		expect(row('Private access').disabled).toBe(false);
+
+		dirtyFeatureBranch();
+		await rerender({ isGitRepo: true });
+		expect(trigger().textContent).toContain('+5');
+		expect(row('Commit').disabled).toBe(false);
 	});
 
 	it('still offers Init Repo for an ordinary non-repository project', () => {

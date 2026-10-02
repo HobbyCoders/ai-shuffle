@@ -685,6 +685,8 @@ _PERMANENT_START_FAILURES = (
     "no credentials configured",
     "needs to be reconnected",
     "no longer exists",
+    # A checkout folder on the wrong branch reads the same on every attempt.
+    "refusing to run on the wrong branch",
     "is disabled",
     "did not finish within the",
     "server is at capacity",
@@ -886,6 +888,11 @@ async def _dispatch_worker_with_retries(
         )
         if kind is None:
             return _capacity_worded(outcome, used["rate"])
+
+        # The attempt never started, so its dedicated checkout (if any) holds
+        # no work; the retry provisions its own. Reclaim refuses anything dirty.
+        from app.core.worker_checkout import reclaim_untouched_worker_checkout
+        await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_id)
 
         delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
         used[kind] += 1
@@ -1976,9 +1983,21 @@ def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = 
         "Top-level session orchestration is unavailable to workers. Use your "
         "parent-report channel when exposed; otherwise put the result or "
         "blocker in your final response. Do not rediscover or bypass a denied "
-        "top-level scope. Verify your assigned checkout and prerequisites "
-        "before edits; report an unavailable prerequisite instead of "
-        "switching another session's branch.\n"
+        "top-level scope. Coding workers in Git projects get a host-provisioned "
+        "dedicated worktree and branch before launch. Use that assigned checkout, "
+        "not a parent's path in the brief; do not provision another worktree. "
+        "If a repository-editing assignment has no isolated checkout, report "
+        "the blocker before editing. Verify its "
+        "branch, base commit, and prerequisites, use its absolute working "
+        "directory for all shell/build/test commands and absolute edit paths, "
+        "and never switch or write in the parent's bound checkout. For read-only "
+        "assignments, you may share it without mutations. Dependency reports do "
+        "not transfer code: integrate predecessor commits into your assigned "
+        "worktree before dependent work. Commit only assigned changes and "
+        "return commit SHAs, checkout/branch, verification, and blockers for "
+        "the parent's integration. Do not merge into the parent checkout or "
+        "main, copy credential files or dependencies from other checkouts, "
+        "remove provisioned worktrees by hand, or bypass a checkout refusal.\n"
         "Lead your final response with ONE sentence stating the result — what "
         "is now true, or what you found. That line is what the parent sees in "
         "its task list, so a heading, a title, or 'I'll start by…' there tells "

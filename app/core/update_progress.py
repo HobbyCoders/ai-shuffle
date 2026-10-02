@@ -103,6 +103,9 @@ def observe(operation, rows):
         phase = "waiting"
     result = {**operation, "phase": phase, "workers": workers}
     if phase == "complete":
+        # The UI only celebrates a recent completion, never one replayed from
+        # history into a fresh browser.
+        result["completed_at"] = time.time()
         with _lock:
             current = load()
             if current and current["id"] == operation["id"]:

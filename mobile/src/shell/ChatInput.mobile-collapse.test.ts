@@ -224,3 +224,16 @@ describe('ChatInput attachments per lane', () => {
 		expect(chatInput).not.toMatch(/if \(composerMode !== 'code'\) return;/);
 	});
 });
+
+describe('narrow-phone placeholder (#1612)', () => {
+	const narrow = mobileStyles.match(/@media \(max-width: 360px\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
+
+	it('shortens only the code lane placeholder, by the exact value ChatInput sets', () => {
+		const long = narrow.match(/\[data-placeholder='([^']+)'\]::before/)?.[1];
+		expect(long).toBeTruthy();
+		// If ChatInput's wording changes, this rule would silently stop matching.
+		expect(chatInput).toContain(`'${long}'`);
+		expect(narrow).toMatch(/content: 'Ask or describe a task';/);
+		expect(narrow).toContain(MOBILE);
+	});
+});

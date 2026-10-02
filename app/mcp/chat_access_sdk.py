@@ -55,10 +55,9 @@ def create_chat_access_server(session_id: str):
             if operation == "request":
                 result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""))
             elif operation == "resources":
-                snap = await broker.snapshot(session_id)
-                # Pending command/write contents belong to the approval UI.
-                result = {"grants": [{k: g[k] for k in ("id", "kind", "expires_at", "writable")}
-                                     for g in snap["grants"]], "folder_available": snap["folder_available"]}
+                # Grant metadata only: pending command/write contents belong to
+                # the approval UI, saved connections to the access panel.
+                result = await broker.resources(session_id)
             else:
                 result = await broker.run(session_id, args.get("grant_id", ""), operation, args)
             return {"content": [{"type": "text", "text": json.dumps(result)}]}

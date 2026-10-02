@@ -86,6 +86,25 @@ def _merge_session_create_overrides(
     return {**base, **(overrides or {})}
 
 
+_RUN_BINDING_KEYS = (
+    "model", "effort", "permission_mode", "context_window", "fast",
+    "workspace_project_ids",
+)
+
+
+def persist_promptless_run_binding(session_id: str, overrides: Optional[dict]) -> None:
+    """Store the composer's picks on a session created without a first turn.
+
+    A first turn persists its overrides as the session's run binding
+    (``turn_manager``). A promptless create has no turn yet, so it writes the
+    same binding here; otherwise a call or a later server-initiated turn would
+    run on defaults instead of the composer's model and permission mode.
+    """
+    binding = {k: (overrides or {}).get(k) for k in _RUN_BINDING_KEYS}
+    if any(value is not None for value in binding.values()):
+        database.set_session_run_binding(session_id, **binding)
+
+
 def _migrate_uploads_to_dir(
     project_id: str,
     target_dir: Path,
@@ -387,6 +406,8 @@ async def _create_remote_branch_session(
             )
             database.create_session(**create_kwargs)
             database.set_session_branch(session_id, branch_name, pv2["id"])
+            if not prompt:
+                persist_promptless_run_binding(session_id, body.overrides)
 
         await run_sync(_create)
     # Keep the submitted text even if the owner takes longer than the request
@@ -643,6 +664,8 @@ async def _create_v2_branch_session(
         )
         database.create_session(**create_kwargs)
         database.set_session_branch(session_id, branch_name, pv2["id"])
+        if not (body.prompt or "").strip():
+            persist_promptless_run_binding(session_id, body.overrides)
 
     await run_sync(_create)
 

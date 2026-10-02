@@ -152,17 +152,33 @@ describe('provider rows', () => {
 			credits: { usage: 1.5 },
 		})]);
 		const container = await open();
-		expect(sectionText(container, 'Router')).toContain('Updated 12m ago · next check in 1m 30s');
+		let text = sectionText(container, 'Router');
+		expect(text).toContain('Last reported 12m ago');
+		expect(text).toContain('Next check in 1m 30s');
+		expect(text).not.toMatch(/Updated|not live/);
 		await vi.advanceTimersByTimeAsync(91_000);
-		const text = sectionText(container, 'Router');
-		expect(text).toContain('Updated 13m ago');
-		expect(text).not.toContain('next check');
+		text = sectionText(container, 'Router');
+		expect(text).toContain('Last reported 13m ago');
+		expect(text).not.toMatch(/next check/i);
 	});
 
 	it('a persisted "fresh" row that has aged reads as stale', async () => {
 		snapshot([row({ provider_id: 'Router', status: 'fresh', fetched_at: T0, credits: { usage: 1.5 } })]);
 		vi.setSystemTime(T0 + 2 * 3_600_000);
-		expect(sectionText(await open(), 'Router')).toContain('Updated 2h ago');
+		expect(sectionText(await open(), 'Router')).toContain('Last reported 2h ago');
+	});
+
+	it('stale with a key refusal: guidance in the header, the age once in the rows', async () => {
+		snapshot([row({
+			provider_id: 'Router', status: 'stale', fetched_at: T0 - 30 * 60_000,
+			last_error_kind: 'billing_access_denied', credits: { usage: 1.5 },
+		})]);
+		const container = await open();
+		const section = Array.from(container.querySelectorAll('.popover-section'))
+			.find((s) => s.querySelector('.section-device')?.textContent === 'Router') as HTMLElement;
+		expect(section.querySelector('.provider-status')?.textContent).toBe('Balance unavailable for this key');
+		const ages = Array.from(container.querySelectorAll('.usage-as-of')).map((e) => e.textContent);
+		expect(ages).toEqual(['Last reported 30m ago']);
 	});
 
 	it('error: one provider’s failure is labelled and the others still render', async () => {
@@ -243,6 +259,6 @@ describe('Claude rows', () => {
 			{ type: 'seven_day', utilization: 50, resets_at: null, observed_at: T0 - 20 * 60_000 },
 		] });
 		const container = await open();
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 20m ago');
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 20m ago');
 	});
 });

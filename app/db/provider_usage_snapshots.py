@@ -193,7 +193,7 @@ def record_provider_usage_failure(
 
 
 def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optional[str]) -> bool:
-    setting = "fal_billing_api_key"
+    setting = "fal_api_key"
     if provider_type == "openrouter_account":
         from app.core.openrouter_usage import SETTING_PREFIX, SNAPSHOT_PREFIX, supported
 
@@ -216,6 +216,11 @@ def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optiona
     # and deletion take this same lock before invalidating the cached balance.
     cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", (setting,))
     row = cursor.fetchone()
+    if provider_type == "fal" and row is None and expected:
+        # No stored key: the poller read FAL_KEY/FAL_API_KEY from the environment.
+        from app.core.provider_usage import fal_env_key_generation
+
+        return expected == fal_env_key_generation()
     return bool(expected and row and row["revision"] == expected)
 
 
@@ -269,7 +274,7 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
             "SELECT p.provider_id, p.provider_type, p.plan_type, p.windows, p.credits, "
             "p.raw, p.fetched_at, s.revision AS credential_generation "
             "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = CASE "
-            "WHEN p.provider_type = 'fal' THEN 'fal_billing_api_key' "
+            "WHEN p.provider_type = 'fal' THEN 'fal_api_key' "
             "WHEN p.provider_type = 'openrouter_account' THEN 'openrouter_billing_key:' || SUBSTR(p.provider_id, 20) END"
         )
         rows = rows_to_list(cursor.fetchall())
@@ -287,6 +292,11 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         row["credits"] = _parse_json_dict(row.get("credits"))
         row["raw"] = _parse_json_dict(row.get("raw"))
         generation = row.pop("credential_generation", None)
+        if row["provider_type"] == "fal" and generation is None:
+            # No stored key: valid only for the current environment key.
+            from app.core.provider_usage import fal_env_key_generation
+
+            generation = fal_env_key_generation()
         observed = (row["raw"] or {}).get("credential_generation")
         if row["provider_type"] == "openrouter_account" and isinstance(observed, str) and observed.startswith("model:"):
             parent = parents.get(row["provider_id"].removeprefix(SNAPSHOT_PREFIX))
