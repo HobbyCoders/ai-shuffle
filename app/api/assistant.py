@@ -1,6 +1,7 @@
 """Owner-only persistent assistant API; normal auth and same-origin CSRF apply."""
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Optional
 
@@ -8,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.auth import require_admin
-from app.core import assistant_service as service
+from app.core import assistant_introduction as introductions, assistant_service as service
 from app.core.assistant_manager import assistant_manager
 from app.db import assistant as store
 from app.db.async_database import run_sync
@@ -17,8 +18,10 @@ router = APIRouter(prefix="/api/v1/assistant", tags=["Assistant"], dependencies=
 
 
 class Introduction(BaseModel):
+    """Owner corrections to the detected introduction; empty restores detection."""
     model_config = ConfigDict(extra="forbid")
     preferred_name: Optional[str] = Field(None, max_length=80)
+    email: Optional[str] = Field(None, max_length=254)
     github_username: Optional[str] = Field(None, max_length=39)
     repository_refs: Optional[list[str]] = Field(None, max_length=20)
     project_ids: Optional[list[str]] = Field(None, max_length=20)
@@ -30,6 +33,16 @@ class Introduction(BaseModel):
         if value is not None and any(ord(c) < 32 and c not in "\n\t" for c in value):
             raise ValueError("Introduction must be printable text")
         return value.strip() if value is not None else value
+
+    @field_validator("email")
+    @classmethod
+    def email_address(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if value and not introductions.clean_email(value):
+            raise ValueError("Use an email address")
+        return value
 
     @field_validator("github_username")
     @classmethod
@@ -67,11 +80,10 @@ class Configuration(BaseModel):
     timeout_seconds: Optional[int] = Field(None, ge=30, le=900)
     max_cost_per_run: Optional[float] = Field(None, gt=0, le=100, allow_inf_nan=False)
     max_cost_per_day: Optional[float] = Field(None, gt=0, le=1000, allow_inf_nan=False)
-    # enabled, paused, the limits and the introduction are still validated so
-    # an older client gets the same errors, then ignored: research is
-    # automatic (store.research_allowed) under the fixed store.RESEARCH_LIMITS,
-    # and setup no longer collects an introduction. A stored introduction is
-    # kept and still read by build_role_context.
+    # enabled, paused and the limits are still validated so an older client
+    # gets the same errors, then ignored: research is automatic
+    # (store.research_allowed) under the fixed store.RESEARCH_LIMITS.
+    # introduction carries the owner's corrections to the detected one.
     introduction: Optional[Introduction] = None
     assistant_name: Optional[str] = Field(None, min_length=1, max_length=80)
     avatar_id: Optional[str] = None
@@ -114,8 +126,22 @@ async def _value_error_call(fn, *args):
         raise HTTPException(status, str(exc)) from exc
 
 
+# How long GET ?detect=true waits for a fresh owner-detection pass before
+# answering with what is stored; the pass keeps running either way.
+DETECT_WAIT_SECONDS = 4
+
+
 @router.get("")
-async def read_assistant():
+async def read_assistant(detect: bool = False):
+    if detect:
+        # Opening the Assistant page re-reads the owner's details, so a
+        # connection made elsewhere shows up without waiting for the loop.
+        task = assistant_manager.detect_owner(max_age=30)
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=DETECT_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                pass
     return await run_sync(service.get_state)
 
 
@@ -130,13 +156,16 @@ async def configure_assistant(body: Configuration):
         for key, value in changes["introduction"].items():
             if value is None:
                 raise HTTPException(422, f"introduction.{key} cannot be null")
-    for key in (*store.LIMIT_KEYS, "introduction", "enabled", "paused"):
+    for key in (*store.LIMIT_KEYS, "enabled", "paused"):
         changes.pop(key, None)
     if changes.get("create_agent") is False:
         changes.pop("create_agent")
     state = await _value_error_call(service.configure, changes)
     await assistant_manager.cancel_invalid_runs()
     assistant_manager.notify()
+    if "agent_id" in changes or "create_agent" in changes:
+        # A new or changed assistant learns about its owner right away.
+        assistant_manager.detect_owner()
     return state
 
 

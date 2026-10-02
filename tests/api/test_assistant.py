@@ -165,18 +165,43 @@ def test_new_agent_takes_the_chosen_name_and_avatar(client):
     assert agent["id"] == "pip"
 
 
-def test_switches_limits_and_introduction_are_accepted_but_ignored(client, assistant_fixture, monkeypatch):
+def test_switches_and_limits_are_accepted_but_ignored(client, assistant_fixture, monkeypatch):
     monkeypatch.setattr(service, "_guard_version", 1)
-    service.configure({"introduction": {"preferred_name": "Ada"}})
     response = client.patch("/api/v1/assistant", json={
         "enabled": False, "paused": True,
         "max_runs_per_day": 100, "max_concurrent_runs": 3, "max_turns": 20, "timeout_seconds": 900,
-        "max_cost_per_run": 50, "max_cost_per_day": 900, "introduction": {"preferred_name": "Mallory"}})
+        "max_cost_per_run": 50, "max_cost_per_day": 900})
     assert response.status_code == 200
     state = response.json()
     assert {k: state[k] for k in store.LIMIT_KEYS} == store.RESEARCH_LIMITS
-    assert state["introduction"]["preferred_name"] == "Ada"
     assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+
+
+def test_owner_corrects_the_detected_introduction_and_can_restore_it(client, assistant_fixture):
+    service.apply_detection({"preferred_name": "ada", "email": "ada@example.com"}, {"gmail": True, "github": False})
+    response = client.patch("/api/v1/assistant", json={"introduction": {"preferred_name": "Ada Lovelace", "github_username": "ada-gh"}})
+    assert response.status_code == 200
+    state = response.json()
+    assert state["introduction"] == {"preferred_name": "Ada Lovelace", "email": "ada@example.com", "github_username": "ada-gh"}
+    assert state["introduction_detected"] == {"preferred_name": "ada", "email": "ada@example.com"}
+    assert state["introduction_corrected"] == ["github_username", "preferred_name"]
+    restored = client.patch("/api/v1/assistant", json={"introduction": {"preferred_name": "", "github_username": ""}}).json()
+    assert restored["introduction"] == {"preferred_name": "ada", "email": "ada@example.com"}
+    assert restored["introduction_corrected"] == []
+    assert client.patch("/api/v1/assistant", json={"introduction": {"email": "not an address"}}).status_code == 422
+    assert client.patch("/api/v1/assistant", json={"introduction": {"projects": ["typed"]}}).status_code == 422
+
+
+def test_opening_the_page_runs_a_fresh_detection_pass(client, assistant_fixture, monkeypatch):
+    from app.core import assistant_introduction as introductions
+    from app.core.assistant_manager import assistant_manager
+    monkeypatch.setattr(assistant_manager, "_detect_task", None)
+    monkeypatch.setattr(assistant_manager, "_detected_at", None)
+    monkeypatch.setattr(introductions, "github_login", lambda: "ada-gh")
+    assert "github_username" not in client.get("/api/v1/assistant").json()["introduction"]
+    state = client.get("/api/v1/assistant?detect=true").json()
+    assert state["introduction"]["github_username"] == "ada-gh"
+    assert state["suggested_connections"] == []
 
 
 def test_research_turns_on_by_itself_with_an_opted_in_source_and_the_guard(client, assistant_fixture, monkeypatch):

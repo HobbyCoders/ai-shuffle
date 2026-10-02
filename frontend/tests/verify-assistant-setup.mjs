@@ -1,8 +1,10 @@
 // Real-browser check of the minimal Assistant setup (issue #1608): name,
 // avatar and agent only. Background research has no owner controls (no
-// switch, pause, usage or limits); only the per-source opt-in remains. A fake
-// /api/v1/assistant backend
-// lives in this script, so nothing reaches a server or a model provider.
+// switch, pause, usage or limits); only the per-source opt-in remains. The
+// owner's details are detected by the server, shown read-only and
+// correctable, with Gmail/GitHub suggestion cards when those are missing. A
+// fake /api/v1/assistant backend lives in this script, so nothing reaches a
+// server or a model provider.
 //
 // Run from frontend/ while the fixture is serving:
 //   npx vite dev --config tests/vite.assistant-setup.config.js --host 127.0.0.1 --port 5741 --strictPort
@@ -41,6 +43,18 @@ function fakeBackend() {
 		status: 'unconfigured', agent: null, assistant_name: null, avatar_id: 'robot', avatar_presets: [],
 		introduction: {}, proactive_guard_ready: true,
 	};
+	// What a detection pass on the server found (no Gmail, gh signed out).
+	const detected = { preferred_name: 'ada', projects: ['Shuffle', 'Notes'] };
+	const corrections = {};
+	const detectRequests = [];
+	const introduce = () => {
+		const merged = { ...detected };
+		for (const [key, value] of Object.entries(corrections)) merged[key] = value;
+		Object.assign(state, {
+			introduction: merged, introduction_detected: { ...detected },
+			introduction_corrected: Object.keys(corrections).sort(), suggested_connections: ['gmail', 'github'],
+		});
+	};
 	const sources = [{
 		id: 'gmail', connector_id: 'gmail', name: 'Work Gmail', type: 'gmail', enabled: false, available: true, status: 'connected',
 		trigger_ids: ['new_email'], observation_mode: 'poll_and_events', last_observed_at: null, last_error: null,
@@ -53,6 +67,14 @@ function fakeBackend() {
 	const patches = [];
 	function configure(patch) {
 		patches.push(patch);
+		if (patch.introduction) {
+			for (const [key, value] of Object.entries(patch.introduction)) {
+				if (value === '' || (Array.isArray(value) && !value.length)) delete corrections[key];
+				else corrections[key] = value;
+			}
+			introduce();
+			return;
+		}
 		let id = patch.agent_id;
 		if (patch.create_agent) {
 			const existing = identities.find((a) => a.dedicated);
@@ -64,13 +86,17 @@ function fakeBackend() {
 		if (patch.assistant_name) agent.name = patch.assistant_name;
 		if (patch.avatar_id) agent.avatar_id = patch.avatar_id;
 		Object.assign(state, { configured: true, agent: { ...agent }, assistant_name: agent.name, avatar_id: agent.avatar_id });
+		introduce();
 		derive();
 	}
 	async function handle(route) {
 		const request = route.request();
 		const path = new URL(request.url()).pathname.replace('/api/v1', '');
 		const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
-		if (path === '/assistant' && request.method() === 'GET') return json(state);
+		if (path === '/assistant' && request.method() === 'GET') {
+			if (new URL(request.url()).searchParams.get('detect') === 'true') detectRequests.push(request.url());
+			return json(state);
+		}
 		if (path === '/assistant' && request.method() === 'PATCH') { configure(request.postDataJSON()); return json(state); }
 		if (path === '/assistant/agents') return json(identities);
 		if (path === '/assistant/sources') return json(sources);
@@ -83,7 +109,7 @@ function fakeBackend() {
 		if (path === '/assistant/activity') return json([]);
 		return json({ detail: `unexpected ${request.method()} ${path}` }, 404);
 	}
-	return { handle, patches, state };
+	return { handle, patches, state, detectRequests };
 }
 
 async function run(viewport) {
@@ -125,6 +151,13 @@ async function run(viewport) {
 	const rows = [...new Set(boxes.map((b) => b.y))];
 	check(rows.length === 4 && boxes.slice(0, 4).every((b) => b.y === boxes[0].y), 'avatars form a 4x4 grid', rows);
 	check(boxes.every((b) => b.w >= 44 && b.h >= 44), 'avatar targets at least 44px', boxes[0]);
+	// Each avatar is its own SVG file, inlined and styled by AgentAvatar.
+	const drawings = await page.locator('.avatar-picker .agent-avatar').evaluateAll((els) => els.map((el) => {
+		const shape = el.querySelector('svg .shape');
+		return { avatar: el.getAttribute('data-avatar'), fill: shape ? getComputedStyle(shape).fill : null, markup: el.innerHTML.length };
+	}));
+	check(new Set(drawings.map((d) => d.avatar)).size === 16, 'every picker button draws its own avatar', drawings.map((d) => d.avatar));
+	check(drawings.every((d) => d.fill && d.fill !== 'none' && d.fill !== 'rgb(0, 0, 0)'), 'avatar shapes take the theme fill', drawings.map((d) => d.fill));
 	check(await page.getByRole('textbox', { name: 'What should I call you?' }).count() === 0, 'no introduction form');
 	check(await page.getByRole('spinbutton').count() === 0, 'no limit fields');
 	check(await page.getByRole('checkbox').count() === 0, 'no background research switch');
@@ -167,7 +200,36 @@ async function run(viewport) {
 	await page.waitForFunction(() => document.querySelector('[role=switch]')?.getAttribute('aria-checked') === 'true');
 	check(await page.getByText('Using 1 connected source.').isVisible(), 'one neutral line once a source is opted in');
 	check(await overflow() <= 0, 'no horizontal overflow after opting in', await overflow());
+
+	// About you: detected details, read-only, correctable; suggestion cards.
+	await page.waitForFunction(() => document.body.textContent.includes('What your assistant knows'));
+	const about = page.locator('section', { has: page.getByRole('heading', { name: 'What your assistant knows' }) });
+	const aboutText = async () => (await about.innerText()).replace(/\s+/g, ' ');
+	check(backend.detectRequests.length >= 1, 'the page asked the server to re-detect', backend.detectRequests);
+	check((await aboutText()).includes('Name ada') && (await aboutText()).includes('Shuffle, Notes'), 'detected name and projects shown', await aboutText());
+	check((await aboutText()).includes('Email Not found'), 'missing email says so', await aboutText());
+	check(await about.locator('input').count() === 0, 'details are read-only until Correct');
+	const gmail = page.getByRole('button', { name: 'Connect Gmail' });
+	const github = page.getByRole('button', { name: 'Sign in to GitHub' });
+	check(await gmail.isVisible() && await github.isVisible(), 'Gmail and GitHub suggestion cards shown');
+	await press(gmail);
+	await press(github);
+	const opened = await page.evaluate(() => window.assistantFixture.opened);
+	assert.deepEqual(opened.slice(-2), [['plugins', undefined], ['settings', 'providers']], `[${name}] suggestion links`);
+	passed++;
 	await shoot('home');
+	await press(about.getByRole('button', { name: /Correct/ }));
+	const nameField = about.getByRole('textbox', { name: 'Name', exact: true });
+	check(await nameField.inputValue() === '' && await nameField.getAttribute('placeholder') === 'ada', 'correction starts empty over the detected value');
+	await nameField.fill('Ada Lovelace');
+	check(await overflow() <= 0, 'no horizontal overflow while correcting', await overflow());
+	await shoot('correct');
+	await press(about.getByRole('button', { name: 'Save' }));
+	await page.waitForFunction(() => document.body.textContent.includes('Ada Lovelace· corrected'));
+	assert.deepEqual(backend.patches.at(-1), { introduction: { preferred_name: 'Ada Lovelace', email: '', github_username: '', repository_refs: [] } }, `[${name}] correction payload`);
+	passed++;
+	check(await about.locator('input').count() === 0, 'back to read-only after saving');
+	check((await page.getByRole('heading', { level: 1 }).locator('..').textContent()).includes('Hello, Ada Lovelace.'), 'greeting uses the corrected name');
 
 	// Editing reopens on the dedicated agent rather than offering a second one.
 	await press(page.getByRole('button', { name: 'Edit assistant' }));
@@ -175,7 +237,8 @@ async function run(viewport) {
 	check(await page.getByText(/Uses Juniper, the agent setup made earlier/).isVisible(), 'edit names the existing dedicated agent');
 	await press(page.getByRole('button', { name: 'Save assistant' }));
 	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
-	check(backend.patches[1].agent_id === 'assistant' && !('create_agent' in backend.patches[1]), 'second save reuses the agent', backend.patches[1]);
+	const resave = backend.patches.at(-1);
+	check(resave.agent_id === 'assistant' && !('create_agent' in resave), 'second save reuses the agent', resave);
 	check(errors.length === 0, 'no page errors or failed requests', errors);
 	await context.close();
 }

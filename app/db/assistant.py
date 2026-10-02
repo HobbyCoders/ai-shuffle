@@ -21,8 +21,10 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
-# The frontend mirror is AVATARS in frontend/src/lib/api/assistant.ts, drawn in
-# AgentAvatar.svelte; tests/api/test_assistant_avatars.py keeps the three in step.
+# The source of truth is frontend/src/lib/components/assistant/avatars/: one
+# SVG per avatar and avatars.json for the order. The backend ships without the
+# frontend sources, so this copy stays here; tests/api/test_assistant_avatars.py
+# fails if it drifts from the manifest.
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "owl", "fox", "cat", "bear", "ghost", "cloud",
                   "moon", "sun", "bolt", "gem", "drop")

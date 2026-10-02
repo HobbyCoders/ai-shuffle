@@ -17,11 +17,12 @@ export function acceptAssistant(state: AssistantState) {
  revision++;
  assistantState.set(state);
 }
-export function refreshAssistant(): Promise<void> {
+/** `detect` re-reads the owner's details on the server before answering. */
+export function refreshAssistant(detect = false): Promise<void> {
  if (pending) return pending;
  const owner = sessionOwnerEpoch();
  const version = revision;
- const request = Promise.all([getAssistant(), getAgentIdentities()]).then(([state, identities]) => {
+ const request = Promise.all([getAssistant(detect), getAgentIdentities()]).then(([state, identities]) => {
   if (owner !== sessionOwnerEpoch() || version !== revision) return;
   assistantState.set(state);
   agentIdentities.set(identities);

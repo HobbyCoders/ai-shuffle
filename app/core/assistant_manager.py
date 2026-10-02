@@ -21,6 +21,9 @@ from app.db.base import get_db, row_to_dict
 logger = logging.getLogger(__name__)
 
 RETENTION_INTERVAL_SECONDS = 3600
+# How stale the owner introduction may get before the loop detects it again.
+# Opening the Assistant page asks for a fresh pass (see detect_owner).
+DETECTION_INTERVAL_SECONDS = 6 * 3600
 
 
 def _deadline(value):
@@ -102,6 +105,9 @@ class AssistantManager:
         self._active_runs = {}
         # Monotonic time of the last retention attempt (None: not yet run).
         self._retention_at = None
+        # Owner detection: the in-flight pass and when the last one started.
+        self._detect_task = None
+        self._detected_at = None
 
     async def start(self):
         if self._task and not self._task.done():
@@ -113,6 +119,7 @@ class AssistantManager:
         self._observer_wake = asyncio.Event()
         self._pass_lock = asyncio.Lock()
         self._stopping = False
+        self._detect_task = None
         self._task = asyncio.create_task(self._loop(), name="assistant-manager")
         self._observer_task = asyncio.create_task(self._observer_loop(), name="assistant-observer")
 
@@ -122,7 +129,7 @@ class AssistantManager:
 
     async def shutdown(self):
         self._stopping = True
-        for task in (self._task, self._observer_task):
+        for task in (self._task, self._observer_task, self._detect_task):
             if task:
                 task.cancel()
                 try:
@@ -131,7 +138,7 @@ class AssistantManager:
                     pass
                 except Exception:
                     logger.exception("Assistant loop failed before shutdown")
-        self._task = self._observer_task = None
+        self._task = self._observer_task = self._detect_task = None
         # A failed/closed database must not prevent local inference teardown.
         # Settlement stays best-effort: do not invent a cancelled/$0 outcome
         # when the provider may already have completed and reported billing.
@@ -191,6 +198,7 @@ class AssistantManager:
                 retry_delay = min(60, retry_delay * 2)
                 failed = True
             await self._maybe_retention_sweep()
+            self.detect_owner(DETECTION_INTERVAL_SECONDS)
             # DB outages deny new admission/tools, but must not kill this loop
             # or extend known inference deadlines. Retry with bounded backoff.
             for run in active:
@@ -224,6 +232,39 @@ class AssistantManager:
                 logger.info("Assistant retention sweep: %s", counts)
         except Exception:
             logger.exception("Assistant retention sweep failed")
+
+    def detect_owner(self, max_age=0):
+        """Start an owner-detection pass unless one ran within ``max_age`` seconds.
+
+        Single-flight; returns the pass's task (or None when fresh enough) so a
+        caller may wait for it briefly. Never raises into the caller's loop.
+        """
+        if self._detect_task is not None and not self._detect_task.done():
+            return self._detect_task
+        clock = time.monotonic()
+        if self._detected_at is not None and clock - self._detected_at < max_age:
+            return None
+        self._detected_at = clock
+        self._detect_task = asyncio.create_task(self._detect_owner(), name="assistant-owner-detection")
+        return self._detect_task
+
+    @staticmethod
+    async def _detect_owner():
+        from app.core import assistant_introduction as introductions
+        from app.core.connectors.manager import connector_manager
+        try:
+            runner = service.assistant_id()
+            gmail = await run_sync(introductions.owner_gmail_connectors, runner)
+            emails = []
+            for connector_id in gmail:
+                instance = await connector_manager.get_running_connector(connector_id)
+                # Set when the connector connected (users.getProfile); no mail is read.
+                emails.append(getattr(instance, "_email_address", "") if instance is not None else "")
+            detected = await run_sync(introductions.detect, runner, emails)
+            connections = {"gmail": bool(gmail), "github": bool(detected.get("github_username"))}
+            await run_sync(service.apply_detection, detected, connections)
+        except Exception:
+            logger.warning("Assistant owner detection failed", exc_info=True)
 
     async def _observer_loop(self):
         while not self._stopping:
