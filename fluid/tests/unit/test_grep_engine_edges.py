@@ -5,6 +5,7 @@ fallback's own validation and bounds; plus the shared walk/glob helpers."""
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -24,22 +25,40 @@ from fluid.tools.builtins._util import (
 from fluid.tools.registry import ToolCtx
 
 
-class _Proc:
-    def __init__(self, returncode=0, stdout=b"", stderr=b"", hang=False) -> None:
-        self.returncode = returncode
-        self._out, self._err, self._hang = stdout, stderr, hang
-        self.killed = False
+class FakeRgProc:
+    """Stands in for an rg subprocess: canned stdout and stderr streams, an exit
+    status, and a record of being killed. ``hang`` keeps both streams open and
+    the process alive until it is killed. Build it inside a running loop."""
 
-    async def communicate(self):
-        if self._hang:
-            await asyncio.sleep(3600)
-        return self._out, self._err
+    def __init__(self, returncode=0, stdout=b"", stderr=b"", hang=False) -> None:
+        self.returncode: int | None = None
+        self.killed = False
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stderr.feed_data(stderr)
+        self._exited = asyncio.Event()
+        if not hang:
+            self._exit(returncode)
+
+    def _exit(self, code: int) -> None:
+        self.returncode = code
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._exited.set()
 
     def kill(self) -> None:
         self.killed = True
+        if self.returncode is None:
+            self._exit(-9)
 
     async def wait(self) -> int:
-        return -9
+        await self._exited.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+
+_Proc = FakeRgProc
 
 
 @pytest.fixture
@@ -76,13 +95,15 @@ async def test_rg_error_exit_is_an_error_with_stderr(tmp_path, fake_rg) -> None:
 
 
 async def test_rg_withholds_credential_file_hits_and_caps_globally(tmp_path, fake_rg) -> None:
-    lines = [f"./src/f{i}.py:{i}:needle" for i in range(5)] + ["./.env:1:needle=secret"]
+    # The credential hit arrives before the cap: the stream stops at the cap,
+    # so a hit after it is never read and never counted.
+    lines = ["./.env:1:needle=secret"] + [f"./src/f{i}.py:{i}:needle" for i in range(5)]
     fake_rg["proc"] = _Proc(stdout=("\n".join(lines) + "\n").encode())
     outcome = await _grep(tmp_path, limit=3)
     assert "needle=secret" not in outcome.text
     assert "hits in credential-pattern files" in outcome.text
-    assert "[showing first 3 of 5 matches" in outcome.text
-    assert f"{tmp_path}/src/f0.py:0:needle" in outcome.text
+    assert "[search truncated: match cap 3 reached" in outcome.text
+    assert f"{tmp_path}{os.sep}src/f0.py:0:needle" in outcome.text
 
 
 async def test_rg_single_file_target_runs_in_its_parent(tmp_path, fake_rg) -> None:
