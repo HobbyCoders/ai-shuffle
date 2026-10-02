@@ -1,4 +1,4 @@
-"""Real filesystem confinement probes; runnable directly on Windows and Linux."""
+"""Real filesystem confinement probes; runnable directly on Windows, Linux and macOS."""
 import os
 from pathlib import Path
 import subprocess
@@ -16,7 +16,8 @@ from app.core import confined_files as files
 class ConfinedFilesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp.name)
+        # macOS temp paths sit behind the /var symlink, which the root walk refuses.
+        self.base = Path(os.path.realpath(self.temp.name))
         self.root = self.base / 'workspace'
         self.root.mkdir()
         self.outside = self.base / 'outside'

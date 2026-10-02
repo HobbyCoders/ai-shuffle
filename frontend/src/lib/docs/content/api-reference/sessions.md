@@ -466,6 +466,8 @@ Forget a saved connection and end any grant that uses it. Returns `{"deleted": t
 
 A request, grant or action that no longer exists returns `409` (`400` when granting).
 
+For a session that runs on another device, these endpoints forward to that device over the worker network, and grants, approvals and saved connections stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved connection or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
+
 ## Browser Panel
 
 ### POST /api/v1/sessions/{session_id}/browser/panel/start

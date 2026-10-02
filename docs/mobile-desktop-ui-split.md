@@ -150,8 +150,9 @@ on the web UI, `'https://worker/api/v1'` when bundled), `apiOrigin()`,
 `window.shuffleMobileSetToken(token)` or a `message` event
 `{ type: 'shuffle-mobile-token', token }` from the page's own origin — no
 reload. On the worker, `Authorization: Bearer shc_…` is accepted by every
-`require_auth` route, is CSRF-exempt, and the app origin is always in the CORS
-allow-list (`app/core/cors.py`); the chat / global / browser WebSockets take
+`require_auth` route, is CSRF-exempt, and the app origins (Android's asset
+origin and the iOS app's `aishuffle://app`) are always in the CORS allow-list
+(`app/core/cors.py`); the chat / global / browser WebSockets take
 `?token=`.
 
 Worker-hosted media uses `WorkerAssetLoader` in the native WebView client.

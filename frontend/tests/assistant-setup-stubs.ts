@@ -7,6 +7,8 @@ export const profiles = writable([
 	{ id: 'researcher', name: 'Researcher', is_builtin: false, config: {} },
 	{ id: 'reviewer', name: 'Reviewer', is_builtin: false, config: {} }
 ]);
+export const projects = writable([]);
+export const sessions = writable([]);
 export const appData = { async loadProfiles() {}, async loadSessions() {} };
 export const layout = {
 	openFeaturePage(page: string, id?: string) {
@@ -16,7 +18,16 @@ export const layout = {
 export async function isVoiceEnabled() {
 	return false;
 }
+// Reached through the session stores (voiceExecutionContext); never called here.
+export async function updateVoiceContext() {
+	return {};
+}
 export async function startCallForSession() {}
+// Reached through the session stores (message-sender); no call runs here.
+export function isCallActiveFor() {
+	return false;
+}
+export async function sendVoiceText() {}
 export function openSession(id: string) {
 	(window as unknown as { assistantFixture: { opened: unknown[] } }).assistantFixture.opened.push(['session', id]);
 }

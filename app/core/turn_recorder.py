@@ -1532,6 +1532,40 @@ async def record_voice_exchange(
         return None
 
 
+#: Turn-id prefix of a brief posted into a conversation between turns. Like a
+#: voice exchange it is a synthetic turn with no ``turns`` row; the reducer
+#: ignores its lifecycle events so it never takes over a live turn's state.
+BRIEF_TURN_PREFIX = "brief-"
+
+
+async def record_brief(
+    session_id: str, text: str, *, extra_payload: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Post a backend-authored assistant message into a conversation.
+
+    One unfenced batch (``turn.started`` / ``message.assistant`` /
+    ``turn.completed``) under a ``brief-<uuid>`` turn id, the same shape as
+    :func:`record_voice_exchange`. Nothing runs and the session's engine does
+    not see it. Returns the synthetic turn id, or ``None`` when nothing was
+    written. Never raises.
+    """
+    try:
+        text = (text or "").strip()
+        if not text:
+            return None
+        turn_id = f"{BRIEF_TURN_PREFIX}{uuid.uuid4()}"
+        await _append_unfenced(session_id, [
+            _build_event(contract.TurnStarted, session_id, turn_id=turn_id, source="assistant_brief"),
+            _build_event(contract.MessageAssistant, session_id, turn_id=turn_id,
+                         content=text, kind="text", extra_payload=extra_payload),
+            _build_event(contract.TurnCompleted, session_id, turn_id=turn_id, stop_reason="end_turn"),
+        ])
+        return turn_id
+    except Exception:
+        logger.warning("[TurnRecorder] record_brief failed for %s", session_id, exc_info=True)
+        return None
+
+
 async def record_voice_tool_exchange(
     session_id: str,
     call_id: str,

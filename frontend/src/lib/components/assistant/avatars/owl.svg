@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <path class="shape" d="M12 12q8 2 12 8h16q4-6 12-8v28c0 11-9 16-20 16S12 51 12 40Z" />
+  <circle class="ring" cx="25" cy="31" r="7" />
+  <circle class="ring" cx="39" cy="31" r="7" />
+  <path class="eyes" d="M25 31v.5m14-.5v.5" />
+  <path class="mark" d="m29 40 3 5 3-5Z" />
+</svg>

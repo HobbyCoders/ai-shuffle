@@ -111,11 +111,26 @@ describe('PrivateAccessRequest', () => {
 	it('grants a writable folder with the chosen duration', async () => {
 		const { onComplete } = mount({ request: { id: 'r/1', kind: 'folder', purpose: 'Read my notes', expires_at: inAnHour() } });
 		expect(screen.queryByLabelText('Connection')).toBeNull();
+		// Folders are confined on Linux and macOS workers, so the note names neither.
+		expect(screen.getByText(/Kernel file confinement: no shell/)).toBeTruthy();
+		expect(screen.queryByText(/Linux file confinement/)).toBeNull();
 		await fireEvent.input(field('Folder on this worker'), { target: { value: '/home/me/notes' } });
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow text writes/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][1]).toMatchObject({ saved_id: '', save_connection: false, connection: { kind: 'folder', label: 'Folder', path: '/home/me/notes', writable: true } });
+	});
+
+	it('names the owning device for a mirrored conversation and posts to this worker', async () => {
+		const { onComplete } = mount({ owner: 'Owner PC', savedConnections: [], request: { id: 'r/1', kind: 'folder', purpose: 'Read my notes', expires_at: inAnHour() } });
+		expect(screen.getByText(/Sent only to Owner PC through this worker/)).toBeTruthy();
+		await fireEvent.input(field('Folder on Owner PC'), { target: { value: '/home/me/notes' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post.mock.calls[0][0]).toBe(endpoint);
+		cleanup();
+		mount({ owner: 'Owner PC', savedConnections: [] });
+		expect(screen.getByText(/Encrypted on Owner PC for future requests/)).toBeTruthy();
 	});
 
 	it('collects an HTTPS service credential privately and only offers saved services', async () => {

@@ -89,8 +89,10 @@ def load_plugin_hooks(plugin_paths: List[str]) -> Dict[str, List[Dict[str, Any]]
                     for hook_def in matcher_def.get("hooks", []):
                         if hook_def.get("type") == "command":
                             command = hook_def.get("command", "")
-                            # Replace ${CLAUDE_PLUGIN_ROOT} with actual path
+                            # Replace ${CLAUDE_PLUGIN_ROOT} (Claude) and
+                            # ${PLUGIN_ROOT} (Agent Plugins) with the actual path
                             command = command.replace("${CLAUDE_PLUGIN_ROOT}", plugin_path)
+                            command = command.replace("${PLUGIN_ROOT}", plugin_path)
 
                             # Stop hooks process the full transcript, which grows with
                             # session length. Give them a longer default timeout (120s)

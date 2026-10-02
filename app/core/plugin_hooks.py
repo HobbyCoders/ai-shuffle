@@ -173,24 +173,17 @@ def get_hooks_from_plugins(plugins: List) -> List[Dict[str, Any]]:
             except Exception as e:
                 logger.error(f"[get_hooks_from_plugins] Error parsing hooks.json for {plugin.id}: {e}")
 
-        # Also check plugin.json for hooks section
-        # Check both root and .claude-plugin/ directory
-        plugin_json = plugin_dir / "plugin.json"
-        if not plugin_json.exists():
-            plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
-        if plugin_json.exists():
-            try:
-                with open(plugin_json) as f:
-                    data = json.load(f)
+        # Also check the plugin manifest (either format) for a hooks section.
+        # Same shapes as hooks.json. A string ``hooks`` is a path to a hooks
+        # file, not a list of events; the standard object form
+        # ({"PreToolUse": [...]}) used to raise on the first key and silently
+        # drop every hook the plugin declared.
+        try:
+            from fluid.context.plugin_formats import read_manifest
 
-                # Same shapes as hooks.json. A string ``hooks`` is a path to a
-                # hooks file, not a list of events; the standard object form
-                # ({"PreToolUse": [...]}) used to raise on the first key and
-                # silently drop every hook the plugin declared.
-                if isinstance(data, dict):
-                    result.extend(_hook_rows(plugin, data.get("hooks")))
-            except Exception:
-                pass
+            result.extend(_hook_rows(plugin, read_manifest(plugin_dir).get("hooks")))
+        except Exception:
+            pass
 
     return result
 

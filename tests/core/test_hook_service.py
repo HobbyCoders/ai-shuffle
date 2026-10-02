@@ -48,6 +48,19 @@ class TestLoadPluginHooks:
         assert "check.py" in result["PreToolUse"][0]["command"]
         assert str(plugin_dir) in result["PreToolUse"][0]["command"]
 
+    def test_agent_plugins_root_variable_is_substituted(self, tmp_path):
+        """Agent Plugins hooks spell the plugin root ${PLUGIN_ROOT} (#1610)."""
+        plugin_dir = tmp_path / "agent-plugin"
+        (plugin_dir / "hooks").mkdir(parents=True)
+        (plugin_dir / "hooks" / "hooks.json").write_text(
+            '{"hooks": {"Stop": [{"hooks": [{"type": "command", '
+            '"command": "python ${PLUGIN_ROOT}/stop.py"}]}]}}'
+        )
+
+        result = load_plugin_hooks([str(plugin_dir)])
+
+        assert result["Stop"][0]["command"] == f"python {plugin_dir}/stop.py"
+
     def test_load_hooks_no_file(self, tmp_path):
         """Should return empty dict if no hooks.json exists."""
         plugin_dir = tmp_path / "empty-plugin"

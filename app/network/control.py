@@ -18,9 +18,11 @@ the mirrored transcript into a new session on an online runner.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi.encoders import jsonable_encoder
@@ -59,6 +61,16 @@ class ControlRefused(RuntimeError):
     """The owner answered with an error (4xx)."""
 
 
+class InsecureRoute(ControlRefused):
+    """A request that must not travel in the clear has no HTTPS route to the peer."""
+
+
+# Set by the /peer/control endpoint for the request being handled: whether it
+# reached this worker over HTTPS (directly, or through the tunnel's attested
+# loopback listener). Handlers that accept private inputs refuse them otherwise.
+inbound_https: contextvars.ContextVar[bool] = contextvars.ContextVar("control_inbound_https", default=False)
+
+
 # ---------------------------------------------------------------------------
 # Client side (the device whose UI is driving)
 # ---------------------------------------------------------------------------
@@ -77,8 +89,13 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
     return owner
 
 
-async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None) -> Dict[str, Any]:
-    """POST a control action to the owner with a device token."""
+async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None,
+               secure: bool = False) -> Dict[str, Any]:
+    """POST a control action to the owner with a device token.
+
+    ``secure`` sends only to the peer's HTTPS addresses, and raises
+    ``InsecureRoute`` when it has none, for a payload carrying private inputs.
+    """
     ctx = engine.require_context()
     known = ctx.member(device_id)
     if known is not None and known.status != membership.STATUS_ACTIVE:
@@ -95,6 +112,8 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
         transport._links[device_id] = link
     if not link.endpoints:
         raise RunnerUnreachable("The owning worker has no reachable address")
+    if secure and not any(_https(route) for route in link.endpoints):
+        raise InsecureRoute("The owning worker has no HTTPS address")
     # DB-backed control payloads contain datetimes (notably session rows).
     # httpx does not apply FastAPI's response encoding to outgoing JSON.
     payload = jsonable_encoder(body or {})
@@ -109,7 +128,7 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
                 if round_:
                     await asyncio.sleep(CONNECT_RETRY_DELAY)
                 failures.clear()
-                tried = link.routes()
+                tried = [route for route in link.routes() if not secure or _https(route)]
                 for route in tried:
                     try:
                         result = await _post(link, client, ctx, route, action, payload, timeout)
@@ -139,6 +158,13 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
     peer, me = await run_sync(_names, ctx, device_id)
     raise RunnerUnreachable(_unreachable_message(peer, me, failures, len(tried))) from (
         failures[-1] if failures else None)
+
+
+def _https(route: str) -> bool:
+    try:
+        return urlsplit(route).scheme == "https"
+    except ValueError:
+        return False
 
 
 def _refusal(exc: "transport.PeerError") -> Exception:
@@ -364,7 +390,19 @@ def _run_settings_handler():
     return handle_run_settings
 
 
+def _chat_access_handler():
+    from app.network.chat_access_routing import handle
+    return handle
+
+
+def _chat_access_changed_handler():
+    from app.network.chat_access_routing import handle_changed
+    return handle_changed
+
+
 _LAZY_HANDLERS = {
+    "chat-access": _chat_access_handler,
+    "chat-access-changed": _chat_access_changed_handler,
     "run-settings": _run_settings_handler,
     "permission-mode": _permission_mode_handler,
     "session-active": _session_active_handler,

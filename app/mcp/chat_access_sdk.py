@@ -23,7 +23,7 @@ connection details as chat text. The card sends those inputs directly to the
 worker; you receive only a temporary handle, resource kind, permissions and
 expiry. Never try to reveal private inputs.
 Grants expire and are lost on restart. Supported resources are SSH machines,
-Linux folders and HTTPS API services. A service grant holds one API key or token
+Linux or macOS folders and HTTPS API services. A service grant holds one API key or token
 which ChatHttpRequest attaches for you; you never see it, and responses are
 redacted. Do not collect any other secret, because no tool can consume it
 privately.
@@ -73,7 +73,7 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
+    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux or macOS folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
     async def request(args):
         return await invoke("request", args)
 

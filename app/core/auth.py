@@ -221,23 +221,7 @@ class AuthService:
             else:
                 self._gh_web_login_error = 'GitHub web sign-in expired or was cancelled. Please try again.'
         authenticated = self.is_github_authenticated()
-        user = None
-
-        if authenticated:
-            try:
-                gh_cmd = find_gh_executable()
-                if gh_cmd:
-                    result = subprocess.run(
-                        [gh_cmd, 'api', '--hostname', 'github.com', 'user', '-q', '.login'],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        env=self._github_env()
-                    )
-                    if result.returncode == 0:
-                        user = result.stdout.strip()
-            except Exception as e:
-                logger.warning(f"Could not get GitHub user: {e}")
+        user = self.github_login() if authenticated else None
 
         return {
             "authenticated": authenticated,
@@ -246,6 +230,24 @@ class AuthService:
             "web_login_pending": self._gh_web_login_process is not None,
             "web_login_error": self._gh_web_login_error,
         }
+
+    def github_login(self) -> Optional[str]:
+        """The signed-in GitHub login (``gh api user``), or None. Blocking."""
+        try:
+            gh_cmd = find_gh_executable()
+            if gh_cmd:
+                result = subprocess.run(
+                    [gh_cmd, 'api', '--hostname', 'github.com', 'user', '-q', '.login'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=self._github_env()
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip() or None
+        except Exception as e:
+            logger.warning(f"Could not get GitHub user: {e}")
+        return None
 
     def _github_env(self) -> Dict[str, str]:
         return {**os.environ, 'GH_CONFIG_DIR': str(self.gh_config_dir),

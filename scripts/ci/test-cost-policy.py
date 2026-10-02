@@ -182,6 +182,24 @@ class CostPolicyTests(unittest.TestCase):
                 self.assertNotIn("schedule", config["on"])
                 self.assertNotIn("canary-gate", config.get("jobs", {}))
 
+    def test_ios_macos_job_is_path_filtered_unsigned_and_bounded(self):
+        config = workflow("ios.yml")
+        self.assertEqual(set(config["on"]), {"pull_request", "workflow_dispatch"})
+        self.assertEqual(config["on"]["pull_request"]["paths"], ["ios/**", "mobile/**", ".github/workflows/ios.yml"])
+        self.assertIsNone(config["on"]["workflow_dispatch"] or None)
+        self.assertEqual(config["permissions"], {"contents": "read"})
+        self.assertEqual(config["concurrency"]["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}")
+        jobs = config["jobs"]
+        self.assertEqual(list(jobs), ["simulator"])
+        job = jobs["simulator"]
+        self.assertEqual(job["runs-on"], "blacksmith-6vcpu-macos-latest")
+        self.assertLessEqual(int(job["timeout-minutes"]), 30)
+        text = (ROOT / ".github/workflows/ios.yml").read_text(encoding="utf-8")
+        # Simulator-only CI: no signing material, no uploads, no publishing.
+        for forbidden in ["secrets.", "environment:", "upload-artifact", "altool", "-exportArchive", "archive "]:
+            self.assertNotIn(forbidden, text)
+        self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
+
     def test_costly_single_purpose_suites_are_manual_only(self):
         # Releases re-run the container check in docker-publish.yml; Linux
         # identity coverage stays in CI Backend.

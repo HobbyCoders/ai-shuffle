@@ -22,7 +22,7 @@ const browser = await chromium.launch({
 	headless: true,
 	args: ['--no-sandbox', '--disable-gpu'],
 });
-const url = process.env.CHAT_ACCESS_FIXTURE_URL || 'http://127.0.0.1:6917/tests/chat-access.html';
+const url = process.env.CHAT_ACCESS_FIXTURE_URL || 'http://127.0.0.1:6917/tests/chat-access.html?session=fixture-session';
 const shots = process.env.SCREENSHOT_DIR;
 const SANDBOX = 'Runs once in an isolated sandbox that sees only this folder and has no network.';
 const scenarios = [

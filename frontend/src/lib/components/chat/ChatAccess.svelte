@@ -16,6 +16,8 @@
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
+	/** The device a mirrored conversation runs on, where its grants and saved connections live. */
+	let owner = $state<string | null>(null);
 	async function removeSaved(id: string) {
 		busy = true; error = '';
 		try { await api.delete(`${base}/saved/${id}`); confirmingDelete = null; await refresh(); }
@@ -96,11 +98,12 @@
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
 			if (!verified) {
-				const session = await api.get<{mode: string; is_remote?: boolean}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				const session = await api.get<{mode: string; is_remote?: boolean; device_name?: string | null}>(`/sessions/${encodeURIComponent(sessionId)}`);
 				if (!alive) return;
-				// Mirrored conversations can run remotely, but private grants stay
-				// on the owner. Do not probe this worker's private-access endpoint.
-				enabled = !session.is_remote && (session.mode == null || ['code', 'chat', 'voice'].includes(session.mode));
+				// A mirrored conversation's grants stay on the device that runs it;
+				// this worker forwards the panel's requests there.
+				enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
+				owner = session.is_remote ? (session.device_name || 'the device that runs this conversation') : null;
 				verified = true;
 			}
 			if (!enabled) {
@@ -235,7 +238,7 @@
 		<div class="private-access" aria-label="Temporary access in this conversation">
 		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#each data.requests as request (request.id)}
-			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} onComplete={() => void refresh()} />
+			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} onComplete={() => void refresh()} />
 		{/each}
 		{#each data.actions as action (action.id)}
 			{@const grant = data.grants.find(g => g.id === action.grant_id)}
@@ -313,7 +316,7 @@
 							<div class="pa-row-main">
 								<strong>{saved.label}</strong>
 								<code>{saved.target}</code>
-								<small>Encrypted on this worker{#if saved.fingerprint} · host key {saved.fingerprint.slice(0, 19)}…{/if}</small>
+								<small>Encrypted on {owner ?? 'this worker'}{#if saved.fingerprint} · host key {saved.fingerprint.slice(0, 19)}…{/if}</small>
 							</div>
 							<div class="pa-row-actions">
 								{#if confirmingDelete === saved.id}

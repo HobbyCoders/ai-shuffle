@@ -10,7 +10,8 @@
 	 * - API: Rate limits + API users (admin)
 	 * - System: System prompt (admin)
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
 	import './settings/settings-layout.css';
@@ -69,6 +70,17 @@
 				]
 			: [])
 	]);
+
+	// Deep link: openFeaturePage('settings', '<tab>') opens that tab, once.
+	let { initialTab = null }: { initialTab?: string | null } = $props();
+	$effect(() => {
+		const tab = initialTab;
+		if (!tab) return;
+		untrack(() => {
+			if (settingsTabs.some((item) => item.id === tab && !item.heading)) activeTab = tab as Tab;
+			layout.clearFeatureItemId();
+		});
+	});
 
 	let error = $state('');
 
