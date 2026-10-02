@@ -280,7 +280,7 @@ class ContainerUpdates:
             self.state.pop("pending", None)
             self.state.pop("booting", None)
             self.save()
-            self.publish("idle", "Application update is running.")
+            self.publish("idle", "Updated version is running.")
             self.prune()
 
     def prune(self):

@@ -270,6 +270,13 @@ def create_postgres_schema(cursor) -> None:
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.
             owner_device_id TEXT,
+            -- The native leg's "# Workspace facts" card as rendered on the
+            -- session's first connect: {"v", "card", "cwd",
+            -- "preview_expires_at", "captured_at"}. Every later connect
+            -- (cold-evicted park, worker restart, a worker on the same
+            -- database) reuses these exact bytes so the cached system prefix
+            -- does not move. NULL until the first native connect.
+            workspace_facts JSONB,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
@@ -393,7 +400,18 @@ def create_postgres_schema(cursor) -> None:
             -- still count toward budgets; the flag only marks them as
             -- estimates in the usage displays. Same guarded ADD COLUMN in
             -- database._run_column_migrations for existing installs.
-            usage_estimated BOOLEAN DEFAULT FALSE
+            usage_estimated BOOLEAN DEFAULT FALSE,
+            -- Which provider leg served the turn, captured when it is booked
+            -- (app/core/usage_attribution.py). ``provider_type`` is 'claude'
+            -- for the native/delegated Claude leg (``provider_id`` NULL),
+            -- otherwise the model_providers row's type; ``billing`` is
+            -- 'subscription' or 'api'. NULL on rows booked before this
+            -- existed: the Stats provider breakdown attributes those from the
+            -- session's binding instead. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            provider_id TEXT,
+            provider_type TEXT,
+            billing TEXT
         )
     """)
 

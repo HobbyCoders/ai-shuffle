@@ -126,13 +126,81 @@ def test_swarm_routing_is_gated_and_does_not_encourage_task_fanout():
             if "Swarm" in surface:
                 assert SWARM_ROUTING_SUMMARY in prompt
                 assert SWARM_ROUTING in description
-                assert "three or more planned subagent tasks" in description
+                assert "(3+ tasks or dependencies)" in description
                 assert "Do not split batches into Task calls" in description
                 assert "adaptive follow-up" in description
                 assert "never override a restriction on delegation" in description
                 assert "send several Task calls" not in description
+                assert "cover the whole requested job" in description
+                assert "not just a small initial slice" in description
+                assert "max_parallel limits concurrent tasks" in description
+                assert "depth limits delegation chains, not how many tasks" in description
+                assert "silently dropping scope" in description
             else:
                 assert "Swarm" not in prompt + description
+
+
+# Recommendation phrasings that would turn a configured maximum into a goal.
+_TARGET_PHRASES = re.compile(
+    r"\b(?:up to|aim for|as many as|use|spin up|launch|start|run|recommended?)"
+    r"\s+(?:up to\s+)?\d",
+    re.IGNORECASE,
+)
+
+
+def test_delegation_limits_read_as_ceilings_not_targets() -> None:
+    """Issue #1606: stating the real limits must not invite 64-worker plans.
+
+    Sizing comes from the work, the maxima are ceilings, and the typical
+    ranges stay far below them so no number near the ceiling becomes an
+    anchor.
+    """
+    from fluid.tools.builtins import swarm, task
+    from fluid.tools.fragments import DELEGATION_SIZING, SWARM_ROUTING
+
+    sizing_rules = (
+        "one worker per genuinely independent unit of work",
+        "Prefer fewer, larger assignments over many tiny ones",
+        "shares files or needs sequential decisions in one assignment",
+        "do it yourself or use one worker",
+        "Typical sizes:",
+        "safety ceilings, not targets",
+        "never add workers to approach them",
+    )
+    for rule in sizing_rules:
+        assert rule in DELEGATION_SIZING
+    assert DELEGATION_SIZING in SWARM_ROUTING
+    assert "Coverage comes from what each task includes" in SWARM_ROUTING
+    # Every Task surface carries the sizing rules, with or without Swarm.
+    for surface in (frozenset({"Task"}), frozenset({"Task", "Swarm"})):
+        assert DELEGATION_SIZING in task.describe(surface)
+    swarm_text = swarm.describe(frozenset({"Task", "Swarm"}))
+    assert DELEGATION_SIZING in swarm_text
+    assert "at most 64 tasks; that is a ceiling, not a target" in swarm_text
+
+    # Ranges are spelled out and stay far below every maximum: no digits
+    # in the shared routing text beyond the "3+" Swarm threshold.
+    assert re.findall(r"\d+", SWARM_ROUTING) == ["3"]
+    assert re.search(r"\b(?:twenty|thirty|forty|fifty|sixty)", SWARM_ROUTING, re.I) is None
+    for text in (SWARM_ROUTING, swarm_text, task.describe(frozenset({"Task"}))):
+        assert _TARGET_PHRASES.search(text) is None, _TARGET_PHRASES.search(text)
+    # The only "64" a model sees in Swarm's prose is the ceiling sentence.
+    assert swarm_text.count("64") == 1
+
+
+def test_checkout_guidance_requires_delegation_surface() -> None:
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SUBAGENT_WORKTREE_SUMMARY
+
+    for surface in (frozenset(), frozenset({"Read"}), frozenset({"Task"}),
+                    frozenset({"Task", "Swarm"})):
+        for code_mode in (False, True):
+            prompt = compose_base_prompt(PromptProfile(tools=surface, code_mode=code_mode))
+            assert (SUBAGENT_WORKTREE_SUMMARY in prompt) is ("Task" in surface)
+    assert "not automatically main" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "dependency reports do not transfer code" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "remove provisioned worktrees by hand" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "unique branch for each coding worker" in SUBAGENT_WORKTREE_GUIDANCE
+    assert "do not provision a duplicate" in SUBAGENT_WORKTREE_GUIDANCE
 
 
 def test_refined_full_surface_matches_module_constants() -> None:
@@ -170,6 +238,8 @@ def test_shared_fragments_appear_verbatim() -> None:
             ("Task", "Monitor"),
         ),
         "SWARM_ROUTING": (fr.SWARM_ROUTING, ("Task", "Swarm")),
+        "DELEGATION_SIZING": (fr.DELEGATION_SIZING, ("Task", "Swarm")),
+        "SUBAGENT_WORKTREE_GUIDANCE": (fr.SUBAGENT_WORKTREE_GUIDANCE, ("Task", "Swarm")),
         "WEB_UNTRUSTED": (fr.WEB_UNTRUSTED, ("WebFetch", "WebSearch")),
     }
     for label, (fragment, names) in carriers.items():
@@ -180,6 +250,7 @@ def test_shared_fragments_appear_verbatim() -> None:
 
     assert END_TURN_ON_BACKGROUND in DEFAULT_BASE_PROMPT
     assert fr.SWARM_ROUTING_SUMMARY in DEFAULT_BASE_PROMPT
+    assert fr.SUBAGENT_WORKTREE_SUMMARY in DEFAULT_BASE_PROMPT
     # Bash and Monitor share one cwd parameter description.
     for name in ("Bash", "Monitor"):
         spec = registry.get(name)

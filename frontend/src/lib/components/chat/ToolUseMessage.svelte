@@ -32,9 +32,11 @@
 		serverSide?: boolean;
 		/** Data URI of a screenshot from MCP image results (e.g. browser automation). */
 		screenshot?: string;
+		/** Hover text for the preview, when it should say more than the preview. */
+		previewTitle?: string;
 	}
 
-	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
+	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot, previewTitle }: Props = $props();
 
 	const prefs = $derived(chatPreferences.current);
 	// Scalar boundaries stop replay's store-backed prop getters from making
@@ -125,7 +127,7 @@
 			<span class="wl-badge">dismissed</span>
 			<span class="wtxt" title={QUESTION_DISMISSED_LABEL}>{QUESTION_DISMISSED_LABEL}</span>
 		{:else if preview}
-			<span class="wtxt" title={preview}>{preview}</span>
+			<span class="wtxt" title={previewTitle || preview}>{preview}</span>
 		{/if}
 
 		<span class="wright">

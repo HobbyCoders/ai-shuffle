@@ -794,6 +794,45 @@ class TopSession(BaseModel):
     usage_estimated: bool = False
 
 
+class ProviderUsageItem(BaseModel):
+    """Usage booked on one provider leg over a date range.
+
+    ``key`` is a ``model_providers`` id, ``"claude"`` for the native Claude
+    leg, or ``"unattributed"`` for session-less rows booked before provider
+    attribution existed.
+    """
+    key: str
+    name: str
+    provider_type: Optional[str] = None
+    # 'subscription' | 'api' | 'mixed' | 'unknown'. A subscription leg's cost
+    # is the app's API-price estimate, not money billed per token.
+    billing: str = "unknown"
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_cost_usd: float = 0.0
+    # 'estimated' (every turn priced) | 'partial' | 'unknown' (no turn priced:
+    # the model has no price, so the cost is missing, not zero).
+    cost_status: str = "estimated"
+    query_count: int = 0
+    estimated_query_count: int = 0
+    # Turns with tokens but no price.
+    unpriced_query_count: int = 0
+    subscription_query_count: int = 0
+    api_query_count: int = 0
+    # Turns booked before attribution existed, attributed from the session's
+    # current provider binding (and that provider's current billing).
+    inferred_query_count: int = 0
+
+
+class ProviderBreakdownResponse(BaseModel):
+    """Per-provider usage for a date range."""
+    start_date: str
+    end_date: str
+    items: List[ProviderUsageItem] = []
+
+
 class AnalyticsSummaryResponse(BaseModel):
     """Combined analytics summary response"""
     start_date: str

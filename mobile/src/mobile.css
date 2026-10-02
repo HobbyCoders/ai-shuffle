@@ -180,11 +180,50 @@ html:root[data-platform='mobile'] .mobile-controls-open .textarea-wrapper .tipta
 	max-height: min(150px, calc(var(--app-viewport-height, 100dvh) * 0.15));
 }
 
-/* Thumb-sized primary action. */
+/* Thumb-sized primary action: a full 44px touch target. */
 html:root[data-platform='mobile'] .send-btn, html:root[data-platform='mobile'] .send-cluster .stop-btn {
-	width: 34px;
-	height: 34px;
-	border-radius: 10px;
+	width: 44px;
+	height: 44px;
+	border-radius: 12px;
+}
+
+/* Composer text at 16px: readable on a phone, and mobile browsers do not zoom
+   into an editor whose text is at least 16px. The suggestion ghost text sits
+   on the same line, so it follows. A 24px line keeps one line inside the
+   editor's 24px minimum: a taller line would make the idle editor a scroll
+   owner, and the swipe-to-open gesture yields to scroll owners. */
+html:root[data-platform='mobile'] .chat-input-wrapper .tiptap-editor .ProseMirror,
+html:root[data-platform='mobile'] .chat-input-wrapper .inline-suggestion {
+	font-size: 16px;
+	line-height: 24px;
+}
+
+/* At 16px a long placeholder can wrap on a narrow phone, which also turns the
+   idle editor into a scroll owner. Keep it on one line, truncated, the way the
+   editor already lays it out beside a suggestion. */
+html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child::before {
+	position: absolute;
+	inset-inline: 0;
+	float: none;
+	height: auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* At 360px and narrower the code lane's placeholder no longer fits and would
+   end in an ellipsis, so it says the same thing in fewer words. It matches the
+   value ChatInput sets, which leaves chat's "Ask anything" and suggestion
+   ghost text alone. */
+@media (max-width: 360px) {
+	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
+		content: 'Ask or describe a task';
+	}
+}
+
+/* Expanded, the editor offers a comfortable target even before any text. */
+html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
+	min-height: 44px;
 }
 
 html:root[data-platform='mobile'] .mobile-collapsed .chat-island {
@@ -217,9 +256,9 @@ html:root[data-platform='mobile'] .mobile-toolbar-blocked .controls-dock {
 html:root[data-platform='mobile'] .mobile-collapsed .input-area {
 	border-radius: 14px;
 	min-width: 0;
-	min-height: 48px;
+	min-height: 52px;
 	align-items: center;
-	padding: 7px 8px 7px 16px;
+	padding: 4px 4px 4px 16px;
 }
 
 /* ── frontend/src/lib/components/chat/ControlsDock.svelte ──────────────────── */
@@ -252,14 +291,21 @@ html:root[data-platform='mobile'] .dock-left {
 	gap: 0;
 }
 
+/* Every dock control is a 44px touch target. */
 html:root[data-platform='mobile'] .dock-ico, html:root[data-platform='mobile'] .dock-left .voice-btn, html:root[data-platform='mobile'] .dock-left .voice-call-btn {
-	width: 36px;
-	height: 36px;
-	border-radius: 11px;
+	width: 44px;
+	height: 44px;
+	border-radius: 12px;
+}
+
+html:root[data-platform='mobile'] .mobile-controls .usage-indicator {
+	width: 44px;
+	height: 44px;
+	margin-left: 0;
 }
 
 html:root[data-platform='mobile'] .dock-left .voice-btn-wrapper {
-	border-radius: 11px;
+	border-radius: 12px;
 }
 
 /* ── frontend/src/lib/components/chat/ProfileSelector.svelte ───────────────── */

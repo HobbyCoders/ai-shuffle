@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeHeaderSummary, computePipeline, type HeaderSummaryInput } from './git-header-summary';
+import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
 
 const base: HeaderSummaryInput = {
 	accessPending: 0,
@@ -116,5 +116,26 @@ describe('computePipeline', () => {
 	it('leaves every step plain when there is nothing to ship', () => {
 		expect(states(computePipeline({ hasChanges: false, canPush: false, hasOpenPr: false, showShipIt: false, mergeBlocked: false })))
 			.toEqual(['todo', 'todo', 'todo', 'todo']);
+	});
+});
+
+describe('computeUnreadableCheckoutSummary', () => {
+	it('names the branch instead of a git state, never an empty label', () => {
+		const s = computeUnreadableCheckoutSummary('feature/x', false);
+		expect(s.label).toBe('feature/x');
+		expect(s.detail).toBe('unavailable');
+		expect(s.icon).toBe('branch');
+		expect(s.summary).toBe("This checkout can't be read right now");
+	});
+
+	it('says it is checking while a placeholder revalidates', () => {
+		const s = computeUnreadableCheckoutSummary('feature/x', true);
+		expect(s.detail).toBe('checking');
+		expect(s.summary).toBe('Checking this checkout…');
+	});
+
+	it('falls back to a generic label when no branch is known', () => {
+		expect(computeUnreadableCheckoutSummary(null, false).label).toBe('Worktree');
+		expect(computeUnreadableCheckoutSummary('', true).label).toBe('Worktree');
 	});
 });

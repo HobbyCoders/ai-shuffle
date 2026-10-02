@@ -280,20 +280,10 @@ async def test_glob_deadline_returns_partial(tmp_path, monkeypatch) -> None:
     assert "[search truncated: deadline reached after" in out.text
 
 
-class _FakeProc:
-    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
-        self.returncode = returncode
-        self._out, self._err = stdout, stderr
-        self.killed = False
+def _FakeProc(returncode: int, stdout: bytes = b"", stderr: bytes = b""):
+    from tests.unit.test_grep_engine_edges import FakeRgProc
 
-    async def communicate(self):
-        return self._out, self._err
-
-    def kill(self) -> None:  # pragma: no cover - only on the timeout path
-        self.killed = True
-
-    async def wait(self):  # pragma: no cover - only on the timeout path
-        return self.returncode
+    return FakeRgProc(returncode, stdout, stderr)
 
 
 async def test_grep_rg_error_is_surfaced_and_args_are_safe(tmp_path, monkeypatch) -> None:
@@ -355,8 +345,8 @@ async def test_grep_rg_limit_is_global_across_files(tmp_path, monkeypatch) -> No
     hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
     assert len(hits) == 3
     assert (
-        "[showing first 3 of 4 matches — pass a higher limit or narrow the pattern]"
-        in out.text
+        "[search truncated: match cap 3 reached — pass a higher limit or narrow "
+        "the pattern]" in out.text
     )
     # The per-file bound is still handed to rg, set from the same limit.
     assert captured[captured.index("--max-count") + 1] == "3"
@@ -378,7 +368,7 @@ async def test_grep_rg_under_limit_has_no_note(tmp_path, monkeypatch) -> None:
     register_builtins(registry)
     out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
     assert out.text.endswith("/repo/a.py:1:needle")
-    assert "showing first" not in out.text
+    assert "showing first" not in out.text and "match cap" not in out.text
 
 
 async def test_grep_rg_no_matches_is_not_an_error(tmp_path, monkeypatch) -> None:

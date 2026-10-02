@@ -395,6 +395,51 @@ def resolve_subagent(
     )
 
 
+def host_worker_limits_text() -> str:
+    """The configured worker limits, stated with their actual values.
+
+    SWARM_ROUTING says only that the host has limits, which left models
+    guessing the numbers (and reading the depth default as a five-agent Swarm
+    cap). The text frames them as safety ceilings, never a recommended worker
+    count. The values come from settings, not runtime state, so
+    the Task description stays byte-identical across turns until the
+    configuration changes. Each read mirrors how task_dispatch interprets the
+    setting: 0 falls back to the default for depth and the root budget, and
+    disables the per-parent and per-provider limits.
+    """
+    try:
+        from app.core.config import settings
+
+        max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
+        max_workers = int(getattr(settings, "task_tool_max_workers", 64) or 64)
+        per_parent = int(getattr(settings, "subagent_max_concurrent_per_session", 0) or 0)
+        per_provider = int(getattr(settings, "task_worker_max_per_provider", 0) or 0)
+    except Exception:  # noqa: BLE001 — a missing setting must not break the contract
+        logger.debug("Could not read worker limits for the Task contract", exc_info=True)
+        return ""
+
+    parts = [
+        f"at most {max_workers} live workers per root session tree, nested "
+        "workers included",
+        (
+            f"at most {per_parent} concurrent workers per parent session"
+            if per_parent > 0
+            else "no separate per-parent concurrency limit"
+        ),
+        f"agent-invokes-agent nesting at most {max_depth} levels deep",
+    ]
+    if per_provider > 0:
+        parts.append(f"at most {per_provider} concurrent workers per provider")
+    # Stated as ceilings so a model reading "64" does not plan 64 workers;
+    # the sizing guidance in SWARM_ROUTING, just before this, sets the count.
+    return (
+        "Host safety ceilings (from configuration): " + "; ".join(parts) + ". "
+        "They protect the host and are not targets or a recommended worker "
+        "count; they cap concurrency and delegation depth, not how many tasks "
+        "a Swarm may declare."
+    )
+
+
 @dataclass(frozen=True)
 class TaskContract:
     description: str
@@ -408,7 +453,7 @@ def build_task_contract(
     additional_targets: Sequence[SubagentTarget] = (),
 ) -> TaskContract:
     """Build the provider-scoped model-facing Task contract."""
-    from fluid.tools.fragments import SWARM_ROUTING
+    from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     targets = list(available_subagents(caller_profile_id, provider_id))
 
@@ -511,12 +556,16 @@ def build_task_contract(
         "worker_session_id/task_id and the completion is announced later."
     )
 
+    limits = host_worker_limits_text()
     description = (
         "Delegate a self-contained task to one configured subagent. The "
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        f"tool call. {SWARM_ROUTING}\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
+        "tool call. "
+        f"{SWARM_ROUTING}" + (f" {limits}" if limits else "")
+        + f"\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
+        f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
     agent_property: dict[str, Any] = {
@@ -650,7 +699,7 @@ def parent_subagent_guidance(
     monitor_available: bool = True, browser_available: bool = True,
 ) -> str:
     """Describe only workflows exposed by this session's effective surface."""
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SWARM_ROUTING
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING
 
     parts = []
     if task_available:
@@ -666,7 +715,10 @@ def parent_subagent_guidance(
             "scope and expected result. Choose the role that matches the work: "
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
-            "Delegate only when the user authorizes subagents.\n"
+            "Delegate only when the user authorizes subagents. "
+            # The full checkout contract rides the Task/Swarm descriptions;
+            # repeating it here would resend it every turn.
+            + SUBAGENT_WORKTREE_SUMMARY + "\n"
             + (SWARM_ROUTING if swarm_available else
                "Use Task for independent or adaptive assignments; do not "
                "invent an unavailable workflow tool.")

@@ -264,6 +264,21 @@ describe('SessionCard actions', () => {
 		expect(mocks.toastPush).toHaveBeenCalledWith('Failed to update session', { severity: 'error' });
 	});
 
+	it('names the server reason when a settle is refused (#1621)', async () => {
+		mocks.setSessionActive.mockRejectedValueOnce({
+			status: 503,
+			detail: "DesktopWorker, the worker that runs this session, can't be reached right now. Try again once it is back online.",
+		});
+		renderCard({ is_active: true }, { active: true });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(mocks.toastPush).toHaveBeenCalledWith(
+			"Failed to update session: DesktopWorker, the worker that runs this session, can't be reached right now. Try again once it is back online.",
+			{ severity: 'error' },
+		);
+	});
+
 	it("doesn't fire onSettled when a background session is settled", async () => {
 		const { onSettled } = renderCard({ is_active: true }, { active: false });
 

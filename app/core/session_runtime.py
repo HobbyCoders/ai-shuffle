@@ -1370,8 +1370,10 @@ class SessionRuntime:
                 self._abort_reason = "user_stopped"
                 return
             # Peer messages held while the session was parked ride this turn,
-            # whatever started it (turn_scheduler's held-message policy). Only
-            # the engine sees them; the transcript keeps the prompt as sent.
+            # whatever started it (turn_scheduler's held-message policy). The
+            # engine gets them in its prompt; the transcript keeps the prompt as
+            # sent and shows each one as an attributed agent message once the
+            # engine is running (``_note_held_peer_deliveries``).
             if not resume:
                 try:
                     from app.core import turn_scheduler
@@ -1415,6 +1417,11 @@ class SessionRuntime:
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
             ):
+                if held_peer and not engine_started:
+                    # Same point the store counts them delivered (see the
+                    # restore in ``finally``), so a turn that never starts
+                    # shows nothing it did not deliver.
+                    await self._note_held_peer_deliveries(recorder, held_peer)
                 engine_started = True
                 etype = event.get("type") if isinstance(event, dict) else None
                 # ANY frame is proof the engine is still moving — a tool result,
@@ -1668,12 +1675,20 @@ class SessionRuntime:
             try:
                 if row.get("source") == "agent_message":
                     payload = row.get("payload") or {}
-                    from app.core import session_orchestration
-                    sender = await asyncio.to_thread(session_orchestration._caller, payload["orchestration_sender"])
-                    await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    sender_id = payload.get("orchestration_sender")
+                    if sender_id:
+                        from app.core import session_orchestration
+                        sender = await asyncio.to_thread(session_orchestration._caller, sender_id)
+                        await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    else:
+                        from app.core import agent_messaging
+                        sender_id = payload["task_peer_sender"]
+                        if not agent_messaging.may_message(sender_id, self.session_id):
+                            raise PermissionError(
+                                f"{sender_id} can no longer message {self.session_id}"
+                            )
                     await adapter.steer_peer(
-                        payload["peer_message_content"],
-                        sender=payload["orchestration_sender"], id=row_id,
+                        payload["peer_message_content"], sender=sender_id, id=row_id,
                     )
                 else:
                     await adapter.steer(prompt, id=row_id)
@@ -1913,7 +1928,10 @@ class SessionRuntime:
         if row.get("source") == "agent_message":
             # Only an attributed, scope-checked producer may use the peer channel.
             # Recheck revocation/ownership/Stop before handing it to the engine.
-            if not payload.get("orchestration_sender") or not payload.get("peer_message_content"):
+            # Two producers qualify: MessageSession (``orchestration_sender``)
+            # and a Task/Swarm SendMessage (``task_peer_sender``).
+            sender = payload.get("orchestration_sender") or payload.get("task_peer_sender")
+            if not sender or not payload.get("peer_message_content"):
                 return False
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
@@ -1959,8 +1977,7 @@ class SessionRuntime:
                 # rather than silently dropping it or asking the user to interrupt.
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": {"sender": str(steer["from"]),
-                             "content": str(steer["text"]), "delivery": "delivered"},
+                    "data": self._peer_note_data(str(steer["from"]), str(steer["text"])),
                 })
                 continue
             if not row_id:
@@ -2074,6 +2091,9 @@ class SessionRuntime:
                     "failed for %s (%d frame(s))",
                     self.session_id, len(frames), exc_info=True,
                 )
+        held = entry.get("held_peer_messages") or ""
+        if held:
+            await self._note_held_peer_deliveries(recorder, held)
         try:
             from app.core import turn_scheduler
 
@@ -2085,6 +2105,42 @@ class SessionRuntime:
                 "for %s", self.session_id, exc_info=True,
             )
         return True
+
+    def _peer_note_data(self, sender: str, content: str) -> Dict[str, Any]:
+        """An ``agent_message`` note: the sender's session id, plus the name
+        this session knows it by (its task description) when there is one."""
+        data: Dict[str, Any] = {"sender": sender, "content": content, "delivery": "delivered"}
+        try:
+            from app.core import agent_messaging
+
+            label = agent_messaging.sender_label(self.session_id, sender)
+        except Exception:  # noqa: BLE001 — the label is cosmetic
+            label = None
+        if label:
+            data["sender_label"] = label
+        return data
+
+    async def _note_held_peer_deliveries(self, recorder: TurnRecorder, held: str) -> None:
+        """Show held peer messages this turn delivered, one attributed item each.
+
+        They reach the model inside a system-reminder that no ``message.user``
+        records (a folded prompt, a steered task notification), so without
+        this the user never sees them. Same event the live peer receipt
+        writes. Best-effort: a missing note never touches the turn.
+        """
+        try:
+            from app.core import turn_scheduler
+
+            for item in turn_scheduler.held_peer_deliveries(held):
+                await recorder.on_event({
+                    "type": "system", "subtype": "agent_message",
+                    "data": self._peer_note_data(item["sender"], item["content"]),
+                })
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "SessionRuntime: could not note held peer messages for %s",
+                self.session_id, exc_info=True,
+            )
 
     async def _strand_task_steers(self) -> None:
         """Hand back every task notification this turn swallowed undelivered.

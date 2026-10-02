@@ -301,8 +301,14 @@
 			// Desktop moves to a fresh composer. On mobile, keep the current
 			// session and drawer open so settling does not navigate the user away.
 			if (settling && active && !platform.isMobile) onSettled?.();
-		} catch {
-			notify('Failed to update session', { severity: 'error' });
+		} catch (err) {
+			// The server says why (owner offline, owner still syncing); pass that
+			// on so the toast tells the user what to do instead of a bare failure.
+			const detail = (err as { detail?: unknown } | null)?.detail;
+			const reason = typeof detail === 'string' ? detail.trim() : '';
+			notify(reason ? `Failed to update session: ${reason}` : 'Failed to update session', {
+				severity: 'error'
+			});
 		}
 	}
 

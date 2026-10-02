@@ -146,6 +146,8 @@
 	let runnerMenuLoading = $state(false);
 	let runnerMenuError = $state('');
 	let runnerActionPending = $state(false);
+	/** Why the last move/continue was refused, shown inside the reopened menu. */
+	let runnerActionError = $state('');
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
 
 	const sessionHasProject = $derived(!!(sessionRow?.project_id || sessionRow?.project_v2_id));
@@ -189,6 +191,7 @@
 	}
 
 	function toggleRunnerMenu() {
+		runnerActionError = '';
 		if (showRunnerMenu) {
 			closeDropdown('runner');
 			return;
@@ -208,6 +211,7 @@
 			return;
 		}
 		runnerActionPending = true;
+		runnerActionError = '';
 		try {
 			if (item.action.kind === 'adopt') {
 				await adoptSession(sessionId);
@@ -223,6 +227,14 @@
 					? (e as { detail: string }).detail
 					: 'Could not change this session\'s runner';
 			notify.error(detail);
+			// The confirmation closed the menu. Reopen it with the reason next
+			// to the destinations, so a refusal (busy checkout, unreachable
+			// worker) shows where the move was started.
+			if (sessionId === $activeSession.sessionId) {
+				runnerActionError = detail;
+				openDropdown('runner');
+				void loadRunnerMenu();
+			}
 		} finally {
 			runnerActionPending = false;
 		}
@@ -320,6 +332,9 @@
 				</button>
 				{#if showRunnerMenu}
 					<div class="runner-dropdown" role="menu" aria-label="Move this session">
+						{#if runnerActionError}
+							<div class="runner-error" role="alert">{runnerActionError}</div>
+						{/if}
 						{#if runnerMenuLoading}
 							<div class="runner-loading">
 								<Loader2 size={14} strokeWidth={1.5} class="spin" />
@@ -514,6 +529,15 @@
 		padding: 8px 10px;
 		color: var(--muted-foreground);
 		font-size: 0.75rem;
+	}
+
+	.runner-error {
+		padding: 8px 10px;
+		color: var(--destructive);
+		font-size: 0.75rem;
+		line-height: 1.35;
+		overflow-wrap: anywhere;
+		border-bottom: 1px solid var(--border);
 	}
 
 	.runner-item {

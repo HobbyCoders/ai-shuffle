@@ -77,6 +77,7 @@ from app.api.sessions_fork import (
 from app.api.sessions_worktree import (
     worktree_router,
 )
+from app.api.sessions_create import CreateSessionResponse, create_empty_session
 from app.api.sessions_permissions import router as permissions_router
 from app.api.sessions_uploads import router as uploads_router
 
@@ -89,6 +90,12 @@ router.include_router(fork_router)
 router.include_router(worktree_router)
 router.include_router(permissions_router)
 router.include_router(uploads_router)
+# POST /api/v1/sessions: an empty session from the composer's picks. Added on
+# this router directly because a sub-router cannot own the bare prefix path.
+router.add_api_route(
+    "", create_empty_session, methods=["POST"],
+    response_model=CreateSessionResponse, tags=["Sessions"],
+)
 
 
 # ============================================================================
@@ -1830,7 +1837,7 @@ async def set_session_active(
     ctx = engine.context()
     if ctx is not None:
         try:
-            await session_active.handle({"session_id": session_id, "is_active": payload.is_active}, ctx.device_id)
+            await session_active.set_local(session_id, payload.is_active)
             return await run_sync(database.get_session, session_id)
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc

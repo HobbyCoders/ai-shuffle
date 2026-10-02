@@ -67,8 +67,10 @@ bar. The action row does not use an overflow rail that could clip the Git panel.
 Swarm workflow controls, stages, and history live in that dropdown; non-Git chats
 get a standalone workflow dropdown instead. The conversation's live task strip
 shows only running tasks, not completed/failed receipts or full swarm boards.
-At phone widths the Git trigger is icon-only to leave room for the chat title;
-its accessible name and the opened panel still expose the full status.
+At phone widths the Git trigger keeps a short label: the desktop label (or the
++/− numbers), or the branch name for an unreadable checkout, truncated with an
+ellipsis to leave room for the chat title. The dimmer detail drops; the
+accessible name and the opened panel still expose the full status.
 Mobile header and Git-sheet actions use matching 44px touch targets; both halves
 of a split action share the same height. Private-access dialogs use one scrolling
 body below a fixed close/header row. Connection details wrap within the card and
