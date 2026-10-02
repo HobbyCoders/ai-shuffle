@@ -229,13 +229,10 @@ describe('GitHub', () => {
 
 it('renders every Integrations registry entry where it lives', async () => {
 	gh.status.mockResolvedValue({ authenticated: false, user: null, config_dir: '' });
-	await assertCategoryCoverage(
-		'integrations',
-		async ({ item, tab }) => {
-			const view = await open(item, tab);
-			if (item === 'github') await screen.findByRole('button', { name: 'Sign in with GitHub' });
-			return view.container;
-		},
-		{ skip: { 'integrations.githubDisconnect': 'shown only while GitHub is connected' } }
-	);
+	await assertCategoryCoverage('integrations', async ({ item, tab }) => (await open(item, tab)).container);
+	// Detail rows are reached through searchSource(), not registry anchors.
+	await open('github');
+	await screen.findByRole('button', { name: 'Sign in with GitHub' });
+	expect(Array.from(document.querySelectorAll('[data-setting-anchor]')).map((a) => a.getAttribute('data-setting-anchor'))).toEqual(['integrations.apiUsers']);
+	expect(searchSource().find((s) => s.title === 'Connect GitHub')?.target).toEqual({ category: 'integrations', item: 'github' });
 });

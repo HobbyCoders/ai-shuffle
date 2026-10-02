@@ -52,7 +52,6 @@
 		danger={connected
 			? [
 					{
-						id: 'integrations.githubDisconnect',
 						label: 'Disconnect GitHub',
 						hint: 'Agents lose git push',
 						button: 'Disconnect',
@@ -76,7 +75,7 @@
 			</RowGroup>
 		{:else if flow.authenticated === false}
 			<RowGroup title="Connect">
-				<SettingRow id="integrations.githubMethod">
+				<SettingRow label="Connect with">
 					<Segmented
 						options={METHODS}
 						value={flow.method}

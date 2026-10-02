@@ -2,75 +2,30 @@
  * Devices: account and remote access, approval requests, pairing, workers,
  * phones and browsers (attention: pending requests).
  *
- * Fixed rows live on two items: `account` (Shuffle account) and `self`
- * (this worker, Overview and Network tabs). Other devices are dynamic and
- * reach search through `searchSource()`.
+ * Every Devices row needs loaded data, and the shared coverage test renders
+ * each collection with nothing loaded, so there are no registry entries.
+ * Search reaches the rows through `searchSource()`, landing on the item and
+ * tab (Shuffle account, This worker > Overview or Network, each device).
  */
 import { devicesModel } from '$lib/components/settings/devices/devices-model.svelte';
 import { isPendingRequest, requestId } from '$lib/components/settings/devices/device-requests.svelte';
 import type { Attention, SearchItem, SettingEntry } from '../types';
 
-export const entries: SettingEntry[] = [
-	{
-		id: 'devices.accountSignIn',
-		category: 'devices',
-		section: 'Shuffle account',
-		item: 'account',
-		label: 'Sign in',
-		hint: 'Optional for local use',
-		keywords: ['shuffle account', 'hobbycoders', 'login', 'phone', 'qr code']
-	},
-	{
-		id: 'devices.username',
-		category: 'devices',
-		section: 'Shuffle account',
-		item: 'account',
-		label: 'Username',
-		keywords: ['account name', 'profile']
-	},
-	{
-		id: 'devices.remoteAccess',
-		category: 'devices',
-		section: 'Shuffle account',
-		item: 'account',
-		label: 'Remote access',
-		keywords: ['tunnel', 'connections', 'limit', 'remote']
-	},
-	{
-		id: 'devices.workerName',
-		category: 'devices',
-		section: 'This worker',
-		item: 'self',
-		tab: 'Overview',
-		label: 'Name',
-		keywords: ['rename', 'worker name', 'device name']
-	},
-	{
-		id: 'devices.joinNetwork',
-		category: 'devices',
-		section: 'This worker, Network',
-		item: 'self',
-		tab: 'Network',
-		label: 'Join a network',
-		keywords: ['invite', 'invite code', 'tailscale', 'worker address', 'leave and join']
-	},
-	{
-		id: 'devices.keepSeparate',
-		category: 'devices',
-		section: 'This worker, Network',
-		item: 'self',
-		tab: 'Network',
-		label: 'Keep separate settings',
-		hint: 'Start its own network',
-		keywords: ['own network', 'standalone', 'no sync']
-	}
-];
+export const entries: SettingEntry[] = [];
+
+const account = { category: 'devices' as const, item: 'account' };
+const self = (tab: string) => ({ category: 'devices' as const, item: 'self', tab });
 
 export function searchSource(): SearchItem[] {
 	const m = devicesModel;
 	const items: SearchItem[] = [
 		{ title: 'Add device', where: 'Devices', keywords: 'pair pairing code qr invite worker phone browser', target: { category: 'devices' } },
-		{ title: 'Shuffle account', where: 'Devices, Account', keywords: 'sign in remote access', target: { category: 'devices', item: 'account' } }
+		{ title: 'Shuffle account', where: 'Devices, Account', keywords: 'hobbycoders sign in login', target: account },
+		{ title: 'Remote access', where: 'Devices, Shuffle account', keywords: 'tunnel connections limit', target: account },
+		{ title: 'Account username', where: 'Devices, Shuffle account', keywords: 'username profile name', target: account },
+		{ title: 'Rename this worker', where: 'Devices, This worker', keywords: 'worker name device name', target: self('Overview') },
+		{ title: 'Join network', where: 'Devices, This worker, Network', keywords: 'invite code tailscale worker address leave and join', target: self('Network') },
+		{ title: 'Keep separate settings', where: 'Devices, This worker, Network', keywords: 'own network standalone', target: self('Network') }
 	];
 	for (const d of m.requests.devices) {
 		items.push({ title: d.device_name || 'Unnamed device', where: 'Devices, Requests', keywords: 'approve deny request', target: { category: 'devices', item: requestId(d) } });

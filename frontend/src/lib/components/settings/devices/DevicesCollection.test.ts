@@ -169,14 +169,10 @@ describe('Devices list', () => {
 });
 
 it('renders every Devices registry entry where it lives', async () => {
-	await assertCategoryCoverage(
-		'devices',
-		({ item, tab }) => show(item, tab).container,
-		{
-			skip: {
-				'devices.accountSignIn': 'shown only while signed out',
-				'devices.keepSeparate': 'shown only before the worker joins a network'
-			}
-		}
-	);
+	await assertCategoryCoverage('devices', ({ item, tab }) => show(item, tab).container);
+	for (const tab of ['Overview', 'Network']) {
+		show('self', tab);
+		expect(document.querySelector('[data-setting-anchor]')).toBeNull();
+		cleanup();
+	}
 });

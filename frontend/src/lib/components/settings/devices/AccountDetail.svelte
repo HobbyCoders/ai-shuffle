@@ -121,7 +121,7 @@
 		<p class="st-empty" role="status">{flow.checking ? 'Checking account…' : 'Account status unavailable'}</p>
 	{:else if !flow.signedIn}
 		<RowGroup title="Sign in">
-			<SettingRow id="devices.accountSignIn">
+			<SettingRow label="Sign in" hint="Optional for local use">
 				{#if !flow.offerOpen}
 					<button
 						type="button"
@@ -164,7 +164,7 @@
 		</RowGroup>
 	{:else}
 		<RowGroup title="Profile">
-			<SettingRow id="devices.username" label={flow.needsUsername ? 'Choose your username' : undefined} hint={editing ? 'Others see this name' : undefined}>
+			<SettingRow label={flow.needsUsername ? 'Choose your username' : 'Username'} hint={editing ? 'Others see this name' : undefined}>
 				{#if editing}
 					<TextField bind:value={flow.usernameInput} maxlength={64} width={180} disabled={flow.savingUsername} />
 					<button
@@ -199,7 +199,7 @@
 			{/if}
 		</RowGroup>
 		<RowGroup title="Remote access">
-			<SettingRow id="devices.remoteAccess" hint={refusal ? 'Over the limit: LAN only' : undefined}>
+			<SettingRow label="Remote access" hint={refusal ? 'Over the limit: LAN only' : undefined}>
 				<ValueText status={c.status === 'connected' ? 'ok' : refusal ? 'warn' : 'off'} value={remoteShort(flow)} tone="fg" />
 			</SettingRow>
 			{#if flow.browserViaAccount}

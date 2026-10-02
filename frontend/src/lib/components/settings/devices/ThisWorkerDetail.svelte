@@ -67,7 +67,7 @@
 		{#if tab === 'Overview'}
 			<RowGroup title="Device">
 				{#key rev}
-					<SettingRow id="devices.workerName" hint={model.enrolled && model.self ? undefined : 'Join a network to rename'}>
+					<SettingRow label="Name" hint={model.enrolled && model.self ? undefined : 'Join a network to rename'}>
 						<TextField
 							value={model.workerName}
 							maxlength={100}
@@ -109,7 +109,7 @@
 		{:else}
 			{@render joinFields()}
 			<RowGroup title="Or keep this worker on its own">
-				<SettingRow id="devices.keepSeparate">
+				<SettingRow label="Keep separate settings" hint="Start its own network">
 					<button type="button" class="st-btn" disabled={model.startingFresh} onclick={() => model.startFresh()}>
 						{model.startingFresh ? 'Setting up…' : 'Keep separate settings'}
 					</button>
@@ -155,7 +155,7 @@
 				<button type="button" class="st-btn ghost" disabled={join.busy} onclick={() => join.cancel()}>Dismiss</button>
 			</SettingRow>
 		{/if}
-		<SettingRow id="devices.joinNetwork" label="Invite link or code" hint="Home network or Tailscale">
+		<SettingRow label="Invite link or code" hint="Home network or Tailscale">
 			<TextField
 				bind:value={join.input}
 				mono
