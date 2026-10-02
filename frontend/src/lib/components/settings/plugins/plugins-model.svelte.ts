@@ -1,0 +1,524 @@
+/**
+ * Plugins state for Settings: packages (installed, available, agent-authored
+ * drafts), connector runtimes with their accounts, plugin sources, updates
+ * and auto-update. Load, install, enable, approve, update and remove live
+ * here so the collection and its details stay thin and this stays testable.
+ *
+ * Connector types, accounts, sources and updates are owner-only (main's
+ * plugin hub loaded them only for admins); a read-only device sees the
+ * packages.
+ */
+import { getContext, setContext } from 'svelte';
+import { api } from '$lib/api/client';
+import { getConnectors, getConnectorTypes, type Connector, type ConnectorTypeInfo } from '$lib/api/connectors';
+import * as pluginsApi from '$lib/api/plugins';
+import type {
+	AutoUpdateSettings,
+	AvailablePlugin,
+	MarketplaceInfo,
+	PluginDetails,
+	PluginInfo,
+	PluginUpdateInfo
+} from '$lib/api/plugins';
+import { isForbidden } from '$lib/settings/access.svelte';
+import { CONNECTION_TYPES } from '$lib/settings/entries/plugins';
+import { publishPlugins, type PluginSearchRow } from '$lib/settings/entries/plugins-live.svelte';
+
+export interface RuntimeRef {
+	id: string;
+	name: string;
+	active: boolean;
+	automations: { id: string; name: string; is_enabled: boolean }[];
+}
+
+export type RuntimeAction = 'install' | 'enable' | 'disable' | 'uninstall' | 'rollback';
+
+export interface PluginEntry {
+	/** Collection item id: `plugin:<id>` or `connection:<type>`. */
+	item: string;
+	/** Plugin id (packages) or connector type (connections). */
+	id: string;
+	kind: 'connection' | 'package';
+	name: string;
+	description: string;
+	installed: boolean;
+	enabled: boolean;
+	/** Agent-authored draft waiting for approval. */
+	review: boolean;
+	authored: boolean;
+	version?: string;
+	marketplace?: string;
+	/** Connector type (connections only). */
+	type?: ConnectorTypeInfo;
+	/** Accounts of this connector type. */
+	count: number;
+	/** An account of this type reports an error. */
+	failing: boolean;
+	update?: PluginUpdateInfo;
+	info?: PluginInfo | AvailablePlugin;
+}
+
+export const pluginItem = (id: string) => `plugin:${id}`;
+export const connectionItem = (type: string) => `connection:${type}`;
+
+export type ParsedItem =
+	{ kind: 'plugin'; id: string } | { kind: 'connection'; type: string } | { kind: 'explore' } | { kind: 'sources' };
+
+export function parseItem(item: string | null | undefined): ParsedItem | null {
+	if (!item) return null;
+	if (item === 'explore' || item === 'sources') return { kind: item };
+	if (item.startsWith('plugin:')) return { kind: 'plugin', id: item.slice(7) };
+	if (item.startsWith('connection:')) return { kind: 'connection', type: item.slice(11) };
+	return null;
+}
+
+export function errorText(err: unknown, fallback: string): string {
+	if (typeof err === 'object' && err !== null) {
+		const e = err as { detail?: unknown; message?: unknown };
+		if (typeof e.detail === 'string' && e.detail) return e.detail;
+		if (typeof e.message === 'string' && e.message) return e.message;
+	}
+	return fallback;
+}
+
+/** Capability words for a package ("skills, commands"). */
+export function capabilities(
+	p: Pick<PluginInfo, 'has_skills' | 'has_commands' | 'has_agents' | 'has_hooks' | 'has_mcp'>
+): string[] {
+	const out: string[] = [];
+	if (p.has_skills) out.push('skills');
+	if (p.has_commands) out.push('commands');
+	if (p.has_agents) out.push('agents');
+	if (p.has_hooks) out.push('hooks');
+	if (p.has_mcp) out.push('MCP');
+	return out;
+}
+
+export function plural(n: number, word: string): string {
+	return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+export class PluginsModel {
+	readonly canManage: () => boolean;
+
+	loading = $state(true);
+	/** Load failure (not a 403). */
+	error = $state('');
+	forbidden = $state(false);
+	/** Last failed action. */
+	actionError = $state('');
+
+	installed = $state<PluginInfo[]>([]);
+	available = $state<AvailablePlugin[]>([]);
+	types = $state<ConnectorTypeInfo[]>([]);
+	connections = $state<Connector[]>([]);
+	marketplaces = $state<MarketplaceInfo[]>([]);
+	updates = $state<PluginUpdateInfo[]>([]);
+	autoUpdate = $state<AutoUpdateSettings | null>(null);
+
+	details = $state<Record<string, PluginDetails>>({});
+	detailsError = $state<Record<string, string>>({});
+	refs = $state<Record<string, RuntimeRef[]>>({});
+
+	/** Plugin id or connector type being changed. */
+	busy = $state('');
+	approving = $state(false);
+	checking = $state(false);
+	updatingAll = $state(false);
+	updating = $state<Record<string, boolean>>({});
+	syncing = $state<Record<string, boolean>>({});
+	addingSource = $state(false);
+
+	#generation = 0;
+
+	constructor(options: { canManage?: () => boolean } = {}) {
+		this.canManage = options.canManage ?? (() => true);
+	}
+
+	readonly connectionEntries: PluginEntry[] = $derived(
+		this.types.map((t) => {
+			const accounts = this.connections.filter((c) => c.type === t.type);
+			return {
+				item: connectionItem(t.type),
+				id: t.type,
+				kind: 'connection' as const,
+				name: t.name,
+				description: CONNECTION_TYPES[t.type]?.description || t.description,
+				installed: !!t.plugin_installed,
+				enabled: !!t.plugin_enabled,
+				review: false,
+				authored: false,
+				version: t.plugin_version,
+				type: t,
+				count: accounts.length,
+				failing: accounts.some((c) => c.status === 'error')
+			};
+		})
+	);
+
+	readonly packageEntries: PluginEntry[] = $derived.by(() => {
+		const installedIds = new Set(this.installed.map((p) => p.id));
+		const updates = new Map(this.updates.map((u) => [u.plugin_id, u]));
+		const all: (PluginInfo | AvailablePlugin)[] = [
+			...this.installed,
+			...this.available.filter((p) => !installedIds.has(p.id))
+		];
+		return all
+			.filter((p) => !p.connector_type)
+			.map((p) => {
+				const record = installedIds.has(p.id) ? (p as PluginInfo) : undefined;
+				return {
+					item: pluginItem(p.id),
+					id: p.id,
+					kind: 'package' as const,
+					name: p.name,
+					description: p.description,
+					installed: !!record,
+					enabled: record?.enabled ?? false,
+					review: record?.approval === 'pending',
+					authored: record?.trust === 'authored' || p.id.endsWith('@authored'),
+					version: record?.version,
+					marketplace: p.marketplace,
+					count: 0,
+					failing: false,
+					update: updates.get(p.id),
+					info: p
+				};
+			});
+	});
+
+	readonly entries: PluginEntry[] = $derived([...this.connectionEntries, ...this.packageEntries]);
+	/** Drafts waiting for review. */
+	readonly review = $derived(this.packageEntries.filter((e) => e.review));
+	/** Apps with a runtime installed or accounts set up. */
+	readonly apps = $derived(this.connectionEntries.filter((e) => e.installed || e.count > 0));
+	readonly installedPackages = $derived(this.packageEntries.filter((e) => e.installed && !e.review));
+	readonly availableCount = $derived(this.entries.filter((e) => !e.installed && e.count === 0).length);
+
+	entryByItem(item: string | null | undefined): PluginEntry | undefined {
+		return item ? this.entries.find((e) => e.item === item) : undefined;
+	}
+
+	/**
+	 * Map a deep-link item onto this collection's ids: bare plugin ids, bare
+	 * connector types and connector account ids (main's hub accepted those).
+	 */
+	resolveItem(raw: string): string | null {
+		if (parseItem(raw)) return raw;
+		if (this.packageEntries.some((e) => e.id === raw)) return pluginItem(raw);
+		if (this.types.some((t) => t.type === raw)) return connectionItem(raw);
+		const account = this.connections.find((c) => c.id === raw);
+		return account ? connectionItem(account.type) : null;
+	}
+
+	async load(): Promise<void> {
+		const request = ++this.#generation;
+		const admin = this.canManage();
+		try {
+			const [installed, available, types, connections] = await Promise.all([
+				pluginsApi.getInstalledPlugins(),
+				pluginsApi.getAvailablePlugins(),
+				admin ? getConnectorTypes() : Promise.resolve([] as ConnectorTypeInfo[]),
+				admin ? getConnectors() : Promise.resolve([] as Connector[])
+			]);
+			if (request !== this.#generation) return;
+			this.installed = installed;
+			this.available = available;
+			this.types = types;
+			this.connections = connections;
+			this.error = '';
+			this.forbidden = false;
+			this.#publish();
+			this.loading = false;
+			if (admin) await this.loadManagement();
+		} catch (err) {
+			if (request !== this.#generation) return;
+			if (isForbidden(err)) this.forbidden = true;
+			else this.error = errorText(err, 'Could not load plugins.');
+		} finally {
+			if (request === this.#generation) this.loading = false;
+		}
+	}
+
+	/** Sources, updates and auto-update (owner only). Failures leave them empty. */
+	async loadManagement(): Promise<void> {
+		const [marketplaces, updates, autoUpdate] = await Promise.all([
+			pluginsApi.getMarketplaces().catch(() => this.marketplaces),
+			pluginsApi.checkForUpdates().catch(() => this.updates),
+			pluginsApi.getAutoUpdateSettings().catch(() => this.autoUpdate)
+		]);
+		this.marketplaces = marketplaces ?? [];
+		this.updates = updates ?? [];
+		this.autoUpdate = autoUpdate ?? null;
+	}
+
+	dispose(): void {
+		this.#generation++;
+	}
+
+	#publish(): void {
+		const rows: PluginSearchRow[] = this.entries.map((e) => ({
+			item: e.item,
+			title: e.name,
+			where:
+				e.kind === 'connection'
+					? 'Plugins, Apps'
+					: e.review
+						? 'Plugins, Needs review'
+						: e.installed
+							? 'Plugins, Installed'
+							: 'Plugins, Catalog',
+			keywords: `${e.description ?? ''} ${e.kind === 'connection' ? 'connector account' : 'plugin package'}`
+		}));
+		publishPlugins(rows, this.review.length);
+	}
+
+	async #run(id: string, action: () => Promise<void>, fallback: string): Promise<boolean> {
+		this.busy = id;
+		this.actionError = '';
+		try {
+			await action();
+			return true;
+		} catch (err) {
+			this.actionError = errorText(err, fallback);
+			return false;
+		} finally {
+			if (this.busy === id) this.busy = '';
+		}
+	}
+
+	async loadDetails(id: string): Promise<void> {
+		try {
+			const result = await pluginsApi.getPluginDetails(id);
+			this.details = { ...this.details, [id]: result };
+			const { [id]: _gone, ...rest } = this.detailsError;
+			this.detailsError = rest;
+		} catch (err) {
+			this.detailsError = {
+				...this.detailsError,
+				[id]: errorText(err, 'Could not load plugin details.')
+			};
+		}
+	}
+
+	install(id: string): Promise<boolean> {
+		return this.#run(
+			id,
+			async () => {
+				await pluginsApi.installPlugin(id);
+				await this.load();
+				await this.loadDetails(id);
+			},
+			'Could not install plugin.'
+		);
+	}
+
+	/** Enable or disable an installed package. Resolves false on failure (the switch flips back). */
+	setEnabled(id: string, on: boolean): Promise<boolean> {
+		return this.#run(
+			id,
+			async () => {
+				if (on) await pluginsApi.enablePlugin(id);
+				else await pluginsApi.disablePlugin(id);
+				this.installed = this.installed.map((p) => (p.id === id ? { ...p, enabled: on } : p));
+				const detail = this.details[id];
+				if (detail) this.details = { ...this.details, [id]: { ...detail, enabled: on } };
+				this.#publish();
+			},
+			on ? 'Could not enable plugin.' : 'Could not disable plugin.'
+		);
+	}
+
+	/**
+	 * Approve an agent-authored draft: enabling it pins the content hash of the
+	 * version that was reviewed, so a later change needs a new review.
+	 */
+	async approve(id: string): Promise<boolean> {
+		const plugin = this.details[id];
+		if (!plugin?.content_hash) return false;
+		this.approving = true;
+		this.actionError = '';
+		try {
+			await pluginsApi.enablePlugin(id, plugin.content_hash);
+			await this.load();
+			await this.loadDetails(id);
+			return true;
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not enable plugin.');
+			return false;
+		} finally {
+			this.approving = false;
+		}
+	}
+
+	uninstall(id: string): Promise<boolean> {
+		return this.#run(
+			id,
+			async () => {
+				await pluginsApi.uninstallPlugin(id);
+				const { [id]: _gone, ...rest } = this.details;
+				this.details = rest;
+				await this.load();
+			},
+			'Could not uninstall plugin.'
+		);
+	}
+
+	async update(id: string): Promise<boolean> {
+		this.updating = { ...this.updating, [id]: true };
+		try {
+			return await this.#run(
+				id,
+				async () => {
+					await pluginsApi.updatePlugin(id);
+					await this.load();
+					if (this.details[id]) await this.loadDetails(id);
+				},
+				'Could not update plugin.'
+			);
+		} finally {
+			this.updating = { ...this.updating, [id]: false };
+		}
+	}
+
+	async checkUpdates(): Promise<void> {
+		this.checking = true;
+		this.actionError = '';
+		try {
+			this.updates = await pluginsApi.checkForUpdates();
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not check for updates.');
+		} finally {
+			this.checking = false;
+		}
+	}
+
+	async updateAll(): Promise<void> {
+		this.updatingAll = true;
+		this.actionError = '';
+		try {
+			await pluginsApi.updateAllPlugins();
+			await this.load();
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not update plugins.');
+		} finally {
+			this.updatingAll = false;
+		}
+	}
+
+	/** Install, enable, disable, uninstall or roll back a connector runtime. */
+	changeRuntime(type: string, action: RuntimeAction): Promise<boolean> {
+		const pluginId = this.types.find((t) => t.type === type)?.plugin_id;
+		if (!pluginId) return Promise.resolve(false);
+		return this.#run(
+			type,
+			async () => {
+				if (action === 'rollback') {
+					await api.post(`/plugins/runtime/${encodeURIComponent(pluginId)}/rollback`);
+				} else {
+					const operation = {
+						install: pluginsApi.installPlugin,
+						enable: pluginsApi.enablePlugin,
+						disable: pluginsApi.disablePlugin,
+						uninstall: pluginsApi.uninstallPlugin
+					}[action];
+					await operation(pluginId);
+				}
+				await this.load();
+				await this.loadReferences(type);
+			},
+			'Could not change the connector plugin.'
+		);
+	}
+
+	/** Connections (and their automations) that use a connector runtime. */
+	async loadReferences(type: string): Promise<void> {
+		const pluginId = this.types.find((t) => t.type === type)?.plugin_id;
+		if (!pluginId) return;
+		try {
+			const refs = await api.get<RuntimeRef[]>(`/plugins/runtime/${encodeURIComponent(pluginId)}/connections`);
+			this.refs = { ...this.refs, [type]: Array.isArray(refs) ? refs : [] };
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not load plugin dependencies.');
+			this.refs = { ...this.refs, [type]: [] };
+		}
+	}
+
+	async addSource(url: string, name: string): Promise<boolean> {
+		if (!url.trim() || !name.trim()) return false;
+		this.addingSource = true;
+		this.actionError = '';
+		try {
+			const source = await pluginsApi.addMarketplace(url.trim(), name.trim());
+			this.marketplaces = [...this.marketplaces, source];
+			await this.load();
+			return true;
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not add source.');
+			return false;
+		} finally {
+			this.addingSource = false;
+		}
+	}
+
+	async syncSource(id: string): Promise<void> {
+		this.syncing = { ...this.syncing, [id]: true };
+		this.actionError = '';
+		try {
+			await pluginsApi.syncMarketplace(id);
+			await this.load();
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not sync source.');
+		} finally {
+			this.syncing = { ...this.syncing, [id]: false };
+		}
+	}
+
+	async removeSource(id: string): Promise<void> {
+		this.actionError = '';
+		try {
+			await pluginsApi.removeMarketplace(id);
+			this.marketplaces = this.marketplaces.filter((m) => m.id !== id);
+			await this.load();
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not remove source.');
+		}
+	}
+
+	/** Resolves false on failure (the control flips back). */
+	async setAutoUpdate(patch: Partial<AutoUpdateSettings>): Promise<boolean> {
+		this.actionError = '';
+		try {
+			this.autoUpdate = await pluginsApi.updateAutoUpdateSettings(patch);
+			return true;
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not save auto-update.');
+			return false;
+		}
+	}
+
+	async runAutoUpdate(): Promise<void> {
+		this.checking = true;
+		this.actionError = '';
+		try {
+			await pluginsApi.runAutoUpdate();
+			await this.load();
+		} catch (err) {
+			this.actionError = errorText(err, 'Could not run auto-update.');
+		} finally {
+			this.checking = false;
+		}
+	}
+}
+
+const KEY = Symbol('settings-plugins');
+
+export function setPluginsModel(model: PluginsModel): void {
+	setContext(KEY, model);
+}
+
+export function getPluginsModel(): PluginsModel {
+	const model = getContext<PluginsModel | undefined>(KEY);
+	if (!model) throw new Error('Plugins details need the Plugins collection');
+	return model;
+}

@@ -52,7 +52,7 @@ function nav() {
 }
 
 describe('SettingsShell index', () => {
-	it('lists nine categories in three groups and opens General', async () => {
+	it('lists ten categories in three groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
 		for (const group of ['Personal', 'AI', 'This worker']) expect(within(index).getByText(group)).toBeTruthy();
@@ -65,6 +65,7 @@ describe('SettingsShell index', () => {
 			'Providers',
 			'Default models',
 			'Integrations',
+			'Plugins',
 			'Devices',
 			'Security',
 			'System',

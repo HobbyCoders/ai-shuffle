@@ -10,6 +10,7 @@ import * as voice from './entries/voice';
 import * as providers from './entries/providers';
 import * as models from './entries/models';
 import * as integrations from './entries/integrations';
+import * as plugins from './entries/plugins';
 import * as devices from './entries/devices';
 import * as security from './entries/security';
 import * as system from './entries/system';
@@ -22,6 +23,7 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	providers,
 	models,
 	integrations,
+	plugins,
 	devices,
 	security,
 	system,
