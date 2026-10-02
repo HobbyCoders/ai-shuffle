@@ -1,6 +1,8 @@
 <script lang="ts">
 	/**
-	 * JoinNetworkPanel — join another worker's network with its invite.
+	 * JoinNetworkPanel — join another worker's network with its invite, as the
+	 * setup wizard shows it. The logic is JoinFlow, which Settings > Devices >
+	 * This worker > Network shares.
 	 *
 	 * Paste the invite link (or the QR payload), or type the address and code
 	 * by hand. The inviter admits this worker on contact; the parent polls
@@ -9,9 +11,8 @@
 	 * network for the invited one (the invited network's records win).
 	 */
 	import { Loader2, LogIn, ShieldAlert, X } from 'lucide-svelte';
-	import { getErrorMessage } from '$lib/api/client';
-	import { cancelEnrollment, startEnrollment, type NetworkStatus } from '$lib/api/network';
-	import { looksLikePairingLink, parseJoinLink } from '$lib/api/network-status';
+	import type { NetworkStatus } from '$lib/api/network';
+	import { JoinFlow } from '$lib/components/settings/devices/join-flow.svelte';
 
 	let { status = null, replace = false, deviceName = '', onStarted, onChanged }: {
 		status?: NetworkStatus | null;
@@ -21,41 +22,21 @@
 		onChanged?: () => void;
 	} = $props();
 
-	let input = $state('');
-	let endpoint = $state('');
-	let code = $state('');
-	let busy = $state(false);
-	let error = $state('');
-	let confirmReplace = $state(false);
-
-	const parsed = $derived(parseJoinLink(input));
-	const pairingLinkPasted = $derived(looksLikePairingLink(input));
-	const enrollment = $derived(status && !status.enrolled ? status.enrollment ?? null : null);
-	const pending = $derived(enrollment?.status === 'pending' || enrollment?.status === 'syncing');
-	const failed = $derived(enrollment !== null && !pending && enrollment.status !== 'complete');
-	const ready = $derived(parsed ? Boolean(parsed.endpoint && parsed.code) : Boolean(endpoint.trim() && code.trim()));
-
-	async function join() {
-		if (!ready || busy) return;
-		if (replace && !confirmReplace) { confirmReplace = true; return; }
-		busy = true; error = '';
-		try {
-			const name = deviceName.trim() || undefined;
-			const extra = { ...(name ? { device_name: name } : {}), ...(replace ? { replace: true } : {}) };
-			await startEnrollment(parsed ? { link: input, ...extra } : { endpoint_url: endpoint, code, ...extra });
-			input = ''; endpoint = ''; code = ''; confirmReplace = false;
-			onStarted?.(); onChanged?.();
-		} catch (e) {
-			error = getErrorMessage(e, 'Could not join');
-		} finally { busy = false; }
-	}
-
-	async function cancel() {
-		busy = true; error = '';
-		try { await cancelEnrollment(); onChanged?.(); }
-		catch (e) { error = getErrorMessage(e, 'Could not cancel'); }
-		finally { busy = false; }
-	}
+	const flow = new JoinFlow({
+		status: () => status,
+		replace: () => replace,
+		deviceName: () => deviceName,
+		onStarted: () => onStarted?.(),
+		onChanged: () => onChanged?.()
+	});
+	const parsed = $derived(flow.parsed);
+	const pairingLinkPasted = $derived(flow.pairingLinkPasted);
+	const enrollment = $derived(flow.enrollment);
+	const pending = $derived(flow.pending);
+	const failed = $derived(flow.failed);
+	const ready = $derived(flow.ready);
+	const busy = $derived(flow.busy);
+	const confirmReplace = $derived(flow.confirmReplace);
 </script>
 
 <div class="join" aria-label="Join with an invite">
@@ -63,7 +44,7 @@
 		<div class="waiting" role="status">
 			<h5><Loader2 size={14} class="spin" /> {enrollment.status === 'syncing' ? 'Copying settings from' : 'Joining'} {enrollment.endpoint_url || 'the inviting worker'}…</h5>
 			<p>The invite admits this worker on its own. If the other worker went offline, this finishes when it is back.</p>
-			<button type="button" class="btn sm" onclick={cancel} disabled={busy}><X size={13} /> Cancel</button>
+			<button type="button" class="btn sm" onclick={() => flow.cancel()} disabled={busy}><X size={13} /> Cancel</button>
 		</div>
 	{:else}
 		<p>Invite codes are for a worker on your home network or a VPN such as Tailscale; workers signed in to the same Shuffle account find each other and always talk over the encrypted tunnel.</p>
@@ -71,12 +52,12 @@
 			<div class="fail" role="alert">
 				<ShieldAlert size={14} />
 				<span>The last join {enrollment.status}{enrollment.error ? `: ${enrollment.error}` : ''}.</span>
-				<button type="button" class="btn sm" onclick={cancel} disabled={busy}>Dismiss</button>
+				<button type="button" class="btn sm" onclick={() => flow.cancel()} disabled={busy}>Dismiss</button>
 			</div>
 		{/if}
 		<label class="field">
 			<span>Invite link or code</span>
-			<input class="inp mono" bind:value={input} placeholder="shuffle://network/join?… or ABCD-EFGH-JKLM" autocomplete="off" spellcheck="false" oninput={() => { if (!parsed && /^[A-Za-z0-9-\s]{12,15}$/.test(input.trim()) && !input.includes('://')) code = input.trim(); }} />
+			<input class="inp mono" bind:value={flow.input} placeholder="shuffle://network/join?… or ABCD-EFGH-JKLM" autocomplete="off" spellcheck="false" oninput={() => flow.inputChanged()} />
 		</label>
 		{#if pairingLinkPasted}
 			<p class="dim error">That is a phone or browser pairing link. On this worker use the <strong>Worker</strong> invite from the other worker's Add device panel.</p>
@@ -87,8 +68,8 @@
 			</div>
 		{:else}
 			<div class="manual">
-				<label class="field"><span>Worker address</span><input class="inp" bind:value={endpoint} placeholder="http://10.0.0.5:8000" autocomplete="off" spellcheck="false" /></label>
-				<label class="field"><span>Code</span><input class="inp mono" bind:value={code} placeholder="ABCD-EFGH-JKLM" autocomplete="off" spellcheck="false" /></label>
+				<label class="field"><span>Worker address</span><input class="inp" bind:value={flow.endpoint} placeholder="http://10.0.0.5:8000" autocomplete="off" spellcheck="false" /></label>
+				<label class="field"><span>Code</span><input class="inp mono" bind:value={flow.code} placeholder="ABCD-EFGH-JKLM" autocomplete="off" spellcheck="false" /></label>
 			</div>
 		{/if}
 		{#if replace && confirmReplace}
@@ -98,14 +79,14 @@
 			</div>
 		{/if}
 		<div class="actions">
-			<button type="button" class="btn primary" onclick={join} disabled={busy || !ready || pairingLinkPasted}>
+			<button type="button" class="btn primary" onclick={() => flow.join()} disabled={busy || !ready || pairingLinkPasted}>
 				{#if busy}<Loader2 size={13} class="spin" />{:else}<LogIn size={13} />{/if}
 				{replace ? (confirmReplace ? 'Leave and join' : 'Join another network') : 'Join'}
 			</button>
-			{#if replace && confirmReplace}<button type="button" class="btn" onclick={() => (confirmReplace = false)} disabled={busy}>Keep current network</button>{/if}
+			{#if replace && confirmReplace}<button type="button" class="btn" onclick={() => flow.keepCurrent()} disabled={busy}>Keep current network</button>{/if}
 		</div>
 	{/if}
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
+	{#if flow.error}<p class="error" role="alert">{flow.error}</p>{/if}
 </div>
 
 <style>

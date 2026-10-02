@@ -1,187 +1,42 @@
 <script lang="ts">
-	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
-	 * AccountPanel — the Shuffle account this worker belongs to.
+	 * AccountPanel — the Shuffle account this worker belongs to, as the setup
+	 * wizard shows it (Settings > Devices > Shuffle account uses the same
+	 * AccountFlow with its own layout).
 	 *
 	 * Signed out: sign in (or create an account during setup) in the browser on
-	 * the account service, or on the phone with a QR/code). Signed in: the
+	 * the account service, or on the phone with a QR/code. Signed in: the
 	 * username (with first-time setup when the account has none yet), the
 	 * other workers on the account, remote access state and sign-out. The
 	 * account is optional for local and LAN use.
 	 */
 	import { onMount } from 'svelte';
 	import { Check, Copy, ExternalLink, LogOut, Pencil, RefreshCw, Server, Smartphone, UserRound } from 'lucide-svelte';
-	import { getErrorMessage } from '$lib/api/client';
-	import { auth } from '$lib/stores/auth.svelte';
-	import {
-		beginAccountConnection, disconnectAccount, getAccountConnection, getAccountProfile, normalizeUsername,
-		openSettingsTab, setAccountUsername, USERNAME_HINT, USERNAME_PATTERN, type AccountConnection, type AccountProfile
-	} from '$lib/api/account';
+	import { openSettingsTab, USERNAME_HINT } from '$lib/api/account';
+	import { AccountFlow, groupCode } from '$lib/components/settings/devices/account-flow.svelte';
 
-	let { workerName = 'My worker', variant = 'settings', profile = $bindable<AccountProfile | null>(null), inventoryReady = $bindable(false) }: {
-		workerName?: string; variant?: 'settings' | 'setup'; profile?: AccountProfile | null; inventoryReady?: boolean;
-	} = $props();
+	let { workerName = 'My worker', variant = 'settings' }: { workerName?: string; variant?: 'settings' | 'setup' } = $props();
 
-	const POLL_MS = 4000;
-	const INVENTORY_MS = 30_000;
-	let profileCheckedAt = 0;
-	let loadingProfile = $state(false);
-	let connection = $state<AccountConnection | null>(null);
-	let checking = $state(true);
-	let busy = $state(false);
-	let statusError = $state('');
-	let actionError = $state('');
-	let profileError = $state('');
-	/** Which button opened the browser flow; decides which link is primary. */
-	let intent = $state<'signin' | 'signup' | null>(null);
-	let showPhone = $state(false);
-	let copied = $state(false);
-	let editingName = $state(false);
-	let usernameInput = $state('');
-	let savingUsername = $state(false);
-	let stopped = false;
-	let requestVersion = 0;
-	let profileVersion = 0;
-	let poll: ReturnType<typeof setTimeout> | undefined;
-
-	const canStart = $derived(connection !== null && connection.status !== 'locked' && connection.status !== 'unavailable');
-	const signedIn = $derived(Boolean(connection?.signed_in));
-	const needsUsername = $derived(signedIn && profile !== null && !profile.account.profile_complete);
+	const flow = new AccountFlow(() => workerName);
+	const connection = $derived(flow.connection);
+	const profile = $derived(flow.profile);
+	const signedIn = $derived(flow.signedIn);
+	const needsUsername = $derived(flow.needsUsername);
 	const accountWorkers = $derived(profile?.servers ?? []);
-	/** The account service refused this worker a remote connection (tunnel_limit). */
-	const refusal = $derived(connection?.signed_in && connection.refusal?.code === 'tunnel_limit' ? connection.refusal : null);
-	const browserSignedInThroughAccount = $derived(variant === 'settings' && auth.current.status?.auth_mode === 'account');
-	const remoteAccess = $derived.by(() => {
-		switch (connection?.status) {
-			case 'connected': return 'Remote access is on';
-			case 'connecting': return 'Turning on remote access…';
-			case 'reconnecting': return 'Remote access is reconnecting';
-			case 'limited': return 'Remote access is off: connection limit reached';
-			case 'locked': case 'unavailable': return connection?.error ? '' : 'Remote access is unavailable on this worker';
-			default: return '';
-		}
-	});
+	const refusal = $derived(flow.refusal);
+	const browserSignedInThroughAccount = $derived(variant === 'settings' && flow.browserViaAccount);
+	const remoteAccess = $derived(flow.remoteAccess);
 
-	function scheduleRefresh() {
-		clearTimeout(poll);
-		if (!stopped) poll = setTimeout(refresh, POLL_MS);
+	/** Re-read the account inventory (exposed for callers holding the component). */
+	export function loadProfile(force = false) {
+		return flow.loadProfile(force);
 	}
 
-	async function refresh() {
-		if (busy) { scheduleRefresh(); return; }
-		const version = ++requestVersion;
-		try {
-			const next = await getAccountConnection();
-			if (stopped || version !== requestVersion) return;
-			const wasSignedIn = connection?.signed_in ?? false;
-			const wasProfilePending = connection?.profile_ready === false;
-			const reconnected = connection?.status !== 'connected' && next.status === 'connected';
-			connection = next;
-			statusError = '';
-			if (next.signed_in) {
-				if (!wasSignedIn) inventoryReady = false;
-				intent = null; showPhone = false;
-				if (!wasSignedIn || wasProfilePending || reconnected || Date.now() - profileCheckedAt >= INVENTORY_MS) void loadProfile();
-			} else {
-				inventoryReady = true;
-				profileVersion++; profileCheckedAt = 0;
-				profile = null; profileError = ''; editingName = false;
-			}
-		} catch (e) {
-			if (!stopped && version === requestVersion) statusError = getErrorMessage(e, 'Could not check account status');
-		} finally {
-			if (!stopped && version === requestVersion) { checking = false; scheduleRefresh(); }
-		}
-	}
+	onMount(() => flow.start());
 
-	export async function loadProfile(force = false) {
-		if ((!force && loadingProfile) || savingUsername || !connection?.signed_in || connection.profile_ready === false) return;
-		loadingProfile = true;
-		profileCheckedAt = Date.now();
-		const version = ++profileVersion;
-		try {
-			const next = await getAccountProfile();
-			if (stopped || version !== profileVersion) return;
-			profile = next; profileError = ''; inventoryReady = true;
-			if (!next.account.profile_complete && !editingName) usernameInput = next.account.username;
-		} catch (e) {
-			if (!stopped && version === profileVersion) {
-				profileError = getErrorMessage(e, 'Could not load the account profile');
-				inventoryReady = false;
-			}
-		} finally { if (version === profileVersion) loadingProfile = false; }
-	}
-
-	onMount(() => {
-		void refresh();
-		return () => { stopped = true; requestVersion++; profileVersion++; clearTimeout(poll); };
-	});
-
-	async function start(kind: 'signin' | 'signup') {
-		if (busy || !canStart || !connection || connection.signed_in) return;
-		intent = kind; actionError = ''; copied = false; showPhone = false;
-		// Reserve the tab in the click handler so popup blockers do not treat
-		// the asynchronous offer response as an unsolicited window.
-		const tab = window.open('about:blank', '_blank');
-		if (tab) tab.opener = null;
-		busy = true; requestVersion++;
-		try {
-			// Reuse a pending offer rather than registering another worker.
-			if (!connection.code) connection = await beginAccountConnection(workerName);
-			const url = kind === 'signup' ? connection.signup_url || connection.authorization_url : connection.authorization_url;
-			if (tab && url) tab.location.replace(url);
-			else tab?.close();
-			statusError = '';
-		} catch (e) {
-			tab?.close();
-			intent = null;
-			actionError = getErrorMessage(e, 'Could not start the account sign-in');
-		} finally { busy = false; scheduleRefresh(); }
-	}
-
-	async function copyCode() {
-		if (!connection?.code) return;
-		try { await copyText(connection.code); copied = true; }
-		catch { copied = false; actionError = COPY_ERROR_MESSAGE; }
-	}
-
-	async function signOut() {
-		if (busy) return;
-		busy = true; actionError = ''; requestVersion++; profileVersion++;
-		try {
-			const result = await disconnectAccount();
-			if (result) {
-				connection = result;
-				// A local sign-out can succeed while remote cleanup fails; keep that warning visible.
-				actionError = result.error || '';
-				statusError = '';
-			}
-			profile = null; profileError = ''; profileCheckedAt = 0; inventoryReady = true; intent = null; showPhone = false; editingName = false;
-		} catch (e) {
-			actionError = getErrorMessage(e, 'Could not sign out');
-		} finally { busy = false; scheduleRefresh(); }
-	}
-
-	async function saveUsername(event?: Event) {
+	function saveUsername(event?: Event) {
 		event?.preventDefault();
-		const username = normalizeUsername(usernameInput);
-		if (!USERNAME_PATTERN.test(username)) { profileError = USERNAME_HINT; return; }
-		savingUsername = true; profileError = ''; profileVersion++;
-		try {
-			profile = await setAccountUsername(username);
-			editingName = false;
-		} catch (e) {
-			profileError = getErrorMessage(e, 'Could not save the username');
-		} finally { savingUsername = false; }
-	}
-
-	function startEdit() {
-		usernameInput = profile?.account.username ?? '';
-		profileError = ''; editingName = true;
-	}
-
-	async function signOutBrowser() {
-		try { await auth.logout(); } catch (e) { actionError = getErrorMessage(e, 'Could not sign out of this browser'); }
+		void flow.saveUsername();
 	}
 </script>
 
@@ -195,12 +50,12 @@
 					<span class="status" role="status">
 						{#if connection}
 							{#if connection.signed_in}
-								{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if refusal}Signed in · remote access off{:else if connection.profile_ready === false}Signed in · finishing connection…{:else if profileError}Signed in{:else}Signed in · loading profile…{/if}
+								{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if refusal}Signed in · remote access off{:else if connection.profile_ready === false}Signed in · finishing connection…{:else if flow.profileError}Signed in{:else}Signed in · loading profile…{/if}
 							{:else}Not signed in{/if}
-						{:else}{checking ? 'Checking account…' : 'Account status unavailable'}{/if}
+						{:else}{flow.checking ? 'Checking account…' : 'Account status unavailable'}{/if}
 					</span>
-					{#if signedIn && profile && !needsUsername && !editingName}
-						<button type="button" class="btn icon-btn edit" onclick={startEdit} aria-label="Edit username" title="Edit username"><Pencil size={13} /></button>
+					{#if signedIn && profile && !needsUsername && !flow.editingName}
+						<button type="button" class="btn icon-btn edit" onclick={() => flow.startEdit()} aria-label="Edit username" title="Edit username"><Pencil size={13} /></button>
 					{/if}
 				</div>
 				{#if signedIn && remoteAccess}<span class="remote" class:connected={connection?.status === 'connected'}><span class="connection-dot" aria-hidden="true"></span>{remoteAccess}</span>{/if}
@@ -208,11 +63,11 @@
 		</div>
 		<div class="head-actions">
 			{#if signedIn}
-				<button type="button" class="btn" disabled={busy} onclick={signOut}><LogOut size={14} /> {busy ? 'Signing out…' : 'Sign out'}</button>
-				<button type="button" class="btn icon-btn refresh" disabled={loadingProfile || busy || savingUsername || connection?.profile_ready === false} onclick={() => loadProfile()} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={loadingProfile ? 'refreshing' : ''} /></button>
-			{:else if connection && !(intent && connection.code)}
-				<button type="button" class="btn primary" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signin')}>{busy && intent === 'signin' ? 'Preparing…' : 'Sign in'}</button>
-				{#if variant === 'setup'}<button type="button" class="btn" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signup')}>{busy && intent === 'signup' ? 'Preparing…' : 'Create account'}</button>{/if}
+				<button type="button" class="btn" disabled={flow.busy} onclick={() => flow.signOut()}><LogOut size={14} /> {flow.busy ? 'Signing out…' : 'Sign out'}</button>
+				<button type="button" class="btn icon-btn refresh" disabled={flow.loadingProfile || flow.busy || flow.savingUsername || connection?.profile_ready === false} onclick={() => flow.loadProfile()} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={flow.loadingProfile ? 'refreshing' : ''} /></button>
+			{:else if connection && !(flow.intent && connection.code)}
+				<button type="button" class="btn primary" disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signin')}>{flow.busy && flow.intent === 'signin' ? 'Preparing…' : 'Sign in'}</button>
+				{#if variant === 'setup'}<button type="button" class="btn" disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signup')}>{flow.busy && flow.intent === 'signup' ? 'Preparing…' : 'Create account'}</button>{/if}
 			{/if}
 		</div>
 	</div>
@@ -221,34 +76,34 @@
 		<p class="hint">Sign in on every worker you want to see from your phone or another worker. Workers on one account share settings, profiles and provider keys; the account's settings replace this worker's own. Local use needs no account.</p>
 	{/if}
 
-	{#if canStart && intent && connection?.code && !connection.signed_in}
+	{#if flow.offerOpen && connection?.code}
 		<div class="flow">
 			{#if connection.authorization_url}
-				<a class="btn primary" href={intent === 'signup' && connection.signup_url ? connection.signup_url : connection.authorization_url} target="_blank" rel="noopener noreferrer">
-					<ExternalLink size={14} /> {intent === 'signup' ? 'Create account in browser' : 'Sign in in browser'}
+				<a class="btn primary" href={flow.intent === 'signup' && connection.signup_url ? connection.signup_url : connection.authorization_url} target="_blank" rel="noopener noreferrer">
+					<ExternalLink size={14} /> {flow.intent === 'signup' ? 'Create account in browser' : 'Sign in in browser'}
 				</a>
 				<p>Finish in the browser tab that opens, then return here. This worker joins your account as soon as you do.</p>
-				<button type="button" class="btn" aria-expanded={showPhone} onclick={() => (showPhone = !showPhone)}><Smartphone size={14} /> {showPhone ? 'Hide phone code' : 'Use my phone instead'}</button>
+				<button type="button" class="btn" aria-expanded={flow.showPhone} onclick={() => flow.togglePhone()}><Smartphone size={14} /> {flow.showPhone ? 'Hide phone code' : 'Use my phone instead'}</button>
 			{/if}
-			{#if showPhone || !connection.authorization_url}
+			{#if flow.showPhone || !connection.authorization_url}
 				<p>In the Shuffle app, sign in and choose <strong>Add worker</strong>, then scan this code or type it.</p>
 				{#if connection.qr_svg}<div class="qr" aria-label="Worker connection QR code">{@html connection.qr_svg}</div>{/if}
-				<div class="code"><code>{connection.code.match(/.{1,4}/g)?.join(' ')}</code><button type="button" class="btn" onclick={copyCode} aria-label="Copy connection code">{#if copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy{/if}</button></div>
+				<div class="code"><code>{groupCode(connection.code)}</code><button type="button" class="btn" onclick={() => flow.copyCode()} aria-label="Copy connection code">{#if flow.copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy{/if}</button></div>
 				<p>The code expires after ten minutes and links exactly one worker.</p>
 			{/if}
-			<button type="button" class="btn subtle" disabled={busy} onclick={signOut}>{busy ? 'Cancelling…' : 'Cancel'}</button>
+			<button type="button" class="btn subtle" disabled={flow.busy} onclick={() => flow.signOut()}>{flow.busy ? 'Cancelling…' : 'Cancel'}</button>
 		</div>
 	{/if}
 
 	{#if signedIn}
-		{#if needsUsername || editingName}
+		{#if needsUsername || flow.editingName}
 			<form class="username" onsubmit={saveUsername}>
 				<label for="account-username">{needsUsername ? 'Choose your username' : 'Username'}</label>
 				<p class="muted">{needsUsername ? 'Your account has a temporary name. Pick the one other devices will see.' : USERNAME_HINT}</p>
 				<div class="row">
-					<input id="account-username" class="input" bind:value={usernameInput} maxlength="64" autocomplete="off" spellcheck="false" disabled={savingUsername} />
-					<button type="submit" class="btn primary" disabled={savingUsername || !usernameInput.trim()}>{savingUsername ? 'Saving…' : 'Save'}</button>
-					{#if !needsUsername}<button type="button" class="btn" disabled={savingUsername} onclick={() => (editingName = false)}>Cancel</button>{/if}
+					<input id="account-username" class="input" bind:value={flow.usernameInput} maxlength="64" autocomplete="off" spellcheck="false" disabled={flow.savingUsername} />
+					<button type="submit" class="btn primary" disabled={flow.savingUsername || !flow.usernameInput.trim()}>{flow.savingUsername ? 'Saving…' : 'Save'}</button>
+					{#if !needsUsername}<button type="button" class="btn" disabled={flow.savingUsername} onclick={() => flow.cancelEdit()}>Cancel</button>{/if}
 				</div>
 			</form>
 		{/if}
@@ -273,14 +128,14 @@
 			</div>
 			<p class="muted">These are account registrations, including offline devices. Local network members and direct pairings are separate from account registrations.</p>
 		{/if}
-		{#if profileError}<div class="error-row"><p role="alert">{profileError}</p><button type="button" class="btn" onclick={() => loadProfile()}>Retry profile</button></div>{/if}
+		{#if flow.profileError}<div class="error-row"><p role="alert">{flow.profileError}</p><button type="button" class="btn" onclick={() => flow.loadProfile()}>Retry profile</button></div>{/if}
 		{#if browserSignedInThroughAccount}
-			<button type="button" class="btn subtle" onclick={signOutBrowser}><LogOut size={13} /> Sign this browser out</button>
+			<button type="button" class="btn subtle" onclick={() => flow.signOutBrowser()}><LogOut size={13} /> Sign this browser out</button>
 		{/if}
 	{/if}
 
-	{#if statusError}
-		<div class="error-row"><p role="alert">{statusError}</p><button type="button" class="btn" disabled={busy} onclick={refresh}>Retry account status</button></div>
+	{#if flow.statusError}
+		<div class="error-row"><p role="alert">{flow.statusError}</p><button type="button" class="btn" disabled={flow.busy} onclick={() => flow.refresh()}>Retry account status</button></div>
 	{/if}
 	{#if refusal}
 		<div class="refusal" role="alert">
@@ -293,7 +148,7 @@
 			{/if}
 		</div>
 	{/if}
-	{#if actionError || (connection?.error && !refusal)}<p id="account-panel-error" class="error" role="alert">{actionError || connection?.error}</p>{/if}
+	{#if flow.errorText}<p id="account-panel-error" class="error" role="alert">{flow.errorText}</p>{/if}
 </section>
 
 <style>
