@@ -8,6 +8,7 @@ import { get } from 'svelte/store';
 import { describe, expect, it } from 'vitest';
 import { activeView, layout, pluginsSettingsTarget } from './layout.svelte';
 import { featurePanelKeyForView } from '$lib/components/deck/lazy/panels';
+import { decodeTarget } from '$lib/settings/navigation.svelte';
 
 describe('Manage plugins links', () => {
 	it('open the Settings view on Plugins with the item', () => {
@@ -32,5 +33,14 @@ describe('Manage plugins links', () => {
 		expect(featurePanelKeyForView('plugins')).toBe('settings');
 		expect(featurePanelKeyForView('settings')).toBe('settings');
 		expect(featurePanelKeyForView('mcp')).toBe('build');
+	});
+});
+
+describe('deep links into the new Settings homes', () => {
+	it('decode to Plugins and to Integrations > GitHub (the Assistant cards)', () => {
+		expect(decodeTarget(pluginsSettingsTarget('connection:gmail'))).toEqual({ category: 'plugins', item: 'connection:gmail' });
+		expect(decodeTarget(pluginsSettingsTarget(null))).toEqual({ category: 'plugins' });
+		expect(decodeTarget('plugins')).toEqual({ category: 'plugins' });
+		expect(decodeTarget('category=integrations&item=github')).toEqual({ category: 'integrations', item: 'github' });
 	});
 });

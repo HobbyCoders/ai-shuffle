@@ -291,9 +291,10 @@ describe('About you', () => {
  it('suggests only the missing connections and links to the existing flows', async () => {
   about({ suggested_connections: ['gmail', 'github'] }); render(AssistantHome);
   await fireEvent.click(await screen.findByRole('button', { name: 'Connect Gmail' }));
-  expect(mocks.openFeaturePage).toHaveBeenCalledWith('plugins');
+  // Settings > Plugins > Gmail, and Settings > Integrations > GitHub (where sign-in lives now).
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('plugins', 'connection:gmail');
   await fireEvent.click(screen.getByRole('button', { name: 'Sign in to GitHub' }));
-  expect(mocks.openFeaturePage).toHaveBeenCalledWith('settings', 'providers');
+  expect(mocks.openFeaturePage).toHaveBeenCalledWith('settings', 'category=integrations&item=github');
  });
  it('shows no suggestion cards when nothing is missing', async () => {
   about(); render(AssistantHome);

@@ -284,8 +284,8 @@
     {/if}
     {#if suggestions.length}
      <ul class="suggestions">
-      {#if suggestions.includes('gmail')}<li><Mail size={19} /><div class="source-copy"><strong>Gmail</strong><p>Adds your email address.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('plugins')}>Connect Gmail<ArrowUpRight size={14} /></button></li>{/if}
-      {#if suggestions.includes('github')}<li><Github size={19} /><div class="source-copy"><strong>GitHub</strong><p>Adds your GitHub username.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('settings', 'providers')}>Sign in to GitHub<ArrowUpRight size={14} /></button></li>{/if}
+      {#if suggestions.includes('gmail')}<li><Mail size={19} /><div class="source-copy"><strong>Gmail</strong><p>Adds your email address.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('plugins', 'connection:gmail')}>Connect Gmail<ArrowUpRight size={14} /></button></li>{/if}
+      {#if suggestions.includes('github')}<li><Github size={19} /><div class="source-copy"><strong>GitHub</strong><p>Adds your GitHub username.</p></div><button class="secondary" onclick={() => layout.openFeaturePage('settings', 'category=integrations&item=github')}>Sign in to GitHub<ArrowUpRight size={14} /></button></li>{/if}
      </ul>
     {/if}
    </section>

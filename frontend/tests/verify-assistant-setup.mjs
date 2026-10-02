@@ -215,7 +215,7 @@ async function run(viewport) {
 	await press(gmail);
 	await press(github);
 	const opened = await page.evaluate(() => window.assistantFixture.opened);
-	assert.deepEqual(opened.slice(-2), [['plugins', undefined], ['settings', 'providers']], `[${name}] suggestion links`);
+	assert.deepEqual(opened.slice(-2), [['plugins', 'connection:gmail'], ['settings', 'category=integrations&item=github']], `[${name}] suggestion links`);
 	passed++;
 	await shoot('home');
 	await press(about.getByRole('button', { name: /Correct/ }));
