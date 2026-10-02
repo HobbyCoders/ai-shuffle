@@ -479,16 +479,30 @@ def mcp_server_support(cfg: Any) -> tuple[str, str]:
     return SUPPORT_LOADED, ""
 
 
-def mcp_server_detail(cfg: Any, limit: int = 300) -> str:
-    """The command line or URL of a raw server entry, for review (no env)."""
+def mcp_server_detail(cfg: Any, limit: int = 2000) -> str:
+    """The command line or URL of a raw server entry, for review.
+
+    Environment entries are listed only when their value is a ``${VAR}``
+    reference (which variable the server is handed); a literal value is shown
+    as ``…`` so a secret written into a package never reaches the UI. A cut
+    text ends in ``…`` so a reviewer knows there is more than they see.
+    """
     if not isinstance(cfg, dict):
         return ""
     if isinstance(cfg.get("url"), str):
         text = cfg["url"]
     else:
-        parts = [cfg.get("command")] + list(cfg.get("args") or [])
+        args = cfg.get("args")
+        parts = [cfg.get("command")] + (list(args) if isinstance(args, list) else [])
         text = " ".join(str(p) for p in parts if isinstance(p, (str, int, float)))
-    return text[:limit]
+    env = cfg.get("env")
+    if isinstance(env, dict) and env:
+        shown = [
+            f"{k}={v}" if isinstance(v, str) and _VAR_RE.fullmatch(v) else f"{k}=…"
+            for k, v in env.items()
+        ]
+        text = f"{text} (env: {', '.join(shown)})"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def normalize_mcp_server(name: str, cfg: dict[str, Any]) -> dict[str, Any] | None:

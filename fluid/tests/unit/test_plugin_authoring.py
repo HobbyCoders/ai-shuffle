@@ -78,10 +78,10 @@ def test_save_writes_an_agent_plugins_package_the_reader_loads(home):
     assert [a.name for a in record.agents] == ["release-notes:editor"]
     assert set(record.mcp_servers) == {"changelog"}
     assert all(c.support == "loaded" for c in record.components)
-    # A reviewer sees the server's command line, never its env.
+    # A reviewer sees the whole command line and which variables the server
+    # is handed (references only; a literal value would show as "…").
     [server] = [c for c in record.components if c.kind == "mcp_server"]
-    assert server.detail == "python ${PLUGIN_ROOT}/srv.py"
-    assert "CHANGELOG_TOKEN" not in json.dumps([c.to_dict() for c in record.components])
+    assert server.detail == "python ${PLUGIN_ROOT}/srv.py (env: TOKEN=${CHANGELOG_TOKEN})"
     assert saved.content_hash == content_hash(saved.path)
     # Nothing staged is left behind.
     assert list((home / ".fluid" / "plugins" / "cache" / ".authored-staging").iterdir()) == []
@@ -109,6 +109,10 @@ def test_identical_resave_is_a_no_op_and_changed_content_needs_a_new_version(hom
     ({"skills": [], "commands": [], "agents": [], "mcp_servers": {}}, "at least one"),
     ({"skills": [{"name": "a", "description": "d", "body": "x" * 60_000}]}, "longer"),
     ({"settings": {}}, "unsupported fields"),
+    ({"mcp_servers": {"x": {"command": "x", "env": {"P": "${ADMIN_PASSWORD}"}}}}, "own secrets"),
+    ({"mcp_servers": {"x": {"command": "x", "args": ["--db", "${DATABASE_URL}"]}}}, "own secrets"),
+    ({"mcp_servers": {"x": {"url": "https://a.test/?k=${SECRET_KEY}"}}}, "own secrets"),
+    ({"mcp_servers": {"x": {"command": "x", "args": ["a" * 1500, "b" * 600]}}}, "command line"),
 ])
 def test_refused_drafts_write_nothing(home, overrides, message):
     with pytest.raises(PluginDraftError, match=message):
@@ -143,6 +147,29 @@ def test_an_alias_folder_for_the_authored_source_does_not_skip_review(home, tmp_
         pytest.skip("symlinks are not available here")
     _enable(home, "release-notes@alias")
     assert discover_plugins(tmp_path) == []
+
+
+def test_approved_draft_never_expands_the_apps_own_secrets(home, tmp_path, monkeypatch):
+    # Even an approved draft (here written by hand, past save_plugin's checks)
+    # gets no admin password or database URL out of ${VAR} references.
+    monkeypatch.setenv("ADMIN_PASSWORD", "hunter2")
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@db/x")
+    monkeypatch.setenv("CHANGELOG_TOKEN", "owner-set")
+    root = authored_dir() / "leaky" / "0.1.0"
+    root.mkdir(parents=True)
+    (root / "plugin.json").write_text(json.dumps({"name": "leaky", "version": "0.1.0"}), encoding="utf-8")
+    (root / "mcp.json").write_text(json.dumps({"mcpServers": {"s": {
+        "command": "x", "args": ["${DATABASE_URL}"],
+        "env": {"P": "${ADMIN_PASSWORD}", "T": "${CHANGELOG_TOKEN}"},
+    }}}), encoding="utf-8")
+    (home / ".fluid" / "plugins" / APPROVALS_FILE).write_text(json.dumps({"approvals": {
+        "leaky@authored": {"version": "0.1.0", "hash": content_hash(root)},
+    }}), encoding="utf-8")
+    _enable(home, "leaky@authored")
+    [plugin] = discover_plugins(tmp_path)
+    server = plugin.mcp_servers["s"]
+    assert server["args"] == [""]
+    assert (server["env"]["P"], server["env"]["T"]) == ("", "owner-set")
 
 
 def test_approved_content_loads_and_any_edit_stops_it(home, tmp_path):

@@ -69,6 +69,14 @@ def is_host_secret(name: str, extra_allowed: frozenset[str] = frozenset()) -> bo
     return bool(_DENY_PREFIX_RE.match(upper) or _DENY_SUFFIX_RE.search(upper))
 
 
+def is_app_secret(name: str) -> bool:
+    """True for the host app's own secrets (admin password, lifecycle tokens,
+    database settings): the named part of :func:`is_host_secret`, without the
+    credential-suffix rule that also matches the owner's own ``*_TOKEN``s."""
+    upper = name.upper()
+    return upper in _DENY_NAMES or bool(_DENY_PREFIX_RE.match(upper))
+
+
 def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """A copy of ``environ`` (default ``os.environ``) without host secrets."""
     source = os.environ if environ is None else environ

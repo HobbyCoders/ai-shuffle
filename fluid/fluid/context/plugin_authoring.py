@@ -31,7 +31,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fluid.context.plugin_formats import SHUFFLE_EXTENSION, content_hash, read_plugin
+from fluid.context.plugin_formats import (
+    _DATA_VARS,
+    _ROOT_VARS,
+    _VAR_RE,
+    SHUFFLE_EXTENSION,
+    content_hash,
+    mcp_server_detail,
+    read_plugin,
+)
+from fluid.tools.child_env import is_app_secret
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +56,10 @@ MAX_SERVERS = 10
 MAX_TEXT = 50_000
 MAX_DESCRIPTION = 500
 MAX_TOTAL_BYTES = 256 * 1024
+# The review screen shows each MCP server's whole command line, so a draft
+# may not hide part of it past the display limit.
+MAX_COMMAND_LINE = 2000
+_PLUGIN_VARS = _ROOT_VARS | _DATA_VARS | {"CLAUDE_PROJECT_DIR"}
 
 
 class PluginDraftError(ValueError):
@@ -185,7 +198,25 @@ def _server(name: str, cfg: Any) -> dict[str, Any]:
                     "secrets are never written into a plugin"
                 )
         out["env"] = dict(env)
+    if len(mcp_server_detail(out, limit=MAX_COMMAND_LINE + 1)) > MAX_COMMAND_LINE:
+        raise PluginDraftError(
+            f"MCP server {name!r}: the command line is longer than {MAX_COMMAND_LINE} characters"
+        )
     return out
+
+
+def _host_secret_refs(value: Any) -> set[str]:
+    """``${VAR}`` names in ``value`` that are the host app's own secrets."""
+    if isinstance(value, str):
+        return {
+            m.group(1) for m in _VAR_RE.finditer(value)
+            if m.group(1) not in _PLUGIN_VARS and is_app_secret(m.group(1))
+        }
+    if isinstance(value, dict):
+        return set().union(*(_host_secret_refs(v) for v in value.values())) if value else set()
+    if isinstance(value, list):
+        return set().union(*(_host_secret_refs(v) for v in value)) if value else set()
+    return set()
 
 
 def _frontmatter(fields: dict[str, str]) -> str:
@@ -247,6 +278,11 @@ def build_files(spec: dict[str, Any]) -> tuple[str, str, dict[str, str], list[st
     if len(raw_servers) > MAX_SERVERS:
         raise PluginDraftError(f"at most {MAX_SERVERS} MCP servers per plugin")
     servers = {_name(k, "MCP server name"): _server(k, v) for k, v in raw_servers.items()}
+    secret_refs = _host_secret_refs(servers)
+    if secret_refs:
+        raise PluginDraftError(
+            f"MCP servers may not reference the app's own secrets {sorted(secret_refs)}"
+        )
     for server_name in servers:
         components.append(f"MCP server {server_name}")
     if not components:

@@ -313,3 +313,11 @@ def test_content_hash_refuses_symlinks(tmp_path: Path) -> None:
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
     assert content_hash(root) is None
+
+
+def test_mcp_server_detail_marks_cut_text_and_hides_literal_env():
+    from fluid.context.plugin_formats import mcp_server_detail
+
+    assert mcp_server_detail({"command": "x", "env": {"A": "${B}", "C": "sk-live"}}) == "x (env: A=${B}, C=…)"
+    long = mcp_server_detail({"command": "x", "args": ["y" * 50]}, limit=20)
+    assert len(long) == 20 and long.endswith("…")
