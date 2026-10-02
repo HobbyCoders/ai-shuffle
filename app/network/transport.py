@@ -561,6 +561,52 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
     return results
 
 
+def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
+    """Open the outbox on what an authenticated peer that reached us holds of our stream.
+
+    ``view`` is the peer's ``{incarnation: last_seq}`` for this device, the
+    same claim ``PeerLink._check_rollback`` reads from an exchange we start.
+    With one-way reachability (the peer reaches us, we cannot dial it) our
+    own pass never completes, and the hold would otherwise last until we can
+    (#1621). A peer that holds nothing of our current or a newer incarnation
+    past our own log is evidence that we were not restored from a backup
+    behind it. A claim past our log keeps the hold: only an exchange we start
+    can fetch the signed op that proves a rollback. While we are comparing
+    streams with another peer, that comparison decides. Runs in a worker
+    thread. Returns True when this call opened the outbox.
+    """
+    if not engine.outbox_held() or not isinstance(view, dict):
+        return False
+    if any(device_id != peer_device_id and link._sync_lock.locked() for device_id, link in list(_links.items())):
+        return False
+    ctx = engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return False
+    current = ctx.identity.incarnation
+    claims: Dict[int, int] = {}
+    for incarnation, seq in view.items():
+        try:
+            incarnation, seq = int(incarnation), int(seq)
+        except (TypeError, ValueError):
+            return False
+        if incarnation >= current and seq > 0:
+            claims[incarnation] = seq
+    if any(incarnation > current for incarnation in claims):
+        return False  # a newer incarnation of ours exists somewhere
+    if claims:
+        with store.get_db() as conn:
+            held = store.own_watermark(conn.cursor(), ctx.device_id, current)
+        if claims[current] > held:
+            return False
+    if not engine.outbox_held():
+        return False
+    engine.hold_outbox(False)
+    logger.info("Publishing resumed: peer %s holds none of this worker's stream past its own log",
+                peer_device_id)
+    request_scan()
+    return True
+
+
 async def liveness_loop() -> None:
     """Invalidate readers on contact expiry even if sync is blocked or idle.
 
