@@ -3,6 +3,7 @@
 Only the supervisor selects code. The API can enqueue a fixed action, never a
 path, URL or command. No Docker socket or elevated container permissions.
 """
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -54,11 +55,23 @@ def all_workers():
     return database.get_system_setting(ALL_KEY) == "true"
 
 
+def _epoch(value):
+    """An ISO timestamp from the desktop shell as epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() if value else None
+    except ValueError:
+        return None
+
+
 def desktop_exchange(state):
     """Only called by the token-authenticated local launcher, never a browser."""
     global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup
+    state = dict(state)
+    # When the shell last asked its feed. A worker that is idle but checked
+    # before another worker found an update has simply not seen it yet.
+    state["checked_at"] = _epoch(state.pop("checkedAt", None))
     with _bridge_lock:
-        _desktop_state = dict(state)
+        _desktop_state = state
         _desktop_seen = time.monotonic()
         # A phase-change report can race an already accepted action. The shell
         # refuses actions while checking or downloading, so leave the request
@@ -127,13 +140,23 @@ def control_root():
 def status():
     root = control_root()
     result = {"allow_updates": mirror_policy(), "update_all_workers": all_workers(), "supported": root is not None,
-              "phase": "idle", "version": None, "error": None, "request_pending": False,
+              "phase": "idle", "version": None, "error": None, "request_pending": False, "checked_at": None,
               "running_version": os.environ.get("GIT_SHA") if root else None}
     if root:
         try:
-            saved = json.loads((root / "status.json").read_text())
+            path = root / "status.json"
+            saved = json.loads(path.read_text())
             result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
                                                            "release", "notes", "channel")})
+            # When the supervisor last asked the feed. Older supervisors do not
+            # say, but they write an available status when a check ends and an
+            # idle one mostly then too (also at startup and after an install),
+            # so the file time stands in. Other phases are rewritten as work
+            # goes on and give no time.
+            if "checked_at" in saved:
+                result["checked_at"] = saved["checked_at"] if isinstance(saved["checked_at"], (int, float)) else None
+            elif result["phase"] in ("idle", "available"):
+                result["checked_at"] = path.stat().st_mtime
         except FileNotFoundError:
             result["message"] = "Starting application updater…"
         except (ValueError, TypeError, AttributeError, OSError):

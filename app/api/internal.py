@@ -66,6 +66,8 @@ class DesktopUpdateState(BaseModel):
     # manifest; the limits match docker/application_updates.py).
     release: str | None = Field(default=None, max_length=80)
     notes: str | None = Field(default=None, max_length=4000)
+    # When the shell last checked its feed (an ISO time; the shell's own field name).
+    checkedAt: str | None = Field(default=None, max_length=64)
     # No policy fields: the native heartbeat cannot overwrite account preferences.
 
 
