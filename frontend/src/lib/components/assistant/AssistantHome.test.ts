@@ -78,12 +78,13 @@ describe('Assistant home', () => {
   const patch = mocks.configureAssistant.mock.calls[0][0];
   expect(patch).toEqual({ create_agent: true, assistant_name: 'Assistant', avatar_id: avatar, enabled: false, paused: true });
  });
- it('has no introduction form or limit fields, and explains background research in plain words', async () => {
+ it('has no introduction form, limit fields or limit numbers', async () => {
   render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
   expect(screen.queryByRole('textbox', { name: 'What should I call you?' })).toBeNull();
   expect(screen.queryByRole('textbox', { name: 'Repositories you care about' })).toBeNull();
   expect(screen.queryAllByRole('spinbutton')).toHaveLength(0);
-  expect(screen.getByText(/can’t send, change or delete anything/).textContent).toContain('at most 12 passes');
+  expect(screen.getByText('Lets your assistant look into opted-in sources while you’re away.')).toBeTruthy();
+  expect(screen.queryByText(/12 passes|admission limit/)).toBeNull();
   expect(screen.getAllByRole('button', { name: / avatar$/ })).toHaveLength(AVATARS.length);
  });
  it('reuses the dedicated agent setup already made instead of creating another', async () => {

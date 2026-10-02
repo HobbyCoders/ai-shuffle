@@ -186,9 +186,7 @@
       {#if chosenAgent?.is_builtin}<p class="micro">Built-in identity is protected. Create a custom agent in Agents to give it a new name and avatar.</p>{/if}
      {/if}
 
-     <div class="section-heading"><div><span class="eyebrow">03 / BACKGROUND RESEARCH</span><h2>What happens while you’re away</h2></div></div>
-     <p class="explain">Background research stays off until you turn it on and opt a connected source in below. Once it’s on, your assistant checks those sources about once a minute for new items, such as the subject and preview of unread email, and looks into them in a short research pass. A pass can search and read the web and the source, but it can’t send, change or delete anything. Each pass is capped at {assistant.max_turns} turns and {Math.round(assistant.timeout_seconds / 60)} minutes, with at most {assistant.max_runs_per_day} passes and about {money(assistant.max_cost_per_day)} of reported usage in any 24 hours. What it finds shows up under Activity below.</p>
-     {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research</strong><small>Optional. No sources are turned on automatically.</small></span></label>{/if}
+     {#if !assistant.enabled || assistant.paused}<label class="activation check-label"><input type="checkbox" bind:checked={activating} /><span><strong>Enable background research</strong><small>Lets your assistant look into opted-in sources while you’re away.</small></span></label>{/if}
      <div class="form-actions"><button type="submit" class="primary" disabled={!canSave || !!busy}>{busy === 'save' ? 'Saving…' : activating ? 'Save & enable research' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
     </fieldset>
    </form>
@@ -200,8 +198,8 @@
      {#if remoteHome}
       <p class="micro runner-note">Your conversation and background research run on {remoteHome.name}{remoteHome.online ? '' : ', which is offline right now'}. Opening the conversation here talks to it there, and its usage is counted there.</p>
      {:else}
-      <div class="usage-grid"><div><strong>{assistant.usage.runs_today}<span> / {assistant.max_runs_per_day}</span></strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}<span> / {assistant.max_concurrent_runs}</span></strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>{money(assistant.max_cost_per_day)} admission limit · last 24 hours</small></div></div>
-      <p class="micro">Per run: {assistant.max_turns} turns · {assistant.timeout_seconds}s · {money(assistant.max_cost_per_run)} admission limit. Costs are reported after runs, not a hard billing cap.</p>
+      <div class="usage-grid"><div><strong>{assistant.usage.runs_today}</strong><small>runs · last 24 hours</small></div><div><strong>{assistant.usage.in_flight_runs}</strong><small>in flight</small></div><div><strong>{money(assistant.usage.reported_cost_today)}</strong><small>reported · last 24 hours</small></div></div>
+      <p class="micro">Costs are reported after runs, not a hard billing cap.</p>
      {/if}
      <div class="panel-actions">
       {#if assistant.enabled && !assistant.paused}<button class="secondary" disabled={!!busy} onclick={pause}><Pause size={15} />{busy === 'pause' ? 'Pausing…' : 'Pause background'} </button>
@@ -261,7 +259,6 @@
  .identity-note h2 { font-family:var(--font-display); font-size:25px; font-weight:400; margin-top:16px; }
  .usage-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:24px 0 18px; }
  .usage-grid strong { font-size:22px; letter-spacing:-.04em; font-weight:500; white-space:nowrap; }
- .usage-grid strong span { font-size:12px; color:var(--muted-foreground); }
  .usage-grid small { display:block; margin-top:5px; font-size:10px; line-height:1.6; color:var(--muted-foreground); }
  .panel-actions { margin-top:20px; flex-wrap:wrap; }
  .section { padding-top:34px; margin-top:30px; border-top:1px solid var(--border); }
@@ -303,7 +300,6 @@
  .choice input { width:18px; height:18px; min-height:0; padding:0; margin:1px 0 0; accent-color:var(--primary); flex:none; }
  .choice strong { display:block; font-size:12px; font-weight:550; }
  .choice small { display:block; margin-top:6px; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
- .explain { max-width:680px; font-size:12px; line-height:1.8; color:var(--muted-foreground); margin:0; }
  .avatar-picker button.selected,.avatar-picker button:hover:not(:disabled) { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 6%,transparent); color:var(--foreground); }
  .check-label { flex-direction:row; align-items:center; gap:12px; min-height:44px; font-weight:400; }
  .check-label input { width:18px; height:18px; min-height:0; padding:0; accent-color:var(--primary); flex:none; }

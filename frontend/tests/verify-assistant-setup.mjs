@@ -110,9 +110,8 @@ async function run(viewport) {
 	check(boxes.every((b) => b.w >= 44 && b.h >= 44), 'avatar targets at least 44px', boxes[0]);
 	check(await page.getByRole('textbox', { name: 'What should I call you?' }).count() === 0, 'no introduction form');
 	check(await page.getByRole('spinbutton').count() === 0, 'no limit fields');
-	const explanation = page.getByText(/can’t send, change or delete anything/);
-	check(await explanation.isVisible(), 'background research explained');
-	check((await explanation.textContent()).includes('at most 12 passes'), 'explanation uses the server limits');
+	check(await page.getByText('Lets your assistant look into opted-in sources while you’re away.').isVisible(), 'one-line research hint by the toggle');
+	check(!(await page.locator('body').textContent()).match(/12 passes|admission limit|Per run/), 'no limit numbers shown');
 	check(await page.getByRole('checkbox', { name: /Enable background research/ }).isChecked() === false, 'research stays off by default');
 	check(await overflow() <= 0, 'no horizontal overflow on setup', await overflow());
 	await shoot('setup');
