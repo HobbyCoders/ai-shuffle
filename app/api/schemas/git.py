@@ -254,6 +254,7 @@ class CloneRepoResponse(BaseModel):
 
 class GenerateCommitMessageRequest(BaseModel):
     """Request to generate a commit message using AI"""
+    model: Optional[str] = Field(None, description="Generation model: native alias or prov:<providerId>:<modelId>; omitted uses Settings")
     include_unstaged: bool = Field(default=True)
 
 
@@ -264,6 +265,7 @@ class GenerateCommitMessageResponse(BaseModel):
 
 class GeneratePRDescriptionRequest(BaseModel):
     """Request to generate a PR title and description using AI"""
+    model: Optional[str] = Field(None, description="Generation model: native alias or prov:<providerId>:<modelId>; omitted uses Settings")
     base_branch: str = Field(default="main")
 
 

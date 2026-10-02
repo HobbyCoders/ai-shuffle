@@ -79,6 +79,7 @@ class FinishRequest(BaseModel):
 
 class ShipRequest(BaseModel):
     """Body for the Ship It flow (commit everything, open + merge a PR)."""
+    generation_model: Optional[str] = Field(default=None, description="Per-request model for commit and PR generation; omitted uses Settings")
     include_unstaged: bool = Field(default=True, description="Stage all changes before committing")
     merge_method: str = Field(default="squash", pattern="^(merge|squash|rebase)$")
     base_branch: Optional[str] = Field(default=None, description="PR base (defaults to the repo default branch)")
@@ -796,6 +797,7 @@ async def _execute_ship(
     existing_pr: Any,
     dirty: bool,
     include_unstaged: bool,
+    generation_model: Optional[str] = None,
     needs_push: bool = True,
     merge_method: str,
     draft: bool,
@@ -807,7 +809,9 @@ async def _execute_ship(
         if dirty:
             op.set_step("commit", STEP_RUNNING)
             try:
-                message = await generate_commit_message_for_dir(working_dir, include_unstaged)
+                message = await generate_commit_message_for_dir(
+                    working_dir, include_unstaged, **({"model": generation_model} if generation_model else {})
+                )
             except HTTPException as e:
                 op.set_step("commit", STEP_ERROR, error=str(e.detail))
                 op.status = "error"
@@ -850,7 +854,9 @@ async def _execute_ship(
         else:
             op.set_step("create_pr", STEP_RUNNING)
             try:
-                title, body = await generate_pr_description_for_dir(working_dir, base_branch)
+                title, body = await generate_pr_description_for_dir(
+                    working_dir, base_branch, **({"model": generation_model} if generation_model else {})
+                )
             except HTTPException as e:
                 op.set_step("create_pr", STEP_ERROR, error=str(e.detail))
                 op.status = "error"
@@ -1127,6 +1133,7 @@ async def ship(
             dirty=dirty,
             needs_push=(st or {}).get("unpushed") != 0,
             include_unstaged=body.include_unstaged,
+            generation_model=body.generation_model,
             merge_method=body.merge_method,
             draft=body.draft,
             cleanup=body.cleanup,

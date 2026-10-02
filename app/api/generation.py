@@ -56,7 +56,7 @@ class GenerateProfileRequest(BaseModel):
     """Request to generate a profile configuration"""
     description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired profile")
     reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
-    model: Optional[str] = Field(None, description="Model to use for generation (see /api/v1/models)")
+    model: Optional[str] = Field(None, description="Native alias or prov:<providerId>:<modelId> for this request; omitted uses Settings (see /api/v1/models)")
     skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
@@ -64,7 +64,7 @@ class GenerateSubagentRequest(BaseModel):
     """Request to generate a subagent configuration"""
     description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired subagent")
     reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
-    model: Optional[str] = Field(None, description="Model to use for generation (see /api/v1/models)")
+    model: Optional[str] = Field(None, description="Native alias or prov:<providerId>:<modelId> for this request; omitted uses Settings (see /api/v1/models)")
     skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
@@ -74,7 +74,7 @@ class ContinueGenerationRequest(BaseModel):
     description: str = Field(..., min_length=10, max_length=5000, description="Original description")
     reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material")
     answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
-    model: Optional[str] = Field(None, description="Model to use for generation")
+    model: Optional[str] = Field(None, description="Native alias or prov:<providerId>:<modelId>; send the original selection to retain it through clarification")
 
 
 class SubagentExportData(BaseModel):
@@ -249,7 +249,16 @@ async def generate_with_claude(
     # flows (branch naming, commit messages) and a slow DB round-trip here used
     # to stall every other request in the process.
     generation_config = await run_sync(text_generation_config)
-    effective_model = model or generation_config.get("model") or DEFAULT_MODEL
+    if model:
+        # A UI selection is a complete run binding, not a bare model on the
+        # Settings provider. Native aliases explicitly clear that provider.
+        from app.core.query_options import decode_provider_model
+
+        decoded = decode_provider_model(model)
+        provider_id, selected_model = decoded if decoded else (None, model)
+        generation_config = {"model": selected_model, "provider": provider_id, "effort": None}
+        model = selected_model
+    effective_model = generation_config.get("model") or DEFAULT_MODEL
 
     # Single-shot turn: max_turns=1 since we only send one prompt.
     try:

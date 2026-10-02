@@ -12,6 +12,8 @@ export type PullStrategy = 'merge' | 'rebase';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export interface CommitOptions {
+	/** Per-request generation binding; empty uses Settings. */
+	generationModel?: string;
 	message?: string;
 	includeUnstaged?: boolean;
 	nextStep?: CommitNextStep;
@@ -70,12 +72,16 @@ export interface PullOptions {
 	autoStash?: boolean;
 }
 export interface CreatePROptions {
+	/** Per-request generation binding; empty uses Settings. */
+	generationModel?: string;
 	title?: string;
 	body?: string;
 	base?: string;
 	draft?: boolean;
 }
 export interface ShipItOptions {
+	/** Per-request generation binding; empty uses Settings. */
+	generationModel?: string;
 	mergeMethod?: MergeMethod;
 	cleanup?: boolean;
 	includeUnstaged?: boolean;

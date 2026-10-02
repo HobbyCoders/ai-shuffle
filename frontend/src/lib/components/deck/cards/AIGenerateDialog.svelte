@@ -9,6 +9,7 @@
 		type SubagentExport
 	} from '$lib/api/client';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import GenerationModelSelect from '$lib/components/settings/GenerationModelSelect.svelte';
 	type GenerationType = 'profile' | 'subagent';
 	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
 
@@ -23,6 +24,7 @@
 
 	// Form state
 	let description = $state('');
+	let generationModel = $state('');
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
 	let dialogState = $state<DialogState>('initial');
@@ -52,6 +54,7 @@
 	$effect(() => {
 		if (isOpen) {
 			description = '';
+			generationModel = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;
 			dialogState = 'initial';
@@ -106,9 +109,9 @@
 			let response: GenerationResponse;
 			const refMaterial = referenceMaterial.trim() || undefined;
 			if (type === 'profile') {
-				response = await generateProfile(description, undefined, false, refMaterial);
+				response = await generateProfile(description, generationModel || undefined, false, refMaterial);
 			} else {
-				response = await generateSubagent(description, undefined, false, refMaterial);
+				response = await generateSubagent(description, generationModel || undefined, false, refMaterial);
 			}
 			handleResponse(response);
 		} catch (e) {
@@ -135,7 +138,7 @@
 				type,
 				description,
 				clarificationAnswers,
-				undefined,
+				generationModel || undefined,
 				refMaterial
 			);
 			handleResponse(response);
@@ -206,6 +209,7 @@
 			</div>
 
 			<div class="dialog-content">
+				<GenerationModelSelect bind:value={generationModel} disabled={isLoading || dialogState === 'clarifying'} />
 				{#if dialogState === 'clarifying'}
 					<!-- Clarification Questions UI -->
 					<div class="clarification-intro">

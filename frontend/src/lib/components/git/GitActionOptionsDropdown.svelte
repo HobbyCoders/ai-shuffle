@@ -3,6 +3,7 @@
 	 * Saved preferences persist; message/force/PR overrides reset on mount.
 	 */
 	import { ArrowLeft } from 'lucide-svelte';
+	import GenerationModelSelect from '$lib/components/settings/GenerationModelSelect.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import {
 		computeShipItSteps,
@@ -66,6 +67,7 @@
 
 	// ── Per-invocation local state (reset on every open) ────────────────────────
 	let commitMessage = $state('');
+	let generationModel = $state('');
 	// On the default branch (#1659): commit on a new branch by default, or push
 	// to the default branch only as an explicit, labelled choice. The default-
 	// branch step is local so it never overwrites the saved after-commit flow.
@@ -105,7 +107,9 @@
 	$effect(() => {
 		window.addEventListener('keydown', onKeydown);
 		// Editors without a text field focus Back; the chevron that opened them is gone.
-		(panelRef?.querySelector<HTMLElement>('textarea, input, select') ?? panelRef?.querySelector<HTMLElement>('.opt-back'))?.focus({ preventScroll: true });
+		// The optional generation-model picker leads every AI editor, so it never takes initial focus.
+		const field = Array.from(panelRef?.querySelectorAll<HTMLElement>('textarea, input, select') ?? []).find((el) => !el.closest('.generation-model'));
+		(field ?? panelRef?.querySelector<HTMLElement>('.opt-back'))?.focus({ preventScroll: true });
 		return () => window.removeEventListener('keydown', onKeydown);
 	});
 	function onKeydown(e: KeyboardEvent) {
@@ -119,6 +123,7 @@
 		if (cannotSubmit) return;
 		if (onDefaultBranch && !committingOnNewBranch) {
 			onCommit?.({
+				...(generationModel ? { generationModel } : {}),
 				message: commitMessage.trim() || undefined,
 				includeUnstaged: prefs.includeUnstaged,
 				nextStep: defaultStep,
@@ -126,6 +131,7 @@
 			});
 		} else {
 			onCommit?.({
+				...(generationModel ? { generationModel } : {}),
 				message: commitMessage.trim() || undefined,
 				includeUnstaged: prefs.includeUnstaged,
 				nextStep: prefs.nextStep,
@@ -147,6 +153,7 @@
 	function submitCreatePR() {
 		if (cannotSubmit) return;
 		onCreatePR?.({
+			...(generationModel ? { generationModel } : {}),
 			title: prTitle.trim() || undefined,
 			body: prBody.trim() || undefined,
 			base: prBase || undefined,
@@ -157,6 +164,7 @@
 	function submitShipIt() {
 		if (cannotSubmit) return;
 		onShipIt?.({
+			...(generationModel ? { generationModel } : {}),
 			mergeMethod: prefs.mergeMethod,
 			cleanup: prefs.cleanupAfterMerge,
 			includeUnstaged: prefs.includeUnstaged
@@ -220,6 +228,9 @@
 	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>
 	{:else if submitBlocked}<p class="opt-blocked" role="status">{submitBlocked}</p>{/if}
 	<fieldset class="opt-fields" disabled={busy}>
+	{#if action === 'commit' || action === 'pr' || action === 'shipit'}
+		<GenerationModelSelect bind:value={generationModel} disabled={busy} />
+	{/if}
 	{#if action === 'commit'}
 		<label class="opt-field">
 			<span class="opt-label">Message</span>

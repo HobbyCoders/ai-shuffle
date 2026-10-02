@@ -88,7 +88,7 @@ export interface GenerationResponse {
 /**
  * Generate a profile configuration using AI
  * @param description Natural language description of the desired profile
- * @param model Optional model to use for generation (haiku, sonnet, opus)
+ * @param model Optional native model alias or prov:<providerId>:<modelId> binding; omitted uses Settings
  * @param skipClarification Skip clarification questions
  * @param referenceMaterial Optional reference material (existing prompts, examples)
  * @returns GenerationResponse with either result or clarification questions
@@ -115,7 +115,7 @@ export async function generateProfile(
 /**
  * Generate a subagent configuration using AI
  * @param description Natural language description of the desired subagent
- * @param model Optional model to use for generation (haiku, sonnet, opus)
+ * @param model Optional native model alias or prov:<providerId>:<modelId> binding; omitted uses Settings
  * @param skipClarification Skip clarification questions
  * @param referenceMaterial Optional reference material (existing prompts, examples)
  * @returns GenerationResponse with either result or clarification questions

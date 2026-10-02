@@ -106,7 +106,7 @@ _MAX_UNTRACKED_LISTED = 50
 
 
 async def generate_commit_message_for_dir(
-    working_dir: str, include_unstaged: bool = True
+    working_dir: str, include_unstaged: bool = True, model: Optional[str] = None
 ) -> str:
     """Generate a commit message from the working directory's diff.
 
@@ -154,9 +154,12 @@ Return ONLY the commit message text, nothing else.
 {diff_text}
 </diff>"""
 
-    # Use the Default AI profile's model (no explicit override - respects user config)
+    # Use the request binding when supplied, otherwise the Settings default.
     t_ai_start = time.perf_counter()
-    response_text = await generate_with_claude(prompt)
+    response_text = (
+        await generate_with_claude(prompt, model)
+        if model else await generate_with_claude(prompt)
+    )
     t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
 
     # Clean up: remove any markdown code blocks the model may have wrapped around the message
@@ -177,7 +180,7 @@ Return ONLY the commit message text, nothing else.
 
 
 async def generate_pr_description_for_dir(
-    working_dir: str, base_branch: str = "main"
+    working_dir: str, base_branch: str = "main", model: Optional[str] = None
 ) -> tuple[str, str]:
     """Generate a ``(title, body)`` PR description from the branch's commits.
 
@@ -221,9 +224,12 @@ The body should have a "## Summary" section with bullet points describing what c
 
 Return ONLY the JSON object, no markdown code blocks or explanation."""
 
-    # Use the Default AI profile's model (no explicit override - respects user config)
+    # Use the request binding when supplied, otherwise the Settings default.
     t_ai_start = time.perf_counter()
-    response_text = await generate_with_claude(prompt)
+    response_text = (
+        await generate_with_claude(prompt, model)
+        if model else await generate_with_claude(prompt)
+    )
     t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
 
     try:
@@ -273,7 +279,9 @@ async def generate_commit_message(
     """
     check_project_access(request, project_id)
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
-    message = await generate_commit_message_for_dir(working_dir, body.include_unstaged)
+    message = await generate_commit_message_for_dir(
+        working_dir, body.include_unstaged, **({"model": body.model} if body.model else {})
+    )
     return GenerateCommitMessageResponse(message=message)
 
 
@@ -294,7 +302,9 @@ async def generate_pr_description(
     """
     check_project_access(request, project_id)
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
-    title, pr_body = await generate_pr_description_for_dir(working_dir, body.base_branch)
+    title, pr_body = await generate_pr_description_for_dir(
+        working_dir, body.base_branch, **({"model": body.model} if body.model else {})
+    )
     return GeneratePRDescriptionResponse(title=title, body=pr_body)
 
 

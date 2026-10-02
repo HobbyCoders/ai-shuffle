@@ -11,6 +11,10 @@ const save = vi.hoisted(() => vi.fn());
 vi.mock('$lib/services/preferences', () => ({ preferenceSync: { save, refresh: vi.fn(), register: vi.fn() } }));
 import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
+vi.mock('$lib/constants/model-picker', () => ({ buildModelPickerCatalog: () => ({
+	groups: [{ key: 'strong', name: 'Provider', subtext: 'api' }],
+	options: [{ value: 'prov:strong:astra', label: 'Astra', groupKey: 'strong' }]
+}) }));
 
 let onClose: ReturnType<typeof vi.fn<() => void>>;
 beforeEach(() => {
@@ -26,6 +30,38 @@ function mount(action: string, extra: Record<string, unknown> = {}) {
 	} as never);
 }
 const submit = (name: string) => screen.getAllByRole('button', { name }).find((b) => b.classList.contains('opt-submit')) as HTMLButtonElement;
+
+describe('generation binding', () => {
+	it.each([
+		['commit', 'Commit', 'onCommit'],
+		['pr', 'Create PR', 'onCreatePR'],
+		['shipit', 'Ship It', 'onShipIt']
+	])('passes the selected model for %s without saving a preference', async (action, label, callback) => {
+		const onSubmit = vi.fn();
+		mount(action, { [callback]: onSubmit });
+		const picker = screen.getByRole('combobox', { name: /Generation model/ });
+		await fireEvent.change(picker, { target: { value: 'prov:strong:astra' } });
+		await fireEvent.click(submit(label));
+		expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ generationModel: 'prov:strong:astra' }));
+		expect(save).not.toHaveBeenCalled();
+	});
+	it.each([
+		['Commit on new branch', { newBranch: 'fix/login' }],
+		['Commit only', { pushToDefaultBranch: false }]
+	])('passes the selected model when committing on the default branch (%s)', async (label, expected) => {
+		const onCommit = vi.fn();
+		mount('commit', { currentBranch: 'main', defaultBranch: 'main', onCommit });
+		await fireEvent.change(screen.getByRole('combobox', { name: /Generation model/ }), { target: { value: 'prov:strong:astra' } });
+		if (label === 'Commit only') await fireEvent.click(screen.getByRole('button', { name: 'main' }));
+		else await fireEvent.input(screen.getByLabelText('Branch name'), { target: { value: 'fix/login' } });
+		await fireEvent.click(submit(label));
+		expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ generationModel: 'prov:strong:astra', ...expected }));
+	});
+	it('disables the model picker while the action is busy', () => {
+		mount('commit', { busy: true });
+		expect((screen.getByRole('combobox', { name: /Generation model/ }) as HTMLSelectElement).disabled).toBe(true);
+	});
+});
 
 describe('commit options on the default branch (#1659)', () => {
 	const onMain = { currentBranch: 'main', defaultBranch: 'main' };

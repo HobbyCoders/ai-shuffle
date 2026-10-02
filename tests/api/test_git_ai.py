@@ -111,6 +111,25 @@ def _patch_stack(
 # generate-commit-message
 # =============================================================================
 
+@pytest.mark.parametrize("endpoint,reply", [
+    ("generate-commit-message", "feat: add the thing"),
+    ("generate-pr-description", '{"title":"Add the thing","body":"Details"}'),
+])
+def test_request_model_reaches_generation(
+    app, mock_git_service, mock_database, mock_settings, sample_project, endpoint, reply
+):
+    mock_database.get_project.return_value = sample_project
+    with ExitStack() as stack:
+        gen = _patch_stack(stack, mock_git_service, mock_database, mock_settings, generate_return=reply)
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/projects/test-project-id/git/{endpoint}",
+                json={"model": "prov:strong:astra"},
+            )
+    assert response.status_code == 200, response.text
+    assert gen.await_args.args[1] == "prov:strong:astra"
+
+
 class TestGenerateCommitMessage:
     """POST /api/v1/projects/{project_id}/git/generate-commit-message"""
 

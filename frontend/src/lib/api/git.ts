@@ -1118,6 +1118,7 @@ export async function cloneRepository(
 // ============================================================================
 
 export interface GenerateCommitMessageRequest {
+    model?: string;
     include_unstaged?: boolean;
 }
 
@@ -1126,6 +1127,7 @@ export interface GenerateCommitMessageResponse {
 }
 
 export interface GeneratePRDescriptionRequest {
+    model?: string;
     base_branch?: string;
 }
 
@@ -1205,6 +1207,7 @@ export interface GitOperation {
 }
 
 export interface ShipOperationRequest {
+    generation_model?: string;
     worktree_id?: string;
     session_id?: string;
     merge_method: MergeMethod;

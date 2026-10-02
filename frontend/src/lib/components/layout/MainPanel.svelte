@@ -625,7 +625,7 @@
 		let title = opts.title?.trim();
 		let body = opts.body;
 		if (!title) {
-			const gen = await generatePRDescription(projectId, { base_branch: base }, worktreeId, sessionId);
+			const gen = await generatePRDescription(projectId, { base_branch: base, model: opts.generationModel }, worktreeId, sessionId);
 			title = gen.title;
 			body = body ?? gen.body;
 		}
@@ -670,7 +670,7 @@
 			let message = userMessage;
 			if (!message) {
 				gitOperations.setStep('message', 'running');
-				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, target.worktreeId, target.sessionId ?? target.workerTarget);
+				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged, model: opts.generationModel }, target.worktreeId, target.sessionId ?? target.workerTarget);
 				message = gen.message;
 				gitOperations.setStep('message', 'done');
 			}
@@ -697,7 +697,7 @@
 			let prInfo: { url: string; number: number } | null = null;
 			if (nextStep === 'pr') {
 				gitOperations.setStep('pr', 'running');
-				prInfo = await runCreatePR({}, commitTarget);
+				prInfo = await runCreatePR({ generationModel: opts.generationModel }, commitTarget);
 				gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
 				if (activeSessionId === (target.sessionId ?? null)) git.refreshPrState(true).catch(() => {});
 			}
@@ -819,7 +819,8 @@
 						cleanup,
 						include_unstaged: includeUnstaged,
 						base_branch: base,
-						draft: opts.draft ?? false
+						draft: opts.draft ?? false,
+						generation_model: opts.generationModel
 					}),
 				{ sessionId: origin.sessionId, kind: 'ship' }
 			);

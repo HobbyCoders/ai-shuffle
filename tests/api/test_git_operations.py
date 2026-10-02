@@ -785,8 +785,9 @@ class TestExecuteShip:
         assert op.result["pr_number"] == 9
         mock_github_service.create_pull.assert_not_called()
 
+    @pytest.mark.parametrize("generation_model", [None, "prov:strong:astra"])
     async def test_dirty_commits_and_creates_pr(
-        self, mock_git_service, mock_github_service, mock_worktree_manager
+        self, mock_git_service, mock_github_service, mock_worktree_manager, generation_model
     ):
         op = _ship_op()
         gen_msg = AsyncMock(return_value="feat: ship it")
@@ -803,13 +804,16 @@ class TestExecuteShip:
                 op, working_dir="/wd", worktree_id=None, repo="o/r",
                 feature_branch="feat/x", default_branch="main", base_branch="main",
                 existing_pr=None, dirty=True, include_unstaged=True,
+                generation_model=generation_model,
                 merge_method="squash", draft=True, cleanup=False, session_id=None,
             )
 
         assert op.status == "done"
         assert _step_status(op, "commit") == "done"
         assert _step_status(op, "create_pr") == "done"
-        gen_msg.assert_awaited_once()
+        override = {"model": generation_model} if generation_model else {}
+        gen_msg.assert_awaited_once_with("/wd", True, **override)
+        gen_pr.assert_awaited_once_with("/wd", "main", **override)
         mock_git_service.commit.assert_called_once()
         # draft flag forwarded to create_pull
         assert mock_github_service.create_pull.call_args.args[-1] is True
@@ -953,6 +957,12 @@ class TestFinishEndpoint:
 
 
 class TestShipEndpoint:
+    def test_request_binding_reaches_executor(self, op_client):
+        with patch.object(gitops, "_execute_ship", new_callable=AsyncMock) as execute:
+            resp = op_client.post("/api/v1/projects/p1/git/ship", json={"generation_model": "prov:strong:astra"})
+        assert resp.status_code == 200
+        assert execute.call_args.kwargs["generation_model"] == "prov:strong:astra"
+
     @pytest.mark.parametrize("unpushed,needs_push", [(0, False), (2, True), (None, True)])
     def test_preflight_passes_remote_ahead_state(self, op_client, mock_git_service, unpushed, needs_push):
         mock_git_service.get_status.return_value = {"is_clean": True, "unpushed": unpushed, "ahead": 5}

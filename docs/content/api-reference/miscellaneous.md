@@ -299,7 +299,7 @@ Write a commit message for the current changes with AI.
 
 **Auth:** Required. Optional query `worktree_id` or `session_id`.
 
-Body: `{"include_unstaged": true}` (default `true`; `false` uses only staged changes). Returns `{"message": "..."}`.
+Body: `{"include_unstaged": true}` (default `true`; `false` uses only staged changes). Optional `model` selects a native alias or `prov:<providerId>:<modelId>` for this request; omitted uses the Settings text-generation binding. Returns `{"message": "..."}`.
 
 ### POST /api/v1/projects/{project_id}/git/generate-pr-description
 
@@ -307,7 +307,7 @@ Write a pull-request title and description from the branch's commits with AI.
 
 **Auth:** Required. Optional query `worktree_id` or `session_id`.
 
-Body: `{"base_branch": "main"}` (default `main`). Returns `{"title": "...", "body": "..."}`.
+Body: `{"base_branch": "main"}` (default `main`). Optional `model` selects a native alias or `prov:<providerId>:<modelId>` for this request; omitted uses the Settings text-generation binding. Returns `{"title": "...", "body": "..."}`.
 
 ### POST /api/v1/projects/{project_id}/git/generate-branch-name
 
@@ -337,6 +337,7 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/ship \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `include_unstaged` | boolean | `true` | Stage all changes before committing |
+| `generation_model` | string | Settings default | Native alias or `prov:<providerId>:<modelId>` used for both commit and PR generation |
 | `merge_method` | string | `squash` | `merge`, `squash` or `rebase` |
 | `base_branch` | string | repository default | Base of the pull request |
 | `draft` | boolean | `false` | Open the pull request as a draft |
@@ -539,7 +540,7 @@ Remove the Anthropic API key.
 
 ### GET /api/v1/settings/text-generation
 
-The model and effort behind every internal one-shot AI call: session titles, commit messages, PR descriptions, branch names, and generated agents. Agents do not carry a model, and generation runs outside any session, so this one setting governs all of it.
+The default model and effort for internal one-shot AI calls: session titles, commit messages, PR descriptions, branch names, and generated agents. Generation runs outside any session. Agent/sub-agent builders and Git commit, PR and Ship It options offer a **Generation model** picker to override this binding for one request without changing Settings. An explicit selection uses the chosen model and provider with their default effort; automatic background helpers continue to use this Settings default.
 
 **Response:**
 

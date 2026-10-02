@@ -298,6 +298,10 @@ Draft an agent or a nested agent from a plain-language description. Nothing is s
 
 **Auth:** Required for every generate endpoint.
 
+The **Generation model** picker in the agent and sub-agent builders is a per-request choice. Leave it on **Use Settings default** for the text-generation model and effort configured in Settings. Selecting a model binds both its provider and model for this generation, uses that model's default effort, and does not save anything to Settings or change the generated delegate's model assignment. The same choice is sent when answering clarification questions.
+
+API callers can send a native alias (such as `opus`) or a provider-qualified `prov:<providerId>:<modelId>` in `model`. Omit it (or send an empty value) to use Settings. Send the same binding to `/continue` to retain it through clarification.
+
 ### POST /api/v1/generate/profile
 
 Draft an agent. When the description is vague, the answer may be questions instead of a result.
@@ -313,7 +317,7 @@ curl -X POST http://localhost:8000/api/v1/generate/profile \
 |-------|------|----------|-------------|
 | `description` | string | Yes | 10 to 5000 characters |
 | `reference_material` | string | No | Up to 15000 characters, such as an existing prompt to build on. When given, no questions are asked |
-| `model` | string | No | Model to generate with (see `GET /api/v1/models`) |
+| `model` | string | No | Native alias or `prov:<providerId>:<modelId>` for this request; omitted uses Settings (see `GET /api/v1/models`) |
 | `skip_clarification` | boolean | No | `true` never asks questions. Default `false` |
 
 ```json
