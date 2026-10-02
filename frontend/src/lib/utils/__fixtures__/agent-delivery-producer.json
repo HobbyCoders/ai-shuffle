@@ -1,0 +1,18 @@
+{
+	"held": [
+		{
+			"content": "Found the failing path.",
+			"sender": "worker-a"
+		},
+		{
+			"content": "Tests are red:\n\n- one\n- two",
+			"sender": "worker-b"
+		}
+	],
+	"prompts": {
+		"idle_single": "[agent message from='worker-c' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nDone; report attached.\n[/agent message]",
+		"promotion": "<system-reminder>\nMessages from other agents that arrived while this session was parked on background work. They were held for its next wake and are delivered now because none came in time; the background work may still be running:\n\n[agent message from='worker-a' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nFound the failing path.\n[/agent message]\n\n[agent message from='worker-b' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nTests are red:\n\n- one\n- two\n[/agent message]\n</system-reminder>",
+		"unpark_with_held": "<task-notification>\n  <task-id>worker-a</task-id>\n  <status>completed</status>\n  <summary>worker-a finished</summary>\n  <note>Background work has come to rest. This is an automatic, one-time summary of its result(s). Inspect failures or truncated output and finish outstanding work the user requested; do not invent unrelated work. If the outcome is already reflected in your earlier work, or needs no follow-up, stop after a brief acknowledgement; do not invent next steps or re-explain what already finished.</note>\n</task-notification>\n\n<system-reminder>\nMessages from other agents that arrived while this session was parked on background work (they were not delivered separately):\n\n[agent message from='worker-a' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nFound the failing path.\n[/agent message]\n\n[agent message from='worker-b' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nTests are red:\n\n- one\n- two\n[/agent message]\n</system-reminder>",
+		"urgent_with_held": "<system-reminder>\nMessages from other agents that arrived while this session was parked on background work (they were not delivered separately):\n\n[agent message from='worker-a' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nFound the failing path.\n[/agent message]\n\n[agent message from='worker-b' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nTests are red:\n\n- one\n- two\n[/agent message]\n</system-reminder>\n\n[agent message from='worker-c' \u2014 a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nBlocked: may I edit control.py?\n[/agent message]"
+	}
+}

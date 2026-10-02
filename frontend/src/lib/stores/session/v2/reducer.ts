@@ -19,6 +19,7 @@ import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '..
 import { apiBase } from '$lib/api/runtime';
 import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
+import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -833,6 +834,34 @@ function parseUsageNum(raw: string): number | string | undefined {
 	return Number.isFinite(n) && String(n) === t ? n : t;
 }
 
+const TASK_NOTIFICATION_BLOCK = /<task-notification>[\s\S]*?<\/task-notification>/g;
+
+/** One `agent_message` item per delivered peer message, rendered the same way
+ *  as a live delivery receipt. `sole`: these are the event's only items, so a
+ *  single one keeps the event id. */
+function appendAgentDeliveries(
+	state: V2SessionState,
+	deliveries: AgentDelivery[],
+	eventId: string,
+	stamp: string,
+	seq: number,
+	sole: boolean
+): V2SessionState {
+	let next = state;
+	deliveries.forEach((delivery, i) => {
+		next = appendMessage(next, {
+			id: sole && deliveries.length === 1 ? eventId : `${eventId}-am-${i}`,
+			role: 'system',
+			type: 'system',
+			content: delivery.content,
+			systemSubtype: 'agent_message',
+			systemData: { sender: delivery.sender, content: delivery.content, delivery: 'held' },
+			timestamp: stamp || undefined,
+		}, seq);
+	});
+	return next;
+}
+
 /** Parse one `<task-notification>` block into `systemData` for a system card. */
 function parseTaskNotification(block: string): Record<string, unknown> {
 	const usage: Record<string, number | string> = {};
@@ -1296,6 +1325,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						};
 						next = appendMessage(next, msg, seq);
 					});
+					// Peer messages held while parked ride the same wake, after its
+					// notifications (turn_scheduler::_unpark_prompt).
+					const held = heldAgentDeliveries(content.replace(TASK_NOTIFICATION_BLOCK, ''));
+					if (held) next = appendAgentDeliveries(next, held, event.id, notifStamp, seq, false);
 					// A pump card arms "ok"-ack suppression for the live turn; a purely
 					// own notification (or nothing pumped) clears any stale watch.
 					return anyPump
@@ -1303,6 +1336,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						: { ...next, pendingPumpAck: null, pumpAckBuffer: '' };
 				}
 				// substring present but no complete block parsed → safe fallback.
+			}
+
+			// A wake that delivers peer messages held while the session was parked
+			// (a promotion, or an urgent message after held ones) records them inside
+			// a harness <system-reminder>. Show one attributed agent message per peer
+			// and never the reminder itself (#1618).
+			if (content.includes('<system-reminder>')) {
+				const held = heldAgentDeliveries(content);
+				if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true);
 			}
 
 			// A real typed message (wake-turn notifications returned above): the
