@@ -9,6 +9,7 @@ import '../src/app.css';
 // WebSocket are answered here.
 //   ?fail=1            the worktree session create fails (500)
 //   ?checkout=existing a remembered existing worktree instead of a staged branch
+//   ?checkout=auto     no remembered checkout: the branch is named on send
 //   ?ws=down           the WebSocket never opens
 //   ?hold=sessions     the startup session-list load waits for fixtureRelease()
 //   ?hold=projects     the startup project-catalog load waits for fixtureRelease()
@@ -22,7 +23,7 @@ localStorage.clear();
 sessionStorage.clear();
 localStorage.setItem('ai-shuffle-layout', JSON.stringify({ activeView: { type: 'session', sessionId: null } }));
 localStorage.setItem('ai-shuffle.sessionMode', 'code');
-const checkout = params.get('checkout') === 'existing'
+const checkout = params.get('checkout') === 'auto' ? null : params.get('checkout') === 'existing'
 	? { kind: 'existing', projectId: PROJECT, projectV2Id: null, worktreeId: 'wt-1', branch: BRANCH }
 	: { kind: 'branch', projectId: PROJECT, projectV2Id: null, branch: BRANCH, baseBranch: 'main', createNew: false };
 const picks: Record<string, unknown> = {
@@ -111,7 +112,7 @@ Object.assign(window, {
 	fixtureNotices: () => notifications.current.history.map(n => n.message),
 	fixtureSession: () => {
 		const s = activeSession.current;
-		return { sessionId: s.sessionId, error: s.error, worktreeError: s.worktreeError, worktreeBranch: s.worktreeBranch,
+		return { sessionId: s.sessionId, project: s.project, error: s.error, worktreeError: s.worktreeError, worktreeBranch: s.worktreeBranch,
 			worktreeId: s.worktreeId, messages: s.messages.length, isRestoringSession: s.isRestoringSession };
 	},
 });

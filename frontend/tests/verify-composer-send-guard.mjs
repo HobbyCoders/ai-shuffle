@@ -101,6 +101,23 @@ try {
 			await page.close();
 		}
 		{
+			// The auto-named branch path echoes the message into the transcript
+			// while it creates; a failed create takes the echo back and the
+			// composer gets the text.
+			const { page, errors, session, creates, send, editorText } = await open('?checkout=auto&fail=1', width, height);
+			await page.waitForFunction(() => window.fixtureSession().project === 'shuffle-scratch');
+			await send();
+			await page.waitForFunction(() => !!window.fixtureSession().worktreeError);
+			assert.equal((await creates()).length, 1);
+			assert.equal((await session()).messages, 0, 'the echo is gone');
+			assert.equal((await editorText()).trim(), PROMPT, 'a failed auto-branch create keeps the text');
+			assert.ok(await page.getByText(/Server error creating worktree/).first().isVisible(), 'the reason is on screen');
+			await page.screenshot({ path: `${output}/auto-create-failed-${size}.png` });
+			assert.deepEqual(errors, []);
+			console.log(`PASS ${size}: a failed auto-branch create keeps the text and shows why`);
+			await page.close();
+		}
+		{
 			const { page, errors, session, creates, queries, send, editorText } = await open('?checkout=existing&ws=down', width, height);
 			await page.waitForFunction(() => window.fixtureSession().worktreeId === 'wt-1');
 			await send();
