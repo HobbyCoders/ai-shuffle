@@ -31,6 +31,9 @@ export interface RuntimeRef {
 	automations: { id: string; name: string; is_enabled: boolean }[];
 }
 
+/** `busy` while a batch install runs. */
+export const BATCH = 'batch-install';
+
 export type RuntimeAction = 'install' | 'enable' | 'disable' | 'uninstall' | 'rollback';
 
 export interface PluginEntry {
@@ -310,6 +313,19 @@ export class PluginsModel {
 				await this.loadDetails(id);
 			},
 			'Could not install plugin.'
+		);
+	}
+
+	/** Install several packages in one request (Explore's batch install). */
+	installMany(ids: string[]): Promise<boolean> {
+		if (!ids.length) return Promise.resolve(true);
+		return this.#run(
+			BATCH,
+			async () => {
+				await pluginsApi.installPluginsBatch(ids);
+				await this.load();
+			},
+			'Could not install plugins.'
 		);
 	}
 

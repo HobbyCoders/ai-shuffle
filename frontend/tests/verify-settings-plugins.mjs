@@ -74,53 +74,59 @@ async function harness(viewport, touch) {
 	const errors = [];
 	page.on('pageerror', (e) => errors.push(e.message));
 
-	// 1. The deep link lands on Settings > Plugins with the hub mounted.
+	const index = page.getByRole('navigation', { name: 'Settings' });
+	const noOverflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+	const item = (id) => page.locator(`[data-settings-item="${id}"]`);
+
+	// 1. The deep link lands on Settings > Plugins, with the draft under Needs review.
 	await page.goto(`${base}?tab=plugins`);
-	const nav = page.getByRole('navigation', { name: 'Settings sections' });
-	const hub = page.getByRole('region', { name: 'Plugins' });
-	await hub.waitFor();
-	check(await page.getByRole('heading', { name: 'Plugins', level: 2 }).isVisible(), 'plugin hub heading visible');
-	if (await nav.isVisible()) {
-		const item = nav.getByRole('button', { name: 'Plugins' });
-		check(await item.evaluate((el) => el.classList.contains('on')), 'Plugins is the active Settings section');
+	const draftRow = item('plugin:release-notes@authored');
+	await draftRow.waitFor();
+	if (await index.isVisible()) {
+		const current = await index.getByRole('button', { name: /^Plugins/ }).getAttribute('aria-current');
+		check(current === 'page', 'Plugins is the current Settings category', current);
 	}
-	const row = hub.locator('.plugin-row', { hasText: 'release-notes' });
-	await row.waitFor();
-	check((await row.innerText()).includes('Needs review'), 'authored plugin marked as needing review', await row.innerText());
-	check(!(await hub.locator('.plugin-row', { hasText: 'reviewkit' }).innerText()).includes('Needs review'), 'marketplace plugin not marked');
-	const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-	check(overflow <= 0, 'no horizontal overflow on the list', overflow);
+	// Which group label precedes each row in the list.
+	const groupOf = (id) => page.evaluate((id) => {
+		let el = document.querySelector(`[data-settings-item="${id}"]`);
+		while (el && !el.classList?.contains('st-lg')) el = el.previousElementSibling;
+		return el?.textContent?.trim() ?? null;
+	}, id);
+	check((await groupOf('plugin:release-notes@authored')) === 'Needs review', 'authored plugin listed under Needs review', await groupOf('plugin:release-notes@authored'));
+	check((await groupOf('plugin:reviewkit@mp')) !== 'Needs review', 'marketplace plugin not under Needs review', await groupOf('plugin:reviewkit@mp'));
+	check((await noOverflow()) <= 0, 'no horizontal overflow on the list', await noOverflow());
 	await shot(page, '1-list');
 
-	// 2. The review lists every component, with the MCP server's command line.
-	await row.locator('.entry').click();
+	// 2. The draft opens on its review: version, every component, the MCP command line.
+	await draftRow.click();
 	const review = page.getByTestId('plugin-review');
 	await review.waitFor();
 	const text = await review.innerText();
-	check(text.includes('version 0.1.0'), 'review names the version', text);
-	check(text.includes('Skill') || text.includes('skill draft-notes'), 'review lists the skill', text);
+	check(text.includes('0.1.0'), 'review names the version', text);
+	check(/Skill\s+draft-notes/i.test(text), 'review lists the skill', text);
 	check(text.includes('python ${PLUGIN_ROOT}/srv.py'), 'review shows the MCP command line', text);
-	const reviewOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-	check(reviewOverflow <= 0, 'no horizontal overflow on the review', reviewOverflow);
+	check((await noOverflow()) <= 0, 'no horizontal overflow on the review', await noOverflow());
 	await shot(page, '2-review');
 
-	// 3. Approving sends exactly the reviewed hash, then the review is gone.
-	await page.getByRole('button', { name: 'Approve and enable' }).click();
+	// 3. Approving (with its inline confirm) sends exactly the reviewed hash, then the review is gone.
+	await review.getByRole('button', { name: 'Approve and enable' }).click();
+	await review.getByRole('button', { name: 'Approve', exact: true }).click();
 	await review.waitFor({ state: 'detached' });
 	check(state.enables.length === 1, 'one enable request', state.enables);
 	check(JSON.stringify(state.enables[0].body) === JSON.stringify({ content_hash: 'sha256:reviewed' }), 'enable carries the reviewed hash', state.enables[0]);
 	check(state.enables[0].path.includes('release-notes@authored') || state.enables[0].path.includes('release-notes%40authored'), 'enable targets the authored plugin', state.enables[0].path);
 	await shot(page, '3-approved');
 
-	// 4. Without a deep link Settings opens on Account, and Plugins is one click away.
+	// 4. Without a deep link (and a fresh session: Settings reopens where it was
+	// left within a session) Plugins is not current, and it is one click away.
+	await page.evaluate(() => sessionStorage.clear());
 	await page.goto(base);
-	await nav.waitFor().catch(() => {});
-	if (await nav.isVisible()) {
-		check(!(await nav.getByRole('button', { name: 'Plugins' }).evaluate((el) => el.classList.contains('on'))), 'Plugins not active without a deep link');
-		await nav.getByRole('button', { name: 'Plugins' }).click();
-		await page.getByRole('region', { name: 'Plugins' }).waitFor();
-		check(true, 'Plugins section opens from the rail');
-	}
+	await index.waitFor();
+	const plugins = index.getByRole('button', { name: /^Plugins/ });
+	check((await plugins.getAttribute('aria-current')) !== 'page', 'Plugins not current without a deep link');
+	await plugins.click();
+	await item('plugin:reviewkit@mp').waitFor();
+	check(true, 'Plugins opens from the Settings index');
 	check(errors.length === 0, 'no page errors', errors);
 	await context.close();
 }

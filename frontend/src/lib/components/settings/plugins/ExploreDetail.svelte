@@ -2,9 +2,10 @@
 	/**
 	 * ExploreDetail: every app and agent plugin this worker can add, from the
 	 * official connector runtimes and the plugin sources. Search, filter by
-	 * Apps or Agent plugins, install a package in place, or open an item.
+	 * Apps or Agent plugins, install a package in place (or pick several and
+	 * install them together), or open an item.
 	 */
-	import { Download, RefreshCw } from 'lucide-svelte';
+	import { Check, Download, RefreshCw } from 'lucide-svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
@@ -15,7 +16,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
 	import SearchBox from '../models/SearchBox.svelte';
-	import { getPluginsModel, plural, type PluginEntry } from './plugins-model.svelte';
+	import { BATCH, getPluginsModel, plural, type PluginEntry } from './plugins-model.svelte';
 	import { EXPLORE_ICON, PACKAGE_ICON, REVIEW_ICON, connectionIcon } from './icons';
 	import type { StatusTone } from '$lib/settings/types';
 
@@ -30,6 +31,16 @@
 	const access = getSettingsAccess();
 	let query = $state('');
 	let kind = $state<Kind>('all');
+	/** Packages picked for batch install, by id. */
+	let picked = $state<string[]>([]);
+
+	function togglePick(id: string) {
+		picked = picked.includes(id) ? picked.filter((p) => p !== id) : [...picked, id];
+	}
+
+	async function installPicked() {
+		if (await model.installMany(picked)) picked = [];
+	}
 
 	const q = $derived(query.trim().toLowerCase());
 	const shown = $derived(
@@ -85,7 +96,15 @@
 	category="plugins"
 	item="explore"
 >
-	<RowGroup title={q ? 'Search results' : 'Browse'} count={shown.length} bare>
+	{#snippet batchActions()}
+		{#if picked.length && !access.readOnly}
+			<button type="button" class="st-btn primary sm" disabled={!!model.busy} onclick={installPicked}>
+				<Download />{model.busy === BATCH ? 'Installing…' : `Install (${picked.length})`}
+			</button>
+			<button type="button" class="st-btn ghost sm" disabled={!!model.busy} onclick={() => (picked = [])}>Clear</button>
+		{/if}
+	{/snippet}
+	<RowGroup title={q ? 'Search results' : 'Browse'} count={shown.length} actions={batchActions} bare>
 		<SearchBox bind:value={query} placeholder="Search plugins" />
 		<div class="filters">
 			<Segmented options={KINDS} bind:value={kind} size="sm" label="Plugin kind" />
@@ -119,6 +138,16 @@
 							<span class="meta">{s.text}</span>
 						</button>
 						{#if entry.kind === 'package' && !entry.installed && !access.readOnly}
+							<button
+								type="button"
+								class="pick"
+								aria-pressed={picked.includes(entry.id)}
+								aria-label="Select {entry.name} for batch install"
+								disabled={!!model.busy}
+								onclick={() => togglePick(entry.id)}
+							>
+								{#if picked.includes(entry.id)}<Check />{/if}
+							</button>
 							<button
 								type="button"
 								class="st-btn sm"
@@ -200,6 +229,26 @@
 		font-size: 12px;
 		color: var(--st-subtle);
 		white-space: nowrap;
+	}
+	.pick {
+		width: 18px;
+		height: 18px;
+		flex: none;
+		display: grid;
+		place-items: center;
+		padding: 0;
+		border: 1px solid var(--st-border-strong);
+		border-radius: 4px;
+		background: var(--st-muted);
+		color: var(--st-pfg);
+	}
+	.pick[aria-pressed='true'] {
+		background: var(--st-primary);
+		border-color: var(--st-primary);
+	}
+	.pick :global(svg.lucide) {
+		width: 12px;
+		height: 12px;
 	}
 	.st-empty {
 		padding: 16px 2px;

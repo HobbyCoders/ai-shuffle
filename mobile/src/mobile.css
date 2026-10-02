@@ -516,11 +516,6 @@ html:root[data-platform='mobile'] .sb-top { padding-top: env(safe-area-inset-top
 html:root[data-platform='mobile'] .sb-head { height: 56px;
 }
 
-/* ── frontend/src/lib/components/layout/build/BuildPluginList.svelte ───────── */
-
-html:root[data-platform='mobile'] .bpl-actions--hover { opacity: 1;
-}
-
 /* ── frontend/src/lib/components/layout/sidebar/WorkspaceCustomize.svelte ──── */
 
 html:root[data-platform='mobile'] .crow { height: 44px;

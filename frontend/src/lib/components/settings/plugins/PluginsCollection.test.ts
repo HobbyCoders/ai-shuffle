@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
 	getAvailablePlugins: vi.fn(),
 	getPluginDetails: vi.fn(),
 	installPlugin: vi.fn(),
+	installPluginsBatch: vi.fn(),
 	uninstallPlugin: vi.fn(),
 	enablePlugin: vi.fn(),
 	disablePlugin: vi.fn(),
@@ -508,6 +509,61 @@ describe('sources and updates', () => {
 		});
 		await fireEvent.click(within(pane).getByRole('button', { name: 'Add' }));
 		await waitFor(() => expect(m.addMarketplace).toHaveBeenCalledWith('https://x/more.git', 'more'));
+	});
+});
+
+// Ported from BuildPluginList.test.ts (main's hub mounted it as its Manage view).
+describe('ported from the hub manage view', () => {
+	it('batch-installs the selected plugins from Explore', async () => {
+		m.getAvailablePlugins.mockResolvedValue([
+			...responses.available,
+			{ id: 'docs@mp', name: 'docs', description: 'Docs helpers' }
+		]);
+		m.installPluginsBatch.mockResolvedValue([]);
+		await show('explore');
+		const pane = detail();
+		expect(within(pane).queryByRole('button', { name: /^Install \(/ })).toBeNull();
+		const pick = within(pane).getByRole('button', { name: 'Select extra for batch install' });
+		await fireEvent.click(pick);
+		expect(pick.getAttribute('aria-pressed')).toBe('true');
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Select docs for batch install' }));
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Install (2)' }));
+		await waitFor(() => expect(m.installPluginsBatch).toHaveBeenCalledWith(['extra@mp', 'docs@mp']));
+		await waitFor(() => expect(within(pane).queryByRole('button', { name: /^Install \(/ })).toBeNull());
+		expect(m.getInstalledPlugins.mock.calls.length).toBeGreaterThan(1);
+	});
+
+	it('shows a failed toggle and puts the switch back', async () => {
+		m.disablePlugin.mockRejectedValue({ detail: 'Plugin is busy' });
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		const sw = within(pane).getByRole('switch', { name: 'Enabled' });
+		await fireEvent.click(sw);
+		await waitFor(() => expect(screen.getByText('Plugin is busy')).toBeTruthy());
+		await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'));
+	});
+
+	it('keeps the add-source form filled when the worker refuses it', async () => {
+		m.addMarketplace.mockRejectedValue({ detail: 'not a git repository' });
+		await show('sources');
+		const pane = detail();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Add source' }));
+		await fireEvent.input(within(pane).getByRole('textbox', { name: 'Name' }), { target: { value: 'team' } });
+		await fireEvent.input(within(pane).getByRole('textbox', { name: 'Git URL' }), { target: { value: 'https://x' } });
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Add' }));
+		await waitFor(() => expect(m.addMarketplace).toHaveBeenCalledOnce());
+		await waitFor(() => expect(screen.getByText('not a git repository')).toBeTruthy());
+		expect((within(pane).getByRole('textbox', { name: 'Git URL' }) as HTMLInputElement).value).toBe('https://x');
+	});
+
+	it('says so when plugin details fail to load, and the list stays', async () => {
+		m.getInstalledPlugins.mockResolvedValue([
+			...responses.installed,
+			{ id: 'broken@mp', name: 'broken', description: 'x', enabled: true }
+		]);
+		await show('plugin:broken@mp');
+		await waitFor(() => expect(within(detail()).getByRole('alert').textContent).toContain('Not found'));
+		expect(screen.getAllByText('toolkit').length).toBeGreaterThan(0);
 	});
 });
 
