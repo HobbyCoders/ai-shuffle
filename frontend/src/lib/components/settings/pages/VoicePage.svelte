@@ -40,8 +40,6 @@
 		{ value: 'toggle', label: 'Toggle' }
 	];
 
-	// Switch, Segmented and SelectField keep the value they were set to; a
-	// failed save redraws them ({#key voice.failures}) to show the saved value.
 	const voice = new VoiceState();
 	const preview = new VoicePreview();
 	let promptsOpen = $state(false);
@@ -142,14 +140,12 @@
 			value={s ? micMode : undefined}
 			onReset={() => voice.save({ voice_input_mode: 'auto' })}
 		>
-			{#key voice.failures}
-				<Segmented
-					options={MIC_OPTIONS}
-					value={micMode}
-					disabled={locked}
-					onchange={(mode) => voice.save({ voice_input_mode: mode })}
-				/>
-			{/key}
+			<Segmented
+				options={MIC_OPTIONS}
+				value={micMode}
+				disabled={locked}
+				onchange={(mode) => voice.save({ voice_input_mode: mode })}
+			/>
 		</SettingRow>
 		{#if micMode === 'auto'}
 			<SettingRow
@@ -189,9 +185,7 @@
 			value={s ? callsOn : undefined}
 			onReset={() => voice.save({ voice_mode_enabled: false })}
 		>
-			{#key voice.failures}
-				<Switch checked={callsOn} disabled={locked} onchange={(v) => voice.save({ voice_mode_enabled: v })} />
-			{/key}
+			<Switch checked={callsOn} disabled={locked} onchange={(v) => voice.save({ voice_mode_enabled: v })} />
 		</SettingRow>
 		<SettingRow
 			id="voice.voice"
@@ -212,18 +206,16 @@
 				</button>
 			{/if}
 			{#if s}
-				{#key voice.failures}
-				<SelectField
-					value={s.voice_voice}
-					options={voiceOptions}
-					width={180}
-					disabled={locked || !details}
-					onchange={(id) => {
-						preview.stop();
-						void voice.save({ voice_voice: id });
-					}}
-				/>
-				{/key}
+			<SelectField
+				value={s.voice_voice}
+				options={voiceOptions}
+				width={180}
+				disabled={locked || !details}
+				onchange={(id) => {
+					preview.stop();
+					void voice.save({ voice_voice: id });
+				}}
+			/>
 			{:else}
 				<ValueText value={unavailable} />
 			{/if}
@@ -232,15 +224,13 @@
 			{#if providers === null}
 				<ValueText value={voice.status === 'forbidden' ? FORBIDDEN_TEXT : 'OpenAI API key'} />
 			{:else if providers.length > 1 && effectiveProvider}
-				{#key voice.failures}
-					<SelectField
-						value={effectiveProvider.id}
-						options={providers.map((p) => ({ value: p.id, label: p.name }))}
-						width={220}
-						disabled={locked}
-						onchange={(id) => voice.save({ voice_provider_id: id })}
-					/>
-				{/key}
+				<SelectField
+					value={effectiveProvider.id}
+					options={providers.map((p) => ({ value: p.id, label: p.name }))}
+					width={220}
+					disabled={locked}
+					onchange={(id) => voice.save({ voice_provider_id: id })}
+				/>
 			{:else if effectiveProvider}
 				<LinkValue
 					label={effectiveProvider.name}

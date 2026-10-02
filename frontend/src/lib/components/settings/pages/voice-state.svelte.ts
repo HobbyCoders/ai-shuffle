@@ -51,8 +51,6 @@ export class VoiceState {
 	/** Last load or save failure, shown under the page's groups. */
 	error = $state('');
 	saving = $state(false);
-	/** Bumps on every failed save, so the page can redraw controls that showed the unsaved value. */
-	failures = $state(0);
 	/** OpenAI providers that can fund GPT Live calls; null until loaded or when the read failed. */
 	providers = $state<VoiceProvider[] | null>(null);
 
@@ -115,7 +113,6 @@ export class VoiceState {
 		} catch (err) {
 			if (this.current()) {
 				this.error = message(err, 'Could not save voice settings.');
-				this.failures += 1;
 			}
 			return false;
 		} finally {

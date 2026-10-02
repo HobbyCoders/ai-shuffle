@@ -69,13 +69,12 @@ describe('VoiceState sync', () => {
 		expect(voiceApi.save).not.toHaveBeenCalled();
 	});
 
-	it('counts failed saves so controls can redraw', async () => {
+	it('reports a failed save so controls can revert', async () => {
 		const state = new VoiceState();
 		voiceApi.save.mockRejectedValue({ detail: 'Nope' });
 		voiceApi.load.mockResolvedValue(settings('marin'));
 		expect(await state.save({ voice_voice: 'cedar' })).toBe(false);
 		expect(state.error).toBe('Nope');
-		expect(state.failures).toBe(1);
 	});
 
 	it('lists only providers that can fund GPT Live calls', async () => {

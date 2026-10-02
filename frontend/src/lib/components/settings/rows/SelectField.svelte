@@ -13,16 +13,18 @@
 <script lang="ts">
 	/**
 	 * SelectField: a native select. `options` is a flat list or groups
-	 * (`{ label, options }`, label '' for ungrouped leading options).
+	 * (`{ label, options }`, label '' for ungrouped leading options). An
+	 * `onchange` that reports a failed save (see `settle`) restores the
+	 * previous value.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
-	import { controlAria, getRowContext } from './row-context';
+	import { controlAria, getRowContext, settle, type ChangeResult } from './row-context';
 
 	interface Props {
 		value: string;
 		options?: readonly (SelectOption | string)[];
 		groups?: readonly SelectGroup[];
-		onchange?: (value: string) => void;
+		onchange?: (value: string) => ChangeResult;
 		disabled?: boolean;
 		label?: string;
 		mono?: boolean;
@@ -54,8 +56,13 @@
 	disabled={disabled || access.readOnly}
 	{...controlAria(row, label)}
 	onchange={(e) => {
-		value = e.currentTarget.value;
-		onchange?.(value);
+		const select = e.currentTarget;
+		const before = value;
+		value = select.value;
+		settle(onchange?.(value), () => {
+			value = before;
+			select.value = before;
+		});
 	}}
 >
 	{#if groups}

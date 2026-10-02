@@ -90,8 +90,6 @@
 
 	/* ---------- updates ---------- */
 
-	// Switch and Segmented keep the value they were set to; a failed save
-	// redraws them ({#key failures}) so they show the saved value again.
 	const updates = new UpdatesState();
 	let resultsOpen = $state(false);
 	const allow = $derived(updates.policy?.allow_updates ?? true);
@@ -301,9 +299,7 @@
 			value={updates.policy?.allow_updates}
 			onReset={() => updates.set('allow_updates', true)}
 		>
-			{#key updates.failures}
-				<Switch checked={allow} disabled={updatesLocked} onchange={(v) => updates.set('allow_updates', v)} />
-			{/key}
+			<Switch checked={allow} disabled={updatesLocked} onchange={(v) => updates.set('allow_updates', v)} />
 		</SettingRow>
 		<SettingRow
 			id="system.updateAll"
@@ -311,13 +307,11 @@
 			value={updates.policy?.update_all_workers}
 			onReset={() => updates.set('update_all_workers', false)}
 		>
-			{#key updates.failures}
-				<Switch
-					checked={updates.policy?.update_all_workers ?? false}
-					disabled={updatesLocked || !allow}
-					onchange={(v) => updates.set('update_all_workers', v)}
-				/>
-			{/key}
+			<Switch
+				checked={updates.policy?.update_all_workers ?? false}
+				disabled={updatesLocked || !allow}
+				onchange={(v) => updates.set('update_all_workers', v)}
+			/>
 		</SettingRow>
 		<SettingRow
 			id="system.checkUpdates"

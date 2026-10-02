@@ -100,8 +100,6 @@ export class UpdatesState {
 	status = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
 	saving = $state(false);
 	error = $state('');
-	/** Bumps on every failed save, so the page can redraw controls that showed the unsaved value. */
-	failures = $state(0);
 
 	/** Check results, null until a check runs. */
 	rows = $state<UpdateResultRow[] | null>(null);
@@ -134,20 +132,21 @@ export class UpdatesState {
 		}
 	}
 
-	async set(key: keyof UpdatePolicy, value: boolean): Promise<void> {
-		if (!this.policy || this.saving) return;
+	async set(key: keyof UpdatePolicy, value: boolean): Promise<boolean> {
+		if (!this.policy || this.saving) return false;
 		this.saving = true;
 		this.error = '';
 		try {
 			const next = await api.put<UpdatePolicy>('/settings/application-updates', { [key]: value });
-			if (!this.#alive) return;
+			if (!this.#alive) return false;
 			this.policy = { allow_updates: next.allow_updates, update_all_workers: next.update_all_workers };
 			window.dispatchEvent(new Event(POLICY_EVENT));
 			flashSaved();
+			return true;
 		} catch (cause) {
-			if (!this.#alive) return;
+			if (!this.#alive) return false;
 			this.error = getErrorMessage(cause, 'Could not save update setting');
-			this.failures += 1;
+			return false;
 		} finally {
 			this.saving = false;
 		}

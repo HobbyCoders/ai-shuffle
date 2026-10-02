@@ -2,16 +2,18 @@
 	/**
 	 * Segmented: a short set of exclusive choices as pressed buttons
 	 * ("Light | Dark | System"). Options are strings or { value, label }.
+	 * An `onchange` that reports a failed save (see `settle`) restores the
+	 * previous choice.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
-	import { getRowContext } from './row-context';
+	import { getRowContext, settle, type ChangeResult } from './row-context';
 
 	type Option = T | { value: T; label: string; disabled?: boolean };
 
 	interface Props {
 		options: readonly Option[];
 		value: T;
-		onchange?: (value: T) => void;
+		onchange?: (value: T) => ChangeResult;
 		size?: 'md' | 'sm';
 		disabled?: boolean;
 		/** Group name when not inside a SettingRow. */
@@ -29,8 +31,9 @@
 
 	function pick(next: T) {
 		if (off || next === value) return;
+		const before = value;
 		value = next;
-		onchange?.(next);
+		settle(onchange?.(next), () => (value = before));
 	}
 </script>
 

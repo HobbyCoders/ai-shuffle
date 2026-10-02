@@ -2,14 +2,15 @@
 	/**
 	 * Switch: the only on/off control in Settings. `role="switch"` with
 	 * `aria-checked`. Inside a SettingRow it is labelled by the row; elsewhere
-	 * pass `label`. Disabled while Settings is read-only.
+	 * pass `label`. Disabled while Settings is read-only. An `onchange`
+	 * that reports a failed save (see `settle`) flips it back.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
-	import { controlAria, getRowContext } from './row-context';
+	import { controlAria, getRowContext, settle, type ChangeResult } from './row-context';
 
 	interface Props {
 		checked: boolean;
-		onchange?: (checked: boolean) => void;
+		onchange?: (checked: boolean) => ChangeResult;
 		size?: 'md' | 'sm';
 		disabled?: boolean;
 		/** Accessible name when not inside a SettingRow (or to override it). */
@@ -24,8 +25,9 @@
 
 	function toggle() {
 		if (off) return;
-		checked = !checked;
-		onchange?.(checked);
+		const before = checked;
+		checked = !before;
+		settle(onchange?.(checked), () => (checked = before));
 	}
 </script>
 

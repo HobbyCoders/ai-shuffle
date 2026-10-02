@@ -44,3 +44,22 @@ export function controlAria(row: RowContext | undefined, label: string | undefin
 	if (row) return { 'aria-labelledby': row.labelId, 'aria-describedby': row.hintId };
 	return {};
 }
+
+/**
+ * What a control's `onchange` may return. A promise that resolves to `false`
+ * or rejects means the save failed, and the control goes back to the value
+ * it showed before the change. Plain return values are ignored, so
+ * `(v) => (on = v)` is safe.
+ */
+export type ChangeResult = unknown;
+
+/** Calls `revert` when an `onchange` result reports a failed save. */
+export function settle(result: ChangeResult, revert: () => void): void {
+	if (!(result instanceof Promise)) return;
+	result.then(
+		(ok) => {
+			if (ok === false) revert();
+		},
+		() => revert()
+	);
+}
