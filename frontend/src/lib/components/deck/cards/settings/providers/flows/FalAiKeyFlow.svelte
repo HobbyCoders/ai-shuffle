@@ -2,7 +2,7 @@
 	import { Loader2 } from 'lucide-svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { providers } from '$lib/stores/providers.svelte';
-	import AIToolsSettings from '../../AIToolsSettings.svelte';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
 		onDone: () => void;
@@ -41,9 +41,9 @@
 
 <div class="space-y-4">
 	{#if saved}
-		<p role="status" class="text-sm text-muted-foreground">{verified ? 'API key saved and verified.' : 'API key saved, but verification was unavailable.'} Choose your media models below. Changes save automatically.</p>
-		<AIToolsSettings />
-		<div class="flex justify-end">
+		<p role="status" class="text-sm text-muted-foreground">{verified ? 'API key saved and verified.' : 'API key saved, but verification was unavailable.'} Pick media models in Default models.</p>
+		<div class="flex justify-end gap-3">
+			<button type="button" onclick={() => openSettings({ category: 'models', item: 't2i' })} class="btn btn-secondary px-4 py-2">Default models</button>
 			<button type="button" onclick={onDone} class="btn btn-primary px-4 py-2">Done</button>
 		</div>
 	{:else}

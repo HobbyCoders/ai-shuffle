@@ -17,7 +17,7 @@
 	import { onMount } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { platform } from '$lib/stores/platform.svelte';
-	import AIToolsSettings from '../AIToolsSettings.svelte';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -80,7 +80,10 @@
 
 		<!-- Body -->
 		<div class="flex-1 overflow-y-auto p-6">
-			<AIToolsSettings />
+			<!-- Media models moved to Settings > Default models (settings rebuild, slice C). -->
+			<button type="button" class="btn btn-primary px-4 py-2" onclick={() => { onClose(); openSettings({ category: 'models', item: 't2i' }); }}>
+				Open Default models
+			</button>
 		</div>
 	</div>
 </div>
