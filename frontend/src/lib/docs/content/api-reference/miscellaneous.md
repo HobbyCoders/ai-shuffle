@@ -711,7 +711,7 @@ The update policy for your account and the updater status of this worker.
 }
 ```
 
-`allow_updates` is `true` until you turn it off. `update_all_workers` sends update actions to every worker on the account instead of only this one. `supported` is `false` when this install has no updater; `phase` is then `idle`. Otherwise `phase` is the updater's state, such as `checking`, `available`, `downloading`, `ready` (downloaded, waiting to install) or `error`. `version` is the update on offer and `running_version` the build now running. When present, `message`, `release` and `notes` describe the release.
+`allow_updates` is `true` until you turn it off. `update_all_workers` sends update actions to every worker on the account instead of only this one. `supported` is `false` when this install has no updater; `phase` is then `idle`. Otherwise `phase` is the updater's state, such as `checking`, `available`, `downloading`, `ready` (downloaded, waiting to install) or `error`. `version` is the update on offer and `running_version` the build now running. When present, `message`, `release` and `notes` describe the release. `request_pending` is `true` while a queued action has not been taken by the updater yet; a desktop takes one on its next report, within about 30 seconds.
 
 ### PUT /api/v1/settings/application-updates
 
@@ -754,7 +754,7 @@ curl -X POST http://localhost:8000/api/v1/settings/application-updates \
 }
 ```
 
-With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, nothing to download, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
+With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. A `download` sent to a worker that has not found the update yet (phase `idle`) is still queued: that worker checks first and downloads only if the check finds an update, and its `reason` says so. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, an update already downloaded, a newer runtime required, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
 
 ### GET /api/v1/settings/application-updates/workers
 
@@ -768,7 +768,7 @@ Update status of this worker and, when `update_all_workers` is on or an install 
   "update_all_workers": true,
   "operation": null,
   "workers": [
-    {"device_id": "…", "device_name": "Current worker", "is_self": true, "online": true, "supported": true, "allow_updates": true, "phase": "ready", "version": "…", "running_version": "…", "percent": null, "message": null, "error": null, "reason": null}
+    {"device_id": "…", "device_name": "Current worker", "is_self": true, "online": true, "supported": true, "allow_updates": true, "phase": "ready", "version": "…", "running_version": "…", "percent": null, "message": null, "error": null, "reason": null, "request_pending": false}
   ]
 }
 ```

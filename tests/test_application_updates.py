@@ -77,9 +77,33 @@ def test_signed_download_stages_then_explicit_restart_and_health_commit(feed):
     updater.activating()
     updater.healthy()
     assert updater.state == {"active": B}
-    offline = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {})
+    # #1623: the idle status after an install must not read as work in progress.
+    status = json.loads((updater.root / "status.json").read_text())
+    assert status["phase"] == "idle" and not policy.IN_PROGRESS.search(status["message"])
+    offline =ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {})
     assert offline.launch({})[1] == cwd
     assert all("authorization" not in request.headers for request in requests)
+
+
+def test_fanned_out_download_stages_on_a_container_that_never_checked(feed, monkeypatch):
+    # #1623 live test: the container checks on its own once a day, so a peer
+    # usually has not seen the new revision when another worker fans out the
+    # download. The app must queue it; the supervisor checks, then downloads.
+    from app.core import update_workers
+    updater, publish, _, _, _ = feed
+    publish()
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(updater.root))
+    monkeypatch.delenv("SHUFFLE_UPDATE_POLICY_FILE", raising=False)
+    monkeypatch.setattr(policy.database, "get_system_setting", lambda key: None)
+    update_workers._receipts.clear()
+    assert policy.status()["phase"] == "idle"
+    result = update_workers.local_action("download", "initiator:request")
+    assert result["accepted"], result
+    assert policy.status()["request_pending"] is True
+    updater.service()
+    assert updater.state == {"pending": B}
+    status = policy.status()
+    assert status["phase"] == "ready" and status["request_pending"] is False
 
 
 def test_lease_goes_to_hub_manifest_and_archive_requests_only(feed):
