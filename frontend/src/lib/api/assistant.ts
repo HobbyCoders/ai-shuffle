@@ -32,8 +32,9 @@ export type SuggestedConnection = 'gmail' | 'github';
 /**
  * Background research has no owner controls: the server runs it whenever an
  * agent is set, its safety guard is up and a source is opted in (`ready`).
- * `enabled` mirrors that; the server still returns legacy limit and usage
- * fields for older clients, and this UI ignores them.
+ * `enabled` mirrors that. Research limits are server-side only and are not
+ * in this response. A run that finds something posts a brief into the home
+ * conversation.
  */
 export interface AssistantState {
  agent_id: string | null;

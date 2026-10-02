@@ -199,7 +199,7 @@ async def update_source(connector_id: str, body: SourceUpdate):
 
 @router.get("/activity")
 async def read_activity(limit: int = Query(50, ge=1, le=100)):
-    return await run_sync(store.get_activity, service.assistant_id(), limit)
+    return await run_sync(service.activity, limit)
 
 
 @router.get("/agents")

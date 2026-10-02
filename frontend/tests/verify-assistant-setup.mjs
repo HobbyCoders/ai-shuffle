@@ -26,7 +26,7 @@ const browser = await chromium.launch({
 	args: ['--no-sandbox', '--disable-gpu'],
 });
 const url = process.env.ASSISTANT_FIXTURE_URL || 'http://127.0.0.1:5741/tests/assistant-setup.html';
-// The server still returns these legacy fields; the page must not show them.
+// Servers before #1650 still return these legacy fields; the page must not show them.
 const LEGACY = {
 	max_runs_per_day: 12, max_concurrent_runs: 1, max_turns: 3, timeout_seconds: 180, max_cost_per_run: 1, max_cost_per_day: 5,
 	paused: false, cost_accounting: 'reported_after_run_not_hard_cap', usage: { runs_today: 7, reported_cost_today: 0.42, in_flight_runs: 1 },

@@ -173,8 +173,24 @@ def test_switches_and_limits_are_accepted_but_ignored(client, assistant_fixture,
         "max_cost_per_run": 50, "max_cost_per_day": 900})
     assert response.status_code == 200
     state = response.json()
-    assert {k: state[k] for k in store.LIMIT_KEYS} == store.RESEARCH_LIMITS
     assert state["status"] == "ready" and state["enabled"] and not state["paused"]
+    # The limits stay server-side: not in the response, and admission still
+    # uses the fixed values whatever an older client sent.
+    for body in (state, client.get("/api/v1/assistant").json()):
+        assert not set(store.LIMIT_KEYS) & set(body)
+        assert "usage" not in body and "cost_accounting" not in body
+    assert store.research_limits(store.get_state(service.assistant_id())) == store.RESEARCH_LIMITS
+
+
+def test_activity_rows_leave_out_research_limits(client, assistant_fixture, monkeypatch):
+    from tests.db.test_assistant_store import events
+    monkeypatch.setattr(service, "_guard_version", 1)
+    events()
+    run = store.admit_run(service.assistant_id())
+    assert run["limits"]["max_turns"] == store.RESEARCH_LIMITS["max_turns"]  # Kept server-side.
+    rows = client.get("/api/v1/assistant/activity").json()
+    assert [row["id"] for row in rows] == [run["id"]]
+    assert not {"limits", "deadline_at", "brief"} & set(rows[0])
 
 
 def test_owner_corrects_the_detected_introduction_and_can_restore_it(client, assistant_fixture):
