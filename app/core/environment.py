@@ -361,6 +361,11 @@ def inject_claude_code_auth(
       ``ANTHROPIC_AUTH_TOKEN`` from the host or the profile env is kept away,
       so the CLI runs on the sign-in the user completed with ``claude auth
       login``. The CLI's own credential files are never read or touched here.
+    - ``off``: Claude is turned off. Nothing is injected and every Anthropic
+      credential variable (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``,
+      ``CLAUDE_CODE_OAUTH_TOKEN``) is kept away; the credential gate refuses
+      the turn before a CLI starts, so this only guards a spawn that slipped
+      past it.
 
     Inherited host variables are removed through fluid's
     ``FLUID_CHILD_ENV_UNSET`` marker, which the delegated loop honors and never
@@ -387,6 +392,8 @@ def inject_claude_code_auth(
             # key from somewhere else stand in for the user's.
             unset = unset + ("ANTHROPIC_API_KEY",)
             env.pop("ANTHROPIC_API_KEY", None)
+    elif mode == claude_auth_mode.MODE_OFF:
+        unset = claude_auth_mode.OFF_UNSET
     else:
         unset = claude_auth_mode.SUBSCRIPTION_UNSET
     for name in unset:

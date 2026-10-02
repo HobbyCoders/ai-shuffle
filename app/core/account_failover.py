@@ -115,7 +115,7 @@ def _is_subscription_session(session_id: Optional[str]) -> bool:
             return ptype in ("chatgpt", "grok") or mode in _SUBSCRIPTION_AUTH_MODES
         from app.core import claude_auth_mode
 
-        return claude_auth_mode.current_mode() != claude_auth_mode.MODE_API_KEY
+        return claude_auth_mode.current_mode() == claude_auth_mode.MODE_SUBSCRIPTION
     except Exception:  # noqa: BLE001 — classification must never break the seam
         logger.debug("account_failover: 429 classification failed", exc_info=True)
         return True

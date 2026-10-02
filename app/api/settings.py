@@ -67,7 +67,9 @@ class IntegrationSettingsResponse(BaseModel):
     # (``claude_auth_mode``; see GET /settings/claude-auth):
     #   "api_key"  — api_key mode: the stored key is injected
     #   "account"  — subscription mode: the CLI's own sign-in is used
-    # Kept for older clients; ``claude_auth_mode`` carries the mode itself.
+    #   "off"      — Claude is turned off on this worker
+    # Kept for older clients; ``claude_auth_mode`` carries the mode itself
+    # ("subscription", "api_key" or "off").
     claude_code_auth_method: str = "account"
     claude_auth_mode: str = "subscription"
     # Model selections (all fal.ai model IDs)
@@ -257,7 +259,9 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
             # The explicit mode decides, never the key's mere presence.
-            claude_code_auth_method="api_key" if auth_mode == "api_key" else "account",
+            claude_code_auth_method=(
+                auth_mode if auth_mode in ("api_key", "off") else "account"
+            ),
             claude_auth_mode=auth_mode,
             image_model=image_model,
             image_edit_model=image_edit_model,
@@ -405,11 +409,11 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Claude Code auth mode (subscription or API key)
+# Claude Code auth mode (subscription, API key or off)
 # ============================================================================
 
 class ClaudeAuthModeRequest(BaseModel):
-    mode: str = Field(..., description="'subscription' or 'api_key'")
+    mode: str = Field(..., description="'subscription', 'api_key' or 'off'")
 
 
 async def claude_auth_payload(refresh: bool = False) -> dict:
@@ -430,8 +434,9 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
 async def get_claude_auth(refresh: bool = False, token: str = Depends(require_auth)):
     """Which credential Claude Code runs on.
 
-    ``mode`` is ``subscription`` or ``api_key``; ``explicit`` is false only
-    before startup has recorded the default. ``cli`` is what `claude auth
+    ``mode`` is ``subscription``, ``api_key`` or ``off`` (Claude turned off on
+    this worker); ``explicit`` is false only before startup has recorded the
+    default. ``cli`` is what `claude auth
     status` reports (account shown only when signed in); ``api_key`` says
     whether a key is stored and its last four characters; ``gate`` is the
     credential gate (``ready``, ``reason``, ``license_allows_runs``...).
@@ -441,7 +446,11 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
 
 @router.put("/claude-auth")
 async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
-    """Choose the mode (admin only). Takes effect for the next agent run."""
+    """Choose the mode (admin only). Takes effect for the next agent run.
+
+    ``off`` turns Claude off on this worker: Claude models leave the pickers
+    and Claude runs are refused with the gate's off message (``gate.reason``).
+    """
     from app.core import claude_auth_mode
 
     try:

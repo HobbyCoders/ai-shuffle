@@ -8,7 +8,8 @@
    (``app.core.claude_auth_mode``): in ``subscription`` mode the stock CLI
    reports a sign-in (``claude auth status``, via ``claude_cli_status``; the
    CLI's credential files are never read); in ``api_key`` mode an Anthropic API
-   key is stored on this worker.
+   key is stored on this worker; in ``off`` mode Claude is turned off and every
+   Claude run is refused with :data:`OFF_MESSAGE`.
 
 There is no fallback: a worker with neither credential does not borrow any
 other, it refuses the run with a setup message. The same function drives three
@@ -35,25 +36,29 @@ SETUP_CODE = "agent_setup_required"
 
 NO_CLI_MESSAGE = (
     "Agents cannot start: the Claude Code CLI is not installed on this worker. "
-    "See Settings > Providers > Claude Code CLI for how to install it, or choose "
+    "See Settings > Providers > Claude for how to install it, or choose "
     "API key mode there and add your Anthropic API key."
 )
 NOT_SIGNED_IN_MESSAGE = (
     "Agents cannot start: Claude Code is set to subscription mode and the Claude "
     "Code CLI is not signed in. Sign in with your Claude account in Settings > "
-    "Providers > Claude Code CLI (it runs `claude auth login`), or add an "
+    "Providers > Claude (it runs `claude auth login`), or add an "
     "Anthropic API key and switch Claude Code mode to API key. AI Shuffle never "
     "falls back to another credential."
 )
 NO_KEY_MESSAGE = (
     "Agents cannot start: Claude Code is set to API key mode and no Anthropic API "
-    "key is stored on this worker. Add your key in Settings > Providers, or switch "
-    "Claude Code mode to subscription and sign in to the Claude Code CLI. AI "
+    "key is stored on this worker. Add your key in Settings > Providers > Claude, or "
+    "switch Claude Code mode to subscription and sign in to the Claude Code CLI. AI "
     "Shuffle never falls back to another credential."
 )
 UNKNOWN_CLI_MESSAGE = (
     "Agents cannot start: AI Shuffle could not read the Claude Code CLI's sign-in "
-    "status ({detail}). Check Settings > Providers > Claude Code CLI."
+    "status ({detail}). Check Settings > Providers > Claude."
+)
+OFF_MESSAGE = (
+    "Claude is off on this worker. Turn it on in Settings > Providers > Claude, "
+    "or pick a model from another provider."
 )
 
 
@@ -76,6 +81,8 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
     from app.core import claude_auth_mode
 
     mode = claude_auth_mode.current_mode()
+    if mode == claude_auth_mode.MODE_OFF:
+        return False, OFF_MESSAGE
     if mode == claude_auth_mode.MODE_API_KEY:
         if claude_auth_mode.has_stored_api_key():
             return True, None
@@ -163,13 +170,20 @@ def refusal_event(reason: str) -> dict:
 
 
 def record_startup(cli=None) -> Tuple[bool, Optional[str]]:
-    """Startup's check: log the blocking setup state (no fallback is tried)."""
+    """Startup's check: log the blocking setup state (no fallback is tried).
+
+    Claude turned off is a choice, not a setup problem: it is logged as
+    information, while the state still reads ``setup_required`` because Claude
+    runs are refused.
+    """
     global startup_state, startup_reason
     ready, reason = agent_credentials_ready(cli)
     startup_state = "ready" if ready else "setup_required"
     startup_reason = reason
     if ready:
         logger.info("Agent runs: ready")
+    elif reason == OFF_MESSAGE:
+        logger.info("Claude is off on this worker; Claude agent runs are refused. Other providers still run.")
     else:
         logger.warning("Agent runs are blocked until setup is finished: %s", reason)
     return ready, reason

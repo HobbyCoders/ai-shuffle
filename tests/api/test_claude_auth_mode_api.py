@@ -83,3 +83,42 @@ def test_payload_carries_the_credential_gate(authenticated_client):
     with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is True and body["gate"]["reason"] is None
+
+
+@pytest.mark.real_agent_gate
+def test_put_off_turns_claude_off(authenticated_client):
+    from app.core import credential_gate
+
+    db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
+    claude_auth_mode.set_mode("subscription")
+    with _probe(True):
+        response = authenticated_client.put(ENDPOINT, json={"mode": "off"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["mode"] == "off" and body["mode_label"] == "Off"
+    assert [m["value"] for m in body["modes"]] == ["subscription", "api_key", "off"]
+    assert body["gate"]["mode"] == "off"
+    assert body["gate"]["claude_credential_ready"] is False
+    assert body["gate"]["reason"] == credential_gate.OFF_MESSAGE
+    integrations = authenticated_client.get("/api/v1/settings/integrations").json()
+    assert integrations["claude_auth_mode"] == "off"
+    assert integrations["claude_code_auth_method"] == "off"
+    registry = authenticated_client.get("/api/v1/models").json()
+    assert registry["claude"] == {"auth_kind": None, "plan_type": None, "enabled": False}
+
+    with _probe(True):
+        back_on = authenticated_client.put(ENDPOINT, json={"mode": "subscription"}).json()
+    assert back_on["mode"] == "subscription"
+    assert back_on["gate"]["claude_credential_ready"] is True
+
+
+def test_put_off_is_owner_only(client):
+    from app.api.auth import hash_api_key
+
+    db.create_api_user("auth-mode-user", "Auth Mode User", hash_api_key("aih_auth_mode_user_key"))
+    claude_auth_mode.set_mode("subscription")
+    with _probe(True):
+        r = client.put(ENDPOINT, json={"mode": "off"},
+                       headers={"Authorization": "Bearer aih_auth_mode_user_key"})
+    assert r.status_code == 403
+    assert claude_auth_mode.stored_mode() == "subscription"

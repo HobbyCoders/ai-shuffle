@@ -57,6 +57,46 @@ def test_api_key_mode_needs_a_stored_key_not_a_cli_login(mock_db):
     assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (True, None)
 
 
+def test_off_mode_refuses_claude_whatever_credentials_exist(mock_db):
+    database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+    claude_auth_mode.set_mode("off")
+    assert credential_gate.claude_credential_ready(_cli(signed_in=True)) == (
+        False, credential_gate.OFF_MESSAGE)
+    assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (
+        False, credential_gate.OFF_MESSAGE)
+    assert credential_gate.OFF_MESSAGE == (
+        "Claude is off on this worker. Turn it on in Settings > Providers > Claude, "
+        "or pick a model from another provider.")
+
+
+def test_off_mode_refuses_the_claude_leg_but_not_a_provider_leg(mock_db):
+    claude_auth_mode.set_mode("off")
+    assert credential_gate.turn_refusal("delegated") == credential_gate.OFF_MESSAGE
+    assert credential_gate.turn_refusal(None) == credential_gate.OFF_MESSAGE
+    assert credential_gate.turn_refusal("openai_responses") is None
+
+
+def test_off_mode_status_payload(mock_db):
+    claude_auth_mode.set_mode("off")
+    payload = credential_gate.status_payload(_cli(signed_in=True))
+    assert payload["mode"] == "off"
+    assert payload["claude_credential_ready"] is False
+    assert payload["reason"] == credential_gate.OFF_MESSAGE
+    assert payload["ready"] is False and payload["license_allows_runs"] is True
+
+
+def test_startup_logs_off_as_information_not_a_warning(mock_db, caplog):
+    import logging
+
+    claude_auth_mode.set_mode("off")
+    with caplog.at_level(logging.INFO, logger=credential_gate.logger.name):
+        ready, reason = credential_gate.record_startup(_cli(signed_in=True))
+    assert not ready and reason == credential_gate.OFF_MESSAGE
+    records = [r for r in caplog.records if r.name == credential_gate.logger.name]
+    assert records and all(r.levelno == logging.INFO for r in records)
+    assert "Claude is off" in records[-1].getMessage()
+
+
 def test_an_unlicensed_worker_is_blocked_with_the_license_reason(mock_db, monkeypatch):
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
     claude_auth_mode.set_mode("api_key")

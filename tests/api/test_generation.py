@@ -512,6 +512,45 @@ class TestGenerateWithClaude:
         assert result == '{"name": "X"}'
 
 
+@pytest.mark.real_agent_gate
+class TestGenerationCredentialGate:
+    """Generation on the Claude Code CLI leg passes the same gate as a turn."""
+
+    @pytest.mark.asyncio
+    async def test_claude_off_refuses_generation_on_the_cli_leg(self, mock_db):
+        from fastapi import HTTPException
+        from app.api.generation import generate_with_claude
+        from app.core import claude_auth_mode, credential_gate
+
+        claude_auth_mode.set_mode("off")
+        adapter = FakeAdapter(text_turn("never"))
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "sonnet", "provider": None, "effort": None},
+                ),                 patch_adapter(adapter):
+            with pytest.raises(HTTPException) as exc_info:
+                await generate_with_claude("Test prompt")
+
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == credential_gate.OFF_MESSAGE
+        assert exc_info.value.headers == {"X-Error-Code": credential_gate.SETUP_CODE}
+        assert adapter.connected is False and adapter.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_claude_off_leaves_a_provider_leg_alone(self, mock_db):
+        from app.api.generation import generate_with_claude
+        from app.core import claude_auth_mode
+
+        claude_auth_mode.set_mode("off")
+        adapter = FakeAdapter(text_turn("feat: thing"))
+        with patch(
+                    "app.core.generation_options.text_generation_config",
+                    return_value={"model": "gpt-x", "provider": "prov-1", "effort": None},
+                ),                 patch("app.core.generation_options.build_generation_options", return_value=MagicMock()),                 patch("app.core.credential_gate.leg_for_options", return_value="openai_responses"),                 patch_adapter(adapter):
+            assert await generate_with_claude("Test prompt") == "feat: thing"
+        assert adapter.connected is True
+
+
 class TestGenerateProfileEndpoint:
     """Test the profile generation endpoint."""
 
