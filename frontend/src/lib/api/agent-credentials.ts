@@ -2,7 +2,7 @@
  * How Claude Code is paid for on this worker, and whether agents can start.
  *
  * The setup wizard reads all of it from one call, `GET /api/v1/settings/claude-auth`
- * (the same summary Settings > Providers > Claude Code mode shows):
+ * (the same summary Settings > Providers > Claude shows):
  *
  * - `mode`: `'subscription'`, `'api_key'` or `'off'`, with `explicit` false only before
  *   startup has recorded the worker's default.

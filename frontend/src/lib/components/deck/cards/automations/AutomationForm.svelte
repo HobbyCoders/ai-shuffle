@@ -25,6 +25,7 @@
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
 	import { getClaudeAuth, type ClaudeAuthMode } from '$lib/api/claude-auth';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
 		currentView: 'create' | 'edit';
@@ -145,7 +146,7 @@
 		if (claudeMode !== 'subscription') return '';
 		const profile = profiles.find((p) => p.id === formProfileId);
 		if (profile?.config?.provider) return '';
-		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude Code mode). The loop guard holds unattended turns past its budget until you confirm them.';
+		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
 	});
 
 	function addActionStep(type: ActionStepType = 'connector_action') {
@@ -215,7 +216,11 @@
 
 {#if scheduledRunNotice}
 	<div data-testid="automation-api-key-notice">
-		<Banner severity="warning" message={scheduledRunNotice} />
+		<Banner
+			severity="warning"
+			message={scheduledRunNotice}
+			action={{ label: 'Open Claude settings', onClick: () => openSettings({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' }) }}
+		/>
 	</div>
 {/if}
 

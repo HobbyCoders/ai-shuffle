@@ -63,8 +63,8 @@ interface ProvidersState {
 	falEnabled: boolean;
 	/** Masked form of the stored key, or null when none is set. */
 	anthropicKeyMasked: string | null;
-	/** Which auth method Claude Code runs with: 'api_key' or 'account'. */
-	claudeCodeAuthMethod: 'account' | 'api_key' | null;
+	/** Which auth method Claude Code runs with: 'api_key', 'account' or 'off'. */
+	claudeCodeAuthMethod: 'account' | 'api_key' | 'off' | null;
 	/** Non-null when the integrations load failed unexpectedly. */
 	integrationsError: string | null;
 	/** True once `/settings/integrations` answered. */
