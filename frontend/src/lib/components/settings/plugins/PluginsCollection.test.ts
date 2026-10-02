@@ -1,0 +1,550 @@
+/**
+ * Settings > Plugins rendered against mocked plugin and connector APIs.
+ * Ports the assertions of main's PluginsHub.test.ts (list, filters, install,
+ * connector runtime guidance) and PluginDetails.test.ts (backend payloads,
+ * components not loaded here, agent-draft review), plus runtime references,
+ * accounts, sources, read-only access, deep links and registry coverage.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import type { PluginDetails, PluginInfo } from '$lib/api/plugins';
+import responses from '$lib/api/__fixtures__/plugin-responses.json';
+
+const m = vi.hoisted(() => ({
+	getInstalledPlugins: vi.fn(),
+	getAvailablePlugins: vi.fn(),
+	getPluginDetails: vi.fn(),
+	installPlugin: vi.fn(),
+	uninstallPlugin: vi.fn(),
+	enablePlugin: vi.fn(),
+	disablePlugin: vi.fn(),
+	getMarketplaces: vi.fn(),
+	addMarketplace: vi.fn(),
+	removeMarketplace: vi.fn(),
+	syncMarketplace: vi.fn(),
+	checkForUpdates: vi.fn(),
+	updatePlugin: vi.fn(),
+	updateAllPlugins: vi.fn(),
+	getAutoUpdateSettings: vi.fn(),
+	updateAutoUpdateSettings: vi.fn(),
+	runAutoUpdate: vi.fn(),
+	getConnectors: vi.fn(),
+	getConnectorTypes: vi.fn(),
+	get: vi.fn(),
+	post: vi.fn()
+}));
+vi.mock('$lib/api/plugins', () => ({ ...m }));
+vi.mock('$lib/api/connectors', () => ({ getConnectors: m.getConnectors, getConnectorTypes: m.getConnectorTypes }));
+vi.mock('$lib/api/client', () => ({ api: { get: m.get, post: m.post } }));
+vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
+// Account editing has its own tests (ConnectorManager, GoogleConnection,
+// AccountConnections); here it only has to mount for the right type.
+vi.mock('$lib/components/ConnectorManager.svelte', async () => ({
+	default: (await import('$lib/test-stubs/ConnectorManagerStub.svelte')).default
+}));
+
+import { settingsNav } from '$lib/settings/navigation.svelte';
+import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
+import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
+import { resetPluginsLive } from '$lib/settings/entries/plugins-live.svelte';
+import PluginsCollection from './PluginsCollection.svelte';
+
+const toolkit = responses.installed[0] as PluginInfo;
+const installedDetails = responses.details_installed as PluginDetails;
+const marketplaceDetails = responses.details_available as PluginDetails;
+const gmail = {
+	type: 'gmail',
+	name: 'Gmail',
+	description: 'Email',
+	plugin_id: 'gmail@shuffle-connectors',
+	config_fields: [],
+	triggers: [],
+	actions: [],
+	tools: []
+};
+
+let details: Record<string, PluginDetails>;
+
+function hub() {
+	// The data main's PluginsHub tests used.
+	m.getConnectorTypes.mockResolvedValue([gmail]);
+	m.getConnectors.mockResolvedValue([{ id: 'work', type: 'gmail', name: 'Work', is_active: true }]);
+	m.getInstalledPlugins.mockResolvedValue([
+		{ id: 'writer@local', name: 'Writer', description: 'Writing skills', enabled: true }
+	]);
+	m.getAvailablePlugins.mockResolvedValue([
+		{ id: 'writer@local', name: 'Writer', description: 'Duplicate' },
+		{ id: 'review@local', name: 'Review', description: 'Code review' }
+	]);
+}
+
+function backend() {
+	// Real payloads from tests/api/test_plugins_frontend_contract.py.
+	m.getConnectorTypes.mockResolvedValue([]);
+	m.getConnectors.mockResolvedValue([]);
+	m.getInstalledPlugins.mockResolvedValue(responses.installed);
+	m.getAvailablePlugins.mockResolvedValue(responses.available);
+}
+
+async function show(item?: string, options: { tab?: string; readOnly?: boolean } = {}) {
+	settingsNav.reset();
+	settingsNav.selectCategory('plugins');
+	if (item) settingsNav.go({ category: 'plugins', item, tab: options.tab });
+	const context = new Map<unknown, unknown>();
+	if (options.readOnly) context.set(SETTINGS_ACCESS_CONTEXT, { readOnly: true });
+	const page = render(PluginsCollection, { context });
+	await waitFor(() => expect(screen.queryByText('Loading plugins…')).toBeNull());
+	return page;
+}
+
+function detail(): HTMLElement {
+	return screen.getByRole('region', { name: 'Details' });
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	resetPluginsLive();
+	details = {
+		[installedDetails.id]: installedDetails,
+		[marketplaceDetails.id]: marketplaceDetails
+	};
+	backend();
+	m.getPluginDetails.mockImplementation(async (id: string) => {
+		if (details[id]) return details[id];
+		throw { detail: 'Not found' };
+	});
+	m.getMarketplaces.mockResolvedValue([]);
+	m.checkForUpdates.mockResolvedValue([]);
+	m.getAutoUpdateSettings.mockResolvedValue(null);
+	m.get.mockResolvedValue([]);
+});
+afterEach(cleanup);
+
+describe('the list (from PluginsHub)', () => {
+	it('groups apps with accounts and installed plugins, then the catalog', async () => {
+		hub();
+		await show();
+		const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
+		expect(within(list).getByText('Connected apps')).toBeTruthy();
+		expect(within(list).getByText('1 account')).toBeTruthy();
+		expect(within(list).getByText('Installed')).toBeTruthy();
+		expect(within(list).getByRole('button', { name: /Writer/ })).toBeTruthy();
+		// Review is only in the catalog.
+		expect(within(list).queryByRole('button', { name: /^Review/ })).toBeNull();
+		expect(within(list).getByRole('button', { name: /Explore plugins/ }).textContent).toContain('1 to add');
+		await fireEvent.input(within(list).getByRole('searchbox'), { target: { value: 'gmail' } });
+		expect(within(list).queryByRole('button', { name: /Writer/ })).toBeNull();
+		expect(within(list).getByRole('button', { name: /Gmail/ })).toBeTruthy();
+	});
+
+	it('merges installed apps and packages in Explore without duplicate catalog entries', async () => {
+		hub();
+		await show('explore');
+		const pane = detail();
+		const rows = () => pane.querySelectorAll('[data-settings-nav-item]');
+		expect(rows()).toHaveLength(3);
+		expect(within(pane).getByText('1 account')).toBeTruthy();
+		const search = within(pane).getByRole('searchbox', { name: 'Search plugins' });
+		await fireEvent.input(search, { target: { value: 'gmail' } });
+		expect(rows()).toHaveLength(1);
+		await fireEvent.input(search, { target: { value: 'no-such-plugin' } });
+		expect(within(pane).getByText('No plugins match your search.')).toBeTruthy();
+	});
+
+	it('filters apps independently of agent plugins', async () => {
+		hub();
+		await show('explore');
+		const pane = detail();
+		const rows = () => pane.querySelectorAll('[data-settings-nav-item]');
+		expect(rows()).toHaveLength(3);
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Apps' }));
+		expect(rows()).toHaveLength(1);
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Agent plugins' }));
+		expect(rows()).toHaveLength(2);
+	});
+
+	it('installs using the existing package id, not a connection id', async () => {
+		hub();
+		await show('explore');
+		await fireEvent.click(within(detail()).getByRole('button', { name: 'Install Review' }));
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('review@local'));
+	});
+
+	it('opens an item from Explore', async () => {
+		hub();
+		await show('explore');
+		await fireEvent.click(within(detail()).getByRole('button', { name: /Writer/ }));
+		expect(settingsNav.selectedItem('plugins')).toBe('plugin:writer@local');
+	});
+});
+
+describe('a connected app (from PluginsHub)', () => {
+	it('explains bundled source and PyPI dependencies without requiring GitHub access', async () => {
+		hub();
+		m.getConnectors.mockResolvedValue([{ id: 'work', type: 'gmail', name: 'Work', is_active: false }]);
+		await show('connection:gmail');
+		const pane = detail();
+		expect(within(pane).getByText('Bundled with AI Shuffle')).toBeTruthy();
+		expect(within(pane).getByText('GitHub access').closest('.st-row')?.textContent).toContain('Not needed');
+		expect(within(pane).getByText('Downloads from PyPI')).toBeTruthy();
+		expect(within(pane).queryByText(/sign in to GitHub in Settings/i)).toBeNull();
+		// Existing accounts keep working on the bundled runtime and stay manageable.
+		expect(within(pane).getByText('Keep their IDs')).toBeTruthy();
+		expect(within(pane).getByRole('region', { name: 'Accounts for gmail' })).toBeTruthy();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Install Gmail' }));
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('gmail@shuffle-connectors'));
+	});
+
+	it('manages accounts of an installed runtime and warns before removing one that is in use', async () => {
+		hub();
+		m.getConnectorTypes.mockResolvedValue([
+			{ ...gmail, plugin_installed: true, plugin_enabled: true, plugin_version: '1.4.0' }
+		]);
+		m.get.mockImplementation(async (url: string) =>
+			url.includes('/connections')
+				? [{ id: 'work', name: 'Work', active: true, automations: [{ id: 'a1', name: 'Digest', is_enabled: true }] }]
+				: []
+		);
+		await show('connection:gmail');
+		const pane = detail();
+		expect(within(pane).getByRole('region', { name: 'Accounts for gmail' }).getAttribute('data-type-filter')).toBe(
+			'gmail'
+		);
+		await waitFor(() => expect(within(pane).getByText('Used by 1 connection, 1 automation')).toBeTruthy());
+
+		// Turning the runtime off asks first while connections use it.
+		await fireEvent.click(within(pane).getByRole('switch', { name: 'Runtime' }));
+		expect(within(pane).getByText('Disable? 1 connection, 1 automation use it.')).toBeTruthy();
+		expect(m.disablePlugin).not.toHaveBeenCalled();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Disable' }));
+		await waitFor(() => expect(m.disablePlugin).toHaveBeenCalledWith('gmail@shuffle-connectors'));
+
+		// So does uninstalling.
+		const uninstall = within(pane).getByRole('button', { name: 'Uninstall' }) as HTMLButtonElement;
+		await waitFor(() => expect(uninstall.disabled).toBe(false));
+		await fireEvent.click(uninstall);
+		expect(within(pane).getByText('Uninstall? 1 connection, 1 automation use it.')).toBeTruthy();
+		const confirm = within(pane).getAllByRole('button', { name: 'Uninstall' }).at(-1)!;
+		await fireEvent.click(confirm);
+		await waitFor(() => expect(m.uninstallPlugin).toHaveBeenCalledWith('gmail@shuffle-connectors'));
+	});
+
+	it('lists what uses the runtime and offers update and roll back', async () => {
+		hub();
+		m.getConnectorTypes.mockResolvedValue([
+			{
+				...gmail,
+				plugin_installed: true,
+				plugin_enabled: true,
+				plugin_version: '1.4.0',
+				plugin_update_available: true,
+				plugin_rollback_available: true
+			}
+		]);
+		m.get.mockResolvedValue([
+			{ id: 'work', name: 'Work', active: false, automations: [{ id: 'a1', name: 'Digest', is_enabled: false }] }
+		]);
+		await show('connection:gmail', { tab: 'Runtime' });
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('↳ Digest')).toBeTruthy());
+		expect(within(pane).getByText('Inactive')).toBeTruthy();
+		expect(within(pane).getByText('Paused')).toBeTruthy();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Roll back runtime' }));
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Roll back' }));
+		await waitFor(() => expect(m.post).toHaveBeenCalledWith('/plugins/runtime/gmail%40shuffle-connectors/rollback'));
+		await fireEvent.click(within(pane).getAllByRole('button', { name: 'Update runtime' })[0]);
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('gmail@shuffle-connectors'));
+	});
+});
+
+describe('a plugin package (from PluginDetails)', () => {
+	it('shows an installed plugin: version, install date, what it includes and its contents', async () => {
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('Review helpers for pull requests.')).toBeTruthy());
+		expect(within(pane).getByRole('heading', { name: 'toolkit' })).toBeTruthy();
+		expect(within(pane).getByText('v1.2.0')).toBeTruthy();
+		expect(within(pane).getByText('Enabled')).toBeTruthy();
+		expect(within(pane).getByRole('switch', { name: 'Enabled' }).getAttribute('aria-checked')).toBe('true');
+		const installedOn = new Date(installedDetails.installed_at!).toLocaleDateString(undefined, {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric'
+		});
+		expect(within(pane).getByText(installedOn)).toBeTruthy();
+		const row = (label: string) => within(pane).getByText(label).closest('.st-row')?.textContent;
+		expect(row('Commands')).toContain('1');
+		expect(row('Agents')).toContain('1');
+		expect(row('Skills')).toContain('1');
+		// has_hooks drives the row; there is no hook list, so no count and no tab.
+		expect(row('Hooks')).toContain('Yes');
+		expect(within(pane).queryByRole('tab', { name: 'Hooks' })).toBeNull();
+		expect(within(pane).getByText(installedDetails.install_path)).toBeTruthy();
+
+		await fireEvent.click(within(pane).getByRole('tab', { name: 'Contents' }));
+		expect(within(pane).getByText('/review')).toBeTruthy();
+		expect(within(pane).getByText('reviewer')).toBeTruthy();
+		expect(within(pane).getByText('lint')).toBeTruthy();
+	});
+
+	it('enables and disables from the header switch and uninstalls from the danger zone', async () => {
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		await fireEvent.click(within(pane).getByRole('switch', { name: 'Enabled' }));
+		await waitFor(() => expect(m.disablePlugin).toHaveBeenCalledWith('toolkit@mp'));
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Uninstall' }));
+		expect(within(pane).getByText('Uninstall toolkit?')).toBeTruthy();
+		await fireEvent.click(within(pane).getAllByRole('button', { name: 'Uninstall' }).at(-1)!);
+		await waitFor(() => expect(m.uninstallPlugin).toHaveBeenCalledWith('toolkit@mp'));
+	});
+
+	it('flips the switch back when enabling fails', async () => {
+		m.disablePlugin.mockRejectedValueOnce({ detail: 'Plugin is busy' });
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		const sw = within(pane).getByRole('switch', { name: 'Enabled' });
+		await fireEvent.click(sw);
+		await waitFor(() => expect(within(pane).getByRole('alert').textContent).toBe('Plugin is busy'));
+		expect(sw.getAttribute('aria-checked')).toBe('true');
+	});
+
+	it('lists components this app does not run, with the reason, and nothing when all load', async () => {
+		await show('plugin:toolkit@mp');
+		await waitFor(() => expect(within(detail()).getByText('Review helpers for pull requests.')).toBeTruthy());
+		expect(screen.queryByTestId('plugin-not-loaded')).toBeNull();
+		cleanup();
+
+		details['toolkit@mp'] = {
+			...installedDetails,
+			format: 'agent-plugins',
+			components: [
+				{ kind: 'skill', name: 'lint', support: 'loaded', reason: '' },
+				{ kind: 'app', name: 'drive', support: 'unsupported', reason: 'hosted by ChatGPT; it cannot run outside it' },
+				{
+					kind: 'user_config',
+					name: 'api_token',
+					support: 'needs_config',
+					reason: 'asks for settings this app does not collect yet'
+				}
+			]
+		};
+		await show('plugin:toolkit@mp');
+		const block = await screen.findByTestId('plugin-not-loaded');
+		const text = (label: string) => within(block).getByText(label).closest('.st-row')?.textContent;
+		expect(text('App drive')).toContain('hosted by ChatGPT; it cannot run outside it');
+		expect(text('Settings api_token')).toContain('asks for settings this app does not collect yet');
+		expect(block.textContent).not.toContain('lint');
+		expect(within(detail()).getByText('Agent plugin')).toBeTruthy();
+	});
+
+	it('shows a marketplace plugin with an install action and no install date', async () => {
+		await show('plugin:extra@mp');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('No README')).toBeTruthy());
+		expect(within(pane).queryByText('Installed')).toBeNull();
+		expect(within(pane).queryByText(/1970/)).toBeNull();
+		expect(within(pane).queryByText('Hooks')).toBeNull();
+		expect(within(pane).getByText('Not installed')).toBeTruthy();
+		expect(within(pane).queryByRole('switch')).toBeNull();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Install' }));
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('extra@mp'));
+	});
+
+	it('omits the install date for an installed record without one', async () => {
+		details['toolkit@mp'] = { ...installedDetails, installed_at: null };
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('Scope')).toBeTruthy());
+		expect(within(pane).queryByText('Installed')).toBeNull();
+		expect(within(pane).queryByText(/1970/)).toBeNull();
+		expect(within(pane).getByText('Scope').nextElementSibling?.textContent).toBe('user');
+	});
+
+	it('offers an update when one is available', async () => {
+		m.checkForUpdates.mockResolvedValue([
+			{
+				plugin_id: 'toolkit@mp',
+				name: 'toolkit',
+				marketplace: 'mp',
+				installed_version: '1.2.0',
+				available_version: '1.3.0',
+				is_local: false
+			}
+		]);
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('Update to v1.3.0')).toBeTruthy());
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Update' }));
+		await waitFor(() => expect(m.updatePlugin).toHaveBeenCalledWith('toolkit@mp'));
+	});
+});
+
+describe('an agent-authored draft (review)', () => {
+	const draftInfo: PluginInfo = {
+		...toolkit,
+		id: 'release-notes@authored',
+		name: 'release-notes',
+		marketplace: 'authored',
+		version: '0.1.0',
+		enabled: false,
+		trust: 'authored',
+		approval: 'pending',
+		content_hash: 'sha256:abc'
+	};
+	const draft: PluginDetails = {
+		...installedDetails,
+		...draftInfo,
+		components: [
+			{ kind: 'skill', name: 'draft-notes', support: 'loaded', reason: '', detail: '' },
+			{ kind: 'mcp_server', name: 'changelog', support: 'loaded', reason: '', detail: 'python srv.py' }
+		]
+	};
+
+	it('needs review in the list and on the index badge', async () => {
+		m.getInstalledPlugins.mockResolvedValue([toolkit, draftInfo]);
+		await show();
+		const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
+		expect(within(list).getByText('Needs review')).toBeTruthy();
+		expect(within(list).getByRole('button', { name: /release-notes/ }).textContent).toContain('Agent draft, v0.1.0');
+		const { attention } = await import('$lib/settings/entries/plugins');
+		expect(attention()).toEqual({ count: 1, tone: 'warn' });
+	});
+
+	it('opens on Review, lists every component and its command line, and approves the reviewed hash', async () => {
+		m.getInstalledPlugins.mockResolvedValue([toolkit, draftInfo]);
+		details[draft.id] = draft;
+		await show(`plugin:${draft.id}`);
+		const pane = detail();
+		const review = await screen.findByTestId('plugin-review');
+		expect(within(pane).getByRole('tab', { name: 'Review' }).getAttribute('aria-selected')).toBe('true');
+		expect(within(pane).getByText('Written by an agent. Review first.')).toBeTruthy();
+		expect(within(review).getByText('Version').closest('.st-row')?.textContent).toContain('0.1.0');
+		expect(within(review).getByText('Skill draft-notes')).toBeTruthy();
+		expect(within(review).getByText('MCP server changelog')).toBeTruthy();
+		expect(within(review).getByText('python srv.py')).toBeTruthy();
+		// No enable switch: a draft is enabled only by approving it.
+		expect(within(pane).queryByRole('switch')).toBeNull();
+
+		await fireEvent.click(within(review).getByRole('button', { name: 'Approve and enable' }));
+		expect(within(review).getByText('Approve v0.1.0?')).toBeTruthy();
+		expect(m.enablePlugin).not.toHaveBeenCalled();
+		await fireEvent.click(within(review).getByRole('button', { name: 'Approve' }));
+		await waitFor(() => expect(m.enablePlugin).toHaveBeenCalledWith(draft.id, 'sha256:abc'));
+	});
+
+	it('shows no review once approved, nor for a marketplace plugin', async () => {
+		m.getInstalledPlugins.mockResolvedValue([toolkit, { ...draftInfo, approval: 'approved', enabled: true }]);
+		details[draft.id] = { ...draft, approval: 'approved', enabled: true };
+		await show(`plugin:${draft.id}`);
+		await waitFor(() => expect(within(detail()).getByRole('switch', { name: 'Enabled' })).toBeTruthy());
+		expect(screen.queryByTestId('plugin-review')).toBeNull();
+		cleanup();
+
+		await show('plugin:toolkit@mp');
+		await waitFor(() => expect(within(detail()).getByText('Review helpers for pull requests.')).toBeTruthy());
+		expect(screen.queryByTestId('plugin-review')).toBeNull();
+	});
+});
+
+describe('sources and updates', () => {
+	it('adds, syncs and removes sources and updates plugins', async () => {
+		m.getMarketplaces.mockResolvedValue([
+			{ id: 'mp', name: 'mp', url: 'https://x/mp.git', source: 'git', path: '', last_updated: null }
+		]);
+		m.checkForUpdates.mockResolvedValue([
+			{
+				plugin_id: 'toolkit@mp',
+				name: 'toolkit',
+				marketplace: 'mp',
+				installed_version: '1.2.0',
+				available_version: '1.3.0',
+				is_local: false
+			}
+		]);
+		m.getAutoUpdateSettings.mockResolvedValue({
+			enabled: true,
+			interval_hours: 6,
+			auto_sync_marketplaces: true,
+			auto_update_plugins: false,
+			last_check: null
+		});
+		m.addMarketplace.mockResolvedValue({
+			id: 'more',
+			name: 'more',
+			url: 'https://x/more.git',
+			source: 'git',
+			path: '',
+			last_updated: null
+		});
+		m.updateAutoUpdateSettings.mockResolvedValue({
+			enabled: true,
+			interval_hours: 12,
+			auto_sync_marketplaces: true,
+			auto_update_plugins: false,
+			last_check: null
+		});
+		await show('sources');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('https://x/mp.git')).toBeTruthy());
+
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Update all (1)' }));
+		await waitFor(() => expect(m.updateAllPlugins).toHaveBeenCalled());
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Update toolkit' }));
+		await waitFor(() => expect(m.updatePlugin).toHaveBeenCalledWith('toolkit@mp'));
+
+		await fireEvent.change(within(pane).getByRole('combobox', { name: 'Check every' }), { target: { value: '12' } });
+		await waitFor(() => expect(m.updateAutoUpdateSettings).toHaveBeenCalledWith({ interval_hours: 12 }));
+
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Sync mp' }));
+		await waitFor(() => expect(m.syncMarketplace).toHaveBeenCalledWith('mp'));
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(within(pane).getAllByRole('button', { name: 'Remove' }).at(-1)!);
+		await waitFor(() => expect(m.removeMarketplace).toHaveBeenCalledWith('mp'));
+
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Add source' }));
+		await fireEvent.input(within(pane).getByRole('textbox', { name: 'Name' }), { target: { value: 'more' } });
+		await fireEvent.input(within(pane).getByRole('textbox', { name: 'Git URL' }), {
+			target: { value: 'https://x/more.git' }
+		});
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Add' }));
+		await waitFor(() => expect(m.addMarketplace).toHaveBeenCalledWith('https://x/more.git', 'more'));
+	});
+});
+
+describe('access and deep links', () => {
+	it('keeps apps, sources and installs off a read-only device', async () => {
+		hub();
+		await show('explore', { readOnly: true });
+		expect(m.getConnectorTypes).not.toHaveBeenCalled();
+		expect(screen.queryByRole('button', { name: /Sources and updates/ })).toBeNull();
+		expect(within(detail()).queryByRole('button', { name: 'Install Review' })).toBeNull();
+		cleanup();
+		await show('connection:gmail', { readOnly: true });
+		expect(within(detail()).getByText('Available after approval')).toBeTruthy();
+	});
+
+	it('shows Available after approval when the plugin list is forbidden', async () => {
+		m.getInstalledPlugins.mockRejectedValue(Object.assign(new Error('Forbidden'), { status: 403 }));
+		await show();
+		expect(screen.getByText('Available after approval')).toBeTruthy();
+	});
+
+	it('lands bare plugin ids, connector types and account ids from older links on their item', async () => {
+		hub();
+		await show('writer@local');
+		await waitFor(() => expect(settingsNav.selectedItem('plugins')).toBe('plugin:writer@local'));
+		cleanup();
+		await show('work');
+		await waitFor(() => expect(settingsNav.selectedItem('plugins')).toBe('connection:gmail'));
+	});
+});
+
+describe('registry', () => {
+	it('renders every Plugins entry where the registry says', async () => {
+		await assertCategoryCoverage('plugins', async (where) => {
+			settingsNav.reset();
+			settingsNav.go({ category: 'plugins', ...where });
+			return render(PluginsCollection).container;
+		});
+	});
+});

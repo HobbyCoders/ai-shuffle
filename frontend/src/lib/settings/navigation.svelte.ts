@@ -32,6 +32,7 @@ export const LEGACY_TAB_MAP: Readonly<Record<string, SettingsTarget>> = {
 	providers: { category: 'providers' },
 	license: { category: 'system', anchor: 'system.license' },
 	api: { category: 'integrations' },
+	plugins: { category: 'plugins' },
 	system: { category: 'security' },
 	logs: { category: 'logs' }
 };

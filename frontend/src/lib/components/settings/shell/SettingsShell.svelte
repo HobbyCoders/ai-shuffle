@@ -7,7 +7,7 @@
 
 <script lang="ts">
 	/**
-	 * SettingsShell: the Settings page. A 224px index (title, search, nine
+	 * SettingsShell: the Settings page. A 224px index (title, search, ten
 	 * categories) beside the content: a PreferencePage, or a CollectionPage
 	 * loaded on first visit.
 	 *

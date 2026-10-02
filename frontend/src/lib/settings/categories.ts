@@ -1,5 +1,5 @@
 /**
- * The nine Settings categories, in index order, grouped Personal / AI / This worker.
+ * The ten Settings categories, in index order, grouped Personal / AI / This worker.
  */
 import {
 	SlidersHorizontal,
@@ -7,6 +7,7 @@ import {
 	KeyRound,
 	Sparkles,
 	Plug,
+	Puzzle,
 	MonitorSmartphone,
 	Shield,
 	Server,
@@ -38,6 +39,7 @@ const ROWS: CategoryRow[] = [
 	{ id: 'providers', label: 'Providers', icon: KeyRound, group: 'ai' },
 	{ id: 'models', label: 'Default models', icon: Sparkles, group: 'ai' },
 	{ id: 'integrations', label: 'Integrations', icon: Plug, group: 'ai' },
+	{ id: 'plugins', label: 'Plugins', icon: Puzzle, group: 'ai' },
 	{ id: 'devices', label: 'Devices', icon: MonitorSmartphone, group: 'worker' },
 	{ id: 'security', label: 'Security', icon: Shield, group: 'worker' },
 	{ id: 'system', label: 'System', icon: Server, group: 'worker' },

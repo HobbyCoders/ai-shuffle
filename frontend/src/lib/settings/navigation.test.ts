@@ -47,6 +47,7 @@ describe('settings targets', () => {
 			providers: { category: 'providers' },
 			license: { category: 'system', anchor: 'system.license' },
 			api: { category: 'integrations' },
+			plugins: { category: 'plugins' },
 			system: { category: 'security' },
 			logs: { category: 'logs' }
 		});

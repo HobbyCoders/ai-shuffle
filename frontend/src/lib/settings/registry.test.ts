@@ -27,7 +27,7 @@ describe('settings registry', () => {
 		expect(entriesFor('general').map((e) => e.id)).toContain('general.theme');
 	});
 
-	it('lists nine categories in three groups with icons', () => {
+	it('lists ten categories in three groups with icons', () => {
 		expect(CATEGORIES.map((c) => c.id)).toEqual([...CATEGORY_IDS]);
 		expect(CATEGORY_GROUPS.map((g) => g.label)).toEqual(['Personal', 'AI', 'This worker']);
 		for (const c of CATEGORIES) {

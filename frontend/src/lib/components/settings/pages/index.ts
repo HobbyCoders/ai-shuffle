@@ -25,6 +25,7 @@ export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	providers: () => import('../providers/ProvidersCollection.svelte'),
 	models: () => import('../models/ModelsCollection.svelte'),
 	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
+	plugins: () => import('../plugins/PluginsCollection.svelte'),
 	devices: () => import('../devices/DevicesCollection.svelte'),
 	logs: () => import('../logs/LogsCollection.svelte')
 };

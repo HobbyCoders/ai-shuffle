@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * SettingsIndex: title, search, then the nine categories in three groups.
+	 * SettingsIndex: title, search, then the ten categories in three groups.
 	 * A category with something to look at shows a dot and count (the
 	 * module's `attention()`). Up/Down move between categories.
 	 */
