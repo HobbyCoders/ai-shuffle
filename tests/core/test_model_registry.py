@@ -553,7 +553,7 @@ class TestRegistryPayloadClaude:
     def test_payload_always_carries_the_claude_block(self, mock_db):
         payload = m.registry_payload()
         assert "claude" in payload
-        assert set(payload["claude"]) == {"auth_kind", "plan_type"}
+        assert set(payload["claude"]) == {"auth_kind", "plan_type", "enabled"}
 
     def test_api_key_mode_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
         """API-key mode with a stored key → API auth, no plan, even while the
@@ -563,7 +563,16 @@ class TestRegistryPayloadClaude:
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
         claude_auth_mode.set_mode("api_key")
-        assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None}
+        assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None, "enabled": True}
+
+    def test_off_mode_disables_claude_with_no_auth_kind(self, mock_db, monkeypatch):
+        """Off hides Claude from the pickers whatever credentials exist."""
+        from app.core import claude_auth_mode
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
+        claude_auth_mode.set_mode("off")
+        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None, "enabled": False}
 
     def test_stored_key_does_not_override_subscription_mode(self, mock_db, monkeypatch):
         from app.core import claude_auth_mode
@@ -571,25 +580,25 @@ class TestRegistryPayloadClaude:
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
         claude_auth_mode.set_mode("subscription")
-        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max"}
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max", "enabled": True}
 
     def test_cli_login_reports_subscription_and_the_plan_it_prints(self, mock_db, monkeypatch):
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max"}
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max", "enabled": True}
 
     def test_cli_login_without_a_plan_reports_null(self, mock_db, monkeypatch):
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": None}
+        assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": None, "enabled": True}
 
     def test_signed_out_cli_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=False))
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None}
+        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None, "enabled": True}
 
     def test_registry_never_runs_the_cli(self, mock_db, monkeypatch):
         from app.core import claude_cli_status as cs
@@ -598,7 +607,7 @@ class TestRegistryPayloadClaude:
             raise AssertionError("GET /api/models must not spawn the CLI")
         monkeypatch.setattr(cs, "probe", _no_probe)
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
-        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None}
+        assert m.registry_payload()["claude"] == {"auth_kind": None, "plan_type": None, "enabled": True}
 
     def test_db_failure_degrades_to_nulls(self, monkeypatch):
         """Same contract as ``_providers_payload``: never 500 GET /api/models."""
@@ -608,7 +617,7 @@ class TestRegistryPayloadClaude:
 
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", _raise)
         payload = m.registry_payload()
-        assert payload["claude"] == {"auth_kind": None, "plan_type": None}
+        assert payload["claude"] == {"auth_kind": None, "plan_type": None, "enabled": True}
         # And the rest of the payload is intact.
         assert payload["default"] == "sonnet"
         assert isinstance(payload["models"], list)

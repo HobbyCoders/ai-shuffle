@@ -87,6 +87,32 @@ class TestSubscriptionMode:
         assert child["FOO"] == "bar" and child["PATH"] == "/bin"
 
 
+class TestOffMode:
+    def test_every_anthropic_credential_is_stripped(self):
+        base = {
+            "ANTHROPIC_API_KEY": "sk-profile",
+            "ANTHROPIC_AUTH_TOKEN": "tok",
+            "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+            "FOO": "bar",
+        }
+        with _mode("off"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-x") as m:
+            env = inject_claude_code_auth(base)
+        m.assert_not_called()
+        assert env["FOO"] == "bar"
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            assert name not in env
+        assert _unset(env) == {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+
+    def test_host_credentials_never_reach_the_cli_child(self):
+        with _mode("off"):
+            env = inject_claude_code_auth({})
+        child = child_env_with_overlay(env, {
+            "ANTHROPIC_API_KEY": "sk-host", "CLAUDE_CODE_OAUTH_TOKEN": "oauth-host", "PATH": "/bin",
+        })
+        assert "ANTHROPIC_API_KEY" not in child and "CLAUDE_CODE_OAUTH_TOKEN" not in child
+        assert child["PATH"] == "/bin"
+
+
 def test_provider_session_is_left_alone():
     with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-x"):
         env = inject_claude_code_auth({"ANTHROPIC_AUTH_TOKEN": "gw"}, provider_id="p1")
@@ -144,6 +170,23 @@ class TestModeDefault:
     def test_set_mode_rejects_unknown(self, mock_db):
         with pytest.raises(ValueError):
             claude_auth_mode.set_mode("both")
+
+    def test_off_is_a_mode_the_user_can_choose(self, mock_db):
+        assert claude_auth_mode.set_mode("off") == "off"
+        assert claude_auth_mode.current_mode() == "off" and claude_auth_mode.is_off()
+        out = claude_auth_mode.summary({})
+        assert out["mode"] == "off" and out["mode_label"] == "Off"
+        assert {"value": "off", "label": "Off"} in out["modes"]
+
+    @pytest.mark.parametrize("key", [False, True])
+    @pytest.mark.parametrize("signed_in", [False, True, None])
+    def test_the_default_is_never_off(self, key, signed_in):
+        assert claude_auth_mode.default_mode(key, signed_in) != "off"
+
+    def test_a_recorded_off_survives_startup(self, mock_db):
+        claude_auth_mode.set_mode("off")
+        with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
+            assert claude_auth_mode.ensure_mode_recorded(True) == "off"
 
     def test_summary_shows_last_four_only(self, mock_db):
         claude_auth_mode.set_mode("api_key")

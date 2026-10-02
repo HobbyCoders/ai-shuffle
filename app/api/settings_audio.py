@@ -14,9 +14,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_input_settings import get_voice_input_model
 from app.api.auth import get_api_user_from_request, require_admin, require_auth
-from app.api.settings_crypto import get_decrypted_api_key
 from app.api.settings_media import get_model_params
-from app.core.environment import resolve_api_credential_with_policy
 from app.services.fal_schema import schema_service, ModelSchema
 
 logger = logging.getLogger(__name__)
@@ -308,7 +306,7 @@ def _openai_voice(voice: Optional[str], model_info: Optional[dict]) -> str:
     return voices[0] if voices else "alloy"
 
 
-FAL_KEY_MISSING = "fal.ai API key not configured. Go to Settings > Integrations to add your key."
+FAL_KEY_MISSING = "fal.ai API key not configured. Go to Settings > Providers > fal.ai to add your key."
 FAL_KEY_USER_PROVIDED = (
     "Your credential policy requires your own fal.ai API key, and none is stored "
     "for this API key. Ask the owner to store your key or change your fal.ai policy."
@@ -322,18 +320,23 @@ def _resolve_fal_key(api_user: Optional[dict]) -> tuple[Optional[str], Optional[
     the owner's key. An API user gets the same resolution agent sessions apply
     (``resolve_api_credential_with_policy``): ``user_provided`` only their own
     stored key, ``optional`` their key else the owner's, ``admin_provided`` the
-    owner's. Returns ``(key or None, policy or None for the owner)``.
-    Synchronous: call via ``run_sync``.
+    owner's. Returns ``(key or None, policy or None for the owner)``; while
+    fal.ai is off the key is None and the policy is
+    ``fal_credential.OFF_POLICY``. Synchronous: call via ``run_sync``.
     """
-    if api_user is None:
-        return get_decrypted_api_key("fal_api_key"), None
-    return resolve_api_credential_with_policy("fal_api_key", api_user["id"])
+    from app.core import fal_credential
+
+    return fal_credential.api_key_with_policy(None if api_user is None else api_user["id"])
 
 
 def _require_fal_key(fal_key: Optional[str], policy: Optional[str]) -> str:
     """The resolved fal key, or the error that explains why there is none."""
     if fal_key:
         return fal_key
+    from app.core import fal_credential
+
+    if policy == fal_credential.OFF_POLICY:
+        raise HTTPException(status_code=400, detail=fal_credential.OFF_MESSAGE)
     if policy == "user_provided":
         raise HTTPException(status_code=403, detail=FAL_KEY_USER_PROVIDED)
     raise HTTPException(status_code=400, detail=FAL_KEY_MISSING)
@@ -897,7 +900,7 @@ async def transcribe_audio(
     if STT_MODELS.get(stt_model, {}).get("realtime_only"):
         raise HTTPException(
             status_code=400,
-            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file-capable model in Settings > Voice > Voice transcription.",
+            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file-capable model in Settings > Default models > Dictation.",
         )
     provider = _model_provider(stt_model, STT_MODELS.get(stt_model))
 
@@ -943,7 +946,7 @@ async def transcribe_audio(
                 if response.status_code == 401:
                     raise HTTPException(
                         status_code=400,
-                        detail="fal.ai API key is invalid. Please update it in Settings > Integrations."
+                        detail="fal.ai API key is invalid. Please update it in Settings > Providers > fal.ai."
                     )
                 elif response.status_code == 429:
                     raise HTTPException(

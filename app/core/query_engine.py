@@ -900,7 +900,7 @@ async def _emit_api_error_notification(
                     "Claude Code refused the request (HTTP 401): its sign-in on this "
                     "worker is missing or has expired. "
                     f"Run `{LOGIN_COMMAND}` on the worker, or use Settings > "
-                    "Providers > Claude Code CLI to sign in again, then retry."
+                    "Providers > Claude to sign in again, then retry."
                 ),
                 category="api_error",
                 surface="notification",

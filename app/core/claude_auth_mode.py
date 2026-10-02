@@ -1,13 +1,17 @@
-"""Which credential Claude Code runs on: the user's subscription or their API key.
+"""Which credential Claude Code runs on: the user's subscription, their API key, or none.
 
-AI Shuffle runs the stock Claude Code CLI in exactly one of two modes, and the
-user picks it:
+AI Shuffle runs the stock Claude Code CLI in one of two modes, or not at all,
+and the user picks it:
 
 - ``subscription``: the CLI uses its own sign-in, which the user completed in
   Anthropic's flow (``claude auth login``). Nothing is injected; any Anthropic
   key in the host or profile environment is kept away from the CLI.
 - ``api_key``: the Anthropic API key the user stored in Settings is passed to
   the CLI as ``ANTHROPIC_API_KEY``, and nothing else credential-like is.
+- ``off``: Claude is turned off on this worker. Claude models leave the model
+  pickers, every Claude turn is refused with a setup message, and no Anthropic
+  credential reaches a CLI child. Only the user turns this on; the startup
+  default never picks it.
 
 The mode is an explicit per-worker setting (``claude_auth_mode:<instance id>``).
 When both a CLI sign-in and a stored key exist, the setting decides; the app
@@ -33,11 +37,13 @@ logger = logging.getLogger(__name__)
 
 MODE_SUBSCRIPTION = "subscription"
 MODE_API_KEY = "api_key"
-MODES = (MODE_SUBSCRIPTION, MODE_API_KEY)
+MODE_OFF = "off"
+MODES = (MODE_SUBSCRIPTION, MODE_API_KEY, MODE_OFF)
 
 MODE_LABELS = {
     MODE_SUBSCRIPTION: "Claude subscription",
     MODE_API_KEY: "Anthropic API key",
+    MODE_OFF: "Off",
 }
 
 SETTING_PREFIX = "claude_auth_mode:"
@@ -47,6 +53,7 @@ API_KEY_SETTING = "anthropic_api_key"
 # ones that do not belong to it are removed from what the CLI child inherits.
 SUBSCRIPTION_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 API_KEY_UNSET = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+OFF_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
 def setting_key() -> str:
@@ -90,7 +97,7 @@ def stored_mode(*, cached: bool = False) -> Optional[str]:
 
 
 def default_mode(key_stored: bool, cli_signed_in: Optional[bool]) -> str:
-    """The mode an install without an explicit choice starts in."""
+    """The mode an install without an explicit choice starts in (never ``off``)."""
     if key_stored and not cli_signed_in:
         return MODE_API_KEY
     return MODE_SUBSCRIPTION
@@ -117,6 +124,10 @@ def current_mode() -> str:
         return default_mode(has_stored_api_key(), _cli_signed_in_peek())
     except Exception:  # noqa: BLE001
         return MODE_SUBSCRIPTION
+
+
+def is_off() -> bool:
+    return current_mode() == MODE_OFF
 
 
 def is_explicit() -> bool:

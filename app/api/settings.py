@@ -57,6 +57,9 @@ class IntegrationSettingsResponse(BaseModel):
     fal_api_key_set: bool
     fal_billing_api_key_set: bool = False
     fal_api_key_masked: str
+    # fal.ai on/off (Settings > Providers > fal.ai). Off keeps the key stored
+    # but no fal.ai call spends it. Unset reads as on.
+    fal_enabled: bool = True
     # Anthropic API key — a Claude Code AUTHENTICATION credential. When set, it
     # is injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
     # overrides the connected Claude account (API-key login). When unset, Claude
@@ -67,7 +70,9 @@ class IntegrationSettingsResponse(BaseModel):
     # (``claude_auth_mode``; see GET /settings/claude-auth):
     #   "api_key"  — api_key mode: the stored key is injected
     #   "account"  — subscription mode: the CLI's own sign-in is used
-    # Kept for older clients; ``claude_auth_mode`` carries the mode itself.
+    #   "off"      — Claude is turned off on this worker
+    # Kept for older clients; ``claude_auth_mode`` carries the mode itself
+    # ("subscription", "api_key" or "off").
     claude_code_auth_method: str = "account"
     claude_auth_mode: str = "subscription"
     # Model selections (all fal.ai model IDs)
@@ -224,6 +229,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         single off-loop closure with the query order untouched.
         """
         fal_key = get_decrypted_api_key("fal_api_key")
+        from app.core import fal_credential
+        fal_enabled = fal_credential.is_enabled()
         anthropic_key = get_decrypted_api_key("anthropic_api_key")
         from app.core import claude_auth_mode
         auth_mode = claude_auth_mode.current_mode()
@@ -254,10 +261,13 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             fal_api_key_set=bool(fal_key),
             fal_billing_api_key_set=bool(database.get_system_setting("fal_billing_api_key")),
             fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
+            fal_enabled=fal_enabled,
             anthropic_api_key_set=bool(anthropic_key),
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
             # The explicit mode decides, never the key's mere presence.
-            claude_code_auth_method="api_key" if auth_mode == "api_key" else "account",
+            claude_code_auth_method=(
+                auth_mode if auth_mode in ("api_key", "off") else "account"
+            ),
             claude_auth_mode=auth_mode,
             image_model=image_model,
             image_edit_model=image_edit_model,
@@ -324,6 +334,36 @@ async def remove_fal_api_key(token: str = Depends(require_admin)):
     """
     await run_sync(database.delete_system_setting, "fal_api_key")
     return {"success": True}
+
+
+class FalEnabledRequest(BaseModel):
+    """Turn fal.ai on or off."""
+    enabled: bool
+
+
+class FalEnabledResponse(BaseModel):
+    fal_enabled: bool
+    fal_api_key_set: bool
+
+
+@router.put("/integrations/fal-ai/enabled", response_model=FalEnabledResponse)
+async def set_fal_enabled(request: FalEnabledRequest, token: str = Depends(require_admin)):
+    """
+    Turn fal.ai on or off (admin only).
+
+    Off keeps the stored key but every fal.ai reader (AI tools, dictation and
+    text-to-speech on fal models, fal voice calls, the model catalog) gets no
+    key, including the FAL_KEY / FAL_API_KEY environment fallback. The write
+    announces a settings change to open clients. Takes effect for the next
+    fal.ai call; an open agent session drops its AI tools at its next turn.
+    """
+    from app.core import fal_credential
+
+    def _apply() -> FalEnabledResponse:
+        enabled = fal_credential.set_enabled(request.enabled)
+        return FalEnabledResponse(fal_enabled=enabled, fal_api_key_set=fal_credential.key_stored())
+
+    return await run_sync(_apply)
 
 
 @router.post("/integrations/anthropic", response_model=AnthropicKeyResponse)
@@ -405,11 +445,11 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Claude Code auth mode (subscription or API key)
+# Claude Code auth mode (subscription, API key or off)
 # ============================================================================
 
 class ClaudeAuthModeRequest(BaseModel):
-    mode: str = Field(..., description="'subscription' or 'api_key'")
+    mode: str = Field(..., description="'subscription', 'api_key' or 'off'")
 
 
 async def claude_auth_payload(refresh: bool = False) -> dict:
@@ -430,9 +470,10 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
 async def get_claude_auth(refresh: bool = False, token: str = Depends(require_auth)):
     """Which credential Claude Code runs on.
 
-    ``mode`` is ``subscription`` or ``api_key``; ``explicit`` is false only
-    before startup has recorded the default. ``cli`` is what `claude auth
-    status` reports (account shown only when signed in); ``api_key`` says
+    ``mode`` is ``subscription``, ``api_key`` or ``off`` (Claude turned off on
+    this worker); ``explicit`` is false only before startup has recorded the
+    default. ``cli`` is what `claude auth status` reports (account shown only
+    when signed in); ``api_key`` says
     whether a key is stored and its last four characters; ``gate`` is the
     credential gate (``ready``, ``reason``, ``license_allows_runs``...).
     """
@@ -441,7 +482,11 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
 
 @router.put("/claude-auth")
 async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
-    """Choose the mode (admin only). Takes effect for the next agent run."""
+    """Choose the mode (admin only). Takes effect for the next agent run.
+
+    ``off`` turns Claude off on this worker: Claude models leave the pickers
+    and Claude runs are refused with the gate's off message (``gate.reason``).
+    """
     from app.core import claude_auth_mode
 
     try:

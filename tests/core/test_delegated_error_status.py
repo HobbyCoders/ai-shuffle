@@ -46,7 +46,7 @@ async def test_a_delegated_401_asks_for_a_claude_code_sign_in():
     assert emit.await_args.args == ("u1",)
     message = emit.await_args.kwargs["message"]
     assert "claude auth login" in message
-    assert "Settings > Providers > Claude Code CLI" in message
+    assert "Settings > Providers > Claude to sign in" in message
     assert emit.await_args.kwargs["session_id"] == "s1"
 
 

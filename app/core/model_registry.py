@@ -434,28 +434,34 @@ def _claude_payload() -> Dict[str, object]:
         ``api_key`` mode with a stored key → ``auth_kind = "api"``, no plan;
       * ``subscription`` mode, when the Claude Code CLI reports a login
         (``claude auth status``) → ``auth_kind = "subscription"`` with the plan
-        the CLI printed, if any.
+        the CLI printed, if any;
+      * ``off`` mode → no auth kind and ``enabled = False``, so the pickers
+        (which hide Claude when ``auth_kind`` is null) drop Claude models.
 
-    Reads the last probe result only (never runs the CLI on this request path)
-    and degrades to nulls on any failure.
+    ``enabled`` is False only in ``off`` mode. Reads the last probe result only
+    (never runs the CLI on this request path) and degrades to nulls on any
+    failure.
     """
     try:
         from app.core import claude_auth_mode
 
-        if claude_auth_mode.current_mode() == claude_auth_mode.MODE_API_KEY:
+        mode = claude_auth_mode.current_mode()
+        if mode == claude_auth_mode.MODE_OFF:
+            return {"auth_kind": None, "plan_type": None, "enabled": False}
+        if mode == claude_auth_mode.MODE_API_KEY:
             if claude_auth_mode.has_stored_api_key():
-                return {"auth_kind": "api", "plan_type": None}
-            return {"auth_kind": None, "plan_type": None}
+                return {"auth_kind": "api", "plan_type": None, "enabled": True}
+            return {"auth_kind": None, "plan_type": None, "enabled": True}
 
         from app.core import claude_cli_status
 
         status = claude_cli_status.peek()
         if status is None or not status.signed_in:
-            return {"auth_kind": None, "plan_type": None}
-        return {"auth_kind": "subscription", "plan_type": status.plan}
+            return {"auth_kind": None, "plan_type": None, "enabled": True}
+        return {"auth_kind": "subscription", "plan_type": status.plan, "enabled": True}
     except Exception as e:  # noqa: BLE001 — display metadata is never fatal
         logger.warning("Could not resolve Claude auth metadata for registry: %s", e)
-        return {"auth_kind": None, "plan_type": None}
+        return {"auth_kind": None, "plan_type": None, "enabled": True}
 
 
 def registry_payload() -> Dict[str, object]:

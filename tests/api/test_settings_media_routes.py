@@ -298,7 +298,7 @@ async def test_catalog_refresh_during_another_refresh_reports_its_outcome(monkey
 
     service = fal_catalog.FalCatalogService()
     monkeypatch.setattr(catalog_api, "catalog_service", service)
-    monkeypatch.setattr(catalog_api, "get_decrypted_api_key", lambda name: FAL_KEY)
+    monkeypatch.setattr(catalog_api.fal_credential, "api_key", lambda api_user_id=None: FAL_KEY)
     monkeypatch.setattr(service, "_persist_to_db", lambda models: None)
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
@@ -337,7 +337,7 @@ async def test_catalog_refresh_waiting_on_a_hung_refresh_gives_up_with_the_cache
     service = fal_catalog.FalCatalogService()
     service._cache = [object(), object()]  # two cached models
     monkeypatch.setattr(catalog_api, "catalog_service", service)
-    monkeypatch.setattr(catalog_api, "get_decrypted_api_key", lambda name: FAL_KEY)
+    monkeypatch.setattr(catalog_api.fal_credential, "api_key", lambda api_user_id=None: FAL_KEY)
     monkeypatch.setattr(service, "get_categories", lambda: [])
     monkeypatch.setattr(fal_catalog, "REFRESH_WAIT_TIMEOUT_SECONDS", 0.2, raising=False)
     entered, release = asyncio.Event(), asyncio.Event()

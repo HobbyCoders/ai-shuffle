@@ -76,6 +76,15 @@ def test_api_key_mode_disabled_guard_and_provider_legs_are_exempt(mock_db):
         assert loop_guard.check("s", "automation", "delegated") is None
 
 
+def test_off_mode_leaves_the_guard_inactive(mock_db):
+    loop_guard.update_config(session_turns_per_hour=1, install_turns_per_hour=1)
+    claude_auth_mode.set_mode("off")
+    assert loop_guard.applies() is False
+    for _ in range(3):
+        assert loop_guard.check("s", "automation", "delegated") is None
+    assert loop_guard.usage("s") == {"install_last_hour": 0, "session_last_hour": 0}
+
+
 def test_update_config_validates(mock_db):
     with pytest.raises(ValueError):
         loop_guard.update_config(session_turns_per_hour=0)

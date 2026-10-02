@@ -285,7 +285,7 @@ def status(now: float | None = None, *, cached: bool = False) -> dict:
     if not lease:
         return result | {
             "state": "unlicensed", "allowed": False,
-            "reason": "No license is active on this worker, so new agent runs are paused. Add your license key in Settings > License. Your data is not affected.",
+            "reason": "No license is active on this worker, so new agent runs are paused. Add your license key in Settings > System > License. Your data is not affected.",
             "banner": {"severity": "error", "message": "No license is active on this worker. New agent runs are paused until you add a license key."},
         }
     try:
@@ -294,7 +294,7 @@ def status(now: float | None = None, *, cached: bool = False) -> dict:
         logger.warning("Saved license lease rejected: %s", exc)
         return result | {
             "state": "invalid", "allowed": False,
-            "reason": "The saved license lease could not be verified, so new agent runs are paused. Enter your license key again in Settings > License.",
+            "reason": "The saved license lease could not be verified, so new agent runs are paused. Enter your license key again in Settings > System > License.",
             "banner": {"severity": "error", "message": "The saved license could not be verified. Enter your license key again."},
         }
     expires = float(payload["expires_at"])
@@ -309,7 +309,7 @@ def status(now: float | None = None, *, cached: bool = False) -> dict:
     if now >= expires:
         return result | {
             "state": "expired", "allowed": False,
-            "reason": f"This worker's license lease ended on {_day(expires)}, so new agent runs are paused. Connect it to the internet or renew your license in Settings > License. Your data is not affected.",
+            "reason": f"This worker's license lease ended on {_day(expires)}, so new agent runs are paused. Connect it to the internet or renew your license in Settings > System > License. Your data is not affected.",
             "banner": {"severity": "error", "message": f"The license lease ended on {_day(expires)}. New agent runs are paused until it renews."},
         }
     server_status = state.get("server_status") or {}

@@ -200,7 +200,7 @@ async def generate_with_claude(
     """
     Generate a response using AI, honoring the text-generation setting.
 
-    Settings → Providers carries one model + effort pair — the user-facing
+    Settings > Default models carries one model + effort pair — the user-facing
     control for all internal AI generation (commit messages, PR descriptions,
     branch names, profile / subagent generation, etc.). This function reads that
     binding, then runs a throwaway turn through the provider adapter seam
@@ -264,6 +264,22 @@ async def generate_with_claude(
         # provider message, not a generic "Internal server error:" 500 (this
         # call is outside the api_error_handler block below).
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # A generation call on the Claude Code CLI leg needs what any Claude turn
+    # needs (license plus the active Claude Code mode's credential); with
+    # Claude turned off it is refused here instead of starting a CLI. A
+    # provider-row leg reports its own missing key, so it is not gated.
+    from app.core import credential_gate
+
+    leg = await run_sync(credential_gate.leg_for_options, options)
+    if leg == "delegated":
+        refusal = await credential_gate.turn_refusal_async(leg)
+        if refusal:
+            raise HTTPException(
+                status_code=503,
+                detail=refusal,
+                headers={"X-Error-Code": credential_gate.SETUP_CODE},
+            )
 
     t0 = time.perf_counter()
     response_text: list[str] = []

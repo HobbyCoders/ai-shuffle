@@ -128,7 +128,9 @@ def list_eligible_voice_providers(
         if _is_eligible_voice_provider(row)
     ]
     if api_user is None:
-        fal_available = bool(database.get_system_setting("fal_api_key"))
+        from app.core import fal_credential
+
+        fal_available = fal_credential.is_enabled() and fal_credential.key_stored()
     else:
         fal_available = bool(_fal_key_for(api_user)[0])
     if fal_available:
@@ -147,7 +149,11 @@ def _eligible_provider_row(
     generic "cannot fund voice calls".
     """
     if provider_id == FAL_PROVIDER_ID:
-        if api_user is not None or database.get_system_setting("fal_api_key"):
+        from app.core import fal_credential
+
+        # A stored key keeps the row eligible while fal.ai is off, so
+        # :func:`_provider_api_key` answers with the "fal.ai is off" message.
+        if api_user is not None or fal_credential.key_stored():
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
     row = database.get_model_provider(provider_id, include_token=True)
@@ -416,7 +422,7 @@ def _resolve_provider_row(
             status_code=400,
             detail=(
                 "No OpenAI provider with a stored API key is configured. Add one "
-                "in Settings → Providers before starting a voice session "
+                "in Settings > Providers before starting a voice session "
                 "(Realtime does not support ChatGPT-subscription logins)."
             ),
         )
@@ -596,8 +602,11 @@ async def _provider_api_key(
 
             fal_key, policy = await run_sync(_fal_key_for, api_user)
             return _require_fal_key(fal_key, policy)
-        from app.api.settings import get_decrypted_api_key
-        api_key = await run_sync(get_decrypted_api_key, "fal_api_key")
+        from app.core import fal_credential
+
+        if not await run_sync(fal_credential.is_enabled):
+            raise HTTPException(status_code=400, detail=fal_credential.OFF_MESSAGE)
+        api_key = await run_sync(fal_credential.api_key)
     else:
         api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:
@@ -605,7 +614,7 @@ async def _provider_api_key(
             status_code=400,
             detail=(
                 f"The API key for provider {provider_row.get('name') or provider_row['id']!r} "
-                "could not be read. Re-enter it in Settings → Providers."
+                "could not be read. Re-enter it in Settings > Providers."
             ),
         )
     return api_key
@@ -619,7 +628,7 @@ async def _require_voice_enabled() -> Dict[str, Any]:
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
             status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings → Voice.",
+            detail="Voice mode is disabled. Enable it in Settings > Voice.",
         )
     return voice_settings
 
@@ -779,7 +788,7 @@ async def create_voice_session(
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
             status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings → Voice.",
+            detail="Voice mode is disabled. Enable it in Settings > Voice.",
         )
 
     provider_row = await run_sync(

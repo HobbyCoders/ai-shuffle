@@ -4,7 +4,7 @@ In subscription mode every Claude agent run spends the user's own plan limits.
 A runaway automation, an agent that keeps re-arming wake-ups, a flood of
 connector messages or a fan-out of background workers can use a plan up
 without anyone watching. The guard adds three things, all configurable in
-Settings > Providers > Loop guard:
+Settings > Providers > Claude (the subscription's Policy tab):
 
 1. **Unattended budget.** Turns from unattended sources (``automation``,
    ``wakeup``, ``provider_agent`` workers, ``connector``) that run on the
@@ -75,7 +75,7 @@ LIMITS = {
 SCHEDULED_RUN_GUIDANCE = (
     "Claude Code is in subscription mode, so this runs on your Claude plan while "
     "you are away. Anthropic sizes plans for one person's hands-on use; use an "
-    "API key for scheduled runs (Settings > Providers > Claude Code mode). The "
+    "API key for scheduled runs (Settings > Providers > Claude). The "
     "loop guard holds unattended turns past its budget until you confirm them."
 )
 
@@ -203,7 +203,7 @@ def check(session_id: str, source: str, leg: Optional[str], *, confirmed: bool =
                     f"Loop guard: this {label} turn is waiting for your confirmation. "
                     f"This session already ran {len(times)} unattended turns on your Claude "
                     f"subscription in the last hour (budget {cfg.session_turns_per_hour}). "
-                    "Confirm or dismiss it in Settings > Providers > Loop guard. Use an API key "
+                    "Confirm or dismiss it in Settings > Providers > Claude > Policy. Use an API key "
                     "for scheduled and unattended runs."
                 )
             if len(_install) >= cfg.install_turns_per_hour:
@@ -211,7 +211,7 @@ def check(session_id: str, source: str, leg: Optional[str], *, confirmed: bool =
                     f"Loop guard: this {label} turn is waiting for your confirmation. This "
                     f"worker already ran {len(_install)} unattended turns on your Claude "
                     f"subscription in the last hour (budget {cfg.install_turns_per_hour}). "
-                    "Confirm or dismiss it in Settings > Providers > Loop guard. Use an API key "
+                    "Confirm or dismiss it in Settings > Providers > Claude > Policy. Use an API key "
                     "for scheduled and unattended runs."
                 )
         times.append(now)

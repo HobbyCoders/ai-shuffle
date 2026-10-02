@@ -34,7 +34,7 @@ MESSAGE = (
     "manages its own sign-in. To make sure the CLI's token comes from its own "
     "sign-in on Anthropic's page, sign out and in again once: run "
     f"`{LOGOUT_COMMAND}` and then `{LOGIN_COMMAND}` (Settings > Providers > "
-    "Claude Code CLI has Sign out and Sign in)."
+    "Claude has Sign out and Sign in)."
 )
 
 

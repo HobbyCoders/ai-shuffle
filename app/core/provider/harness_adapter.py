@@ -6273,7 +6273,7 @@ def _require_env_credential(env_var: str, kind: str) -> None:
     raise ProviderCredentialError(
         f"No model provider is bound to this session and {env_var} is not set, "
         f"so the {kind} provider has no credentials configured. Bind the session "
-        f"to a model provider (Settings → Model Providers) or set {env_var}."
+        f"to a model provider (Settings > Providers) or set {env_var}."
     )
 
 

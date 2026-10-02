@@ -1236,7 +1236,7 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
         return (
             f"Model provider '{label}' has no credentials configured, so the "
             "worker would fail at connect. Add an API key (or connect its "
-            "ChatGPT account) under Settings → Model Providers."
+            "ChatGPT account) under Settings > Providers."
         )
     if not has_api_key and has_codex and row.get("needs_reauth"):
         return (

@@ -253,10 +253,12 @@ async def test_update_voice_settings_rejects_a_bad_model_from_the_worker(mock_db
 
 async def test_get_audio_models_reads_key_and_models_in_one_hop(mock_db, loop_thread):
     setting = _ThreadSpy(audio_api.database.get_system_setting)
-    key = _ThreadSpy(audio_api.get_decrypted_api_key)
+    from app.core import fal_credential
+
+    key = _ThreadSpy(fal_credential.api_key_with_policy)
 
     with patch.object(audio_api.database, "get_system_setting", setting), \
-         patch.object(audio_api, "get_decrypted_api_key", key):
+         patch.object(fal_credential, "api_key_with_policy", key):
         # The owner: no API user on the request state.
         owner_request = SimpleNamespace(state=SimpleNamespace())
         payload = await audio_api.get_audio_models(owner_request, token="t")

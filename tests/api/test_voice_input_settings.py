@@ -60,7 +60,6 @@ def test_model_selection_is_independent_and_routes_voice_input(authenticated_cli
 
     # Exercise the saved setting through both consumers. Provider I/O is stubbed.
     monkeypatch.setattr(settings_audio, "_resolve_openai_api_key", lambda: "sk-test")
-    monkeypatch.setattr(settings_audio, "get_decrypted_api_key", lambda key: None)
     capability = c.get("/api/v1/settings/transcribe/stream/capability").json()
     assert capability["model"] == chosen
     assert capability["supported"] is True

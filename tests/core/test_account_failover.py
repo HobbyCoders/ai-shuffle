@@ -120,6 +120,7 @@ class TestApiKey429IsNotAUsageWindow:
     @pytest.mark.parametrize("mode,expected", [
         ("subscription", "USAGE_LIMIT_MESSAGE"),
         ("api_key", "RATE_LIMIT_MESSAGE"),
+        ("off", "RATE_LIMIT_MESSAGE"),
     ])
     async def test_a_claude_session_follows_the_claude_auth_mode(self, mode, expected):
         message = await self._notice({"provider_id": None}, None, claude_mode=mode)
