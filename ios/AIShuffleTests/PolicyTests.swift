@@ -183,17 +183,23 @@ final class ChatPolicyTests: XCTestCase {
 
     func testContentRulesBlockEverythingButTheBundleAndWorker() throws {
         let source = try ChatPolicy.contentRules(base: "https://Worker.Example:8443/")
-        let rules = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(source.utf8)) as? [[String: [String: String]]])
-        XCTAssertEqual(rules.first?["trigger"]?["url-filter"], ".*")
-        XCTAssertEqual(rules.first?["action"]?["type"], "block")
-        XCTAssertEqual(rules.dropFirst().map { $0["action"]?["type"] }, Array(repeating: "ignore-previous-rules", count: 5))
-        XCTAssertEqual(rules.dropFirst().compactMap { $0["trigger"]?["url-filter"] }, [
+        let rules = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(source.utf8)) as? [[String: [String: Any]]])
+        XCTAssertEqual(rules.first?["trigger"]?["url-filter"] as? String, ".*")
+        XCTAssertNil(rules.first?["trigger"]?["resource-type"])
+        XCTAssertEqual(rules.first?["action"]?["type"] as? String, "block")
+        XCTAssertEqual(rules.dropFirst().map { $0["action"]?["type"] as? String }, Array(repeating: "ignore-previous-rules", count: 6))
+        XCTAssertEqual(rules.dropFirst().compactMap { $0["trigger"]?["url-filter"] as? String }, [
             #"^aishuffle://app/"#,
             #"^https://worker\.example:8443/"#,
             #"^wss://worker\.example:8443/"#,
             "^data:",
             "^blob:",
+            "^https://",
         ])
+        // Only the allowlist entries apply to every load; the HTTPS exception is for popups alone.
+        XCTAssertEqual(rules.dropFirst().compactMap { $0["trigger"]?["resource-type"] as? [String] }, [["popup"]])
+        XCTAssertNil(rules[5]["trigger"]?["resource-type"])
+        XCTAssertEqual(rules[6]["trigger"]?["resource-type"] as? [String], ["popup"])
         let ipv6 = try ChatPolicy.contentRules(base: "https://[::1]")
         XCTAssertTrue(ipv6.contains(#"^https://\\[::1\\]/"#), ipv6)
         XCTAssertThrowsError(try ChatPolicy.contentRules(base: "http://worker.example"))

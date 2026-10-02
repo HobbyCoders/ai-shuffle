@@ -101,6 +101,11 @@ enum ChatPolicy {
         rules += allowed.map { filter -> [String: Any] in
             ["trigger": ["url-filter": filter], "action": ["type": "ignore-previous-rules"]]
         }
+        // `window.open` and target=_blank links are "popup" loads, which the block-all rule would
+        // stop before WebKit asks the UI delegate. Let HTTPS ones reach it: the delegate never
+        // creates a window, it only offers the link outside the app after confirmation.
+        rules.append(["trigger": ["url-filter": "^https://", "resource-type": ["popup"]],
+                      "action": ["type": "ignore-previous-rules"]])
         let data = try JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys, .withoutEscapingSlashes])
         return String(decoding: data, as: UTF8.self)
     }

@@ -168,48 +168,23 @@ final class WebKitTests: XCTestCase {
         let script = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/script")!) }
         XCTAssertTrue(script, "A script location change was not offered: \(offered.urls)")
 
-        // In the app WebKit asks for a new window only from a real tap, since popups are off; a
-        // test script has no tap, so let it through here and check what the controller does with it.
-        controller.webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // The same call the UI makes (frontend MainPanel.svelte).
+        // The same call the UI makes (frontend MainPanel.svelte). evaluateJavaScript counts as a
+        // user gesture, so WebKit's popup gate lets it through as it would a tap; the content rules
+        // must not block it first (they did, as a "popup" load).
         _ = try await evaluate(controller.webView, "window.open('https://docs.example/popup', '_blank', 'noopener'); return true")
         let popup = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/popup")!) }
         XCTAssertTrue(popup, "window.open was not offered: \(offered.urls)")
 
+        _ = try await evaluate(controller.webView, """
+            const link = document.createElement('a');
+            link.href = 'https://docs.example/blank'; link.target = '_blank'; link.rel = 'noopener';
+            document.body.appendChild(link); link.click(); return true
+            """)
+        let blank = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/blank")!) }
+        XCTAssertTrue(blank, "A target=_blank link was not offered: \(offered.urls)")
+
         try await Task.sleep(nanoseconds: 500_000_000)
         XCTAssertTrue(MobileUI.isAssetOrigin(controller.webView.url), "\(String(describing: controller.webView.url))")
-    }
-
-    /// TEMPORARY diagnostic: what WebKit hands createWebViewWith for a script window.open.
-    func testDiagnoseWindowOpen() async throws {
-        final class Recorder: NSObject, WKUIDelegate {
-            var calls: [String] = []
-            func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                         for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-                let source = action.value(forKey: "sourceFrame") as? WKFrameInfo
-                calls.append("type=\(action.navigationType.rawValue) url=\(action.request.url?.absoluteString ?? "nil") " +
-                             "source=\(source.map { "\($0.isMainFrame) \($0.securityOrigin.protocol)://\($0.securityOrigin.host):\($0.securityOrigin.port)" } ?? "nil") " +
-                             "target=\(action.targetFrame == nil ? "nil" : "set")")
-                return nil
-            }
-        }
-        let root = try XCTUnwrap(BundleAssets.root)
-        for auto in [false, true] {
-            for features in ["'noopener'", "''", "'fresh'"] {
-                let recorder = Recorder()
-                let configuration = ChatWebController.configuration(rules: nil, root: root)
-                if features == "'fresh'" { configuration.preferences.javaScriptCanOpenWindowsAutomatically = auto }
-                let webView = WKWebView(frame: .zero, configuration: configuration)
-                webView.uiDelegate = recorder
-                show(webView)
-                webView.load(URLRequest(url: MobileUI.indexURL))
-                _ = try await waitUntil(30) { !webView.isLoading && webView.url != nil }
-                webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = auto
-                let result = try await evaluate(webView, "return String(window.open('https://docs.example/p', '_blank', \(features)))")
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                XCTFail("DIAG auto=\(auto) features=\(features) result=\(result) calls=\(recorder.calls)")
-            }
-        }
     }
 
     /// Closing must actually unload the chat document; about:blank is otherwise refused by the policy.
