@@ -4,7 +4,9 @@
  import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight } from 'lucide-svelte';
  import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId } from '$lib/api/assistant';
  import { assistantState, agentIdentities, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
- import { appData, profiles } from '$lib/stores/app-data.svelte';
+ import { appData, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
+ import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
+ import { callBusyReason, explainBlockedCall, prefersTouch } from '$lib/components/chat/call-gate';
  import { layout } from '$lib/stores/layout.svelte';
  import { sessionOwnerEpoch } from '$lib/stores/session-owner';
  import { openSession } from '$lib/services/session-navigation';
@@ -46,6 +48,18 @@
  const inUse = $derived(!assistant || ['unconfigured', 'agent_unavailable', 'guard_unavailable'].includes(assistant.status) ? 0 : sources.filter(s => s.enabled && s.available).length);
  const presenceText = $derived(inUse ? `Using ${inUse} connected ${inUse === 1 ? 'source' : 'sources'}.` : 'No connected sources in use.');
  const optedIn = $derived(sources.filter(s => s.enabled).length);
+ // Same gate as the composer's call button: a call starts only once the home
+ // conversation is ready or finished. Without the transcript loaded, the
+ // cross-device streaming marker and background prompts stand in for it.
+ const callBlocked = $derived.by(() => {
+  const homeId = assistant?.home_session_id;
+  if (!homeId) return null;
+  const attention = $backgroundPermissions.get(homeId);
+  const state = $activeSession.sessionId === homeId ? $activeSession
+   : { sessionId: homeId, isStreaming: $streamingSessions.has(homeId), activeTasks: [], pendingPermissions: attention?.count ? [attention] : [], pendingQuestions: [] };
+  return callBusyReason(state, $sessions.find(s => s.id === homeId));
+ });
+ let touch = $state(false);
 
  let loaded = false;
  async function load() {
@@ -66,6 +80,7 @@
   finally { if (current()) { loading = false; refreshing = false; } }
  }
  onMount(() => {
+  touch = prefersTouch();
   void load();
   void isVoiceEnabled().then(enabled => { if (current()) voiceEnabled = enabled; });
   const tick = setInterval(() => { if (document.visibilityState === 'visible' && !busy && !editing) void load(); }, 15000);
@@ -132,6 +147,10 @@
    if (voice) await startCallForSession(home.session_id, { attach: true });
   });
  }
+ function startCall() {
+  if (callBlocked) { if (touch) explainBlockedCall(callBlocked); return; }
+  conversation(true);
+ }
  function toggleSource(source: AssistantSource) {
   void act(source.id, async () => { const next = await setAssistantSource(source.connector_id, !source.enabled); if (current()) sources = sources.map(s => s.id === next.id ? next : s); });
  }
@@ -153,7 +172,7 @@
     <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off. Your assistant can coordinate work across your sessions, with access you control.` : 'Give it a name and a face. It gets one lasting conversation, and you can change any of this later.'}</p>
     {#if hasAgent && !editing}
      <div class="hero-actions"><button class="primary" disabled={!!busy} onclick={() => conversation()}><MessageSquare size={17} />{busy === 'open' ? 'Opening…' : 'Open conversation'}<ArrowUpRight size={16} /></button>
-      {#if voiceEnabled}<button class="secondary" disabled={!!busy} onclick={() => conversation(true)}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}
+      {#if voiceEnabled}<button class="secondary" class:blocked={!!callBlocked} disabled={!!busy || (!!callBlocked && !touch)} aria-disabled={callBlocked ? 'true' : undefined} title={callBlocked ?? undefined} onclick={startCall}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}
       <button class="icon-button" aria-label="Edit assistant" title="Edit assistant" disabled={!!busy} onclick={() => beginEdit()}><Settings2 size={18} /></button>
      </div>
      <p class="micro">Text and voice share this conversation. The microphone is only used when you start a call or dictate.</p>
@@ -223,13 +242,13 @@
  .hero-actions { flex-wrap:wrap; margin-top:22px; }
  button { cursor:pointer; transition:background .2s, border-color .2s, transform .2s; }
  button:active:not(:disabled) { transform:translateY(1px); }
- button:disabled,fieldset:disabled { opacity:.55; cursor:not-allowed; }
+ button:disabled,button.blocked,fieldset:disabled { opacity:.55; cursor:not-allowed; }
  button:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
  .primary,.secondary,.icon-button,.text-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; border-radius:8px; border:1px solid transparent; font-size:12px; font-weight:550; }
  .primary { background:var(--primary); color:var(--primary-foreground); padding:0 18px; }
  .primary:hover:not(:disabled) { filter:brightness(1.08); }
  .secondary { color:var(--foreground); background:var(--card); border-color:var(--border); padding:0 14px; }
- .secondary:hover:not(:disabled),.icon-button:hover:not(:disabled) { background:var(--accent); border-color:var(--primary); }
+ .secondary:hover:not(:disabled):not(.blocked),.icon-button:hover:not(:disabled) { background:var(--accent); border-color:var(--primary); }
  .icon-button { width:44px; flex:none; background:transparent; color:var(--muted-foreground); }
  .text-button { color:var(--primary); background:transparent; padding:0 3px; text-align:left; }
  .text-button:hover { text-decoration:underline; text-underline-offset:4px; }

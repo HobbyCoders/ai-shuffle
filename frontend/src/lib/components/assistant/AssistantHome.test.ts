@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
  getAssistant: vi.fn(), getAgentIdentities: vi.fn(), configureAssistant: vi.fn(), openAssistant: vi.fn(),
  getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(),
  openSession: vi.fn(), startCallForSession: vi.fn(), isVoiceEnabled: vi.fn(), openFeaturePage: vi.fn(),
- loadSessions: vi.fn(), loadProfiles: vi.fn(),
+ loadSessions: vi.fn(), loadProfiles: vi.fn(), banner: vi.fn(() => 'banner-id'),
 }));
 vi.mock('$lib/api/assistant', async original => ({ ...await original<typeof import('$lib/api/assistant')>(), ...mocks }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession }));
@@ -16,10 +16,25 @@ vi.mock('$lib/api/voice', () => ({ isVoiceEnabled: mocks.isVoiceEnabled }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openFeaturePage: mocks.openFeaturePage } }));
 vi.mock('$lib/stores/app-data.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { profiles: writable([{ id: 'guide', name: 'Guide', is_builtin: false, config: { system_prompt: { content: 'KEEP ME' }, provider_models: { native: 'keep' } } }, { id: 'builtin', name: 'Built-in', is_builtin: true }]), projects: writable([{ id: 'project-1', name: 'My project' }]), appData: { loadSessions: mocks.loadSessions, loadProfiles: mocks.loadProfiles } };
+ return { sessions: writable([]), profiles: writable([{ id: 'guide', name: 'Guide', is_builtin: false, config: { system_prompt: { content: 'KEEP ME' }, provider_models: { native: 'keep' } } }, { id: 'builtin', name: 'Built-in', is_builtin: true }]), projects: writable([{ id: 'project-1', name: 'My project' }]), appData: { loadSessions: mocks.loadSessions, loadProfiles: mocks.loadProfiles } };
 });
+vi.mock('$lib/stores/active-session', async () => {
+ const { writable } = await import('svelte/store');
+ return {
+  activeSession: writable({ sessionId: null, isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] }),
+  streamingSessions: writable(new Map()), backgroundPermissions: writable(new Map()),
+ };
+});
+vi.mock('$lib/stores/notifications', () => ({ notify: { banner: mocks.banner, dismissLive: vi.fn() } }));
+import type { Writable } from 'svelte/store';
 import AssistantHome from './AssistantHome.svelte';
 import { assistantState, agentIdentities } from '$lib/stores/assistant';
+import { sessions } from '$lib/stores/app-data.svelte';
+import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
+const rows = sessions as unknown as Writable<Record<string, unknown>[]>;
+const active = activeSession as unknown as Writable<Record<string, unknown>>;
+const streaming = streamingSessions as unknown as Writable<Map<string, unknown>>;
+const prompts = backgroundPermissions as unknown as Writable<Map<string, { count: number; kind: string }>>;
 const initial = (): AssistantState => ({
  configured: false, agent_id: null, home_session_id: null, enabled: false, status: 'unconfigured', research_sources: 0, agent: null,
  assistant_name: null, avatar_id: 'robot', avatar_presets: ['robot', 'spark', 'orbit', 'sprout', 'pixel'], introduction: {},
@@ -32,6 +47,8 @@ const configured = (patch: Partial<AssistantState> = {}) => {
 const source: AssistantSource = { id: 'connected', connector_id: 'connected', name: 'My authorized inbox', type: 'gmail', enabled: false, available: true, status: 'connected', trigger_ids: ['new_email'], observation_mode: 'poll_and_events', last_observed_at: null, last_error: null };
 beforeEach(() => {
  vi.clearAllMocks(); server = initial(); assistantState.set(null); agentIdentities.set([]);
+ rows.set([]); streaming.set(new Map()); prompts.set(new Map());
+ active.set({ sessionId: null, isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] });
  mocks.getAssistant.mockImplementation(async () => structuredClone(server));
  mocks.getAgentIdentities.mockResolvedValue([{ id: 'guide', name: 'Guide', avatar_id: 'orbit' }]);
  mocks.getAssistantSources.mockResolvedValue([]); mocks.getAssistantActivity.mockResolvedValue([]);
@@ -40,7 +57,7 @@ beforeEach(() => {
  mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: 'no_sources' }; return structuredClone(server); });
  mocks.setAssistantSource.mockImplementation(async (_id, enabled) => ({ ...source, enabled }));
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 async function useMine() {
  await fireEvent.click(await screen.findByRole('radio', { name: /One of my agents/ }));
@@ -173,5 +190,42 @@ describe('Assistant home', () => {
   const selection = await screen.findByRole('combobox', { name: 'Assistant agent' });
   expect((selection as HTMLSelectElement).value).toBe('guide');
   expect(get(assistantState)?.agent_id).toBe('guide');
+ });
+});
+describe('Assistant home call gate', () => {
+ const startCall = async () => await screen.findByRole('button', { name: 'Start call' }) as HTMLButtonElement;
+ it.each([
+  ['reports running tasks', () => rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]), /finishes working/],
+  ['is streaming on another device', () => streaming.set(new Map([['home', {}]])), /finishes working/],
+  ['waits on a permission or question', () => prompts.set(new Map([['home', { count: 1, kind: 'question' }]])), /finishes working/],
+  ['is the open session and streaming', () => active.set({ sessionId: 'home', isStreaming: true, activeTasks: [], pendingPermissions: [], pendingQuestions: [] }), /finishes working/],
+  ['is parked on background work', () => rows.set([{ id: 'home', status: 'active', parked_task_kind: 'shell' }]), /background tasks finish/],
+ ])('disables Start call with a reason while the home %s', async (_label, arrange, reason) => {
+  configured(); arrange(); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(true);
+  expect(button.title).toMatch(reason);
+  await fireEvent.click(button);
+  expect(mocks.openAssistant).not.toHaveBeenCalled();
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+ });
+ it('re-enables Start call once the home finishes', async () => {
+  configured(); rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(true);
+  rows.set([{ id: 'home', status: 'active', has_running_tasks: false }]);
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await fireEvent.click(button);
+  await waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true }));
+ });
+ it('explains a blocked Start call with a brief banner on a touch screen', async () => {
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
+  configured(); rows.set([{ id: 'home', status: 'active', parked_task_kind: 'agent' }]); render(AssistantHome);
+  const button = await startCall();
+  expect(button.disabled).toBe(false);
+  expect(button.getAttribute('aria-disabled')).toBe('true');
+  await fireEvent.click(button);
+  expect(mocks.banner).toHaveBeenCalledWith(button.title, expect.objectContaining({ persist: false }));
+  expect(mocks.openAssistant).not.toHaveBeenCalled();
  });
 });

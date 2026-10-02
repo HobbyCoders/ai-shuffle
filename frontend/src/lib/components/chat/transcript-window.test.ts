@@ -8,6 +8,7 @@ import {
 	initialWindowStart,
 	isLiveTailIndex,
 	scrollTopPreservingBottom,
+	settleSkippedTurns,
 	shouldExpandOnScroll,
 	turnTopsFromVisibility,
 	windowStartForItem,
@@ -161,6 +162,56 @@ describe('turn visibility → rail index', () => {
 	it('skips mounted-but-unobserved turns instead of freezing on turn 0', () => {
 		// 'd' has just mounted and the observer has not reported it yet.
 		expect(indexFor({ a: 'above', b: 'above', c: 'above' })).toBe(2);
+	});
+});
+
+describe('settleSkippedTurns', () => {
+	const ids = ['a', 'b', 'c', 'd', 'e'];
+
+	function settle(states: Record<string, TurnVisibility>, reported: string[]) {
+		const map = new Map(Object.entries(states));
+		settleSkippedTurns(ids, map, new Set(reported));
+		return Object.fromEntries(map);
+	}
+
+	it('moves turns a long downward jump skipped above the band', () => {
+		// a..d jumped from below the band to above it in one frame; only e reported.
+		expect(settle({ a: 'above', b: 'below', c: 'below', d: 'below', e: 'inside' }, ['e'])).toEqual({
+			a: 'above', b: 'above', c: 'above', d: 'above', e: 'inside'
+		});
+	});
+
+	it('moves turns a long upward jump skipped below the band', () => {
+		expect(settle({ a: 'inside', b: 'above', c: 'above', d: 'below', e: 'above' }, ['a'])).toEqual({
+			a: 'inside', b: 'below', c: 'below', d: 'below', e: 'below'
+		});
+	});
+
+	it('changes nothing without a turn reported inside the band', () => {
+		const states: Record<string, TurnVisibility> = { a: 'above', b: 'below', c: 'below' };
+		expect(settle(states, [])).toEqual(states);
+	});
+
+	it('only trusts a reported turn whose final state in the batch is inside', () => {
+		// c was reported inside then above in the same batch (last entry wins);
+		// a was inside before this batch and was not reported.
+		const states: Record<string, TurnVisibility> = { a: 'inside', b: 'below', c: 'above', d: 'above' };
+		expect(settle(states, ['c'])).toEqual(states);
+	});
+
+	it('leaves unobserved turns and turns between inside ones alone', () => {
+		expect(settle({ b: 'inside', c: 'below', d: 'inside' }, ['b', 'd'])).toEqual({
+			b: 'inside', c: 'below', d: 'inside'
+		});
+	});
+
+	it('lets the rail resolve the reported turn after a jump', () => {
+		const map = new Map<string, TurnVisibility>(
+			Object.entries({ a: 'above', b: 'below', c: 'below', d: 'inside', e: 'below' })
+		);
+		settleSkippedTurns(ids, map, new Set(['d']));
+		const tops = turnTopsFromVisibility(ids, map, 140, () => true);
+		expect(resolveCurrentTurnIndex(tops, 140)).toBe(3);
 	});
 });
 

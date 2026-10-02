@@ -863,10 +863,12 @@ def _dedupe_frames_by_task_id(
 # drops ids already delivered, so a message is delivered once and only once
 # even when a restore puts back text that a turn already carried.
 #
-# A message that arrives while a turn is live but the park has not settled
-# yet (the unpark wake was just claimed) is not held for the deadline: its row
-# is armed to fire now, so either the live turn's start takes it or it is
-# promoted straight away.
+# A message that arrives while a turn is live is not held at all, even when
+# the park has not settled yet (the unpark wake was just claimed, or a user
+# turn runs beside the background work). The receiver is running, so the
+# message queues as an ordinary agent message and joins that live turn at its
+# next tool boundary (``SessionRuntime.steer_pending``). If the turn ends
+# before a boundary takes it, the queued row runs as a turn of its own.
 #
 # Policy defaults (deliberate, not configurable):
 #
@@ -1029,9 +1031,10 @@ async def _hold_in_queued_unpark(session_id: str, held: str) -> Optional[Dict[st
 async def _hold_peer_message(session_id: str, prompt: str) -> Any:
     """Hold one formatted peer message for a parked session.
 
-    Returns :data:`HELD`, ``_NOT_PARKED`` when the session is not parked (the
-    caller queues the message as before), or None when the wakeup service
-    refused because the user stopped the session.
+    Returns :data:`HELD`, ``_NOT_PARKED`` when the session is not parked or
+    has a live turn (the caller queues the message, and a live turn takes it
+    at its next tool boundary), or None when the wakeup service refused
+    because the user stopped the session.
     """
     from app.core import wakeup_service
 
@@ -1039,23 +1042,22 @@ async def _hold_peer_message(session_id: str, prompt: str) -> Any:
     async with _terminal_delivery_lock(session_id):
         if not await asyncio.to_thread(_session_has_parked_turn, session_id):
             return _NOT_PARKED
+        # A live turn next to the park means the parent's wake was just
+        # claimed (or another turn runs beside its background work). The
+        # receiver is running, so it reads the message mid-turn like any other
+        # message; holding it would deliver it only after that turn ends.
+        if await asyncio.to_thread(turns_db.get_live_turn, session_id) is not None:
+            return _NOT_PARKED
         if await _hold_in_queued_unpark(session_id, prompt) is not None:
             logger.info(
                 "turn_scheduler: peer message for parked %s held in its queued "
                 "unpark wake", session_id,
             )
             return HELD
-        # A live turn next to the park means the parent's wake was just
-        # claimed (or another turn runs beside its background work). Holding
-        # for the full deadline would strand the message behind a turn that
-        # is already running, so the row fires now: the live turn's start
-        # takes it if it has not passed that point, else it is promoted.
-        live = await asyncio.to_thread(turns_db.get_live_turn, session_id)
-        delay = 0.0 if live is not None else HELD_PEER_PROMOTION_SECONDS
         context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
         row = await wakeup_service.hold_peer_messages(
             session_id, prompt,
-            delay_seconds=delay,
+            delay_seconds=HELD_PEER_PROMOTION_SECONDS,
             profile_id=context.get("profile_id"),
             project_id=context.get("project_id"),
             model=(context.get("overrides") or {}).get("model"),
@@ -1155,6 +1157,30 @@ def held_peer_block(held: str) -> str:
     return _held_peer_block(held)
 
 
+#: One held entry's text: exactly what ``format_peer_message(...).strip()``
+#: produced. The body cannot hold a marker of its own (it was defanged).
+_HELD_ENVELOPE_RE = re.compile(
+    r"\A\[agent message from=(['\"])(.*?)\1 — [^\n]*\]\n(.*)\n\[/agent message\]\Z",
+    re.S,
+)
+
+
+def held_peer_deliveries(held: str) -> List[Dict[str, str]]:
+    """``{"sender", "content"}`` for each message in ``held``, oldest first.
+
+    For the transcript only: a turn that carries held messages without
+    recording them in its own prompt notes each one as an attributed agent
+    message instead, so the user sees who said what."""
+    out: List[Dict[str, str]] = []
+    for _, text in _held_entries(held):
+        match = _HELD_ENVELOPE_RE.match(text)
+        if match:
+            out.append({"sender": match.group(2), "content": match.group(3)})
+        else:
+            out.append({"sender": "Agent", "content": text})
+    return out
+
+
 def restore_held_peer_messages(session_id: str, held: str) -> None:
     """Public form of :func:`_restore_held_peer_messages` for the pump."""
     _restore_held_peer_messages(session_id, held)
@@ -1241,6 +1267,15 @@ async def _on_agent_message_locked(
             if earlier:
                 prompt = f"{_held_peer_block(earlier)}\n\n{prompt}"
                 extra_payload = {"held_peer_messages": earlier}
+        if extra_payload is None:
+            # One attributed message: a live turn can take it at its next tool
+            # boundary (``SessionRuntime.steer_pending``) instead of after the
+            # turn ends. A row that also carries held messages cannot, because
+            # the peer channel would deliver only the newest of them.
+            extra_payload = {
+                "task_peer_sender": sender,
+                "peer_message_content": defang_harness_markers(text),
+            }
     try:
         turn = await _enqueue_context_wake(
             session_id, "agent_message", [], [], prompt,

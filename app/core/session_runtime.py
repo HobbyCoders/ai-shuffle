@@ -554,6 +554,35 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
         )
 
 
+async def _broadcast_work_time(session_id: str) -> None:
+    """Push the session's working-time fields to every device's sidebar.
+
+    Sent after a turn takes the live slot and after it settles or parks, so
+    a card ticks from the real turn start and banks the finished interval
+    without waiting for the next list reload. Best-effort.
+    """
+    try:
+        from app.core.sync_engine import sync_engine
+        from app.db import sessions as sessions_db
+
+        row = await asyncio.to_thread(sessions_db.get_session, session_id)
+        if not row:
+            return
+        started = row.get("work_started_at")
+        if hasattr(started, "isoformat"):
+            started = started.isoformat()
+        await sync_engine.broadcast_user_session_updated(
+            user_id=row.get("api_user_id") or "admin",
+            session_id=session_id,
+            updates={"work_ms": int(row.get("work_ms") or 0), "work_started_at": started},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "SessionRuntime: work-time broadcast failed for %s",
+            session_id, exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Durable surface for a turn that died on a provider error
 # ---------------------------------------------------------------------------
@@ -965,6 +994,8 @@ class SessionRuntime:
             # forget: nothing may add latency in front of the pump.
             broadcast_task = asyncio.create_task(_broadcast_queue_after_start(sid))
             broadcast_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            work_task = asyncio.create_task(_broadcast_work_time(sid))
+            work_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
             # 3. Sticky pin: the FIRST winner of an
             #    "anywhere"/capability placement pins the session to itself
@@ -1161,6 +1192,11 @@ class SessionRuntime:
                     outcome = final["state"]
                 return outcome
             outcome, settled_here = await self._finalize(sid, tid)
+            if settled_here:
+                # The finished interval is banked now. Fire-and-forget: the
+                # done frame below must not wait on a row read.
+                work_task = asyncio.create_task(_broadcast_work_time(sid))
+                work_task.add_done_callback(lambda t: t.cancelled() or t.exception())
             if (
                 self._pending_done is not None
                 and self._abort_reason != "recording_failed"
@@ -1334,8 +1370,10 @@ class SessionRuntime:
                 self._abort_reason = "user_stopped"
                 return
             # Peer messages held while the session was parked ride this turn,
-            # whatever started it (turn_scheduler's held-message policy). Only
-            # the engine sees them; the transcript keeps the prompt as sent.
+            # whatever started it (turn_scheduler's held-message policy). The
+            # engine gets them in its prompt; the transcript keeps the prompt as
+            # sent and shows each one as an attributed agent message once the
+            # engine is running (``_note_held_peer_deliveries``).
             if not resume:
                 try:
                     from app.core import turn_scheduler
@@ -1379,6 +1417,11 @@ class SessionRuntime:
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
             ):
+                if held_peer and not engine_started:
+                    # Same point the store counts them delivered (see the
+                    # restore in ``finally``), so a turn that never starts
+                    # shows nothing it did not deliver.
+                    await self._note_held_peer_deliveries(recorder, held_peer)
                 engine_started = True
                 etype = event.get("type") if isinstance(event, dict) else None
                 # ANY frame is proof the engine is still moving — a tool result,
@@ -1632,12 +1675,20 @@ class SessionRuntime:
             try:
                 if row.get("source") == "agent_message":
                     payload = row.get("payload") or {}
-                    from app.core import session_orchestration
-                    sender = await asyncio.to_thread(session_orchestration._caller, payload["orchestration_sender"])
-                    await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    sender_id = payload.get("orchestration_sender")
+                    if sender_id:
+                        from app.core import session_orchestration
+                        sender = await asyncio.to_thread(session_orchestration._caller, sender_id)
+                        await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                    else:
+                        from app.core import agent_messaging
+                        sender_id = payload["task_peer_sender"]
+                        if not agent_messaging.may_message(sender_id, self.session_id):
+                            raise PermissionError(
+                                f"{sender_id} can no longer message {self.session_id}"
+                            )
                     await adapter.steer_peer(
-                        payload["peer_message_content"],
-                        sender=payload["orchestration_sender"], id=row_id,
+                        payload["peer_message_content"], sender=sender_id, id=row_id,
                     )
                 else:
                     await adapter.steer(prompt, id=row_id)
@@ -1877,7 +1928,10 @@ class SessionRuntime:
         if row.get("source") == "agent_message":
             # Only an attributed, scope-checked producer may use the peer channel.
             # Recheck revocation/ownership/Stop before handing it to the engine.
-            if not payload.get("orchestration_sender") or not payload.get("peer_message_content"):
+            # Two producers qualify: MessageSession (``orchestration_sender``)
+            # and a Task/Swarm SendMessage (``task_peer_sender``).
+            sender = payload.get("orchestration_sender") or payload.get("task_peer_sender")
+            if not sender or not payload.get("peer_message_content"):
                 return False
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
@@ -1923,8 +1977,7 @@ class SessionRuntime:
                 # rather than silently dropping it or asking the user to interrupt.
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": {"sender": str(steer["from"]),
-                             "content": str(steer["text"]), "delivery": "delivered"},
+                    "data": self._peer_note_data(str(steer["from"]), str(steer["text"])),
                 })
                 continue
             if not row_id:
@@ -2038,6 +2091,9 @@ class SessionRuntime:
                     "failed for %s (%d frame(s))",
                     self.session_id, len(frames), exc_info=True,
                 )
+        held = entry.get("held_peer_messages") or ""
+        if held:
+            await self._note_held_peer_deliveries(recorder, held)
         try:
             from app.core import turn_scheduler
 
@@ -2049,6 +2105,42 @@ class SessionRuntime:
                 "for %s", self.session_id, exc_info=True,
             )
         return True
+
+    def _peer_note_data(self, sender: str, content: str) -> Dict[str, Any]:
+        """An ``agent_message`` note: the sender's session id, plus the name
+        this session knows it by (its task description) when there is one."""
+        data: Dict[str, Any] = {"sender": sender, "content": content, "delivery": "delivered"}
+        try:
+            from app.core import agent_messaging
+
+            label = agent_messaging.sender_label(self.session_id, sender)
+        except Exception:  # noqa: BLE001 — the label is cosmetic
+            label = None
+        if label:
+            data["sender_label"] = label
+        return data
+
+    async def _note_held_peer_deliveries(self, recorder: TurnRecorder, held: str) -> None:
+        """Show held peer messages this turn delivered, one attributed item each.
+
+        They reach the model inside a system-reminder that no ``message.user``
+        records (a folded prompt, a steered task notification), so without
+        this the user never sees them. Same event the live peer receipt
+        writes. Best-effort: a missing note never touches the turn.
+        """
+        try:
+            from app.core import turn_scheduler
+
+            for item in turn_scheduler.held_peer_deliveries(held):
+                await recorder.on_event({
+                    "type": "system", "subtype": "agent_message",
+                    "data": self._peer_note_data(item["sender"], item["content"]),
+                })
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "SessionRuntime: could not note held peer messages for %s",
+                self.session_id, exc_info=True,
+            )
 
     async def _strand_task_steers(self) -> None:
         """Hand back every task notification this turn swallowed undelivered.

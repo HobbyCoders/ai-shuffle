@@ -294,7 +294,7 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 ## Usage tracking keys
 
-Optional admin keys that let the app read account spend for a provider. Each key is stored encrypted and never returned; the responses only say whether one is configured and show the latest reading. Readings appear in [usage limits](/docs/api-reference/miscellaneous#usage-limits). The fal.ai billing key is saved under [settings](/docs/api-reference/miscellaneous#post-apiv1settingsintegrationsfal-billing) instead.
+Optional admin keys that let the app read account spend for a provider. Each key is stored encrypted and never returned; the responses only say whether one is configured and show the latest reading. Readings appear in [usage limits](/docs/api-reference/miscellaneous#usage-limits). fal.ai needs no extra key: its balance is read with the [fal.ai API key](/docs/api-reference/miscellaneous#post-apiv1settingsintegrationsfal-ai).
 
 **Auth:** Owner only for every endpoint in this section.
 

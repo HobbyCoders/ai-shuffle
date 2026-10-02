@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
-from app.core.project_utils import get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
+from app.core.project_utils import enclosing_repo_root, get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
 from app.db import database
 from app.db.async_database import run_sync
@@ -163,6 +163,21 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
     return full_path
 
 
+def refuse_nested_repository(full_path: Path) -> None:
+    """A project is one Git repository operated from its root: refuse a folder
+    inside a repository and name the root to add instead. A repository root
+    and a folder in no repository are accepted."""
+    root = enclosing_repo_root(full_path)
+    if root:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This folder is inside the Git repository at {root}. "
+                f"Add the repository root ({root}) as the project instead."
+            ),
+        )
+
+
 def _load_projects_for_listing(api_user_project_id: Optional[str]) -> tuple:
     """Every DB read (and the one-time link-group derivation) for the listing.
 
@@ -269,12 +284,14 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
         if effective_path and is_absolute_project_path(effective_path):
             # Absolute path (local mode only) - create directory if it doesn't exist
             project_path = validate_project_path(effective_path, allow_create=True)
+            refuse_nested_repository(project_path)
             project_path.mkdir(parents=True, exist_ok=True)
             db_path = effective_path
         else:
             # Relative path (or normalized Docker path) - create directory inside workspace
             rel_path = effective_path if effective_path else payload.id
             project_path = validate_project_path(rel_path)
+            refuse_nested_repository(project_path)
             project_path.mkdir(parents=True, exist_ok=True)
             db_path = rel_path
 
@@ -314,11 +331,18 @@ async def update_project(
         db_path = None
         if request.path is not None:
             effective_path = normalize_docker_path(request.path) if request.path else None
+            # Resending a project's stored path is not a move: an existing
+            # nested project stays editable (it is reported at start-up).
+            moved = effective_path != existing.get("path")
             if effective_path and is_absolute_project_path(effective_path):
-                validate_project_path(effective_path, allow_create=False)
+                full_path = validate_project_path(effective_path, allow_create=False)
+                if moved:
+                    refuse_nested_repository(full_path)
                 db_path = effective_path
             elif effective_path:
-                validate_project_path(effective_path)
+                full_path = validate_project_path(effective_path)
+                if moved:
+                    refuse_nested_repository(full_path)
                 db_path = effective_path
 
         settings_dict = None

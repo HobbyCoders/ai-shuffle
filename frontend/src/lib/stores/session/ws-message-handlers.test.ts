@@ -1843,6 +1843,25 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (working time, #1619)', () => {
+		it('patches work_ms and work_started_at into the row without a list reload', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				const updates = { work_ms: 125_000, work_started_at: '2026-10-01T12:00:00+00:00' };
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates });
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', updates);
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	describe('user_session_updated handler (hidden flip)', () => {
 		// The voice attach backfill hides a wake-word "command" session after
 		// the row already existed visibly (create→attach window). The flip is

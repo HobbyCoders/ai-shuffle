@@ -37,6 +37,13 @@ from fluid.providers._retry import (
 # Generous by design: this is a runaway guard, not a latency budget. A long
 # reasoning call on a slow provider must never trip it, so it sits far above
 # any plausible honest call.
+#
+# It is deliberately not raised above the ChatGPT/Codex backend's own cut of
+# about 900 s per response. That cut is counted from the request, this one from
+# the response headers, so on that lane the provider always closes first and
+# the engine treats it as a dropped connection (re-sent, with lower effort on
+# the last try). A higher deadline would win nothing there and would only let
+# a runaway stream on other providers bill for longer.
 DEFAULT_STREAM_DEADLINE_S = 900.0
 
 # How long a call may go without its first byte (response headers, then the

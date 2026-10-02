@@ -222,6 +222,41 @@ def usage_settlement_key(session_id: str, turn: dict) -> str:
     )
 
 
+#: ``metadata`` key carrying the provider binding the turn actually ran on
+#: (``options.aih_provider_id``; ``None`` = the native Claude leg). Stamped
+#: next to ``usage_settlement_key`` when a turn's metadata is created, so
+#: settlement attributes the ledger row to that leg.
+USAGE_PROVIDER_KEY = "usage_provider_id"
+
+
+def _turn_usage_attribution(session_id: str, metadata: dict) -> dict:
+    """Attribution columns for a settled turn (sync; never raises).
+
+    Reads the leg stamped under :data:`USAGE_PROVIDER_KEY`; a metadata dict
+    without it (a caller that never stamped one) falls back to the session's
+    current binding.
+    """
+    from app.core.usage_attribution import session_provider_id, usage_attribution
+
+    if USAGE_PROVIDER_KEY in metadata:
+        provider_id = metadata.get(USAGE_PROVIDER_KEY)
+    else:
+        provider_id = session_provider_id(session_id)
+    return dict(usage_attribution(provider_id))
+
+
+async def _usage_attribution_for(session_id: str, metadata: dict) -> dict:
+    """:func:`_turn_usage_attribution` off the loop. Attribution only labels
+    the ledger row, so any failure books the row unattributed rather than
+    losing the settlement."""
+    try:
+        attribution = await run_sync(_turn_usage_attribution, session_id, metadata)
+    except Exception:  # noqa: BLE001
+        logger.warning("Usage attribution failed for %s", session_id, exc_info=True)
+        return {}
+    return attribution if isinstance(attribution, dict) else {}
+
+
 async def capture_usage_identity(session_id: str) -> str:
     """Capture before execution, while the owning turn is still live."""
     from app.db import turns as turns_db
@@ -308,10 +343,11 @@ async def _persist_turn_results(
                     "left open", log_prefix, session_id,
                 )
             else:
+                attribution = await _usage_attribution_for(session_id, metadata)
                 await run_sync(
                     database.settle_turn_usage,
                     session_id=session_id, settlement_key=settlement_key,
-                    profile_id=profile_id, **booking,
+                    profile_id=profile_id, **booking, **attribution,
                 )
         except Exception:
             logger.exception("%sUsage settlement failed for %s", log_prefix, session_id)
@@ -555,6 +591,9 @@ async def settle_killed_session(
                 key = usage_settlement_key(session_id, {
                     "id": turn_id, "run_id": run_id, "started_at": started_at,
                 })
+                # No options object survives a kill: attribute from the
+                # session's binding, which the turn's run binding wrote.
+                attribution = await _usage_attribution_for(session_id, {})
                 settled = await run_sync(
                     database.settle_turn_usage,
                     session_id=session_id, settlement_key=key,
@@ -567,6 +606,7 @@ async def settle_killed_session(
                     model_calls=totals["model_calls"],
                     turn_increment=0,
                     usage_estimated=totals["usage_estimated"],
+                    **attribution,
                 )
             except Exception:
                 logger.warning(

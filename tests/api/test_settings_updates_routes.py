@@ -94,12 +94,13 @@ def test_policy_update_validation(c, body, detail):
 
 
 def test_action_queues_a_fixed_request_and_is_refused_when_disabled(c, updater):
-    # Nothing on offer: the worker declines a download and says why.
+    # Nothing found yet: the download is queued and the updater checks first (#1623).
     r = c.post(URL, json={"action": "download"})
     assert r.status_code == 200, r.text
     result = r.json()["results"][0]
-    assert (result["accepted"], result["reason"]) == (False, "No application update available; current version left running")
-    assert not (updater / "request.json").exists()
+    assert (result["accepted"], result["reason"]) == (True, "Checking for an update to download")
+    assert json.loads((updater / "request.json").read_text())["action"] == "download"
+    (updater / "request.json").unlink()
     r = c.post(URL, json={"action": "check"})
     assert r.status_code == 200, r.text
     assert r.json()["scope"] == "current"
@@ -126,7 +127,7 @@ def test_workers_lists_this_worker_without_peer_endpoints(c):
     assert [w["device_name"] for w in body["workers"]] == ["Current worker"]
     assert set(body["workers"][0]) == {
         "device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version",
-        "running_version", "percent", "message", "error", "reason"}
+        "running_version", "percent", "message", "error", "reason", "request_pending"}
 
 
 def test_api_users_may_read_but_not_change_or_act(client, api_user, updater):

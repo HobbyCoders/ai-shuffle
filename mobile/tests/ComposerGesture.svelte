@@ -1,7 +1,12 @@
 <script lang="ts">
 	import ChatInput from '../../frontend/src/lib/components/chat/ChatInput.svelte';
+	// The app shell's banner host, so brief explanations (a tap on a blocked
+	// call button) render as they do in the app.
+	import BannerHost from '../../frontend/src/lib/components/BannerHost.svelte';
 	let { compact = true }: { compact?: boolean } = $props();
 </script>
+
+<BannerHost />
 
 <main class="chat-view" class:is-empty={!compact}>
 	<header>

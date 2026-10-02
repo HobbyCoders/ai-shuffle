@@ -529,6 +529,40 @@ async def test_receive_control_hop_preserves_owner_refusal(pair, monkeypatch, er
 
 
 @pytest.mark.asyncio
+async def test_receiver_that_cannot_reach_the_owner_names_both_workers(pair, monkeypatch):
+    """The live #1524 failure: the destination's call back to the owner never connects."""
+    import httpx
+    from app.db import network as store
+    a, b, source, target = pair
+    real_async = httpx.AsyncClient
+    dialed = []
+
+    def refuse(request):
+        dialed.append(str(request.url))
+        raise httpx.ConnectError("[Errno -3] Temporary failure in name resolution", request=request)
+
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda *args, **kwargs: real_async(**{**kwargs, "transport": httpx.MockTransport(refuse)}))
+    monkeypatch.setattr(control, "CONNECT_RETRY_DELAY", 0)
+    head = git(source, "rev-parse", "HEAD")
+    with b.active():
+        transport._links[a.device_id] = transport.PeerLink(a.device_id, ["https://a.tunnel.example"])
+        with pytest.raises(ValueError) as raised:
+            await control.handle("handoff", {"session_id": "handoff-test", "phase": "receive"},
+                                 from_device=a.device_id)
+        owner_name = store.get_member(a.device_id)["name"]  # the founder defaults to its host name
+        assert str(raised.value) == f"Couldn't reach {owner_name} from b (address lookup failed on its only route)."
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM runs WHERE state='active' AND runner_id LIKE %s",
+                        (handoff.HOLD + "%",))
+            assert cur.fetchone()["n"] == 0
+    assert len(dialed) == control.CONNECT_ROUNDS
+    assert git(source, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.asyncio
 async def test_session_handed_back_to_its_first_worker_lists_as_local(pair, monkeypatch):
     """A -> B -> A: the first worker owns the row again and must not list it as
     remote with an unknown state because instance_id still named B."""

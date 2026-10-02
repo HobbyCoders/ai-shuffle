@@ -66,6 +66,39 @@ def get_project_working_dir_as_path(project: Union[dict, str]) -> Path:
     return Path(get_project_working_dir(project))
 
 
+def enclosing_repo_root(path: Union[str, Path]) -> Optional[str]:
+    """The Git repository root that ``path`` sits INSIDE, or None.
+
+    None when ``path`` is itself a repository root, is in no repository, or
+    Git cannot answer (not installed, timeout, an ownership refusal): those
+    cases keep today's behavior. A path that does not exist yet is checked
+    from its nearest existing parent, since creating it there would place it
+    inside the same repository.
+    """
+    import os
+    import subprocess
+
+    from app.core.git_service import git_service
+
+    target = Path(path).resolve()
+    probe = target
+    while not probe.is_dir():
+        if probe.parent == probe:
+            return None
+        probe = probe.parent
+    try:
+        result = git_service._run_git(str(probe), ["rev-parse", "--show-toplevel"], timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = (result.stdout or "").strip() if result.returncode == 0 else ""
+    if not top:
+        return None
+    root = os.path.realpath(top)
+    if os.path.normcase(root) == os.path.normcase(os.path.realpath(target)):
+        return None
+    return root
+
+
 def get_worktree_working_dir(worktree: dict) -> str:
     """
     Resolve the filesystem working directory for a worktree.

@@ -717,6 +717,7 @@ feedController.attach({
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
+/** Remember the staged branch until a session is created on it (one-time, #1528). */
 function rememberBranchIntent() {
 	composerPreferences.set('checkout', _state.worktreeBranch ? {
 		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
@@ -1085,7 +1086,9 @@ export const activeSession = {
 		const picks = composerPreferences.current;
 		const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
 		const code = _state.mode !== 'chat';
-		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout
+		// A branch choice spoken for by a create still in flight belongs to that
+		// session, not to this new compose.
+		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout && !composerPreferences.checkoutClaimed
 			&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
 			? picks.checkout : null;
 		// A legacy worktree ID belongs to its original checkout. Never transplant
@@ -1118,6 +1121,9 @@ export const activeSession = {
 
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
+
+	/** Create the composed session with no first message (the call button). */
+	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),
 
 	// ── Pending Messages (delegated to message-sender) ─────────────
 

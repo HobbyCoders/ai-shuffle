@@ -145,6 +145,34 @@ def test_v2_worktree_not_materialized_here_raises_worktree_error(tmp_path):
         with pytest.raises(qo.WorktreeUnavailableError) as exc_info:
             qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
     assert exc_info.value.branch_name == "feat/x"
+    assert "no longer exists" in str(exc_info.value)
+
+
+def test_v2_worktree_on_wrong_branch_names_the_branch_instead_of_missing():
+    """#1606: a bound checkout folder that exists on another branch is still
+    refused, but the error names that branch instead of "no longer exists"."""
+    session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": "feat/x"}
+    cause = "its folder /w/feat-x exists but is on branch 'fix/y', not this session's branch 'feat/x'"
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+        qo.database, "get_session", return_value=session
+    ), patch(
+        "app.core.project_resolver.resolve_cwd", return_value=None
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2",
+        return_value={"id": "pv2-1", "name": "MyRepo"},
+    ), patch.object(
+        qo, "_claim_and_run_pending_checkout", return_value=False
+    ), patch(
+        "app.core.project_resolver.describe_checkout_mismatch", return_value=cause
+    ):
+        with pytest.raises(qo.WorktreeUnavailableError) as exc_info:
+            qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
+    message = str(exc_info.value)
+    assert cause in message
+    assert "no longer exists" not in message
+    assert "Refusing to run on the wrong branch" in message
+    assert exc_info.value.branch_name == "feat/x"
 
 
 def test_orphan_session_falls_to_workspace(tmp_path, monkeypatch):

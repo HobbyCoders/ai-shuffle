@@ -323,6 +323,21 @@ async def test_adapter_crash_mid_stream_errors_persists_and_drops_the_client(tmp
         in b.run_sync_calls
 
 
+async def test_turn_metadata_names_the_provider_leg_for_settlement(tmp_path):
+    """Settlement attributes the ledger row to the binding the turn actually
+    ran on (#1614), read off the options rather than the session row."""
+    from app.core.query_persistence import USAGE_PROVIDER_KEY
+
+    with ExitStack() as stack:
+        adapter = fresh_adapter([_result(num_turns=1)])
+        b = engine_patches(stack, cwd=str(tmp_path), adapter=adapter)
+        b.options.aih_provider_id = "p-codex"
+        await _turn(stack)
+    metadata = b.persist.await_args.kwargs["metadata"]
+    assert metadata["usage_settlement_key"] == "settle-key"
+    assert metadata[USAGE_PROVIDER_KEY] == "p-codex"
+
+
 async def test_stream_that_ends_without_a_result_still_completes(tmp_path):
     with ExitStack() as stack:
         adapter = fresh_adapter([AssistantMessage(content=[TextBlock(text="hi")], model="m")])

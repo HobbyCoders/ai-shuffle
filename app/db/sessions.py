@@ -128,6 +128,10 @@ class SessionRow(TypedDict):
     pr_number: Optional[int]
     pr_url: Optional[str]
     pr_state: Optional[str]
+    # The native leg's "# Workspace facts" snapshot, rendered once and reused
+    # byte-for-byte on every later connect (see
+    # ``set_session_workspace_facts``). NULL until the first native connect.
+    workspace_facts: Optional[Dict[str, Any]]
 
 
 class SessionSearchResult(TypedDict):
@@ -1071,6 +1075,45 @@ def get_session_context_usage_snapshot(session_id: str) -> Optional[Dict[str, An
         except (ValueError, TypeError):
             return None
     return raw
+
+
+def set_session_workspace_facts(session_id: str, snapshot: Dict[str, Any]) -> None:
+    """Persist the session's "# Workspace facts" snapshot, replacing any prior one.
+
+    ``snapshot`` is the adapter's ``{"v", "card", "cwd", "preview_expires_at",
+    "captured_at"}`` dict. Serialized to a JSON string so the SQLite test shim
+    (which stores JSONB as TEXT) round-trips the card's exact bytes, the same
+    way ``set_session_context_usage`` does.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET workspace_facts = {_ph} WHERE id = {_ph}",
+            (json.dumps(snapshot), session_id),
+        )
+
+
+def get_session_workspace_facts(session_id: str) -> Optional[Dict[str, Any]]:
+    """The persisted "# Workspace facts" snapshot, or None when the column is
+    empty, unreadable, or the session does not exist."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT workspace_facts FROM sessions WHERE id = {_ph}",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    raw = row["workspace_facts"] if not isinstance(row, (tuple, list)) else row[0]
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw if isinstance(raw, dict) else None
 
 
 def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:

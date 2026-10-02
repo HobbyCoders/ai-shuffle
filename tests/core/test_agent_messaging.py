@@ -163,10 +163,25 @@ async def test_running_delegated_worker_queues_instead_of_using_native_engine(ru
     engines["worker"].adapter.provider_kind = "delegated"
     queue = AsyncMock(return_value="message-turn")
     monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    steer = AsyncMock(return_value=1)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
     result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "progress?"}, ToolCtx())
     assert not result.is_error
     queue.assert_awaited_once_with("worker", "parent", "progress?")
     engine.submit.assert_not_awaited()
+    # The queued row is offered to the running receiver's next tool boundary.
+    steer.assert_awaited_once_with("worker")
+
+
+async def test_held_message_is_not_offered_to_a_live_turn(runtime, monkeypatch):
+    worker(runtime, "parent", "worker")
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", AsyncMock(return_value=turn_scheduler.HELD))
+    steer = AsyncMock()
+    monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
+    result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "hi"}, ToolCtx())
+    assert result.text == messaging.held_receipt("Helper")
+    steer.assert_not_awaited()
 
 
 async def test_policy_rejected_worker_is_not_resumed(runtime, monkeypatch):
@@ -269,3 +284,21 @@ def test_dispatch_forwards_the_name_to_the_registry(monkeypatch):
     # Re-registration never clobbers a name already recorded.
     registry.start_task("parent", "w1", "agent", "Task · General Purpose", name="other")
     assert registry.get_task("parent", "w1")["name"] == "fix-flaky-login"
+
+
+# ─── owner decision 2026-10-01: a delivery names the worker by its task ───
+
+
+def test_sender_label_is_the_workers_task_description(runtime):
+    registry, _ = runtime
+    registry.start_task("parent", "worker-a", "agent", "Fix flaky login",
+                        agent="General Purpose", name="fix-flaky-login")
+    registry.start_task("parent", "worker-b", "agent", "", agent="Reviewer")
+    assert messaging.sender_label("parent", "worker-a") == "Fix flaky login"
+    # No description: the roster name the worker is addressed by.
+    assert messaging.sender_label("parent", "worker-b") == "Reviewer"
+    # The worker's view of its parent.
+    assert messaging.sender_label("worker-a", "parent") == "main"
+    # Unknown to the receiver: no label, so the chat shows the session id.
+    assert messaging.sender_label("parent", "stranger") is None
+    assert messaging.sender_label(None, "worker-a") is None

@@ -392,9 +392,9 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'API credit balance unavailable');
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
 		expect(container.textContent).not.toMatch(/Last known|Refresh pending|Refresh timed out|Usage unavailable/);
-		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
+		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 		if (cached) {
 			expect(container.textContent).toContain('$12.34 left');
 			expect(container.textContent).toContain('42%');
@@ -404,7 +404,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(cached ? (status === 'stale' ? 'Last reported · not live' : null) : 'API credit balance unavailable');
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
 		if (cached) expect(container.textContent).toContain('$12.34 left');
 	});
 
@@ -419,6 +419,23 @@ describe('ContextUsageBar — provider refresh status', () => {
 	});
 
 
+	it.each([true, false])('keeps ChatGPT extra credits in the expanded rows only (windows: %s)', async (withWindows) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'codex', provider_type: 'chatgpt', provider_name: 'ChatGPT', status: 'fresh', fetched_at: Date.now(),
+				credits: { balance: 12.5 },
+				windows: withWindows ? [{ type: 'five_hour', utilization: 30, resets_at: future() }] : [] },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe('12.5 extra credits available');
+		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
+		const header = getByRole('button', { name: 'OpenAI usage — expand' });
+		expect(header.textContent).not.toContain('extra credits');
+		expect(container.querySelector('.sec-credits')).toBeNull();
+		if (withWindows) expect(header.textContent).toContain('70% left');
+		expect(container.textContent).not.toContain('extra credits');
+	});
+
 	it('labels official organization costs as spend rather than credit remaining', async () => {
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'admin-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
@@ -430,30 +447,26 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.textContent).not.toContain('$12.34 left');
 	});
 
-	it.each(['unavailable', 'stale'] as const)('links to Platform billing when OpenAI billing is %s', async (status) => {
+	it.each(['unavailable', 'stale'] as const)('says the balance is not available, without a billing link, when OpenAI billing is %s', async (status) => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
 				last_error_kind: 'billing_access_denied',
 				...(status === 'stale' ? { credits: { balance_remaining: 12.34 }, fetched_at: 123 } : {}) },
 		] });
-		const { container, getByRole } = render(ContextUsageBar);
+		const { container, getByRole, queryByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		// Keep long guidance in the wrapping prose class, not just an account label.
 		const guidance = container.querySelector('.provider-status');
-		expect(guidance?.textContent).toBe(status === 'stale' ? 'Billing access required' : 'API credit balance unavailable');
+		expect(guidance?.textContent).toBe(status === 'stale' ? 'Billing access required' : 'Credit balance not available for this key');
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
 		if (status === 'stale') {
 			expect(container.textContent).toContain('$12.34 left');
 		}
-		const link = getByRole('link', { name: 'View balance in OpenAI Platform billing' });
-		expect(link.getAttribute('href')).toBe('https://platform.openai.com/settings/organization/billing/overview');
-		expect(link.getAttribute('target')).toBe('_blank');
-		expect(link.getAttribute('rel')).toBe('noopener noreferrer');
-		expect(link.closest('button')).toBeNull();
+		expect(queryByRole('link', { name: /View balance/ })).toBeNull();
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(getByRole('link', { name: 'View balance in OpenAI Platform billing' })).toBe(link);
+		expect(queryByRole('link', { name: /View balance/ })).toBeNull();
 		if (status === 'stale') expect(container.textContent).toContain('$12.34 left');
 	});
 
@@ -465,7 +478,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
-		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
+		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 		expect(container.textContent).not.toContain('cannot read');
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
 		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
@@ -478,10 +491,21 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('API credit balance unavailable');
+		expect(container.textContent).toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).toContain('Balance unavailable for this key');
-		expect(container.querySelector('.provider-billing-link')).not.toBeNull();
+		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
+	});
+
+	it('does not ask for billing access when fal.ai refuses the ordinary key', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'fal-ai', provider_type: 'fal', provider_name: 'fal.ai', status: 'unavailable', last_error_kind: 'billing_access_denied' },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.provider-status')?.textContent).toBe('Balance unavailable for this key');
+		expect(container.textContent).not.toContain('Billing access required');
+		expect(container.textContent).not.toContain('$0.00');
 	});
 
 	it('keeps stale API balances and actionable billing errors without refresh narration', async () => {
@@ -493,7 +517,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
-		expect(container.textContent).toContain('API credit balance unavailable');
+		expect(container.textContent).toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });
@@ -963,15 +987,21 @@ describe('ContextUsageBar — plan usage limits', () => {
 		);
 	});
 
-	it('says when a stale Claude reading was last updated', async () => {
+	it('says when a stale Claude reading was last reported, without "not live"', async () => {
 		rateLimit.applySnapshot({
 			available: true, windows: [], self_instance_id: 'self',
 			snapshots: [{ instance_id: 'self', available: true, fetched_at: Date.now() - 2 * 86_400_000,
 				windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] }],
 		});
-		const { container } = render(ContextUsageBar);
+		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
+		const header = getByRole('button', { name: /Plan usage limits/ });
+		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
+		expect(container.querySelectorAll('.usage-as-of')).toHaveLength(1);
+		expect(container.textContent).not.toContain('not live');
+		// Collapsed, the header still carries the freshness.
+		await fireEvent.click(header);
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
 	});
 
 	it('keeps the as-of line when a live event refreshes only one window', async () => {
@@ -988,7 +1018,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		// The weekly window is still two days old.
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Updated 2d ago');
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
 	});
 
 	it('keeps a stale provider reading on screen with when it can next refresh', async () => {
@@ -1000,9 +1030,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-as-of')?.textContent).toMatch(
-			/^Updated 10m ago · next check in 2m \d+s$/
-		);
+		// Same freshness as the Claude header: the age once, in the header.
+		const header = container.querySelector('[aria-label^="Router usage"]') as HTMLElement;
+		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
+		expect(container.querySelectorAll('.usage-as-of')).toHaveLength(1);
+		expect(container.querySelector('.usage-next-check')?.textContent).toMatch(/^Next check in 2m \d+s$/);
+		expect(container.textContent).not.toMatch(/not live|Updated/);
+		// Collapsed, the header still carries the freshness.
+		await fireEvent.click(header);
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
 	});
 
 	it('lists all windows with humanised labels on open', async () => {

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,6 +19,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.delenv("SHUFFLE_UPDATE_POLICY_FILE", raising=False)
     monkeypatch.setattr(updates, "_desktop_seen", 0)
     monkeypatch.setattr(updates, "_desktop_request", None)
+    monkeypatch.setattr(updates, "_desktop_followup", None)
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
     fleet._peer_status.clear()
@@ -124,8 +126,23 @@ def test_all_snapshot_handles_partial_failures_without_aborting(setup):
     assert len(result["workers"]) == 3
     assert result["workers"][0]["supported"]
     assert "unavailable" in result["workers"][1]["reason"]
+    # An online worker that cannot be read is unknown, not excluded (#1623).
+    assert result["workers"][1]["phase"] == "unknown"
     assert result["workers"][2]["reason"] == "Offline; not queued"
+    assert result["workers"][2]["phase"] == "unsupported"
     assert "private endpoint" not in str(result)
+
+def test_peer_that_answers_with_a_refusal_is_excluded_not_unknown(setup):
+    # #1623: a peer that answers 4xx (e.g. an older build without the update
+    # endpoint) will never stage, so it must not hold restart as "unknown".
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    remote.side_effect = fleet.control.ControlRefused("Unknown control action")
+    result = asyncio.run(fleet.snapshot())
+    peer = result["workers"][1]
+    assert peer["phase"] == "unsupported" and not peer["supported"]
+    assert peer["reason"] == "Worker declined application updates; not included"
+
 
 A, B = "a" * 40, "b" * 40
 
@@ -162,10 +179,13 @@ def test_idle_snapshot_reuses_a_peer_reading_then_refreshes_behind_the_reply(set
     asyncio.run(scenario())
 
 
-def test_busy_peer_is_reread_sooner(setup):
+@pytest.mark.parametrize("reading", [{"phase": "downloading", "percent": 10},
+                                     # A queued request the peer has not taken yet (#1623).
+                                     {"phase": "idle", "request_pending": True}])
+def test_busy_peer_is_reread_sooner(setup, reading):
     values, remote = setup
     values[updates.ALL_KEY] = "true"
-    remote.return_value = {"supported": True, "phase": "downloading", "percent": 10}
+    remote.return_value = {"supported": True, **reading}
     async def scenario():
         await fleet.snapshot()
         fleet._peer_status["peer"]["at"] -= fleet.PEER_STATUS_BUSY_TTL + 1
@@ -209,6 +229,22 @@ def test_completed_install_stops_reading_its_cohort(setup):
         assert state["operation"]["phase"] == "complete"
         assert [w["device_id"] for w in state["workers"]] == ["self"]
     remote.assert_not_called()
+
+
+def test_completion_is_stamped_once_so_the_ui_can_tell_news_from_history(setup, monkeypatch):
+    # #1623: a fresh browser replayed an old completion while a newer update was staged.
+    fleet.progress.begin("done", [{"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("done", "self", target_version=B[:12], result={"accepted": True})
+    updates.desktop_exchange({"phase": "idle", "running_version": B})
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: 1_000.0)
+    first = asyncio.run(fleet.snapshot())
+    assert first["operation"]["phase"] == "complete"
+    assert first["operation"]["completed_at"] == 1_000.0
+    assert fleet.progress.load()["completed_at"] == 1_000.0
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: 5_000.0)
+    later = asyncio.run(fleet.snapshot())
+    assert later["operation"]["completed_at"] == 1_000.0
+    assert later["server_time"] > later["operation"]["completed_at"]
 
 
 def test_an_action_discards_cached_peer_readings(setup):
@@ -372,3 +408,87 @@ def test_declined_install_without_live_matching_revision_stays_unconfirmed(setup
     assert operation["phase"] == "error"
     assert operation["workers"][0]["status"] == "skipped"
     assert updates._desktop_request is None
+
+
+# #1623 live test: a container peer that had not run its daily check sat in
+# "idle" and refused the fanned-out download, so it was never updated.
+@pytest.fixture
+def container(setup, monkeypatch, tmp_path):
+    root = tmp_path / "updater"
+    root.mkdir()
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(root))
+    def status(phase, **fields):
+        (root / "status.json").write_text(json.dumps({"phase": phase, **fields}))
+    return root, status
+
+
+@pytest.mark.parametrize("phase", ["idle", "error", "available"])
+def test_download_reaches_a_container_that_has_not_found_the_update(container, phase):
+    root, status = container
+    status(phase, message="Application update is running." if phase == "idle" else None)
+    result = fleet.local_action("download", "peer:" + phase)
+    assert result["accepted"], result
+    assert result["reason"] == ("Checking for an update to download" if phase == "idle" else "Request queued")
+    assert json.loads((root / "request.json").read_text())["action"] == "download"
+    assert updates.status()["request_pending"] is True
+
+
+@pytest.mark.parametrize("phase,reason", [
+    ("checking", "An update is already in progress"),
+    ("downloading", "An update is already in progress"),
+    ("image-required", "A newer runtime release is required"),
+    ("ready", "Already staged; ready to restart"),
+])
+def test_download_is_still_refused_while_the_container_is_busy_or_blocked(container, phase, reason):
+    root, status = container
+    status(phase)
+    result = fleet.local_action("download", "peer:" + phase)
+    assert (result["accepted"], result["reason"]) == (False, reason)
+    assert not (root / "request.json").exists()
+    assert updates.status()["request_pending"] is False
+
+
+def test_download_is_refused_when_updates_are_disabled_on_the_container(setup, container):
+    values, _ = setup
+    root, status = container
+    status("idle")
+    values[updates.KEY] = "false"
+    result = fleet.local_action("download", "peer:disabled")
+    assert (result["accepted"], result["reason"]) == (False, "Updates disabled")
+    assert not (root / "request.json").exists()
+
+
+def test_install_still_needs_a_staged_update_and_no_live_sessions(container, monkeypatch):
+    root, status = container
+    status("idle")
+    assert fleet.local_action("install", "peer:idle")["reason"] == "No staged update; current version left running"
+    status("ready")
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: ["running"])
+    assert "Busy" in fleet.local_action("install", "peer:busy")["reason"]
+    assert not (root / "request.json").exists()
+
+
+def test_fanned_out_download_queues_an_idle_container_peer(setup):
+    # The peer side runs local_action; this checks the receipt the initiator shows.
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    updates.desktop_exchange({"phase": "available", "version": B[:12]})
+    async def peer(*args, **kwargs):
+        return {"accepted": True, "reason": "Checking for an update to download", "phase": "idle"}
+    remote.side_effect = peer
+    result = asyncio.run(fleet.dispatch("download"))
+    by_id = {row["device_id"]: row for row in result["results"]}
+    assert by_id["peer"]["accepted"] and by_id["peer"]["reason"] == "Checking for an update to download"
+    assert by_id["self"]["accepted"]
+
+
+def test_idle_status_drops_a_message_that_claims_work_in_progress(container):
+    _, status = container
+    status("idle", message="Application update is running.")
+    assert updates.status()["message"] is None
+    status("idle", message="Updated version is running.")
+    assert updates.status()["message"] == "Updated version is running."
+    status("ready", message="Update ready. Choose Update and restart.")
+    assert updates.status()["message"] == "Update ready. Choose Update and restart."
+    status("downloading", message="Building frontend…")
+    assert updates.status()["message"] == "Building frontend…"
