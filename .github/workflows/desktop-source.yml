@@ -21,6 +21,7 @@ on:
       - "Registry CI"
       - "Desktop source update checks"
       - "Desktop CI"
+      - "Folder confinement (macOS)"
 
 permissions:
   contents: read
