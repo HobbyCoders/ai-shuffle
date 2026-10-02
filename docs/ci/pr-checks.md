@@ -15,6 +15,9 @@ The slow platform suites run when someone asks for them, and before a release.
   Android build and unit tests when APK inputs change, the account hub and
   website tests, the desktop typecheck
   and unit tests, and the browser editor smoke test
+- iOS CI, on PRs that touch `ios/` or `mobile/`: the mobile UI build, then
+  an unsigned iOS Simulator build with the unit and WebKit tests on a macOS
+  runner. It never signs or uploads.
 - The small policy and service checks (artifact policy, desktop source
   update checks, license server, registry, Android Play)
 
