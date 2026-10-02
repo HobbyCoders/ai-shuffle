@@ -110,7 +110,7 @@ async def test_beta_mode_refuses_activation_without_calling_out(monkeypatch, ser
 def test_unlicensed_blocks_new_runs_only_with_a_setup_message(store):
     allowed, reason = licensing.license_allows_agent_runs()
     assert allowed is False
-    assert "Settings > License" in reason and "data is not affected" in reason
+    assert "Settings > System > License" in reason and "data is not affected" in reason
     assert licensing.status()["state"] == "unlicensed"
 
 

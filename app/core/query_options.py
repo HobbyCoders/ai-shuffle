@@ -1329,7 +1329,7 @@ def build_options_from_profile(
         logger.exception("Failed to add built-in MCP server tools to allowed_tools")
 
     # Computer-use (host desktop control). Only allow-list its tools when the
-    # GLOBAL toggle (Settings → Chat & Input, persisted as a system setting)
+    # GLOBAL toggle (Settings > Security > Computer use, persisted as a system setting)
     # is on AND the host can actually run it (native / non-Docker with a usable
     # display). Off by default; tools never reach the model otherwise. The
     # legacy per-profile ``computer_use.enabled`` config key is no longer

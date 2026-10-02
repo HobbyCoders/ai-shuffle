@@ -200,7 +200,7 @@ async def generate_with_claude(
     """
     Generate a response using AI, honoring the text-generation setting.
 
-    Settings → Providers carries one model + effort pair — the user-facing
+    Settings > Default models carries one model + effort pair — the user-facing
     control for all internal AI generation (commit messages, PR descriptions,
     branch names, profile / subagent generation, etc.). This function reads that
     binding, then runs a throwaway turn through the provider adapter seam

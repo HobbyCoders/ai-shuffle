@@ -156,7 +156,7 @@ def create_computer_use_server(
             return _err("Computer-use was stopped for this session. Start a new turn to continue.")
         from app.api.computer_use import get_computer_use_enabled
         if not get_computer_use_enabled():
-            return _err("Computer use is disabled in Settings.")
+            return _err("Computer use is disabled in Settings > Security > Computer use.")
         return _access_error()
 
     # ----- the synchronous action executor (shared by tools + batch) --------

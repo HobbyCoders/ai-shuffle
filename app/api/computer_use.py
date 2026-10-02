@@ -1,6 +1,6 @@
 """Computer-use control endpoints.
 
-Backs the global computer-use toggle (Settings → Chat & Input) and the live
+Backs the global computer-use toggle (Settings > Security > Computer use) and the live
 status the UI's indicators consume. The toggle is a system setting consulted
 by ``query_options`` when wiring the computer-use tools; the per-session halt
 switch is driven by chat Stop, physical Escape, and the host stop endpoint.

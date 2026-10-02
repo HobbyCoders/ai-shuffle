@@ -38,7 +38,7 @@ export class LicenseRequiredError extends Error {
   constructor(readonly keySent: boolean) {
     super(keySent
       ? 'The hub did not accept this license key for updates. Check the key, or that the license is active, at hobbycoders.com.'
-      : 'Updates need an active AI Shuffle license. Enter your license key, or add it in Settings > License.');
+      : 'Updates need an active AI Shuffle license. Enter your license key, or add it in Settings > System > License.');
   }
 }
 const FEEDS: Record<UpdateChannel, string> = { stable: SOURCE_ORIGIN + '/v1/desktop/manifest', edge: SOURCE_ORIGIN + '/v1/desktop/manifest/edge' };

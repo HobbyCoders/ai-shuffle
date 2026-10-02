@@ -412,7 +412,7 @@ async def _adopt_or_wait() -> None:
         return
     if not _state.get("adoption_required"):
         logger.warning("The account already has a network; this worker syncs with %d other worker(s) and "
-                       "keeps its own until the switch is confirmed from Settings > Providers > Devices", len(others))
+                       "keeps its own until the switch is confirmed from Settings > Devices", len(others))
     _state["adoption_required"] = True
     _state["status"] = "conflict"
 def _bootstrap_id() -> str:

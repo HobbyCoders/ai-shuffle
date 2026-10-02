@@ -3,7 +3,7 @@
 Session titles, commit messages, PR descriptions, branch names and agent
 generation all run one-shot, outside any session. That binding used to live on
 the built-in "Default AI" agent; it is now a pair of system settings edited
-under Settings → Providers, because generation has no session and therefore no
+under Settings > Default models, because generation has no session and therefore no
 agent whose configuration would sensibly apply.
 
 Covers:

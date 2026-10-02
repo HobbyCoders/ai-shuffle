@@ -900,7 +900,7 @@ async def transcribe_audio(
     if STT_MODELS.get(stt_model, {}).get("realtime_only"):
         raise HTTPException(
             status_code=400,
-            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file-capable model in Settings > Voice > Voice transcription.",
+            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file-capable model in Settings > Default models > Dictation.",
         )
     provider = _model_provider(stt_model, STT_MODELS.get(stt_model))
 

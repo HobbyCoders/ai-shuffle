@@ -2,7 +2,7 @@
 
 The model + effort behind every internal one-shot call (session titles, commit
 messages, PR descriptions, branch names, agent generation). It replaced the
-built-in "Default AI" agent's model, and lives under Settings → Providers.
+built-in "Default AI" agent's model, and lives under Settings > Default models.
 """
 
 import pytest

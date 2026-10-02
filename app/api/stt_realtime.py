@@ -138,7 +138,7 @@ def _resolve_capability() -> Dict[str, Any]:
             "realtime_only": bool(entry.get("realtime_only")),
             "reason": (
                 f"{display} transcribes uploaded audio only. Pick an OpenAI STT "
-                f"model in Settings > Voice > Voice transcription for live transcription."
+                f"model in Settings > Default models > Dictation for live transcription."
             ),
         }
 

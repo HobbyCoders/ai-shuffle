@@ -424,7 +424,7 @@ def register_self() -> bool:
         )
         if not approved:
             logger.warning(
-                "Install %s is quarantined. Approve it from Settings > Providers > Devices "
+                "Install %s is quarantined. Approve it from Settings > Devices "
                 "on an existing admin device, then restart this install.",
                 settings.effective_instance_id,
             )

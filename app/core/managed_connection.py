@@ -63,7 +63,7 @@ def _tunnel_limit_message(refused):
                 'its license covers. Turn off remote access on another worker to free one.')
     one = 'its one remote connection' if refused.limit == 1 else f'its {refused.limit} remote connections'
     return (f'Remote access is off: this account already uses {one}. Remote access for more workers '
-            'needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. '
+            'needs an AI Shuffle license (Settings > System > License), or turn off remote access on another worker. '
             'Local use is not affected.')
 
 

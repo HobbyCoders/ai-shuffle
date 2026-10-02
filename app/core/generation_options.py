@@ -4,7 +4,7 @@ Generation call option builder.
 Builds a `AgentOptions` for one-shot AI generation calls (commit
 messages, PR descriptions, branch names, profile / subagent generation, etc.)
 from the **text-generation setting** — one model + effort pair configured under
-Settings → Providers, shared by every internal generation call.
+Settings > Default models, shared by every internal generation call.
 
 All generation calls run through the provider adapter seam
 (`app.core.provider.factory.make_adapter`), exactly like chat: a
@@ -240,7 +240,7 @@ def _resolve_env(
 # ---------------------------------------------------------------------------
 #
 # One model + effort pair, stored in ``system_settings`` and edited under
-# Settings → Providers. Every internal generation call runs on it: session and
+# Settings > Default models. Every internal generation call runs on it: session and
 # thread titles, commit messages, PR descriptions, branch names, agent and
 # subagent generation. It replaced the old "Default AI" agent, which pinned
 # these on an agent row even though generation never runs in a session.

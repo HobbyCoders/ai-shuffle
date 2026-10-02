@@ -422,7 +422,7 @@ def _resolve_provider_row(
             status_code=400,
             detail=(
                 "No OpenAI provider with a stored API key is configured. Add one "
-                "in Settings → Providers before starting a voice session "
+                "in Settings > Providers before starting a voice session "
                 "(Realtime does not support ChatGPT-subscription logins)."
             ),
         )
@@ -614,7 +614,7 @@ async def _provider_api_key(
             status_code=400,
             detail=(
                 f"The API key for provider {provider_row.get('name') or provider_row['id']!r} "
-                "could not be read. Re-enter it in Settings → Providers."
+                "could not be read. Re-enter it in Settings > Providers."
             ),
         )
     return api_key
@@ -628,7 +628,7 @@ async def _require_voice_enabled() -> Dict[str, Any]:
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
             status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings → Voice.",
+            detail="Voice mode is disabled. Enable it in Settings > Voice.",
         )
     return voice_settings
 
@@ -788,7 +788,7 @@ async def create_voice_session(
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
             status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings → Voice.",
+            detail="Voice mode is disabled. Enable it in Settings > Voice.",
         )
 
     provider_row = await run_sync(

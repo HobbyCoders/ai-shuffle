@@ -3,8 +3,8 @@
 The provider model list (Settings > Providers) is a TEXT-GENERATION picker: its
 entries land in ``models_json`` and are offered as chat models by
 ``app.core.model_registry._providers_payload``. Audio, voice, image and video
-endpoints are managed elsewhere — Settings > AI tools for media models, Settings
-> Voice for the realtime voice model — and listing them among chat models only
+endpoints are managed elsewhere — Settings > Default models for media models and
+the realtime voice model — and listing them among chat models only
 invites someone to pick one for a job it cannot do.
 
 DENY-LIST BY DESIGN. An id this module does not recognise is TEXT and stays
