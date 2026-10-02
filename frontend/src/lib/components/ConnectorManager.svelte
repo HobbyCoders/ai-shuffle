@@ -43,6 +43,7 @@
 	import { api, type Profile } from '$lib/api/client';
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 	import { listInstalls } from '$lib/api/installs';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
 	import { notify } from '$lib/stores/notifications';
@@ -1185,7 +1186,11 @@
 							</select>
 							<p class="text-xs text-muted-foreground mt-1">
 								Select an existing API user or leave empty to auto-create one.
-								Manage API users in Settings &rarr; API.
+								<button
+									type="button"
+									class="underline underline-offset-2 hover:text-foreground"
+									onclick={() => openSettings({ category: 'integrations' })}
+								>Manage API users in Settings &gt; Integrations</button>
 							</p>
 						</div>
 					{/if}
