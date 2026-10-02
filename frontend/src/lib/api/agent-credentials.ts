@@ -4,7 +4,7 @@
  * The setup wizard reads all of it from one call, `GET /api/v1/settings/claude-auth`
  * (the same summary Settings > Providers > Claude Code mode shows):
  *
- * - `mode`: `'subscription'` or `'api_key'`, with `explicit` false only before
+ * - `mode`: `'subscription'`, `'api_key'` or `'off'`, with `explicit` false only before
  *   startup has recorded the worker's default.
  * - `cli`: what `claude auth status` reports, with the account only when signed in.
  * - `api_key`: whether a key is stored, and its last four characters.
@@ -43,17 +43,18 @@ export interface AgentCredentials {
 	apiKey: ClaudeAuthSummary['api_key'];
 }
 
-function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
-	return value === 'subscription' || value === 'api_key';
+export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
+	return value === 'subscription' || value === 'api_key' || value === 'off';
 }
 
 /** The wizard's view of the worker's `claude-auth` summary. */
 export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredentials {
 	const mode: ClaudeAuthMode = isClaudeAuthMode(summary.mode) ? summary.mode : 'subscription';
 	const gate = summary.gate;
+	// Off: Claude is turned off on this worker, so no credential is in use.
 	const credentialReady = gate
 		? gate.claude_credential_ready === true
-		: mode === 'subscription' ? summary.cli.signed_in : summary.api_key.set;
+		: mode === 'subscription' ? summary.cli.signed_in : mode === 'api_key' ? summary.api_key.set : false;
 	const licenseAllowsRuns = gate?.license_allows_runs !== false;
 	return {
 		mode,

@@ -3,7 +3,7 @@
  *
  * Covers the model_providers registry cluster:
  *  1. `loadProviders` populates state from the list API.
- *  2. `toggleProvider` calls the toggle API, then refreshes (re-lists + re-hydrates
+ *  2. `setProviderEnabled` PATCHes `{enabled}`, then refreshes (re-lists + re-hydrates
  *     the model registry).
  *  3. `refreshProviders` invokes `hydrateModelRegistry` (landmine L4 — every
  *     mutation must re-hydrate so the profile editor's picker stays fresh).
@@ -18,7 +18,7 @@ import type { ModelProvider } from '$lib/api/model-providers';
 
 const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
-	toggleModelProvider: vi.fn(),
+	updateModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
@@ -28,7 +28,7 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 	return {
 		...actual,
 		listModelProviders: mocks.listModelProviders,
-		toggleModelProvider: mocks.toggleModelProvider
+		updateModelProvider: mocks.updateModelProvider
 	};
 });
 
@@ -70,7 +70,7 @@ function provider(partial: Partial<ModelProvider>): ModelProvider {
 
 beforeEach(() => {
 	mocks.listModelProviders.mockReset();
-	mocks.toggleModelProvider.mockReset();
+	mocks.updateModelProvider.mockReset();
 	mocks.hydrateModelRegistry.mockReset();
 	mocks.getAuthStatus.mockReset();
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
@@ -91,18 +91,29 @@ describe('providers store — model_providers registry', () => {
 		expect(providers.current.providersError).toBe('');
 	});
 
-	it('toggleProvider calls the toggle API then refreshes (re-list + re-hydrate)', async () => {
-		mocks.toggleModelProvider.mockResolvedValue(provider({ id: 'p1', enabled: false }));
+	it('setProviderEnabled PATCHes {enabled} then refreshes (re-list + re-hydrate)', async () => {
+		mocks.updateModelProvider.mockResolvedValue(provider({ id: 'p1', enabled: false }));
 		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', enabled: false })] });
 
-		await providers.toggleProvider('p1');
+		await providers.setProviderEnabled('p1', false);
 
-		expect(mocks.toggleModelProvider).toHaveBeenCalledWith('p1');
+		expect(mocks.updateModelProvider).toHaveBeenCalledWith('p1', { enabled: false });
 		// refreshProviders() ran: list re-fetched AND the registry re-hydrated (L4).
 		expect(mocks.listModelProviders).toHaveBeenCalledTimes(1);
 		expect(mocks.hydrateModelRegistry).toHaveBeenCalledTimes(1);
 		expect(providers.current.togglingProviderId).toBe(null);
 		expect(providers.current.providers).toEqual([provider({ id: 'p1', enabled: false })]);
+	});
+
+	it('setProviderEnabled rolls the switch back and rethrows when the save fails', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', enabled: true })] });
+		await providers.loadProviders();
+		mocks.updateModelProvider.mockRejectedValue({ status: 500, detail: 'nope' });
+
+		await expect(providers.setProviderEnabled('p1', false)).rejects.toEqual({ status: 500, detail: 'nope' });
+
+		expect(providers.current.providers[0].enabled).toBe(true);
+		expect(providers.current.togglingProviderId).toBe(null);
 	});
 
 	it('refreshProviders invokes hydrateModelRegistry (landmine L4)', async () => {
@@ -240,5 +251,53 @@ describe('providers store — refreshAll silent refetch', () => {
 		expect(mocks.listModelProviders).toHaveBeenCalledTimes(2);
 
 		vi.unstubAllGlobals();
+	});
+});
+
+describe('providers store — fal.ai and Claude mode', () => {
+	it('loadIntegrations reads the fal key and its on/off flag (unset means on)', async () => {
+		vi.stubGlobal('fetch', vi.fn()
+			.mockResolvedValueOnce({ ok: true, json: async () => ({ fal_api_key_set: true, fal_api_key_masked: '…9c1e', fal_enabled: false }) })
+			.mockResolvedValueOnce({ ok: true, json: async () => ({ fal_api_key_set: true }) }));
+		await providers.loadIntegrations();
+		expect(providers.current.falKeyMasked).toBe('…9c1e');
+		expect(providers.current.falEnabled).toBe(false);
+		await providers.loadIntegrations();
+		expect(providers.current.falEnabled).toBe(true);
+		vi.unstubAllGlobals();
+	});
+
+	it('setFalEnabled PUTs the flag, keeps the answer and rolls back on failure', async () => {
+		const client = await import('$lib/api/client');
+		const put = vi.spyOn(client.api, 'put').mockResolvedValue({ fal_enabled: false, fal_api_key_set: true });
+		await providers.setFalEnabled(false);
+		expect(put).toHaveBeenCalledWith('/settings/integrations/fal-ai/enabled', { enabled: false });
+		expect(providers.current.falEnabled).toBe(false);
+		put.mockRejectedValueOnce({ status: 500 });
+		await expect(providers.setFalEnabled(true)).rejects.toEqual({ status: 500 });
+		expect(providers.current.falEnabled).toBe(false);
+		put.mockRestore();
+	});
+
+	it('setClaudeMode stores the mode, off included, and re-reads the model registry', async () => {
+		const client = await import('$lib/api/client');
+		const summary = { mode: 'off', mode_label: 'Off', explicit: true, modes: [], cli: {}, api_key: { set: false, last4: null } };
+		const put = vi.spyOn(client.api, 'put').mockResolvedValue(summary);
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
+		await providers.setClaudeMode('off');
+		expect(put).toHaveBeenCalledWith('/settings/claude-auth', { mode: 'off' });
+		expect(providers.current.claude?.mode).toBe('off');
+		expect(mocks.hydrateModelRegistry).toHaveBeenCalled();
+		put.mockRestore();
+		vi.unstubAllGlobals();
+	});
+
+	it('loadClaude marks a 403 as forbidden without an error', async () => {
+		const client = await import('$lib/api/client');
+		const get = vi.spyOn(client.api, 'get').mockRejectedValue({ status: 403, detail: 'Admin only' });
+		await providers.loadClaude();
+		expect(providers.current.claudeForbidden).toBe(true);
+		expect(providers.current.claudeError).toBe(null);
+		get.mockRestore();
 	});
 });
