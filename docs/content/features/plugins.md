@@ -48,9 +48,19 @@ A plugin can contribute any combination of:
 
 Each plugin in the API response includes boolean flags indicating which capabilities it provides: `has_hooks`, `has_commands`, `has_agents`, `has_skills`, `has_mcp`.
 
+Responses also carry:
+
+- `format`: `claude` (Claude Code), `agent-plugins` (Agent Plugins / OpenAI) or `shuffle` (official connector runtimes).
+- `trust`: `official`, `marketplace` or `authored`.
+- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason` when it does not load. LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
+
+These fields are absent from workers that predate them.
+
 ## Plugin Structure
 
-A plugin is a directory containing a `.claude-plugin/plugin.json` manifest file. The manifest defines the plugin's metadata and declares its contributions.
+AI Shuffle reads two package formats and keeps each on disk as it was published.
+
+**Claude Code.** A directory with an optional `.claude-plugin/plugin.json` manifest (only `name` is required). The manifest defines the plugin's metadata and declares its contributions.
 
 ```
 my-plugin/
@@ -74,9 +84,22 @@ The `plugin.json` manifest includes:
 - **version** -- Semantic version string
 - **scope** -- Installation scope
 
+**Agent Plugins / OpenAI (ChatGPT and Codex).** A root `plugin.json` (or the older `.codex-plugin/plugin.json`) with `skills/` and `mcp.json`. Display metadata under `extensions["com.openai"].interface` (`displayName`, `shortDescription`, `logo`) is shown in the plugin list. Commands and agents can be declared under `extensions["ai.shuffle"]`.
+
+```
+my-plugin/
+├── plugin.json            # Agent Plugins manifest
+├── skills/
+│   └── <name>/SKILL.md
+├── mcp.json               # MCP servers
+└── .app.json              # ChatGPT-hosted apps (listed, not run)
+```
+
+`${CLAUDE_PLUGIN_ROOT}` and `${PLUGIN_ROOT}` both expand to the plugin's folder. `${CLAUDE_PLUGIN_DATA}` and `${PLUGIN_DATA}` both expand to `~/.fluid/plugins/data/<name>@<marketplace>`, which is kept across plugin updates.
+
 ## Marketplaces
 
-Plugins are distributed through marketplaces, which are git repositories containing one or more plugins.
+Plugins are distributed through marketplaces, which are git repositories containing one or more plugins. A marketplace lists its plugins in `.claude-plugin/marketplace.json` (Claude Code) or `.agents/plugins/marketplace.json` (Agent Plugins / OpenAI). In the second format, `source.path` and `source.url` entries are supported; npm (`source.package`) entries are skipped for now.
 
 ### List Marketplaces
 

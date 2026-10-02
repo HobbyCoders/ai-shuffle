@@ -46,6 +46,86 @@ from app.core import plugin_updates as _upd_mod
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Shared plugin reader (fluid.context.plugin_formats)
+# =============================================================================
+#
+# Every plugin directory this service describes is read by fluid's one parser,
+# the same one the runtime loads plugins with, so the components listed here
+# are the ones that load (Claude Code and Agent Plugins / OpenAI formats).
+
+
+def plugin_record(path: Path, name: str, source: str, version: Optional[str] = None):
+    """The normalized :class:`~fluid.context.plugin_formats.PluginRecord` for
+    the plugin at ``path``, or ``None`` when it is missing or unreadable."""
+    from fluid.context.plugin_formats import read_plugin
+
+    try:
+        if not path.is_dir():
+            return None
+        return read_plugin(path, name=name, source=source, version=version)
+    except Exception as e:  # noqa: BLE001 — one bad plugin never hides the rest
+        logger.warning(f"Could not read plugin at {path}: {e}")
+        return None
+
+
+def record_summary(record, install_path: Path) -> Dict[str, Any]:
+    """The ``has_*`` flags, format and components the API reports for a plugin."""
+    if record is None:
+        return {
+            "has_commands": False, "has_agents": False, "has_skills": False,
+            "has_hooks": False, "has_mcp": False, "format": None, "components": [],
+        }
+    # Hook prompt files (hooks/*.md) are listed by plugin_hooks without being
+    # a hooks.json component; keep counting a hooks folder as "has hooks".
+    legacy_hooks = (install_path / "hooks").is_dir() or (install_path / "hooks.json").exists()
+    return {
+        "has_commands": bool(record.commands),
+        "has_agents": bool(record.agents),
+        "has_skills": bool(record.skills),
+        "has_hooks": record.has("hook") or legacy_hooks,
+        "has_mcp": bool(record.mcp_servers),
+        "format": record.format,
+        "components": [c.to_dict() for c in record.components],
+    }
+
+
+def record_description(record, install_path: Path) -> str:
+    """The manifest description, else the README's first line."""
+    if record is not None and record.description:
+        return record.description[:200]
+    return PluginService._readme_first_line(install_path) or ""
+
+
+def _component_names(record) -> tuple:
+    """``(commands, agents, skills)`` names as the details view lists them."""
+    if record is None:
+        return [], [], []
+
+    def local(name: str) -> str:
+        return name.split(":", 1)[-1]
+
+    return (
+        [local(c.name) for c in record.commands],
+        [local(a.name) for a in record.agents],
+        [local(s.name) for s in record.skills],
+    )
+
+
+def _read_readme(directory: Path) -> Optional[str]:
+    readme_path = directory / "README.md"
+    if not readme_path.exists():
+        return None
+    try:
+        return readme_path.read_text(encoding='utf-8')
+    except (IOError, UnicodeDecodeError):
+        return None
+
+
+def _trust_for(marketplace: str) -> str:
+    return "authored" if marketplace == "authored" else "marketplace"
+
+
 class PluginConfigUnreadable(McpConfigUnreadable):
     """A plugin settings/registry file exists but cannot be read, so it is not rewritten.
 
@@ -375,19 +455,24 @@ class PluginService:
     # =========================================================================
 
     def _get_marketplace_manifest(self, mp_path: Path) -> Optional[Dict[str, Any]]:
-        """Read and parse .claude-plugin/marketplace.json from a marketplace directory."""
-        manifest_path = mp_path / ".claude-plugin" / "marketplace.json"
-        if not manifest_path.exists():
+        """Read a marketplace catalog from a marketplace directory.
+
+        ``.claude-plugin/marketplace.json`` (Claude Code), else
+        ``.agents/plugins/marketplace.json`` (Agent Plugins / OpenAI), whose
+        entries fluid's reader rewrites into the Claude ``source`` shapes the
+        install path resolves.
+        """
+        from fluid.context.plugin_formats import read_marketplace
+
+        catalog = read_marketplace(mp_path)
+        if catalog is None:
             return None
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-        except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-            logger.warning(f"Failed to parse marketplace.json at {manifest_path}")
-            return None
-        if not isinstance(manifest, dict):
-            logger.warning(f"marketplace.json at {manifest_path} is not an object")
-            return None
-        return manifest
+        if catalog.skipped:
+            logger.info(
+                f"Marketplace {mp_path.name}: skipping entries with unsupported sources: "
+                f"{', '.join(catalog.skipped[:10])}"
+            )
+        return catalog.data
 
     def _resolve_plugin_source(self, source, mp_path: Path, plugin_root: Optional[str] = None) -> Optional[Path]:
         """
@@ -546,34 +631,14 @@ class PluginService:
                 # Try to resolve to a local directory for component detection
                 local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
 
+                record = None
                 if local_dir:
-                    # Local source - scan directory for components
-                    components = self._detect_components_from_dir(local_dir)
+                    # Local source - read the plugin with the shared parser
+                    record = plugin_record(local_dir, plugin_name, mp.id)
+                    components = record_summary(record, local_dir)
                     mp_path_str = str(local_dir)
-
-                    # If description is empty, try reading from local plugin files
                     if not description:
-                        # Try .claude-plugin/plugin.json
-                        pj = local_dir / ".claude-plugin" / "plugin.json"
-                        if pj.exists():
-                            try:
-                                pj_data = json.loads(pj.read_text(encoding='utf-8'))
-                                description = pj_data.get("description", "")[:200]
-                            except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-                                pass
-                        # Try README.md
-                        if not description:
-                            readme = local_dir / "README.md"
-                            if readme.exists():
-                                try:
-                                    content = readme.read_text(encoding='utf-8')
-                                    for line in content.strip().split("\n"):
-                                        line = line.strip()
-                                        if line and not line.startswith("#"):
-                                            description = line[:200]
-                                            break
-                                except (IOError, UnicodeDecodeError):
-                                    pass
+                        description = record_description(record, local_dir)
                 else:
                     # External source - infer components from entry keys
                     components = self._detect_components_from_entry(entry)
@@ -596,7 +661,9 @@ class PluginService:
                     has_hooks=components.get("has_hooks", False),
                     has_mcp=components.get("has_mcp", False),
                     installed=plugin_id in installed_plugins,
-                    enabled=enabled_plugins.get(plugin_id, False)
+                    enabled=enabled_plugins.get(plugin_id, False),
+                    format=record.format if record else None,
+                    components=components.get("components", []),
                 ))
 
         from app.core import connector_packages
@@ -646,57 +713,21 @@ class PluginService:
                 except (ValueError, TypeError):
                     pass
 
-            # Check components
-            has_commands = (install_path / "commands").exists() if install_path.exists() else False
-            has_agents = (install_path / "agents").exists() if install_path.exists() else False
-            has_skills = (install_path / "skills").exists() if install_path.exists() else False
-            has_hooks = ((install_path / "hooks").exists() or
-                        (install_path / "hooks.json").exists()) if install_path.exists() else False
-            has_mcp = (install_path / ".mcp.json").exists() if install_path.exists() else False
-
-            # Check if this is an external plugin (has .claude-plugin/plugin.json)
-            is_external = (install_path / ".claude-plugin" / "plugin.json").exists() if install_path.exists() else False
-
-            # Get description based on plugin type
-            description = ""
-            if is_external:
-                # External plugins: read from .claude-plugin/plugin.json
-                manifest_path = install_path / ".claude-plugin" / "plugin.json"
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                    description = manifest.get("description", "")[:200]
-                except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-                    pass
-            else:
-                # Regular plugins: read from README.md
-                readme_path = install_path / "README.md"
-                if readme_path.exists():
-                    try:
-                        content = readme_path.read_text(encoding='utf-8')
-                        lines = content.strip().split("\n")
-                        for line in lines:
-                            line = line.strip()
-                            if line and not line.startswith("#"):
-                                description = line[:200]
-                                break
-                    except (IOError, UnicodeDecodeError):
-                        pass
+            record = plugin_record(install_path, name, marketplace, install.get("version"))
+            summary = record_summary(record, install_path)
 
             plugins.append(PluginInfo(
                 id=plugin_id,
                 name=name,
                 marketplace=marketplace,
-                description=description,
+                description=record_description(record, install_path),
                 version=install.get("version", "unknown"),
                 scope=install.get("scope", "user"),
                 install_path=str(install_path),
                 installed_at=installed_at,
                 enabled=enabled_plugins.get(plugin_id, False),
-                has_commands=has_commands,
-                has_agents=has_agents,
-                has_skills=has_skills,
-                has_hooks=has_hooks,
-                has_mcp=has_mcp
+                trust=_trust_for(marketplace),
+                **summary,
             ))
 
         from app.core import connector_packages
@@ -744,82 +775,40 @@ class PluginService:
             except (ValueError, TypeError):
                 pass
 
-        # Collect commands
-        commands = []
-        commands_dir = install_path / "commands"
-        if commands_dir.exists():
-            for cmd_file in commands_dir.glob("**/*.md"):
-                cmd_name = cmd_file.stem
-                commands.append(cmd_name)
-
-        # Collect agents
-        agents = []
-        agents_dir = install_path / "agents"
-        if agents_dir.exists():
-            for agent_file in agents_dir.glob("**/*.md"):
-                agent_name = agent_file.stem
-                agents.append(agent_name)
-
-        # Collect skills
-        skills = []
-        skills_dir = install_path / "skills"
-        if skills_dir.exists():
-            for skill_dir in skills_dir.iterdir():
-                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                    skills.append(skill_dir.name)
-
-        # Check if this is an external plugin (has .claude-plugin/plugin.json)
-        is_external = (install_path / ".claude-plugin" / "plugin.json").exists()
-        has_mcp = (install_path / ".mcp.json").exists()
-
-        # Read README
-        readme = None
-        readme_path = install_path / "README.md"
-        if readme_path.exists():
-            try:
-                readme = readme_path.read_text(encoding='utf-8')
-            except (IOError, UnicodeDecodeError):
-                pass
-
-        # Get description based on plugin type
-        description = ""
-        if is_external:
-            # External plugins: read from .claude-plugin/plugin.json
-            manifest_path = install_path / ".claude-plugin" / "plugin.json"
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                description = manifest.get("description", "")[:200]
-            except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-                pass
-        elif readme:
-            # Regular plugins: extract from README
-            lines = readme.strip().split("\n")
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    description = line[:200]
-                    break
+        record = plugin_record(install_path, name, marketplace, install.get("version"))
+        summary = record_summary(record, install_path)
+        commands, agents, skills = _component_names(record)
 
         return PluginDetails(
             id=plugin_id,
             name=name,
             marketplace=marketplace,
-            description=description,
+            description=record_description(record, install_path),
             version=install.get("version", "unknown"),
             scope=install.get("scope", "user"),
             install_path=str(install_path),
             installed_at=installed_at,
             enabled=enabled_plugins.get(plugin_id, False),
-            has_commands=bool(commands),
-            has_agents=bool(agents),
-            has_skills=bool(skills),
-            has_hooks=(install_path / "hooks").exists() or (install_path / "hooks.json").exists(),
-            has_mcp=has_mcp,
+            trust=_trust_for(marketplace),
+            **summary,
             commands=commands,
             agents=agents,
             skills=skills,
-            readme=readme
+            readme=_read_readme(install_path),
         )
+
+    def _implicit_component_names(self, root: Path) -> tuple:
+        """Component names of a marketplace-less repo added as a source."""
+        commands_dir = self._resolve_component_dir(root, "commands")
+        agents_dir = self._resolve_component_dir(root, "agents")
+        skills_dir = self._resolve_component_dir(root, "skills")
+        commands = [f.stem for f in commands_dir.glob("**/*.md")] if commands_dir else []
+        agents = [f.stem for f in agents_dir.glob("**/*.md")] if agents_dir else []
+        skills = [
+            d.name for d in skills_dir.iterdir()
+            if d.is_dir() and (d / "SKILL.md").exists()
+        ] if skills_dir else []
+        return commands, agents, skills
 
     def get_available_plugin_details(self, plugin_id: str) -> Optional[PluginDetails]:
         """Get detailed information about an available (not-yet-installed) plugin from its marketplace path."""
@@ -853,44 +842,25 @@ class PluginService:
                 has_skills=plugin.has_skills,
                 has_hooks=plugin.has_hooks,
                 has_mcp=plugin.has_mcp,
+                trust=_trust_for(marketplace),
+                format=plugin.format,
+                components=plugin.components,
                 commands=[],
                 agents=[],
                 skills=[],
                 readme=readme
             )
 
-        # Collect commands / agents / skills. Component dirs may live at the repo
-        # root or under .claude/ or .agents/ (implicit, marketplace-less plugins).
-        commands = []
-        commands_dir = self._resolve_component_dir(plugin_path, "commands")
-        if commands_dir:
-            for cmd_file in commands_dir.glob("**/*.md"):
-                commands.append(cmd_file.stem)
-
-        agents = []
-        agents_dir = self._resolve_component_dir(plugin_path, "agents")
-        if agents_dir:
-            for agent_file in agents_dir.glob("**/*.md"):
-                agents.append(agent_file.stem)
-
-        skills = []
-        skills_dir = self._resolve_component_dir(plugin_path, "skills")
-        if skills_dir:
-            for skill_dir in skills_dir.iterdir():
-                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                    skills.append(skill_dir.name)
-
-        has_hooks = (plugin_path / "hooks").exists() or (plugin_path / "hooks.json").exists()
-        has_mcp = (plugin_path / ".mcp.json").exists()
-
-        # Read README
-        readme = None
-        readme_path = plugin_path / "README.md"
-        if readme_path.exists():
-            try:
-                readme = readme_path.read_text(encoding='utf-8')
-            except (IOError, UnicodeDecodeError):
-                pass
+        record = plugin_record(plugin_path, name, marketplace)
+        summary = record_summary(record, plugin_path)
+        commands, agents, skills = _component_names(record)
+        if not (commands or agents or skills):
+            # An implicit, marketplace-less plugin keeps its components at the
+            # repo root or under .claude/ or .agents/ (see plugin_install).
+            commands, agents, skills = self._implicit_component_names(plugin_path)
+            summary.update(
+                has_commands=bool(commands), has_agents=bool(agents), has_skills=bool(skills),
+            )
 
         return PluginDetails(
             id=plugin_id,
@@ -902,15 +872,12 @@ class PluginService:
             install_path=str(plugin_path),
             installed_at=None,
             enabled=False,
-            has_commands=bool(commands),
-            has_agents=bool(agents),
-            has_skills=bool(skills),
-            has_hooks=has_hooks,
-            has_mcp=has_mcp,
+            trust=_trust_for(marketplace),
+            **summary,
             commands=commands,
             agents=agents,
             skills=skills,
-            readme=readme
+            readme=_read_readme(plugin_path)
         )
 
     # =========================================================================
@@ -1094,55 +1061,9 @@ class PluginService:
                 plugin_name = plugin_dir.name
                 plugin_id = f"{plugin_name}@project-{scope.value}"
 
-                # Read plugin.json for metadata if exists
-                # Check both root and .claude-plugin/ directory
-                plugin_json = plugin_dir / "plugin.json"
-                if not plugin_json.exists():
-                    plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
-                version = "1.0.0"
-                if plugin_json.exists():
-                    try:
-                        with open(plugin_json) as f:
-                            data = json.load(f)
-                        version = data.get("version", version)
-                    except (json.JSONDecodeError, IOError):
-                        pass
-
-                # Read description from README
-                # Check if this is an external plugin (has .claude-plugin/plugin.json)
-                is_external = (plugin_dir / ".claude-plugin" / "plugin.json").exists()
-
-                # Get description based on plugin type
-                description = ""
-                if is_external:
-                    # External plugins: read from .claude-plugin/plugin.json
-                    manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
-                    try:
-                        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                        description = manifest.get("description", "")[:200]
-                    except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-                        pass
-                else:
-                    # Regular plugins: read from README.md
-                    readme_path = plugin_dir / "README.md"
-                    if readme_path.exists():
-                        try:
-                            content = readme_path.read_text(encoding='utf-8')
-                            lines = content.strip().split("\n")
-                            for line in lines:
-                                line = line.strip()
-                                if line and not line.startswith("#"):
-                                    description = line[:200]
-                                    break
-                        except (IOError, UnicodeDecodeError):
-                            pass
-
-                # Check components
-                has_commands = (plugin_dir / "commands").exists()
-                has_agents = (plugin_dir / "agents").exists()
-                has_skills = (plugin_dir / "skills").exists()
-                has_hooks = (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists()
-                has_mcp = (plugin_dir / ".mcp.json").exists()
+                record = plugin_record(plugin_dir, plugin_name, f"project-{scope.value}")
+                summary = record_summary(record, plugin_dir)
+                version = (record.manifest.get("version") if record else None) or "1.0.0"
 
                 # Get file timestamps
                 dir_stat = plugin_dir.stat()
@@ -1152,17 +1073,14 @@ class PluginService:
                     id=plugin_id,
                     name=plugin_name,
                     marketplace="project",
-                    description=description,
-                    version=version,
+                    description=record_description(record, plugin_dir),
+                    version=str(version),
                     scope=scope.value,
                     install_path=str(plugin_dir),
                     installed_at=installed_at,
                     enabled=enabled_plugins.get(plugin_id, True),  # Default enabled
-                    has_commands=has_commands,
-                    has_agents=has_agents,
-                    has_skills=has_skills,
-                    has_hooks=has_hooks,
-                    has_mcp=has_mcp
+                    trust="marketplace",
+                    **summary,
                 ))
 
         return plugins

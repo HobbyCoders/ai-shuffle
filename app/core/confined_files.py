@@ -1,6 +1,7 @@
 """Upload/attachment IO through pinned directories, never a checked-then-open path.
 
-Linux uses openat2; Windows pins each directory without FILE_SHARE_DELETE and
+Linux and macOS use chat_files.confined_open (openat2, or a per-component
+openat walk on macOS); Windows pins each directory without FILE_SHARE_DELETE and
 opens entries with OPEN_REPARSE_POINT. Other platforms fail closed.
 """
 from contextlib import contextmanager, ExitStack

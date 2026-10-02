@@ -35,16 +35,18 @@ function keysOf<T>() {
 
 const PLUGIN_INFO_KEYS = keysOf<PluginInfo>()([
 	'id', 'name', 'marketplace', 'description', 'version', 'scope', 'install_path', 'installed_at',
-	'enabled', 'has_commands', 'has_agents', 'has_skills', 'has_hooks', 'has_mcp', 'connector_type'
+	'enabled', 'has_commands', 'has_agents', 'has_skills', 'has_hooks', 'has_mcp', 'connector_type',
+	'format', 'trust', 'components'
 ]);
 const DETAILS_KEYS = keysOf<PluginDetails>()([
 	'id', 'name', 'marketplace', 'description', 'version', 'scope', 'install_path', 'installed_at',
 	'enabled', 'has_commands', 'has_agents', 'has_skills', 'has_hooks', 'has_mcp', 'connector_type',
-	'commands', 'agents', 'skills', 'readme'
+	'format', 'trust', 'components', 'commands', 'agents', 'skills', 'readme'
 ]);
 const AVAILABLE_KEYS = keysOf<AvailablePlugin>()([
 	'id', 'name', 'marketplace', 'marketplace_path', 'description', 'has_commands', 'has_agents',
-	'has_skills', 'has_hooks', 'has_mcp', 'connector_type', 'installed', 'enabled'
+	'has_skills', 'has_hooks', 'has_mcp', 'connector_type', 'installed', 'enabled', 'format',
+	'components'
 ]);
 const AGENT_KEYS = keysOf<FileBasedAgent>()([
 	'id', 'name', 'description', 'model', 'tools', 'prompt', 'source_plugin', 'file_path'

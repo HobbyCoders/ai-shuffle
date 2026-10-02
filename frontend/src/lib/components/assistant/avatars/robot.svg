@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <path d="M32 10v9" stroke="currentColor" stroke-width="3" />
+  <circle cx="32" cy="8" r="4" fill="currentColor" />
+  <rect class="shape" x="12" y="19" width="40" height="33" rx="12" />
+  <path d="M7 30v11m50-11v11" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+  <path class="eyes" d="M24 29v5m16-5v5" />
+  <path class="smile" d="M26 42q6 5 12 0" />
+</svg>

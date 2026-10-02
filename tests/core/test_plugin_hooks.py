@@ -158,12 +158,19 @@ def test_plugin_json_hooks_path_string_and_bad_json(tmp_path):
     assert _hooks(tmp_path / "d", **{"plugin.json": {"name": "no hooks"}}) == []
 
 
-def test_root_plugin_json_wins_over_claude_plugin_dir(tmp_path):
+def test_claude_manifest_wins_like_the_runtime_loader(tmp_path):
+    # Listed hooks come from the manifest fluid's shared reader picks (the
+    # one the runtime loads): .claude-plugin/plugin.json over a root plugin.json.
     rows = _hooks(tmp_path, **{
         "plugin.json": {"hooks": ["RootEvent"]},
         ".claude-plugin__plugin.json": {"hooks": ["NestedEvent"]},
     })
-    assert [r["event"] for r in rows] == ["RootEvent"]
+    assert [r["event"] for r in rows] == ["NestedEvent"]
+
+
+def test_agent_plugins_legacy_manifest_hooks_are_listed(tmp_path):
+    rows = _hooks(tmp_path, **{".codex-plugin__plugin.json": {"hooks": {"Stop": []}}})
+    assert [r["event"] for r in rows] == ["Stop"]
 
 
 def test_get_all_plugin_hooks_uses_the_service(tmp_path):

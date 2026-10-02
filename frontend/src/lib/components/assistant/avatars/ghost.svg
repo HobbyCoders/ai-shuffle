@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <path class="shape" d="M14 52V28a18 18 0 0 1 36 0v24l-6-5-6 5-6-5-6 5-6-5Z" />
+  <path class="eyes" d="M26 28v5m12-5v5" />
+  <path class="smile" d="M29 39q3 2 6 0" />
+</svg>

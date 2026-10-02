@@ -10,6 +10,7 @@ import httpx
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.db import network as store
 from app.db.base import get_db
 from app.network import control, engine, membership, transport
 
@@ -52,6 +53,12 @@ async def handle(body: dict, from_device: str) -> dict:
     session_id, active = body.get("session_id"), body.get("is_active")
     if not isinstance(session_id, str) or not session_id or not isinstance(active, bool):
         raise ValueError("session_id and boolean is_active are required")
+    view = body.get("owner_watermarks")
+    if engine.outbox_held() and isinstance(view, dict):
+        # Startup sync: our outbox is held until a peer has compared streams
+        # with us. The asking peer's view of our stream is that comparison
+        # (#1621); without it the request is refused below as before.
+        await run_sync(transport.release_hold_for_peer_view, from_device, view)
     row, envelope = await run_sync(_write, session_id, active)
     await _broadcast(row, session_id, active)
     # Only the signed catalog representation crosses the worker boundary.
@@ -91,10 +98,18 @@ def _offline_message(device_id: str, reason: str) -> Optional[str]:
     return f"{who} can't be reached right now. Try again once it is back online."
 
 
+def _view_of(owner: str) -> dict:
+    """What this worker holds of the owner's stream, as an exchange would send it."""
+    return store.local_watermarks().get(owner) or {}
+
+
 async def set_remote(owner: str, session_id: str, active: bool) -> dict:
     try:
         response = await control.call(owner, "session-active", {
             "session_id": session_id, "is_active": active,
+            # Lets an owner whose outbox is still held after a restart compare
+            # streams with us and sign the change (owners before #1621 ignore it).
+            "owner_watermarks": await run_sync(_view_of, owner),
         })
     except control.RunnerUnreachable as exc:
         # The transport reason ("PeerError: HTTP 530") says nothing to the
