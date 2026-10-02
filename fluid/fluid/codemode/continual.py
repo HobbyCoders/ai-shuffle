@@ -185,14 +185,27 @@ the full current store with usage data. Improve its SHAPE:
 - merge near-duplicate memories into one entry (rewrite one with its id,
   delete the others);
 - generalize entries that captured one narrow instance of a broader fact;
+- retire facts a newer fact superseded: when two entries describe the same
+  thing at different times (hardware, versions, addresses, paths, an
+  owner's machine), the newer one wins — delete the older entry, or rewrite
+  it without the outdated detail. A fact that still cites hardware a later
+  entry says was replaced is stale, not history worth keeping;
 - delete entries that contradict each other (keep the better-evidenced one),
-  restate stale-looking absolutes more carefully, and drop task narratives
-  that never belonged in memory;
+  restate stale-looking absolutes more carefully, and drop task narratives,
+  one-off outcomes (a PR merged, a test passed once, a branch's setup) and
+  anything the repository itself records — those never belonged in memory;
 - an entry with zero recalls and old timestamps is a candidate for deletion,
   but low usage alone is not proof of uselessness — prefer merging over
   deleting when the fact still looks true;
 - for skills: delete ones that are superseded by a better one; do NOT write
   new skills in this pass.
+
+Entries marked "read-only" were saved at the user's request: never rewrite
+or delete them, but use them as the newest truth when judging whether
+another entry is stale. Entries marked "agent-saved" were kept by an agent on
+its own judgment; curate them like any other. The listing is grouped by
+topic so related facts sit together; a store too large for one pass is
+reviewed a section at a time.
 
 A small, sharp store beats a large, stale one — but do not destroy
 information wholesale: most passes change a handful of entries at most.
@@ -354,7 +367,9 @@ PROMPT_CHAR_LIMIT = 32_000
 MEMORY_PROMPT_CHARS = 6_000
 LIBRARY_PROMPT_RESERVE = 8_000
 JOURNAL_MIN_PROMPT_CHARS = 8_000
-# Consolidation lists only facts it may change (inferred, not explicit).
+# Consolidation lists the facts it may change (learned and agent-saved) and,
+# read-only, the explicit ones they might contradict, grouped by topic. A
+# store larger than this is reviewed a rotating section per pass.
 CONSOLIDATE_MEMORY_CHARS = 24_000
 # Rough cost of a "--- session ... ---" divider when sizing the journal.
 _SESSION_LABEL_ALLOWANCE = 80
@@ -392,9 +407,15 @@ SKILL_SOURCE_BUDGET = 24_000
 # over one store never pay for the same slice or write the same memory twice.
 SYNTHESIS_LOCK = "synthesis"
 # Consolidation (a whole-store curation pass) is interval-gated like skill
-# curation; it rides an ordinary background pass, never session close.
-CONSOLIDATE_INTERVAL_DAYS = 7.0
+# curation; it rides an ordinary background pass, never session close. One
+# store took about a dozen saves a day, so a weekly pass that saw one
+# section of it never caught up.
+CONSOLIDATE_INTERVAL_DAYS = 2.0
 CONSOLIDATE_MIN_MEMORIES = 8
+# Daily inference calls synthesis leaves for consolidation. Synthesis can
+# otherwise spend the whole facts.MAX_INFERENCE_CALLS_PER_DAY budget, and a
+# store whose learner is always out of budget is never curated.
+CONSOLIDATE_RESERVED_CALLS = 2
 
 
 class Synthesizer:
@@ -591,7 +612,9 @@ class Synthesizer:
             self._budget_spent_day = int(time.time() // 86400)
             self.last_error = f"{type(exc).__name__}: {exc}"
             self._log_pass("synthesis", [], error=self.last_error)
-            return []
+            # Synthesis stops short of CONSOLIDATE_RESERVED_CALLS, so a due
+            # curation pass can still run on the calls it left.
+            changed = []
         except Exception as exc:  # never let synthesis break the session
             self.last_error = f"{type(exc).__name__}: {exc}"
             retry = self._note_failure(self.last_error)
@@ -938,28 +961,43 @@ class Synthesizer:
             self._store.reap()
         except Exception:  # cleanup is opportunistic, never fatal
             pass
-        lines = ["## Memory store (id, recalls, age, scope, text)"]
+        lines = ["## Memory store (id, recalls, age, scope, tier, text), grouped by topic"]
         now = time.time()
-        memories = [m for m in self._store.memories() if not m.protected]
-        revisions = {m.id: m.revision for m in memories}
-        memories.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
+        everything = [m for m in self._store.memories() if not m.conflicted]
+        # Grouped by scope and key/topic so a fact sits beside the facts that
+        # could supersede it, and read from a rotating offset so a store too
+        # large for one pass is reviewed in full over successive passes
+        # instead of only its newest entries every time.
+        everything.sort(key=lambda m: (m.scope, (m.key or "~").split(".")[0].casefold(),
+                                       (m.key or "").casefold(), m.text.casefold(), m.id))
+        start = self._store.consolidation_offset() % len(everything) if everything else 0
+        ordered = everything[start:] + everything[:start]
         budget = CONSOLIDATE_MEMORY_CHARS
-        omitted = 0
-        if not memories:
-            lines.append("(empty)")
-        for m in memories:
+        listed: list[tuple[int, Any, str]] = []
+        taken = 0
+        for i, m in enumerate(ordered):
             age_days = (now - (m.updated_at or m.created_at or now)) / 86_400
+            label = "read-only" if m.protected else ("agent-saved" if m.durable else "learned")
             line = (
                 f"[{m.id}] recalls={m.uses} age={age_days:.0f}d "
-                f"scope={m.scope}: {m.text}"
+                f"scope={m.scope} {label}: {m.text}"
             )
             if len(line) + 1 > budget:
-                omitted += 1
-                continue
-            lines.append(line)
+                break  # a contiguous window keeps topic groups together
+            listed.append(((start + i) % len(everything), m, line))
             budget -= len(line) + 1
-        if omitted:
-            lines.append(f"({omitted} older facts not listed this pass)")
+            taken += 1
+        listed.sort(key=lambda row: row[0])
+        memories = [m for _, m, _ in listed if not m.protected]
+        revisions = {m.id: m.revision for m in memories}
+        if not listed:
+            lines.append("(empty)")
+        lines.extend(line for _, _, line in listed)
+        if taken < len(everything):
+            lines.append(
+                f"({len(everything) - taken} facts outside this section are "
+                "reviewed in a later pass)"
+            )
         lines.append("")
         lines.append("## Skill library (name, uses, description)")
         skills = self._store.list()
@@ -1007,6 +1045,8 @@ class Synthesizer:
             stop_reason=self.last_stop_reason,
         )
         self._store.set_last_consolidated_at(time.time())
+        if everything:
+            self._store.set_consolidation_offset((start + taken) % len(everything))
         return changed
 
     def _resolve_scope(self, scope_attr: str | None) -> str | None:
@@ -1092,7 +1132,7 @@ class Synthesizer:
         budget = MEMORY_PROMPT_CHARS
         omitted = 0
         for m in memories:
-            flag = " explicit" if m.protected else ""
+            flag = " explicit" if m.protected else (" agent-saved" if m.durable else "")
             line = f"[{m.id}] recalls={m.uses} scope={m.scope}{flag}: {m.text}"
             if len(line) + 1 > budget:
                 omitted += 1
@@ -1222,7 +1262,7 @@ class Synthesizer:
         return "\n".join(library + [""] + memory + [""] + journal + guidance)
 
     async def _complete(
-        self, prompt: str, system: str = _SYNTH_SYSTEM,
+        self, prompt: str, system: str = _SYNTH_SYSTEM, *, reserve: int | None = None,
     ) -> tuple[str, dict[str, int]]:
         """One plain completion: the text, and the tokens it cost.
 
@@ -1237,7 +1277,11 @@ class Synthesizer:
         model never reached a verdict, so the caller must not treat the
         result as NO_CHANGES.
         """
-        if not self._store._facts.claim_inference_call():
+        # Synthesis leaves CONSOLIDATE_RESERVED_CALLS of the day's budget
+        # for curation; consolidation itself may spend them.
+        if reserve is None:
+            reserve = 0 if system is _CONSOLIDATE_SYSTEM else CONSOLIDATE_RESERVED_CALLS
+        if not self._store._facts.claim_inference_call(reserve=reserve):
             raise InferenceBudgetExhausted(
                 "Daily inference-model budget reached; explicit memory saves remain available"
             )

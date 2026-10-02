@@ -44,7 +44,7 @@ def _remember_ctx(store: SkillStore, synth: Synthesizer | None = None) -> ToolCt
 async def test_remember_commits_a_protected_fact(tmp_path) -> None:
     store = SkillStore(tmp_path)
     out = await remember_mod.handler(
-        {"text": "user prefers rebase over merge", "scope": "project"},
+        {"text": "user prefers rebase over merge", "scope": "project", "user_requested": True},
         _remember_ctx(store),
     )
     assert not out.is_error
@@ -110,7 +110,7 @@ async def test_explicit_remember_bypasses_synthesis(tmp_path) -> None:
         provider=provider, model="m", store=store, project="my-proj"
     )
     out = await remember_mod.handler(
-        {"text": "remember: prefer rebase", "scope": "project"},
+        {"text": "remember: prefer rebase", "scope": "project", "user_requested": True},
         _remember_ctx(store, synth),
     )
     assert not out.is_error
@@ -267,6 +267,59 @@ async def test_consolidation_rewrites_and_deletes_but_never_adds(tmp_path) -> No
     assert "consolidation pass" in provider.systems[0]
     # The pass stamped its clock.
     assert store.last_consolidated_at() > 0
+
+
+class PromptRecordingProvider(ScriptedProvider):
+    def __init__(self, replies: list[str]) -> None:
+        super().__init__(replies)
+        self.prompts: list[str] = []
+
+    async def stream(self, request):
+        self.prompts.append(request.messages[0].content[0].text)
+        async for chunk in super().stream(request):
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_consolidation_retires_agent_fact_superseded_by_user_fact(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    stale = store.save_memory(
+        "Tdarr transcodes on the AMD Ryzen AI MAX+ 395 iGPU.", durable=True, key="unraid.tdarr-setup")
+    current = store.save_memory(
+        "The user's Unraid server is now a Ryzen 9 5900XT; the AI MAX+ 395 machine is gone.",
+        protected=True, key="unraid.current-hardware")
+    provider = PromptRecordingProvider([
+        f'<delete-memory id="{stale.id}"/>\n<delete-memory id="{current.id}"/>\n'
+        f'<memory id="{current.id}">rewritten</memory>'
+    ])
+    changed = await Synthesizer(provider=provider, model="m", store=store).consolidate()
+    prompt = provider.prompts[0]
+    # Both facts are listed next to each other: the agent fact as editable,
+    # the user fact as read-only context.
+    assert f"[{stale.id}]" in prompt and "agent-saved" in prompt
+    assert f"[{current.id}]" in prompt and "read-only" in prompt
+    assert "superseded" in provider.systems[0]
+    assert changed == [f"-memory:{stale.id}"]
+    assert [m.text for m in store.memories()] == [current.text]
+
+
+@pytest.mark.asyncio
+async def test_consolidation_reviews_a_large_store_in_rotating_sections(tmp_path, monkeypatch) -> None:
+    import fluid.codemode.continual as continual
+
+    monkeypatch.setattr(continual, "CONSOLIDATE_MEMORY_CHARS", 400)
+    store = SkillStore(tmp_path)
+    for i in range(12):
+        store.save_memory(f"topic.{i:02d} fact number {i} about something durable", durable=True,
+                          key=f"topic.{i:02d}")
+    provider = PromptRecordingProvider(["NO_CHANGES"] * 6)
+    synth = Synthesizer(provider=provider, model="m", store=store)
+    seen: set[str] = set()
+    for _ in range(6):
+        await synth.consolidate()
+        seen |= {m.id for m in store.memories() if f"[{m.id}]" in provider.prompts[-1]}
+    assert "reviewed in a later pass" in provider.prompts[0]
+    assert seen == {m.id for m in store.memories()}
 
 
 def test_consolidation_due_gating(tmp_path) -> None:

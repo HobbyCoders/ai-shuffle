@@ -18,7 +18,7 @@ def ctx(store, project="project:one", session="source-one"):
 @pytest.mark.asyncio
 async def test_save_receipt_means_immediate_durability_without_learner(tmp_path):
     store = SkillStore(tmp_path)
-    out = await remember.handler({"text": "The user's name is AuditName."}, ctx(store))
+    out = await remember.handler({"text": "The user's name is AuditName.", "user_requested": True}, ctx(store))
     assert not out.is_error and "Saved" in out.text
     assert store.journal_count() == 0
     fresh = SkillStore(tmp_path)
@@ -32,11 +32,11 @@ async def test_save_receipt_means_immediate_durability_without_learner(tmp_path)
 async def test_correct_forget_and_restore_through_tools(tmp_path):
     store = SkillStore(tmp_path)
     c = ctx(store)
-    await remember.handler({"text": "The user's name is Before."}, c)
+    await remember.handler({"text": "The user's name is Before.", "user_requested": True}, c)
     old = store.memories()[0]
-    bad = await remember.handler({"text": "The user's name is After."}, c)
+    bad = await remember.handler({"text": "The user's name is After.", "user_requested": True}, c)
     assert bad.is_error and "revision" in bad.text
-    out = await remember.handler({"text": "The user's name is After.", "memory_id": old.id,
+    out = await remember.handler({"text": "The user's name is After.", "memory_id": old.id, "user_requested": True,
                                    "expected_revision": old.revision}, c)
     assert not out.is_error
     assert len(store.memories()) == 1
@@ -53,6 +53,24 @@ async def test_correct_forget_and_restore_through_tools(tmp_path):
     restored = await remember.handler({"text": "The user's name is After.", "restore": True}, c)
     assert not restored.is_error
     assert store.memories()[0].id != current.id
+
+
+@pytest.mark.asyncio
+async def test_remember_tier_follows_user_requested(tmp_path):
+    store = SkillStore(tmp_path)
+    c = ctx(store)
+    own = await remember.handler({"text": "Vite moves to the next free port when busy."}, c)
+    assert not own.is_error and "agent-saved" in own.text
+    asked = await remember.handler({"text": "The user prefers dark mode.", "user_requested": True}, c)
+    assert not asked.is_error and "kept until the user changes it" in asked.text
+    tiers = {e.text: (e.protected, e.durable) for e in store.memories()}
+    assert tiers == {"Vite moves to the next free port when busy.": (False, True),
+                     "The user prefers dark mode.": (True, False)}
+    out = await recall.handler({"query": "vite"}, c)
+    assert "agent-saved" in out.text and "updated: " in out.text
+    dark = next(e for e in store.memories() if e.protected)
+    refused = await remember.handler({"text": "The user prefers light mode.", "memory_id": dark.id}, c)
+    assert refused.is_error and "user's request" in refused.text
 
 
 @pytest.mark.asyncio
@@ -186,14 +204,132 @@ def test_memory_footer_counts_scope_and_space_drops_separately(tmp_path):
     assert "saved facts omitted for space" in everything
 
 
-def test_full_explicit_quota_does_not_evict_an_earlier_promise(tmp_path, monkeypatch):
+def test_full_explicit_tier_archives_least_used_instead_of_refusing(tmp_path, monkeypatch):
     monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
     store = SkillStore(tmp_path)
     for i in range(2):
         store.save_memory(f"Explicit preference {i}", protected=True)
-    with pytest.raises(ValueError, match="quota"):
-        store.save_memory("Extra explicit preference", protected=True)
-    assert [e.text for e in store.memories()] == ["Explicit preference 0", "Explicit preference 1"]
+    store.note_memories_recalled(["m1"])  # m1 earns its place; m2 is least used
+    saved = store.save_memory("Extra explicit preference", protected=True)
+    assert saved.protected
+    assert {e.text for e in store.memories()} == {"Explicit preference 0", "Extra explicit preference"}
+    archived = store.archived_memories()
+    assert [(e.text, e.protected) for e in archived] == [("Explicit preference 1", True)]
+    # Still searchable, and an explicit fact in the archive never expires.
+    assert [e.text for e, was_archived in store.search_memories("preference 1") if was_archived] == ["Explicit preference 1"]
+
+
+def test_saving_never_refuses_for_room_in_any_tier(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 3)
+    monkeypatch.setattr(facts, "MAX_DURABLE", 3)
+    store = SkillStore(tmp_path)
+    for i in range(10):
+        store.save_memory(f"User fact {i}", protected=True)
+        store.save_memory(f"Agent fact {i}", durable=True)
+        store.save_memory(f"Learned fact {i}")
+    live = store.memories()
+    assert sum(e.protected for e in live) == 3
+    assert sum(e.durable for e in live) == 3
+    # The fact saved last is never the one archived to make room for itself.
+    assert {"User fact 9", "Agent fact 9", "Learned fact 9"} <= {e.text for e in live}
+    assert sum(e.protected for e in store.archived_memories()) == 7
+
+
+def test_durable_tier_lifetime_renews_on_recall_and_resave(tmp_path, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(facts.time, "time", lambda: clock[0])
+    store = SkillStore(tmp_path)
+    saved = store.save_memory("Pytest lives at /usr/local/bin/pytest", durable=True)
+    assert saved.durable and not saved.protected
+    assert saved.expires_at == clock[0] + facts.DURABLE_TTL
+    clock[0] += facts.DURABLE_TTL - 86400
+    store.search_memories("pytest")  # a recall renews it
+    clock[0] += facts.DURABLE_TTL - 86400
+    again = store.save_memory("Pytest lives at /usr/local/bin/pytest", durable=True)
+    assert again.revision == saved.revision  # renewal is not an edit
+    assert again.expires_at == clock[0] + facts.DURABLE_TTL
+    clock[0] += facts.DURABLE_TTL + 1  # nothing touched it for a whole TTL
+    assert store.memories() == [] and store.archived_memories() == []
+
+
+def test_branch_specific_facts_get_a_short_lifetime(tmp_path, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(facts.time, "time", lambda: clock[0])
+    store = SkillStore(tmp_path)
+    receipt = store.save_memory("fix/swarm-docs-drift-links has its own .venv with pytest.", durable=True)
+    named = store.save_memory("The fix-allow-provider-task-models Linux worktree has its own .venv.", durable=True)
+    general = store.save_memory("In a fresh frontend checkout, run npx svelte-kit sync before npm test.",
+                                durable=True)
+    path = store.save_memory("Docs live in docs/content and tests/test_docs.py checks them.", durable=True)
+    assert receipt.expires_at == named.expires_at == clock[0] + facts.VOLATILE_TTL
+    assert general.expires_at == path.expires_at == clock[0] + facts.DURABLE_TTL
+    # An explicit fact never expires, whatever it mentions.
+    assert store.save_memory("User wants fix/x merged first.", protected=True).expires_at == 0
+
+
+def test_agent_save_cannot_downgrade_or_rewrite_a_user_requested_fact(tmp_path):
+    store = SkillStore(tmp_path)
+    user = store.save_memory("The user's name is Kept.", protected=True)
+    same = store.save_memory("The user's name is Kept.", durable=True)
+    assert same.id == user.id and same.protected
+    with pytest.raises(ValueError, match="user's request"):
+        store.save_memory("The user's name is Changed.", durable=True)
+    # The learner never downgrades an agent save either.
+    agent = store.save_memory("Builds use make", durable=True, key="build.tool")
+    rewritten = store.save_memory("Builds use make release", key="build.tool")
+    assert rewritten.id == agent.id and rewritten.durable
+    # An agent fact the user then asks to keep becomes explicit.
+    upgraded = store.save_memory("Builds use make release", protected=True, key="build.tool")
+    assert upgraded.protected and not upgraded.durable
+
+
+def test_legacy_explicit_facts_split_into_user_and_agent_tiers(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("placeholder", protected=True)
+    path = tmp_path / "memories.json"
+    doc = json.loads(path.read_text())
+    base = doc["entries"][0]
+    legacy = [
+        ("m1", "The user prefers tabs over spaces.", None),
+        ("m2", "User wants the Git panel inline.", None),
+        ("m3", "Ships to Play through the internal track.", "career.goal"),
+        ("m4", "Tdarr on Unraid uses an AMD Ryzen AI MAX+ 395 for transcodes.", "unraid.tdarr-setup"),
+        ("m5", "pytest is installed at /usr/local/bin/pytest.", None),
+    ]
+    doc["entries"] = []
+    for mid, text, key in legacy:
+        entry = {k: v for k, v in base.items() if k not in ("saved_by", "durable")}
+        entry.update(id=mid, text=text, key=key, clock={base["origin"]: 1}, revision=1)
+        doc["entries"].append(entry)
+    path.write_text(json.dumps(doc))
+    tiers = {e.id: (e.protected, e.durable) for e in SkillStore(tmp_path).memories()}
+    assert tiers == {"m1": (True, False), "m2": (True, False), "m3": (True, False),
+                     "m4": (False, True), "m5": (False, True)}
+    migrated = json.loads(path.read_text())["entries"]
+    # Classification is local and deterministic; it never bumps the clock,
+    # so it cannot replicate as an edit that overrides another worker.
+    assert all(e["clock"] == {base["origin"]: 1} and e["revision"] == 1 for e in migrated)
+    assert all(e["expires_at"] > 0 for e in migrated if e.get("durable"))
+
+
+def test_replica_with_more_explicit_facts_than_the_cap_merges(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
+    a, b = SkillStore(tmp_path / "a", owner="o"), SkillStore(tmp_path / "b", owner="o")
+    for i in range(4):
+        a.save_memory(f"User asked fact {i}", protected=True)
+    b._facts.merge(a._facts.export())  # previously raised the quota error
+    assert sum(e.protected for e in b.memories()) == 2
+    assert len(b.archived_memories()) == 2
+
+
+def test_learner_budget_leaves_room_for_consolidation(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_INFERENCE_CALLS_PER_DAY", 3)
+    store = SkillStore(tmp_path)
+    assert store._facts.claim_inference_call(reserve=2)
+    assert not store._facts.claim_inference_call(reserve=2)
+    assert store._facts.claim_inference_call()
+    assert store._facts.claim_inference_call()
+    assert not store._facts.claim_inference_call()
 
 
 def test_unknown_rewrite_cannot_insert(tmp_path):
@@ -321,7 +457,7 @@ async def test_curator_cannot_delete_protected_or_insert_unknown(tmp_path):
         async def stream(self, request):
             yield StreamChunk(kind="text_delta", payload={"text": '<delete-memory id="m1"/><memory id="m999">New</memory>'})
     store = SkillStore(tmp_path)
-    await remember.handler({"text": "The user's name is StillHere."}, ctx(store))
+    await remember.handler({"text": "The user's name is StillHere.", "user_requested": True}, ctx(store))
     await Synthesizer(Provider(), "test", store).consolidate()
     assert len(store.memories()) == 1
     assert "StillHere" in store.memories()[0].text

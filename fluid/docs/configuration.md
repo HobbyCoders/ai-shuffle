@@ -269,11 +269,34 @@ There is no `[memory]` table and no model-curated memory file. Declarative
 memory belongs to the continual learner (`continual = true`): its synthesizer
 distills remembered facts from session journals into
 `<skills_dir>/memories.json` alongside the skills, and each session's prompt
-carries a frozen `# Memory` snapshot of that list. The store is bounded
-(oldest entries archive past the cap), synthesizer-curated, and screened for
-prompt-injection patterns and credentials — the model never files or prunes
-entries itself. Episodic recall is the session store: `SessionSearch` lists
-and searches past sessions, `SessionView` opens one.
+carries a frozen `# Memory` snapshot of that list. Every entry is screened for
+prompt-injection patterns and credentials. Episodic recall is the session
+store: `SessionSearch` lists and searches past sessions, `SessionView` opens
+one.
+
+The store holds three tiers, each with its own live cap. A save is never
+refused for lack of room: when a tier is full, its least useful entry moves to
+the searchable archive. Usefulness is the entry's last activity (an update or
+a `Recall` hit) plus seven days of credit for each recall, up to ten.
+
+| Tier | Written by | Lifetime | Live cap |
+|---|---|---|---|
+| user | `Remember` with `user_requested: true` (the user asked, or corrected a fact) | Permanent. Only the user can change it. Consolidation can't retire it. | 256 (archive keeps up to 256 more) |
+| agent | `Remember` without `user_requested` | 120 days from the last recall or re-save. Consolidation can merge or retire it. | 120 |
+| learned | Synthesizer, from session journals | 90 days from the last recall | 40 |
+
+A non-user fact that names a branch or worktree, such as `fix/foo` or
+`.fluid/worktrees/foo`, lives 14 days. The non-user archive keeps up to 200
+entries and trims learned facts first. Consolidation runs every two days. Each
+pass reviews one section of the store, and the next pass starts where it left
+off. Synthesis can't spend the last two daily inference calls, so
+consolidation keeps a share of the budget.
+
+Stores written before the tiers existed are migrated in place. An old
+protected entry stays a user fact if its key or text shows that it records the
+user (for example `profile.*` or `The user prefers…`). Any other old protected
+entry becomes an agent fact. It gets at least 30 days of grace, or 7 days if it
+names a branch or worktree.
 
 ### `[[hooks]]`
 

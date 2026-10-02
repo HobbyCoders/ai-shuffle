@@ -284,8 +284,10 @@ def test_tool_provenance_facts_render_with_a_confirm_hint(tmp_path) -> None:
 
 def test_remember_description_says_when() -> None:
     text = remember_mod.describe()
-    assert "durable facts you establish yourself" in text
-    assert "Task progress goes in Note" in text
+    assert "non-obvious fact you established" in text
+    assert "user_requested to true only when the user asked" in text
+    assert "retire when nothing recalls them" in text
+    assert "belong in Note" in text
     assert "pytest" in text
 
 

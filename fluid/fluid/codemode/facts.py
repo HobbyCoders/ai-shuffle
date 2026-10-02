@@ -17,7 +17,39 @@ from pathlib import Path
 
 from fluid.codemode.transactions import file_transaction
 
+# Three tiers, none of which can refuse a save for lack of room:
+#
+# * explicit (``protected``): the user asked for it or corrected a fact. No
+#   TTL and never touched by the learner; past MAX_EXPLICIT live entries the
+#   least useful moves to the searchable archive rather than refusing a save.
+# * durable (``durable``): an agent decided a fact was worth keeping
+#   (Remember without ``user_requested``). Longer TTL than inferred, renewed
+#   when recalled or re-saved, curated by consolidation, and archived past
+#   MAX_DURABLE. The store filled its 256-slot explicit quota in three weeks
+#   when every agent save was explicit, then refused every new save.
+# * inferred: learner output and tool harvests, as before.
 MAX_EXPLICIT = 256
+MAX_DURABLE = 120
+# Archived explicit facts are kept apart from the shared archive so an
+# inference flood can never trim a fact the user asked for.
+MAX_ARCHIVED_EXPLICIT = 256
+DURABLE_TTL = 120 * 86400
+# Recalls count as this much recent activity each (capped), so a fact that
+# keeps being looked up outranks one that was merely written recently.
+USE_CREDIT = 7 * 86400
+MAX_USE_CREDIT = 10
+# A legacy fact demoted from explicit never expires sooner than this.
+MIGRATION_GRACE = 30 * 86400
+# A non-explicit fact about one branch or named worktree ("fix/x has its own
+# .venv") stops being true when the branch merges. A fifth of one store's
+# explicit quota was such receipts. They live this long unless recalled.
+VOLATILE_TTL = 14 * 86400
+VOLATILE_GRACE = 7 * 86400
+_BRANCH_REF = re.compile(
+    r"(?<![\w/.-])(?:feat|fix|chore|refactor|perf|hotfix|release)/[a-z0-9][a-z0-9-]*(?![\w/.])"
+    r"|\b(?:worktree|checkout)\s+[a-z0-9]+(?:-[a-z0-9]+)+\b"
+    r"|\b[a-z0-9]+(?:-[a-z0-9]+)+\s+(?:(?:Linux|Windows)\s+)?(?:worktree|checkout)\b"
+    r"|\.fluid/worktrees/[\w.-]+")
 MAX_TOMBSTONES = 256
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -46,6 +78,51 @@ def canonical_key(text):
     if re.match(r"^(?:the )?user(?:'s|’s) (?:preferred )?name is\b", text, re.I):
         return "profile.name"
     return None
+
+
+def usefulness(entry):
+    """Eviction and display rank: last activity plus credit for recalls."""
+    activity = max(float(entry.get("updated_at") or 0), float(entry.get("last_recalled_at") or 0))
+    return activity + min(int(entry.get("uses") or 0), MAX_USE_CREDIT) * USE_CREDIT
+
+
+def tier(entry):
+    if entry.get("protected"):
+        return "explicit"
+    return "durable" if entry.get("durable") else "inferred"
+
+
+def volatile(text):
+    """Whether a fact names one branch or worktree and so goes stale fast."""
+    return bool(_BRANCH_REF.search(text or ""))
+
+
+def lifetime(entry):
+    """Seconds a non-explicit fact lives past its last save or recall."""
+    if volatile(entry.get("text")):
+        return VOLATILE_TTL
+    return DURABLE_TTL if entry.get("durable") else INFERRED_TTL
+
+
+# Legacy classification. Before tiers existed every Remember call was
+# explicit, so an old explicit fact is kept explicit only when it reads as
+# the user's own statement, preference or decision; the rest were facts an
+# agent chose to save and become durable. Deterministic, so every worker
+# classifies a replicated fact the same way without a clock bump.
+_USER_KEY = re.compile(r"^(?:profile|preferences?|career|business|user|owner)[.:_-]", re.IGNORECASE)
+_USER_SUBJECT = re.compile(r"^(?:the\s+)?(?:user|owner)(?:['’]s)?\b", re.IGNORECASE)
+_USER_INTENT = re.compile(
+    r"\b(?:user|owner)\s+(?:has\s+|had\s+)?(?:explicitly\s+|now\s+|later\s+)?"
+    r"(?:wants?|wanted|requires?|required|expects?|chose|approved|prefers?|preferred|"
+    r"corrected|confirmed|deferred|asked|requested|decided|clarified|reports?|reported|"
+    r"owns|said|says|means|likes?|dislikes?|insists?|instructed)\b", re.IGNORECASE)
+
+
+def legacy_saved_by(entry):
+    if entry.get("provenance") == "user" or _USER_KEY.match(entry.get("key") or ""):
+        return "user"
+    text = entry.get("text") or ""
+    return "user" if _USER_SUBJECT.match(text) or _USER_INTENT.search(text) else "agent"
 
 
 def validate_text(text):
@@ -141,7 +218,34 @@ class FactStore:
             legacy.unlink()
         return doc
 
-    def _maintain(self, doc):
+    @staticmethod
+    def _classify(e, now):
+        """Normalize tier fields; demote legacy agent saves to durable.
+
+        The clock is deliberately left alone: every worker reaches the same
+        result for the same record, and an equal clock keeps each side's
+        local copy, so classification never replicates as an edit.
+        """
+        if e.get("protected"):
+            e.pop("durable", None)
+            if e.get("saved_by") == "user":
+                return
+            if legacy_saved_by(e) == "user":
+                e["saved_by"] = "user"
+                return
+            activity = max(float(e.get("updated_at") or 0), float(e.get("last_recalled_at") or 0))
+            e.update(protected=False, durable=True, saved_by="agent")
+            grace = VOLATILE_GRACE if volatile(e.get("text")) else MIGRATION_GRACE
+            e["expires_at"] = max(activity + lifetime(e), now + grace)
+        elif "durable" in e and not isinstance(e["durable"], bool):
+            e["durable"] = bool(e["durable"])
+
+    def _maintain(self, doc, keep=None):
+        """Expire, classify and bound the store. Never refuses for room.
+
+        ``keep`` is a fact saved in this transaction: it is never the one
+        archived to make room for itself.
+        """
         from fluid.codemode.skills import MAX_MEMORIES, MAX_ARCHIVED_MEMORIES
         before = json.dumps(doc, sort_keys=True)
         now = time.time()
@@ -149,18 +253,30 @@ class FactStore:
             doc[bucket] = [e for e in doc[bucket] if isinstance(e, dict) and e.get("id") and e.get("text")]
             for e in doc[bucket]:
                 e["history"] = [h for h in e.get("history", []) if h.get("at", 0) > now - HISTORY_TTL][-MAX_HISTORY:]
+                self._classify(e, now)
             # Expiry does not become a forget tombstone. It travels with the
             # fact so replaying an old snapshot cannot renew its lifetime.
             expired = [e for e in doc[bucket] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
             doc[bucket] = [e for e in doc[bucket] if e not in expired]
-        inferred = [e for e in doc["entries"] if not e.get("protected")]
-        ranked = sorted(inferred, key=lambda e: (e.get("uses", 0), e.get("updated_at", 0)))
+        live = doc["entries"]
+        inferred = [e for e in live if tier(e) == "inferred"]
+        ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
         overflow = ranked[:max(0, len(inferred) - MAX_MEMORIES)]
-        doc["entries"] = [e for e in doc["entries"] if e not in overflow]
-        doc["archived"].extend(overflow)
-        doc["archived"] = sorted(doc["archived"], key=lambda e: e.get("updated_at", 0))[-MAX_ARCHIVED_MEMORIES:]
-        if sum(bool(e.get("protected")) for e in doc["entries"]) > MAX_EXPLICIT:
-            raise ValueError("Explicit memory quota reached; no previous fact was evicted")
+        for name, cap in (("durable", MAX_DURABLE), ("explicit", MAX_EXPLICIT)):
+            group = [e for e in live if tier(e) == name]
+            ranked = sorted(group, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
+            overflow += ranked[:max(0, len(group) - cap)]
+        gone = {id(e) for e in overflow}
+        doc["entries"] = [e for e in live if id(e) not in gone]
+        archived = doc["archived"] + overflow
+        # An archived explicit fact leaves only by an explicit Forget or by
+        # MAX_ARCHIVED_EXPLICIT newer ones; the shared archive gives up
+        # inferred facts before durable ones, least useful first.
+        explicit = sorted((e for e in archived if e.get("protected")), key=lambda e: (usefulness(e), str(e.get("id"))))
+        rest = sorted((e for e in archived if not e.get("protected")),
+                      key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
+        doc["archived"] = (rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):]
+                           + explicit[max(0, len(explicit) - MAX_ARCHIVED_EXPLICIT):])
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
@@ -172,13 +288,14 @@ class FactStore:
             after = self._prepare()
             return max(0, before - len(after["entries"]) - len(after["archived"]))
 
-    def claim_inference_call(self):
+    def claim_inference_call(self, reserve=0):
+        """Claim one of the day's inference calls, leaving ``reserve`` unclaimed."""
         with file_transaction(self.lock):
             doc = self._prepare()
             day = int(time.time() // 86400)
             budget = doc.get("inference_budget", {})
             calls = budget.get("calls", 0) if budget.get("day") == day else 0
-            if calls >= MAX_INFERENCE_CALLS_PER_DAY:
+            if calls >= MAX_INFERENCE_CALLS_PER_DAY - max(0, reserve):
                 return False
             doc["inference_budget"] = {"day": day, "calls": calls + 1}
             self._write(doc)
@@ -192,7 +309,13 @@ class FactStore:
         return [self._entry(e) for e in self.snapshot()["archived" if archived else "entries"]]
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
-             key=None, expected_revision=None, source_session=None, restore=False):
+             durable=None, key=None, expected_revision=None, source_session=None, restore=False):
+        """Save one fact in a tier.
+
+        ``protected`` is the explicit tier (the user asked). ``durable=True``
+        is an agent's own save. Neither (the learner, harvests) keeps a
+        rewritten fact's existing tier and never downgrades one.
+        """
         text = validate_text(text)
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,96}", key)):
             raise ValueError("Invalid memory key")
@@ -216,18 +339,39 @@ class FactStore:
             if old is None:
                 old = next((e for e in all_entries if e.get("scope", "global") == (scope or "global") and
                             ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
+            now = time.time()
+            archived_old = bool(old) and any(e is old for e in doc["archived"])
             if old and old.get("protected") and not protected:
+                if durable and not old.get("conflicted") and old["text"] == text:
+                    return self._entry(old)  # already saved at the user's request
+                if durable:
+                    raise ValueError("This fact was saved at the user's request; an agent cannot "
+                                     "rewrite it unless the user asked for the change")
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
             # A revision guards a rewrite. With nothing to rewrite (a new fact,
             # no memory ID) it has nothing to compare against: models fill the
             # optional field in anyway, and refusing made every such save fail.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
-            if old and not old.get("conflicted") and old["text"] == text and old.get("protected", False) == protected:
+            # The learner and harvests never downgrade an agent's durable fact.
+            is_durable = not protected and bool(durable or (old and old.get("durable")))
+            if (old and not old.get("conflicted") and old["text"] == text
+                    and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
+                if not (protected or durable):
+                    return self._entry(old)
+                # Saving the same fact again is a use: renew a durable fact's
+                # lifetime and bring an archived one back. No new revision.
+                if durable:
+                    old["expires_at"] = max(old.get("expires_at", 0), now + lifetime(old))
+                old["last_recalled_at"] = now
+                if archived_old:
+                    doc["archived"] = [e for e in doc["archived"] if e is not old]
+                    doc["entries"].append(old)
+                self._maintain(doc, keep=old["id"])
+                self._write(doc)
                 return self._entry(old)
             if old and old.get("protected") and expected_revision is None:
                 raise ValueError("Recall the existing fact and supply its revision before correcting it")
-            now = time.time()
             entry = dict(old) if old else {
                 "id": f"m{doc['next_id']}", "origin": doc["store_id"],
                 "created_at": now, "revision": 0, "uses": 0,
@@ -257,15 +401,26 @@ class FactStore:
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
-                         expires_at=0 if protected else entry.get("expires_at", now + INFERRED_TTL))
+                         expires_at=0 if protected else (now + DURABLE_TTL if is_durable
+                                                         else entry.get("expires_at", now + INFERRED_TTL)))
             if not protected and not entry["expires_at"]:
                 entry["expires_at"] = now + INFERRED_TTL
+            if is_durable:
+                entry.update(durable=True, saved_by="agent")
+            if not protected:
+                entry["expires_at"] = min(entry["expires_at"], now + lifetime(entry))
+            if not is_durable:
+                entry.pop("durable", None)
+                if protected:
+                    entry["saved_by"] = "user"
+                else:
+                    entry.pop("saved_by", None)
             present = any(e["id"] == entry["id"] for e in doc["entries"])
             doc["entries"] = [entry if e["id"] == entry["id"] else e for e in doc["entries"]]
             if not present:
                 doc["entries"].append(entry)
             doc["archived"] = [e for e in doc["archived"] if e["id"] != entry["id"]]
-            self._maintain(doc)
+            self._maintain(doc, keep=entry["id"])
             self._write(doc)
             return self._entry(entry)
 
@@ -314,10 +469,14 @@ class FactStore:
             return
         with file_transaction(self.lock):
             doc = self._prepare()
+            now = time.time()
             for e in doc["entries"]:
                 if e["id"] in ids:
                     e["uses"] = min(1_000_000, e.get("uses", 0) + 1)
-                    e["last_recalled_at"] = time.time()
+                    e["last_recalled_at"] = now
+                    # A fact that is still being looked up is not stale.
+                    if not e.get("protected"):
+                        e["expires_at"] = max(e.get("expires_at", 0), now + lifetime(e))
             self._write(doc)
 
     def export(self):

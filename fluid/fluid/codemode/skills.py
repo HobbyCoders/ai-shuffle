@@ -20,11 +20,12 @@ Alongside the skills the store keeps:
   (stated preferences, environment conventions, corrections) rendered into
   every session's prompt as a frozen snapshot (``render_memory_section``).
   Written through :class:`fluid.codemode.facts.FactStore` by the synthesizer,
-  by the ``Remember`` builtin (``save_memory`` directly, protected) and by
-  runtime-fact provisioning. The store caps the count, moving the least
-  recalled into the file's ``archived`` list instead of growing without
-  bound; the ``Recall`` builtin searches live and archived entries and feeds
-  the usage counters that drive that eviction.
+  by the ``Remember`` builtin (``save_memory`` directly: explicit when the
+  user asked, durable when the agent chose to) and by runtime-fact
+  provisioning. Each tier has a live cap; the least useful entries move into
+  the file's ``archived`` list instead of growing without bound or refusing
+  a save. The ``Recall`` builtin searches live and archived entries and
+  feeds the usage counters that drive that eviction.
 - ``journal_loss.json`` — fixed-shape counts and times of journal entries
   that were not recorded or were dropped unsynthesized (quota, busy lock,
   backlog overflow), so coverage loss outlives the process that saw it.
@@ -605,7 +606,11 @@ class MemoryEntry:
     # file and web content the agent read is not a source the next session
     # should be told to trust.
     provenance: str = "session"
+    # ``protected``: saved at the user's request (no TTL, learner read-only).
+    # ``durable``: an agent's own Remember save — longer-lived than learned
+    # facts and renewed on recall, but evictable. See fluid.codemode.facts.
     protected: bool = False
+    durable: bool = False
     revision: int = 1
     key: str | None = None
     expires_at: float = 0.0
@@ -1401,7 +1406,7 @@ class SkillStore:
             return EMPTY_MEMORY_SECTION
         from fluid.context.screening import screen_findings
 
-        from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS
+        from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS, usefulness
 
         out_of_scope = 0
         over_budget = 0
@@ -1409,7 +1414,11 @@ class SkillStore:
         other_checkout = 0
         checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
         normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
-        entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -e.updated_at))
+        # Within a tier, most useful first (recent activity plus recalls), not
+        # merely newest: a recency sort showed whatever was saved last and
+        # pushed facts sessions actually look up out of the snapshot.
+        rank = {e.id: usefulness(vars(e)) for e in entries}
+        entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -rank[e.id]))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
@@ -1454,14 +1463,14 @@ class SkillStore:
                 )
                 line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
                 candidates.append((entry, line, True))
-        # Protected (Remember) facts rank first, and they alone can fill the
-        # budget: on the desktop store 92 protected facts (about 28 KB) hid
-        # every learner fact and every env.* harvest. Unprotected facts
-        # therefore get the first claim on a bounded slice of the budget,
-        # user-sourced and env.* facts before the rest, newest first. What
-        # the slice leaves unused goes back to the protected tier, and the
-        # slice is small enough that an inference flood cannot push
-        # protected facts out.
+        # Explicit (user-requested) facts rank first, and they alone can fill
+        # the budget: on the desktop store 92 protected facts (about 28 KB)
+        # hid every learner fact and every env.* harvest. Agent-saved and
+        # learned facts therefore get the first claim on a bounded slice of
+        # the budget, user-sourced and env.* facts before the rest, most
+        # useful first. What the slice leaves unused goes back to the
+        # explicit tier, and the slice is small enough that an inference
+        # flood cannot push explicit facts out.
         reserve = min(RESERVED_INFERRED_CHARS, MAX_PROMPT_CHARS)
         reserved: set[int] = set()
         for i in sorted(
@@ -1469,7 +1478,7 @@ class SkillStore:
             key=lambda i: (
                 not (candidates[i][0].provenance == "user"
                      or (candidates[i][0].key or "").startswith("env.")),
-                -candidates[i][0].updated_at,
+                -rank[candidates[i][0].id],
             ),
         ):
             cost = len(candidates[i][1]) + 1
@@ -1532,6 +1541,18 @@ class SkillStore:
     def set_last_consolidated_at(self, ts: float) -> None:
         meta = self._load_meta()
         meta["last_consolidated_at"] = float(ts)
+        self._save_meta(meta)
+
+    def consolidation_offset(self) -> int:
+        """Where the next consolidation pass starts reading the grouped store."""
+        try:
+            return max(0, int(self._load_meta().get("consolidation_offset", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_consolidation_offset(self, offset: int) -> None:
+        meta = self._load_meta()
+        meta["consolidation_offset"] = max(0, int(offset))
         self._save_meta(meta)
 
     # ─── lifecycle curation ──────────────────────────────────────────────

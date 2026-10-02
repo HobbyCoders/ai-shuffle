@@ -109,10 +109,18 @@ async def test_remember_commits_the_fact_before_returning(monkeypatch, tmp_path)
     assert "Saved" in result["content"][0]["text"]
     from fluid.codemode.skills import SkillStore
     (entry,) = SkillStore(tmp_path / "skills").memories()
-    assert entry.protected
+    # An agent-initiated save is durable but evictable; only a
+    # user_requested save is permanent.
+    assert entry.durable and not entry.protected
     assert entry.scope != "global"
     assert "blue box" in entry.text
     assert not (tmp_path / "skills" / "journal.jsonl").exists()
+
+    await tools["Remember"].handler(
+        {"text": "the user wants deploys on Fridays", "user_requested": True}
+    )
+    pinned = [e for e in SkillStore(tmp_path / "skills").memories() if "Fridays" in e.text]
+    assert pinned and pinned[0].protected
 
 
 @pytest.mark.asyncio

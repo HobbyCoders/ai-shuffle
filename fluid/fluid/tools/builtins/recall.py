@@ -16,6 +16,7 @@ engine drops the tool from the schema surface entirely.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -113,6 +114,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 tags.append(f"key: {entry.key}")
             if entry.protected:
                 tags.append("explicit save")
+            elif entry.durable:
+                tags.append("agent-saved")
+            if entry.updated_at:
+                # A date lets the caller notice a fact a newer one superseded.
+                tags.append("updated: " + time.strftime("%Y-%m-%d", time.gmtime(entry.updated_at)))
             if entry.provenance == "tool":
                 tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
             if archived:
