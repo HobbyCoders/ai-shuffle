@@ -168,3 +168,57 @@ async def test_peer_settle_without_a_stream_view_is_still_refused_during_the_hol
                                          "owner_watermarks": {"1": 10 ** 6}}, b.device_id)
         assert engine.outbox_held() is True
         assert bool(database.get_session("old-peer")["is_active"]) is True
+
+
+async def test_inbound_view_waits_for_peers_we_have_not_compared_with(workers, monkeypatch):
+    """A restored worker with several peers: one that dials in holding none of
+    our stream past our log must not open the hold before our own pass has
+    compared with the peers we can reach. Here C holds more of B's stream
+    than B's restored log; A shows nothing past it (offline since before the
+    backup, say)."""
+    a, b, c = _network(workers, "a", "b", "c")
+    set_owner_pref(b, "before-backup", 1)
+    converge([a, b, c])
+    net = Network(monkeypatch, b=b, c=c)
+    with b.active():
+        b.sql("DELETE FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))  # restored from backup
+        store.touch_member(a.device_id, endpoints=["http://nowhere.local:9"])
+        store.touch_member(c.device_id, endpoints=[net.url("c")])
+        transport._links.clear()
+        engine.hold_outbox(True)  # B restarted; its first pass has not reached C yet
+
+        assert transport.release_hold_for_peer_view(a.device_id, {}) is False
+        assert engine.outbox_held() is True
+        set_owner_pref(b, "after-restore", 2)
+        assert _pref_ops(b, "after-restore") == []
+
+        # B's own pass reaches C, which proves the rollback.
+        async with httpx.AsyncClient() as client:
+            await transport.sync_pass(client)
+        assert engine.context().identity.incarnation == 2
+        assert engine.outbox_held() is False
+        engine.scan_all()
+        [op] = _pref_ops(b, "after-restore")
+        assert op["origin_incarnation"] == 2
+
+
+def test_inbound_view_opens_the_hold_once_other_peers_were_tried(workers, monkeypatch):
+    """Peers our pass tried and could not reach do not keep the hold: the
+    one-way reachability case with more than one peer."""
+    a, b, c = _network(workers, "a", "b", "c")
+    Network(monkeypatch, b=b)  # nobody but B answers
+    with b.active():
+        store.touch_member(a.device_id, endpoints=["http://a.local:8000"])
+        store.touch_member(c.device_id, endpoints=["http://c.local:8000"])
+        transport._links.clear()
+        engine.hold_outbox(True)
+        assert transport.release_hold_for_peer_view(a.device_id, {}) is False
+
+        async def unreachable_pass():
+            async with httpx.AsyncClient() as client:
+                assert await transport.sync_pass(client) == {}
+        asyncio.run(unreachable_pass())
+        assert engine.outbox_held() is True
+
+        assert transport.release_hold_for_peer_view(a.device_id, {}) is True
+        assert engine.outbox_held() is False

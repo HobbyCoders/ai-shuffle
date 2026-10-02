@@ -72,6 +72,10 @@ _owner_collections: set[str] = set()
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _last_contact: Dict[str, float] = {}
+# Peers our own sync pass has tried (reached or not) since the startup outbox
+# hold began. A peer's inbound view opens the hold only once every other peer
+# we can dial is in here (``release_hold_for_peer_view``).
+_tried_since_hold: set[str] = set()
 # Our own advertised addresses as of the last sync pass; a change (the
 # account tunnel appearing or going away) is announced to peers at once
 # instead of at the next presence interval.
@@ -553,12 +557,33 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             link.failures += 1
             link.backoff_until = time.monotonic() + 10.0
             logger.warning("Sync with %s failed", link.device_id, exc_info=True)
+        _tried_since_hold.add(link.device_id)
     if engine.outbox_held() and (results or not any(link.endpoints for link in _links.values())):
         # Our stream was compared with at least one peer (or there is no
         # peer to compare with): local writes may be published now.
         engine.hold_outbox(False)
         request_scan()
     return results
+
+
+def _untried_peer(ctx: engine.NetworkContext, peer_device_id: str) -> bool:
+    """Another active member we can dial that our pass has not tried yet.
+
+    Read from the database, not ``_links``: before our first pass the links
+    do not exist yet. Such a peer may hold the rollback proof one peer's
+    view cannot rule out, and our pass reaches it shortly.
+    """
+    presence = engine.all_presence()
+    for row in store.list_members(include_revoked=False):
+        device_id = row["device_id"]
+        if device_id in (ctx.device_id, peer_device_id) or device_id in _tried_since_hold:
+            continue
+        member = ctx.member(device_id)
+        if member is None or member.status != membership.STATUS_ACTIVE:
+            continue
+        if dial_endpoints(peer_endpoints(row, presence.get(device_id))):
+            return True
+    return False
 
 
 def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
@@ -571,9 +596,10 @@ def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
     (#1621). A peer that holds nothing of our current or a newer incarnation
     past our own log is evidence that we were not restored from a backup
     behind it. A claim past our log keeps the hold: only an exchange we start
-    can fetch the signed op that proves a rollback. While we are comparing
-    streams with another peer, that comparison decides. Runs in a worker
-    thread. Returns True when this call opened the outbox.
+    can fetch the signed op that proves a rollback. Until our own pass has
+    tried every other peer we can dial, or while it is comparing streams
+    with one, that comparison decides. Runs in a worker thread. Returns True
+    when this call opened the outbox.
     """
     if not engine.outbox_held() or not isinstance(view, dict):
         return False
@@ -581,6 +607,8 @@ def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
         return False
     ctx = engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return False
+    if _untried_peer(ctx, peer_device_id):
         return False
     current = ctx.identity.incarnation
     claims: Dict[int, int] = {}
@@ -854,6 +882,7 @@ def start() -> List[asyncio.Task]:
     # worker restored from a backup must move to a new incarnation before it
     # reuses sequence numbers peers already hold under other content.
     engine.hold_outbox(True)
+    _tried_since_hold.clear()
     _tasks[:] = [
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
@@ -882,6 +911,7 @@ def forget_peers() -> None:
     """Drop every peer link and contact record (the worker left its network)."""
     _links.clear()
     _last_contact.clear()
+    _tried_since_hold.clear()
 
 
 def reset_for_tests() -> None:
