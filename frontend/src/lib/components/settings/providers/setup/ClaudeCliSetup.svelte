@@ -65,7 +65,7 @@
 {#if !cli.status}
 	<p class="pv-msg" role="status">{cli.loadError || 'Asking the Claude Code CLI'}</p>
 {:else if signedIn}
-	<div class="pv-card">
+	<div class="st-card pv-card">
 		<div class="pv-flow">
 			<span class="status" role="status"
 				><StatusDot tone="ok" />CLI signed in{cli.status.email ? ` as ${cli.status.email}` : ''}</span

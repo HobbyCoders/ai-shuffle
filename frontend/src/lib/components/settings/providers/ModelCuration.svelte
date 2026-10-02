@@ -161,7 +161,7 @@
 			<TextField bind:value={filter} type="search" placeholder="Filter models" label="Filter models" width={260} />
 		</div>
 	{/if}
-	<div class="pv-card">
+	<div class="st-card pv-card">
 		{#if loading && rows.length === 0}
 			<p class="pv-empty">Loading models</p>
 		{:else if rows.length === 0}

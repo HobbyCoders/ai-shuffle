@@ -9,13 +9,15 @@ import type { ClaudeAuthMode } from '$lib/api/claude-auth';
 import ClaudePolicy from './ClaudePolicy.svelte';
 import { LoopGuard } from '../loop-guard.svelte';
 import { fakeWorker, loopGuardStatus } from '../fake-worker';
+import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 
 let worker: ReturnType<typeof fakeWorker>;
 
-async function show(mode: ClaudeAuthMode = 'subscription') {
+async function show(mode: ClaudeAuthMode = 'subscription', readOnly = false) {
 	const guard = new LoopGuard();
 	await guard.load();
-	render(ClaudePolicy, { guard, mode });
+	const context = readOnly ? new Map([[SETTINGS_ACCESS_CONTEXT, { readOnly: true }]]) : undefined;
+	render(ClaudePolicy, { props: { guard, mode }, context });
 	return guard;
 }
 
@@ -162,4 +164,17 @@ it('reloads and says so when a save fails', async () => {
 	await fireEvent.blur(input);
 	expect((await screen.findByRole('alert')).textContent).toBe('Budget too high');
 	await waitFor(() => expect(input.value).toBe('60'));
+});
+
+// main 2a5e2c2: only viewers who can act on a held turn get its buttons.
+it('lists held turns without Confirm or Dismiss for a read-only viewer', async () => {
+	worker.state.loopGuard = loopGuardStatus({
+		held: [
+			{ id: 'h1', session_id: 's1', turn_id: 't1', source: 'automation', prompt: 'nightly report', reason: 'x', held_at: 0 }
+		]
+	});
+	await show('subscription', true);
+	const held = screen.getByRole('region', { name: /Waiting for you/ });
+	expect(within(held).getByText('nightly report')).toBeTruthy();
+	expect(within(held).queryByRole('button')).toBeNull();
 });

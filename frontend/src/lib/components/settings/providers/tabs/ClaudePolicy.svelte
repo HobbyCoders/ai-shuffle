@@ -1,7 +1,7 @@
 <script lang="ts">
 	/** Claude subscription > Policy: the loop guard and the turns it holds. */
 	import type { ClaudeAuthMode } from '$lib/api/claude-auth';
-	import { FORBIDDEN_TEXT } from '$lib/settings/access.svelte';
+	import { FORBIDDEN_TEXT, getSettingsAccess } from '$lib/settings/access.svelte';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import Switch from '../../rows/Switch.svelte';
@@ -15,6 +15,8 @@
 	}
 
 	let { guard, mode }: Props = $props();
+	// Only owners can confirm or dismiss a held turn; others see the list only (main 2a5e2c2).
+	const access = getSettingsAccess();
 	const s = $derived(guard.status);
 </script>
 
@@ -102,18 +104,20 @@
 	<RowGroup title="Waiting for you" count={s.held.length} id="providers-held">
 		{#each s.held as turn (turn.id)}
 			<SettingRow label={heldTitle(turn.source, turn.held_at)} hint={promptHint(turn.prompt)}>
-				<button
-					type="button"
-					class="st-btn primary sm"
-					disabled={guard.busy}
-					onclick={() => guard.act(turn.id, 'confirm')}>Confirm</button
-				>
-				<button
-					type="button"
-					class="st-btn ghost sm"
-					disabled={guard.busy}
-					onclick={() => guard.act(turn.id, 'dismiss')}>Dismiss</button
-				>
+				{#if !access.readOnly}
+					<button
+						type="button"
+						class="st-btn primary sm"
+						disabled={guard.busy}
+						onclick={() => guard.act(turn.id, 'confirm')}>Confirm</button
+					>
+					<button
+						type="button"
+						class="st-btn ghost sm"
+						disabled={guard.busy}
+						onclick={() => guard.act(turn.id, 'dismiss')}>Dismiss</button
+					>
+				{/if}
 			</SettingRow>
 		{:else}
 			<SettingRow label="No held turns" />

@@ -5,12 +5,7 @@
  */
 
 /* A card of rows outside RowGroup's own list (bare groups) */
-.settings-shell .pv-card {
-	background: var(--st-card);
-	border: 1px solid var(--st-border);
-	border-radius: var(--st-radius);
-	overflow: hidden;
-}
+/* .pv-card adds hairlines between any children to the shared .st-card. */
 .settings-shell .pv-card > * + * {
 	border-top: 1px solid var(--st-border);
 }

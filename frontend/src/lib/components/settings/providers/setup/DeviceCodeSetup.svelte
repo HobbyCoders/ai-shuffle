@@ -68,7 +68,7 @@
 	});
 </script>
 
-<div class="pv-card">
+<div class="st-card pv-card">
 	<div class="pv-flow" data-testid="device-code-setup">
 		{#if enrollment.phase === 'awaiting'}
 			<div class="pv-flow-head">Enter this code at {service}</div>

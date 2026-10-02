@@ -244,6 +244,7 @@
 					<TextField
 						value={rowValue(row, 'context_window')}
 						placeholder="Auto"
+						inputmode="numeric"
 						width={110}
 						disabled={saving}
 						onchange={(v) => saveNumber('context_window', v)}
@@ -253,6 +254,7 @@
 					<TextField
 						value={rowValue(row, 'max_output_tokens')}
 						placeholder="Auto"
+						inputmode="numeric"
 						width={110}
 						disabled={saving}
 						onchange={(v) => saveNumber('max_output_tokens', v)}

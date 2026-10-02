@@ -8,7 +8,7 @@
 </script>
 
 <RowGroup title="Models" count="built in" bare>
-	<div class="pv-card">
+	<div class="st-card pv-card">
 		<div class="pv-mlist">
 			{#each models as m (m.value)}
 				<div class="pv-mrow static">
