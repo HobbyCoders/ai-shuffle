@@ -6,6 +6,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { getLicense, LICENSE_CHANGED_EVENT, type LicenseStatus } from '$lib/api/license';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 	import Banner from './Banner.svelte';
 
 	const POLL_MS = 30 * 60 * 1000;
@@ -31,7 +32,8 @@
 {#if banner && visible}
 	<Banner
 		title={banner.severity === 'error' ? 'License' : 'License notice'}
-		message={`${banner.message} See Settings > License.`}
+		message={banner.message}
+		action={{ label: 'Open license', onClick: () => openSettings({ category: 'system', anchor: 'system.license' }) }}
 		severity={banner.severity}
 		dismissible={banner.severity !== 'error'}
 		onDismiss={() => (dismissed = banner.message)}

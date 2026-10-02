@@ -97,7 +97,7 @@ export function groupBlockedReason(
 	ctx: SelectabilityContext
 ): string | null {
 	if (group.kind === 'computer_use' && !ctx.computerUseEnabled) {
-		return 'Enable computer use in Settings → Chat & Input to grant these tools.';
+		return 'Enable computer use in Settings > Security to grant these tools.';
 	}
 	if (group.available === false) {
 		return 'This tool source is unavailable on this host.';
