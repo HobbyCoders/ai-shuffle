@@ -22,6 +22,9 @@ final class ChatModel: ObservableObject {
 
     private func authorized() -> Bool { !closed && store.isCurrent(server) }
 
+    /// The chat screen left the navigation stack (popped), as opposed to being covered.
+    nonisolated static func shouldClose(path: [String], serverId: String) -> Bool { !path.contains(serverId) }
+
     func start(reload: Bool = false) {
         guard task == nil else { return }
         guard authorized() else { close(); return }
@@ -66,9 +69,15 @@ final class ChatModel: ObservableObject {
         let rules = try await Self.compileRules(for: server)
         let web = ChatWebController(server: server, rules: rules, root: root) { [weak self] in self?.authorized() ?? false }
         web.onStatus = { [weak self] in self?.status = $0 }
-        web.onExternalLink = { [weak self] in self?.externalLink = $0 }
+        web.onExternalLink = { [weak self] in self?.offerExternalLink($0) }
         controller = web
         return web
+    }
+
+    /// One confirmation at a time: a page that keeps opening links cannot stack or swap the prompt.
+    func offerExternalLink(_ url: URL) {
+        guard externalLink == nil, authorized() else { return }
+        externalLink = url
     }
 
     /// Compiled before the WebView exists; a failure leaves the chat closed rather than unfiltered.
@@ -86,12 +95,16 @@ final class ChatModel: ObservableObject {
 
 struct ChatScreen: View {
     @StateObject private var model: ChatModel
+    /// The list's navigation path. The chat closes only when it leaves the path, not on every
+    /// `onDisappear`: a full-screen camera picker or a cancelled swipe-back also fires that.
+    @Binding private var path: [String]
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
-    init(server: Server, store: ServerStore) {
+    init(server: Server, store: ServerStore, path: Binding<[String]>) {
         _model = StateObject(wrappedValue: ChatModel(server: server, store: store))
+        _path = path
     }
 
     var body: some View {
@@ -129,8 +142,16 @@ struct ChatScreen: View {
         } message: {
             Text("\(model.externalLink?.host ?? "This link") opens in your browser. No account or server credential will be added.")
         }
-        .onAppear { model.start() }
-        .onDisappear { model.close() }
+        .onAppear { model.resume() }
+        .onDisappear {
+            // Captured now: a popped view's StateObject must not be read after it is uninstalled.
+            let chat = model
+            let stack = $path
+            // Let a pop finish updating the path before deciding.
+            Task { @MainActor in
+                if ChatModel.shouldClose(path: stack.wrappedValue, serverId: chat.server.id) { chat.close() }
+            }
+        }
         .onChange(of: model.closed) { closed in if closed { dismiss() } }
         .onChange(of: scenePhase) { phase in if phase == .active { model.resume() } }
     }

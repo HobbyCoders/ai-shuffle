@@ -6,9 +6,10 @@ struct ServerListView: View {
     @EnvironmentObject private var store: ServerStore
     @State private var pairing = false
     @State private var error: String?
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if let message = store.loadError ?? error {
                     Text(message).font(.footnote).foregroundStyle(.red)
@@ -34,7 +35,7 @@ struct ServerListView: View {
             .navigationTitle("Workers")
             .navigationDestination(for: String.self) { id in
                 if let server = store.server(id: id) {
-                    ChatScreen(server: server, store: store)
+                    ChatScreen(server: server, store: store, path: $path)
                 }
             }
             .toolbar {

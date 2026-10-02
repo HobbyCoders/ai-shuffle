@@ -30,10 +30,11 @@ that involves Apple accounts, money or credentials is the owner's.
 
 ## Before the first upload
 
-- **Worker support.** The app's page origin is `aishuffle://app`. Workers must
-  accept it in CORS before chat works (see README.md, "Not ported yet"). Ship
-  that worker change, deploy it, and only then set a repository variable
-  `IOS_WORKERS_READY=true`, the same kind of gate as `ANDROID_WORKERS_READY`.
+- **Worker support.** The app's page origin is `aishuffle://app`. Workers
+  accept it in CORS from the release that added this app on (`app/core/cors.py`).
+  Deploy a worker release that includes it, and only then set a repository
+  variable `IOS_WORKERS_READY=true`, the same kind of gate as
+  `ANDROID_WORKERS_READY`.
 - **Toolchain.** Per the design on issue #1617, uploads since April 28, 2026
   must be built with Xcode 26 and the iOS 26 SDK. The deployment target stays
   iOS 16.

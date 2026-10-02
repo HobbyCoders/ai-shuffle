@@ -40,10 +40,9 @@ TLS errors are never overridden; WebKit's default certificate checks apply.
 
 ## Not ported yet
 
-- Workers must accept `aishuffle://app` as a CORS origin before the chat page
-  can call them. Today `app/core/cors.py` admits only the Android asset origin,
-  so pairing works but chat API calls from the page are refused. This is the
-  worker change in step 3 of the design on issue #1617.
+- Workers accept `aishuffle://app` in CORS (`app/core/cors.py`, alongside the
+  Android asset origin) from the release that added this app on. Older workers
+  pair, but refuse the chat page's API calls until they update.
 - Media the page loads straight from the worker (`<img src="https://worker/...">`)
   has no Authorization header. Android proxies those loads natively; WKWebView
   cannot intercept `https`, so these need another approach.

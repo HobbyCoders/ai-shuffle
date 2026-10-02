@@ -135,6 +135,34 @@ final class ChatPolicyTests: XCTestCase {
         XCTAssertNil(ChatPolicy.workerURL(base: base, url: long))
     }
 
+    /// Android offers any main-frame HTTPS navigation with a gesture; WebKit reports
+    /// `window.open` and `location` changes from a tap handler as `.other`.
+    func testScriptOpenedLinksCountOnlyFromTheBundleMainFrame() {
+        XCTAssertTrue(ChatPolicy.userInitiated(.linkTap, fromBundleMainFrame: false))
+        XCTAssertTrue(ChatPolicy.userInitiated(.script, fromBundleMainFrame: true))
+        XCTAssertTrue(ChatPolicy.userInitiated(.newWindow, fromBundleMainFrame: true))
+        XCTAssertFalse(ChatPolicy.userInitiated(.script, fromBundleMainFrame: false))
+        XCTAssertFalse(ChatPolicy.userInitiated(.newWindow, fromBundleMainFrame: false))
+        XCTAssertFalse(ChatPolicy.userInitiated(.other, fromBundleMainFrame: true))
+
+        let script = ChatPolicy.userInitiated(.script, fromBundleMainFrame: true)
+        XCTAssertEqual(ChatPolicy.navigation(base: base, url: URL(string: "https://docs.example/x"), mainFrame: true,
+                                             userInitiated: script),
+                       .openExternally(URL(string: "https://docs.example/x")!))
+        let framed = ChatPolicy.userInitiated(.script, fromBundleMainFrame: false)
+        XCTAssertEqual(ChatPolicy.navigation(base: base, url: URL(string: "https://docs.example/x"), mainFrame: true,
+                                             userInitiated: framed), .cancel)
+    }
+
+    func testBundleOrigin() {
+        XCTAssertTrue(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app", port: 0))
+        XCTAssertTrue(ChatPolicy.isBundleOrigin(scheme: "AIShuffle", host: "APP", port: 0))
+        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app.evil", port: 0))
+        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "aishuffle", host: "app", port: 8443))
+        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "https", host: "app", port: 0))
+        XCTAssertFalse(ChatPolicy.isBundleOrigin(scheme: "", host: "", port: 0))
+    }
+
     func testMicrophoneOnlyForTheBundleDocument() {
         let page = URL(string: "aishuffle://app/assets/mobile-ui/")
         func allowed(top: URL? = page, scheme: String = "aishuffle", host: String = "app", port: Int = 0,
@@ -220,6 +248,33 @@ final class BundleAssetsTests: XCTestCase {
         XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.js")), "text/javascript; charset=utf-8")
         XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.woff2")), "font/woff2")
         XCTAssertEqual(BundleAssets.mimeType(for: URL(fileURLWithPath: "/a/x.unknown")), "application/octet-stream")
+    }
+}
+
+@MainActor
+final class ChatModelTests: XCTestCase {
+    private let server = Server(id: "1", name: "Desk", baseUrl: "https://worker.example", apiKey: "aim_secret", deviceId: "d")
+
+    func testExternalLinksPromptOneAtATimeAndOnlyWhileAuthorized() throws {
+        let store = ServerStore(storage: MemoryStorage())
+        try store.add(server)
+        let model = ChatModel(server: server, store: store)
+        let first = URL(string: "https://a.example/")!
+        model.offerExternalLink(first)
+        model.offerExternalLink(URL(string: "https://b.example/")!)
+        XCTAssertEqual(model.externalLink, first)
+        model.externalLink = nil
+        try store.remove(id: server.id)
+        model.offerExternalLink(first)
+        XCTAssertNil(model.externalLink)
+    }
+
+    /// A covered chat (camera picker, cancelled swipe-back) stays open; a popped one closes.
+    func testChatClosesOnlyWhenItLeavesTheNavigationPath() {
+        XCTAssertFalse(ChatModel.shouldClose(path: ["1"], serverId: "1"))
+        XCTAssertFalse(ChatModel.shouldClose(path: ["2", "1"], serverId: "1"))
+        XCTAssertTrue(ChatModel.shouldClose(path: [], serverId: "1"))
+        XCTAssertTrue(ChatModel.shouldClose(path: ["2"], serverId: "1"))
     }
 }
 

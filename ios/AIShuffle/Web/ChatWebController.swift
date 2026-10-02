@@ -16,6 +16,8 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     private let server: Server
     private let authorized: () -> Bool
+    /// Set by `close()`: from then on the only navigation allowed is the blank page that unloads the chat.
+    private var closing = false
     var onStatus: (String) -> Void = { _ in }
     var onExternalLink: (URL) -> Void = { _ in }
 
@@ -61,7 +63,10 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView.load(URLRequest(url: MobileUI.indexURL))
     }
 
+    /// Unloads the chat document (and the token in its memory). The blank page is about:blank,
+    /// which the navigation policy refuses, so `closing` admits exactly that one load.
     func close() {
+        closing = true
         webView.stopLoading()
         webView.configuration.userContentController.removeAllUserScripts()
         webView.loadHTMLString("", baseURL: nil)
@@ -71,25 +76,34 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        decisionHandler(handle(action) ? .allow : .cancel)
+        if closing {
+            let blank = (action.targetFrame?.isMainFrame ?? false) && action.request.url?.absoluteString == "about:blank"
+            decisionHandler(blank ? .allow : .cancel)
+            return
+        }
+        decisionHandler(handle(action, newWindow: false) ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if closing {
+            decisionHandler(response.isForMainFrame && response.response.url?.absoluteString == "about:blank" ? .allow : .cancel)
+            return
+        }
         let allowed = !response.isForMainFrame || MobileUI.isAssetOrigin(response.response.url)
         decisionHandler(allowed && authorized() ? .allow : .cancel)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        if authorized() { loadIndex() }
+        if !closing && authorized() { loadIndex() }
     }
 
     // MARK: WKUIDelegate
 
-    /// No new windows: a target=_blank link gets the same treatment as a main-frame link.
+    /// No new windows: a target=_blank link or a `window.open` gets the same treatment as a main-frame link.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        _ = handle(action)
+        if !closing { _ = handle(action, newWindow: true) }
         return nil
     }
 
@@ -123,17 +137,25 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
     // MARK: Helpers
 
     /// Applies ChatPolicy to a navigation; true only for in-app routes of the bundle.
-    private func handle(_ action: WKNavigationAction) -> Bool {
+    /// `newWindow` is true for `createWebViewWith`, whose target is a window that will never exist.
+    private func handle(_ action: WKNavigationAction, newWindow: Bool) -> Bool {
         let mainFrame = action.targetFrame?.isMainFrame ?? true
+        let trigger: ChatPolicy.Trigger
+        switch action.navigationType {
+        case .linkActivated: trigger = .linkTap
+        case .other: trigger = newWindow ? .newWindow : .script
+        default: trigger = .other
+        }
+        let userInitiated = ChatPolicy.userInitiated(trigger, fromBundleMainFrame: isBundleMainFrame(Self.sourceFrame(of: action)))
         let decision = ChatPolicy.navigation(base: server.baseUrl, url: action.request.url, mainFrame: mainFrame,
-                                             userInitiated: action.navigationType == .linkActivated)
+                                             userInitiated: userInitiated)
         switch decision {
         case .allow:
             return authorized()
         case .cancel:
             return false
         case .workerFile:
-            if mainFrame && action.navigationType == .linkActivated {
+            if mainFrame && userInitiated {
                 onStatus("Saving worker files is not available in the iOS app yet.")
             }
             return false
@@ -143,12 +165,23 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
     }
 
+    /// `sourceFrame` is declared non-optional, but WebKit can leave it nil (for example for
+    /// loads the app itself starts); read it without trusting the annotation.
+    private static func sourceFrame(of action: WKNavigationAction) -> WKFrameInfo? {
+        action.value(forKey: "sourceFrame") as? WKFrameInfo
+    }
+
+    /// The bundled UI's own main frame, while it is the document on screen and the chat is authorized.
+    private func isBundleMainFrame(_ frame: WKFrameInfo?) -> Bool {
+        guard let frame, frame.isMainFrame else { return false }
+        let origin = frame.securityOrigin
+        return ChatPolicy.document(topLevel: webView.url, authorized: authorized()) &&
+            ChatPolicy.isBundleOrigin(scheme: origin.protocol, host: origin.host, port: origin.port)
+    }
+
     /// Script dialogs only for the bundle's own main frame, presented over the chat.
     private func presenter(for frame: WKFrameInfo) -> UIViewController? {
-        let origin = frame.securityOrigin
-        guard frame.isMainFrame, ChatPolicy.document(topLevel: webView.url, authorized: authorized()),
-              origin.protocol == MobileUI.scheme, origin.host == MobileUI.host,
-              var top = webView.window?.rootViewController else { return nil }
+        guard isBundleMainFrame(frame), var top = webView.window?.rootViewController else { return nil }
         while let next = top.presentedViewController { top = next }
         return top
     }

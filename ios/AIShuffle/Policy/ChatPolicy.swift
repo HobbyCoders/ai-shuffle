@@ -29,6 +29,38 @@ enum ChatPolicy {
         return URL(string: resolved)
     }
 
+    /// How WebKit says a navigation started.
+    enum Trigger: Equatable {
+        /// An `<a>` tap (`.linkActivated`), in place or with `target=_blank`.
+        case linkTap
+        /// A script `location` change (`.other`).
+        case script
+        /// `window.open`, which WebKit hands to `createWebViewWith`.
+        case newWindow
+        /// Back/forward, reload or a form submission.
+        case other
+    }
+
+    /// Whether a navigation is the user's own: Android's `WebResourceRequest.hasGesture()`.
+    /// WebKit has no public gesture flag. Link taps carry `.linkActivated`. `window.open` reaches
+    /// `createWebViewWith` only from a user gesture, because `javaScriptCanOpenWindowsAutomatically`
+    /// is off. A script `location` change is reported as `.other` with no gesture information,
+    /// so it counts only when the bundled UI's own main frame made it: HTML previews are
+    /// sandboxed frames without top navigation or popups, and the user still confirms every
+    /// external link before it opens.
+    static func userInitiated(_ trigger: Trigger, fromBundleMainFrame: Bool) -> Bool {
+        switch trigger {
+        case .linkTap: return true
+        case .script, .newWindow: return fromBundleMainFrame
+        case .other: return false
+        }
+    }
+
+    /// A WebKit security origin that is exactly the bundle's `aishuffle://app`.
+    static func isBundleOrigin(scheme: String, host: String, port: Int) -> Bool {
+        scheme.lowercased() == MobileUI.scheme && host.lowercased() == MobileUI.host && port == 0
+    }
+
     static func navigation(base: String, url: URL?, mainFrame: Bool, userInitiated: Bool) -> Navigation {
         guard let url else { return .cancel }
         if let worker = workerURL(base: base, url: url) { return .workerFile(worker) }
@@ -49,7 +81,7 @@ enum ChatPolicy {
     static func microphone(topLevel: URL?, requestScheme: String, requestHost: String, requestPort: Int,
                            mainFrame: Bool, microphoneOnly: Bool, authorized: Bool) -> Bool {
         document(topLevel: topLevel, authorized: authorized) && mainFrame && microphoneOnly &&
-            requestScheme.lowercased() == MobileUI.scheme && requestHost.lowercased() == MobileUI.host && requestPort == 0
+            isBundleOrigin(scheme: requestScheme, host: requestHost, port: requestPort)
     }
 
     /// WebKit content rules: block every load except the bundle, the paired worker's HTTPS and

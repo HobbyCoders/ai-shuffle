@@ -145,6 +145,49 @@ final class WebKitTests: XCTestCase {
         XCTAssertTrue(ran, "A sandboxed srcdoc preview frame did not run")
     }
 
+    private func loadedController() async throws -> ChatWebController {
+        let root = try XCTUnwrap(BundleAssets.root)
+        let server = Server(id: "t", name: "t", baseUrl: "https://worker.invalid", apiKey: "k", deviceId: "d")
+        let controller = ChatWebController(server: server, rules: try await compile(server.baseUrl), root: root) { true }
+        show(controller.webView)
+        controller.loadIndex()
+        let loaded = try await waitUntil(30) { !controller.webView.isLoading && MobileUI.isAssetOrigin(controller.webView.url) }
+        XCTAssertTrue(loaded, "The chat controller did not load the bundled UI")
+        return controller
+    }
+
+    /// `location` changes and `window.open` from the bundle are offered outside the app (Android
+    /// treats them as gestures), and never navigate the chat document.
+    func testScriptOpenedLinksAreOfferedOutsideTheApp() async throws {
+        final class Offered { var urls: [URL] = [] }
+        let offered = Offered()
+        let controller = try await loadedController()
+        controller.onExternalLink = { offered.urls.append($0) }
+
+        _ = try await evaluate(controller.webView, "location.href = 'https://docs.example/script'; return true")
+        let script = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/script")!) }
+        XCTAssertTrue(script, "A script location change was not offered: \(offered.urls)")
+
+        _ = try await evaluate(controller.webView, "window.open('https://docs.example/popup', '_blank', 'noopener'); return true")
+        let popup = try await waitUntil(10) { offered.urls.contains(URL(string: "https://docs.example/popup")!) }
+        XCTAssertTrue(popup, "window.open was not offered: \(offered.urls)")
+
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertTrue(MobileUI.isAssetOrigin(controller.webView.url), "\(String(describing: controller.webView.url))")
+    }
+
+    /// Closing must actually unload the chat document; about:blank is otherwise refused by the policy.
+    func testCloseUnloadsTheChatDocument() async throws {
+        let controller = try await loadedController()
+        _ = try await evaluate(controller.webView, "window.__chatMarker = 'loaded'; return true")
+        controller.close()
+        let unloaded = try await waitUntil(10) {
+            try await self.evaluate(controller.webView, "return location.href + '|' + String(window.__chatMarker)") ==
+                "\"about:blank|undefined\""
+        }
+        XCTAssertTrue(unloaded, "close() left the chat document loaded")
+    }
+
     func testSchemeHandlerRefusesWritesAndUnknownPaths() async throws {
         let root = try XCTUnwrap(BundleAssets.root)
         let webView = WKWebView(frame: .zero, configuration: ChatWebController.configuration(rules: nil, root: root))
