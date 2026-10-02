@@ -18,15 +18,31 @@ const project = { id: 'composer-fixture', name: 'mobile-composer-repository-with
 // Install isolated transports before importing the real component/store graph.
 // No request reaches a backend, and every navigation starts with the same picks.
 localStorage.setItem('ai-shuffle.sessionMode', mode);
-// `voice=on` turns the voice surface on (the call button still needs a session).
+// `voice=on` turns the voice surface on so the call button renders. A call
+// started here creates its session (stubbed) and attaches (stubbed), then stops
+// at the microphone, which the fixture always denies: no audio, no realtime
+// connection, nothing leaves the page.
 const voice = params.get('voice') === 'on';
 const requests: string[] = [];
+const calls: { method: string; path: string; body: unknown }[] = [];
 (window as unknown as { fixtureRequests: string[] }).fixtureRequests = requests;
-window.fetch = async (input) => {
+(window as unknown as { fixtureCalls: typeof calls }).fixtureCalls = calls;
+const CREATED_SESSION = 'fixture-call-session';
+if (voice) {
+	Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
+		getUserMedia: async () => { throw new DOMException('Fixture denies the microphone', 'NotAllowedError'); },
+	} });
+}
+window.fetch = async (input, init) => {
 	const path = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+	const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
 	requests.push(path);
+	calls.push({ method, path, body: typeof init?.body === 'string' ? JSON.parse(init.body) : null });
 	let data: unknown = [];
 	if (voice && path.endsWith('/settings/voice')) data = { voice_mode_enabled: true };
+	else if (method === 'POST' && path === '/api/v1/sessions') data = { session_id: CREATED_SESSION, mode };
+	else if (method === 'POST' && path === '/api/v1/sessions/with-worktree') data = { session_id: CREATED_SESSION, branch_name: 'call/auto-fixture', base_branch: 'main', worktree_path: '/fixture/w', status: 'active', query_started: false };
+	else if (method === 'POST' && path === `/api/v1/voice/sessions/${CREATED_SESSION}/attach`) data = { session_id: CREATED_SESSION, client_secret: 'fixture-secret', model: 'gpt-realtime' };
 	else if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
 	else if (path === '/api/v1/projects') data = [project];
 	else if (path.endsWith('/git/status')) data = { is_git_repo: true, current_branch: branch, is_clean: true, default_branch: 'main' };
@@ -57,6 +73,10 @@ if (mode === 'code') {
 	// Exercise ContextPillBar's active-session row separately from ExecutionModeBar.
 	if (params.get('context') === 'active') activeSession.addSystemMessage('Fixture conversation already has a message.');
 }
+// A branch session needs an agent picked, as in the app.
+if (voice) activeSession.setProfile('fixture-agent');
+// `device=worker` picks another install as the runner for the new session.
+if (params.get('device') === 'worker') activeSession.setDeviceIntent({ id: 'worker-1', name: 'Studio PC' });
 const { default: ComposerGesture } = await import('./ComposerGesture.svelte');
 // Last, as in the app: the mobile rules follow the shared component styles.
 await import('../src/mobile.css');

@@ -1,21 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import type { Writable } from 'svelte/store';
-const mocks = vi.hoisted(() => ({ isVoiceEnabled: vi.fn(), startCallForSession: vi.fn(), banner: vi.fn(() => 'banner-id'), dismissLive: vi.fn() }));
+const mocks = vi.hoisted(() => ({ isVoiceEnabled: vi.fn(), startCallForSession: vi.fn(), startSessionWithoutPrompt: vi.fn(), confirmCallReplacement: vi.fn(), banner: vi.fn(() => 'banner-id'), dismissLive: vi.fn() }));
 vi.mock('$lib/stores/notifications', () => ({ notify: { banner: mocks.banner, dismissLive: mocks.dismissLive } }));
 vi.mock('$lib/api/voice', () => ({ isVoiceEnabled: mocks.isVoiceEnabled }));
-vi.mock('$lib/stores/active-session', async () => ({ activeSession: (await import('svelte/store')).writable({}) }));
+vi.mock('$lib/stores/active-session', async () => ({ activeSession: Object.assign((await import('svelte/store')).writable({}), { startSessionWithoutPrompt: mocks.startSessionWithoutPrompt }) }));
 vi.mock('$lib/stores/app-data.svelte', async () => ({ sessions: (await import('svelte/store')).writable([]) }));
-vi.mock('$lib/services/voiceCall', async () => ({ startCallForSession: mocks.startCallForSession, voiceCallState: (await import('svelte/store')).writable({ status: 'idle' }), isCallSurfaceActive: () => false }));
+vi.mock('$lib/services/voiceCall', async () => ({ startCallForSession: mocks.startCallForSession, confirmCallReplacement: mocks.confirmCallReplacement, voiceCallState: (await import('svelte/store')).writable({ status: 'idle' }), isCallSurfaceActive: () => false }));
 import { activeSession } from '$lib/stores/active-session';
 import { sessions } from '$lib/stores/app-data.svelte';
 import VoiceCallButton from './VoiceCallButton.svelte';
-type State = { sessionId: string | null; mode: string; isStreaming: boolean; activeTasks: { status: string }[]; pendingPermissions: unknown[]; pendingQuestions: unknown[] };
+type State = { sessionId: string | null; mode: string; isStreaming: boolean; isCreatingWorktree?: boolean; deviceIntent?: { id: string; name: string } | null; activeTasks: { status: string }[]; pendingPermissions: unknown[]; pendingQuestions: unknown[] };
 const active = activeSession as unknown as Writable<State>;
 const rows = sessions as unknown as Writable<Record<string, unknown>[]>;
 const ready: State = { sessionId: 'home', mode: 'code', isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] };
 const callButton = () => screen.findByRole('button', { name: 'Start a call in this conversation' });
-beforeEach(() => { vi.clearAllMocks(); mocks.isVoiceEnabled.mockResolvedValue(true); active.set(ready); rows.set([]); });
+beforeEach(() => { vi.clearAllMocks(); mocks.isVoiceEnabled.mockResolvedValue(true); mocks.confirmCallReplacement.mockResolvedValue(true); active.set(ready); rows.set([]); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 /** A phone or tablet: no hover, so a tooltip never shows. */
 const touchScreen = () => vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
@@ -31,10 +31,6 @@ describe('call action on a conversation', () => {
   active.set({ ...ready, sessionId: 'legacy', mode: 'voice' }); render(VoiceCallButton);
   await fireEvent.click(await callButton());
   expect(mocks.startCallForSession).toHaveBeenCalledWith('legacy', { attach: false });
- });
- it('never creates an implicit voice session for an empty composer', async () => {
-  active.set({ ...ready, sessionId: null, mode: 'chat' }); render(VoiceCallButton);
-  await Promise.resolve(); expect(screen.queryByRole('button')).toBeNull();
  });
  it('is absent when the configured voice surface is disabled', async () => {
   mocks.isVoiceEnabled.mockResolvedValue(false); render(VoiceCallButton);
@@ -126,5 +122,72 @@ describe('a blocked call button explains itself on touch screens', () => {
   expect(button.disabled).toBe(true);
   await fireEvent.click(button);
   expect(mocks.banner).not.toHaveBeenCalled();
+ });
+});
+describe('call button on the new-session composer (#1616)', () => {
+ const fresh: State = { ...ready, sessionId: null, isCreatingWorktree: false, deviceIntent: null };
+ const freshButton = () => screen.findByRole('button', { name: 'Start a call in a new conversation' });
+ it.each(['code', 'chat'])('is offered in the %s lane and creates the conversation, then calls it', async mode => {
+  mocks.startSessionWithoutPrompt.mockResolvedValue('created');
+  active.set({ ...fresh, mode }); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('created', { attach: true }));
+  expect(mocks.startSessionWithoutPrompt).toHaveBeenCalledTimes(1);
+  // A call running elsewhere is settled before anything is created.
+  expect(mocks.confirmCallReplacement).toHaveBeenCalledWith(null);
+  expect(mocks.confirmCallReplacement.mock.invocationCallOrder[0])
+   .toBeLessThan(mocks.startSessionWithoutPrompt.mock.invocationCallOrder[0]);
+ });
+ it('starts no call when the session could not be created', async () => {
+  mocks.startSessionWithoutPrompt.mockResolvedValue(null);
+  active.set(fresh); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  expect(mocks.startSessionWithoutPrompt).toHaveBeenCalledTimes(1);
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+ });
+ it('creates nothing when the user keeps the call already running', async () => {
+  mocks.confirmCallReplacement.mockResolvedValue(false);
+  active.set(fresh); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  expect(mocks.confirmCallReplacement).toHaveBeenCalled();
+  expect(mocks.startSessionWithoutPrompt).not.toHaveBeenCalled();
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+ });
+ it('a double press creates one session and starts one call', async () => {
+  let finish!: (id: string) => void;
+  mocks.startSessionWithoutPrompt.mockReturnValue(new Promise<string>(resolve => { finish = resolve; }));
+  active.set(fresh); render(VoiceCallButton);
+  const button = await freshButton();
+  await fireEvent.click(button);
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(mocks.startSessionWithoutPrompt).toHaveBeenCalledTimes(1));
+  finish('created');
+  await vi.waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledTimes(1));
+ });
+ it.each([
+  ['another device is picked as the runner', { deviceIntent: { id: 'worker-1', name: 'Studio PC' } }, /Switch the runner to Local.*Studio PC/],
+  ['a first message is already creating the session', { isStreaming: true }, /once this session is created/],
+  ['a worktree is being set up', { isCreatingWorktree: true }, /once this session is created/],
+ ])('is disabled with a reason when %s', async (_label, state, reason) => {
+  active.set({ ...fresh, ...state }); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(button.title).toMatch(reason);
+  await fireEvent.click(button);
+  expect(mocks.startSessionWithoutPrompt).not.toHaveBeenCalled();
+ });
+ it('explains a blocked press on touch screens', async () => {
+  touchScreen(); active.set({ ...fresh, deviceIntent: { id: 'worker-1', name: 'Studio PC' } }); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  await fireEvent.click(button);
+  expect(mocks.banner).toHaveBeenCalledWith(button.title, expect.objectContaining({ persist: false }));
+  expect(mocks.startSessionWithoutPrompt).not.toHaveBeenCalled();
  });
 });

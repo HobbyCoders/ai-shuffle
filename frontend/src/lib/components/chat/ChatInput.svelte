@@ -1154,10 +1154,10 @@
 							bind:isTranscribing
 						/>
 
-						<!-- Voice call (VM19): starts a call on this conversation. It
-						     renders nothing on a fresh composer (no session yet) and
-						     shows disabled with the reason while the session is
-						     working or parked. -->
+						<!-- Voice call (VM19): starts a call on this conversation. On a
+						     fresh composer it creates the conversation from the
+						     composer's picks first (#1616); it shows disabled with the
+						     reason while the session is working or parked. -->
 						<VoiceCallButton
 							disabled={isUploading || isRecording || isTranscribing}
 							disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
