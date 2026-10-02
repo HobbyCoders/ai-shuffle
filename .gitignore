@@ -50,6 +50,8 @@ nul
 # Logs
 *.log
 logs/
+# The Settings > Logs collection is source, not a log folder.
+!frontend/src/lib/components/settings/logs/
 
 # Docker
 docker-compose.override.yml

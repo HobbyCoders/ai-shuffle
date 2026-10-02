@@ -1,0 +1,398 @@
+/*
+ * Settings shell: aliases and the rules that span components.
+ *
+ * Every color is an alias of an app.css token (directly or through
+ * color-mix), never a literal, so the theme presets keep working. Component
+ * look lives in each component's scoped <style>; this file holds the tokens,
+ * the shared row/list grammar the primitives compose into, the stacked
+ * (phone) layout and the 601-900px reflow. Mobile-app-only tweaks live in
+ * mobile/src/mobile.css under "Settings".
+ */
+
+.settings-shell {
+	--st-bg: var(--background);
+	--st-card: var(--card);
+	--st-popover: var(--popover);
+	--st-muted: var(--muted);
+	--st-accent: var(--accent);
+	--st-fg: var(--foreground);
+	--st-mfg: var(--muted-foreground);
+	--st-subtle: color-mix(in oklch, var(--muted-foreground) 72%, var(--background));
+	--st-primary: var(--primary);
+	--st-pfg: var(--primary-foreground);
+	--st-primary-soft: color-mix(in oklch, var(--primary) 13%, transparent);
+	--st-primary-line: color-mix(in oklch, var(--primary) 45%, transparent);
+	--st-destructive: var(--destructive);
+	--st-destructive-fg: var(--destructive-foreground);
+	--st-destructive-soft: color-mix(in oklch, var(--destructive) 10%, transparent);
+	--st-destructive-line: color-mix(in oklch, var(--destructive) 40%, transparent);
+	--st-success: var(--success);
+	--st-warning: var(--warning);
+	--st-warning-soft: color-mix(in oklch, var(--warning) 12%, transparent);
+	--st-warning-line: color-mix(in oklch, var(--warning) 50%, transparent);
+	--st-border: var(--border);
+	--st-border-strong: color-mix(in oklch, var(--foreground) 16%, transparent);
+	--st-input: var(--input);
+	--st-hover: color-mix(in oklch, var(--foreground) 4%, transparent);
+	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
+	--st-code-bg: var(--code-bg, var(--muted));
+	--st-knob: var(--card);
+	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
+	--st-radius: var(--radius, 10px);
+	--st-radius-md: calc(var(--radius, 10px) - 2px);
+	--st-radius-sm: calc(var(--radius, 10px) - 4px);
+	--st-line: 1.5px;
+	--st-index-width: 224px;
+	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
+
+	container: settings / inline-size;
+	position: relative;
+	display: grid;
+	grid-template-columns: var(--st-index-width) minmax(0, 1fr);
+	height: 100%;
+	min-height: 0;
+	min-width: 0;
+	background: var(--st-bg);
+	color: var(--st-fg);
+	font-size: 14px;
+	line-height: 1.4;
+}
+
+.dark .settings-shell {
+	--st-knob: var(--foreground);
+	--st-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px var(--st-border-strong);
+}
+
+.settings-shell :focus-visible {
+	outline: 2px solid var(--st-primary);
+	outline-offset: 2px;
+}
+
+.settings-shell button {
+	font: inherit;
+	color: inherit;
+	cursor: pointer;
+}
+.settings-shell button:disabled {
+	cursor: not-allowed;
+}
+
+.settings-shell .st-vh {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.settings-shell .st-mono {
+	font-family: var(--st-mono);
+	font-size: 12px;
+}
+
+/* Lucide icons inside Settings */
+.settings-shell svg.lucide {
+	width: 16px;
+	height: 16px;
+	stroke-width: 1.75;
+	flex: none;
+}
+
+/* ---------- content column ---------- */
+.settings-shell .st-content {
+	min-height: 0;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+/* ---------- shared buttons (used by several primitives and pages) ---------- */
+.settings-shell .st-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 0 12px;
+	border-radius: var(--st-radius-md);
+	border: 1px solid var(--st-border-strong);
+	background: transparent;
+	font-size: 13px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+.settings-shell .st-btn:hover:not(:disabled) {
+	background: var(--st-hover);
+}
+.settings-shell .st-btn:disabled {
+	opacity: 0.45;
+}
+.settings-shell .st-btn.primary {
+	background: var(--st-primary);
+	color: var(--st-pfg);
+	border-color: transparent;
+}
+.settings-shell .st-btn.primary:hover:not(:disabled) {
+	background: var(--st-primary);
+	filter: brightness(1.06);
+}
+.settings-shell .st-btn.danger {
+	color: var(--st-destructive);
+	border-color: var(--st-destructive-line);
+}
+.settings-shell .st-btn.danger.solid {
+	background: var(--st-destructive);
+	color: var(--st-destructive-fg);
+	border-color: transparent;
+}
+.settings-shell .st-btn.ghost {
+	border-color: transparent;
+	color: var(--st-mfg);
+}
+.settings-shell .st-btn.ghost:hover:not(:disabled) {
+	color: var(--st-fg);
+}
+.settings-shell .st-btn.warn {
+	color: var(--st-warning);
+	border-color: var(--st-warning-line);
+}
+.settings-shell .st-btn.sm {
+	height: 26px;
+	padding: 0 9px;
+	font-size: 12.5px;
+}
+.settings-shell .st-btn.icon {
+	width: 30px;
+	padding: 0;
+	justify-content: center;
+}
+.settings-shell .st-btn.icon.sm {
+	width: 26px;
+}
+.settings-shell .st-btn svg.lucide {
+	width: 15px;
+	height: 15px;
+}
+
+/* Back button: only in stacked mode */
+.settings-shell .st-back {
+	display: none;
+	align-items: center;
+	gap: 2px;
+	height: 32px;
+	padding: 0 8px 0 2px;
+	border: 0;
+	background: none;
+	border-radius: var(--st-radius-md);
+	font-size: 14px;
+	flex: none;
+}
+.settings-shell .st-back svg.lucide {
+	width: 20px;
+	height: 20px;
+}
+
+/* Search jump highlight */
+.settings-shell .st-flash {
+	animation: st-flash 2.2s ease-out;
+}
+@keyframes st-flash {
+	0%,
+	35% {
+		background: var(--st-primary-soft);
+		box-shadow: inset 0 0 0 1.5px var(--st-primary);
+	}
+	100% {
+		box-shadow: inset 0 0 0 1.5px transparent;
+	}
+}
+
+.settings-shell .st-empty {
+	margin: 0;
+	padding: 20px 12px;
+	color: var(--st-mfg);
+	font-size: 13px;
+}
+
+/* Scrollbars in the scroll panes */
+.settings-shell .st-scroll {
+	scrollbar-width: thin;
+	scrollbar-color: var(--st-border-strong) transparent;
+}
+
+/* ---------- 601-900px of shell width: narrower index, fixed list ---------- */
+@container settings (max-width: 900px) {
+	.settings-shell .st-coll .st-divider {
+		display: none;
+	}
+	.settings-shell .st-coll {
+		--st-list-width: 280px !important;
+	}
+	.settings-shell .st-page {
+		padding: 28px 28px 100px;
+	}
+	.settings-shell .st-dwrap {
+		padding: 18px 22px 80px;
+	}
+}
+
+.settings-shell[data-mid] {
+	--st-index-width: 190px;
+}
+
+/* ---------- stacked (phone app, or the shell is 600px or less) ---------- */
+.settings-shell[data-stacked] {
+	grid-template-columns: minmax(0, 1fr);
+}
+.settings-shell[data-stacked][data-view='index'] .st-content {
+	display: none;
+}
+.settings-shell[data-stacked]:not([data-view='index']) .st-index {
+	display: none;
+}
+.settings-shell[data-stacked] .st-back {
+	display: inline-flex;
+}
+.settings-shell[data-stacked] .st-index {
+	border-right: 0;
+	padding: 18px 14px 32px;
+}
+.settings-shell[data-stacked] .st-ix-title {
+	font-size: 24px;
+	padding: 6px 4px 16px;
+}
+.settings-shell[data-stacked] .st-search input {
+	height: 40px;
+	font-size: 15px;
+}
+.settings-shell[data-stacked] .st-search .st-search-icon {
+	top: 12px;
+}
+.settings-shell[data-stacked] .st-search kbd {
+	display: none;
+}
+.settings-shell[data-stacked] .st-nav-g {
+	padding: 18px 6px 6px;
+	font-size: 13px;
+}
+.settings-shell[data-stacked] .st-nav-item {
+	height: 48px;
+	font-size: 15px;
+	padding: 0 8px;
+}
+.settings-shell[data-stacked] .st-nav-item .st-go {
+	display: inline-flex;
+}
+.settings-shell[data-stacked] .st-page {
+	padding: 0 14px 100px;
+}
+.settings-shell[data-stacked] .st-page-h {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	background: var(--st-bg);
+	margin: 0 -14px 14px;
+	padding: 10px 10px 10px 6px;
+	border-bottom: 1px solid var(--st-border);
+	gap: 4px;
+}
+.settings-shell[data-stacked] .st-page-h h1 {
+	font-size: 17px;
+}
+.settings-shell[data-stacked] .st-row {
+	gap: 10px;
+	padding: 10px 14px;
+}
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-sel, .st-seg, .st-vbtn, .st-meter)) {
+	grid-template-columns: minmax(0, 1fr);
+	gap: 8px;
+}
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-sel, .st-seg, .st-vbtn, .st-meter)) .st-rc {
+	justify-content: flex-start;
+	flex-wrap: wrap;
+}
+.settings-shell[data-stacked] .st-row .st-txt {
+	flex: 1 1 160px;
+}
+.settings-shell[data-stacked] .st-row.mod .st-reset {
+	visibility: visible;
+	order: 2;
+}
+.settings-shell[data-stacked] .st-rowx {
+	padding: 4px 14px 14px;
+}
+.settings-shell[data-stacked] .st-coll {
+	grid-template-columns: minmax(0, 1fr);
+}
+.settings-shell[data-stacked] .st-coll .st-divider {
+	display: none;
+}
+.settings-shell[data-stacked][data-view='page'] .st-dpane {
+	display: none;
+}
+.settings-shell[data-stacked][data-view='detail'] .st-lcol {
+	display: none;
+}
+.settings-shell[data-stacked] .st-lcol {
+	border-right: 0;
+}
+.settings-shell[data-stacked] .st-lhead {
+	padding: 10px 14px 10px 6px;
+	gap: 10px;
+	border-bottom: 1px solid var(--st-border);
+}
+.settings-shell[data-stacked] .st-lhead .st-filter,
+.settings-shell[data-stacked] .st-lhead .st-ltools {
+	margin-left: 8px;
+}
+.settings-shell[data-stacked] .st-lh-top h1 {
+	font-size: 17px;
+}
+.settings-shell[data-stacked] .st-lscroll {
+	padding: 0 6px 60px;
+}
+.settings-shell[data-stacked] .st-it {
+	min-height: 54px;
+}
+.settings-shell[data-stacked] .st-dwrap {
+	padding: 0 14px 90px;
+}
+.settings-shell[data-stacked] .st-dtop {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	background: var(--st-bg);
+	margin: 0 -14px 14px;
+	padding: 10px 10px 10px 6px;
+	border-bottom: 1px solid var(--st-border);
+}
+.settings-shell[data-stacked] .st-dh {
+	grid-template-columns: auto minmax(0, 1fr);
+}
+.settings-shell[data-stacked] .st-dha {
+	grid-column: 1 / -1;
+	justify-content: flex-start;
+}
+.settings-shell[data-stacked] .st-facts {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.settings-shell[data-stacked] .st-fact:nth-child(odd) {
+	border-left: 0;
+	padding-left: 0;
+}
+.settings-shell[data-stacked] .st-fact:nth-child(n + 3) {
+	border-top: 1px solid var(--st-border);
+}
+.settings-shell[data-stacked] .st-meter {
+	width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.settings-shell *,
+	.settings-shell *::before,
+	.settings-shell *::after {
+		animation: none !important;
+		transition: none !important;
+	}
+}
