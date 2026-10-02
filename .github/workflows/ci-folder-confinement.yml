@@ -1,0 +1,39 @@
+name: Folder confinement (macOS)
+
+# Keep platform-specific checks available without duplicating ordinary backend validation on an additional paid
+# runner.
+on:
+  pull_request:
+    paths:
+      - 'app/core/chat_files.py'
+      - 'app/core/confined_files.py'
+      - 'tests/core/test_chat_files.py'
+      - 'tests/core/test_confined_files.py'
+      - '.github/workflows/ci-folder-confinement.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: folder-confinement-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS folder confinement
+    runs-on: blacksmith-6vcpu-macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Stdlib only: no app dependencies, credentials or network.
+      - name: Exercise the native descriptor walk
+        run: |
+          sw_vers
+          uname -m
+          stat -f '%N dev=%d' / /Users /Applications /private /System/Volumes/Data
+          python tests/core/test_chat_files.py
+          python tests/core/test_confined_files.py

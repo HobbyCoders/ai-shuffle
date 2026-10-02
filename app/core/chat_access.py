@@ -200,6 +200,51 @@ async def session_bypasses_confirmation(session_id: str) -> bool:
     return permission_mode_for_session_mode(mode, row.get("mode")) == "bypassPermissions"
 
 
+async def publish_change(session_id: str, api_user_id: str | None, *, saved: bool = False) -> None:
+    """Tell this worker's UI for the session's principal to refetch its access panel.
+
+    Saved connections belong to the owner, not the session, and every session's
+    panel lists them: a saved-list change also invalidates the unscoped
+    resource so the owner's panels on other sessions refresh.
+    """
+    resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
+    try:
+        from app.core.global_events import global_events
+        # Root-layout subscribers use the authenticated global socket, not the
+        # legacy session socket below. Publish only an invalidation; snapshots
+        # still enforce private-access policy.
+        from app.core.preference_identity import principal_preference_identity
+        from app.db.async_database import run_sync
+        principal = ({"kind": "api_user", "principal_id": api_user_id}
+                     if api_user_id is not None else {"kind": "admin"})
+        kind, identity = await run_sync(principal_preference_identity, principal)
+        global_events.resources_changed(*resources, user_type=kind, user_id=identity)
+        from app.core.sync_engine import sync_engine
+        await sync_engine._broadcast_user_message(
+            api_user_id or "admin",
+            {"type": "chat_access_changed", "session_id": session_id},
+        )
+    except Exception:
+        logger.debug("Access refresh notification unavailable", exc_info=True)
+
+
+def grant_failure(exc: BaseException) -> tuple[int, str]:
+    """Status and fixed message for a failed grant. Never echoes private inputs."""
+    if isinstance(exc, AccessDenied):
+        return 400, str(exc)
+    if isinstance(exc, asyncssh.PermissionDenied):
+        return 400, "SSH sign-in was rejected. Check the username and password or private key."
+    if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+        return 400, "The SSH host key did not match. Verify the server fingerprint using a trusted source."
+    if isinstance(exc, TimeoutError):
+        return 400, "The SSH connection timed out. Check the server address, port and reachability."
+    if isinstance(exc, (asyncssh.Error, ValueError, OSError)):
+        logger.warning("Chat access connection failed: %s", type(exc).__name__)
+        return 400, "Could not connect. Check the path or SSH address, host-key fingerprint and credentials."
+    logger.warning("Chat access grant failed: %s", type(exc).__name__)
+    return 500, "Private access is unavailable on this worker. Check the worker log before retrying."
+
+
 class Broker:
     def __init__(self):
         self.grants: dict[str, Grant] = {}
@@ -208,37 +253,16 @@ class Broker:
         self._notifications: set[asyncio.Task] = set()
 
     def _notify(self, session_id: str, owner: tuple, *, saved: bool = False) -> None:
-        # Saved connections belong to the owner, not the session, and every
-        # session's panel lists them: a saved-list change also invalidates the
-        # unscoped resource so the owner's panels on other sessions refresh.
-        resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
-
-        async def send():
-            try:
-                from app.core.global_events import global_events
-                # Root-layout subscribers use the authenticated global socket,
-                # not the legacy session socket below. Publish only an
-                # invalidation; snapshots still enforce private-access policy.
-                from app.core.preference_identity import principal_preference_identity
-                from app.db.async_database import run_sync
-                principal = ({"kind": "api_user", "principal_id": owner[2]}
-                             if owner[2] is not None else {"kind": "admin"})
-                kind, identity = await run_sync(principal_preference_identity, principal)
-                global_events.resources_changed(*resources, user_type=kind, user_id=identity)
-                from app.core.sync_engine import sync_engine
-                await sync_engine._broadcast_user_message(
-                    owner[2] or "admin",
-                    {"type": "chat_access_changed", "session_id": session_id},
-                )
-            except Exception:
-                logging.getLogger(__name__).debug("Access refresh notification unavailable", exc_info=True)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # Synchronous shutdown has no connected UI to notify.
-        task = loop.create_task(send())
+        task = loop.create_task(publish_change(session_id, owner[2] if len(owner) > 2 else None, saved=saved))
         self._notifications.add(task)
         task.add_done_callback(self._notifications.discard)
+        # Devices showing this session as a mirror refresh through their own worker.
+        from app.network import chat_access_routing
+        chat_access_routing.notify_watchers(session_id, saved=saved)
 
     async def request(self, session_id: str, kind: str, purpose: str):
         owner = await session_owner(session_id)
@@ -313,6 +337,19 @@ class Broker:
             raise
         finally:
             request.claiming = False
+
+    async def forget(self, session_id: str, connection_id: str):
+        """Delete one of the owner's saved connections and revoke grants that use it."""
+        from app.core import chat_vault
+        from app.db.async_database import run_sync
+        owner = await session_owner(session_id)
+        await run_sync(chat_vault.delete, owner, connection_id)
+        for grant in list(self.grants.values()):
+            if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
+                self.revoke(grant.session_id, grant.id)
+        # Clients no longer poll empty snapshots, so tell every panel of this
+        # owner (on any session) that the saved list changed.
+        self._notify(session_id, owner, saved=True)
 
     async def decline(self, session_id: str, request_id: str):
         await session_owner(session_id)

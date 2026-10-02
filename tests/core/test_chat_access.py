@@ -736,8 +736,7 @@ async def test_saved_list_changes_invalidate_every_owner_session(broker, ssh_tar
 
     published.clear()
     monkeypatch.setattr(api, "broker", broker)
-    monkeypatch.setattr(api, "checked", AsyncMock())
-    monkeypatch.setattr(api, "session_owner", owner)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
@@ -791,6 +790,71 @@ async def test_private_inputs_require_secure_transport_and_real_owner(monkeypatc
     await api.checked(request("https", "10.0.0.2", "10.0.0.1"), "chat")
     with pytest.raises(HTTPException):
         await api.checked(request("https", "10.0.0.2", "10.0.0.1", preview=True), "chat")
+
+
+_DESKTOP_TOKEN = "ab" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,scheme,port,peer,host,headers,desktop,accepted", [
+    # The desktop app window carries its per-launch listener token.
+    ("desktop window", "http", 8000, "127.0.0.1", "127.0.0.1:8000",
+     [(b"x-shuffle-desktop-listener", _DESKTOP_TOKEN.encode())], True, True),
+    # A separate browser tab on localhost beside the desktop app has no token.
+    ("chrome on loopback", "http", 8000, "127.0.0.1", "localhost:8000", [], True, False),
+    ("wrong desktop token", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-shuffle-desktop-listener", b"cd" * 32)], True, False),
+    ("loopback without desktop", "http", 8000, "127.0.0.1", "localhost:8000", [], False, True),
+    ("plaintext LAN", "http", 8000, "10.0.0.2", "10.0.0.1:8000", [], False, False),
+    ("LAN forged proto", "http", 8000, "10.0.0.2", "10.0.0.1:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("loopback forged proto", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    # Managed tunnel: cloudflared reaches only the loopback remote listener.
+    ("managed tunnel", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], False, True),
+    ("managed tunnel beside desktop", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], True, True),
+    ("tunnel visitor on http", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"http")], False, False),
+    ("tunnel without proto", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com", [], False, False),
+    ("unknown socket", "http", 9999, "127.0.0.1", "localhost:9999",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("TLS socket", "https", 8443, "10.0.0.2", "worker.example.com", [], False, True),
+])
+async def test_private_access_origins_through_real_ingress(monkeypatch, case, scheme, port, peer,
+                                                           host, headers, desktop, accepted):
+    """Transport trust comes from the accepting socket, never a client header."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.api import chat_access as api
+    from app.core import desktop_listener
+    from app.serve import IngressApplication
+
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "chat"}))
+    monkeypatch.setattr(desktop_listener, "_configured", desktop)
+    monkeypatch.setattr(desktop_listener, "_token", _DESKTOP_TOKEN if desktop else None)
+    seen = []
+
+    async def capture(scope, receive, send):
+        seen.append(scope)
+
+    # A client cannot pre-set the flag: the wrapper recomputes it per socket.
+    await IngressApplication(capture, 8000, 8001)({
+        "type": "http", "scheme": scheme, "method": "GET", "path": "/api/v1/chat-access/chat",
+        "headers": [(b"host", host.encode()), *headers], "server": ("127.0.0.1", port),
+        "client": (peer, 1234), "shuffle.forwarded_https": True, "state": {}}, None, None)
+    request = Request(seen[0])
+    if accepted:
+        assert await api.checked(request, "chat") == {"id": "chat"}, case
+        return
+    with pytest.raises(HTTPException) as error:
+        await api.checked(request, "chat")
+    assert error.value.status_code == 403, case
+    # Actionable for the common case of a browser tab beside the desktop app.
+    assert "desktop app window" in error.value.detail
+    assert "HTTPS remote access address" in error.value.detail
+    api.require_session.assert_not_awaited()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("row", [None, {"mode": "unexpected"}, {"mode": "voice", "owner_device_id": "peer"}])
