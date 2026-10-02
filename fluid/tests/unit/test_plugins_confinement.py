@@ -134,7 +134,14 @@ def test_load_plugin_skips_bad_and_disabled_servers(tmp_path: Path) -> None:
     assert plugin is not None and plugin.version == "1.0.0"
     assert set(plugin.mcp_servers) == {"web", "stdio"}
     assert plugin.mcp_servers["web"]["transport"] == "streamable_http"
-    assert plugin.mcp_servers["stdio"]["env"] == {"K": "v", "CLAUDE_PLUGIN_ROOT": str(root)}
+    # A root plugin.json is an Agent Plugins package: its servers get both
+    # formats' variable names.
+    data = home / "data" / "p@mp"
+    assert plugin.mcp_servers["stdio"]["env"] == {
+        "K": "v",
+        "PLUGIN_ROOT": str(root), "CLAUDE_PLUGIN_ROOT": str(root),
+        "PLUGIN_DATA": str(data), "CLAUDE_PLUGIN_DATA": str(data),
+    }
 
 
 def test_normalize_mcp_server_rejects_incomplete_entries() -> None:

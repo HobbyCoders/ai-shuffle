@@ -96,6 +96,13 @@ class PluginInfo(DictMixin):
     has_hooks: bool = False
     has_mcp: bool = False
     connector_type: Optional[str] = None
+    # Package format ("claude", "agent-plugins", "shuffle"), trust level
+    # ("official", "marketplace", "authored") and every component with its
+    # support status (see fluid.context.plugin_formats). Optional additions:
+    # older clients ignore them.
+    format: Optional[str] = None
+    trust: Optional[str] = None
+    components: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -144,3 +151,5 @@ class AvailablePlugin(DictMixin):
     connector_type: Optional[str] = None
     installed: bool = False
     enabled: bool = False
+    format: Optional[str] = None
+    components: List[Dict[str, Any]] = field(default_factory=list)

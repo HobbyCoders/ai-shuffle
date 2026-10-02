@@ -33,6 +33,19 @@
 	const hasSkills = $derived(plugin.skills && plugin.skills.length > 0);
 	// The details response carries no hook list, only whether the plugin ships hooks.
 	const hasHooks = $derived(plugin.has_hooks);
+	// Components the shared plugin reader found but this app does not run
+	// (an LSP server, a ChatGPT-hosted app, settings it cannot collect yet).
+	const notLoaded = $derived((plugin.components ?? []).filter((c) => c.support !== 'loaded'));
+	const COMPONENT_LABELS: Record<string, string> = {
+		mcp_server: 'MCP server',
+		lsp_server: 'LSP server',
+		output_style: 'Output style',
+		user_config: 'Settings',
+		app: 'App',
+		hook: 'Hook',
+		dependency: 'Dependencies'
+	};
+	const componentLabel = (kind: string) => COMPONENT_LABELS[kind] ?? kind;
 
 	// Format install date
 	function formatDate(dateStr: string): string {
@@ -335,6 +348,16 @@
 				<h4 class="plugin-detail-install-label">Install Location</h4>
 				<code class="plugin-detail-install-path">{plugin.install_path}</code>
 			</div>
+			{#if notLoaded.length}
+				<div class="plugin-detail-install-info" data-testid="plugin-not-loaded">
+					<h4 class="plugin-detail-install-label">Not loaded here</h4>
+					<ul class="plugin-detail-not-loaded">
+						{#each notLoaded as component (component.kind + ':' + component.name)}
+							<li><strong>{componentLabel(component.kind)} {component.name}</strong>: {component.reason}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 		{:else if activeTab === 'commands'}
 			<div class="plugin-detail-items">
 				{#each plugin.commands as command}
@@ -730,6 +753,18 @@
 		color: var(--text-primary, var(--foreground));
 		word-break: break-all;
 		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+	}
+
+	.plugin-detail-not-loaded {
+		margin: 0;
+		padding-left: var(--space-4, 16px);
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.plugin-detail-not-loaded strong {
+		font-weight: 500;
+		color: var(--text-primary, var(--foreground));
 	}
 
 	/* Item lists (commands, agents, skills) */

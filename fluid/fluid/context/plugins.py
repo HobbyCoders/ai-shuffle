@@ -1,11 +1,16 @@
 """Fluid plugin loading — skills, commands, agents, MCP servers.
 
-Ruling CE5. Plugins live in fluid's own home (``~/.fluid/plugins``) using the
-Claude Code plugin package format, so an installed Claude plugin can be copied
-in wholesale by the settings importer and just works. The enabled set comes
-from the merged ``enabledPlugins`` map in the fluid settings stack
-(:mod:`fluid.context.settings_stack`); provider homes (``~/.claude``) are never
-read at runtime.
+Ruling CE5. Plugins live in fluid's own home (``~/.fluid/plugins``). The
+enabled set comes from the merged ``enabledPlugins`` map in the fluid settings
+stack (:mod:`fluid.context.settings_stack`); provider homes (``~/.claude``) are
+never read at runtime.
+
+Package formats are read by :mod:`fluid.context.plugin_formats` — Claude Code
+(``.claude-plugin/plugin.json``) and Agent Plugins / OpenAI (root
+``plugin.json`` or ``.codex-plugin/plugin.json``) — so an installed Claude
+plugin can be copied in wholesale by the settings importer and just works, and
+an Agent Plugins package loads its skills and MCP servers the same way. This
+module only resolves WHERE a plugin lives and what the runtime takes from it.
 
 On-disk layout, in resolution order:
 
@@ -14,28 +19,29 @@ On-disk layout, in resolution order:
      beats ``1.2.0``; non-numeric directory names like ``unknown`` sort below
      every numeric one and are compared lexicographically among themselves).
   2. ``~/.fluid/plugins/marketplaces/<marketplace>/<plugin>/`` — a marketplace
-     git clone with the plugin in a subdirectory.
+     clone with the plugin in a subdirectory.
   3. ``~/.fluid/plugins/marketplaces/<marketplace>/`` — the clone root itself,
      when the marketplace *is* the plugin (its manifest names it).
 
-Manifest: ``.claude-plugin/plugin.json``, else ``plugin.json`` at the root. A
-missing or malformed manifest is not fatal (CE11) — the plugin still loads on
+A missing or malformed manifest is not fatal (CE11) — the plugin still loads on
 directory convention alone.
 
-Components (v1):
+Components the runtime loads:
 
   * skills   ``skills/*/SKILL.md``    → :class:`~fluid.context.instructions.Skill`
   * commands ``commands/*.md``        → :class:`~fluid.context.instructions.Command`
   * agents   ``agents/**/*.md``       → :class:`PluginAgent` (body read by ``agents.discover_agents``)
-  * MCP      ``.mcp.json`` or the manifest's ``mcpServers`` key
+  * MCP      ``.mcp.json`` / ``mcp.json`` or the manifest's ``mcpServers`` key
 
 All three component kinds are namespaced ``<plugin>:<name>`` — Claude Code's own
 convention, and what keeps a plugin from shadowing a user's project skill.
 Manifest path overrides are honored: ``skills`` ADDS to the default scan while
 ``commands`` and ``agents`` REPLACE theirs.
 
-Out of scope for v1 (log-and-ignore): LSP servers, themes, output styles,
-plugin hooks, plugin settings.json, userConfig, dependencies.
+Everything else a plugin declares (hooks, which the app's hook service runs;
+LSP servers, output styles, ChatGPT apps, userConfig, dependencies) is listed
+on the plugin's :class:`~fluid.context.plugin_formats.PluginRecord` with its
+support status, and not loaded here.
 
 Nothing here raises: a broken plugin is skipped with a ``logging`` warning and
 never takes the rest of discovery down with it (CE11).
@@ -43,11 +49,8 @@ never takes the rest of discovery down with it (CE11).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,46 +61,42 @@ from fluid.context.settings_stack import (
     load_settings_stack,
     mcp_toggles,
 )
-from fluid.context.instructions import Command, Skill, _read, parse_frontmatter
+from fluid.context.instructions import Command, Skill
+from fluid.context.plugin_formats import (  # noqa: F401 — re-exported API
+    FORMAT_AGENT_PLUGINS,
+    FORMAT_CLAUDE,
+    PluginAgent,
+    PluginComponent,
+    PluginRecord,
+    _md_files,
+    _rel_paths,
+    _resolve_under,
+    _skill_files,
+    find_manifest,
+    normalize_mcp_server,
+    raw_mcp_servers,
+    read_manifest,
+    read_plugin,
+    substitute_vars,
+)
 
 log = logging.getLogger(__name__)
 
 # A bare ``name`` in enabledPlugins means Anthropic's own marketplace.
 DEFAULT_MARKETPLACE = "claude-plugins-official"
 
-# ``${CLAUDE_PLUGIN_ROOT}`` / ``${CLAUDE_PROJECT_DIR}`` / ``${ANY_ENV_VAR}``.
-_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-_MANIFEST_NAMES = (Path(".claude-plugin") / "plugin.json", Path("plugin.json"))
-
-# Manifest keys v1 knowingly does not act on (CE5: log and ignore, never fail).
-_IGNORED_KEYS = (
-    "lspServers", "themes", "outputStyles", "hooks", "settings", "userConfig", "dependencies",
-)
+def _raw_mcp_servers(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Claude-format server declarations (kept for existing callers)."""
+    return raw_mcp_servers(root, manifest, FORMAT_CLAUDE)
 
 
 # ─── records ─────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True, kw_only=True)
-class PluginAgent:
-    """A plugin-provided subagent definition, advertised but not read.
-
-    Same progressive-disclosure shape as :class:`Skill`: the frontmatter's name
-    and description are parsed at discovery time, the body (the agent's system
-    prompt) is left on disk for :func:`fluid.context.agents.discover_agents`.
-    """
-
-    name: str  # namespaced: "<plugin>:<agent>"
-    description: str
-    path: str
-    scope: str = "plugin"
-    body_loaded: bool = False
-
-
-@dataclass(frozen=True, kw_only=True)
 class Plugin:
-    """One resolved Claude Code plugin and everything fluid takes from it."""
+    """One resolved plugin and everything fluid takes from it."""
 
     name: str
     marketplace: str
@@ -108,6 +107,8 @@ class Plugin:
     commands: list[Command] = field(default_factory=list)
     agents: list[PluginAgent] = field(default_factory=list)
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    format: str = FORMAT_CLAUDE
+    components: list[PluginComponent] = field(default_factory=list)
 
     @property
     def ref(self) -> str:
@@ -174,30 +175,6 @@ def _latest_version_dir(base: Path) -> Path | None:
     return max(versions, key=lambda d: _version_key(d.name))
 
 
-def _manifest_path(root: Path) -> Path | None:
-    for rel in _MANIFEST_NAMES:
-        candidate = root / rel
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def read_manifest(root: Path) -> dict[str, Any]:
-    """The plugin manifest at ``root``, or ``{}`` when missing or malformed."""
-    path = _manifest_path(root)
-    if path is None:
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        log.warning("skipping malformed plugin manifest %s: %s", path, exc)
-        return {}
-    if not isinstance(data, dict):
-        log.warning("skipping plugin manifest %s: expected a JSON object", path)
-        return {}
-    return data
-
-
 def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None) -> tuple[Path, str | None] | None:
     """Where ``name@marketplace`` lives on disk, with its version when known.
 
@@ -222,238 +199,22 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
     # The marketplace repo IS the plugin: accept its root only when a manifest
     # there actually names this plugin (or names nothing at all).
     mp_root = home / "marketplaces" / marketplace
-    if mp_root.is_dir() and _manifest_path(mp_root) is not None:
+    if mp_root.is_dir() and find_manifest(mp_root)[0] is not None:
         manifest_name = read_manifest(mp_root).get("name")
         if not manifest_name or str(manifest_name) == name:
             return mp_root, None
     return None
 
 
-# ─── component scanning ──────────────────────────────────────────────────────
-
-
-def _rel_paths(value: Any) -> list[str]:
-    """A manifest component override as a list of relative paths.
-
-    The on-disk convention writes ``"./commands/x.md"`` or a list of those; a
-    single string is accepted too.
-    """
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [v for v in value if isinstance(v, str)]
-    return []
-
-
-def _resolve_under(root: Path, rel: str) -> Path:
-    """Resolve a manifest-relative path (``./skills`` style) under ``root``."""
-    cleaned = rel.strip()
-    for prefix in ("./", ".\\"):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):]
-            break
-    return root / cleaned if cleaned else root
-
-
-def _skill_files(root: Path, manifest: dict[str, Any]) -> list[Path]:
-    """Every ``SKILL.md`` this plugin offers.
-
-    The default ``skills/`` scan always runs — a manifest ``skills`` entry ADDS
-    directories, it does not replace the convention. An entry may point at a
-    directory of skills, at one skill directory, or straight at a SKILL.md.
-    """
-    found: list[Path] = []
-    seen: set[str] = set()
-
-    def add(path: Path) -> None:
-        # Same identity the instruction walker uses (the resolved path),
-        # case-folded where the filesystem is, so a symlink or a case-only
-        # respelling cannot list one skill twice.
-        try:
-            key = os.path.normcase(str(path.resolve()))
-        except OSError:
-            key = os.path.normcase(str(path))
-        if path.is_file() and key not in seen:
-            seen.add(key)
-            found.append(path)
-
-    def scan(base: Path) -> None:
-        if base.is_file():
-            add(base)
-            return
-        if not base.is_dir():
-            return
-        direct = base / "SKILL.md"
-        if direct.is_file():
-            add(direct)
-            return
-        for skill_md in sorted(base.glob("*/SKILL.md")):
-            add(skill_md)
-
-    scan(root / "skills")
-    for rel in _rel_paths(manifest.get("skills")):
-        scan(_resolve_under(root, rel))
-    return found
-
-
-def _md_files(root: Path, manifest: dict[str, Any], key: str, *, recursive: bool) -> list[Path]:
-    """Markdown component files — manifest override REPLACES the default dir."""
-    overrides = _rel_paths(manifest.get(key))
-    bases = [_resolve_under(root, rel) for rel in overrides] if overrides else [root / key]
-    found: list[Path] = []
-    seen: set[str] = set()
-    for base in bases:
-        if base.is_file():
-            candidates = [base]
-        elif base.is_dir():
-            candidates = sorted(base.rglob("*.md") if recursive else base.glob("*.md"))
-        else:
-            continue
-        for path in candidates:
-            resolved = str(path).lower()
-            if resolved not in seen:
-                seen.add(resolved)
-                found.append(path)
-    return found
-
-
-def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Skill]:
-    out: list[Skill] = []
-    for skill_md in _skill_files(root, manifest):
-        fields, _ = parse_frontmatter(_read(skill_md))
-        local = fields.get("name") or skill_md.parent.name
-        out.append(
-            Skill(
-                name=f"{plugin_name}:{local}",
-                description=fields.get("description", ""),
-                path=str(skill_md),
-                scope="plugin",
-                body_loaded=False,
-            )
-        )
-    return out
-
-
-def _commands_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Command]:
-    return [
-        Command(name=f"{plugin_name}:{path.stem}", path=str(path), scope="plugin")
-        for path in _md_files(root, manifest, "commands", recursive=False)
-    ]
-
-
-def _agents_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[PluginAgent]:
-    out: list[PluginAgent] = []
-    for path in _md_files(root, manifest, "agents", recursive=True):
-        fields, _ = parse_frontmatter(_read(path))
-        local = fields.get("name") or path.stem
-        out.append(
-            PluginAgent(
-                name=f"{plugin_name}:{local}",
-                description=fields.get("description", ""),
-                path=str(path),
-            )
-        )
-    return out
+def plugin_data_dir(name: str, marketplace: str, *, home: Path | None = None) -> Path:
+    """The stable per-plugin data folder ``${CLAUDE_PLUGIN_DATA}``/``${PLUGIN_DATA}``
+    point at: ``~/.fluid/plugins/data/<name>@<marketplace>``. It survives plugin
+    updates (the version directory does not)."""
+    home = plugins_home() if home is None else home
+    return home / "data" / f"{name}@{marketplace}"
 
 
 # ─── MCP servers ─────────────────────────────────────────────────────────────
-
-
-def substitute_vars(
-    value: Any,
-    *,
-    plugin_root: Path | None,
-    project_dir: Path | str,
-    env: Mapping[str, str] | None = None,
-) -> Any:
-    """Expand ``${...}`` tokens through a server config, recursively.
-
-    ``${CLAUDE_PLUGIN_ROOT}`` and ``${CLAUDE_PROJECT_DIR}`` are the two the
-    plugin format defines; anything else reads ``env`` — the process
-    environment by default, or the caller's own map (the loader passes the
-    process environment overlaid with the settings stack's ``env`` for
-    ``mcp.json``). An absent variable expands to the empty string, matching
-    Claude Code. ``os.environ`` is only read, never written. ``plugin_root``
-    is ``None`` outside a plugin, where ``${CLAUDE_PLUGIN_ROOT}`` is looked up
-    like any other variable.
-    """
-    lookup = os.environ if env is None else env
-    if isinstance(value, str):
-
-        def repl(match: re.Match[str]) -> str:
-            var = match.group(1)
-            if var == "CLAUDE_PLUGIN_ROOT" and plugin_root is not None:
-                return str(plugin_root)
-            if var == "CLAUDE_PROJECT_DIR":
-                return str(project_dir)
-            return lookup.get(var, "")
-
-        return _VAR_RE.sub(repl, value)
-    if isinstance(value, dict):
-        return {
-            k: substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir, env=env)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir, env=env)
-            for v in value
-        ]
-    return value
-
-
-def _raw_mcp_servers(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    """The plugin's declared servers: an inline ``mcpServers`` dict, a path to a
-    JSON file, or the conventional ``.mcp.json`` at the plugin root."""
-    declared = manifest.get("mcpServers")
-    if isinstance(declared, dict):
-        return declared
-    path: Path | None = None
-    if isinstance(declared, str) and declared.strip():
-        path = _resolve_under(root, declared)
-    else:
-        default = root / ".mcp.json"
-        path = default if default.is_file() else None
-    if path is None:
-        return {}
-    if not path.is_file():
-        log.warning("plugin MCP config not found: %s", path)
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        log.warning("skipping malformed plugin MCP config %s: %s", path, exc)
-        return {}
-    if not isinstance(data, dict):
-        log.warning("skipping plugin MCP config %s: expected a JSON object", path)
-        return {}
-    servers = data.get("mcpServers", data)
-    return servers if isinstance(servers, dict) else {}
-
-
-def normalize_mcp_server(name: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
-    """Map a Claude-format server entry onto fluid's client config shape.
-
-    stdio entries pass through (command/args/env/cwd); ``type: "http"`` becomes
-    fluid's ``streamable_http`` transport; ``type: "sse"`` is skipped with a
-    warning — fluid's MCP client has no SSE transport, and silently downgrading
-    it would connect to the wrong endpoint.
-    """
-    kind = str(cfg.get("type") or cfg.get("transport") or "").strip().lower()
-    out = {k: v for k, v in cfg.items() if k not in ("type", "transport")}
-    if kind == "sse":
-        log.warning("skipping MCP server %r: sse transport is not supported", name)
-        return None
-    if kind in ("http", "streamable_http") or (not kind and "url" in cfg):
-        if not out.get("url"):
-            log.warning("skipping MCP server %r: http entry has no url", name)
-            return None
-        out["transport"] = "streamable_http"
-        return out
-    if not out.get("command"):
-        log.warning("skipping MCP server %r: no command and no url", name)
-        return None
-    return out
 
 
 def _mcp_servers_for(
@@ -462,27 +223,46 @@ def _mcp_servers_for(
     *,
     project_dir: Path | str,
     disabled: set[str],
+    fmt: str = FORMAT_CLAUDE,
+    servers: dict[str, Any] | None = None,
+    data_dir: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    for name, raw in _raw_mcp_servers(root, manifest).items():
+    declared = raw_mcp_servers(root, manifest, fmt) if servers is None else servers
+    root_vars = ("CLAUDE_PLUGIN_ROOT",) if fmt == FORMAT_CLAUDE else ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT")
+    data_vars = ("CLAUDE_PLUGIN_DATA",) if fmt == FORMAT_CLAUDE else ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")
+    for name, raw in declared.items():
         if not isinstance(raw, dict):
             log.warning("skipping MCP server %r: expected a JSON object", name)
             continue
         if name in disabled:
             log.debug("MCP server %r disabled by settings", name)
             continue
-        expanded = substitute_vars(raw, plugin_root=root, project_dir=project_dir)
+        expanded = substitute_vars(
+            raw, plugin_root=root, project_dir=project_dir, plugin_data=data_dir
+        )
         normalized = normalize_mcp_server(str(name), expanded)
         if normalized is None:
             continue
         if normalized.get("transport", "stdio") == "stdio":
-            # Claude Code exports the plugin root to the server process as
-            # well as substituting it in the config; a server that reads the
-            # variable at runtime (to find its own data files) needs both.
+            # Both formats export the plugin root (and data folder) to the
+            # server process as well as substituting them in the config; a
+            # server that reads the variable at runtime (to find its own data
+            # files) needs both.
             env = dict(normalized.get("env") or {})
-            env.setdefault("CLAUDE_PLUGIN_ROOT", str(root))
+            for var in root_vars:
+                env.setdefault(var, str(root))
+            if data_dir is not None:
+                for var in data_vars:
+                    env.setdefault(var, str(data_dir))
             normalized = {**normalized, "env": env}
         out[str(name)] = normalized
+    if data_dir is not None and out:
+        # Created on first use, like Claude Code, so a server can write to it.
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("cannot create plugin data folder %s: %s", data_dir, exc)
     return out
 
 
@@ -502,28 +282,35 @@ def load_plugin(
     if resolved is None:
         log.warning(
             "enabled plugin %s@%s is not installed under %s — skipping",
-            name, marketplace, plugins_home(),
+            name, marketplace, plugins_home() if home is None else home,
         )
         return None
     root, version = resolved
-    manifest = read_manifest(root)
-    plugin_name = str(manifest.get("name") or name or root.name)
-    ignored = [key for key in _IGNORED_KEYS if key in manifest]
-    if ignored:
-        log.debug("plugin %s: ignoring unsupported manifest keys %s", plugin_name, ignored)
-    declared_version = manifest.get("version") or version
+    record = read_plugin(root, name=name, source=marketplace, version=version)
+    skipped = [f"{c.kind}:{c.name}" for c in record.unsupported()]
+    if skipped:
+        log.debug("plugin %s: not loading %s", record.name, skipped)
+    data_dir = plugin_data_dir(name, marketplace, home=home)
     return Plugin(
-        name=plugin_name,
+        name=record.name,
         marketplace=marketplace,
         root=root,
-        version=str(declared_version) if declared_version else None,
-        manifest=manifest,
-        skills=_skills_for(plugin_name, root, manifest),
-        commands=_commands_for(plugin_name, root, manifest),
-        agents=_agents_for(plugin_name, root, manifest),
+        version=record.version,
+        manifest=record.manifest,
+        skills=record.skills,
+        commands=record.commands,
+        agents=record.agents,
         mcp_servers=_mcp_servers_for(
-            root, manifest, project_dir=cwd, disabled=disabled_mcp or set()
+            root,
+            record.manifest,
+            project_dir=cwd,
+            disabled=disabled_mcp or set(),
+            fmt=record.format,
+            servers=record.mcp_servers,
+            data_dir=data_dir,
         ),
+        format=record.format,
+        components=record.components,
     )
 
 
