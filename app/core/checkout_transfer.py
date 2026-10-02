@@ -90,8 +90,32 @@ def _preflight(cwd):
     if any(line.startswith(b"S ") or line[:1].islower() for line in git(cwd, "ls-files", "-v").splitlines()):
         raise ValueError("Resume cannot commit sparse or assume-unchanged files.")
     for name in git(cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z").decode().split("\0"):
-        if name and (Path(name).name == ".env" or Path(name).suffix.lower() in (".pem", ".key")):
-            raise ValueError("Credential files must be removed from tracking and ignored before resuming elsewhere.")
+        if name and _is_credential_file(Path(cwd) / name):
+            raise ValueError(f"Credential file {name} must be removed from tracking and ignored before resuming elsewhere.")
+
+
+def _is_credential_file(path):
+    """A .env file, or a .pem/.key file that is not clearly public.
+
+    Public keys and certificates (for example a release-signing public key) are
+    safe to push and must not block a move. Anything else with those suffixes,
+    including unreadable or unrecognised content, counts as a credential, so
+    the check fails closed.
+    """
+    if path.name == ".env":
+        return True
+    if path.suffix.lower() not in (".pem", ".key"):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(65536)
+    except OSError:
+        return True
+    if any(marker in head for marker in (b"PRIVATE KEY", b"BEGIN OPENSSH", b"PuTTY-User-Key-File")):
+        return True
+    public = (b"-----BEGIN PUBLIC KEY-----", b"-----BEGIN RSA PUBLIC KEY-----",
+              b"-----BEGIN CERTIFICATE-----", b"-----BEGIN PGP PUBLIC KEY BLOCK-----")
+    return not any(marker in head for marker in public)
 
 
 def export_checkout(cwd, branch, expected_remote=None):
