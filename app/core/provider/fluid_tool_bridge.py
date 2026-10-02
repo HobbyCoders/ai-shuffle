@@ -115,6 +115,9 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ListSessions": "safe",
     "MessageSession": "write",
     "StartSession": "write",
+    "SettleSession": "write",
+    "UnsettleSession": "write",
+    "ArchiveSession": "write",
     # Agent messaging with this session's Task workers and its parent — the
     # same risk fluid's bare-named originals carry.
     "ListAgents": "safe",
@@ -249,6 +252,7 @@ NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "Task", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
     "ListSessions", "MessageSession", "StartSession",
+    "SettleSession", "UnsettleSession", "ArchiveSession",
     "ListAgents", "SendMessage",
 })
 

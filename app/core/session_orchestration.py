@@ -1,7 +1,7 @@
-"""Owner-scoped, durable top-level session orchestration.
+"""Owner-scoped top-level session coordination and sidebar management.
 
-Every action is a peer-authored turn, never a user command. Session identity,
-permissions and ancestry come from the host, not model-authored arguments.
+Coordination queues peer-authored turns, never user commands. Sidebar tools only
+change membership. Identity, permissions and ancestry come from the host.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _text(data, key, limit):
     return value.strip()
 
 
-def _local_top_level(row):
+def _local_top_level(row, *, allow_settled=False):
     from app.core.config import settings
     from app.network.runners import self_device_id
     from app.core.assistant_service import is_primary_session
@@ -36,7 +36,7 @@ def _local_top_level(row):
     visible = row and (not row.get("hidden") or is_primary_session(row["id"]))
     return bool(visible and row.get("instance_id") == settings.effective_instance_id
                 and row.get("owner_device_id") in (None, self_device_id())
-                and row.get("is_active")
+                and (allow_settled or row.get("is_active"))
                 and not row.get("is_worker") and not row.get("parent_session_id")
                 and row.get("status") != "archived" and row.get("mode") != "voice")
 
@@ -52,12 +52,12 @@ def _owner(row):
     return (row.get("api_user_id"), (principal or {}).get("owner", "install-admin"))
 
 
-def _caller(session_id):
+def _caller(session_id, *, allow_settled=False):
     from app.db import sessions
     from app.core import mobile_tool_identity
     from app.core.task_registry import task_registry
     row = sessions.get_session(session_id) if session_id else None
-    if not _local_top_level(row):
+    if not _local_top_level(row, allow_settled=allow_settled):
         raise ValueError("Top-level orchestration requires an active, local, visible top-level chat.")
     if task_registry.is_user_stopped(session_id):
         raise ValueError("The user stopped this session; only the user may continue it.")
@@ -83,21 +83,31 @@ def _target(caller, session_id, *, allow_stopped=False):
 def list_sessions(session_id, data):
     from app.db import sessions
     from app.core.task_registry import task_registry
-    caller = _caller(session_id)
+    caller = _caller(session_id, allow_settled=True)
     scope = data.get("scope", "project")
+    state = data.get("state", "active")
+    if state not in ("active", "settled", "archived", "all"):
+        raise ValueError("state must be active, settled, archived or all")
     if scope not in ("project", "all"):
         raise ValueError("scope must be project or all")
     offset = data.get("offset", 0)
     if type(offset) is not int or offset < 0:
         raise ValueError("offset must be a non-negative integer")
     rows = sessions.get_sessions(api_user_id=caller.get("api_user_id") or "",
-                                 active_only=True, limit=100, offset=offset)
+                                 active_only=state == "active", limit=100, offset=offset)
     result = []
     caller_owner = _owner(caller)
+    from app.core.session_management import visible_session
     for row in rows:
-        if (row["id"] == session_id or not _local_top_level(row)
-                or _owner(row) != caller_owner
-                or task_registry.is_user_stopped(row["id"])):
+        if state == "active":
+            eligible = _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
+        else:
+            eligible = visible_session(row)
+        if row["id"] == session_id or not eligible or _owner(row) != caller_owner:
+            continue
+        if state == "settled" and (row.get("is_active") or row.get("status") == "archived"):
+            continue
+        if state == "archived" and row.get("status") != "archived":
             continue
         if scope == "project" and (
             row.get("project_v2_id") or row.get("project_id")
@@ -105,7 +115,7 @@ def list_sessions(session_id, data):
             continue
         entry = {key: row.get(key) for key in (
             "id", "title", "status", "profile_id", "project_id", "project_v2_id",
-            "branch", "model", "updated_at")}
+            "branch", "model", "updated_at", "is_active", "owner_device_id")}
         stamp = entry.get("updated_at")
         if hasattr(stamp, "isoformat"):
             entry["updated_at"] = stamp.isoformat()
@@ -266,10 +276,14 @@ def make_handler(supplier):
         from app.core import turn_scheduler
         from app.core.task_registry import task_registry
         from app.db import turns
+        from app.network import control, session_active
         try:
             sender_id = supplier()
             if action == "list":
                 result = await asyncio.to_thread(list_sessions, sender_id, data)
+            elif action in ("settle", "unsettle", "archive"):
+                from app.core.session_management import manage
+                result = await manage(sender_id, data, action)
             else:
                 target_id = sender_id if action == "start" else data.get("session_id")
                 sender_generation = task_registry.stop_generation(sender_id)
@@ -303,6 +317,7 @@ def make_handler(supplier):
                     except Exception:
                         log.exception("Session queued, but sidebar broadcast failed")
             return ToolOutcome(text=json.dumps(result), ui=result)
-        except (ValueError, PermissionError) as exc:
+        except (ValueError, PermissionError, LookupError, control.RunnerUnreachable,
+                control.ControlRefused, session_active.MembershipUpdateFailed) as exc:
             return ToolOutcome(text=str(exc), is_error=True)
     return handle

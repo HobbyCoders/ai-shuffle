@@ -1821,57 +1821,17 @@ async def set_session_active(
     """Set the active status of a session. Returns the updated session."""
     existing = await require_session(request, session_id)
 
-    from app.network import control, engine, session_active
-    if engine.context() is not None:
-        try:
-            if payload.archived is None:
-                # Settle/reopen is shared membership: any worker commits it,
-                # even while the session's execution owner is offline.
-                return await session_active.set_shared(session_id, payload.is_active)
-            # Archive/restore changes the owner's session status, so it still
-            # rides the owner-authoritative path.
-            owner = control.owner_of(existing)
-            if owner is not None:
-                await session_active.set_remote(owner, session_id, payload.is_active, payload.archived)
-                # Keep this worker's shared membership in step so a stale local
-                # record cannot project the old value onto the archived mirror.
-                return await session_active.set_shared(session_id, False if payload.archived else payload.is_active)
-            await session_active.set_local(session_id, payload.is_active, payload.archived)
-            return await run_sync(database.get_session, session_id)
-        except control.RunnerUnreachable as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except control.ControlRefused as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except PermissionError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except LookupError as exc:
-            raise HTTPException(404, str(exc)) from exc
-
+    from app.network import control, session_active
     try:
-        session = await run_sync(database.set_session_active, session_id, payload.is_active, payload.archived)
-    except PermissionError as exc:
+        return await session_active.update_membership(existing, payload.is_active, payload.archived)
+    except session_active.MembershipUpdateFailed as exc:
+        raise HTTPException(500, str(exc)) from exc
+    except control.RunnerUnreachable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (control.ControlRefused, PermissionError) as exc:
         raise HTTPException(409, str(exc)) from exc
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update active status"
-        )
-
-    # Fan the Active-membership flip out to the user's other devices so their
-    # sidebars re-group without waiting for a refetch. Best-effort: the caller
-    # already got its authoritative row back.
-    try:
-        from app.core.sync_engine import sync_engine
-        await sync_engine.broadcast_user_session_updated(
-            user_id=session.get("api_user_id") or "admin",
-            session_id=session_id,
-            updates={"is_active": bool(session.get("is_active")), "status": session.get("status")},
-            source_device_id=None,
-        )
-    except Exception:  # noqa: BLE001 — list refresh is best-effort
-        pass
-
-    return session
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 # ============================================================================

@@ -46,6 +46,7 @@ def mock_database():
             patch("app.api.sessions_export.database", mock_db), \
             patch("app.api.sessions_fork.database", mock_db), \
             patch("app.api.sessions_worktree.database", mock_db), \
+            patch("app.network.session_active.database", mock_db), \
             patch("app.api.common.database", mock_db):
         # Set up default returns
         mock_db.get_session_tags.return_value = []

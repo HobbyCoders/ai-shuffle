@@ -135,6 +135,29 @@ async def handle(body: dict, from_device: str) -> dict:
     return {"envelope": envelope}
 
 
+class MembershipUpdateFailed(RuntimeError):
+    """The local writer did not return an updated session."""
+
+
+async def update_membership(existing: dict, active: bool, archived: Optional[bool] = None) -> dict:
+    """Apply an authorized UI or tool edit through the same owner/sync paths."""
+    session_id = existing["id"]
+    if engine.context() is not None:
+        if archived is None:
+            return await set_shared(session_id, active)
+        owner = control.owner_of(existing)
+        if owner is not None:
+            await set_remote(owner, session_id, active, archived)
+            # Prevent a stale local membership record overriding the owner reply.
+            return await set_shared(session_id, False if archived else active)
+        return await set_local(session_id, active, archived)
+    row = await run_sync(database.set_session_active, session_id, active, archived)
+    if row is None:
+        raise MembershipUpdateFailed("Failed to update active status")
+    await _broadcast(row, session_id)
+    return row
+
+
 async def set_local(session_id: str, active: bool, archived: Optional[bool] = None) -> dict:
     """Settle, reopen, archive or restore a session this worker owns, for its own UI."""
     row, _envelope = await run_sync(lambda: _write(session_id, active, archived=archived, local=True))

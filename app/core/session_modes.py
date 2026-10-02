@@ -367,6 +367,7 @@ PROACTIVE_TOOL_SURFACE = ["WebSearch", "WebFetch", "AssistantReadSource"]
 PROACTIVE_DENIED_TOOLS = [
     "Bash", "Monitor", "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
     "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
+    "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
     "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "Skill", "ToolSearch",

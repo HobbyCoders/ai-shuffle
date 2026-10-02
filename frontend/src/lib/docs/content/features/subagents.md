@@ -66,6 +66,26 @@ limits bound each autonomous chain to **4 new sessions, 32 total actions and 8
 hops**; only new user input starts a fresh budget. Existing `Task`, `Swarm`,
 `ListAgents` and `SendMessage` retain their parent/subagent semantics.
 
+## Session organization
+
+When asked to organize chats, agents can use **SettleSession** to move a chat out
+of Active, **UnsettleSession** to put a settled chat back in Active, and
+**ArchiveSession** to archive it without deleting the conversation. Each takes an
+exact `session_id`; the current chat is also allowed. These are write tools and
+use the same permission gates and sidebar updates as the app's controls.
+
+`ListSessions(state="settled")` finds settled chats. `state="archived"` finds
+archives, and `state="all"` includes both, plus active and stopped chats. These
+management views include same-owner chats on other workers; they do not make
+those chats eligible for messaging. Project scope and pagination still apply.
+
+None of these actions starts or stops work, clears a user stop, or deletes a
+transcript. Settling and unsettling work even when the execution worker is
+offline; archiving requires that worker to be reachable. Archived chats must be
+restored in the app before they can be unsettled. Hidden, voice and subagent
+chats are excluded, and persistent personal assistant chats cannot be settled or
+archived. Other users' chats are never accessible.
+
 ## Where to look now
 
 - [Agents](/docs/features/profiles) — the unified configuration model (tools, prompt, memory, the agents it can call).

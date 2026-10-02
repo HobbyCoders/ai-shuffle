@@ -1,4 +1,4 @@
-"""Host-owned coordination between independent, visible top-level sessions."""
+"""Host-owned coordination and sidebar management for top-level sessions."""
 from fluid.tools.registry import ToolSpec, ToolOutcome
 
 _COMMON = (
@@ -18,15 +18,30 @@ def _handler(action):
     return handle
 
 
+def _management_tool(name, action, description):
+    return (ToolSpec(name=name, description=description + (
+        " Use an exact session_id from ListSessions (state='all' includes settled and remote chats); "
+        "the current chat ID is also allowed. Only same-owner top-level chats are accessible. "
+        "Hidden, voice and subagent chats are refused; personal assistant homes cannot be settled "
+        "or archived. Use only when the user requests session organization."),
+        input_schema={"type": "object", "properties": {
+            "session_id": {"type": "string", "minLength": 1, "maxLength": 200}},
+            "required": ["session_id"], "additionalProperties": False},
+        risk="write", requires_extra=("session_orchestration",)), _handler(action))
+
+
 SPECS = (
     (ToolSpec(name="ListSessions", description=(
         "Find active top-level peer chats on this worker owned by the same user, "
         "including idle chats in the Active sidebar. Returns IDs, titles, projects, "
         "models and status, not transcripts. Judge relevance before messaging. "
         "Default scope is this project; use scope='all' for relevant cross-project work. "
+        "Use state='settled', 'archived' or 'all' for sidebar management; these also include "
+        "stopped chats and chats on other workers, which are not messaging targets. "
         "Follow next_offset when present; an empty filtered page may have more pages. "
         + _COMMON), input_schema={"type": "object", "properties": {
             "scope": {"type": "string", "enum": ["project", "all"]},
+            "state": {"type": "string", "enum": ["active", "settled", "archived", "all"]},
             "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": False},
         risk="safe", requires_extra=("session_orchestration",)), _handler("list")),
     (ToolSpec(name="MessageSession", description=(
@@ -61,4 +76,13 @@ SPECS = (
             "request_id": {"type": "string", "maxLength": 120}},
             "required": ["title", "prompt", "request_id"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("start")),
+    _management_tool("SettleSession", "settle",
+        "Move a chat from Active to Settled without stopping its work. "
+        "This also works when its execution worker is offline."),
+    _management_tool("UnsettleSession", "unsettle",
+        "Move a settled chat back to Active without starting a turn or clearing a user stop. "
+        "Archived chats must first be restored in the app."),
+    _management_tool("ArchiveSession", "archive",
+        "Archive a chat and remove it from Active without deleting its conversation or stopping work. "
+        "Its execution worker must be reachable. Repeating this action is safe."),
 )
