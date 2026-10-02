@@ -46,6 +46,22 @@ class DarwinBackendTests(unittest.TestCase):
             files._darwin_flags.cache_clear()
         self.assertIsNotNone(files._darwin_flags())
 
+    def test_flag_must_also_refuse_a_final_symlink(self):
+        # The walk drops O_NOFOLLOW, so a kernel that only refused symlinks in
+        # the middle of a path would follow a final one. The probe refuses it.
+        real_open = os.open
+        def middle_only(name, flags, *args, **kwargs):
+            if name == "l" and flags & files._NOFOLLOW_ANY:
+                flags &= ~files._NOFOLLOW_ANY
+            return real_open(name, flags, *args, **kwargs)
+        files._darwin_flags.cache_clear()
+        try:
+            with patch.object(files.os, "open", side_effect=middle_only):
+                self.assertIsNone(files._darwin_flags())
+        finally:
+            files._darwin_flags.cache_clear()
+        self.assertIsNotNone(files._darwin_flags())
+
 
 @unittest.skipUnless(files.available(), "Linux openat2 or the macOS descriptor walk required")
 class ChatFileFenceTests(unittest.TestCase):

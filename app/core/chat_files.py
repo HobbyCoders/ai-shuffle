@@ -107,12 +107,15 @@ def _darwin_flags() -> int | None:
                         or _mount(top)[0] != os.stat(base).st_dev):
                     return None
                 opened("d/f", os.O_RDONLY | _NOFOLLOW_ANY, dir_fd=top)
-                try:
-                    opened("l/f", os.O_RDONLY | _NOFOLLOW_ANY, dir_fd=top)
-                    return None
-                except OSError as error:
-                    if error.errno != errno.ELOOP:
+                # The walk strips O_NOFOLLOW, so the flag must also refuse a
+                # symlink as the last component, not only in the middle.
+                for link in ("l/f", "l"):
+                    try:
+                        opened(link, os.O_RDONLY | _NOFOLLOW_ANY, dir_fd=top)
                         return None
+                    except OSError as error:
+                        if error.errno != errno.ELOOP:
+                            return None
                 flags = _NOFOLLOW_ANY
                 try:
                     inner = opened("d", os.O_RDONLY | os.O_DIRECTORY | _RESOLVE_BENEATH, dir_fd=top)
