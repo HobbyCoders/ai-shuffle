@@ -26,7 +26,7 @@ on:
       - 'frontend/tests/BrowserWorkspaceParent.svelte'
       - 'frontend/tests/verify-provider-login.mjs'
       - 'frontend/tests/verify-browser-cold-start.mjs'
-      - 'frontend/src/lib/components/deck/cards/settings/providers/OpenAICredits.svelte'
+      - 'frontend/src/lib/components/settings/providers/tabs/KeyUsage.svelte'
       - 'frontend/package*.json'
       - 'tests/test_browser_workspace_integration.py'
       - 'requirements*.txt'
