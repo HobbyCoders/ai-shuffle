@@ -261,39 +261,28 @@ async function verifyPlaceholder(width) {
 	assert.ok(seen.has(LONG_PLACEHOLDER) && seen.has('Ask anything'), `both lane placeholders covered: ${[...seen]}`);
 }
 
-// #1611/#1616: on a fresh composer the call button shows but cannot start a
-// call. A tap on a phone says why, briefly, and nothing reaches the voice API.
-async function verifyCallButtonTap(width) {
+// #1616 (answered, intended): a fresh composer has no conversation to call,
+// so the call button stays absent even with voice on, and nothing reaches the
+// voice API. The setting fetch is awaited first so absence is not vacuous.
+async function verifyNoCallOnFreshComposer(width) {
 	const h = await harness(width, 844);
 	const { page } = h;
 	await h.load({ layout: 'compact', mode: 'chat', voice: 'on' });
 	await page.locator('.tiptap').tap();
 	await page.waitForTimeout(350);
-	const call = page.locator('.controls-dock .voice-call-btn');
-	await call.waitFor();
-	assert.equal(await call.getAttribute('aria-disabled'), 'true', 'fresh composer call button is unavailable');
-	// Playwright counts aria-disabled as disabled, so read the native property
-	// and tap with force (a real touch at the button, minus that wait).
-	assert.equal(await call.evaluate(button => button.disabled), false, 'touch keeps it tappable so it can explain');
-	const reason = await call.getAttribute('title');
-	assert.match(reason, /send a message/i);
-	await call.tap({ force: true });
-	const banner = page.locator('.banner-host');
-	await banner.waitFor();
-	assert.ok((await banner.innerText()).includes(reason), 'tap shows the tooltip reason');
-	await call.tap({ force: true });
-	assert.equal(await page.locator('.banner-host .banner').count(), 1, 'a repeat tap does not stack banners');
-	await page.screenshot({ path: `${artifacts}/${width}-call-explained.png` });
-	await banner.waitFor({ state: 'detached', timeout: 5000 });
+	await page.locator('.controls-dock').waitFor();
+	await page.waitForFunction(() => window.fixtureRequests.some(path => path.endsWith('/settings/voice')));
+	await page.waitForTimeout(100);
+	assert.equal(await page.locator('.voice-call-btn').count(), 0, 'fresh composer has no call button');
 	const voiceCalls = await page.evaluate(() => window.fixtureRequests.filter(path => /\/voice\//.test(path)));
 	assert.deepEqual(voiceCalls, [], 'no call or voice session was requested');
-	console.log(`PASS ${width}px: fresh-composer call tap explains itself and auto-dismisses`);
+	console.log(`PASS ${width}px: fresh composer shows no call button with voice on`);
 	await h.close();
 }
 
 try {
 	for (const width of [320, 360, 390]) await verifyPlaceholder(width);
-	await verifyCallButtonTap(320);
+	await verifyNoCallOnFreshComposer(320);
 	for (const width of [320, 390]) {
 		await verifyTouchSizing(width, 844, 'compact');
 		await verifyTouchSizing(width, 430, 'compact');

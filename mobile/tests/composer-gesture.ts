@@ -18,7 +18,7 @@ const project = { id: 'composer-fixture', name: 'mobile-composer-repository-with
 // Install isolated transports before importing the real component/store graph.
 // No request reaches a backend, and every navigation starts with the same picks.
 localStorage.setItem('ai-shuffle.sessionMode', mode);
-// `voice=on` turns the voice surface on so the call button renders.
+// `voice=on` turns the voice surface on (the call button still needs a session).
 const voice = params.get('voice') === 'on';
 const requests: string[] = [];
 (window as unknown as { fixtureRequests: string[] }).fixtureRequests = requests;

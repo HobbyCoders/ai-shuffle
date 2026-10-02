@@ -1155,8 +1155,9 @@
 						/>
 
 						<!-- Voice call (VM19): starts a call on this conversation. It
-						     never creates a session: on a fresh composer and while the
-						     session is working or parked it shows disabled with the reason. -->
+						     renders nothing on a fresh composer (no session yet) and
+						     shows disabled with the reason while the session is
+						     working or parked. -->
 						<VoiceCallButton
 							disabled={isUploading || isRecording || isTranscribing}
 							disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}

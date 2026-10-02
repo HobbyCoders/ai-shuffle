@@ -26,15 +26,11 @@
 		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
 	);
 	const legacyVoice = $derived($activeSession.mode === 'voice');
-	// A fresh composer has no conversation to attach a call to yet. The button
-	// stays visible there (disabled) so the entry point is discoverable.
-	const freshComposer = $derived(!$activeSession.sessionId);
-	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote));
+	const permittedSurface = $derived(!!$activeSession.sessionId && !sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote);
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
 	// Calls start only on a ready or finished conversation (see callBusyReason).
 	const blockedReason = $derived(
-		freshComposer ? 'Send a message to start this conversation, then you can call it'
-		: callBusyReason($activeSession, sessionRow)
+		callBusyReason($activeSession, sessionRow)
 			?? (disabled ? (disabledReason || 'Unavailable right now') : null)
 	);
 	// On a touch screen the tooltip never shows, so the blocked button stays

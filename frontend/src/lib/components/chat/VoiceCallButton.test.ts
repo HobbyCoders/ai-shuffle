@@ -32,13 +32,9 @@ describe('call action on a conversation', () => {
   await fireEvent.click(await callButton());
   expect(mocks.startCallForSession).toHaveBeenCalledWith('legacy', { attach: false });
  });
- it('is visible but disabled on a fresh composer and never creates a session', async () => {
+ it('never creates an implicit voice session for an empty composer', async () => {
   active.set({ ...ready, sessionId: null, mode: 'chat' }); render(VoiceCallButton);
-  const button = await callButton() as HTMLButtonElement;
-  expect(button.disabled).toBe(true);
-  expect(button.title).toMatch(/send a message/i);
-  await fireEvent.click(button);
-  expect(mocks.startCallForSession).not.toHaveBeenCalled();
+  await Promise.resolve(); expect(screen.queryByRole('button')).toBeNull();
  });
  it('is absent when the configured voice surface is disabled', async () => {
   mocks.isVoiceEnabled.mockResolvedValue(false); render(VoiceCallButton);
@@ -90,7 +86,6 @@ describe('call start gate while the session is busy', () => {
 });
 describe('a blocked call button explains itself on touch screens', () => {
  it.each([
-  ['a fresh composer', { sessionId: null, mode: 'chat' }, /send a message/i, []],
   ['a working session', { isStreaming: true }, /finishes working/, []],
   ['a parked session', {}, /background tasks finish/, [{ id: 'home', status: 'active', parked_task_kind: 'agent' }]],
  ])('a tap on %s shows the tooltip reason as a brief banner', async (_label, state, reason, sessionRows) => {
@@ -109,7 +104,7 @@ describe('a blocked call button explains itself on touch screens', () => {
   expect(options.duration_ms as number).toBeGreaterThan(0);
  });
  it('replaces the previous explanation instead of stacking banners', async () => {
-  touchScreen(); active.set({ ...ready, sessionId: null }); render(VoiceCallButton);
+  touchScreen(); active.set({ ...ready, isStreaming: true }); render(VoiceCallButton);
   const button = await callButton() as HTMLButtonElement;
   await vi.waitFor(() => expect(button.disabled).toBe(false));
   await fireEvent.click(button);
