@@ -91,7 +91,6 @@ _LOCAL_SETTING_PATTERNS = [
         r"^port$|^host$|^advertise_url",
         r"^tunnel_",
         r"^openai_billing_",
-        r"^fal_billing_api_key$",
         r"^openrouter_billing_key:",
         r"^oauth_state",
     )
@@ -310,11 +309,12 @@ _register(Collection(
             "parent_session_id", "fork_point_message_index", "owner_device_id", "launched_model",
             "first_model", "project_v2_id", "branch", "placement", "provider_id", "model", "effort",
             "permission_mode", "context_window", "workspace_project_ids", "fast", "mode", "hidden",
-            "is_worker", "pr_number", "pr_url", "pr_state"),
+            "is_worker", "pr_number", "pr_url", "pr_state", "work_ms", "work_started_at"),
     json_fields=("placement", "workspace_project_ids"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
-                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream"),
+                  "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
+                  "workspace_facts"),
     notes="Session catalog. Owner-ordered: only the owner device publishes."))
 
 _register(Collection(

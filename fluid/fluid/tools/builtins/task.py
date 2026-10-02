@@ -39,7 +39,13 @@ import inspect
 import re
 from typing import Any
 
-from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND, SWARM_ROUTING
+from fluid.tools.fragments import (
+    DELEGATION_SIZING,
+    DONT_PREDICT_PENDING,
+    END_TURN_ON_BACKGROUND,
+    SUBAGENT_WORKTREE_GUIDANCE,
+    SWARM_ROUTING,
+)
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -62,7 +68,7 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "tools — it does not see this conversation and cannot ask you a "
         "follow-up question, so the prompt you send is the entire brief it "
         "will ever get.\n"
-        "\n"
+        "\n" + SUBAGENT_WORKTREE_GUIDANCE + "\n\n" +
         "Available agent types are listed under '# Available agent types' in "
         "your system prompt. Use only names listed there; when no such section "
         "exists, do not call Task.\n"
@@ -76,7 +82,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "need to keep\n"
         + (f"- {SWARM_ROUTING}\n" if has("Swarm") else
            "- Independent work that can run in parallel: send the Task calls "
-           "together rather than waiting between independent assignments\n") +
+           "together rather than waiting between independent assignments. "
+           f"{DELEGATION_SIZING}\n") +
         "- Context-heavy work you want kept out of this conversation\n"
         "\n"
         "## When NOT to Use This Tool\n"

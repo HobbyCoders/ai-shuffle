@@ -88,7 +88,7 @@ it('clears only the successfully consumed choice in storage and account sync, no
  const project={projectId:'local',projectV2Id:'shared'};
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
  p.set('project',project); p.set('checkout',choice); p.set('model','model-to-keep');
- const consume=p.captureNewBranchChoice(project,choice.branch,true);
+ const consume=p.claimBranchChoice(project,choice.branch,true).consume;
  // The same account snapshot arriving during POST is not a new selection.
  mocks.adapters.get('composer.checkout')!.apply({...choice});
  mocks.save.mockClear();
@@ -107,7 +107,7 @@ it.each(['explicit-repick','remote-change-and-return','account-change'])('protec
  const project={projectId:'local',projectV2Id:null};
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
  p.set('checkout',choice);
- const consume=p.captureNewBranchChoice(project,choice.branch,true);
+ const consume=p.claimBranchChoice(project,choice.branch,true).consume;
  if(change==='explicit-repick') p.set('checkout',{...choice});
  if(change==='remote-change-and-return') {
   mocks.adapters.get('composer.checkout')!.apply({...choice,branch:'topic/other'});
@@ -125,14 +125,55 @@ it('does not consume another project, branch, or existing-worktree preference', 
  const project={projectId:'local',projectV2Id:null};
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
  p.set('checkout',choice); mocks.save.mockClear();
- p.captureNewBranchChoice({...project,projectId:'different'},choice.branch,true)();
- p.captureNewBranchChoice(project,'topic/different',true)();
- p.captureNewBranchChoice(project,choice.branch,false)();
+ p.claimBranchChoice({...project,projectId:'different'},choice.branch,true).consume();
+ p.claimBranchChoice(project,'topic/different',true).consume();
+ p.claimBranchChoice(project,choice.branch,false).consume();
  expect(p.current.checkout).toEqual(choice); expect(mocks.save).not.toHaveBeenCalled();
  const existing={...project,kind:'existing' as const,worktreeId:'wt',branch:choice.branch};
  p.set('checkout',existing); mocks.save.mockClear();
- p.captureNewBranchChoice(project,choice.branch,true)();
+ p.claimBranchChoice(project,choice.branch,true).consume();
  expect(p.current.checkout).toEqual(existing); expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it('consumes any remembered branch pick, including an existing branch, but not a legacy worktree pick (#1528)', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const project={projectId:'local',projectV2Id:null};
+ // New branch... creates the branch up front, so it is remembered like a listed branch.
+ const listed={...project,kind:'branch' as const,branch:'live/1528-explicit',baseBranch:'main',createNew:false};
+ p.set('checkout',listed);
+ // A request that would create the branch does not match the staged pick.
+ p.claimBranchChoice(project,listed.branch,true).consume();
+ expect(p.current.checkout).toEqual(listed);
+ p.claimBranchChoice(project,listed.branch,false).consume();
+ expect(p.current.checkout).toBeNull();
+ const legacy={...project,kind:'existing' as const,worktreeId:'wt',branch:'feature/legacy'};
+ p.set('checkout',legacy);
+ p.claimBranchChoice(project,legacy.branch,false).consume();
+ expect(p.current.checkout).toEqual(legacy);
+});
+
+it('marks the choice claimed while a create is in flight and keeps it after a failure', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const project={projectId:'local',projectV2Id:null};
+ const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:false};
+ p.set('checkout',choice);
+ expect(p.checkoutClaimed).toBe(false);
+ const claim=p.claimBranchChoice(project,choice.branch,false);
+ expect(p.checkoutClaimed).toBe(true);
+ // The same account snapshot echoed back is still the claimed choice.
+ mocks.adapters.get('composer.checkout')!.apply({...choice});
+ expect(p.checkoutClaimed).toBe(true);
+ mocks.save.mockClear();
+ claim.release();
+ claim.consume();
+ expect(p.checkoutClaimed).toBe(false);
+ expect(p.current.checkout).toEqual(choice); expect(mocks.save).not.toHaveBeenCalled();
+ // A newer pick is not covered by an older claim.
+ const again=p.claimBranchChoice(project,choice.branch,false);
+ p.set('checkout',{...choice,branch:'topic/next'});
+ expect(p.checkoutClaimed).toBe(false);
+ again.consume();
+ expect(p.current.checkout?.branch).toBe('topic/next');
 });
 
 it('does not let an old queued callback consume a newer account snapshot', async () => {

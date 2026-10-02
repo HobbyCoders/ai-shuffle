@@ -29,6 +29,17 @@ describe('CreateBranchModal', () => {
 		expect(screen.queryByRole('dialog')).toBeNull();
 	});
 
+	it('renders at <body>, outside the mounting container, and leaves with it', async () => {
+		// The composer mounts it from a row that paints under the editor row
+		// (tests/verify-create-branch-modal.mjs checks the real stacking).
+		const view = render(CreateBranchModal, { props: { open: true, onClose } });
+		const dialog = screen.getByRole('dialog', { name: 'Create a branch' });
+		expect(dialog.parentElement).toBe(document.body);
+		expect(view.container.contains(dialog)).toBe(false);
+		await view.rerender({ open: false, onClose });
+		expect(dialog.isConnected).toBe(false);
+	});
+
 	it('needs a non-blank name, then creates the branch and closes', async () => {
 		render(CreateBranchModal, { props: { open: true, onClose, onCreated } });
 		expect(cont().disabled).toBe(true);

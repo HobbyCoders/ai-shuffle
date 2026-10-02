@@ -29,7 +29,7 @@ from app.core.provider_usage import (
     _openrouter_limit_resets_at,
     _openrouter_windows_and_credits,
     normalize_codex_headers,
-    normalize_fal_billing,
+    normalize_fal_user_balance,
     normalize_grok_billing,
 )
 from app.core.usage_limits import UsageLimitsMonitor
@@ -148,10 +148,11 @@ class TestGrokBilling:
 
 
 def test_fal_zero_balance_is_a_balance_not_missing():
-    assert normalize_fal_billing({"credits": {"current_balance": 0, "currency": "USD"}}) == {
+    assert normalize_fal_user_balance(0) == {"balance_remaining": 0.0}
+    assert normalize_fal_user_balance({"credits": {"current_balance": 0, "currency": "USD"}}) == {
         "balance_remaining": 0.0, "currency": "USD",
     }
-    assert normalize_fal_billing({"credits": {"current_balance": None}}) is None
+    assert normalize_fal_user_balance({"credits": {"current_balance": None}}) is None
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,30 @@ def peer_rows(session_id: str | None) -> list[dict]:
     return rows
 
 
+def may_message(sender: str, target: str) -> bool:
+    """Whether ``sender`` can still address ``target`` (the roster's rule)."""
+    return any(row["worker_session_id"] == target for row in peer_rows(sender))
+
+
+def sender_label(receiver: str | None, sender: str) -> str | None:
+    """What ``receiver``'s transcript calls ``sender``: the worker's task
+    description (its roster name when the task has none), or ``main`` for the
+    parent. None when the receiver's roster does not list it; the chat then
+    shows the session id."""
+    try:
+        rows = peer_rows(receiver)
+    except Exception:  # noqa: BLE001 — a label never blocks a delivery note
+        return None
+    for row in rows:
+        if row.get("worker_session_id") != sender:
+            continue
+        label = row.get("description") if row.get("kind") == "subagent" else None
+        label = label or row.get("name")
+        if label and label != sender:
+            return str(label)
+    return None
+
+
 def make_roster(supplier):
     def roster(data, ctx):
         rows = peer_rows(supplier())
@@ -180,6 +204,10 @@ def make_message(supplier):
             return ToolOutcome(text=held_receipt(row["name"]))
         if resuming:
             return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
+        # A receiver that is running (a delegated CLI turn, or a native one the
+        # engine path above could not reach) takes the queued message at its
+        # next tool boundary; the row's receipt retires it exactly once.
+        await session_runtime.try_steer_pending(target)
         return ToolOutcome(text=f"Queued for {row['name']}")
 
     return message
@@ -213,6 +241,11 @@ async def resume_unavailable(target, row):
     error = (str(outcome.get("error") or "") + " " + str(terminal.get("errors") or "")).casefold()
     if any(marker in error for marker in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
         return "the provider rejected this work on policy grounds; ask the user, do not replay it"
+    # An untouched dedicated checkout is reclaimed when its worker finishes;
+    # the resumed turn reuses that saved cwd, so bring it back first.
+    from app.core.worker_checkout import restore_reclaimed_worker_checkout
+    if not await asyncio.to_thread(restore_reclaimed_worker_checkout, target):
+        return "its dedicated checkout could not be restored; dispatch a new Task instead"
     return None
 
 
@@ -259,8 +292,10 @@ async def finish_message_resume(session_id, settled, outcome):
         latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
         if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
             return
+        settled_now = False
         if (not busy and not parked and (not latest or latest["id"] == settled["id"])
                 and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
+            settled_now = True
             task_registry.complete_task(owner, session_id, status, summary=summary)
             if (record and record.continuation_turn_id
                     and supervisor.get_worker(owner, session_id) is record):
@@ -272,3 +307,7 @@ async def finish_message_resume(session_id, settled, outcome):
         "status": status, "summary": summary,
         "agent_message_turn_id": settled["id"],
     })
+    if settled_now:
+        # Same rule as a first run: an untouched dedicated checkout is reclaimed.
+        from app.core.worker_checkout import reclaim_untouched_worker_checkout
+        await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)

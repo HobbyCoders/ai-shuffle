@@ -1,6 +1,10 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
-	import { isTransientProviderRetry } from '$lib/utils/provider-retry';
+	import {
+		isLiveConnectionDropRetry,
+		isTransientProviderRetry,
+		supersededAttempt
+	} from '$lib/utils/provider-retry';
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { parseSwarm } from '$lib/utils/swarm';
@@ -692,6 +696,36 @@
 				}
 				const maxAttempts = data.max_attempts ?? '?';
 				const retryModel = typeof data.model === 'string' ? data.model : '';
+				if (isLiveConnectionDropRetry(message)) {
+					// The provider dropped the connection mid-reply and the engine
+					// re-sent the request. Shown as live work until the reply arrives.
+					const lowered = typeof data.lowered_effort === 'string' ? data.lowered_effort : '';
+					let resent = lowered
+						? `Reconnecting with lower effort after the provider cut a long response (${lowered}, attempt ${data.attempt ?? '?'} of ${maxAttempts})`
+						: `Provider connection dropped. Request re-sent (attempt ${data.attempt ?? '?'} of ${maxAttempts})`;
+					if (retryModel) resent += ` · ${retryModel}`;
+					return {
+						title: 'Reconnecting',
+						content: resent,
+						badge: 'retry',
+						badgeColor: 'amber',
+						compact: true
+					};
+				}
+				const superseded = supersededAttempt(message);
+				if (superseded && !data.exhausted) {
+					// The reply arrived. What the dropped attempt had streamed is
+					// kept here, collapsed, instead of above the new reply.
+					const toolNote = superseded.tools.length
+						? `Not run: ${superseded.tools.join(', ')}`
+						: '';
+					return {
+						title: 'Response interrupted — retried',
+						content: superseded.text ? 'partial reply hidden' : toolNote,
+						collapsible: true,
+						rawOutput: [superseded.text, toolNote].filter(Boolean).join('\n\n') || undefined
+					};
+				}
 				if (data.exhausted) {
 					// The cap was reached and the turn died. The card stops
 					// counting and becomes the failure notice — plus the way
@@ -826,6 +860,8 @@
 	// the reducer's `resuming` drives the disabled state.
 	let retrying = $state(false);
 	const retryInFlight = $derived(retrying || retryResuming);
+	// A reconnect after a dropped provider connection is work in flight too.
+	const reconnecting = $derived(isLiveConnectionDropRetry(message));
 	$effect(() => {
 		if (retryResuming) retrying = false;
 	});
@@ -1046,10 +1082,11 @@
 		<div class="w-full sys-flat">
 			<div class="compact-summary sys-row w-full flex items-center gap-2 min-w-0">
 				<!-- Status icon matching tool message pattern -->
-				{#if retryResuming}
+				{#if retryResuming || reconnecting}
 					<!-- Still in flight: spinner, not a settled check/cross. A
 					     spent card whose resume is running spins again so the
-					     wait for the provider is visible. -->
+					     wait for the provider is visible, and so does a
+					     reconnect after a dropped connection. -->
 					<svg class="w-4 h-4 text-primary animate-spin shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>

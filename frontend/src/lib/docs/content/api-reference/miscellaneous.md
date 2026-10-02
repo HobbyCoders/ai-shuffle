@@ -92,6 +92,18 @@ Get usage trends over time.
 
 List the highest-usage sessions.
 
+### GET /api/v1/analytics/providers
+
+Get turns, tokens and estimated cost per provider (Claude, ChatGPT/Codex, OpenAI, xAI/Grok, OpenRouter, custom endpoints) for `start_date`..`end_date`. Each item has a `billing` (`subscription`, `api`, `mixed` or `unknown`; a subscription's cost is what the same usage would cost at API prices) and a `cost_status` (`estimated`, `partial`, or `unknown` when the model has no known price, in which case the cost is missing rather than zero). `inferred_query_count` counts turns recorded before per-provider tracking, which are attributed to their session's current provider.
+
+**Auth:** Required. API users see only their own usage.
+
+### GET /api/v1/analytics/export
+
+Download the per-provider usage for `start_date`..`end_date` as CSV: one `day` row per provider per day, then one `range_total` row per provider. `estimated_cost_usd` is blank when the cost is unknown.
+
+**Auth:** Required. API users see only their own usage.
+
 ## Usage Limits
 
 ### GET /api/v1/usage/limits
@@ -104,7 +116,7 @@ Which providers get a row:
 - **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
 - **SuperGrok sign-in:** the subscription allowance.
 - **OpenAI API:** the month's spend, only with an [OpenAI usage key](/docs/api-reference/model-providers#openai-usage-key). Without one, the row reports `last_error_kind` `missing_credentials`.
-- **fal.ai:** the account credit balance, only with a [fal.ai billing key](#post-apiv1settingsintegrationsfal-billing). Your media key is never used for it.
+- **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
 
 xAI API keys, other OpenAI-compatible hosts and the Anthropic API key get no row: they report only per-minute rate limits. Rows of a deleted provider are dropped.
 
@@ -460,13 +472,13 @@ Run a workflow again. Returns `{"status": "ok", "message": "Workflow #123 re-run
 
 ### GET /api/v1/settings/integrations
 
-Get integration settings (API key status for various services). Keys are never returned: `fal_api_key_set`, `fal_billing_api_key_set` and `anthropic_api_key_set` say whether each is stored, and `fal_api_key_masked` and `anthropic_api_key_masked` show the key's first 7 and last 4 characters (`""` for a key under 22 characters). The response also carries `claude_auth_mode`, the media tool models and the media tool defaults.
+Get integration settings (API key status for various services). Keys are never returned: `fal_api_key_set` and `anthropic_api_key_set` say whether each is stored, and `fal_api_key_masked` and `anthropic_api_key_masked` show the key's first 7 and last 4 characters (`""` for a key under 22 characters). The response also carries `claude_auth_mode`, the media tool models and the media tool defaults.
 
 **Auth:** Required
 
 ### POST /api/v1/settings/integrations/fal-ai
 
-Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT).
+Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT, and to read the fal.ai credit balance in [usage limits](#usage-limits)). Saving the key (or deleting it) also clears the saved fal.ai balance; the next usage refresh reads it again with the new key.
 
 **Auth:** Owner only
 
@@ -508,20 +520,6 @@ Errors from both routes: `400` for invalid input (empty text or text over 4096 c
 ### DELETE /api/v1/settings/integrations/fal-ai
 
 Remove the fal.ai API key.
-
-**Auth:** Owner only
-
-### POST /api/v1/settings/integrations/fal-billing
-
-Save a separate fal.ai Admin API key used only to read the account credit balance for [usage limits](#usage-limits). The media key is never used for billing. Body: `api_key` (no whitespace, at most 4096 characters, `400` otherwise). Returns `{"success": true}`. Saving the key (or deleting it) also clears the saved fal.ai balance; the next usage refresh reads it again.
-
-**Auth:** Owner only
-
-**Errors:** `409` when credential storage is locked. `503` when the key was saved but usage polling could not resume yet; the detail says what to do, then save again.
-
-### DELETE /api/v1/settings/integrations/fal-billing
-
-Remove the fal.ai Admin API key and its saved balance. The media key is not changed.
 
 **Auth:** Owner only
 
@@ -711,7 +709,7 @@ The update policy for your account and the updater status of this worker.
 }
 ```
 
-`allow_updates` is `true` until you turn it off. `update_all_workers` sends update actions to every worker on the account instead of only this one. `supported` is `false` when this install has no updater; `phase` is then `idle`. Otherwise `phase` is the updater's state, such as `checking`, `available`, `downloading`, `ready` (downloaded, waiting to install) or `error`. `version` is the update on offer and `running_version` the build now running. When present, `message`, `release` and `notes` describe the release.
+`allow_updates` is `true` until you turn it off. `update_all_workers` sends update actions to every worker on the account instead of only this one. `supported` is `false` when this install has no updater; `phase` is then `idle`. Otherwise `phase` is the updater's state, such as `checking`, `available`, `downloading`, `ready` (downloaded, waiting to install) or `error`. `version` is the update on offer and `running_version` the build now running. When present, `message`, `release` and `notes` describe the release. `request_pending` is `true` while a queued action has not been taken by the updater yet; a desktop takes one on its next report, within about 30 seconds.
 
 ### PUT /api/v1/settings/application-updates
 
@@ -754,7 +752,7 @@ curl -X POST http://localhost:8000/api/v1/settings/application-updates \
 }
 ```
 
-With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, nothing to download, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
+With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. A `download` sent to a worker that has not found the update yet (phase `idle`) is still queued: that worker checks first and downloads only if the check finds an update, and its `reason` says so. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, an update already downloaded, a newer runtime required, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
 
 ### GET /api/v1/settings/application-updates/workers
 
@@ -768,7 +766,7 @@ Update status of this worker and, when `update_all_workers` is on or an install 
   "update_all_workers": true,
   "operation": null,
   "workers": [
-    {"device_id": "…", "device_name": "Current worker", "is_self": true, "online": true, "supported": true, "allow_updates": true, "phase": "ready", "version": "…", "running_version": "…", "percent": null, "message": null, "error": null, "reason": null}
+    {"device_id": "…", "device_name": "Current worker", "is_self": true, "online": true, "supported": true, "allow_updates": true, "phase": "ready", "version": "…", "running_version": "…", "percent": null, "message": null, "error": null, "reason": null, "request_pending": false}
   ]
 }
 ```

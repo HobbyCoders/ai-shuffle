@@ -157,6 +157,34 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		else expect(moveSession).not.toHaveBeenCalled();
 	});
 
+	it('shows why a confirmed move was refused inside the reopened worker menu', async () => {
+		const reason = 'Another session is working in this checkout or on this branch. Wait for it to finish before moving this session.';
+		session.store.set({ ...base, messages: [], projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
+			instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
+		] });
+		getClusterGitStateMock.mockResolvedValue({ project_v2_id: 'pv2-project', installs: [
+			{ id: 'peer', online: true, eligible: true }
+		] });
+		vi.mocked(moveSession).mockRejectedValueOnce({ status: 409, detail: reason });
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Other worker' }));
+		await fireEvent.click(view.getByRole('button', { name: 'Commit, push and move' }));
+		const alert = await view.findByRole('alert');
+		expect(alert.textContent).toBe(reason);
+		expect(view.getByRole('menu', { name: 'Move this session' })).toBeTruthy();
+		expect(await view.findByRole('menuitem', { name: 'Other worker' })).toBeTruthy();
+		// Closing the menu clears the reason; reopening starts clean.
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await view.findByRole('menuitem', { name: 'Other worker' });
+		expect(view.queryByRole('alert')).toBeNull();
+	});
+
 	it('explains empty and failed local worker discovery and supports retry', async () => {
 		session.store.set(base);
 		appSessions.store.set([{ id: base.sessionId, is_remote: false }]);

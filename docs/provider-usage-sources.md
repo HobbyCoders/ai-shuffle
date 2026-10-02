@@ -12,8 +12,8 @@ polled, the minimum interval, the failure policy and the provider dashboard
 where the owner can compare the figure. The poller takes its jobs from the
 registry, and every polled request goes through a guard that refuses URLs the
 registry does not list. There is no fallback to dashboard-internal or alpha
-billing endpoints: a figure no source can report is shown as unavailable, with
-the dashboard link.
+billing endpoints beyond the ones listed: a figure no source can report is shown
+as unavailable, with the dashboard link.
 
 The usage API (`GET /api/v1/usage/limits`) returns the registry entry with each
 provider row (`source_info`) and with the local Claude reading
@@ -36,7 +36,7 @@ popover keeps the rows it already shows.
 | `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (local only) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Existing model key; an already-saved legacy management key is preserved | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
-| `fal_billing` | `GET https://api.fal.ai/v1/account/billing?expand=credits` | Separate fal Admin key (local only) | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Billing](https://fal.ai/dashboard/billing) |
+| `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key: saved, or `FAL_KEY` / `FAL_API_KEY`) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
 
@@ -61,15 +61,31 @@ in-flight observations from publishing it.
 
 ChatGPT shows weekly subscription allowance plus extra credits only when their
 reported finite balance is greater than zero. Those credits are **not USD** and
-are unrelated to OpenAI API prepaid billing. OpenAI's model key has no supported
-prepaid balance endpoint here: the panel says unavailable and links to Platform
-billing. Previously configured organization spending access is retained, but
-neither OpenAI nor OpenRouter setup requests another billing/admin key. fal.ai's
-existing account-balance path is unchanged.
+are unrelated to OpenAI API prepaid billing. They appear in the ChatGPT row's
+expanded details, not on its collapsed header.
+
+OpenAI has no source for an API prepaid balance: the Admin API reports
+organization spend only, and the dashboard credit-grants endpoint refuses API
+and Admin keys (it needs a browser session), so it is not in the registry. The
+OpenAI row says "Credit balance not available for this key" and does not link
+out to Platform billing. Previously configured organization spending access is
+retained, but neither OpenAI nor OpenRouter setup requests another
+billing/admin key.
+
+fal.ai reads its balance with the ordinary fal.ai API key the media tools use.
+fal's documented billing API (`api.fal.ai/v1/account/billing`) needs a separate
+Admin key, so the registry lists the `rest.alpha.fal.ai/billing/user_balance`
+endpoint that accepts the ordinary key, labeled "Undocumented endpoint". The
+separate fal Admin billing key and its settings were removed; an upgrade
+deletes a stored one. When no key is saved, the poller uses `FAL_KEY` or
+`FAL_API_KEY` from the environment, the same fallback the media tools use. A
+saved key always wins. The cached balance records a digest of the environment
+key (never the key), so a changed or removed environment key hides it.
 
 Claude remains a credential-free, passive reader of Claude Code's own live
 usage reports; refresh cannot fetch usage spent outside a running CLI session.
-Old readings are labeled last reported, not live. A passed reset does not prove
+Old readings are labeled "Last reported" with their age, on Claude and on every
+provider row. A passed reset does not prove
 100% remains: the panel retains the last reported percentage and says it awaits
 a new report. Compare the provider dashboard for exact idle/external usage.
 No CLI credential extraction, browser scraping, challenge bypass, or balance
@@ -125,8 +141,9 @@ capability is cached per credential revision:
   credential revision (never the credential).
 - While the digest matches, the poller skips that capability entirely: no
   budget claim, no peer round trip and no upstream request.
-- Replacing or re-saving the credential changes the digest. The fal and
-  OpenRouter management keys use the stored setting revision; the OpenAI Admin
+- Replacing or re-saving the credential changes the digest. The fal.ai API key
+  and OpenRouter management keys use the stored setting revision (a fal.ai key
+  from the environment uses a digest of that key); the OpenAI Admin
   key is re-encrypted on every save; OAuth tokens change on refresh or sign-in.
   The next poll probes again.
 - 404, 429, 5xx and timeouts are not negative-cached. They back off
@@ -218,9 +235,10 @@ estimate is presented as a provider-reported account balance.
 ## Documentation and remaining acceptance
 
 The [OpenAI organization usage reference](https://developers.openai.com/api/reference/python/resources/admin/subresources/organization/subresources/usage)
-and [fal account billing reference](https://fal.ai/docs/platform-apis/v1/account/billing)
-cover their Admin-key readers. These readers have different scopes; a working
-inference key does not establish access to either administration API.
+covers its Admin-key reader. That reader has a different scope; a working
+inference key does not establish access to the administration API. fal's
+balance endpoint for the ordinary key is undocumented and may change without
+notice; a refusal is shown as unavailable rather than as a zero balance.
 
 The [Claude Code authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)
 distinguishes an end user's login in the unmodified native client from collecting

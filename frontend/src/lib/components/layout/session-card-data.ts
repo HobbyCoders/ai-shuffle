@@ -358,6 +358,49 @@ export function sessionTimestamp(s: Session): number {
 	return ms;
 }
 
+/** Memo for the live-turn start, same contract as `timestampMemo`. */
+const workStartMemo = new WeakMap<object, { raw: string; ms: number }>();
+
+function workStartedMs(s: Session): number | null {
+	const raw = s.work_started_at || '';
+	if (!raw) return null;
+	const memo = workStartMemo.get(s);
+	if (memo && memo.raw === raw) return Number.isNaN(memo.ms) ? null : memo.ms;
+	const ms = parseUTC(raw).getTime();
+	workStartMemo.set(s, { raw, ms });
+	return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Total time the session has spent working, in ms: the banked `work_ms`
+ * (every finished turn) plus the turn running now. Idle time between turns
+ * never counts, so the total survives Done/Parked and keeps growing when a
+ * later turn runs (#1619).
+ *
+ * `turnLive` says whether this device still sees the turn running. When it
+ * does not but the row still carries a start (the row update that banks the
+ * finished turn has not arrived yet), the interval is closed at the row's
+ * last activity instead of growing with the clock.
+ */
+export function sessionWorkMs(
+	s: Session,
+	now: number,
+	turnLive: boolean,
+	lastActivity: number = sessionTimestamp(s)
+): number {
+	const banked = Math.max(0, Number(s.work_ms) || 0);
+	const start = workStartedMs(s);
+	if (start === null) return banked;
+	const end = turnLive ? now : lastActivity;
+	return banked + Math.max(0, end - start);
+}
+
+/** Statuses during which a turn holds the live slot: a working session, or
+ *  one blocked on a prompt mid-turn. A parked turn has ended its interval. */
+export function isTurnLiveStatus(status: SessionCardStatus): boolean {
+	return isLiveStatus(status) && status !== 'parked';
+}
+
 /** Live elapsed time, e.g. "42s", "4m 12s", "1h 04m". */
 export function formatElapsed(ms: number): string {
 	const total = Math.max(0, Math.floor(ms / 1000));

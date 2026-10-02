@@ -1,13 +1,17 @@
 """Glob — find files by glob pattern, newest first.
 
-Shares the pruned, deadline-bounded walk with Grep's fallback. Exists so a
-model that wants "which files look like X" has a cheap tool for it instead of
-reaching for a repo-wide content search.
+Lists files with ``rg --files`` when ripgrep is installed and with the pruned,
+deadline-bounded walk Grep's fallback uses otherwise; both list the same tree
+(see ``list_rel_files``) and the pattern is matched by the same compiler either
+way. Exists so a model that wants "which files look like X" has a cheap tool
+for it instead of reaching for a repo-wide content search.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -16,8 +20,8 @@ from fluid.tools.builtins._util import (
     GlobSyntaxError,
     WalkState,
     compile_glob,
+    list_rel_files,
     truncate,
-    walk_files,
 )
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
@@ -105,11 +109,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
     limit = _clamp_limit(input.get("limit"))
-    return await asyncio.to_thread(_glob, input["pattern"], root, limit)
+    return await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"))
 
 
-def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
-    """Bounded glob walk. Runs on a thread — the walk can touch many paths."""
+def _glob(
+    pattern: str, root: Path, limit: int = MAX_RESULTS, rg: str | None = None
+) -> ToolOutcome:
+    """Bounded glob listing. Runs on a thread — the listing can touch many paths.
+
+    ``rg`` is the ripgrep binary to list files with; ``None`` (or a ripgrep
+    that will not start) uses the Python walk. The output does not say which
+    one ran: both list the same tree and the same matcher filters it.
+    """
     head = f"globbed under {root}"
     if not root.exists():
         from fluid.tools.builtins._util import missing_path_note
@@ -132,23 +143,22 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
     # cap: truncating during the walk and sorting afterwards would return an
     # arbitrary subset that merely *looks* like "the newest files".
     state = WalkState(deadline=time.monotonic() + DEADLINE_S)
+    files = list_rel_files(root, state, rg)
     hits: list[tuple[float, Path]] = []
     ceiling_hit = False
-    for path in walk_files(root, state):
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            rel = path.name
+    for rel in files:
         if not matcher.matches(rel):
             continue
+        path = root / rel
         try:
-            mtime = path.stat().st_mtime
+            mtime = os.stat(path).st_mtime
         except OSError:
             mtime = 0.0
         hits.append((mtime, path))
         if len(hits) >= MAX_LIMIT:
             ceiling_hit = True
             break
+    files.close()  # stops a ripgrep listing cut short by the ceiling
 
     hits.sort(key=lambda pair: (-pair[0], str(pair[1])))
     total = len(hits)
