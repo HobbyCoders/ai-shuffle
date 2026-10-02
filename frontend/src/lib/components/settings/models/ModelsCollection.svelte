@@ -95,7 +95,13 @@
 			{
 				label: 'Audio',
 				rows: [
-					{ id: 'dict', name: 'Dictation', summary: voice.settings ? voice.inputModelName() : 'Chat mic and hotkey', icon: DICTATION_ICON },
+					{
+						id: 'dict',
+						name: 'Dictation',
+						summary: voice.settings ? voice.inputModelName() : 'Chat mic and hotkey',
+						icon: DICTATION_ICON,
+						status: tools.falEnabled === false && voice.settings && voice.inputOnFal ? 'warn' : undefined
+					},
 					...audioTools,
 					{ id: 'voicecall', name: 'Voice calls', summary: `${VOICE_CALL_MODEL}, fixed`, icon: VOICE_CALL_ICON }
 				]

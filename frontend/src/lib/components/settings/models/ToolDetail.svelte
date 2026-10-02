@@ -185,7 +185,6 @@
 								<SelectField
 									value={value(setting)}
 									options={options.map((o) => ({ value: o, label: optionLabel(setting, o) }))}
-									mono={setting.key === 'voice'}
 									onchange={(v) => tools.setOption(tool, setting, v)}
 								/>
 							{/if}

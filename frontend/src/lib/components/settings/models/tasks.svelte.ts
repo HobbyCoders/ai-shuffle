@@ -193,6 +193,12 @@ export class VoiceDefaults {
 		return this.inputModels.find((m) => m.id === id)?.name ?? id;
 	}
 
+	/** The dictation model is billed to fal.ai. */
+	get inputOnFal(): boolean {
+		const provider = this.inputModels.find((m) => m.id === this.inputModel)?.provider;
+		return provider ? provider === 'fal' || provider === 'fal-ai' : this.inputModel.startsWith('fal-ai/');
+	}
+
 	inputModelProvider(id: string = this.inputModel): string {
 		const provider = this.inputModels.find((m) => m.id === id)?.provider;
 		return provider ? providerLabel(provider) : '';
