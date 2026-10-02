@@ -195,6 +195,10 @@ class ContainerUpdates:
         self.thread = None
         self.install_requested = threading.Event()
         self.running = None
+        # When the feed was last read (epoch seconds). Workers compare it with
+        # each other's to tell "checked and found nothing" from "not checked
+        # since another worker found an update".
+        self.checked_at = None
         self.next_check = time.monotonic() + FIRST_CHECK_SECONDS
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_path = self.root / "state.json"
@@ -262,7 +266,8 @@ class ContainerUpdates:
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
-                    "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel})
+                    "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
+                    "checked_at": self.checked_at})
 
     def failed(self):
         revision = self.state.pop("booting", None)
@@ -440,6 +445,7 @@ class ContainerUpdates:
         self.publish("checking")
         signed = self.fetch("manifest" if self.channel == "stable" else "manifest/edge")
         manifest = verify_manifest(signed, self.public_key)
+        self.checked_at = time.time()
         if manifest.get("channel") != self.channel:
             raise UpdateError(f"The update feed did not return a signed {self.channel} release")
         if not manifest.get("tree"):

@@ -4,6 +4,7 @@ No synced command rows, offline queues, URLs, shell commands or recursive fanout
 Each recipient independently checks its own policy, phase and live sessions.
 """
 import asyncio
+import logging
 import time
 import uuid
 from collections import OrderedDict
@@ -23,6 +24,19 @@ _dispatch_lock = asyncio.Lock()
 PEER_STATUS_TTL = 30
 PEER_STATUS_BUSY_TTL = 3
 _peer_status = {}
+# Why each worker refused the last dispatch: {device_id: reason}, stamped with
+# when it was set. A refused worker that is not preparing or staged would be
+# left behind, so restart waits until a new request reaches it.
+_refusals = {}
+_refusals_at = 0.0
+# Containers check their feed on their own only once a day, so a worker that has
+# not checked since another one found an update is sent a check: at most once
+# per DISCOVERY_SECONDS per worker, never while an action or install is running.
+DISCOVERY_SECONDS = 600
+_discovery = {}
+_discovery_tasks = set()
+NOT_CHECKED = "Not checked yet; will check and download"
+logger = logging.getLogger(__name__)
 
 
 def local_action(action, request_id):
@@ -87,7 +101,10 @@ async def peer_action(body, from_device):
     expiry = body.get("expires_at")
     if type(expiry) not in (int, float) or not time.time() <= expiry <= time.time() + 15:
         raise ValueError("Update request expired; offline commands are not replayed")
-    return local_action(body.get("action"), from_device + ":" + body["request_id"])
+    result = local_action(body.get("action"), from_device + ":" + body["request_id"])
+    logger.info("Application update %s requested by worker %s: %s", body.get("action"), from_device,
+                result["reason"])
+    return result
 
 
 async def _remote(row, body):
@@ -96,7 +113,7 @@ async def _remote(row, body):
         if not isinstance(result, dict):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
-                  "request_pending")
+                  "request_pending", "checked_at", "channel", "release", "notes", "kind")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -145,7 +162,126 @@ def _verifying(operation):
             and time.time() - operation["started_at"] < progress.STARTUP_TIMEOUT)
 
 
-async def snapshot():
+def _same(a, b):
+    return bool(a and b and (a.startswith(b) or b.startswith(a)))
+
+
+def _offers(rows, all_workers):
+    """The updates included workers have found: [{version, channel, checked_at}]."""
+    return [{"version": row["version"], "channel": row.get("channel"), "checked_at": row.get("checked_at")}
+            for row in rows
+            if (all_workers or row.get("is_self")) and row.get("online", True) and row.get("supported")
+            and row.get("allow_updates") and row.get("phase") in ("available", "downloading", "ready")
+            and row.get("version") and not _same(row["version"], row.get("running_version"))]
+
+
+def _not_checked(row, offers):
+    """An idle worker that has not read its feed since another worker found ``offers``."""
+    for offer in offers:
+        if _same(offer["version"], row.get("running_version")):
+            continue
+        if offer["channel"] and row.get("channel") and offer["channel"] != row["channel"]:
+            continue
+        checked, found = row.get("checked_at"), offer["checked_at"]
+        if not isinstance(checked, (int, float)) or (isinstance(found, (int, float)) and checked < found):
+            return True
+    return False
+
+
+def classify(row, all_workers, offers=(), refusals=None):
+    """A worker's part in the next update: ``{"role", "label"}``.
+
+    Roles: excluded (not part of this update), preparing, available, staged,
+    and unknown (an included worker whose state cannot be trusted; restart
+    waits for it). DesktopUpdateButton.svelte keeps a fallback copy of this for
+    workers that predate it; keep the two in step.
+    """
+    phase = row.get("phase")
+    if not all_workers and row.get("is_self") is False:
+        # A peer read only to verify an earlier all-worker install.
+        return {"role": "excluded", "label": "Not in scope; current worker only"}
+    if not row.get("online", True):
+        return {"role": "excluded", "label": row.get("reason") or "Offline; not included"}
+    # A failed status read is not proof the worker sits this update out.
+    if phase == "unknown":
+        return {"role": "unknown", "label": "Status unavailable"}
+    if not row.get("supported"):
+        return {"role": "excluded", "label": row.get("reason") or "No application updater; not included"}
+    if not row.get("allow_updates"):
+        return {"role": "excluded", "label": "Updates disabled on this worker; not included"}
+    if _same(row.get("version"), row.get("running_version")):
+        return {"role": "excluded", "label": "Already up to date"}
+    # Queued but not yet taken (a desktop takes requests on its 30 s report).
+    if row.get("request_pending") and phase != "ready":
+        return {"role": "preparing", "label": "Request queued; waiting for the updater"}
+    refused = (refusals or {}).get(row.get("device_id"))
+    if refused and phase not in ("checking", "downloading", "ready", "image-required"):
+        return {"role": "unknown", "label": f"Refused: {refused}"}
+    if phase == "checking":
+        return {"role": "preparing", "label": "Checking for updates…"}
+    if phase == "downloading":
+        percent = row.get("percent")
+        suffix = f" {round(percent)}%" if isinstance(percent, (int, float)) else ""
+        return {"role": "preparing", "label": f"{row.get('message') or 'Downloading update…'}{suffix}"}
+    if phase == "ready":
+        error = row.get("error")
+        return {"role": "staged", "label": f"Staged, awaiting restart. {error}" if error else "Staged, awaiting restart"}
+    if phase == "available":
+        return ({"role": "available", "label": "Update available; not downloaded"} if row.get("version")
+                else {"role": "excluded", "label": "No update offered"})
+    if phase == "error":
+        return ({"role": "available", "label": row.get("error") or "Download failed; retry"} if row.get("version")
+                else {"role": "unknown", "label": row.get("error") or "Update check failed"})
+    if phase == "image-required":
+        return {"role": "excluded", "label": row.get("message") or "Needs a new Docker image; not included"}
+    if phase == "idle" and _not_checked(row, offers):
+        return {"role": "available", "label": NOT_CHECKED}
+    message = row.get("message")
+    return {"role": "excluded", "label": (message if message and not updates.IN_PROGRESS.search(message) else "")
+            or "No update offered"}
+
+
+def plan(rows, operation=None):
+    """What one click does next, from rows already carrying ``role`` and ``label``."""
+    targets = [row for row in rows if row["role"] != "excluded"]
+    preparing = any(row["role"] == "preparing" for row in targets)
+    available = any(row["role"] == "available" for row in targets)
+    staged = sum(row["role"] == "staged" for row in targets)
+    unknown = [row for row in targets if row["role"] == "unknown"]
+    # Restart is offered only once EVERY included worker is staged, never on the first one.
+    ready = staged > 0 and not preparing and not available and not unknown
+    waits = ", ".join(f"{row['device_name']} ({row['label']})" for row in unknown)
+    held = f"Restart waits for {waits}." if staged and not preparing and not available and unknown else ""
+    return {"action": "install" if ready else "download" if available else "check",
+            "ready": ready, "preparing": preparing, "available": available, "staged": staged,
+            "included": len(targets), "held": held,
+            "waiting": bool(operation and operation.get("phase") == "waiting")}
+
+
+def _discover(rows, busy):
+    """Send a check to included workers that have not seen an update another worker found."""
+    if busy or _dispatch_lock.locked():
+        return
+    now = time.monotonic()
+    for row in rows:
+        if row["label"] != NOT_CHECKED or now - _discovery.get(row["device_id"], -DISCOVERY_SECONDS) < DISCOVERY_SECONDS:
+            continue
+        _discovery[row["device_id"]] = now
+        request_id = uuid.uuid4().hex
+        logger.info("Application update: asking %s to check its feed; another worker found an update",
+                    row["device_name"])
+        if row.get("is_self"):
+            local_action("check", request_id)
+            continue
+        task = asyncio.ensure_future(_remote(row, {"operation": "action", "action": "check", "request_id": request_id,
+                                                   "expires_at": time.time() + 10}))
+        _discovery_tasks.add(task)
+        task.add_done_callback(_discovery_tasks.discard)
+        # Its next status read must show the check rather than the cached idle.
+        _peer_status.pop(row["device_id"], None)
+
+
+async def snapshot(*, fresh=False):
     local = await run_sync(updates.status)
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
@@ -155,7 +291,8 @@ async def snapshot():
     # its cohort no longer needs reading.
     tracked = ({row["device_id"] for row in operation["workers"]}
                if operation and operation["phase"] != "complete" else set())
-    fresh = _verifying(operation)
+    verifying = _verifying(operation)
+    fresh = fresh or verifying
     if local["update_all_workers"] or tracked:
         async def read(row):
             if not row["online"]:
@@ -163,14 +300,27 @@ async def snapshot():
             return {**row, **await _peer_status_for(row["device_id"], fresh=fresh)}
         rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"]
                                           if not row["is_self"] and (local["update_all_workers"] or row["device_id"] in tracked))))
+    observed = await run_sync(progress.observe, operation, rows)
+    global _refusals_at
+    if (_refusals and observed and observed.get("phase") == "complete"
+            and (observed.get("completed_at") or 0) >= _refusals_at):
+        _refusals.clear()  # an install finished after them; they are history
+    all_workers = local["update_all_workers"]
+    offers = _offers(rows, all_workers)
+    for row in rows:
+        row.update(classify(row, all_workers, offers, _refusals))
+    if all_workers:
+        _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
-              "request_pending")
+              "request_pending", "checked_at", "channel", "release", "notes", "role", "label")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
-    return {"allow_updates": local["allow_updates"], "update_all_workers": local["update_all_workers"],
+    return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,
             "server_time": time.time(),
-            "operation": await run_sync(progress.observe, operation, rows),
+            "operation": observed,
+            "plan": plan(rows, observed),
+            "refusals": dict(_refusals),
             "workers": [{key: row.get(key) for key in fields} for row in rows]}
 
 
@@ -184,10 +334,24 @@ async def dispatch(action):
 
 
 async def _dispatch(action):
+    global _refusals_at
     if action not in ("check", "download", "install"):
         raise ValueError("Unknown update action")
     if not await run_sync(updates.allowed):
         raise ValueError("Application updates are disabled in Account settings")
+    result = await _send(action)
+    refused = {row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
+               if not row.get("accepted") and row.get("device_id")}
+    _refusals.clear()
+    _refusals.update(refused)
+    _refusals_at = time.time()
+    for row in result["results"]:
+        logger.info("Application update %s for %s: %s (%s)", result.get("sent", action), row["device_name"],
+                    "accepted" if row.get("accepted") else "refused", row.get("reason"))
+    return result
+
+
+async def _send(action):
     operation = await run_sync(progress.load)
     if operation and operation["phase"] != "complete":
         previous = await snapshot()
@@ -197,6 +361,18 @@ async def _dispatch(action):
     all_workers = await run_sync(updates.all_workers)
     request_id = uuid.uuid4().hex
     self_row = {"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker"}
+    if action == "install" and all_workers:
+        # Never restart part of the fleet: a worker that still has to download
+        # (often one that has not checked yet) is sent the download instead,
+        # and nothing installs until every included worker is staged.
+        current = await snapshot(fresh=True)
+        if not current["plan"]["ready"]:
+            behind = [row for row in current["workers"] if row["role"] == "available"]
+            if not behind:
+                raise ValueError(current["plan"]["held"] or "Not every worker is staged yet; nothing was installed")
+            results = await asyncio.gather(*(_act(row, "download", request_id) for row in behind))
+            return {"scope": "all", "sent": "download", "held": "Not every worker is staged yet; nothing was installed",
+                    "results": list(results)}
     if action == "install":
         targets = [row for row in listing["runners"] if all_workers and not row["is_self"] and row["online"]]
         await run_sync(progress.begin, request_id, [*targets, self_row])
@@ -224,4 +400,14 @@ async def _dispatch(action):
     if action == "install":
         await run_sync(progress.record, request_id, self_row["device_id"], result=local)
     results.append({**self_row, **local})
-    return {"scope": "all" if all_workers else "current", "results": results}
+    return {"scope": "all" if all_workers else "current", "sent": action, "results": results}
+
+
+async def _act(row, action, request_id):
+    """Send one action to one snapshot row, the current worker included."""
+    if row.get("is_self"):
+        result = local_action(action, request_id)
+    else:
+        result = await _remote(row, {"operation": "action", "action": action, "request_id": request_id,
+                                     "expires_at": time.time() + 10})
+    return {"device_id": row["device_id"], "device_name": row["device_name"], **result}

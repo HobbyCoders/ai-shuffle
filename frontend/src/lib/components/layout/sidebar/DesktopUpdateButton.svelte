@@ -5,7 +5,7 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import { notify } from '$lib/stores/notifications';
 
-	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
 	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
@@ -47,7 +47,11 @@
 	const operation = $derived(snapshot?.operation);
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
-	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...classify(worker, snapshot!.update_all_workers) })) ?? []);
+	// The worker classifies (app/core/update_workers.py classify()); the copy
+	// below only covers a snapshot without roles.
+	const offers = $derived(offeredUpdates(snapshot));
+	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...(worker.role && typeof worker.label === 'string'
+		? { role: worker.role, label: worker.label } : classify(worker, snapshot!.update_all_workers, offers)) })) ?? []);
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
 	const downloading = $derived(targets.some(row => row.role === 'preparing'));
 	const available = $derived(targets.some(row => row.role === 'available'));
@@ -74,7 +78,24 @@
 	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
 	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
 
-	function classify(w: Worker, all: boolean): { role: Role; label: string } {
+	const same = (a?: string | null, b?: string | null) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
+	type Offer = { version: string; channel?: string | null; checked_at?: number | null };
+	function offeredUpdates(next: Snapshot | null): Offer[] {
+		return (next?.workers ?? []).filter(w => (next!.update_all_workers || w.is_self !== false) && w.online && w.supported && w.allow_updates
+			&& ['available', 'downloading', 'ready'].includes(w.phase) && !!w.version && !same(w.version, w.running_version))
+			.map(w => ({ version: w.version!, channel: w.channel, checked_at: w.checked_at }));
+	}
+	// An idle worker that has not read its feed since another worker found an
+	// update has simply not seen it yet (containers check once a day). A worker
+	// that does not report checked_at predates this rule and is left out of it.
+	function notChecked(w: Worker, found: Offer[]): boolean {
+		if (w.checked_at === undefined) return false;
+		return found.some(offer => !same(offer.version, w.running_version)
+			&& !(offer.channel && w.channel && offer.channel !== w.channel)
+			&& (typeof w.checked_at !== 'number' || (typeof offer.checked_at === 'number' && w.checked_at < offer.checked_at)));
+	}
+
+	function classify(w: Worker, all: boolean, found: Offer[] = []): { role: Role; label: string } {
 		// A peer read only to verify an earlier all-worker install is outside a current-worker update.
 		if (!all && w.is_self === false) return { role: 'excluded', label: 'Not in scope; current worker only' };
 		if (!w.online) return { role: 'excluded', label: w.reason || 'Offline; not included' };
@@ -98,6 +119,8 @@
 			case 'available': return w.version ? { role: 'available', label: 'Update available; not downloaded' } : { role: 'excluded', label: 'No update offered' };
 			case 'error': return w.version ? { role: 'available', label: w.error || 'Download failed; retry' } : { role: 'unknown', label: w.error || 'Update check failed' };
 			case 'image-required': return { role: 'excluded', label: w.message || 'Needs a new Docker image; not included' };
+			case 'idle': if (notChecked(w, found)) return { role: 'available', label: 'Not checked yet; will check and download' };
+			// fall through
 			default: return { role: 'excluded', label: (w.message && !IN_PROGRESS.test(w.message) ? w.message : '') || 'No update offered' };
 		}
 	}

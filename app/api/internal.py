@@ -66,6 +66,8 @@ class DesktopUpdateState(BaseModel):
     # manifest; the limits match docker/application_updates.py).
     release: str | None = Field(default=None, max_length=80)
     notes: str | None = Field(default=None, max_length=4000)
+    # When the shell last checked its feed (an ISO time; the shell's own field name).
+    checkedAt: str | None = Field(default=None, max_length=64)
     # No policy fields: the native heartbeat cannot overwrite account preferences.
 
 
@@ -75,6 +77,32 @@ async def desktop_update_bridge(body: DesktopUpdateState, request: Request):
     from app.core.application_updates import desktop_exchange
     from app.db.async_database import run_sync
     return await run_sync(desktop_exchange, body.model_dump())
+
+
+class DesktopUpdateAction(BaseModel):
+    action: Literal["check", "download", "install"]
+
+
+@router.get("/desktop/update-workers")
+async def desktop_update_workers(request: Request):
+    """The same update snapshot and plan the sidebar button reads, for the
+    desktop's native Check for Updates."""
+    require_desktop(request)
+    from app.core.update_workers import snapshot
+    return await snapshot()
+
+
+@router.post("/desktop/update-action")
+async def desktop_update_action(body: DesktopUpdateAction, request: Request):
+    """The same dispatch as the web button: the account's all-workers scope,
+    readiness rule and refusals apply to the native menu too."""
+    require_desktop(request)
+    from fastapi import HTTPException
+    from app.core.update_workers import dispatch
+    try:
+        return await dispatch(body.action)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 _shutdown_task = None

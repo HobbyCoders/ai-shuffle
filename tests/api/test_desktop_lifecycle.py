@@ -151,3 +151,34 @@ async def test_update_bridge_carries_release_notes_to_the_update_status(monkeypa
             response = await client.post("/api/v1/internal/desktop/update-bridge",
                                          json={"phase": "ready", field: value}, headers=headers)
             assert response.status_code == 422, field
+
+
+@pytest.mark.parametrize("port,token,expected", [(8000, "secret", 200), (8001, "secret", 403), (8000, "wrong", 403)])
+async def test_native_update_check_uses_the_worker_dispatch(monkeypatch, port, token, expected):
+    # #1623: the tray's Check for Updates must follow the same all-worker plan as the web button.
+    monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "secret")
+    app = FastAPI()
+    app.include_router(internal.router)
+    wrapped = IngressApplication(app, 8000)
+    plan = {"plan": {"action": "download"}, "workers": []}
+    receipt = {"scope": "all", "sent": "download", "results": []}
+    with patch("app.core.update_workers.snapshot", new=AsyncMock(return_value=plan)) as snapshot, \
+         patch("app.core.update_workers.dispatch", new=AsyncMock(return_value=receipt)) as dispatch:
+        async with AsyncClient(transport=ASGITransport(app=wrapped), base_url=f"http://localhost:{port}") as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            response = await client.get("/api/v1/internal/desktop/update-workers", headers=headers)
+            assert response.status_code == expected
+            response = await client.post("/api/v1/internal/desktop/update-action", headers=headers, json={"action": "download"})
+            assert response.status_code == expected
+            if expected == 200:
+                assert response.json() == receipt
+                dispatch.assert_awaited_once_with("download")
+            else:
+                snapshot.assert_not_called()
+                dispatch.assert_not_called()
+            if expected == 200:
+                bad = await client.post("/api/v1/internal/desktop/update-action", headers=headers, json={"action": "rm -rf"})
+                assert bad.status_code == 422
+                dispatch.side_effect = ValueError("Waiting on workers to finish the previous update")
+                refused = await client.post("/api/v1/internal/desktop/update-action", headers=headers, json={"action": "install"})
+                assert refused.status_code == 409 and "Waiting on workers" in refused.json()["detail"]

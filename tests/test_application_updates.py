@@ -106,6 +106,19 @@ def test_fanned_out_download_stages_on_a_container_that_never_checked(feed, monk
     assert status["phase"] == "ready" and status["request_pending"] is False
 
 
+def test_supervisor_publishes_when_it_last_read_the_feed(feed, monkeypatch):
+    # #1623: other workers compare this with their own to tell "checked and
+    # found nothing" from "has not checked since an update was found".
+    updater, publish, _, _, _ = feed
+    publish()
+    monkeypatch.setattr("docker.application_updates.time.time", lambda: 1234.5)
+    updater.check()
+    assert json.loads((updater.root / "status.json").read_text())["checked_at"] == 1234.5
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(updater.root))
+    monkeypatch.setattr(policy.database, "get_system_setting", lambda key: None)
+    assert policy.status()["checked_at"] == 1234.5
+
+
 def test_lease_goes_to_hub_manifest_and_archive_requests_only(feed):
     updater, publish, _, requests, _ = feed
     publish()
