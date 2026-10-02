@@ -122,9 +122,15 @@ class ChatFileFenceTests(unittest.TestCase):
                     files.confined_open(root, path, os.O_RDONLY | os.O_DIRECTORY)
                 self.assertEqual(error.exception.errno, errno.EXDEV)
             # Firmlinks such as /Users resolve onto the Data volume.
-            crossed = [name for name in ("Users", "Applications", "private")
-                       if os.stat("/" + name).st_dev != os.fstat(root).st_dev]
-            self.assertTrue(crossed)
+            seen = {}
+            for name in ("Users", "Applications", "private"):
+                fd = os.open("/" + name, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    seen[name] = files._mount(fd)
+                finally:
+                    os.close(fd)
+            crossed = [name for name, mount in seen.items() if mount != files._mount(root)]
+            self.assertTrue(crossed, f"root {files._mount(root)}, firmlinks {seen}")
             for name in crossed:
                 with self.subTest(firmlink=name), self.assertRaises(OSError) as error:
                     files.confined_open(root, name, os.O_RDONLY | os.O_DIRECTORY)

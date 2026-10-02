@@ -34,5 +34,6 @@ jobs:
         run: |
           sw_vers
           uname -m
+          stat -f '%N dev=%d' / /Users /Applications /private /System/Volumes/Data
           python tests/core/test_chat_files.py
           python tests/core/test_confined_files.py
