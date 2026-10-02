@@ -267,40 +267,30 @@ def _resolve_plugin_source(svc, source, mp_path: Path, plugin_root: Optional[str
 
 
 def _get_plugin_manifest_version(svc, local_dir: Path) -> Optional[str]:
-    """Read a plugin's version from its .claude-plugin/plugin.json manifest.
+    """Read a plugin's version from its own manifest, in any supported format.
 
     This matches Claude Code's behavior: the plugin's own manifest is the
-    source of truth for versioning, not the marketplace repo hash.
-
-    Args:
-        local_dir: Path to the plugin's source directory in the marketplace.
+    source of truth for versioning, not the marketplace repo hash. The
+    manifest is found by fluid's shared reader (``.claude-plugin/plugin.json``,
+    a root ``plugin.json`` or ``.codex-plugin/plugin.json``).
 
     Returns:
-        The version string from plugin.json, or None if not found.
+        The version string from the manifest, or None if not found.
     """
-    manifest_path = local_dir / ".claude-plugin" / "plugin.json"
-    if not manifest_path.exists():
-        # Also check for plugin.json at root (older format)
-        manifest_path = local_dir / "plugin.json"
-        if not manifest_path.exists():
-            return None
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        return manifest.get("version") or None
-    except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    from fluid.context.plugin_formats import read_manifest
+
+    version = read_manifest(local_dir).get("version")
+    return str(version) if version else None
 
 
 def _detect_components_from_dir(svc, plugin_dir: Path) -> Dict[str, bool]:
-    """Detect plugin components by scanning a local plugin directory."""
-    return {
-        "has_commands": (plugin_dir / "commands").exists(),
-        "has_agents": (plugin_dir / "agents").exists(),
-        "has_skills": (plugin_dir / "skills").exists(),
-        "has_hooks": (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists(),
-        "has_mcp": (plugin_dir / ".mcp.json").exists(),
-    }
+    """Detect plugin components by reading a local plugin directory."""
+    from app.core.plugin_service import plugin_record, record_summary
+
+    summary = record_summary(plugin_record(plugin_dir, plugin_dir.name, ""), plugin_dir)
+    return {key: summary[key] for key in (
+        "has_commands", "has_agents", "has_skills", "has_hooks", "has_mcp",
+    )}
 
 
 def _detect_components_from_entry(svc, entry: Dict[str, Any]) -> Dict[str, bool]:

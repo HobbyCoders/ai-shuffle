@@ -47,6 +47,27 @@ describe('PluginDetails with backend payloads', () => {
 		expect(page.getByText('lint')).toBeTruthy();
 	});
 
+	it('lists components this app does not run, with the reason, and nothing when all load', () => {
+		const loaded = render(PluginDetails, { props: { plugin: installedDetails } });
+		expect(loaded.queryByTestId('plugin-not-loaded')).toBeNull();
+		cleanup();
+
+		const plugin: PluginDetailsType = {
+			...installedDetails,
+			format: 'agent-plugins',
+			components: [
+				{ kind: 'skill', name: 'lint', support: 'loaded', reason: '' },
+				{ kind: 'app', name: 'drive', support: 'unsupported', reason: 'hosted by ChatGPT; it cannot run outside it' },
+				{ kind: 'user_config', name: 'api_token', support: 'needs_config', reason: 'asks for settings this app does not collect yet' }
+			]
+		};
+		const page = render(PluginDetails, { props: { plugin } });
+		const block = page.getByTestId('plugin-not-loaded');
+		expect(block.textContent).toContain('App drive: hosted by ChatGPT; it cannot run outside it');
+		expect(block.textContent).toContain('Settings api_token: asks for settings this app does not collect yet');
+		expect(block.textContent).not.toContain('lint');
+	});
+
 	it('shows a marketplace plugin with an install action and no install date', async () => {
 		const onInstall = vi.fn();
 		const page = render(PluginDetails, { props: { plugin: marketplaceDetails, onInstall } });

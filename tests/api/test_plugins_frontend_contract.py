@@ -35,14 +35,14 @@ FIXED_TIME = "2026-01-02T03:04:05"
 PLUGIN_INFO_KEYS = {
     "id", "name", "marketplace", "description", "version", "scope", "install_path",
     "installed_at", "enabled", "has_commands", "has_agents", "has_skills", "has_hooks",
-    "has_mcp", "connector_type",
+    "has_mcp", "connector_type", "format", "trust", "components",
 }
 EXPECTED_KEYS = {
     "marketplace_sync": {"status", "marketplace_id"},
     "available": {
         "id", "name", "marketplace", "marketplace_path", "description", "has_commands",
         "has_agents", "has_skills", "has_hooks", "has_mcp", "connector_type", "installed",
-        "enabled",
+        "enabled", "format", "components",
     },
     "details": PLUGIN_INFO_KEYS | {"commands", "agents", "skills", "readme"},
     "installed": PLUGIN_INFO_KEYS,
@@ -151,6 +151,14 @@ def test_response_keys_match_the_frontend_types(client, tmp_path):
     assert [set(i) for i in p["installed"]] == [EXPECTED_KEYS["installed"]]
     assert [set(a) for a in p["file_based_agents"]] == [EXPECTED_KEYS["file_based_agents"]]
     assert p["file_based_agents"][0]["source_plugin"] == "toolkit@mp"
+    # #1610: the shared reader's format and components ride along.
+    installed = p["installed"][0]
+    assert (installed["format"], installed["trust"]) == ("claude", "marketplace")
+    assert {(c["kind"], c["name"], c["support"]) for c in installed["components"]} == {
+        ("skill", "lint", "loaded"), ("command", "review", "loaded"), ("agent", "reviewer", "loaded"),
+    }
+    for component in installed["components"]:
+        assert set(component) == {"kind", "name", "support", "reason"}
 
 
 def test_shared_frontend_fixture_matches_live_responses(client, tmp_path):

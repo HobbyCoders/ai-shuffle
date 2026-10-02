@@ -287,9 +287,15 @@ def test_mcp_servers_are_substituted_and_normalized(tmp_path, monkeypatch) -> No
     assert local["command"] == "node"
     assert local["args"][0] == f"{plugin.root}/server.js"  # ${CLAUDE_PLUGIN_ROOT}
     assert local["args"][2] == str(proj)  # ${CLAUDE_PROJECT_DIR}
-    # ${MYPLUG_TOKEN} from the environment, plus the plugin root the server
-    # process is given as Claude Code gives it.
-    assert local["env"] == {"TOKEN": "s3cret", "CLAUDE_PLUGIN_ROOT": str(plugin.root)}
+    # ${MYPLUG_TOKEN} from the environment, plus the plugin root and data
+    # folder the server process is given as Claude Code gives them.
+    data_dir = tmp_path / "home" / ".fluid" / "plugins" / "data" / "myplug@testmp"
+    assert local["env"] == {
+        "TOKEN": "s3cret",
+        "CLAUDE_PLUGIN_ROOT": str(plugin.root),
+        "CLAUDE_PLUGIN_DATA": str(data_dir),
+    }
+    assert data_dir.is_dir()  # created on first use
     assert "type" not in local  # stdio is fluid's client default
 
     # http becomes fluid's streamable_http transport.
@@ -327,7 +333,10 @@ def test_inline_manifest_mcp_servers(tmp_path, monkeypatch) -> None:
     assert plugin.mcp_servers == {
         "inline": {
             "command": "npx", "args": ["thing@1"],
-            "env": {"CLAUDE_PLUGIN_ROOT": str(plugin.root)},
+            "env": {
+                "CLAUDE_PLUGIN_ROOT": str(plugin.root),
+                "CLAUDE_PLUGIN_DATA": str(Path.home() / ".fluid" / "plugins" / "data" / "myplug@testmp"),
+            },
         }
     }
 
@@ -342,7 +351,10 @@ def test_manifest_mcp_servers_path(tmp_path, monkeypatch) -> None:
         json.dumps({"mcpServers": {"fromfile": {"command": "srv"}}}),
     )
     assert discover_plugins(proj)[0].mcp_servers == {
-        "fromfile": {"command": "srv", "env": {"CLAUDE_PLUGIN_ROOT": str(root)}}
+        "fromfile": {"command": "srv", "env": {
+            "CLAUDE_PLUGIN_ROOT": str(root),
+            "CLAUDE_PLUGIN_DATA": str(Path.home() / ".fluid" / "plugins" / "data" / "myplug@testmp"),
+        }}
     }
 
 
