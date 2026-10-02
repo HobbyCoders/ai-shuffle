@@ -123,7 +123,7 @@ def test_unraid_template_runtime_flags_paths_and_interface():
     key = configs[LICENSE_KEY_ENV]
     assert key.get("Type") == "Variable" and key.get("Display") == "always"
     assert key.get("Mask") == "true" and key.get("Required") == "false" and key.get("Default") == ""
-    assert "first start" in key.get("Description") and "Settings, License" in key.get("Description")
+    assert "first start" in key.get("Description") and "Settings, System, License" in key.get("Description")
     assert "CORS_ORIGINS" not in configs
 
 
