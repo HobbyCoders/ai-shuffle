@@ -85,6 +85,15 @@
 	{/if}
 {/snippet}
 
+{#snippet batchActions()}
+	{#if picked.length && !access.readOnly}
+		<button type="button" class="st-btn primary sm" disabled={!!model.busy} onclick={installPicked}>
+			<Download />{model.busy === BATCH ? 'Installing…' : `Install (${picked.length})`}
+		</button>
+		<button type="button" class="st-btn ghost sm" disabled={!!model.busy} onclick={() => (picked = [])}>Clear</button>
+	{/if}
+{/snippet}
+
 <DetailPane
 	name="Explore plugins"
 	icon={EXPLORE_ICON}
@@ -96,14 +105,6 @@
 	category="plugins"
 	item="explore"
 >
-	{#snippet batchActions()}
-		{#if picked.length && !access.readOnly}
-			<button type="button" class="st-btn primary sm" disabled={!!model.busy} onclick={installPicked}>
-				<Download />{model.busy === BATCH ? 'Installing…' : `Install (${picked.length})`}
-			</button>
-			<button type="button" class="st-btn ghost sm" disabled={!!model.busy} onclick={() => (picked = [])}>Clear</button>
-		{/if}
-	{/snippet}
 	<RowGroup title={q ? 'Search results' : 'Browse'} count={shown.length} actions={batchActions} bare>
 		<SearchBox bind:value={query} placeholder="Search plugins" />
 		<div class="filters">
