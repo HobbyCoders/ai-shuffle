@@ -20,6 +20,7 @@ import { assertCategoryCoverage, coverageLocations } from './testing/coverage';
 import { PREFERENCE_PAGES, COLLECTION_LOADERS, isPreferenceCategory, type CollectionCategory } from '$lib/components/settings/pages/index';
 import { CATEGORY_IDS } from './types';
 import { MODULES } from './registry';
+import { settingsNav } from './navigation.svelte';
 
 afterEach(cleanup);
 
@@ -92,7 +93,14 @@ describe('every category page matches the registry', () => {
 			const component: Component = isPreferenceCategory(category)
 				? PREFERENCE_PAGES[category]
 				: (await COLLECTION_LOADERS[category as CollectionCategory]()).default;
-			await assertCategoryCoverage(category, () => render(component).container);
+			await assertCategoryCoverage(category, (where) => {
+				// Collections render the place being checked (f0-api.md, Conventions).
+				if (!isPreferenceCategory(category)) {
+					settingsNav.clearSelection(category);
+					settingsNav.go({ category, ...where });
+				}
+				return render(component).container;
+			});
 		});
 	}
 });
