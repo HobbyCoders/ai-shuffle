@@ -70,4 +70,14 @@ jobs:
             -project AIShuffle.xcodeproj -scheme AIShuffle \
             -destination "id=$udid" \
             -derivedDataPath build/DerivedData \
+            -resultBundlePath build/Tests.xcresult \
             CODE_SIGNING_ALLOWED=NO
+          # -quiet hides per-test lines; print the counts and fail if none ran.
+          xcrun xcresulttool get test-results summary --path build/Tests.xcresult > build/summary.json
+          python3 - <<'PY'
+          import json
+          summary = json.load(open("build/summary.json"))
+          print({key: summary.get(key) for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests")})
+          assert summary.get("result") == "Passed" and summary.get("failedTests") == 0, "iOS tests did not pass"
+          assert summary.get("passedTests", 0) >= 20, "Fewer iOS tests ran than expected"
+          PY
