@@ -110,6 +110,21 @@ jobs:
         # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
 
+      - name: Isolated folder shell escape tests (real bubblewrap)
+        # The fast subset skips these: the runner has no bubblewrap. Install
+        # it, lift Ubuntu 24.04's AppArmor block on unprivileged user
+        # namespaces (the image's container needs the equivalent compose
+        # security_opt lines), and require the sandbox so a broken setup
+        # fails instead of skipping. ~20 s.
+        env:
+          CHAT_SHELL_REQUIRE_SANDBOX: '1'
+          PYTHONPATH: .:fluid
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends bubblewrap)
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          bwrap --version
+          python -m pytest tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120
+
       - name: Boot smoke test (real server process)
         # Starts `python -m app.main` as a subprocess against a private
         # PostgreSQL 16 cluster (initialized on a free port by the container

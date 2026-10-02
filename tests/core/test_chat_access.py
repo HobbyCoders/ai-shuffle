@@ -296,6 +296,9 @@ async def test_folder_write_confirmation_mode_preserves_scope(broker, tmp_path, 
     await asyncio.wait_for(task, 3)
     assert (tmp_path / "ok.txt").read_text() == "written"
     assert not broker.actions
+    # Without the isolated shell a folder grant runs no commands at all.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     for operation, args in [("write", {"path": "../escape", "content": "no"}), ("command", {"command": "no"})]:
         with pytest.raises(AccessDenied):
             await broker.run("chat", grant["id"], operation, args)
@@ -541,7 +544,12 @@ def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
 
 @pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
 @pytest.mark.asyncio
-async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path):
+async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path, monkeypatch):
+    # Without the isolated shell (tests/core/test_chat_shell.py covers it) a
+    # folder command is refused; a host with bubblewrap would otherwise wait
+    # for approval here.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     grant = await broker.create("chat", GrantInput(kind="folder", label="Folder", path=str(tmp_path)))
     with pytest.raises(AccessDenied):
         await broker.run("chat", grant["id"], "command", {"command": "anything"})

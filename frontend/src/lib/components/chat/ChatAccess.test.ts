@@ -167,6 +167,18 @@ describe('private-access recovery and live invalidations', () => {
   await fireEvent.click(screen.getByRole('button', {name: 'Deny'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: false});
  });
+ it.each([[true, 'It can change files in the folder.'], [false, 'The folder is read-only to it.']])(
+  'labels a folder grant command as sandboxed, not remote (writable %s)', async (writable, effect) => {
+  snapshot = {...empty(),
+   grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/home/me/notes', expires_at: 9999999999, writable}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'grep -r todo .'}, expires_at: 9999999999}]};
+  const view = render(ChatAccess, {sessionId: 's1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  expect(screen.getByText('Approve this sandboxed command?')).toBeTruthy();
+  expect(screen.queryByText('Approve this remote command?')).toBeNull();
+  expect(view.container.querySelector('pre.pa-mono')!.textContent).toBe('$ grep -r todo .');
+  expect(screen.getByText(`Runs once in an isolated sandbox that sees only this folder and has no network. ${effect}`)).toBeTruthy();
+ });
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};
   render(ChatAccess,{sessionId:'s1'}); await flush();
