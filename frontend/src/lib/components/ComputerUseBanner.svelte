@@ -1,5 +1,12 @@
 <script lang="ts">
-	import { Monitor, MousePointer2, Square, X } from 'lucide-svelte';
+	/**
+	 * Computer-use status bar: a compact bar at the top center of the window,
+	 * shown while an agent controls the host desktop. It sits just below the
+	 * title-bar strip, so it never lands under the desktop app's window
+	 * controls or over the composer. Hiding it shrinks it in place to a chip
+	 * that keeps Stop within reach; it does not move.
+	 */
+	import { ChevronDown, ChevronUp, Square, X } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 
 	$effect(() => {
@@ -25,58 +32,98 @@
 	const detail = $derived(computerUse.connectionLost ? 'Connection lost — status may be out of date'
 		: !computerUse.busy && (computerUse.secondsSince ?? 0) > 2 ? 'Thinking · computer control is still active'
 		: actions[computerUse.action ?? ''] ?? 'Using computer');
-	const pointer = $derived.by(() => {
-		const g = computerUse.geometry, p = computerUse.cursor;
-		if (!g || !p || g.width <= 0 || g.height <= 0) return null;
-		return { x: Math.max(0, Math.min(100, (p[0] - g.left) / g.width * 100)),
-			y: Math.max(0, Math.min(100, (p[1] - g.top) / g.height * 100)) };
-	});
+	const hint = $derived(`Shared mouse & keyboard · ${computerUse.escapeAvailable ? 'Esc on host to stop' : 'Use Stop computer use to take control'}${!computerUse.overlayAvailable ? ' · Screen overlay unavailable' : ''}`);
 </script>
 
 {#if computerUse.active}
-	<aside class="computer-control" class:collapsed aria-label="Computer use controls" data-testid="computer-use-banner">
-		{#if !collapsed}
-			<div class="screen" aria-hidden="true">
-				<Monitor size={30} />
-				{#if pointer}<span class="pointer" style:left={`${pointer.x}%`} style:top={`${pointer.y}%`}><MousePointer2 size={13} fill="currentColor" /></span>{/if}
-			</div>
-			<div class="copy" role="status">
-				<strong>Computer use <span>· {computerUse.displayLabel ?? 'Host desktop'}</span></strong>
-				<span>{detail}</span>
-				<small>Shared mouse &amp; keyboard · {computerUse.escapeAvailable ? 'Esc on host to stop' : 'Use Stop computer use to take control'}{!computerUse.overlayAvailable ? ' · Screen overlay unavailable' : ''}</small>
+	<aside class="cu-bar" class:collapsed aria-label="Computer use controls" data-testid="computer-use-banner">
+		<span class="cu-dot" class:lost={computerUse.connectionLost} aria-hidden="true"></span>
+		{#if collapsed}
+			<strong class="cu-title">Computer use</strong>
+		{:else}
+			<div class="cu-copy" role="status">
+				<div class="cu-line">
+					<strong class="cu-title">Computer use</strong>
+					<span class="cu-target">{computerUse.displayLabel ?? 'Host desktop'}</span>
+					<span class="cu-sep" aria-hidden="true">·</span>
+					<span class="cu-action">{detail}</span>
+				</div>
+				<small class="cu-hint">{hint}</small>
 			</div>
 		{/if}
-		<button class="dismiss" class:restore={collapsed} aria-label={collapsed ? 'Show computer use details' : 'Hide computer use message'} title={collapsed ? 'Show computer use details' : 'Hide message (computer use continues)'} aria-expanded={!collapsed} onclick={() => collapsed = !collapsed}>
-			{#if collapsed}<Monitor size={16} aria-hidden="true" /><span>Computer use</span>{:else}<X size={16} aria-hidden="true" />{/if}
+		<button class="cu-stop" onclick={() => computerUse.halt()} disabled={computerUse.stopping}>
+			<Square size={10} fill="currentColor" aria-hidden="true" />{computerUse.stopping ? 'Stopping…' : 'Stop computer use'}
 		</button>
-		<button class="stop" onclick={() => computerUse.halt()} disabled={computerUse.stopping}>
-			<Square size={12} fill="currentColor" />{computerUse.stopping ? 'Stopping…' : 'Stop computer use'}
+		<button class="cu-icon" aria-label={collapsed ? 'Show computer use details' : 'Hide computer use message'} title={collapsed ? 'Show details' : 'Hide details (computer use continues)'} aria-expanded={!collapsed} onclick={() => collapsed = !collapsed}>
+			{#if collapsed}<ChevronDown size={15} aria-hidden="true" />{:else}<ChevronUp size={15} aria-hidden="true" />{/if}
 		</button>
 	</aside>
 {:else if stopped && !dismissed}
-	<aside class="computer-control stopped" aria-label="Computer use stopped">
-		<Monitor size={22} aria-hidden="true" />
-		<div class="copy" role="status"><strong>Computer use stopped</strong><span>You have control. Start a new chat turn to use the computer again.</span></div>
-		<button class="dismiss" aria-label="Dismiss computer use status" onclick={() => dismissed = true}><X size={16} /></button>
+	<aside class="cu-bar stopped" aria-label="Computer use stopped">
+		<span class="cu-dot idle" aria-hidden="true"></span>
+		<div class="cu-copy" role="status">
+			<strong class="cu-title">Computer use stopped</strong>
+			<small class="cu-hint">You have control. Start a new chat turn to use the computer again.</small>
+		</div>
+		<button class="cu-icon" aria-label="Dismiss computer use status" onclick={() => dismissed = true}><X size={15} aria-hidden="true" /></button>
 	</aside>
 {/if}
 
 <style>
-	.computer-control { position: fixed; z-index: 150; bottom: calc(18px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; width: max-content; max-width: calc(100vw - 24px); padding: 14px 16px; border: 1px solid #9b86ff; border-radius: 14px; background: var(--background, #141417); color: var(--foreground, #f4f4f5); box-shadow: 0 8px 32px #0004; }
-	.screen { position: relative; width: 42px; height: 32px; display: grid; place-items: center; color: #9b86ff; flex-shrink: 0; }
-	.pointer { position: absolute; transform: translate(-50%, -50%); }
-	.copy { display: flex; flex-direction: column; gap: 3px; font-size: 12px; min-width: 0; }
-	.copy strong { font-weight: 650; font-size: 13px; }
-	.copy strong span { font-weight: 450; }
-	.copy small { opacity: 0.7; font-size: 11px; }
-	button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0; cursor: pointer; border-radius: 8px; }
-	.stop { background: #7c3aed; color: #fff; font-size: 12px; font-weight: 600; padding: 9px 12px; }
-	.stop:hover { background: #6d28d9; }
-	.stop:disabled { opacity: 0.65; cursor: wait; }
-	button:focus-visible { outline: 2px solid #9b86ff; outline-offset: 3px; }
-	.dismiss { padding: 6px; min-width: 32px; min-height: 32px; }
-	.collapsed { top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); bottom: auto; left: auto; transform: none; gap: 8px; padding: 6px; }
-	.restore { font-size: 12px; }
-	.stopped { border-color: var(--border, #666); }
-	@media (max-width: 640px) { .computer-control.collapsed { flex-wrap: nowrap; gap: 4px; padding: 6px; } .computer-control { flex-wrap: wrap; gap: 10px; padding: 12px; } .screen { display: none; } .copy { flex: 1 1 200px; } .copy strong span { display: block; } .stop { margin-left: auto; } }
+	/* Agent-control accent, shared with the on-screen overlay and agent cursor. */
+	.cu-bar {
+		--cu-accent: #8b6cff;
+		position: fixed;
+		z-index: 150;
+		/* Below the top bar, which doubles as the desktop title bar. */
+		top: calc(var(--titlebar-height, 52px) + 8px + env(safe-area-inset-top, 0px));
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		width: max-content;
+		max-width: min(640px, calc(100vw - 24px));
+		padding: 6px 6px 6px 12px;
+		border: 1px solid color-mix(in oklab, var(--cu-accent) 55%, var(--border-strong, #444));
+		border-radius: 12px;
+		background: var(--popover, #18181b);
+		color: var(--popover-foreground, #f4f4f5);
+		box-shadow: var(--shadow-l, 0 8px 24px #0005);
+		font-size: 12px;
+		line-height: 1.3;
+	}
+	.cu-bar.collapsed { gap: 8px; padding: 4px 4px 4px 10px; border-radius: 999px; }
+	.cu-bar.stopped { border-color: var(--border-strong, #444); }
+
+	.cu-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--cu-accent); box-shadow: 0 0 0 0 color-mix(in oklab, var(--cu-accent) 60%, transparent); animation: cu-pulse 1.8s ease-out infinite; }
+	.cu-dot.lost { background: var(--muted-foreground, #999); animation: none; }
+	.cu-dot.idle { background: var(--muted-foreground, #999); animation: none; }
+	@keyframes cu-pulse { 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+	@media (prefers-reduced-motion: reduce) { .cu-dot { animation: none; } }
+
+	.cu-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+	.cu-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; }
+	.cu-title { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+	.cu-target { color: var(--muted-foreground, #a1a1aa); overflow: hidden; text-overflow: ellipsis; }
+	.cu-sep { color: var(--muted-foreground, #a1a1aa); }
+	.cu-action { overflow: hidden; text-overflow: ellipsis; }
+	.cu-hint { color: var(--muted-foreground, #a1a1aa); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; border-radius: 8px; }
+	button:focus-visible { outline: 2px solid var(--cu-accent, #8b6cff); outline-offset: 2px; }
+	.cu-stop { gap: 6px; height: 28px; padding: 0 10px; background: #7c3aed; color: #fff; font-size: 12px; font-weight: 600; }
+	.cu-stop:hover { background: #6d28d9; }
+	.cu-stop:disabled { opacity: 0.65; cursor: wait; }
+	.collapsed .cu-stop { border-radius: 999px; }
+	.cu-icon { width: 28px; height: 28px; color: var(--muted-foreground, #a1a1aa); }
+	.cu-icon:hover { background: var(--accent, #27272a); color: var(--foreground, #f4f4f5); }
+	.collapsed .cu-icon { border-radius: 999px; }
+
+	@media (max-width: 640px) {
+		.cu-bar:not(.collapsed) { flex-wrap: wrap; row-gap: 6px; }
+		.cu-bar:not(.collapsed) .cu-copy { flex: 1 1 calc(100% - 60px); }
+		.cu-bar:not(.collapsed) .cu-line { flex-wrap: wrap; white-space: normal; }
+		.cu-bar:not(.collapsed) .cu-stop { margin-left: 18px; }
+	}
 </style>
