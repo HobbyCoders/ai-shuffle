@@ -30,7 +30,11 @@
 	const claudeFirst = $derived(!!provider?.claude && !provider.credentials.some((c) => !c.draft && c.status !== 'warn'));
 
 	const subtitle = $derived(
-		provider?.draft ? 'New provider' : `${provider?.name}, new ${draft.flavor === 'cli' || draft.flavor === 'device' ? 'subscription' : 'API key'}`
+		provider?.draft
+			? provider.name === 'New provider'
+				? 'New provider'
+				: `${provider.name}, new provider`
+			: `${provider?.name}, new ${draft.flavor === 'cli' || draft.flavor === 'device' ? 'subscription' : 'API key'}`
 	);
 
 	async function finish(item: string) {

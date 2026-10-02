@@ -292,6 +292,13 @@ export function claudePlan(plan: string | null | undefined): string | null {
 	return known[value] ?? plan!.trim();
 }
 
+/** A subscription plan as the worker reports it ("pro", "supergrok_heavy") for display: "Pro", "SuperGrok Heavy". */
+export function planLabel(plan: string | null | undefined): string | null {
+	const words = (plan ?? '').trim().split(/[\s_-]+/).filter(Boolean);
+	if (!words.length) return null;
+	return words.map((w) => (w.toLowerCase() === 'supergrok' ? 'SuperGrok' : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
+}
+
 /** One model_providers row as a credential. */
 export function rowCredential(row: ModelProvider): CredentialView {
 	const flavor = flavorOfRow(row);

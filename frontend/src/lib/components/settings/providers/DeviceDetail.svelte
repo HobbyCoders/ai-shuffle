@@ -21,7 +21,7 @@
 	import DeviceCodeSetup from './setup/DeviceCodeSetup.svelte';
 	import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
 	import { BankedResets, isGrokSubscription } from './banked-resets.svelte';
-	import { supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
+	import { planLabel, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import { setCredentialEnabled } from './provider-actions';
 
 	interface Props {
@@ -45,7 +45,7 @@
 	);
 
 	const facts = $derived([
-		{ label: 'Plan', value: usageEntry?.plan_type ?? null },
+		{ label: 'Plan', value: planLabel(usageEntry?.plan_type) },
 		{ label: 'Weekly use', value: weekly ? `${Math.round(weekly.utilization)}%` : null },
 		{ label: 'Models', value: `${row.models.length} in picker` },
 		{ label: 'Resets', value: banked.hasLoaded ? `${banked.availableCount} banked` : null }

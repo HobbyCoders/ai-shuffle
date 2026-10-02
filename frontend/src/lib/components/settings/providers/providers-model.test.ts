@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	planLabel,
 	addableKinds,
 	attentionCount,
 	buildProviders,
@@ -196,5 +197,14 @@ describe('"+" menu', () => {
 	it('numbers draft names after existing ones', () => {
 		expect(draftName('openai', 'key', [{ name: 'OpenAI API key' }])).toBe('OpenAI API key 2');
 		expect(draftName('grok', 'device', [])).toBe('SuperGrok subscription');
+	});
+});
+
+describe('plan label', () => {
+	it('capitalizes the plan the worker reports', () => {
+		expect(planLabel('pro')).toBe('Pro');
+		expect(planLabel('supergrok_heavy')).toBe('SuperGrok Heavy');
+		expect(planLabel('')).toBeNull();
+		expect(planLabel(null)).toBeNull();
 	});
 });
