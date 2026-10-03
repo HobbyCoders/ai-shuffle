@@ -1656,6 +1656,71 @@ def archive_status_sql(archived: Optional[bool], placeholder: str) -> tuple[str,
             ("archived", "active"))
 
 
+def set_sessions_active(
+    session_ids: List[str], is_active: bool, archived: Optional[bool] = None
+) -> List[SessionRow]:
+    """Set-based ``set_session_active`` for a worker that is not networked.
+
+    One UPDATE covers every id. When the change settles or archives, persistent
+    assistant homes are excluded inside the same statement, so a home never
+    appears in the returned rows; callers report missing ids individually.
+    Networked workers must use the per-session membership paths instead.
+    """
+    if not session_ids:
+        return []
+    _ph = ph()
+    marks = ", ".join([_ph] * len(session_ids))
+    status_sql, status_params = archive_status_sql(archived, _ph)
+    guard = _assistant_home_filter() if archived or not is_active else ""
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}{status_sql}
+               WHERE id IN ({marks}){guard} RETURNING *""",
+            (False if archived else is_active, datetime.now(timezone.utc).isoformat(),
+             *status_params, *session_ids)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_sessions_by_ids(session_ids: List[str]) -> Dict[str, SessionRow]:
+    """Fetch many sessions in one query, keyed by id; unknown ids are absent."""
+    if not session_ids:
+        return {}
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT * FROM sessions WHERE id IN ({', '.join([_ph] * len(session_ids))})",
+                       tuple(session_ids))
+        return {row["id"]: row for row in rows_to_list(cursor.fetchall())}
+
+
+def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[SessionRow]:
+    """Settled (inactive, not archived) list-visible top-level rows, newest first.
+
+    A coarse prefilter for bulk sidebar management. ``api_user_id`` follows
+    ``get_sessions``: an empty string selects admin rows (NULL). Callers still
+    apply the per-row visibility, owner and project checks ListSessions uses.
+    """
+    _ph = ph()
+    inst_sql, params = _instance_filter(_ph, "")
+    query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
+             f" AND (is_active IS NULL OR is_active = FALSE) AND (status IS NULL OR status <> {_ph})"
+             " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
+             " AND parent_session_id IS NULL" + _assistant_home_filter())
+    params = [*params, "archived"]
+    if api_user_id:
+        query += f" AND api_user_id = {_ph}"
+        params.append(api_user_id)
+    else:
+        query += " AND api_user_id IS NULL"
+    query += f" ORDER BY updated_at DESC, id LIMIT {_ph} OFFSET {_ph}"
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(query, (*params, limit, offset))
+        return rows_to_list(cursor.fetchall())
+
+
 def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
     """Set the list-visibility flag for a session and return the updated
     session. Hidden sessions drop out of the list queries but stay fully

@@ -71,8 +71,13 @@ hops**; only new user input starts a fresh budget. Existing `Task`, `Swarm`,
 When asked to organize chats, agents can use **SettleSession** to move a chat out
 of Active, **UnsettleSession** to put a settled chat back in Active, and
 **ArchiveSession** to archive it without deleting the conversation. Each takes an
-exact `session_id`; the current chat is also allowed. These are write tools and
-use the same permission gates and sidebar updates as the app's controls.
+exact `session_id`, or a `session_ids` list of up to 500 chats in one call; the
+current chat is also allowed. `ArchiveSession(all_settled=true)` archives every
+settled chat in the project (or everywhere with `scope="all"`) without listing
+first, never including the current chat. Bulk calls check each chat on its own,
+keep going past refusals, and return counts plus the refused or failed chats.
+These are write tools and use the same permission gates and sidebar updates as
+the app's controls.
 
 `ListSessions(state="settled")` finds settled chats. `state="archived"` finds
 archives, and `state="all"` includes both, plus active and stopped chats. These

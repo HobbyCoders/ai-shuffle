@@ -229,6 +229,19 @@ def assert_can_settle(conn, session_id):
         raise PermissionError("Your personal assistant is a persistent conversation and cannot be settled")
 
 
+def home_session_ids(session_ids):
+    """The subset of ``session_ids`` that are persistent assistant homes (one query)."""
+    if not session_ids:
+        return set()
+    marks = ", ".join(["%s"] * len(session_ids))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT home_session_id FROM assistant_state WHERE home_session_id IN ({marks}) "
+                       f"UNION SELECT home_session_id FROM assistant_account WHERE home_session_id IN ({marks})",
+                       (*session_ids, *session_ids))
+        return {row["home_session_id"] for row in cursor.fetchall()}
+
+
 def project(conn, assistant_id, values, sources):
     """Copy the account view this worker runs under into its runner row.
 

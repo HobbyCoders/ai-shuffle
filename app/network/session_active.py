@@ -66,6 +66,32 @@ def write_shared(session_id: str, active: bool) -> Optional[dict]:
     return row
 
 
+def write_shared_many(session_ids: list[str], active: bool) -> list[dict]:
+    """``write_shared`` for many sessions: one transaction, one state lock.
+
+    Any error rolls the whole batch back, so callers can retry item by item.
+    Unknown ids are skipped and absent from the result.
+    """
+    if not isinstance(active, bool):
+        raise ValueError("boolean is_active is required")
+    rows = []
+    with get_db() as conn:
+        cur = conn.cursor()
+        store.lock_state(cur)
+        for session_id in session_ids:
+            cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            if cur.fetchone() is None:
+                continue
+            if not active:
+                from app.db.assistant import assert_can_settle
+                assert_can_settle(conn, session_id)
+            _record_active(cur, session_id, active)
+            cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
+            rows.append(dict(cur.fetchone()))
+    engine.kick()
+    return rows
+
+
 async def set_shared(session_id: str, active: bool) -> dict:
     row = await run_sync(write_shared, session_id, active)
     if row is None:

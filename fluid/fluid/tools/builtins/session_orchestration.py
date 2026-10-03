@@ -18,15 +18,34 @@ def _handler(action):
     return handle
 
 
-def _management_tool(name, action, description):
+# One bulk call covers five ListSessions pages (the 202-chat cleanup that
+# prompted bulk support fits in one) while every item still gets its own
+# checks and, for a networked archive, possibly an owner round trip; that
+# keeps a call to seconds and its arguments small. Larger groups take
+# several calls.
+MAX_SESSIONS_PER_CALL = 500
+_ID = {"type": "string", "minLength": 1, "maxLength": 200}
+
+
+def _management_tool(name, action, description, *, filter_text=""):
+    selectors = "session_id, session_ids" + (" or all_settled=true" if filter_text else "")
+    properties = {"session_id": _ID, "session_ids": {
+        "type": "array", "minItems": 1, "maxItems": MAX_SESSIONS_PER_CALL, "items": _ID}}
+    if filter_text:
+        properties["all_settled"] = {"type": "boolean"}
+        properties["scope"] = {"type": "string", "enum": ["project", "all"]}
     return (ToolSpec(name=name, description=description + (
-        " Use an exact session_id from ListSessions (state='all' includes settled and remote chats); "
+        f" Pass exactly one of {selectors}. session_id changes one chat; session_ids changes up to "
+        f"{MAX_SESSIONS_PER_CALL} chats in one call (duplicates ignored). For a group, prefer one "
+        "session_ids call over one call per chat. " + filter_text +
+        "Use exact IDs from ListSessions (state='all' includes settled and remote chats); "
         "the current chat ID is also allowed. Only same-owner top-level chats are accessible. "
         "Hidden, voice and subagent chats are refused; personal assistant homes cannot be settled "
-        "or archived. Use only when the user requests session organization."),
-        input_schema={"type": "object", "properties": {
-            "session_id": {"type": "string", "minLength": 1, "maxLength": 200}},
-            "required": ["session_id"], "additionalProperties": False},
+        "or archived. Bulk calls check each chat on its own, so one refusal or failure does not stop "
+        "the rest, and return counts (changed, already_in_state, refused, failed) listing only "
+        "refused and failed chats with reasons. Repeating a call is safe. "
+        "Use only when the user requests session organization."),
+        input_schema={"type": "object", "properties": properties, "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler(action))
 
 
@@ -39,6 +58,8 @@ SPECS = (
         "Use state='settled', 'archived' or 'all' for sidebar management; these also include "
         "stopped chats and chats on other workers, which are not messaging targets. "
         "Follow next_offset when present; an empty filtered page may have more pages. "
+        "To settle, unsettle or archive several chats, pass their IDs together in one session_ids "
+        "call; to archive every settled chat, use ArchiveSession all_settled=true without listing. "
         + _COMMON), input_schema={"type": "object", "properties": {
             "scope": {"type": "string", "enum": ["project", "all"]},
             "state": {"type": "string", "enum": ["active", "settled", "archived", "all"]},
@@ -84,5 +105,10 @@ SPECS = (
         "Archived chats must first be restored in the app."),
     _management_tool("ArchiveSession", "archive",
         "Archive a chat and remove it from Active without deleting its conversation or stopping work. "
-        "Its execution worker must be reachable. Repeating this action is safe."),
+        "Its execution worker must be reachable.",
+        filter_text=(
+            "all_settled=true archives every settled chat without listing first; scope is "
+            "'project' (default) or 'all', as in ListSessions. It never selects the current chat, "
+            f"handles up to {MAX_SESSIONS_PER_CALL} chats per call and returns remaining=true when "
+            "more match: repeat the same call to continue. ")),
 )
