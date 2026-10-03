@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from collections import deque
 
@@ -27,6 +28,40 @@ MAX_TEXT_BYTES = 16_000
 MAX_CONNECTIONS = 4
 calls: dict[str, VoiceStream] = {}
 _workers: set[asyncio.Task] = set()
+# A handoff waits until the caller's transcript has been quiet this long, so
+# words still in flight (or a continued sentence) join the same request.
+SETTLE_QUIET_S = 0.7
+SETTLE_MAX_S = 3.0
+# Caller speech with no reply yet is held this long before a checkpoint stores
+# it, so a pause to think does not split one request into two chat messages.
+HOLD_UNANSWERED_S = 10.0
+# Listening sounds GPT Live can make while the caller is still talking.
+_BACKCHANNEL_WORDS = frozenset({
+    "mm", "mmm", "mhm", "mmhmm", "hm", "hmm", "uh", "uhhuh", "huh", "um",
+    "yeah", "yep", "yup", "ok", "okay", "right", "sure", "alright", "gotcha",
+    "i", "see", "got", "it", "cool",
+})
+
+
+# Non-lexical sounds a transcript can contain when only noise or breath was heard.
+_NOISE_WORDS = frozenset({"uh", "um", "umm", "hm", "hmm", "mm", "mmm", "mhm", "ah", "oh", "er", "erm", "huh"})
+
+
+NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was sent to the chat agent. "
+                   "Do not report work. If the user did ask for something, ask them to repeat it.")
+MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent to the chat agent "
+                       "while the user was still speaking; its result will follow.")
+
+
+def is_backchannel(text: str) -> bool:
+    """True for an acknowledgment-only utterance such as "Mm-hmm." or "Yeah."."""
+    words = re.findall(r"[a-z]+", text.lower().replace("-", ""))
+    return 0 < len(words) <= 4 and all(word in _BACKCHANNEL_WORDS for word in words)
+
+
+def is_noise(text: str) -> bool:
+    """True when a caller transcript holds no words, only sounds like "Hmm." or "uh"."""
+    return all(word in _NOISE_WORDS for word in re.findall(r"\w+", text.lower()))
 
 
 def live_session_config(config: dict, history: list[dict]) -> dict:
@@ -194,6 +229,10 @@ class VoiceStream:
         self.progress = None
         self.transcript_seq = 0
         self.delegated_seq = 0
+        self.last_user_caption_at = 0.0
+        self.last_user_seq = 0
+        # Delegation ids waiting for the caller's words to settle; None when idle.
+        self.settling: list[str] | None = None
 
     @property
     def is_live(self):
@@ -220,6 +259,15 @@ class VoiceStream:
         except (RuntimeError, WebSocketDisconnect):
             pass
 
+    def _is_mid_thought_backchannel(self) -> bool:
+        """The reply so far is only a listening sound inside the caller's thought.
+
+        A caller who had just asked a question may have been answered "Yeah.",
+        so only speech that did not end in a question is joined.
+        """
+        user = self.pending["user"].rstrip()
+        return bool(user) and not is_noise(user) and not user.endswith("?") and is_backchannel(self.pending["assistant"])
+
     async def flush(self):
         from app.core.turn_recorder import record_voice_exchange
         # Checkpoint, handoff and speaker changes can flush concurrently. Keep
@@ -227,6 +275,8 @@ class VoiceStream:
         async with self.flush_lock:
             user, assistant = self.pending["user"], self.pending["assistant"]
             self.pending = {"user": "", "assistant": ""}
+            if is_noise(user):
+                user = ""  # Breath or background sound, not something the caller said.
             if user or assistant:
                 self.caption_ids["user"] += 1
                 self.caption_ids["assistant"] += 1
@@ -235,15 +285,32 @@ class VoiceStream:
     async def caption(self, role: str, delta: str, offset: int = 0):
         if not delta:
             return
-        # Do not combine overlapping speakers into a user-first ten-second
-        # bucket: it reverses assistant speech that arrived before a barge-in.
-        if self.last_caption_role is not None and role != self.last_caption_role:
-            await self.flush()
+        # Pending text is always the caller's words followed by the reply, so
+        # one stored exchange never reverses speech that came before a
+        # barge-in. When the caller speaks again after a reply, store that
+        # exchange first. The exception is a listening sound ("Mm-hmm.")
+        # between two parts of one thought: drop it and keep the caller's
+        # words together as one request.
+        if role == "user" and self.last_caption_role == "assistant":
+            if self._is_mid_thought_backchannel():
+                self.pending["assistant"] = ""
+                self.caption_ids["assistant"] += 1
+                self.transcript = deque(
+                    (e for e in self.transcript if not (e["role"] == "assistant" and e.get("seq", 0) > self.last_user_seq)),
+                    maxlen=self.transcript.maxlen,
+                )
+                if not self.pending["user"][-1:].isspace() and not delta[:1].isspace():
+                    delta = " " + delta
+            else:
+                await self.flush()
         self.last_caption_role = role
         self.transcript_seq += 1
         self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "seq": self.transcript_seq})
         self.pending[role] += delta
         self.last_caption_at = time.monotonic()
+        if role == "user":
+            self.last_user_caption_at = self.last_caption_at
+            self.last_user_seq = self.transcript_seq
         await self.emit({"type": "caption", "role": role, "id": f"{role}:{self.caption_ids[role]}", "delta": delta})
         # Live has no authoritative transcript turn-end event. Segment long
         # captions for display/storage only; never infer a task boundary here.
@@ -263,18 +330,21 @@ class VoiceStream:
             context = "Live conversation context (only the latest new request needs action):\n" + "".join(
                 f"{entry['role']}: {entry['text'].strip()}\n" for entry in conversation
             )
-            if not any(e["role"] == "user" and e["text"].strip() for e in conversation):
-                result = "The backend has not received your request. Please repeat it."
+            if not any(e["role"] == "user" and not is_noise(e["text"]) for e in conversation):
+                # Noise, a breath or an empty transcript: no request for the
+                # chat agent, and nothing worth saying aloud either.
+                await self.send({"type": "session.thinking.append", "delegation_id": delegation_id,
+                                 "content": NO_REQUEST_NOTE})
+                return
+            await self.flush()
+            if self.progress is not None:
+                async def submitted(turn_id):
+                    await self.progress.submitted(turn_id, delegation_id)
+                result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted)
+                if not result:
+                    return  # Progress and final results arrive on the event stream.
             else:
-                await self.flush()
-                if self.progress is not None:
-                    async def submitted(turn_id):
-                        await self.progress.submitted(turn_id, delegation_id)
-                    result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted)
-                    if not result:
-                        return  # Progress and final results arrive on the event stream.
-                else:
-                    result = await delegate_to_selected_model(self.session_id, context)
+                result = await delegate_to_selected_model(self.session_id, context)
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
             for content in commentary_chunks(result or "The chat task returned no result."):
@@ -283,6 +353,37 @@ class VoiceStream:
             logger.exception("Voice delegation failed for %s", self.session_id)
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id,
                              "content": "The delegated task failed. No successful result was returned."})
+
+    async def settle_speech(self):
+        """Wait briefly for the caller's transcript to go quiet.
+
+        Live opens a handoff when it decides the request is complete, but the
+        last words' transcript can still be in flight, and the caller may carry
+        on. Waiting keeps the whole request in one chat turn.
+        """
+        deadline = time.monotonic() + SETTLE_MAX_S
+        while True:
+            now = time.monotonic()
+            remaining = min(SETTLE_QUIET_S - (now - self.last_user_caption_at), deadline - now)
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
+    async def dispatch_when_settled(self):
+        try:
+            await self.settle_speech()
+        finally:
+            ids, self.settling = self.settling or [], None
+        # Capture only speech since the previous handoff. The chat already
+        # owns the earlier history.
+        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+        self.delegated_seq = self.transcript_seq
+        for extra in ids[1:]:
+            try:
+                await self.send({"type": "session.thinking.append", "delegation_id": extra, "content": MERGED_REQUEST_NOTE})
+            except Exception:
+                logger.warning("Voice could not acknowledge a combined handoff for %s", self.session_id)
+        await self.run_delegation(ids[0], entries)
 
     async def upstream_frames(self):
         if self.first_frame is not None:
@@ -344,15 +445,16 @@ class VoiceStream:
                     self.delegations.add(did)
                     if len(self.delegations) > 200:
                         raise ValueError("Voice delegation limit reached; start a new call.")
-                    if len(_workers) >= 8:
+                    if self.settling is not None:
+                        # Another handoff while the caller's words are still
+                        # settling is the same request: one chat turn for both.
+                        self.settling.append(did)
+                    elif len(_workers) >= 8:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
                                          "content": "The backend is busy with another task. Ask the user to repeat this new request after it finishes."})
                     else:
-                        # Capture only speech since the previous handoff, before
-                        # yielding. The chat already owns the earlier history.
-                        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
-                        self.delegated_seq = self.transcript_seq
-                        self.delegation_task = asyncio.create_task(self.run_delegation(did, entries))
+                        self.settling = [did]
+                        self.delegation_task = asyncio.create_task(self.dispatch_when_settled())
                         _workers.add(self.delegation_task)
                         self.delegation_task.add_done_callback(_workers.discard)
                 elif kind in ("error", "session.error"):
@@ -440,8 +542,14 @@ class VoiceStream:
     async def checkpoint(self):
         while True:
             await asyncio.sleep(10)
-            if time.monotonic() - self.last_caption_at >= 2:
+            if self.checkpoint_due():
                 await self.flush()
+
+    def checkpoint_due(self) -> bool:
+        # Speech nobody has answered yet is usually a pause to think; storing
+        # it now would split one request into two chat messages.
+        unanswered = self.pending["user"] and not self.pending["assistant"]
+        return time.monotonic() - self.last_caption_at >= (HOLD_UNANSWERED_S if unanswered else 2)
 
     async def start_live(self, history: list[dict]) -> None:
         live_config = live_session_config(self.config, history)

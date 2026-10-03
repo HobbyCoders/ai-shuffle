@@ -20,7 +20,9 @@ class RealtimeOptions(PromptOptions):
     max_output_tokens: int | Literal["inf"] = Field(default="inf")
     turn_detection: Literal["server_vad", "semantic_vad"] = "semantic_vad"
     eagerness: Literal["auto", "low", "medium", "high"] = "medium"
-    threshold: float = Field(default=0.5, ge=0, le=1)
+    # Above the provider's 0.5 so breaths and room noise do not open a turn.
+    threshold: float = Field(default=0.6, ge=0, le=1)
+    noise_reduction: Literal["near_field", "far_field", "off"] = "near_field"
     prefix_padding_ms: int = Field(default=300, ge=0, le=5000)
     silence_duration_ms: int = Field(default=500, ge=100, le=5000)
     idle_timeout_ms: int | None = Field(default=None, ge=5000, le=30000)
@@ -32,6 +34,10 @@ class LiveOptions(PromptOptions):
     delegation_model: str = Field(default="", max_length=500)
     delegation_effort: str = Field(default="", max_length=30)
     delegation_instructions: str = Field(default="", max_length=16000)
+    # GPT Live has no VAD or noise settings, so the browser gates quiet
+    # microphone input (dBFS, per 80 ms frame) before it reaches the provider.
+    # -80 effectively turns the gate off.
+    mic_threshold_db: float = Field(default=-42.0, ge=-80, le=-20)
 
 
 def validate_options(model: str, value: dict) -> dict:
@@ -72,12 +78,16 @@ def realtime_session_options(options: dict | None = None) -> dict:
         )
         if o["idle_timeout_ms"] is not None:
             vad["idle_timeout_ms"] = o["idle_timeout_ms"]
+    noise = o["noise_reduction"]
     return {
         "max_output_tokens": o["max_output_tokens"],
         "audio": {
             "input": {
                 "transcription": {"model": o["transcription_model"]},
                 "turn_detection": vad,
+                # Sent explicitly (null when off) so a sideband reconnect
+                # cannot keep a stale value.
+                "noise_reduction": None if noise == "off" else {"type": noise},
             }
         },
     }

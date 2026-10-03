@@ -153,7 +153,7 @@ class TestVoiceSettings:
             "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":""},
+            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
         }
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
 
@@ -180,7 +180,7 @@ class TestVoiceSettings:
             "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":""},
+            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
         }
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
         # Persisted: a fresh GET returns the same values.

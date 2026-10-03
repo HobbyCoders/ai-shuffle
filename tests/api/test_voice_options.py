@@ -67,6 +67,9 @@ def test_legacy_realtime_vad_remains_mutually_exclusive():
         {"turn_detection": "manual"},
         {"opening": 42},
         {"instructions": None},
+        {"mic_threshold_db": -10},
+        {"mic_threshold_db": -81},
+        {"mic_threshold_db": "loud"},
     ],
 )
 def test_invalid_options_write_nothing(authenticated_client, mock_db, options):
@@ -181,3 +184,25 @@ async def test_sideband_does_not_overwrite_normal_vad():
     assert sent["max_output_tokens"] == 200
     assert sent["audio"]["input"]["turn_detection"]["threshold"] == 0.25
     assert sent["audio"]["input"]["transcription"]["model"] == "gpt-transcribe"
+
+
+def test_legacy_realtime_reduces_input_noise_and_raises_vad_threshold():
+    audio = realtime_session_options({})["audio"]["input"]
+    assert audio["noise_reduction"] == {"type": "near_field"}
+    assert realtime_session_options({"noise_reduction": "off"})["audio"]["input"]["noise_reduction"] is None
+    vad = realtime_session_options({"turn_detection": "server_vad"})["audio"]["input"]["turn_detection"]
+    assert vad["threshold"] == 0.6
+
+
+def test_live_mic_gate_is_saved_and_reaches_the_call(authenticated_client, mock_db):
+    c = authenticated_client
+    _make_provider()
+    _enable_voice(voice_model="gpt-live-1")
+    assert c.get(VOICE_SETTINGS).json()["voice_options"]["mic_threshold_db"] == -42.0
+    saved = save(c, mic_threshold_db=-50)
+    assert saved["voice_options"]["mic_threshold_db"] == -50
+    assert any(row["value"].startswith("Audio quieter than -50 dBFS") for row in saved["model_details"]["runtime_settings"])
+    r = c.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert c.post(f"{VOICE_ROOT}/sessions/{sid}/secret").json()["options"]["mic_threshold_db"] == -50

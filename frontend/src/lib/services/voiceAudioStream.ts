@@ -31,10 +31,47 @@ export type VoiceStreamEndReason =
 export const MAX_PLAYBACK_AHEAD_S = 2;
 /** Unsent microphone audio (bytes) beyond which new frames are dropped. 4 s at 24 kHz. */
 export const MAX_UPLOAD_BUFFER = 192000;
+/** Default microphone gate (dBFS); matches the server's `mic_threshold_db` default. */
+export const DEFAULT_MIC_THRESHOLD_DB = -42;
+const GATE_BLOCK = 240; // 10 ms at 24 kHz
+const GATE_PREROLL_BLOCKS = 2; // keep 20 ms before the first loud block (soft consonant onsets)
+const GATE_HANGOVER = 14400; // keep 600 ms after the last loud block (word endings, short pauses)
 import workletUrl from './voicePcm.worklet.js?url&no-inline';
 
+/**
+ * Microphone gate for streamed calls. GPT Live has no VAD or noise settings,
+ * so breaths and room noise used to reach it as speech and start a turn.
+ * Blocks quieter than the threshold are sent as silence: the provider still
+ * receives continuous audio, and nothing is delayed. Returns the same array
+ * when nothing was gated.
+ */
+export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): (pcm: Int16Array) => Int16Array {
+ const threshold = 32768 * 10 ** (thresholdDb / 20);
+ let hold = 0; // samples still open after earlier loud audio
+ return pcm => {
+  const blocks = Math.ceil(pcm.length / GATE_BLOCK);
+  const open = new Array<boolean>(blocks).fill(false);
+  for (let b = 0; b < blocks; b++) {
+   const start = b * GATE_BLOCK, end = Math.min(pcm.length, start + GATE_BLOCK);
+   let sum = 0;
+   for (let i = start; i < end; i++) sum += pcm[i] * pcm[i];
+   if (Math.sqrt(sum / (end - start)) >= threshold) {
+    for (let p = Math.max(0, b - GATE_PREROLL_BLOCKS); p <= b; p++) open[p] = true;
+    hold = GATE_HANGOVER;
+   } else if (hold > 0) {
+    open[b] = true;
+    hold = Math.max(0, hold - (end - start));
+   }
+  }
+  if (open.every(Boolean)) return pcm;
+  const gated = new Int16Array(pcm.length);
+  open.forEach((on, b) => { if (on) gated.set(pcm.subarray(b * GATE_BLOCK, (b + 1) * GATE_BLOCK), b * GATE_BLOCK); });
+  return gated;
+ };
+}
+
 /** One bidirectional PCM stream; the server owns provider auth and delegation. */
-export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, handlers: Handlers, signal: AbortSignal): Promise<VoiceAudioStream> {
+export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, handlers: Handlers, signal: AbortSignal, micThresholdDb = DEFAULT_MIC_THRESHOLD_DB): Promise<VoiceAudioStream> {
  const context = new AudioContext();
  const output = context.createGain();
  output.connect(context.destination);
@@ -139,6 +176,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   worklet = new AudioWorkletNode(context, 'voice-pcm');
   const silent = context.createGain(); silent.gain.value = 0;
   source.connect(worklet); worklet.connect(silent); silent.connect(context.destination);
+  let gate = createInputGate(micThresholdDb);
   worklet.port.onmessage = event => {
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
    // reject queued pre-mute frames even after a quick mute/unmute.
@@ -150,13 +188,15 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
     return;
    }
    droppedUpload = 0;
-   socket.send(event.data.pcm);
+   const input = new Int16Array(event.data.pcm);
+   const gated = gate(input);
+   socket.send(gated === input ? event.data.pcm : gated.buffer);
   };
   return {
    close,
    muteOutput: muted => { output.gain.value = muted ? 0 : 1; },
    muteInput: muted => {
-    micMuted = muted; micGeneration++;
+    micMuted = muted; micGeneration++; gate = createInputGate(micThresholdDb);
     worklet?.port.postMessage({ type: 'mute', muted, generation: micGeneration });
    },
    sendText: text => {

@@ -41,6 +41,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
             {"label": "Reasoning and tools", "value": "Uses the model, effort and permissions selected in the chat composer"},
             {"label": "Opening words", "value": options["opening"] or "Wait for caller"},
             {"label": "Turn detection", "value": "Managed by GPT Live; no VAD override is sent"},
+            {"label": "Microphone gate", "value": f"Audio quieter than {options['mic_threshold_db']:g} dBFS is sent as silence"},
         ]
         note = "Task requests run in the existing chat session with its selected agent instructions, conversation, tools and approval rules. The voice prompt controls direct replies and when to ask the chat agent for help."
     elif model == PERSONAPLEX_MODEL:
@@ -68,6 +69,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
             {"label": "Input transcription", "value": options["transcription_model"]},
             {"label": "Max output tokens", "value": str(options["max_output_tokens"])},
             *[{"label": f"Turn detection · {key}", "value": str(value).lower()} for key, value in realtime_session_options(options)["audio"]["input"]["turn_detection"].items()],
+            {"label": "Input noise reduction", "value": options["noise_reduction"].replace("_", " ")},
             *[{"label": f"Context retention · {key}", "value": str(value)} for key, value in TRUNCATION_CONFIG.items()],
         ]
         note = "Calls append the available agent roster and any client-supplied device instructions. Phone appendices apply only in the named mode; app-tool instructions apply only when those tools are admitted. Conversation replay is context, not a system prompt."

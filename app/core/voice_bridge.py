@@ -977,9 +977,7 @@ class VoiceBridge:
             self._ensure_approval_poller()
         else:
             from app.core.voice_progress import VoiceProgress
-            async def progress_note(event):
-                await self._inject("[work update] " + event.get("content", ""))
-            self._conversation_progress = VoiceProgress(self.session_id, progress_note)
+            self._conversation_progress = VoiceProgress(self.session_id, self._progress_note)
             await self._conversation_progress.open()
             self._conversation_progress_task = asyncio.create_task(self._conversation_progress.run())
 
@@ -2142,6 +2140,15 @@ class VoiceBridge:
     async def _inject(self, text: str) -> None:
         """Put a backend-authored note into the call and ask for a reply."""
         await self._send_item(text, respond=True)
+
+    async def _progress_note(self, event: Dict[str, Any]) -> None:
+        """Relay one VoiceProgress update; only outcomes ask for speech.
+
+        Routine progress is written as quiet context the model uses when the
+        caller asks, so it does not volunteer a status line for every step.
+        """
+        spoken = event.get("type") == "session.commentary.append"
+        await self._send_item("[work update] " + str(event.get("content", "")), respond=spoken)
 
     async def _send_item(self, text: str, *, respond: bool) -> None:
         """Write one backend-authored conversation item. Never raises.

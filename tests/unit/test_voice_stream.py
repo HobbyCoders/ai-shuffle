@@ -2,6 +2,7 @@
 import base64
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -353,3 +354,140 @@ async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypat
     overrides = submit.await_args.kwargs["overrides"]
     assert overrides["model"] == "haiku"
     assert overrides["system_prompt_append"] == voice_stream.DELEGATION_INSTRUCTIONS
+
+
+def test_live_prompt_forbids_backchannels_and_waiting_filler():
+    from app.core.voice_prompts import LIVE_INSTRUCTIONS
+    # GPT Live reads these headings; the old default asked for "moderate" backchannels.
+    assert "Backchannel policy: Do not use backchannels." in LIVE_INSTRUCTIONS
+    assert "moderate" not in LIVE_INSTRUCTIONS
+    assert "Keep listening while the user pauses" in LIVE_INSTRUCTIONS
+    assert "Do not resume or repeat the sentence you were cut off in" in LIVE_INSTRUCTIONS
+    assert "still on the call" in LIVE_INSTRUCTIONS and "say nothing or at most one word" in LIVE_INSTRUCTIONS
+    assert "applies for the rest of the call" in LIVE_INSTRUCTIONS
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Mm-hmm.", True), ("Yeah.", True), ("Uh-huh", True), ("Okay, got it.", True), ("Right.", True),
+    ("Sure, I'll fix that now.", False), ("Yeah, the rail icons are 20 pixels.", False), ("", False),
+])
+def test_backchannel_detection(text, expected):
+    assert voice_stream.is_backchannel(text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("", True), (" ", True), ("Hmm.", True), ("uh, um", True), ("Yeah.", False), ("uh, the rail", False),
+])
+def test_noise_detection(text, expected):
+    assert voice_stream.is_noise(text) is expected
+
+
+def recorder(monkeypatch):
+    from app.core import turn_recorder
+    capture = AsyncMock()
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", capture)
+    return capture
+
+
+@pytest.mark.asyncio
+async def test_listening_sound_mid_sentence_keeps_one_request(monkeypatch):
+    """Owner's call: "starting with the" / "Yeah." / "first one..." arrived as two requests."""
+    capture = recorder(monkeypatch)
+    call = stream()
+    await call.caption("user", "Okay. So, uh, starting with the")
+    await call.caption("assistant", "Yeah.")
+    await call.caption("user", "first one, the computer use tool needs work.")
+    await call.caption("assistant", "On it.")
+    await call.flush()
+    assert [(a.args[1], a.args[2]) for a in capture.call_args_list] == [
+        ("Okay. So, uh, starting with the first one, the computer use tool needs work.", "On it.")]
+    # The handoff context sees one user line, not the listening sound.
+    assert [(e["role"], e["text"]) for e in call.transcript] == [
+        ("user", "Okay. So, uh, starting with the"), ("user", " first one, the computer use tool needs work."),
+        ("assistant", "On it.")]
+    captions = [c.args[0] for c in call.websocket.send_json.await_args_list]
+    # The caller's words continue the same caption; the next reply starts a new one.
+    assert [c["id"] for c in captions] == ["user:0", "assistant:0", "user:0", "assistant:1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first,reply", [
+    ("Can you hear me?", "Yeah."),  # an answer to a question, not a listening sound
+    ("Make the icons bigger", "Sure, I'll ask the agent to resize them."),  # a real reply
+])
+async def test_answers_and_real_replies_still_separate_exchanges(monkeypatch, first, reply):
+    capture = recorder(monkeypatch)
+    call = stream()
+    await call.caption("user", first)
+    await call.caption("assistant", reply)
+    await call.caption("user", "Next thing.")
+    await call.flush()
+    assert [(a.args[1], a.args[2]) for a in capture.call_args_list] == [(first, reply), ("Next thing.", None)]
+
+
+@pytest.mark.asyncio
+async def test_noise_only_speech_is_not_stored_or_dispatched(monkeypatch):
+    capture = recorder(monkeypatch)
+    delegate = AsyncMock()
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    monkeypatch.setattr(voice_stream, "SETTLE_QUIET_S", 0)
+    call = stream()
+    call.upstream = Upstream([json.dumps(e) for e in [
+        {"type": "session.input_transcript.delta", "delta": "Hmm.", "end_ms": 500},
+        {"type": "session.delegation.created", "delegation": {"id": "noise", "offset_ms": 600}},
+    ]])
+    await call.receive_upstream()
+    await call.delegation_task
+    delegate.assert_not_awaited()
+    # Quiet context for the voice model, not a spoken "please repeat".
+    assert json.loads(call.upstream.sent[0]) == {
+        "type": "session.thinking.append", "delegation_id": "noise", "content": voice_stream.NO_REQUEST_NOTE}
+    await call.flush()
+    capture.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handoff_waits_for_the_rest_of_the_sentence_and_merges_repeat_handoffs(monkeypatch):
+    monkeypatch.setattr(voice_stream, "SETTLE_QUIET_S", 0.05)
+    recorder(monkeypatch)
+    delegate = AsyncMock(return_value="Resized.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call = stream()
+    call.upstream = Upstream([json.dumps(e) for e in [
+        {"type": "session.input_transcript.delta", "delta": "Make the rail icons the same size as the", "end_ms": 900},
+        {"type": "session.delegation.created", "delegation": {"id": "d1", "offset_ms": 1000}},
+        {"type": "session.delegation.created", "delegation": {"id": "d2", "offset_ms": 1100}},
+    ]])
+    await call.receive_upstream()
+    # The last words' transcript lands after Live opened the handoff.
+    await call.caption("user", " other icons.")
+    await call.delegation_task
+    delegate.assert_awaited_once()
+    assert "user: Make the rail icons the same size as the other icons.\n" in delegate.await_args.args[1]
+    sent = [json.loads(e) for e in call.upstream.sent]
+    assert sent[0] == {"type": "session.thinking.append", "delegation_id": "d2", "content": voice_stream.MERGED_REQUEST_NOTE}
+    assert sent[1] == {"type": "session.commentary.append", "delegation_id": "d1", "content": "Resized."}
+    assert call.settling is None
+
+
+@pytest.mark.asyncio
+async def test_handoff_settling_is_bounded_while_the_caller_keeps_talking(monkeypatch):
+    monkeypatch.setattr(voice_stream, "SETTLE_QUIET_S", 10)
+    monkeypatch.setattr(voice_stream, "SETTLE_MAX_S", 0.05)
+    call = stream()
+    call.last_user_caption_at = time.monotonic()
+    started = time.monotonic()
+    await call.settle_speech()
+    assert time.monotonic() - started < 1
+
+
+def test_checkpoint_holds_unanswered_speech_through_a_pause(monkeypatch):
+    call = stream()
+    call.pending["user"] = "So the first thing is"
+    call.last_caption_at = time.monotonic() - 5
+    assert not call.checkpoint_due()  # a pause to think, not a finished request
+    call.last_caption_at = time.monotonic() - voice_stream.HOLD_UNANSWERED_S
+    assert call.checkpoint_due()
+    call.pending["assistant"] = "On it."
+    call.last_caption_at = time.monotonic() - 2
+    assert call.checkpoint_due()

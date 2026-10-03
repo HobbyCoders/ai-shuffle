@@ -52,6 +52,9 @@ export interface VoiceOptions {
  prefix_padding_ms?: number;
  silence_duration_ms?: number;
  idle_timeout_ms?: number | null;
+ noise_reduction?: 'near_field' | 'far_field' | 'off';
+ /** GPT Live: microphone level (dBFS) below which streamed input is sent as silence. */
+ mic_threshold_db?: number;
  opening?: string;
  /** Read-only compatibility for already-pinned legacy calls. Not voice settings. */
  delegation_type?: 'client' | 'responses';

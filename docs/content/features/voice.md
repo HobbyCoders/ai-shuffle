@@ -36,11 +36,13 @@ Hanging up ends the audio connection. Realtime workers and GPT Live tasks alread
 
 The browser streams microphone audio to AI Shuffle over a WebSocket. The server connects to OpenAI and sends response audio back to the browser. This is a server-owned audio transport, not a direct browser-to-OpenAI call.
 
-With **client delegation**, task requests are submitted to the **same chat session**, using its selected model, agent instructions, conversation, tools, effort, and approval rules. The handoff does not create a background worker or use the Realtime agent roster. Task progress and results can be relayed into the voice conversation.
+With **client delegation**, task requests are submitted to the **same chat session**, using its selected model, agent instructions, conversation, tools, effort, and approval rules. The handoff does not create a background worker or use the Realtime agent roster. The handoff waits briefly until your transcript goes quiet, so the last words of a request are not cut off; a handoff with no words in it, such as a breath or a cough, is not sent to the chat. Results, failures, finished tasks and approval requests are spoken. Routine progress is passed to the voice model as quiet context: it answers when you ask about status but does not announce each step.
 
 The backend also retains a **Responses delegation** path for saved GPT Live session configurations. OpenAI handles those requests using a model on the call's OpenAI API provider. AI Shuffle exposes **no app tools** to that backend and does not also dispatch a local chat turn for the same delegation. This is not the current settings UI's task-model selector; new calls use client delegation and the composer selections.
 
-GPT Live input and output transcript events are saved as user and assistant text. Because this stream has no authoritative transcript turn-end event in the integration, saved text is segmented and may not align exactly with spoken turns.
+GPT Live input and output transcript events are saved as user and assistant text. Because this stream has no authoritative transcript turn-end event in the integration, saved text is segmented and may not align exactly with spoken turns. A short listening sound from the assistant, such as "Mm-hmm", in the middle of your sentence does not split your words into two messages.
+
+GPT Live has no turn-detection or noise settings of its own. To keep breaths and room noise from starting a turn, the browser sends microphone audio quieter than the `mic_threshold_db` voice option (default -42 dBFS) as silence. Raise the value if background noise still triggers the assistant; lower it if a quiet microphone is cut off.
 
 ### OpenAI Realtime
 

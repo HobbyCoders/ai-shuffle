@@ -38,7 +38,7 @@ curl http://localhost:8000/api/v1/settings/voice \
   "voice_input_mode": "auto",
   "voice_input_silence_seconds": 5,
   "voice_app_tools_enabled": true,
-  "voice_options": { "instructions": "", "opening": "", "delegation_instructions": "" },
+  "voice_options": { "instructions": "", "opening": "", "delegation_instructions": "", "mic_threshold_db": -42.0 },
   "model_details": { "model": "gpt-live-1", "voices": [{ "id": "marin", "label": "Marin" }] }
 }
 ```
@@ -63,7 +63,7 @@ JSON body, all optional:
 | `voice_input_model` | One of the ids in `voice_input_models` |
 | `voice_input_mode` | `auto` or `toggle` |
 | `voice_input_silence_seconds` | Integer from 1 to 60 |
-| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `opening` (up to 2000), `delegation_instructions` (up to 16000). Send `""` to reset a prompt. Other keys return `400` |
+| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `opening` (up to 2000), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent to GPT Live as silence; -80 turns the gate off). Send `""` to reset a prompt. Other keys return `400` |
 | `voice_options_model` | Optional guard: the model your `voice_options` were written for. A mismatch returns `409` |
 | `voice_app_tools_enabled` | Accepted and ignored |
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./voicePcm.worklet.js?url&no-inline', () => ({ default: '/voice-pcm.js' }));
 vi.mock('$lib/api/runtime', () => ({ wsUrl: (path: string) => 'ws://localhost' + path }));
-import { MAX_PLAYBACK_AHEAD_S, MAX_UPLOAD_BUFFER, openVoiceAudioStream } from './voiceAudioStream';
+import { DEFAULT_MIC_THRESHOLD_DB, MAX_PLAYBACK_AHEAD_S, MAX_UPLOAD_BUFFER, createInputGate, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
 const contexts: any[] = [];
@@ -91,7 +91,7 @@ describe('voice PCM stream', () => {
   const stream = await openVoiceAudioStream('session-1', {} as MediaStream, callbacks, new AbortController().signal);
   expect(sockets[0].url).toBe('ws://localhost/api/v1/voice/sessions/session-1/audio');
   expect(contexts[0].audioWorklet.addModule).toHaveBeenCalledWith('/voice-pcm.js');
-  const pcm = new Int16Array([100, -100]).buffer;
+  const pcm = new Int16Array([3000, -3000]).buffer; // speech level, above the microphone gate
   nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
   expect(sockets[0].send).toHaveBeenCalledWith(pcm);
   sockets[0].onmessage({ data: JSON.stringify({ type: 'caption', id: 'u1', role: 'user', delta: 'Hi' }) });
@@ -198,5 +198,47 @@ describe('voice PCM stream', () => {
   expect(callbacks.closed).toHaveBeenCalledWith('Invalid voice response.', 'invalid-response');
   warn.mockRestore();
   await stream.close();
+ });
+ it('sends quiet microphone input as silence without dropping frames', async () => {
+  const stream = await openVoiceAudioStream('s', {} as MediaStream, handlers(), new AbortController().signal, -42);
+  const breath = new Int16Array(1920).fill(120); // about -49 dBFS
+  nodes[0].port.onmessage({ data: { pcm: breath.buffer, generation: 0 } });
+  const sent = new Int16Array(sockets[0].send.mock.calls[0][0]);
+  expect(sent).toHaveLength(1920); // continuous audio: the provider still hears time pass
+  expect(sent.every(v => v === 0)).toBe(true);
+  await stream.close();
+ });
+});
+
+describe('microphone gate', () => {
+ const frame = (value: number, length = 1920) => new Int16Array(length).fill(value);
+ const silent = (pcm: Int16Array) => pcm.every(v => v === 0);
+ it('passes speech unchanged and silences breath-level noise', () => {
+  const gate = createInputGate(DEFAULT_MIC_THRESHOLD_DB);
+  expect(silent(gate(frame(120)))).toBe(true);
+  const speech = frame(3000);
+  expect(gate(speech)).toBe(speech);
+ });
+ it('keeps 600 ms after speech so word endings and short pauses are not clipped', () => {
+  const gate = createInputGate(-42);
+  gate(frame(3000));
+  // 7 quiet 80 ms frames (560 ms) stay open, the 600 ms hold ends in the 8th.
+  for (let i = 0; i < 7; i++) expect(silent(gate(frame(50)))).toBe(false);
+  const eighth = gate(frame(50));
+  expect(eighth.subarray(0, 960).every(v => v === 50)).toBe(true);
+  expect(silent(eighth.subarray(960))).toBe(true);
+  expect(silent(gate(frame(50)))).toBe(true);
+ });
+ it('opens 20 ms before the first loud block inside a frame', () => {
+  const gate = createInputGate(-42);
+  const pcm = frame(50);
+  pcm.fill(3000, 1200); // speech starts at block 5 (50 ms)
+  const out = gate(pcm);
+  expect(silent(out.subarray(0, 720))).toBe(true);
+  expect(out.subarray(720, 1200).every(v => v === 50)).toBe(true); // soft onset kept
+  expect(out.subarray(1200).every(v => v === 3000)).toBe(true);
+ });
+ it('honours a lower threshold for quiet microphones', () => {
+  expect(silent(createInputGate(-60)(frame(120)))).toBe(false);
  });
 });

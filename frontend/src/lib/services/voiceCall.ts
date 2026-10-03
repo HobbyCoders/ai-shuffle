@@ -731,7 +731,7 @@ export async function startCall(
 						patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
 					});
 				},
-			}, audioAbort.signal);
+			}, audioAbort.signal, cred.options?.mic_threshold_db);
 			if (myGeneration !== generation) { await stream.close(); return; }
 			audioStream = stream;
 			applyMicMuted(get(voiceCallState).micMuted);
