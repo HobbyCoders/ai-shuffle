@@ -215,12 +215,21 @@ def _today() -> str:
 
 
 def environment_block(
-    cwd: str | os.PathLike[str] = ".", *, include_volatile: bool = True
+    cwd: str | os.PathLike[str] = ".",
+    *,
+    include_volatile: bool = True,
+    worker: str | None = None,
 ) -> str:
     """The compiled prompt's environment section (always renders).
 
     Facts that cannot be gathered are omitted line-by-line; the block itself is
     always non-empty (cwd at minimum).
+
+    ``worker`` is the host's text naming which machine this session runs on
+    (fluid cannot know the host's worker network, so it renders the lines it
+    is given, verbatim, right after the shell line). It is session-stable — it
+    only changes when the session moves to another worker, which rebuilds the
+    prompt there — so it belongs in this cached half. ``None``/blank omits it.
 
     ``include_volatile=False`` leaves out the facts that change under a running
     session — today's date, the branch, the working-tree counts, the recent
@@ -240,6 +249,8 @@ def environment_block(
         f"OS: {_os_version()}",
         f"Shell: {shell}",
     ]
+    if worker and worker.strip():
+        lines.append(worker.strip())
     if include_volatile:
         lines.append(f"Today's date: {_today()}")
         git = git_context(cwd_str)

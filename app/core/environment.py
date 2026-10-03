@@ -923,6 +923,148 @@ def _in_container() -> bool:
         return False
 
 
+# ─── "Worker:" — which of the owner's machines this session runs on ──────────
+#
+# The owner runs several networked workers and drives sessions on any of them
+# from any device (Continue here, Move to device, remote control). Without its
+# own name in the prompt, an agent cannot tell that a refusal came from another
+# worker, or that the screen the owner is looking at belongs to a different
+# machine. These lines name the worker as the app shows it.
+#
+# Cache-stability: they hold only the worker's display name, device id, the
+# container/host fact and the NAMES of the other workers (never their online
+# state), so they change only when a worker is renamed, joins or leaves, or when
+# the session moves to another worker. A move always rebuilds the prompt in the
+# adopting worker's process, which renders its own identity.
+
+#: Peers listed at most; a larger network says "and N more".
+_MAX_PEER_NAMES = 8
+
+#: Last successfully rendered lines, per process. A transient lookup failure
+#: (database hiccup) reuses them instead of dropping the line: the prompt is
+#: compared across turns, and a line that blinks out re-bills the cached prefix
+#: and can force a reconnect.
+_WORKER_LINES_CACHE: Dict[str, list] = {}
+
+
+def _clean_name(value: Any) -> str:
+    """A display name on one line, bounded — it lands in the system prompt."""
+    text = " ".join(str(value or "").split())
+    return text[:64]
+
+
+def _worker_identity() -> Dict[str, Any]:
+    """``{name, device_id, id_label, peers}`` for this worker. May raise.
+
+    Networked: the member name the app shows (a shared rename wins, exactly as
+    the runner directory reads it) and the network device id; peers are the
+    other ACTIVE worker members, by name only. Not networked: the install row's
+    name, else the host name, with the instance id; no peers.
+    """
+    from app.network import engine
+
+    # The loaded context first (no database read); a worker that is networked
+    # loads it at startup. A failed load raises, so the caller keeps its last
+    # good answer instead of briefly calling a networked worker by host name.
+    ctx = engine.cached_context() or engine.context()
+    if ctx is not None:
+        from app.db import network as store
+        from app.network import membership
+
+        device_id = ctx.device_id
+        name = ""
+        peers: list = []
+        try:
+            for member in store.list_members(include_revoked=False):
+                if member.get("kind") != membership.KIND_WORKER:
+                    continue
+                if member.get("device_id") == device_id:
+                    name = _clean_name(member.get("name"))
+                else:
+                    peer = _clean_name(member.get("name"))
+                    if peer:
+                        peers.append(peer)
+        except Exception:  # noqa: BLE001 — fall back to the loaded context
+            logger.debug("Worker identity: member listing failed", exc_info=True)
+            peers = [
+                _clean_name(m.name) for m in ctx.active_members()
+                if m.kind == membership.KIND_WORKER and m.device_id != device_id
+                and _clean_name(m.name)
+            ]
+        if not name:
+            own = ctx.member(device_id)
+            name = _clean_name(own.name if own else "")
+        if not name:
+            from app.core.cluster import default_device_name
+
+            name = _clean_name(default_device_name())
+        peers = sorted(set(peers), key=lambda p: (p.lower(), p))
+        return {"name": name, "device_id": device_id, "id_label": "device", "peers": peers}
+
+    instance_id = settings.effective_instance_id
+    name = ""
+    try:
+        row = database.get_install(instance_id)
+        name = _clean_name((row or {}).get("device_name"))
+    except Exception:  # noqa: BLE001 — the install row is optional
+        logger.debug("Worker identity: install row unavailable", exc_info=True)
+    if not name:
+        from app.core.cluster import default_device_name
+
+        name = _clean_name(default_device_name())
+    return {"name": name, "device_id": instance_id, "id_label": "instance", "peers": []}
+
+
+def _render_worker_lines(identity: Dict[str, Any]) -> list:
+    name = identity.get("name") or ""
+    if not name:
+        return []
+    details = []
+    if identity.get("device_id"):
+        details.append(f"{identity.get('id_label') or 'device'} {identity['device_id']}")
+    details.append("in a container" if _in_container() else "on the host")
+    lines = [(
+        f"Worker: {name} ({', '.join(details)}). Your shell, files and tools "
+        "run on this worker."
+    )]
+    peers = [p for p in identity.get("peers") or [] if p and p != name]
+    if peers:
+        shown = peers[:_MAX_PEER_NAMES]
+        more = len(peers) - len(shown)
+        listed = ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+        lines.append(
+            f"Other workers in the owner's network: {listed}. The owner may be "
+            "viewing or remote-controlling this session from another device; "
+            f"messages or refusals that name another worker did not come from {name}."
+        )
+    return lines
+
+
+def worker_identity_lines() -> list:
+    """The ``Worker:`` line (plus the other-workers note), or none. Never raises.
+
+    Both prompt renderers carry these lines in their session-stable half: the
+    app's ``<env>`` block (:func:`generate_environment_details`) and fluid's
+    ``# Environment`` section (the harness adapter passes them in). A failed
+    lookup reuses this process's last good answer; with none, it renders
+    nothing rather than failing the prompt.
+    """
+    try:
+        lines = _render_worker_lines(_worker_identity())
+    except Exception:  # noqa: BLE001 — identity is a prompt nicety, never a gate
+        logger.debug("Worker identity lookup failed", exc_info=True)
+        return list(_WORKER_LINES_CACHE.get("lines") or [])
+    if lines:
+        _WORKER_LINES_CACHE["lines"] = list(lines)
+    return lines
+
+
+def worker_identity_text() -> Optional[str]:
+    """:func:`worker_identity_lines` joined, or None when there are none."""
+    lines = worker_identity_lines()
+    return "\n".join(lines) if lines else None
+
+
 def generate_environment_details(
     working_dir: str,
     execution_mode: str = "local",
@@ -959,7 +1101,10 @@ def generate_environment_details(
       working directory above;
     * runtime placement — where this session executes. It changes only when
       the session is re-placed onto another runner, and that already moves the
-      working directory and the whole prompt with it.
+      working directory and the whole prompt with it;
+    * worker — this machine's name as the owner sees it in the app (see
+      :func:`worker_identity_lines`). Same lifetime as the placement line: a
+      move to another worker rebuilds the prompt there.
 
     What leaves: today's date and the branch pair. Both change under a session
     that is otherwise untouched (UTC midnight; a checkout switch), and neither
@@ -982,6 +1127,7 @@ def generate_environment_details(
         lines.append(f"Today's date: {_today()}")
     lines.append(f"Execution mode: {execution_mode}")
     lines.extend(_placement_lines(placement_where))
+    lines.extend(worker_identity_lines())
     if include_volatile:
         lines.extend(_worktree_lines(execution_mode, worktree_info))
 

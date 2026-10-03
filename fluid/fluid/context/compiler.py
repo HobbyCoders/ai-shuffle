@@ -81,6 +81,10 @@ class PromptInputs:
     extra_blocks: Sequence[str] = field(default_factory=tuple)
     cwd: str | os.PathLike[str] = "."
     include_env: bool = True
+    # Host-supplied text naming the machine this session runs on (the app's
+    # ``Worker:`` line). Rendered inside the environment section's stable
+    # half; ``None`` omits it. Ignored when ``include_env`` is off.
+    worker: str | None = None
     include_global_instructions: bool = True
     include_project_instructions: bool = True
     include_skills: bool = True
@@ -290,7 +294,9 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         sections.append(
             PromptSection(
                 kind="environment",
-                text=environment_block(inputs.cwd, include_volatile=False),
+                text=environment_block(
+                    inputs.cwd, include_volatile=False, worker=inputs.worker
+                ),
             )
         )
     for block in inputs.extra_blocks:

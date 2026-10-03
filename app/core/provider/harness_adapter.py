@@ -303,6 +303,10 @@ class HarnessAdapter(ProviderAdapter):
         # "# Workspace facts" card: the session's persisted snapshot (cached
         # prefix), see ``_build_workspace_card``.
         self._workspace_card: Optional[str] = None
+        # The app's ``Worker:`` lines (which of the owner's machines this
+        # process is), rendered once per connect so a mid-session recompile
+        # reuses the same bytes. See ``app.core.environment.worker_identity_lines``.
+        self._worker_identity: Optional[str] = None
         # Everything a prompt recompile needs (the Task roster refresh, see
         # ``_refresh_task_roster``) — captured at connect, never rebuilt.
         self._prompt_inputs: Optional[Dict[str, Any]] = None
@@ -457,6 +461,9 @@ class HarnessAdapter(ProviderAdapter):
         fluid_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
         permissions = self._build_permissions(options)
+        # Which worker this is, once per connect: a session moved to another
+        # worker reconnects there and renders that worker's name.
+        self._worker_identity = await asyncio.to_thread(_worker_identity_text)
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
@@ -472,14 +479,16 @@ class HarnessAdapter(ProviderAdapter):
                 # plugin dirs (rglob): disk IO, so it runs in a worker thread.
                 delegated_system = None
                 delegated_append = await asyncio.to_thread(
-                    _delegated_append_text, append_system, options, self._registry
+                    _delegated_append_text, append_system, options, self._registry,
+                    worker=self._worker_identity,
                 )
             elif settings.prompt_full_replace:
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
                 delegated_system = await asyncio.to_thread(
-                    self._compile_prompt, system, append_system, options
+                    self._compile_prompt, system, append_system, options,
+                    self._worker_identity,
                 )
                 delegated_append = None
             else:
@@ -491,6 +500,16 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
+                # The CLI's own environment block is replaced along with its
+                # preset, so the worker's name rides the append — unless the
+                # profile's prompt already carries the app's <env> block, which
+                # renders the same lines.
+                if self._worker_identity and "<env>" not in system:
+                    delegated_append = "\n\n".join(
+                        part for part in (
+                            delegated_append, _worker_block(self._worker_identity)
+                        ) if part
+                    )
             # Resolving the CLI stats PATH entries on disk. A missing CLI
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
@@ -849,6 +868,7 @@ class HarnessAdapter(ProviderAdapter):
                 # engine drops it from the schemas — one surface, not two.
                 "wired": _wired_capabilities(native_ctx),
                 "workspace_card": self._workspace_card,
+                "worker": self._worker_identity,
             }
             compiled_prompt = await asyncio.to_thread(
                 self._compile_prompt_sections,
@@ -3459,8 +3479,13 @@ class HarnessAdapter(ProviderAdapter):
         registry: Any = None,
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
+        worker: Optional[str] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
+
+        ``worker`` is the app's ``Worker:`` text, rendered at connect. It goes
+        into fluid's environment section (stable half). A profile that injects
+        the app's own ``<env>`` already carries the same lines there.
 
         ``workspace_card`` is the app's "# Workspace facts" bootstrap card
         (:func:`app.core.environment.workspace_facts_card`), rendered once at
@@ -3546,6 +3571,7 @@ class HarnessAdapter(ProviderAdapter):
                     + _workflow_prompt_blocks(options, permitted),
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
+                    worker=worker,
                     include_agents=False,
                     memories_dir=None,
                     tools=permitted,
@@ -3727,6 +3753,7 @@ class HarnessAdapter(ProviderAdapter):
         system: Optional[str],
         append_system: Optional[str],
         options: SessionOptions,
+        worker: Optional[str] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -3743,7 +3770,7 @@ class HarnessAdapter(ProviderAdapter):
         comes here: it keeps Claude Code's prompt (``_delegated_append_text``).
         """
         compiled = HarnessAdapter._compile_prompt_sections(
-            system, append_system, options, native=False
+            system, append_system, options, native=False, worker=worker
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -5965,7 +5992,11 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
 
 
 def _delegated_append_text(
-    append_system: Optional[str], options: SessionOptions, registry: Any
+    append_system: Optional[str],
+    options: SessionOptions,
+    registry: Any,
+    *,
+    worker: Optional[str] = None,
 ) -> Optional[str]:
     """``--append-system-prompt`` for a preset profile on the delegated leg.
 
@@ -5986,12 +6017,18 @@ def _delegated_append_text(
     and Monitor routing need the bridged ``mcp__builtins__Task`` /
     ``Monitor`` (``_delegated_offered``), and Swarm routing never appears
     because the leg has no Swarm tool.
+
+    ``worker`` (the app's ``Worker:`` text, rendered at connect) follows the
+    profile's append as a ``# Worker`` block: Claude Code's own environment
+    block has no idea which of the owner's machines it runs on.
     """
     offered = _delegated_offered(options, registry)
     task_offered = offered("Task")
     agents_index = _agent_context(options)[0] if task_offered else None
     _, text = _with_agents_index(None, append_system or None, agents_index)
     parts = [text] if text else []
+    if worker:
+        parts.append(_worker_block(worker))
     parts.extend(_workflow_prompt_blocks(
         options, _delegated_permitted_names(options, registry),
         swarm_available=False, task_available=task_offered,
@@ -6001,6 +6038,26 @@ def _delegated_append_text(
     parts.extend(_learned_guidance_blocks(options.model))
     parts.extend(_delegated_guidance_blocks(options, registry))
     return "\n\n".join(parts) or None
+
+
+#: Header of the worker block on the delegated leg, whose environment section
+#: is Claude Code's own (fluid's and the app's renderers carry the lines inline).
+WORKER_BLOCK_HEADER = "# Worker"
+
+
+def _worker_block(worker: str) -> str:
+    return f"{WORKER_BLOCK_HEADER}\n{worker.strip()}"
+
+
+def _worker_identity_text() -> Optional[str]:
+    """The app's ``Worker:`` text, or None. Never raises."""
+    try:
+        from app.core.environment import worker_identity_text
+
+        return worker_identity_text()
+    except Exception:  # noqa: BLE001 — identity never fails a connect
+        logger.warning("[HarnessAdapter] worker identity unavailable", exc_info=True)
+        return None
 
 
 def _agent_context(
