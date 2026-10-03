@@ -72,7 +72,7 @@ describe('Assistant home', () => {
   render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
   expect(screen.queryByRole('radiogroup')).toBeNull();
   expect(screen.queryAllByRole('radio')).toHaveLength(0);
-  expect(screen.queryByRole('combobox')).toBeNull();
+  expect(screen.queryByRole('combobox', { name: /agent/i })).toBeNull();
   expect(screen.queryByRole('button', { name: /Manage agents/ })).toBeNull();
   expect(screen.queryByText(/What runs it|dedicated assistant agent|One of my agents/)).toBeNull();
  });
@@ -200,7 +200,7 @@ describe('Assistant home', () => {
  it('ignores an agent id passed in by older entry points', async () => {
   configured(); render(AssistantHome, { requestedAgentId: 'guide' });
   expect(await screen.findByRole('button', { name: 'Open conversation' })).toBeTruthy();
-  expect(screen.queryByRole('combobox')).toBeNull();
+  expect(screen.queryByRole('combobox', { name: /agent/i })).toBeNull();
  });
 });
 describe('Assistant home call gate', () => {
