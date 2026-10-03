@@ -116,6 +116,8 @@ function fakeBackend() {
 			return json(source);
 		}
 		if (path === '/assistant/activity') return json([]);
+		// One worker on the account: the Run work on row stays hidden.
+		if (path === '/assistant/worker') return json({ device_id: null, workers: [] });
 		if (path === '/assistant/limits' && request.method() === 'GET') return json(limits);
 		if (path === '/assistant/limits' && request.method() === 'PATCH') {
 			const patch = request.postDataJSON();
@@ -208,6 +210,7 @@ async function run(viewport) {
 	check((await limitsSection.innerText()).includes('$3.10'), "today's spend shown", await limitsSection.innerText());
 	check(await limitsSection.getByRole('spinbutton', { name: 'Daily spending limit' }).inputValue() === '20', 'daily limit field');
 	check(await limitsSection.getByRole('combobox', { name: 'Longest background job' }).inputValue() === '120', 'job time field');
+	check(await page.getByRole('combobox', { name: 'Run work on' }).count() === 0, 'no work worker row with one worker');
 	for (const helper of ['All work, at API prices', 'Applies to each job']) {
 		check(await limitsSection.getByText(helper).isVisible(), `helper "${helper}"`);
 	}

@@ -1424,7 +1424,66 @@ def _file_agent_model_id(
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# Every refusal of a named worker that guarantees nothing ran says this, so a
+# default worker that refuses AFTER the up-front check still falls back here.
+NOTHING_DISPATCHED = "nothing was dispatched"
+
+
+def _fallback_reason(refusal: str) -> str:
+    """The first clause of a worker refusal, without its advice to the model."""
+    reason = refusal.split(";", 1)[0].split(". ", 1)[0].strip().rstrip(".")
+    return reason or "it cannot take the work"
+
+
+def _fallback_note(row: Mapping[str, Any], refusal: str) -> str:
+    name = str(row.get("device_name") or row.get("device_id") or "the default worker")
+    reason = _fallback_reason(refusal)
+    if name.casefold() in reason.casefold():
+        return f"Ran on this worker: {reason}."
+    return f"Ran on this worker instead of {name}: {reason[:1].lower()}{reason[1:]}."
+
+
 async def dispatch_task_tool(
+    args: Dict[str, Any],
+    *,
+    caller_session_id: str,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Task dispatch, with the assistant's default worker applied.
+
+    A call that names ``worker`` goes exactly where it says and never falls
+    back. A call from the assistant home or one of its jobs that names none
+    goes to the owner's default worker (``assistant_worker``). When that
+    worker cannot take it (offline, an older release, or any other refusal
+    that left nothing running), the work runs here and the receipt carries
+    ``worker_note``, one line saying why. Every other call runs here.
+    """
+    if args.get("worker") is not None:
+        return await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
+    from app.core import assistant_worker
+
+    default = await asyncio.to_thread(assistant_worker.default_for, caller_session_id)
+    if default is None:
+        return await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
+    caller_row = _session_row(caller_session_id) or {}
+    refusal = await asyncio.to_thread(
+        _remote_worker_refusal, default["device_id"], caller_session_id, caller_row
+    )
+    if refusal is None:
+        payload = await _dispatch_task_tool(
+            {**args, "worker": default["device_id"]},
+            caller_session_id=caller_session_id, **kwargs,
+        )
+        if payload.get("ok") or NOTHING_DISPATCHED not in str(payload.get("error") or ""):
+            return payload
+        refusal = str(payload["error"])
+    payload = await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
+    if payload.get("ok"):
+        payload["worker_note"] = _fallback_note(default, refusal)
+    return payload
+
+
+async def _dispatch_task_tool(
     args: Dict[str, Any],
     *,
     caller_session_id: str,

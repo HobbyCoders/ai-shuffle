@@ -8,6 +8,7 @@
  import { Check, Gauge } from 'lucide-svelte';
  import { getAssistantLimits, updateAssistantLimits, assistantError, type AssistantLimits, type AssistantLimitsPatch } from '$lib/api/assistant';
  import { sessionOwnerEpoch } from '$lib/stores/session-owner';
+ import AssistantWorkerChoice from './AssistantWorkerChoice.svelte';
 
  const owner = sessionOwnerEpoch();
  let disposed = false;
@@ -96,6 +97,7 @@
     <button class="switch" role="switch" aria-checked={limits.job_limit_enabled} aria-label="Longest background job" disabled={busy} onclick={() => limits && save({ job_limit_enabled: !limits.job_limit_enabled })}><span aria-hidden="true"></span><span>{limits.job_limit_enabled ? 'On' : 'Off'}</span></button>
    </div>
   </div>
+  <AssistantWorkerChoice />
   {#if saved}<p class="note saved" role="status"><Check size={14} />Saved</p>{/if}
  {/if}
 </section>

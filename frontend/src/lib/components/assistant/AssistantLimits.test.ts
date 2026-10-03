@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { AssistantLimits as Limits } from '$lib/api/assistant';
-const mocks = vi.hoisted(() => ({ getAssistantLimits: vi.fn(), updateAssistantLimits: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getAssistantLimits: vi.fn(), updateAssistantLimits: vi.fn(), getAssistantWorker: vi.fn() }));
 vi.mock('$lib/api/assistant', async original => ({ ...await original<typeof import('$lib/api/assistant')>(), ...mocks }));
 import AssistantLimits from './AssistantLimits.svelte';
 
@@ -13,6 +13,7 @@ const base = (): Limits => ({
 });
 beforeEach(() => {
  vi.clearAllMocks(); server = base();
+ mocks.getAssistantWorker.mockResolvedValue({ device_id: null, workers: [] });
  mocks.getAssistantLimits.mockImplementation(async () => ({ ...server }));
  mocks.updateAssistantLimits.mockImplementation(async patch => {
   const { confirm_spend_limit_off: _confirm, ...changes } = patch;
@@ -116,5 +117,16 @@ describe('assistant limits', () => {
   await fireEvent.change(amount);
   expect((await screen.findByRole('alert')).textContent).toContain('Daily spending limit must be');
   await waitFor(() => expect(amount.value).toBe('20'));
+ });
+ it('adds the work worker row only when there is another worker', async () => {
+  render(AssistantLimits);
+  await screen.findByRole('combobox', { name: 'Longest background job' });
+  await waitFor(() => expect(mocks.getAssistantWorker).toHaveBeenCalled());
+  expect(screen.queryByRole('combobox', { name: 'Run work on' })).toBeNull();
+  cleanup();
+  mocks.getAssistantWorker.mockResolvedValue({ device_id: null, workers: [{ device_id: 'dev-serverworker', name: 'Unraid', online: true, remote_task: true }] });
+  render(AssistantLimits);
+  const select = await screen.findByRole('combobox', { name: 'Run work on' }) as HTMLSelectElement;
+  expect(select.closest('section')?.getAttribute('aria-labelledby')).toBe('limits-heading');
  });
 });

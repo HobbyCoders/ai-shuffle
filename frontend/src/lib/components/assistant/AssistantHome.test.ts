@@ -6,7 +6,7 @@ import { resourceSync } from '$lib/services/resource-sync';
 
 const mocks = vi.hoisted(() => ({
  getAssistant: vi.fn(), getAgentIdentities: vi.fn(), configureAssistant: vi.fn(), openAssistant: vi.fn(),
- getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(), getAssistantLimits: vi.fn(),
+ getAssistantSources: vi.fn(), getAssistantActivity: vi.fn(), setAssistantSource: vi.fn(), getAssistantLimits: vi.fn(), getAssistantWorker: vi.fn(),
  openSession: vi.fn(), startCallForSession: vi.fn(), isVoiceEnabled: vi.fn(), openFeaturePage: vi.fn(),
  loadSessions: vi.fn(), loadProfiles: vi.fn(), banner: vi.fn(() => 'banner-id'),
 }));
@@ -54,6 +54,7 @@ beforeEach(() => {
  mocks.getAgentIdentities.mockResolvedValue([{ id: 'guide', name: 'Guide', avatar_id: 'orbit' }]);
  mocks.getAssistantSources.mockResolvedValue([]); mocks.getAssistantActivity.mockResolvedValue([]);
  mocks.getAssistantLimits.mockResolvedValue({ spend_limit_enabled: true, daily_spend_limit_usd: 20, job_limit_enabled: true, max_job_minutes: 120, spent_today_usd: 0, day: '2026-10-03', timezone: 'UTC', resets_at: '2026-10-04T00:00:00+00:00', limit_reached: false, warning: false });
+ mocks.getAssistantWorker.mockResolvedValue({ device_id: null, workers: [] });
  mocks.loadSessions.mockResolvedValue(undefined); mocks.loadProfiles.mockResolvedValue(undefined);
  mocks.isVoiceEnabled.mockResolvedValue(true); mocks.openAssistant.mockResolvedValue({ session_id: 'home', home_session_id: 'home' });
  mocks.configureAssistant.mockImplementation(async patch => { server = { ...server, ...patch, configured: true, agent: { id: patch.agent_id, name: patch.assistant_name || 'Guide', avatar_id: patch.avatar_id || 'robot' }, assistant_name: patch.assistant_name || 'Guide', status: 'no_sources' }; return structuredClone(server); });

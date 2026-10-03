@@ -109,6 +109,21 @@ export type AssistantLimitsPatch = Partial<Pick<AssistantLimits, 'spend_limit_en
 };
 export const getAssistantLimits = () => api.get<AssistantLimits>('/assistant/limits');
 export const updateAssistantLimits = (patch: AssistantLimitsPatch) => api.patch<AssistantLimits>('/assistant/limits', patch);
+/** Another active worker of the account the assistant's work could run on. */
+export interface AssistantWorkerOption {
+ device_id: string;
+ name: string;
+ online: boolean;
+ /** False on an older release that cannot run remote subagents. */
+ remote_task: boolean;
+}
+/** Where this worker's assistant sends its work; `device_id` null is this worker. */
+export interface AssistantWorkerChoice {
+ device_id: string | null;
+ workers: AssistantWorkerOption[];
+}
+export const getAssistantWorker = () => api.get<AssistantWorkerChoice>('/assistant/worker');
+export const updateAssistantWorker = (deviceId: string | null) => api.put<AssistantWorkerChoice>('/assistant/worker', { device_id: deviceId });
 export function assistantError(error: unknown): string {
  const detail = (error as { detail?: unknown })?.detail;
  return typeof detail === 'string' ? detail : error instanceof Error ? error.message : 'Could not save this change. Please try again.';

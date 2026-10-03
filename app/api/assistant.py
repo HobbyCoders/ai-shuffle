@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.auth import require_admin
 from app.core import assistant_introduction as introductions, assistant_limits as limits, assistant_service as service
+from app.core import assistant_worker
 from app.core.assistant_manager import assistant_manager
 from app.db import assistant as store, assistant_limits as limits_db
 from app.db.async_database import run_sync
@@ -116,6 +117,12 @@ class LimitsUpdate(BaseModel):
     job_limit_enabled: Optional[bool] = None
     max_job_minutes: Optional[int] = Field(None, ge=limits_db.MINUTE_BOUNDS[0], le=limits_db.MINUTE_BOUNDS[1])
     confirm_spend_limit_off: Optional[bool] = None
+
+
+class WorkerChoice(BaseModel):
+    """The worker the assistant's work runs on; null or empty is this worker."""
+    model_config = ConfigDict(extra="forbid")
+    device_id: Optional[str] = Field(None, max_length=200)
 
 
 class SourceUpdate(BaseModel):
@@ -225,6 +232,21 @@ async def update_limits(body: LimitsUpdate):
     # Enforce a lowered limit now rather than on the next loop pass.
     assistant_manager.notify()
     return await run_sync(limits.status)
+
+
+@router.get("/worker")
+async def read_work_worker():
+    """Where the assistant's work runs, and the other workers it could use."""
+    return await run_sync(assistant_worker.read)
+
+
+@router.put("/worker")
+@router.patch("/worker")
+async def update_work_worker(body: WorkerChoice):
+    try:
+        return await run_sync(assistant_worker.write, body.device_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/sources")
