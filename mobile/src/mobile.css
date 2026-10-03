@@ -587,3 +587,12 @@ html:root[data-platform='mobile'] {
 		background: color-mix(in oklch, var(--muted) 60%, transparent);
 	}
 }
+
+/* ── frontend/src/lib/components/Banner.svelte ─────────────────────────────── */
+
+/* The dismiss X is a full 44px touch target in the phone shell at any width
+   (a tablet in landscape included), not only below the 640px breakpoint. */
+html:root[data-platform='mobile'] .banner-close {
+	min-width: 44px;
+	min-height: 44px;
+}

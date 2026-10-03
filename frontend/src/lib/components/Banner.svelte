@@ -167,8 +167,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 28px;
-		min-height: 28px;
+		min-width: 32px;
+		min-height: 32px;
 		padding: 2px;
 		background: transparent;
 		border: 0;
@@ -189,12 +189,16 @@
 	}
 
 	@media (max-width: 639px) {
-		.banner-close {
-			min-width: 40px;
-			min-height: 40px;
-		}
 		.banner-action {
 			min-height: 40px;
+		}
+	}
+	/* Finger-sized X on narrow and touch screens; the phone shell sets the
+	   same in mobile/src/mobile.css. */
+	@media (max-width: 639px), (pointer: coarse) {
+		.banner-close {
+			min-width: 44px;
+			min-height: 44px;
 		}
 	}
 	@media (prefers-reduced-motion: reduce) {

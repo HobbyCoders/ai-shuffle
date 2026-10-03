@@ -43,10 +43,17 @@
 {/if}
 
 <style>
+	/* In the desktop app the top 52px of the page is the window's title bar:
+	   the sidebar head and top bar are drag regions, and Windows treats a
+	   press there as a title-bar press however high the banner is stacked,
+	   so its Undo and X never received the click. --titlebar-height exists
+	   only on html.desktop, so the browser and phone shells keep the 12px
+	   offset. */
 	.banner-host {
+		--banner-host-top: calc(var(--titlebar-height, 0px) + max(12px, env(safe-area-inset-top)));
 		position: fixed;
-		top: max(12px, env(safe-area-inset-top));
-		max-height: calc(100dvh - 24px);
+		top: var(--banner-host-top);
+		max-height: calc(100dvh - var(--banner-host-top) - 12px);
 		overflow-y: auto;
 		left: 50%;
 		transform: translateX(-50%);
@@ -60,6 +67,7 @@
 
 	.banner-host :global(.banner) {
 		pointer-events: auto;
+		-webkit-app-region: no-drag;
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 	}
 </style>
