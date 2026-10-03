@@ -124,3 +124,16 @@ def test_the_permission_allowlist_is_not_the_tool_surface():
     opts = _build_with({"tool_allowlist": ["Read"]})
     assert "mcp__builtins__Task" in set(opts.allowed_tools or [])
     assert "Read" not in set(opts.allowed_tools or [])
+
+
+def test_tool_denylist_override_joins_the_sessions_disallowed_tools():
+    """A file/plugin agent's ``disallowedTools`` rides the turn as
+    ``tool_denylist`` and is appended to ``disallowed_tools``, which both legs
+    enforce (deny beats allow)."""
+    base = list(_build_with({}).disallowed_tools or [])
+    opts = _build_with({"tool_denylist": ["Bash", "Write", " "], "tool_allowlist": ["Read", "Bash"]})
+    assert opts.disallowed_tools[: len(base)] == base
+    assert [t for t in opts.disallowed_tools if t not in base] == [
+        t for t in ("Bash", "Write") if t not in base
+    ]
+    assert "Bash" in opts.disallowed_tools and "Write" in opts.disallowed_tools

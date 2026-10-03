@@ -1291,3 +1291,35 @@ def test_roster_override_pins_the_targets_own_leg(agents, monkeypatch):
     assert seen[1]["model_id"] == "gpt-5"
     assert outside["ok"] is False
     assert "not available" in outside["error"]
+
+
+# ─── disallowedTools: the worker's deny list ─────────────────────────────────
+
+
+def test_file_agent_disallowed_tools_become_the_workers_denylist(agents):
+    """A plugin agent's ``disallowedTools`` (already mapped to this app's
+    names by fluid.context.plugin_import) reaches dispatch_worker as
+    ``tool_denylist``; an agent without one carries none."""
+    _mk_session(agents, "s-deny", "root-agent")
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-deny", report="r")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-deny",
+            agent_registry={"researcher": _definition(disallowed_tools=("Bash", " ", "Write"))},
+        ))
+    assert payload["ok"] is True
+    assert seen["tool_denylist"] == ["Bash", "Write"]
+    assert "tool_allowlist" not in seen
+
+    seen.clear()
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        asyncio.run(_dispatch(
+            {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-deny",
+            agent_registry={"researcher": _definition()},
+        ))
+    assert "tool_denylist" not in seen

@@ -879,6 +879,7 @@ class CliHost:
         disallowed = list(dict.fromkeys([
             "Task",
             *self.config.tools.disallowed, *parent_disallowed,
+            *(definition.disallowed_tools if definition is not None else ()),
         ]))
         refine_builtin_descriptions(
             registry,

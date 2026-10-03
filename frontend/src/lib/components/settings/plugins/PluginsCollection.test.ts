@@ -706,7 +706,12 @@ describe('telling the owner what a plugin does (plugin review 2026-10-03)', () =
 		expect(left.textContent).not.toContain('brand_new_kind');
 		cleanup();
 
-		details['toolkit@mp'] = installedDetails;
+		// The shared fixture's agent really was adapted (its model pin); clear
+		// the notes to check the empty case.
+		details['toolkit@mp'] = {
+			...installedDetails,
+			components: (installedDetails.components ?? []).map((c) => ({ ...c, reason: '' }))
+		};
 		await show('plugin:toolkit@mp');
 		await waitFor(() => expect(within(detail()).getByText('Review helpers for pull requests.')).toBeTruthy());
 		expect(screen.queryByTestId('plugin-adapted')).toBeNull();

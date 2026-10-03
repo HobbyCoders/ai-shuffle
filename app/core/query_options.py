@@ -1919,6 +1919,14 @@ def build_options_from_profile(
         if DENY_ALL not in (options.disallowed_tools or []):
             options.disallowed_tools = [*(options.disallowed_tools or []), DENY_ALL]
 
+    # A Task-dispatched file/plugin agent's ``disallowedTools``: deny beats
+    # allow on both legs, so appending is enough to enforce it.
+    _tool_denylist = overrides.get("tool_denylist")
+    if isinstance(_tool_denylist, (list, tuple)):
+        _denied = [str(t).strip() for t in _tool_denylist if str(t).strip()]
+        _current = list(options.disallowed_tools or [])
+        options.disallowed_tools = _current + [t for t in _denied if t not in _current]
+
     # DB agents in the caller's context use the exact same provider-scoped
     # roster as Task's schema and runtime admission. File/plugin definitions are
     # added separately by Fluid and run on the caller's provider.

@@ -48,6 +48,8 @@ is refused when none is curated). Its markdown body rides the system prompt.
   ``NativeLoop(allowed_tools=...)`` on native legs; on the delegated leg its
   complement goes out as ``--disallowed-tools`` and ``_delegated_tool_policy``
   refuses off-surface calls. An empty or absent list inherits the caller's tools;
+* ``disallowedTools:`` is enforced as the worker turn's ``tool_denylist``,
+  added to the session's ``disallowed_tools`` on both legs;
 * ``model:`` cannot move the worker to another provider;
 * the profile-id cycle check does not apply; depth and worker budget do.
 """
@@ -1054,6 +1056,20 @@ def _definition_tool_allowlist(definition: Any) -> Optional[List[str]]:
     return names or None
 
 
+def _definition_tool_denylist(definition: Any) -> Optional[List[str]]:
+    """The definition's ``disallowedTools`` frontmatter as a worker deny list.
+
+    Plugin agents arrive with the names already mapped to this app's tools
+    (``fluid.context.plugin_import``). None when the definition denies nothing.
+    """
+    names = [
+        str(t).strip()
+        for t in (_def_field(definition, "disallowed_tools", ()) or ())
+        if str(t).strip()
+    ]
+    return names or None
+
+
 def _stored_agent_tools(agent_id: str) -> Optional[List[str]]:
     """A stored agent's configured tool allowlist, read only to pick a mode.
 
@@ -1474,6 +1490,7 @@ async def dispatch_task_tool(
             return {"ok": False, "error": model_error}
         system_prompt_append = _file_agent_prompt(definition)
         tool_allowlist = _definition_tool_allowlist(definition)
+        tool_denylist = _definition_tool_denylist(definition)
         declared_tools = tool_allowlist
         result_agent = target_name
     else:
@@ -1483,6 +1500,7 @@ async def dispatch_task_tool(
         model_id = requested_model or target.model
         system_prompt_append = None
         tool_allowlist = None
+        tool_denylist = None
         declared_tools = _stored_agent_tools(target.id)
         if target.id in _chain_agent_ids(caller_session_id):
             return {
@@ -1559,6 +1577,8 @@ async def dispatch_task_tool(
         kwargs["system_prompt_append"] = system_prompt_append
     if tool_allowlist:
         kwargs["tool_allowlist"] = tool_allowlist
+    if tool_denylist:
+        kwargs["tool_denylist"] = tool_denylist
 
     # Allocate the durable identity before scheduling the worker. Fluid uses
     # this exact id as its background detach receipt (polling by label could

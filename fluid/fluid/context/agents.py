@@ -49,6 +49,9 @@ class AgentDefinition:
     scope: str = "project"  # "global" | "project" | "plugin"
     model: str | None = None
     tools: tuple[str, ...] = ()  # empty = inherit the parent's whole toolset
+    # ``disallowedTools``: tools the worker may never use, whatever it
+    # inherits. Task dispatch sends it as the worker's deny list.
+    disallowed_tools: tuple[str, ...] = ()
     body: str = ""  # the markdown body IS the agent's system prompt
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -78,12 +81,22 @@ def split_tools(value: Any) -> tuple[str, ...]:
 
 
 def load_agent_definition(
-    path: str | os.PathLike[str], *, scope: str = "project", name: str | None = None
+    path: str | os.PathLike[str],
+    *,
+    scope: str = "project",
+    name: str | None = None,
+    plugin: Any | None = None,
 ) -> AgentDefinition | None:
     """Read one agent file. ``None`` (with a warning) when it cannot be read.
 
     ``name`` overrides the discovered name — plugin agents arrive already
     namespaced ``<plugin>:<agent>`` and must keep that name.
+
+    A ``scope="plugin"`` definition is adapted by
+    :func:`fluid.context.plugin_import.normalize_agent_fields`: no model pin,
+    foreign tool names mapped, unused fields removed. ``None`` when nothing in
+    its tool list exists here. ``plugin`` (the loaded plugin) expands
+    ``${CLAUDE_PLUGIN_ROOT}``/``${PLUGIN_ROOT}`` in the body.
     """
     p = Path(path)
     text = _read_opt(p)
@@ -95,6 +108,26 @@ def load_agent_definition(
     except Exception as exc:  # noqa: BLE001 — CE11: discovery never raises
         log.warning("skipping malformed agent definition %s: %s", p, exc)
         return None
+    if scope == "plugin":
+        from fluid.context.plugin_import import expand_plugin_paths, normalize_agent_fields
+
+        adapted = normalize_agent_fields(
+            fields,
+            plugin_name=str(getattr(plugin, "name", "") or ""),
+            server_names=tuple(getattr(plugin, "mcp_servers", {}) or ()),
+        )
+        if adapted.skip_reason:
+            log.info("skipping plugin agent %s: %s", p, adapted.skip_reason)
+            return None
+        fields = adapted.fields
+        root = getattr(plugin, "root", None)
+        if root is not None:
+            from fluid.context.plugins import plugin_data_dir
+
+            body = expand_plugin_paths(
+                body, root=root,
+                data=plugin_data_dir(str(plugin.name), str(getattr(plugin, "marketplace", ""))),
+            )
     model = _as_text(fields.get("model")).strip() or None
     return AgentDefinition(
         name=name or _as_text(fields.get("name")).strip() or p.stem,
@@ -103,6 +136,7 @@ def load_agent_definition(
         scope=scope,
         model=model,
         tools=split_tools(fields.get("tools")),
+        disallowed_tools=split_tools(fields.get("disallowedTools", fields.get("disallowed_tools"))),
         body=body,
         raw=dict(fields),
     )
@@ -168,7 +202,7 @@ def discover_agents(
         for plugin in plugins:
             for stub in getattr(plugin, "agents", ()):
                 definition = load_agent_definition(
-                    stub.path, scope="plugin", name=stub.name
+                    stub.path, scope="plugin", name=stub.name, plugin=plugin
                 )
                 if definition is not None:
                     by_name.setdefault(definition.name, definition)

@@ -20,7 +20,7 @@
 					"detail": "",
 					"kind": "agent",
 					"name": "reviewer",
-					"reason": "",
+					"reason": "model pin removed: the model is chosen per chat here",
 					"support": "loaded"
 				}
 			],
@@ -128,7 +128,7 @@
 				"detail": "",
 				"kind": "agent",
 				"name": "reviewer",
-				"reason": "",
+				"reason": "model pin removed: the model is chosen per chat here",
 				"support": "loaded"
 			}
 		],
@@ -160,7 +160,7 @@
 			"description": "Reviews diffs",
 			"file_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0/agents/reviewer.md",
 			"id": "toolkit@mp:reviewer",
-			"model": "sonnet",
+			"model": null,
 			"name": "reviewer",
 			"prompt": "You review diffs.",
 			"source_plugin": "toolkit@mp",
@@ -192,7 +192,7 @@
 					"detail": "",
 					"kind": "agent",
 					"name": "reviewer",
-					"reason": "",
+					"reason": "model pin removed: the model is chosen per chat here",
 					"support": "loaded"
 				}
 			],

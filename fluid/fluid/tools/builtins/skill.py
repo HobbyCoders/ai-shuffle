@@ -68,6 +68,29 @@ def _resolve(skills: list[Skill], name: str) -> tuple[Skill | None, list[str]]:
     return None, sorted(s.name for s in candidates)
 
 
+def _expand_plugin_body(body: str, path: str, plugins: Any, cwd: Any, sources: Any) -> str:
+    """Fill in a plugin skill's placeholders, as Claude Code does on load:
+    ``${CLAUDE_PLUGIN_ROOT}``/``${PLUGIN_ROOT}`` become the plugin's folder,
+    the data variables its data folder, and ``${user_config.KEY}`` a note that
+    the setting is not configured here (see
+    :func:`fluid.context.plugin_import.expand_plugin_paths`). Best effort: on
+    any failure the body is returned unchanged."""
+    try:
+        from fluid.context.plugin_import import expand_plugin_paths
+        from fluid.context.plugins import discover_plugins, plugin_data_dir
+
+        if plugins is None:
+            plugins = discover_plugins(cwd) if sources is None else discover_plugins(cwd, sources=sources)
+        for plugin in plugins:
+            if any(s.path == path for s in plugin.skills):
+                return expand_plugin_paths(
+                    body, root=plugin.root, data=plugin_data_dir(plugin.name, plugin.marketplace)
+                )
+    except Exception:  # noqa: BLE001 — loading a skill never fails on this
+        pass
+    return body
+
+
 SPEC = ToolSpec(
     name="Skill",
     description=(
@@ -137,6 +160,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except OSError as exc:
         return ToolOutcome(text=f"failed to read skill: {exc}", is_error=True)
     _, body = parse_frontmatter(raw)
+    if match.scope == "plugin":
+        body = _expand_plugin_body(body, match.path, plugins, ctx.cwd, sources)
     _note_usage(match.path)
     return ToolOutcome(
         text=f"# Skill: {match.name}\n# From: {match.path}\n\n{body.strip()}"

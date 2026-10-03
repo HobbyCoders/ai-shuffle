@@ -43,6 +43,17 @@ def get_file_based_agents(svc) -> List[Dict[str, Any]]:
 
                 # Parse YAML frontmatter
                 agent_data = _parse_agent_frontmatter(content)
+                # Same adaptation the runtime applies (fluid.context.
+                # plugin_import): no model pin, this app's tool names, and an
+                # agent none of whose tools exist here is not listed.
+                from fluid.context.plugin_import import map_tools
+
+                agent_data["model"] = None
+                if agent_data.get("tools"):
+                    kept, _ = map_tools(agent_data["tools"], plugin_name=plugin.name)
+                    if not kept:
+                        continue
+                    agent_data["tools"] = kept
                 agent_data["id"] = f"{plugin.id}:{agent_file.stem}"
                 agent_data["name"] = agent_file.stem
                 agent_data["source_plugin"] = plugin.id

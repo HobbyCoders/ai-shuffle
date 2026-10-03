@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.context.instructions import Command, Skill, _read, parse_frontmatter
+from fluid.context.plugin_import import markdown_notes, normalize_agent_fields
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ SHUFFLE_EXTENSION = "ai.shuffle"
 
 # ``${CLAUDE_PLUGIN_ROOT}`` / ``${PLUGIN_ROOT}`` / ``${ANY_ENV_VAR}``.
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_USER_CONFIG_RE = re.compile(r"\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROOT_VARS = frozenset({"CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"})
 _DATA_VARS = frozenset({"CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"})
 
@@ -340,6 +342,20 @@ def _component_overrides(manifest: dict[str, Any], key: str, fmt: str) -> list[s
     return _rel_paths(manifest.get(key))
 
 
+def _skill_notes(skill_md: Path) -> str:
+    """What in a plugin skill does not apply here, as one sentence list."""
+    fields, body = parse_frontmatter(_read(skill_md))
+    notes = markdown_notes(fields, body, kind="skill")
+    if (skill_md.parent / "agents" / "openai.yaml").is_file():
+        notes.append("OpenAI skill metadata (agents/openai.yaml) is not used here")
+    return "; ".join(notes)
+
+
+def _command_notes(path: Path) -> str:
+    fields, body = parse_frontmatter(_read(path))
+    return "; ".join(markdown_notes(fields, body, kind="command"))
+
+
 def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Skill]:
     out: list[Skill] = []
     for skill_md in _skill_files(root, manifest):
@@ -365,12 +381,31 @@ def _commands_for(plugin_name: str, root: Path, manifest: dict[str, Any], fmt: s
     ]
 
 
-def _agents_for(plugin_name: str, root: Path, manifest: dict[str, Any], fmt: str) -> list[PluginAgent]:
+def _agents_for(
+    plugin_name: str,
+    root: Path,
+    manifest: dict[str, Any],
+    fmt: str,
+    server_names: tuple[str, ...] = (),
+) -> tuple[list[PluginAgent], list[PluginComponent]]:
+    """The plugin's subagents, adapted by :mod:`fluid.context.plugin_import`.
+
+    Returns the agents offered here and one component per agent file: loaded
+    (its reason lists what was adapted) or unsupported (why it is skipped).
+    """
     out: list[PluginAgent] = []
+    components: list[PluginComponent] = []
     overrides = _component_overrides(manifest, "agents", fmt)
     for path in _md_files(root, overrides, "agents", recursive=True):
         fields, _ = parse_frontmatter(_read(path))
         local = fields.get("name") or path.stem
+        adapted = normalize_agent_fields(fields, plugin_name=plugin_name, server_names=server_names)
+        if adapted.skip_reason:
+            components.append(PluginComponent(
+                kind="agent", name=str(local), support=SUPPORT_UNSUPPORTED,
+                reason=adapted.skip_reason, path=str(path),
+            ))
+            continue
         out.append(
             PluginAgent(
                 name=f"{plugin_name}:{local}",
@@ -378,7 +413,10 @@ def _agents_for(plugin_name: str, root: Path, manifest: dict[str, Any], fmt: str
                 path=str(path),
             )
         )
-    return out
+        components.append(PluginComponent(
+            kind="agent", name=str(local), reason="; ".join(adapted.notes), path=str(path),
+        ))
+    return out, components
 
 
 # ─── MCP servers ─────────────────────────────────────────────────────────────
@@ -438,12 +476,28 @@ def _mcp_default_files(fmt: str) -> tuple[str, ...]:
     return ("mcp.json", ".mcp.json") if fmt == FORMAT_AGENT_PLUGINS else (".mcp.json",)
 
 
+def _is_bundle(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower().endswith((".mcpb", ".dxt"))
+
+
 def raw_mcp_servers(root: Path, manifest: dict[str, Any], fmt: str = FORMAT_CLAUDE) -> dict[str, Any]:
     """The plugin's declared servers: an inline ``mcpServers`` dict, a path to a
-    JSON file, or the format's conventional file at the plugin root."""
+    JSON file, a list of either (later names replace earlier ones), or the
+    format's conventional file at the plugin root. MCP bundles (``.mcpb`` /
+    ``.dxt``) are not read; :func:`read_plugin` lists them as unsupported."""
     declared = manifest.get("mcpServers")
     if isinstance(declared, dict):
         return declared
+    if isinstance(declared, list):
+        merged: dict[str, Any] = {}
+        for item in declared:
+            if isinstance(item, dict):
+                merged.update(item)
+            elif isinstance(item, str) and item.strip() and not _is_bundle(item):
+                merged.update(raw_mcp_servers(root, {"mcpServers": item}, fmt))
+        return merged
+    if _is_bundle(declared):
+        return {}
     path: Path | None = None
     if isinstance(declared, str) and declared.strip():
         path = _resolve_under(root, declared)
@@ -468,6 +522,11 @@ def mcp_server_support(cfg: Any) -> tuple[str, str]:
     """``(support, reason)`` for one raw server entry, without logging."""
     if not isinstance(cfg, dict):
         return SUPPORT_UNSUPPORTED, "the server entry is not a JSON object"
+    refs = sorted(set(_USER_CONFIG_RE.findall(json.dumps(cfg))))
+    if refs:
+        return SUPPORT_NEEDS_CONFIG, (
+            "uses plugin settings this app does not collect (" + ", ".join(refs) + ")"
+        )
     kind = str(cfg.get("type") or cfg.get("transport") or "").strip().lower()
     if kind == "sse":
         return SUPPORT_UNSUPPORTED, "SSE transport is not supported"
@@ -651,6 +710,42 @@ def _claude_only_components(root: Path, manifest: dict[str, Any]) -> list[Plugin
             kind="dependency", name="dependencies", support=SUPPORT_UNSUPPORTED,
             reason="plugin dependencies are not installed automatically",
         ))
+    experimental = manifest.get("experimental") if isinstance(manifest.get("experimental"), dict) else {}
+    others = (
+        ("channel", "channels", bool(manifest.get("channels")), "message channels are not supported"),
+        ("monitor", "monitors",
+         bool(experimental.get("monitors") or manifest.get("monitors") or (root / "monitors" / "monitors.json").is_file()),
+         "plugin monitors do not run here"),
+        ("theme", "themes",
+         bool(experimental.get("themes") or manifest.get("themes") or (root / "themes").is_dir()),
+         "themes are not supported"),
+        ("workflow", "workflows",
+         bool(manifest.get("workflows") or (root / "workflows").is_dir()),
+         "workflows are not supported"),
+        ("executables", "bin/", (root / "bin").is_dir(),
+         "files in bin/ are not added to the shell's PATH here"),
+        ("settings", "settings.json",
+         bool(manifest.get("settings")) or (root / "settings.json").is_file(),
+         "plugin default settings are not applied here"),
+        ("command", "commands map", isinstance(manifest.get("commands"), dict),
+         "commands declared inline in the manifest are not read; put each in commands/<name>.md"),
+    )
+    for kind, name, present, reason in others:
+        if present:
+            out.append(PluginComponent(kind=kind, name=name, support=SUPPORT_UNSUPPORTED, reason=reason))
+    declared = manifest.get("mcpServers")
+    for item in declared if isinstance(declared, list) else [declared]:
+        if _is_bundle(item):
+            out.append(PluginComponent(
+                kind="mcp_server", name=str(item).strip()[:200], support=SUPPORT_UNSUPPORTED,
+                reason="MCP bundles (.mcpb/.dxt) are not installed here",
+            ))
+    agents_dir = root / "agents"
+    if agents_dir.is_dir() and any(agents_dir.glob("*.toml")):
+        out.append(PluginComponent(
+            kind="agent", name="agents/*.toml", support=SUPPORT_UNSUPPORTED,
+            reason="Codex agent files (TOML) are not read; write subagents as agents/<name>.md",
+        ))
     return out
 
 
@@ -707,21 +802,27 @@ def read_plugin(
 
     skills = _skills_for(plugin_name, root, manifest)
     commands = _commands_for(plugin_name, root, manifest, fmt)
-    agents = _agents_for(plugin_name, root, manifest, fmt)
     servers = {
         str(k): v for k, v in raw_mcp_servers(root, manifest, fmt).items()
     }
+    agents, agent_components = _agents_for(plugin_name, root, manifest, fmt, tuple(servers))
 
     components: list[PluginComponent] = []
     components += [
-        PluginComponent(kind="skill", name=s.name.split(":", 1)[-1], path=s.path) for s in skills
+        PluginComponent(
+            kind="skill", name=s.name.split(":", 1)[-1], path=s.path,
+            reason=_skill_notes(Path(s.path)),
+        )
+        for s in skills
     ]
     components += [
-        PluginComponent(kind="command", name=c.name.split(":", 1)[-1], path=c.path) for c in commands
+        PluginComponent(
+            kind="command", name=c.name.split(":", 1)[-1], path=c.path,
+            reason=_command_notes(Path(c.path)),
+        )
+        for c in commands
     ]
-    components += [
-        PluginComponent(kind="agent", name=a.name.split(":", 1)[-1], path=a.path) for a in agents
-    ]
+    components += agent_components
     for server_name, cfg in servers.items():
         support, reason = mcp_server_support(cfg)
         components.append(PluginComponent(

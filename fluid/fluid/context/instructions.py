@@ -781,9 +781,13 @@ def render_command_blocks(
     *,
     cwd: str | os.PathLike[str],
     timeout: float = INLINE_BASH_TIMEOUT_S,
+    inline_bash: bool = True,
 ) -> list[str]:
     """Render a slash-command file into prompt blocks for one turn (Claude
     Code conventions). Never raises — anything unresolvable stays literal.
+
+    ``inline_bash=False`` never runs ``!`cmd``` whatever the frontmatter
+    says; callers pass it for plugin commands, which do not run shell code.
 
     * ``$ARGUMENTS`` → the full argument string; ``$1``/``$2``… → positional
       arguments (quoted grouping honored, missing → empty string).
@@ -813,7 +817,7 @@ def render_command_blocks(
     # Collect @-references before bash runs so command output cannot mint new ones.
     refs = _file_references(body)
 
-    if _bash_allowed(fields.get("allowed-tools")):
+    if inline_bash and _bash_allowed(fields.get("allowed-tools")):
         body = _map_unfenced_lines(
             body,
             lambda line: _BASH_RE.sub(
@@ -839,7 +843,10 @@ def render_command(
     *,
     cwd: str | os.PathLike[str],
     timeout: float = INLINE_BASH_TIMEOUT_S,
+    inline_bash: bool = True,
 ) -> str:
     """:func:`render_command_blocks` joined to one string, for callers that
     want the flat prompt (tests, plain-text hosts)."""
-    return "\n\n".join(render_command_blocks(text, arg, cwd=cwd, timeout=timeout))
+    return "\n\n".join(
+        render_command_blocks(text, arg, cwd=cwd, timeout=timeout, inline_bash=inline_bash)
+    )

@@ -263,6 +263,10 @@ def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand
                    include_plugins=True, plugins=plugins)
     plugin_sources = {entry.path: plugin.ref for plugin in plugins
                       for entry in [*plugin.commands, *plugin.skills]}
+    from fluid.context.plugins import plugin_data_dir
+
+    plugin_roots = {entry.path: (plugin.root, plugin_data_dir(plugin.name, plugin.marketplace))
+                    for plugin in plugins for entry in [*plugin.commands, *plugin.skills]}
     commands = []
     seen = set()
     for kind, entries in (("custom", native_commands(working_dir, **options)),
@@ -277,6 +281,15 @@ def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand
             cmd.name = entry.name
             cmd.type = "plugin" if kind == "custom" and entry.path in plugin_sources else kind
             cmd.namespace = entry.name.split(":", 1)[0] if entry.path in plugin_sources else None
+            if entry.path in plugin_roots:
+                # A plugin's model pin does not apply (the model is chosen
+                # per chat) and its placeholders are filled in, as for its
+                # skills (fluid.context.plugin_import).
+                from fluid.context.plugin_import import expand_plugin_paths
+
+                cmd.model = None
+                cmd.content = expand_plugin_paths(cmd.content, root=plugin_roots[entry.path][0],
+                                                  data=plugin_roots[entry.path][1])
             seen.add(entry.name)
             commands.append(cmd)
     return commands

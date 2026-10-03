@@ -76,7 +76,8 @@ FOREIGN_TOOL_NAMES: Mapping[str, str | None] = {
 }
 
 # Agent frontmatter this app reads. Everything else is removed with a note.
-AGENT_KEPT_FIELDS = frozenset({"name", "description", "tools"})
+AGENT_KEPT_FIELDS = frozenset({"name", "description", "tools", "disallowedTools"})
+_DENY_FIELDS = ("disallowedTools", "disallowed_tools")
 
 _PIN_FIELDS = frozenset({
     "model", "effort", "reasoning_effort", "model_reasoning_effort",
@@ -88,6 +89,7 @@ _COMPONENT_FIELDS = frozenset({"hooks", "mcpServers", "mcp_servers"})
 _SPECIFIER_RE = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_.]*)\((?P<spec>.*)\)$")
 _USER_CONFIG_RE = re.compile(r"\$\{user_config\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROOT_TOKEN_RE = re.compile(r"\$\{(CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|PLUGIN_DATA)\}")
+_INLINE_SHELL_RE = re.compile(r"!`[^`\n]+`")
 
 
 @dataclass(frozen=True)
@@ -171,13 +173,16 @@ def normalize_agent_fields(
     * ``tools`` names are mapped (or dropped with a note). When the author
       listed tools and none exist here, the agent is skipped: an empty list
       would mean "every tool", more than the author asked for;
+    * ``disallowedTools`` is mapped the same way and kept as
+      ``disallowedTools``: Task dispatch enforces it as the worker's deny
+      list. A denied tool is also taken out of ``tools``;
     * any other field is removed as unused.
     """
     out: dict[str, Any] = {}
     notes: list[str] = []
     removed_unused: list[str] = []
     for key in fields:
-        if key in AGENT_KEPT_FIELDS:
+        if key in AGENT_KEPT_FIELDS or key in _DENY_FIELDS:
             continue
         if key in _PIN_FIELDS:
             notes.append(f"{key} pin removed: the model is chosen per chat here")
@@ -185,8 +190,6 @@ def normalize_agent_fields(
             notes.append(f"{key} removed: a plugin agent runs with the permissions of the chat that starts it")
         elif key in _COMPONENT_FIELDS:
             notes.append(f"{key} removed: an agent file cannot add hooks or MCP servers")
-        elif key in ("disallowedTools", "disallowed_tools"):
-            notes.append(f"{key} removed: this app does not enforce a deny list for plugin agents")
         else:
             removed_unused.append(str(key))
     if removed_unused:
@@ -195,10 +198,19 @@ def normalize_agent_fields(
         if key in fields:
             out[key] = fields[key]
     skip = ""
+    denied: list[str] = []
+    for key in _DENY_FIELDS:
+        if key in fields:
+            mapped, deny_notes = map_tools(fields.get(key), plugin_name=plugin_name, server_names=server_names)
+            notes.extend(f"denied {n}" for n in deny_notes)
+            denied.extend(t for t in mapped if t not in denied)
+    if denied:
+        out["disallowedTools"] = denied
     if "tools" in fields:
         listed = _items(fields.get("tools"))
         kept, tool_notes = map_tools(listed, plugin_name=plugin_name, server_names=server_names)
         notes.extend(tool_notes)
+        kept = [t for t in kept if t not in denied]
         if listed and not kept:
             skip = (
                 "none of the tools it lists exist here, and an empty tool list "
@@ -222,16 +234,22 @@ def markdown_notes(fields: Mapping[str, Any], body: str, *, kind: str) -> list[s
     if refs:
         notes.append(
             "asks for plugin settings this app does not collect ("
-            + ", ".join(refs) + "); those references stay as written"
+            + ", ".join(refs) + "); each is replaced with a note that it is not set"
         )
+    if kind == "command" and _INLINE_SHELL_RE.search(body):
+        notes.append("inline shell commands (!`...`) are not run for plugin commands")
     return notes
 
 
 def expand_plugin_paths(text: str, *, root: Path | str, data: Path | str | None = None) -> str:
-    """Replace ``${CLAUDE_PLUGIN_ROOT}``/``${PLUGIN_ROOT}`` (and the data
-    variables) in Markdown content with real paths, as Claude Code does when it
-    loads a skill, command or agent. Only these four names are touched; any
-    other ``${...}`` stays literal so no environment value leaks into a prompt.
+    """Fill in a plugin's placeholders in Markdown content, as Claude Code
+    does when it loads a skill, command or agent.
+
+    ``${CLAUDE_PLUGIN_ROOT}``/``${PLUGIN_ROOT}`` and the data variables become
+    real paths. ``${user_config.KEY}`` becomes a short note that the setting
+    is not configured here (this app does not collect plugin settings), so a
+    model reading it does not mistake the placeholder for a value. Any other
+    ``${...}`` stays literal so no environment value leaks into a prompt.
     """
     root_text = str(root).replace("\\", "/")
     data_text = str(data).replace("\\", "/") if data is not None else None
@@ -241,7 +259,10 @@ def expand_plugin_paths(text: str, *, root: Path | str, data: Path | str | None 
             return root_text
         return data_text if data_text is not None else match.group(0)
 
-    return _ROOT_TOKEN_RE.sub(repl, text)
+    text = _ROOT_TOKEN_RE.sub(repl, text)
+    return _USER_CONFIG_RE.sub(
+        lambda m: f"[plugin setting {m.group(1)} is not configured in AI Shuffle]", text
+    )
 
 
 def summarize(components: Iterable[Any]) -> dict[str, list[str]]:

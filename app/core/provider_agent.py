@@ -1693,6 +1693,7 @@ async def dispatch_worker(
     launch_tool_use_id: Optional[str] = None,
     system_prompt_append: Optional[str] = None,
     tool_allowlist: Optional[List[str]] = None,
+    tool_denylist: Optional[List[str]] = None,
     agent_name: Optional[str] = None,
     roster_name: Optional[str] = None,
     worker_session_id: Optional[str] = None,
@@ -2005,6 +2006,11 @@ async def dispatch_worker(
     # app/core/provider/harness_adapter (per-leg enforcement).
     if tool_allowlist:
         overrides["tool_allowlist"] = list(tool_allowlist)
+    # A file/plugin agent's ``disallowedTools``: never callable by this
+    # worker, whatever it inherits (added to ``disallowed_tools`` in
+    # app/core/query_options, which both legs enforce).
+    if tool_denylist:
+        overrides["tool_denylist"] = list(tool_denylist)
 
     # ONE join key for the whole surface: the worker's session id is the
     # registry task id, the registry's ``tool_use_id`` AND the ``task_id`` on

@@ -66,7 +66,7 @@ Responses also carry:
 
 - `format`: `claude` (Claude Code), `agent-plugins` (Agent Plugins / OpenAI) or `shuffle` (official connector runtimes).
 - `trust`: `official`, `marketplace` or `authored`.
-- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason` when it does not load. LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
+- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason`: why it does not load, or, for a loaded component, what was adapted for this app (see [Plugins from Claude Code and Codex](#plugins-from-claude-code-and-codex)). LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
 
 These fields are absent from workers that predate them.
 
@@ -120,6 +120,26 @@ Rules the validator enforces:
 A plugin that talks to an outside API declares it under `services`: `name`, `provider` (`cloudflare` or `custom`), `url` (the public `https://` API address; required for `custom`), `access` (`read` or `write`) and `purpose`. No other keys are accepted. The declaration shows a reviewer what the plugin will ask for. It holds no credential.
 
 The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess` with the provider and purpose. You enter the key in the private access card; the agent then calls `ChatHttpRequest`, and the worker attaches the key. No model sees it. Plugins cannot sign in with OAuth yet.
+
+## Plugins from Claude Code and Codex
+
+AI Shuffle reads Claude Code plugins (`.claude-plugin/plugin.json`) and Codex / Agent Plugins (`.codex-plugin/plugin.json` or a root `plugin.json`) as they are, and keeps their files unchanged on disk. Every time a plugin is read, from any source (a marketplace install or update, a settings import, a project folder), fields that only mean something in the tool it came from are adapted:
+
+| Part | What happens here |
+|------|-------------------|
+| Subagent `model`, `effort`, provider pins | Removed. The model is chosen per chat. |
+| Subagent `permissionMode`, `hooks`, `mcpServers` | Removed. A subagent runs with the permissions of the chat that starts it. |
+| Subagent `disallowedTools` | Mapped like `tools` and enforced: a dispatched plugin agent can never call a tool on this list, whatever it would otherwise inherit. |
+| Subagent `tools` | Mapped to this app's names (`MultiEdit` and `apply_patch` become `Edit`, `shell` becomes `Bash`, `LS` becomes `Glob`, `mcp__plugin_<plugin>_<server>__<tool>` becomes `mcp__<server>__<tool>`). Tools with no equivalent (`TodoWrite`, `BashOutput`, `update_plan`) are dropped. If none of an agent's tools exist here, the agent is not offered, because an empty list would give it every tool. |
+| Other subagent fields (`maxTurns`, `memory`, `color`, `isolation`, ...) | Removed as unused. |
+| Skill and command `model` | Ignored, and not reported as the command's model. |
+| `${CLAUDE_PLUGIN_ROOT}` / `${PLUGIN_ROOT}` in skills, commands and agents | Replaced with the plugin's folder when the skill, command or agent loads. |
+| `${user_config.*}` | This app does not collect plugin settings. In skills, commands and agents each reference is replaced with a note that the setting is not configured. An MCP server that uses one does not start and is marked as needing settings. |
+| Inline shell in commands (`` !`cmd` ``) | Never run for plugin commands, whatever `allowed-tools` says. |
+| Codex skill metadata (`agents/openai.yaml`) | Not used. |
+| LSP servers, output styles, monitors, themes, workflows, channels, `bin/`, `settings.json`, dependencies, MCP bundles (`.mcpb`), inline command maps, Codex agent files (`agents/*.toml`), ChatGPT apps (`.app.json`) | Skipped and listed with the reason. |
+
+Each adaptation and each skipped part appears on the plugin's component list (`components[].reason`). Hooks and MCP servers from a marketplace plugin run once the plugin is enabled, the same as before.
 
 ## Plugin Structure
 
@@ -355,8 +375,8 @@ Each file-based agent includes:
 - `id` -- Unique identifier
 - `name` -- Agent name
 - `description` -- What it does
-- `model` -- Optional model override
-- `tools` -- Optional tool restrictions
+- `model` -- Always empty: a plugin agent runs on the chat's model
+- `tools` -- Optional tool restrictions, mapped to this app's tool names
 - `prompt` -- The agent's system prompt
 - `source_plugin` -- Which plugin provides it
 - `file_path` -- Path to the agent definition file

@@ -840,7 +840,8 @@ class Repl:
             raw = Path(match.path).read_text(encoding="utf-8")
         except OSError:
             return None
-        blocks = render_command_blocks(raw, arg, cwd=cwd)
+        # Plugin commands never run inline shell code (owner decision).
+        blocks = render_command_blocks(raw, arg, cwd=cwd, inline_bash=match.scope != "plugin")
         if len(blocks) <= 1:
             return blocks[0] if blocks else ""
         return [Text(b) for b in blocks]
