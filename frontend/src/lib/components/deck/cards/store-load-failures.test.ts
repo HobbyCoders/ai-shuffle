@@ -39,7 +39,6 @@ import { hooks } from '$lib/stores/hooks.svelte';
 import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 import ProjectMemoryTab from './ProjectMemoryTab.svelte';
 import ProjectHooksTab from './ProjectHooksTab.svelte';
-import HooksCard from './HooksCard.svelte';
 
 const unhandled = vi.fn();
 beforeEach(() => {
@@ -75,11 +74,5 @@ describe('a rejected store load is caught and shown', () => {
 		render(ProjectHooksTab, { props: { projectId: 'p1' } });
 		expect(await screen.findByText('backend offline')).toBeTruthy();
 		expect(api.getProjectHooks).toHaveBeenCalledWith('p1');
-	});
-
-	it('HooksCard (app hooks, no project)', async () => {
-		render(HooksCard, { props: { embedded: true } });
-		expect(await screen.findByText('backend offline')).toBeTruthy();
-		expect(api.getAppHooks).toHaveBeenCalled();
 	});
 });

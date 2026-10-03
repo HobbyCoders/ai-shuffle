@@ -27,7 +27,7 @@ export const searchPages: SearchItem[] = [
  ['file-browser', 'Files', 'Browse workspace files'],
  ['prs', 'Pull requests', 'Open pull requests, reviews and checks across every project'],
  ['stats', 'Usage statistics', 'Costs, tokens and analytics'],
- ['settings', 'Settings', 'Appearance, voice, providers, default models, devices and security']
+ ['settings', 'Settings', 'Appearance, voice, providers, default models, plugins, MCP servers, hooks, devices and security']
 ].map(([view, label, description]) => ({ id: `page:${view}`, view: view as ViewType, label, description }));
 
 export function matches(item: SearchItem, query: string): boolean {

@@ -11,6 +11,8 @@ import * as providers from './entries/providers';
 import * as models from './entries/models';
 import * as integrations from './entries/integrations';
 import * as plugins from './entries/plugins';
+import * as mcp from './entries/mcp';
+import * as hooks from './entries/hooks';
 import * as devices from './entries/devices';
 import * as security from './entries/security';
 import * as system from './entries/system';
@@ -25,6 +27,8 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	models,
 	integrations,
 	plugins,
+	mcp,
+	hooks,
 	devices,
 	security,
 	system,

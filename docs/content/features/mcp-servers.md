@@ -71,7 +71,7 @@ MCP servers can be configured at several levels:
 
 ### USER (Global)
 
-Available across all projects. Managed from **Build → MCP Servers**. Only the owner can add, update, or remove global servers.
+Available across all projects. Managed from **Settings → MCP servers**. Only the owner can add, update, or remove global servers.
 
 Use for: tools you want available everywhere, such as a database explorer or a documentation search server.
 

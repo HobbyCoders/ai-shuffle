@@ -1,18 +1,16 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
-	 * ProfileCard - Profile management in a card format
-	 *
-	 * Uses the Studio editor shell with two view modes:
-	 * - List view: Browse, search, and manage profiles
-	 * - Form view: Edit or create profiles with tabbed interface
+	 * ProfileCard: the Agents page, a ledger. One list of agents; the open agent
+	 * expands in place into its editor (essentials, then collapsible sections).
+	 * Edits save as you type. Delete and restore confirm inline in the row.
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
-	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal } from 'lucide-svelte';
+	import { Download, RotateCcw, Trash2 } from 'lucide-svelte';
+	import { onMount, tick } from 'svelte';
+	import { refreshAssistant } from '$lib/stores/assistant';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -28,12 +26,11 @@
 		normalizeModel,
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
-	import './card-design-system.css';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 
 	// Sub-components
-	import ProfileForm from './profiles/ProfileForm.svelte';
-	import BuildProfileGrid from '$lib/components/layout/build/BuildProfileGrid.svelte';
+	import ProfileForm, { type AgentSection } from './profiles/ProfileForm.svelte';
+	import AgentList, { type AgentSpec, type PendingConfirm } from '$lib/components/layout/build/AgentList.svelte';
 	import {
 		type SelectabilityContext,
 		type ToolSelectionMode,
@@ -43,9 +40,6 @@
 		toggleGroupSelection,
 		toggleToolSelection
 	} from './profiles/toolSurface';
-
-	// Icon map for tabs
-	const tabIcons = { general: Settings, tools: Wrench, agents: Bot, prompt: FileText, advanced: SlidersHorizontal } as const;
 
 	// Types
 	interface Subagent {
@@ -76,21 +70,16 @@
 	}
 
 	interface Props {
-		/** When embedded in the Build page, render the header-less card grid
-		 *  while keeping the same editor form. */
-		embedded?: boolean;
-		/** Reports whether the section is in a full-canvas detail/editor state so
-		 *  the Build page can hide its heading + sub-nav while editing. */
-		onDetailChange?: (detail: boolean) => void;
 		/** One-shot deep-link: open this profile's editor once, after data loads. */
 		initialSelectedId?: string | null;
 	}
 
-	let {
-		embedded = false,
-		onDetailChange,
-		initialSelectedId
-	}: Props = $props();
+	let { initialSelectedId }: Props = $props();
+
+	// The list marks the personal assistant and shows each agent's avatar.
+	onMount(() => {
+		if ($isAdminStore) void refreshAssistant().catch(() => {});
+	});
 
 	// Consume the deep-link exactly once, after the target profile has loaded.
 	let deepLinkConsumed = false;
@@ -170,13 +159,20 @@
 	// View state
 	let viewMode = $state<'list' | 'form'>('list');
 	let editingProfile = $state<Profile | null>(null);
-	let activeTab = $state('general');
+	/** Editor sections expanded under the open agent. */
+	let openSections = $state<AgentSection[]>([]);
+	/**
+	 * Id of an agent created from the draft row in this visit. It stays in the
+	 * draft slot (not jumping into its sorted place) so typing keeps focus.
+	 */
+	let draftId = $state<string | null>(null);
 
-	// Tell the Build page when we enter/leave the editor (form takes the canvas)
-	// so it can hide its heading + sub-nav while editing.
-	$effect(() => {
-		if (embedded) onDetailChange?.(viewMode === 'form');
-	});
+	/** The open agent's id; '' while drafting a new one; null when none is open. */
+	const selectedId = $derived(
+		viewMode !== 'form' ? null : !editingProfile || editingProfile.id === draftId ? '' : editingProfile.id
+	);
+	const listProfiles = $derived(draftId ? profiles.filter((p) => p.id !== draftId) : profiles);
+	let saveState = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
 	// Profile form state — fluid harness options only (ruling R3). SDK-era
 	// fields (thinking mode, checkpointing, …) are gone: the fluid harness
@@ -225,17 +221,8 @@
 	let profileImporting = $state(false);
 	let showGenerateDialog = $state(false);
 
-	// A pending "restore defaults" awaiting confirmation (replaces native confirm()).
-	let pendingRevert = $state<string | null>(null);
-
-	// Tab definitions
-	const tabs = [
-		{ id: 'general', label: 'General', icon: 'settings' },
-		{ id: 'tools', label: 'Tools', icon: 'wrench' },
-		{ id: 'agents', label: 'Agents', icon: 'users' },
-		{ id: 'prompt', label: 'Prompt', icon: 'message' },
-		{ id: 'advanced', label: 'Advanced', icon: 'cog' }
-	];
+	// A delete or "restore defaults" awaiting the inline confirm in its row.
+	let confirm = $state<PendingConfirm | null>(null);
 
 	// Which rows the editor may actually write into a list: computer use follows
 	// the global toggle, admin-only groups follow the signed-in user.
@@ -265,6 +252,34 @@
 		return profileToolCount(profile.config, toolSurface, computerUse.enabled, $isAdminStore);
 	}
 
+	/**
+	 * How many agents this one may dispatch as subagents. 'custom' declares the
+	 * allowlist pruned to agents that still exist (0 really means none); legacy
+	 * rows without a mode and a non-empty list declare exactly it; everything
+	 * else declares every agent but itself.
+	 */
+	function invokableCount(id: string, mode: string | undefined, enabledIds: string[] | undefined): number {
+		const enabled = (enabledIds ?? []).filter((x) => allSubagents.some((a) => a.id === x)).length;
+		if (mode === 'custom') return enabled;
+		if (!mode && enabled > 0) return enabled;
+		return allSubagents.filter((a) => a.id !== id).length;
+	}
+
+	/** Spec line for a row: live from the form for the open agent, saved config otherwise. */
+	function getSpec(profile: Profile): AgentSpec {
+		if (viewMode === 'form' && editingProfile?.id === profile.id) {
+			return {
+				tools: effectiveToolCount,
+				agents: invokableCount(profile.id, profileForm.agent_invoke_mode, profileForm.enabled_agents)
+			};
+		}
+		const config = (profile.config ?? {}) as any;
+		return {
+			tools: getProfileToolCount(profile),
+			agents: invokableCount(profile.id, config.agent_invoke_mode, config.enabled_agents)
+		};
+	}
+
 	function resetForm() {
 		profileForm = {
 			id: '',
@@ -284,14 +299,52 @@
 			setting_sources: null
 		};
 		toolSelectionMode = 'all';
-		activeTab = 'general';
+		openSections = [];
 	}
 
-	function openNewForm() {
+	async function openNewForm() {
+		await flushPendingPersist();
+		remoteChange = '';
+		saveState = 'idle';
+		confirm = null;
+		draftId = null;
 		resetForm();
 		editingProfile = null;
 		viewMode = 'form';
 		markFormClean();
+		await revealRow('');
+	}
+
+	/** Scroll an agent's row (or one of its sections) into view once rendered. */
+	async function revealRow(id: string, section?: AgentSection) {
+		await tick();
+		const target = section
+			? document.getElementById(`agx-sec-${section}`)
+			: document.querySelector(`[data-agent-row="${id.replace(/["\\]/g, '\\$&')}"]`);
+		target?.scrollIntoView?.({ block: section ? 'start' : 'nearest', behavior: 'smooth' });
+	}
+
+	function toggleSection(id: AgentSection) {
+		openSections = openSections.includes(id) ? openSections.filter((s) => s !== id) : [...openSections, id];
+	}
+
+	/**
+	 * Open an agent in place, saving the open one's pending edits first. With a
+	 * section (a click on "12 tools" in its spec line), open straight to it.
+	 */
+	async function selectProfile(profile: Profile, section?: string) {
+		const sec = section as AgentSection | undefined;
+		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
+		if (!alreadyOpen) {
+			await flushPendingPersist();
+			remoteChange = '';
+			saveState = 'idle';
+			confirm = null;
+			draftId = null;
+			openEditForm(profile);
+		}
+		if (sec && !openSections.includes(sec)) openSections = [...openSections, sec];
+		await revealRow(profile.id, sec);
 	}
 
 	function openEditForm(profile: Profile) {
@@ -357,13 +410,16 @@
 		};
 
 		viewMode = 'form';
-		activeTab = 'general';
+		openSections = [];
 		markFormClean();
 	}
 
-	async function backToList() {
+	/** Collapse the open agent, saving pending edits first. */
+	async function closeEditor() {
 		await flushPendingPersist();
 		viewMode = 'list';
+		confirm = null;
+		draftId = null;
 		resetForm();
 		editingProfile = null;
 	}
@@ -527,6 +583,7 @@
 			});
 		} else {
 			await tabsStore.createProfile(data);
+			draftId = data.id;
 			editingProfile = {
 				id: data.id,
 				name: data.name,
@@ -558,9 +615,12 @@
 				while (persistDirty) {
 					persistDirty = false;
 					if (!profileForm.name) continue;
+					saveState = 'saving';
 					try {
 						await writeProfile();
+						saveState = 'saved';
 					} catch (e: any) {
+						saveState = 'error';
 						notify('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
 					}
 				}
@@ -591,19 +651,39 @@
 		schedulePersist();
 	});
 
-	function handleRevertProfile(profileId: string) {
-		const profile = profiles.find(p => p.id === profileId);
-		if (!profile?.is_builtin) return;
-		pendingRevert = profileId;
+	function askRevert(profile: Profile) {
+		if (!profile.is_builtin) return;
+		confirm = { id: profile.id, kind: 'revert' };
 	}
 
-	async function confirmRevert() {
-		const profileId = pendingRevert;
-		pendingRevert = null;
-		if (!profileId) return;
+	function askDelete(profile: Profile) {
+		if (profile.is_builtin) return;
+		confirm = { id: profile.id, kind: 'delete' };
+	}
 
+	function runConfirm() {
+		const pending = confirm;
+		confirm = null;
+		if (!pending) return;
+		void (pending.kind === 'delete' ? deleteProfile(pending.id) : revertProfile(pending.id));
+	}
+
+	async function revertProfile(profileId: string) {
 		try {
+			// Drop unsaved edits first so autosave can't re-apply them over the defaults.
+			if (editingProfile?.id === profileId) {
+				if (saveTimer) clearTimeout(saveTimer);
+				saveTimer = null;
+				persistDirty = false;
+				if (inFlightPromise) await inFlightPromise;
+			}
 			await tabsStore.restoreProfile(profileId);
+			const fresh = profiles.find((p) => p.id === profileId);
+			if (fresh && viewMode === 'form' && editingProfile?.id === profileId) {
+				const sections = openSections;
+				openEditForm(fresh);
+				openSections = sections;
+			}
 		} catch (e: any) {
 			notify('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
 		}
@@ -703,17 +783,37 @@
 		};
 
 		viewMode = 'form';
-		activeTab = 'general';
+		// A generated agent arrives with its prompt and tools filled; show them.
+		openSections = ['prompt', 'tools'];
 		markFormClean();
 	}
 
-	function handleGeneratedProfile(data: AgentExport | unknown) {
+	async function handleGeneratedProfile(data: AgentExport | unknown) {
 		showGenerateDialog = false;
+		await flushPendingPersist();
+		remoteChange = '';
+		saveState = 'idle';
+		confirm = null;
+		draftId = null;
 		openFormFromGenerated(data as AgentExport);
+		await revealRow('');
 	}
 
-	async function handleDeleteProfile(profileId: string) {
-		await tabsStore.deleteProfile(profileId);
+	async function deleteProfile(profileId: string) {
+		try {
+			if (editingProfile?.id === profileId) {
+				if (saveTimer) clearTimeout(saveTimer);
+				saveTimer = null;
+				persistDirty = false;
+				viewMode = 'list';
+				editingProfile = null;
+				draftId = null;
+				resetForm();
+			}
+			await tabsStore.deleteProfile(profileId);
+		} catch (e: any) {
+			notify('Failed to delete agent: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
+		}
 	}
 
 	function assignToGroup(profileId: string, groupName: string) {
@@ -745,44 +845,47 @@
 			return;
 		}
 		if (fresh) {
-			const tab = activeTab;
+			const sections = openSections;
 			openEditForm(fresh);
-			activeTab = tab;
+			openSections = sections;
 			remoteChange = '';
 		} else {
 			viewMode = 'list';
 			editingProfile = null;
+			draftId = null;
 			remoteChange = 'This agent was deleted elsewhere.';
 		}
 	});
 </script>
 
-{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
-
-
-<!-- Shared hidden file input (used by both the embedded grid and the list view) -->
+<!-- Shared hidden file input for Import -->
 <input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
 
-{#if viewMode === 'form'}
-		<StudioEditorShell
-			title={profileForm.name || (editingProfile ? editingProfile.name : 'New Agent')}
-			subtitle={editingProfile ? 'Agent configuration' : 'Create a new agent'}
-			backLabel="Agents"
-			onBack={backToList}
-			sections={tabs.map((t) => ({
-				id: t.id,
-				label: t.label,
-				icon: tabIcons[t.id as keyof typeof tabIcons],
-				// How many tools this agent actually ends up with, live from the surface.
-				count: t.id === 'tools' ? effectiveToolCount : undefined
-			}))}
-			active={activeTab}
-			onSelect={(id) => (activeTab = id)}
-			railLabel="Agent sections"
-		>
-
+<div class="ag">
+	{#if remoteChange}<p role="status" class="ag-remote">{remoteChange}</p>{/if}
+	<AgentList
+		profiles={listProfiles}
+		{groups}
+		{selectedId}
+		draftName={profileForm.name}
+		{loading}
+		{saveState}
+		{confirm}
+		importing={profileImporting}
+		{getSpec}
+		onSelect={selectProfile}
+		onClose={closeEditor}
+		onNew={openNewForm}
+		onGenerate={() => (showGenerateDialog = true)}
+		onImport={triggerImport}
+		onExport={(p) => handleExportProfile(p.id)}
+		onAskDelete={askDelete}
+		onAskRevert={askRevert}
+		onConfirm={runConfirm}
+		onCancelConfirm={() => (confirm = null)}
+	>
+		{#snippet editor()}
 			<ProfileForm
-				{activeTab}
 				{editingProfile}
 				{profileForm}
 				{toolSelectionMode}
@@ -792,6 +895,9 @@
 				{toolSurface}
 				{toolsLoading}
 				{toolsRefreshing}
+				toolCount={effectiveToolCount}
+				{openSections}
+				onToggleSection={toggleSection}
 				isAdmin={$isAdminStore}
 				onFormChange={handleFormChange}
 				onToolSelectionModeChange={handleToolSelectionModeChange}
@@ -805,24 +911,29 @@
 				onCreateGroup={createGroup}
 				onDeleteGroup={deleteGroup}
 			/>
-		</StudioEditorShell>
-	{:else}
-		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
-		<BuildProfileGrid
-			{profiles}
-			{groups}
-			{allSubagents}
-			importing={profileImporting}
-			onEditProfile={openEditForm}
-			onNewProfile={openNewForm}
-			onGenerate={() => showGenerateDialog = true}
-			onImport={triggerImport}
-			onExportProfile={handleExportProfile}
-			onDeleteProfile={handleDeleteProfile}
-			onRevertProfile={handleRevertProfile}
-			{getProfileToolCount}
-		/>
-	{/if}
+			<footer class="ag-foot">
+				{#if editingProfile}
+					{@const current = editingProfile}
+					<button type="button" class="ag-fbtn" onclick={() => handleExportProfile(current.id)}>
+						<Download size={14} strokeWidth={1.8} />Export
+					</button>
+					{#if current.is_builtin && current.is_modified}
+						<button type="button" class="ag-fbtn" onclick={() => askRevert(current)}>
+							<RotateCcw size={14} strokeWidth={1.8} />Restore defaults
+						</button>
+					{/if}
+					{#if !current.is_builtin}
+						<button type="button" class="ag-fbtn danger" onclick={() => askDelete(current)}>
+							<Trash2 size={14} strokeWidth={1.8} />Delete
+						</button>
+					{/if}
+				{/if}
+				<span class="ag-fspace"></span>
+				<button type="button" class="ag-done" onclick={closeEditor}>{editingProfile ? 'Done' : 'Cancel'}</button>
+			</footer>
+		{/snippet}
+	</AgentList>
+</div>
 
 <!-- AI Generate Dialog -->
 <AIGenerateDialog
@@ -832,20 +943,81 @@
 	onGenerated={handleGeneratedProfile}
 />
 
-<!-- Restore-defaults confirmation -->
-<ConfirmDialog
-	open={!!pendingRevert}
-	title="Restore defaults"
-	message="Restore this agent to its original default settings? Your customizations will be lost."
-	confirmLabel="Restore"
-	danger
-	onConfirm={confirmRevert}
-	onCancel={() => (pendingRevert = null)}
-/>
-
-
 <style>
 	.hidden {
 		display: none;
+	}
+	.ag {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		min-height: 0;
+		background: var(--background);
+	}
+	.ag > :global(.al) {
+		flex: 1;
+	}
+	.ag-remote {
+		flex: none;
+		margin: 0;
+		padding: 8px 28px;
+		font-size: 0.8rem;
+		color: var(--muted-foreground);
+		border-bottom: 1px solid var(--border);
+	}
+	.ag-foot {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin-top: 10px;
+		padding: 10px 0 12px;
+		border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+	}
+	.ag-fspace {
+		flex: 1;
+	}
+	.ag-fbtn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 30px;
+		padding: 0 10px;
+		border: none;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 500;
+		cursor: pointer;
+	}
+	.ag-fbtn:hover {
+		color: var(--foreground);
+		background: var(--muted);
+	}
+	.ag-fbtn.danger:hover {
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
+	.ag-done {
+		height: 30px;
+		padding: 0 16px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: var(--background);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.ag-done:hover {
+		background: var(--muted);
+	}
+	.ag-fbtn:focus-visible,
+	.ag-done:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 </style>

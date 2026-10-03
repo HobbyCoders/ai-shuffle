@@ -9,7 +9,7 @@
 	import { untrack, type Snippet } from 'svelte';
 	import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { MediaQuery } from 'svelte/reactivity';
-	import { activeView, pluginsSettingsTarget } from '$lib/stores/layout.svelte';
+	import { activeView, settingsTargetForView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -140,29 +140,16 @@
 		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'prs', 'stats', 'docs'
 	]);
 
-	// The Build page hosts the agent-config tools under one surface. The
-	// member view types remain as deep-link targets ("Configure agents →")
-	// and resolve to BuildPage with the right sub-tab.
-	type BuildSub = 'profile' | 'mcp' | 'hooks';
-	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'hooks'];
-	// Plugin management lives in Settings. openFeaturePage('plugins') already
-	// lands on the settings view; a `plugins` view restored from storage opens
-	// Settings > Plugins.
+	// The Agents page renders the `build` view and its `profile` deep links
+	// ("Configure agents →"). Plugins, MCP servers and hooks live in Settings:
+	// openFeaturePage already lands those on the settings view, and one
+	// restored from storage opens the matching Settings page.
 	const settingsItemId = $derived(
 		$activeView?.type === 'settings'
 			? $activeView.itemId
-			: $activeView?.type === 'plugins'
-				? pluginsSettingsTarget($activeView.itemId)
-				: null
+			: settingsTargetForView($activeView?.type, $activeView?.itemId)
 	);
-	const isBuildView = $derived(
-		$activeView?.type === 'build' || BUILD_SUBS.includes($activeView?.type as BuildSub)
-	);
-	const buildRequestedSub = $derived(
-		BUILD_SUBS.includes($activeView?.type as BuildSub)
-			? ($activeView!.type as BuildSub)
-			: undefined
-	);
+	const isBuildView = $derived($activeView?.type === 'build' || $activeView?.type === 'profile');
 	// One-shot deep-link target (agent id) to open in its editor.
 	const buildRequestedItemId = $derived($activeView?.itemId ?? undefined);
 
@@ -268,8 +255,8 @@
 		if (!type) return 'Sessions';
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
-		if (isBuildView) return 'Build';
-		if (type === 'plugins') return 'Settings';
+		if (isBuildView) return 'Agents';
+		if (type === 'plugins' || type === 'mcp' || type === 'hooks') return 'Settings';
 		return viewTitles[type] || '';
 	});
 
@@ -1002,8 +989,8 @@
 					{#if key === 'build'}
 						<LazyPanel
 							handle={panelForKey('build')}
-							props={{ requestedSub: buildRequestedSub, requestedItemId: buildRequestedItemId }}
-							label="Build"
+							props={{ requestedItemId: buildRequestedItemId }}
+							label="Agents"
 						/>
 					{:else if key === 'project'}
 						<LazyPanel handle={panelForKey('project')} label="Projects" />

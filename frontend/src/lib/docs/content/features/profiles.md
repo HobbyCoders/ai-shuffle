@@ -6,7 +6,7 @@ order: 6
 
 # Agents
 
-An agent is a configuration that controls how the AI behaves during a session. Each agent defines the system prompt, available tools, the other agents it can call, plugins, memory, and other settings. Switch between agents to get different behaviors from the same AI Shuffle instance. Manage them in **Build → Agents**.
+An agent is a configuration that controls how the AI behaves during a session. Each agent defines the system prompt, available tools, the other agents it can call, plugins, memory, and other settings. Switch between agents to get different behaviors from the same AI Shuffle instance. Manage them on the **Agents** page in the sidebar. Each agent is a row; click it to open its editor in place, or click its tool or subagent count to jump straight to that section.
 
 The API and some field names still say "profile": the endpoints are `/api/v1/agents`, but ids are passed as `profile_id` and `{profile_id}`.
 
@@ -33,7 +33,7 @@ An agent contains a `config` object with the following settings:
 | Field              | Type   | Default    | Description                                    |
 |--------------------|--------|------------|------------------------------------------------|
 | `max_turns`        | int    | null       | Optional model-call cap; null means unlimited    |
-| `provider_models`  | dict   | null       | Model this agent runs on when another agent dispatches it, per provider, including the Voice row (the editor's **Agents** tab). A provider left out keeps the agent hidden from callers on that provider |
+| `provider_models`  | dict   | null       | Model this agent runs on when another agent dispatches it, per provider, including the Voice row (the editor's **Models** section). A provider left out keeps the agent hidden from callers on that provider |
 | `memory`           | string | null       | Durable notes this agent keeps across sessions; the agent writes them with its Memory tool |
 
 `model`, `permission_mode` and `effort` are session settings, not agent settings. Agents saved by older versions may still carry them; they are used only as a fallback for sessions created before the move.
@@ -116,7 +116,7 @@ Changing the model or permission mode of an existing session applies live. Chang
 | `allow`    | Only `allowed_tools`. An empty list means no tools.         |
 | `disallow` | Everything except `disallowed_tools`.                       |
 
-**The tool list is discovered live, never hardcoded.** `GET /api/v1/tools/surface` enumerates every tool a session can be given, straight from the running registries: the built-in tools, the app's bridged servers, the AI tools, the browser, computer use, app configuration, and each configured MCP server. The agent editor's Tools tab is that inventory — a new built-in tool shows up there on the next refresh, with no list to update anywhere.
+**The tool list is discovered live, never hardcoded.** `GET /api/v1/tools/surface` enumerates every tool a session can be given, straight from the running registries: the built-in tools, the app's bridged servers, the AI tools, the browser, computer use, app configuration, and each configured MCP server. The agent editor's **Tools** section is that inventory — a new built-in tool shows up there on the next refresh, with no list to update anywhere.
 
 Entries in either list are exact tool names (`Read`, `mcp__github__create_issue`) or `fnmatch` patterns. Selecting a whole MCP server in the editor saves `mcp__<server>__*`, so tools added to that server later are covered too; unchecking one of its tools expands the pattern back to explicit names.
 
@@ -124,7 +124,7 @@ Entries in either list are exact tool names (`Read`, `mcp__github__create_issue`
 
 ### System Prompt
 
-The `system_prompt` field holds the agent's instructions (the editor's **Prompt** tab):
+The `system_prompt` field holds the agent's instructions (the editor's **Prompt** section):
 
 ```json
 {

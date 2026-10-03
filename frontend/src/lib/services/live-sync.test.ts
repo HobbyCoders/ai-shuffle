@@ -87,8 +87,7 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(vi.mocked(loader).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.applyComposerDefaults).mock.invocationCallOrder[0]);
  });
 
- it('registers Build and install choices before authentication starts the first snapshot',()=>{
-  expect(m.bindings.has('build_subtab')).toBe(true);
+ it('registers the install choice before authentication starts the first snapshot',()=>{
   expect(m.bindings.has('install_prompt')).toBe(true);
   expect(m.start).not.toHaveBeenCalled();
  });

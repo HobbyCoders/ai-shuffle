@@ -27,12 +27,12 @@ describe('layout store — one-shot deep-link itemId', () => {
 
 	it('does not persist the itemId to localStorage', async () => {
 		const { layout } = await import('./layout.svelte');
-		layout.openFeaturePage('mcp', 'agent-9');
+		layout.openFeaturePage('profile', 'agent-9');
 
 		const raw = localStorage.getItem(STORAGE_KEY);
 		expect(raw).toBeTruthy();
 		const parsed = JSON.parse(raw!);
-		expect(parsed.activeView.type).toBe('mcp');
+		expect(parsed.activeView.type).toBe('profile');
 		expect('itemId' in parsed.activeView).toBe(false);
 	});
 
@@ -62,7 +62,7 @@ describe('layout store — one-shot deep-link itemId', () => {
 
 	it('openFeaturePage without an itemId leaves it null', async () => {
 		const { layout } = await import('./layout.svelte');
-		layout.openFeaturePage('mcp');
+		layout.openFeaturePage('profile');
 		expect(layout.getState().activeView?.itemId ?? null).toBeNull();
 	});
 

@@ -1,4 +1,9 @@
 <script lang="ts">
+ /**
+  * AgentIdentitySettings: the avatar picker and the personal-assistant line in
+  * the agent editor. The avatar saves on its own through the identity PATCH,
+  * never through the agent's full-replace PUT.
+  */
  import { onMount } from 'svelte';
  import { ArrowUpRight, Check, RefreshCw } from 'lucide-svelte';
  import { AVATARS, updateAgentIdentity, assistantError, type AvatarId } from '$lib/api/assistant';
@@ -34,30 +39,37 @@
  }
 </script>
 
-<section class="agent-personality" aria-label="Agent avatar and personal assistant">
- <div class="heading"><div><h3>Put a face to the name</h3><p>Shared everywhere this agent appears. Instructions and permissions stay unchanged.</p></div>{#if saved}<span class="saved" role="status"><Check size={13} />Saved</span>{/if}</div>
- {#if loading}<p role="status">Loading agent identity…</p>
- {:else if error}<div role="alert" class="error">{error}<button onclick={load}><RefreshCw size={14} />Retry</button></div>
- {:else}<div class="choices" role="group" aria-label="Agent avatar">{#each AVATARS as avatar}<button type="button" aria-label={`${avatar} avatar`} aria-pressed={(identity?.avatar_id ?? 'robot') === avatar} title={avatar} disabled={builtin || saving} onclick={() => choose(avatar)}><AgentAvatar {avatar} size={42} /></button>{/each}</div>{/if}
- {#if builtin}<p class="hint">Built-in identity is protected. Create a custom agent to personalize its name and avatar.</p>{/if}
- <div class="designation"><div><h4>{primary ? 'Your personal assistant' : 'Personal assistant'}</h4><p>{primary ? 'This agent has your lasting home conversation. Background research and its sources are managed in Assistant.' : 'Give this agent a lasting home conversation. Background research stays off until you turn it on in Assistant.'}</p></div><button type="button" onclick={() => layout.openFeaturePage('assistant', id)}>{primary ? 'Assistant settings' : 'Set up as assistant'}<ArrowUpRight size={14} /></button></div>
+<section class="aid" aria-label="Agent avatar and personal assistant">
+ <div class="aid-field">
+  <span class="aid-label">Avatar{#if saved}<span class="aid-saved" role="status"><Check size={12} />Saved</span>{/if}</span>
+  {#if loading}<p class="aid-note" role="status">Loading avatars…</p>
+  {:else if error}<div role="alert" class="aid-error">{error}<button type="button" class="aid-link" onclick={load}><RefreshCw size={13} />Retry</button></div>
+  {:else}<div class="aid-choices" role="group" aria-label="Agent avatar">{#each AVATARS as avatar}<button type="button" class="aid-av" aria-label={`${avatar} avatar`} aria-pressed={(identity?.avatar_id ?? 'robot') === avatar} title={avatar} disabled={builtin || saving} onclick={() => choose(avatar)}><AgentAvatar {avatar} size={28} /></button>{/each}</div>{/if}
+  {#if builtin}<p class="aid-note">Built-in avatars are locked.</p>{/if}
+ </div>
+ <div class="aid-assist">
+  <span class="aid-label">{primary ? 'Your personal assistant' : 'Personal assistant'}</span>
+  <span class="aid-note">{primary ? 'Home conversation and research live in Assistant.' : 'Give it a lasting home conversation.'}</span>
+  <button type="button" class="aid-link" onclick={() => layout.openFeaturePage('assistant', id)}>{primary ? 'Assistant settings' : 'Set up as assistant'}<ArrowUpRight size={13} /></button>
+ </div>
 </section>
 
 <style>
- .agent-personality { padding:24px; margin:0 0 24px; border:1px solid var(--border); border-radius:12px; background:color-mix(in oklch,var(--primary) 3%,var(--card)); }
- .heading { display:flex; justify-content:space-between; gap:12px; align-items:start; }
- h3 { font-size:15px; font-weight:550; margin:0; } h4 { font-size:12px; font-weight:550; margin:0; }
- p { font-size:12px; color:var(--muted-foreground); line-height:1.7; margin:7px 0 0; }
- .choices { display:grid; grid-template-columns:repeat(4,max-content); gap:8px; margin:18px 0; }
- button { display:inline-flex; align-items:center; gap:8px; min-height:44px; cursor:pointer; color:var(--primary); background:transparent; border:1px solid transparent; border-radius:8px; font-size:11px; transition:background .2s,border-color .2s; }
- .choices button { padding:6px; color:var(--muted-foreground); }
- .choices button[aria-pressed=true] { border-color:var(--primary); color:var(--foreground); }
- button:hover:not(:disabled) { background:var(--accent); } button:active { transform:translateY(1px); }
- button:disabled { opacity:.55; cursor:not-allowed; } button:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
- .designation { display:flex; align-items:center; gap:20px; justify-content:space-between; border-top:1px solid var(--border); padding-top:18px; margin-top:18px; }
- .designation>div { flex:1; } .designation button { flex:none; }
- .hint,.saved { font-size:11px; color:var(--muted-foreground); }.saved { display:flex; align-items:center; gap:5px; color:var(--primary); }
- .error { font-size:12px; color:var(--destructive); }
- @media(max-width:600px) { .agent-personality { padding:18px; } .choices { gap:4px; }.choices button { padding:5px; } .designation { align-items:flex-start; flex-direction:column; gap:8px; } }
- @media(prefers-reduced-motion:reduce) { button { transition:none; } }
+ .aid { display:flex; flex-direction:column; gap:14px; min-width:0; }
+ .aid-field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+ .aid-label { display:flex; align-items:center; gap:8px; font-size:12px; font-weight:500; color:var(--muted-foreground); }
+ .aid-saved { display:inline-flex; align-items:center; gap:3px; color:var(--primary); font-size:11px; }
+ .aid-note { margin:0; font-size:12px; color:var(--muted-foreground); line-height:1.5; }
+ .aid-choices { display:flex; flex-wrap:wrap; gap:4px; }
+ .aid-av { display:grid; place-items:center; padding:3px; border:1.5px solid transparent; border-radius:999px; background:transparent; cursor:pointer; transition:border-color .15s, background .15s; }
+ .aid-av:hover:not(:disabled) { background:var(--hover-overlay, var(--muted)); }
+ .aid-av[aria-pressed=true] { border-color:var(--primary); }
+ .aid-av:disabled { cursor:not-allowed; opacity:.55; }
+ .aid-av[aria-pressed=true]:disabled { opacity:1; }
+ .aid-assist { display:flex; align-items:center; flex-wrap:wrap; gap:4px 12px; }
+ .aid-link { display:inline-flex; align-items:center; gap:4px; padding:0; border:none; background:none; font:inherit; font-size:12.5px; font-weight:600; color:var(--primary); cursor:pointer; }
+ .aid-link:hover { text-decoration:underline; }
+ .aid-error { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--destructive); }
+ .aid-av:focus-visible, .aid-link:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+ @media(prefers-reduced-motion:reduce) { .aid-av { transition:none; } }
 </style>

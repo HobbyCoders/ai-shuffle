@@ -33,7 +33,7 @@ describe('settings registry', () => {
 		for (const c of CATEGORIES) {
 			expect(c.icon).toBeTruthy();
 			expect(c.type).toBe(PAGE_TYPES[c.id]);
-			expect(c.label).toMatch(/^[A-Z][a-z]/);
+			expect(c.label).toMatch(/^[A-Z][A-Za-z]/);
 		}
 	});
 

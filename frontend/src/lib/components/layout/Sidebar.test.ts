@@ -925,7 +925,7 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('prefetches on focus, so keyboard navigation warms the same chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.focus(wsrow('Agents & tools'));
+		await fireEvent.focus(wsrow('Agents'));
 		await Promise.resolve();
 
 		expect(panelSpies.preloadCalls).toEqual(['build']);
@@ -935,7 +935,7 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('maps every Build sub-view row onto the Build panel chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.pointerEnter(wsrow('Agents & tools'));
+		await fireEvent.pointerEnter(wsrow('Agents'));
 		await Promise.resolve();
 
 		expect(panelSpies.chunkFetches).toEqual(['build']);
@@ -984,7 +984,7 @@ describe('Sidebar workspace nav customization', () => {
 	it('shows the default three rows inline and folds the rest into More', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		expect(wsLabels()).toEqual(['Files', 'Agents & tools', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Agents', 'Projects']);
 
 		const items = await openMore();
 		expect(items.map((n) => n.textContent?.trim())).toEqual([
@@ -1037,12 +1037,12 @@ describe('Sidebar workspace nav customization', () => {
 		expect(dialog.textContent).toContain('Always first');
 
 		await fireEvent.click(screen.getByRole('checkbox', { name: 'Show Notes' }));
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents & tools', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects']);
 
 		// And it survives the dialog, because the store wrote it.
 		await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
 		expect(screen.queryByRole('dialog', { name: /Customize workspace/ })).toBeNull();
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents & tools', 'Projects']);
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects']);
 	});
 
 	it('reorders a row from the keyboard, so the feature is not pointer-only', async () => {
@@ -1058,7 +1058,7 @@ describe('Sidebar workspace nav customization', () => {
 			key: 'ArrowUp',
 		});
 
-		expect(wsLabels()).toEqual(['Files', 'Projects', 'Agents & tools']);
+		expect(wsLabels()).toEqual(['Files', 'Projects', 'Agents']);
 	});
 });
 

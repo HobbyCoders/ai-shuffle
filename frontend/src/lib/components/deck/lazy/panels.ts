@@ -75,12 +75,12 @@ export type FeaturePanelKey =
 	| 'docs';
 
 /** The Build page hosts these view types as sub-tabs. */
-const BUILD_MEMBER_VIEWS = new Set(['build', 'profile', 'mcp', 'hooks']);
+const BUILD_MEMBER_VIEWS = new Set(['build', 'profile']);
 /**
- * Settings hosts plugin management. `plugins` used to be a Build sub-tab; the
- * view type stays so existing "Manage plugins" deep links land in Settings.
+ * Settings hosts plugins, MCP servers and hooks. They used to be Build
+ * sub-tabs; the view types stay so existing deep links land in Settings.
  */
-const SETTINGS_MEMBER_VIEWS = new Set(['settings', 'plugins']);
+const SETTINGS_MEMBER_VIEWS = new Set(['settings', 'plugins', 'mcp', 'hooks']);
 
 const PANEL_BY_KEY: Record<FeaturePanelKey, LazyComponentHandle<unknown>> = {
 	build: BuildPanel,

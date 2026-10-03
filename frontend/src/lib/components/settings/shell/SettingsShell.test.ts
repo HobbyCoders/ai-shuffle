@@ -67,6 +67,8 @@ describe('SettingsShell index', () => {
 			'Default models',
 			'Integrations',
 			'Plugins',
+			'MCP servers',
+			'Hooks',
 			'Devices',
 			'Security',
 			'System',

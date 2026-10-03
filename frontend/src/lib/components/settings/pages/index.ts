@@ -28,6 +28,8 @@ export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	models: () => import('../models/ModelsCollection.svelte'),
 	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
 	plugins: () => import('../plugins/PluginsCollection.svelte'),
+	mcp: () => import('../mcp/McpCollection.svelte'),
+	hooks: () => import('../hooks/HooksCollection.svelte'),
 	devices: () => import('../devices/DevicesCollection.svelte'),
 	logs: () => import('../logs/LogsCollection.svelte')
 };

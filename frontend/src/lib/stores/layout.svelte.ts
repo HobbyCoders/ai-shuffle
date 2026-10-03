@@ -172,13 +172,15 @@ export const layout = {
 
 	/**
 	 * Navigate to a feature page, optionally deep-linking to an item id.
-	 * Plugins live in Settings: `plugins` (a "Manage plugins" link, with an
-	 * optional plugin id or `connection:<type>`) opens Settings > Plugins.
+	 * Plugins, MCP servers and hooks live in Settings: `plugins` (with an
+	 * optional plugin id or `connection:<type>`), `mcp` (a server name) and
+	 * `hooks` (a hook id) open the matching Settings page.
 	 */
 	openFeaturePage(type: Exclude<ViewType, 'session'>, itemId?: string | null) {
-		if (type === 'plugins') {
+		const target = settingsTargetForView(type, itemId);
+		if (target !== null) {
 			type = 'settings';
-			itemId = pluginsSettingsTarget(itemId);
+			itemId = target;
 		}
 		_update((s) => ({
 			...s,
@@ -255,5 +257,17 @@ export function pluginsSettingsTarget(itemId?: string | null): string {
 		const known = itemId.startsWith('connection:') || itemId.startsWith('plugin:') || itemId === 'explore';
 		params.set('item', known ? itemId : `plugin:${itemId}`);
 	}
+	return params.toString();
+}
+
+/**
+ * The encoded Settings target for a view type that now lives in Settings
+ * (`plugins`, `mcp`, `hooks`), or null for any other view.
+ */
+export function settingsTargetForView(type: string | null | undefined, itemId?: string | null): string | null {
+	if (type === 'plugins') return pluginsSettingsTarget(itemId);
+	if (type !== 'mcp' && type !== 'hooks') return null;
+	const params = new URLSearchParams({ category: type });
+	if (itemId) params.set('item', itemId);
 	return params.toString();
 }

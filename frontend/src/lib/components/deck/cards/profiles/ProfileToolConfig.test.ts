@@ -7,7 +7,7 @@
  * checkbox, the read-only modes, greyed-out rows, and the list a click produces.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, fireEvent, cleanup } from '@testing-library/svelte';
+import { render, fireEvent, cleanup, within } from '@testing-library/svelte';
 import ProfileToolConfig from './ProfileToolConfig.svelte';
 import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 import { toggleGroupSelection, toggleToolSelection } from './toolSurface';
@@ -316,9 +316,10 @@ describe('header', () => {
 		expect(onRefresh).toHaveBeenCalledOnce();
 	});
 
-	it('reports the mode change the select emits', async () => {
-		const { getByLabelText, onToolSelectionModeChange } = setup();
-		await fireEvent.change(getByLabelText('Tool access mode'), { target: { value: 'disallow' } });
+	it('reports the mode picked in the access control', async () => {
+		const { getByRole, onToolSelectionModeChange } = setup();
+		const group = getByRole('radiogroup', { name: 'Tool access mode' });
+		await fireEvent.click(within(group).getByRole('radio', { name: 'All except selected' }));
 		expect(onToolSelectionModeChange).toHaveBeenCalledWith('disallow');
 	});
 });

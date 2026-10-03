@@ -17,7 +17,7 @@
 		X,
 		Files,
 		StickyNote,
-		Hammer,
+		Bot,
 		CalendarClock,
 		FolderKanban,
 		BarChart3,
@@ -378,7 +378,8 @@
 	});
 
 	// --- workspace nav ------------------------------------------------------
-	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'hooks'];
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile'];
+	const SETTINGS_MEMBERS: ViewType[] = ['plugins', 'mcp', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
 
 	// Admin gating stays HERE, above the preference layer: WorkspaceNav and the
@@ -388,7 +389,7 @@
 	const railItems = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
 		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
-		{ id: 'build', label: 'Agents & tools', icon: Hammer, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
+		{ id: 'build', label: 'Agents', icon: Bot, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
@@ -397,7 +398,7 @@
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
 		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
 		...(isAdmin
-			? [{ id: 'settings' as const, label: 'Settings', icon: Settings, on: currentType === 'settings' || currentType === 'plugins' }]
+			? [{ id: 'settings' as const, label: 'Settings', icon: Settings, on: currentType === 'settings' || SETTINGS_MEMBERS.includes(currentType as ViewType) }]
 			: [])
 	]);
 

@@ -1,13 +1,20 @@
+<script lang="ts" module>
+	/** The editor's folding sections, in display order. */
+	export const AGENT_SECTIONS = ['prompt', 'tools', 'subagents', 'models', 'advanced'] as const;
+	export type AgentSection = (typeof AGENT_SECTIONS)[number];
+</script>
+
 <script lang="ts">
 	/**
-	 * ProfileForm — Form tab content for create/edit profile
-	 * Renders the active tab's content (general, tools, agents, prompt, advanced)
-	 * in the Studio-v2 grouped-field design language (.set-group / .set-row).
-	 * The parent (ProfileCard) owns the StudioEditorShell chrome, rail, and footer.
+	 * ProfileForm: the body of an open agent in the Agents ledger. A short
+	 * essentials block (name, group, description, avatar, assistant, streaming)
+	 * sits above five folding sections. Each closed section shows a live summary
+	 * line, so an agent can be read without opening anything. ProfileCard owns
+	 * the data, autosave and which sections are open.
 	 */
 	import type { Profile } from '$lib/api/client';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
-	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText } from 'lucide-svelte';
+	import { Check, ChevronRight, Plus, Trash2, X } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import AgentIdentitySettings from '$lib/components/assistant/AgentIdentitySettings.svelte';
@@ -19,7 +26,7 @@
 		VOICE_PROVIDER_KEY,
 		subagentPickerValue
 	} from '$lib/constants/models';
-	import { onMount } from 'svelte';
+	import './agent-editor.css';
 
 	interface Subagent {
 		id: string;
@@ -69,11 +76,14 @@
 		setting_sources: string[] | null;
 	}
 
+	type ToolMode = 'all' | 'none' | 'allow' | 'disallow';
+
 	interface Props {
-		activeTab: string;
 		editingProfile: Profile | null;
 		profileForm: ProfileFormData;
-		toolSelectionMode: 'all' | 'none' | 'allow' | 'disallow';
+		toolSelectionMode: ToolMode;
+		/** Tools the agent actually ends up with, counted against the live surface. */
+		toolCount: number;
 		groups: GroupState;
 		allSubagents: Subagent[];
 		/** Built-in system-prompt templates (GET /agents/templates), for new agents. */
@@ -83,8 +93,11 @@
 		toolsLoading: boolean;
 		toolsRefreshing: boolean;
 		isAdmin: boolean;
+		/** Sections currently unfolded. */
+		openSections: string[];
+		onToggleSection: (id: AgentSection) => void;
 		onFormChange: (field: string, value: any) => void;
-		onToolSelectionModeChange: (mode: 'all' | 'none' | 'allow' | 'disallow') => void;
+		onToolSelectionModeChange: (mode: ToolMode) => void;
 		onToggleTool: (group: ToolSurfaceGroup, toolName: string) => void;
 		onToggleGroup: (group: ToolSurfaceGroup) => void;
 		onRefreshTools: () => void;
@@ -98,10 +111,10 @@
 	}
 
 	let {
-		activeTab,
 		editingProfile,
 		profileForm,
 		toolSelectionMode,
+		toolCount,
 		groups,
 		allSubagents,
 		templates,
@@ -109,6 +122,8 @@
 		toolsLoading,
 		toolsRefreshing,
 		isAdmin,
+		openSections,
+		onToggleSection,
 		onFormChange,
 		onToolSelectionModeChange,
 		onToggleTool,
@@ -122,14 +137,20 @@
 		onDeleteGroup
 	}: Props = $props();
 
-	// Group creation local state
+	const SECTION_LABELS: Record<AgentSection, string> = {
+		prompt: 'Prompt',
+		tools: 'Tools',
+		subagents: 'Subagents',
+		models: 'Models',
+		advanced: 'Advanced'
+	};
+
+	// ── Group ────────────────────────────────────────────────────────────
 	let creatingGroup = $state(false);
 	let newGroupName = $state('');
-
-	function startGroupCreate() {
-		creatingGroup = true;
-		newGroupName = '';
-	}
+	const currentGroup = $derived(
+		editingProfile ? (groups?.profiles?.assignments?.[editingProfile.id] ?? '') : ''
+	);
 
 	function confirmGroupCreate(profileId: string) {
 		const name = newGroupName.trim();
@@ -146,44 +167,21 @@
 		newGroupName = '';
 	}
 
+	function deleteCurrentGroup() {
+		if (!editingProfile || !currentGroup) return;
+		onRemoveFromGroup(editingProfile.id);
+		onDeleteGroup('profiles', currentGroup);
+	}
+
+	// ── Subagents ────────────────────────────────────────────────────────
 	// Every DB agent except the one being edited. The mode controls both the
 	// context index and Task's runtime roster; provider assignments narrow it
 	// again for each caller.
-	const invocableAgents = $derived(
-		allSubagents.filter((a) => a.id !== editingProfile?.id)
-	);
+	const invocableAgents = $derived(allSubagents.filter((a) => a.id !== editingProfile?.id));
 	const invokeAll = $derived(profileForm.agent_invoke_mode !== 'custom');
-
-	// Setting sources (fluid scope filter). Stored as null when every scope is
-	// on (the default — the config key is omitted); an explicit list otherwise,
-	// including [] for a fully filesystem-isolated agent.
-	const ALL_SETTING_SOURCES = ['user', 'project', 'local'];
-	const SETTING_SOURCE_ROWS = [
-		{ id: 'user', label: 'User (global)', hint: 'The ~/.fluid tree: global instructions, skills, agents, commands, and installed plugins.' },
-		{ id: 'project', label: 'Project', hint: 'The project walk: AGENTS.md files plus .fluid / .agents trees from the git root down to the working directory.' },
-		{ id: 'local', label: 'Local', hint: 'Gitignored per-checkout overrides: .fluid/settings.local.json.' }
-	];
-	const settingSourcesSelected = $derived(profileForm.setting_sources ?? ALL_SETTING_SOURCES);
-
-	function toggleSettingSource(id: string) {
-		const next = settingSourcesSelected.includes(id)
-			? settingSourcesSelected.filter((s) => s !== id)
-			: [...settingSourcesSelected, id];
-		// All three on = the default; store null so the config key is omitted.
-		onFormChange('setting_sources', next.length === ALL_SETTING_SOURCES.length ? null : next);
-	}
-	const allInvocableSelected = $derived(
-		invocableAgents.length > 0 &&
-			invocableAgents.every((a) => profileForm.enabled_agents.includes(a.id))
+	const selectedAgentCount = $derived(
+		profileForm.enabled_agents.filter((id) => invocableAgents.some((a) => a.id === id)).length
 	);
-	const configuredProviders = $derived(getProviders());
-
-	function setProviderModel(key: string, model: string) {
-		onFormChange('provider_models', {
-			...profileForm.provider_models,
-			[key]: model
-		});
-	}
 
 	function providerAssignmentCount(agent: Subagent): number {
 		const config = agent.config || {};
@@ -197,397 +195,647 @@
 		if (config.model) keys.add(config.provider || NATIVE_PROVIDER_KEY);
 		return keys.size;
 	}
+
+	// ── Models ───────────────────────────────────────────────────────────
+	const configuredProviders = $derived(getProviders());
+
+	function setProviderModel(key: string, model: string) {
+		onFormChange('provider_models', { ...profileForm.provider_models, [key]: model });
+	}
+
+	// ── Advanced: setting sources ────────────────────────────────────────
+	// Stored as null when every scope is on (the default; the config key is
+	// omitted); an explicit list otherwise, including [] for a fully
+	// filesystem-isolated agent.
+	const ALL_SETTING_SOURCES = ['user', 'project', 'local'];
+	const SETTING_SOURCE_ROWS = [
+		{ id: 'user', label: 'User', hint: 'The ~/.fluid tree: instructions, skills, agents, plugins.' },
+		{ id: 'project', label: 'Project', hint: 'AGENTS.md and .fluid trees from the git root down.' },
+		{ id: 'local', label: 'Local', hint: 'Gitignored overrides in .fluid/settings.local.json.' }
+	];
+	const settingSourcesSelected = $derived(profileForm.setting_sources ?? ALL_SETTING_SOURCES);
+
+	function toggleSettingSource(id: string) {
+		const next = settingSourcesSelected.includes(id)
+			? settingSourcesSelected.filter((s) => s !== id)
+			: [...settingSourcesSelected, id];
+		// All three on = the default; store null so the config key is omitted.
+		onFormChange('setting_sources', next.length === ALL_SETTING_SOURCES.length ? null : next);
+	}
+
+	// ── Live summaries for the closed section lines ──────────────────────
+	const TOOL_MODE_LABELS: Record<ToolMode, string> = {
+		all: 'All tools',
+		none: 'No tools',
+		allow: 'Only selected',
+		disallow: 'All except selected'
+	};
+
+	const summaries = $derived.by((): Record<AgentSection, { lead: string; rest?: string }> => {
+		const prompt = profileForm.system_prompt_content;
+		const firstLine = prompt.split('\n').find((l) => l.trim())?.trim() ?? '';
+
+		const models: string[] = [];
+		if (profileForm.provider_models[NATIVE_PROVIDER_KEY]?.trim()) models.push('Claude');
+		for (const p of configuredProviders) {
+			if (profileForm.provider_models[p.id]?.trim()) models.push(getProviderDisplay(p).name);
+		}
+		if (profileForm.provider_models[VOICE_PROVIDER_KEY]?.trim()) models.push('Voice');
+
+		const sources =
+			profileForm.setting_sources === null
+				? 'All setting sources'
+				: profileForm.setting_sources.length === 0
+					? 'No setting sources'
+					: profileForm.setting_sources.map((s) => s[0].toUpperCase() + s.slice(1)).join(', ');
+
+		return {
+			prompt: prompt.length
+				? { lead: `${prompt.length.toLocaleString()} / 10,000`, rest: firstLine }
+				: { lead: 'Empty', rest: 'Runtime context still added' },
+			tools: {
+				lead: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+				rest: TOOL_MODE_LABELS[toolSelectionMode]
+			},
+			subagents:
+				invocableAgents.length === 0
+					? { lead: 'No other agents' }
+					: invokeAll
+						? { lead: `All ${invocableAgents.length} agents` }
+						: { lead: `${selectedAgentCount} of ${invocableAgents.length}`, rest: 'Selected only' },
+			models: models.length
+				? { lead: models.join(', ') }
+				: { lead: 'None set', rest: 'Not offered as a subagent' },
+			advanced: {
+				lead: profileForm.max_turns ? `${profileForm.max_turns} calls per turn` : 'Unlimited calls',
+				rest: [sources, profileForm.cwd.trim()].filter(Boolean).join(' · ')
+			}
+		};
+	});
+
+	const nameMissing = $derived(!profileForm.name.trim());
 </script>
 
-<div class="card-system pf-body">
-	{#if activeTab === 'general'}
-		{#if editingProfile && isAdmin}
-			{#key editingProfile.id}<AgentIdentitySettings agentId={editingProfile.id} builtin={editingProfile.is_builtin} />{/key}
-		{/if}
-		<!-- GENERAL TAB -->
-		<div class="set-group">
-			<div class="set-grouphead"><h3><Users />Identity</h3></div>
-			<div class="set-row">
-				<div class="lab"><h4>Name <span class="req">*</span></h4><p>Display name shown across the app.</p></div>
-				<div class="ctl">
-					<input class="inp" value={profileForm.name} oninput={(e) => onFormChange('name', (e.target as HTMLInputElement).value)} placeholder="My Custom Agent" />
-				</div>
-			</div>
-			<div class="set-row stack">
-				<div class="lab"><h4>Description</h4><p>A short summary of what this agent is for.</p></div>
-				<div class="ctl">
-					<textarea class="fld" rows={2} value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLTextAreaElement).value)} placeholder="A coding assistant for frontend work"></textarea>
-				</div>
-			</div>
-			{#if editingProfile}
-				<div class="set-row">
-					<div class="lab"><h4>Group</h4><p>Organize related agents together.</p></div>
-					<div class="ctl ctl-col">
-						<div class="grp-row">
-							<select
-								class="sel"
-								value={groups?.profiles?.assignments?.[editingProfile.id] ?? ''}
-								onchange={(e) => {
-									const v = (e.target as HTMLSelectElement).value;
-									if (editingProfile) {
-										if (v) onAssignToGroup(editingProfile.id, v);
-										else onRemoveFromGroup(editingProfile.id);
-									}
-								}}
-							>
-								<option value="">No group</option>
-								{#each groups?.profiles?.groups ?? [] as group}
-									<option value={group.name}>{group.name}</option>
-								{/each}
-							</select>
-							{#if creatingGroup}
-								<button type="button" class="icon-btn" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
-									<Check size={14} />
-								</button>
-							{:else}
-								<button type="button" class="icon-btn" onclick={startGroupCreate} title="New group">
-									<Plus size={14} />
-								</button>
-								{#if editingProfile && (groups?.profiles?.assignments?.[editingProfile.id] ?? '')}
-									<button type="button" class="icon-btn danger" onclick={() => { if (!editingProfile) return; const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { onRemoveFromGroup(editingProfile.id); onDeleteGroup('profiles', g); } }} title="Delete group">
-										<Trash2 size={14} />
-									</button>
-								{/if}
-							{/if}
-						</div>
-						{#if creatingGroup}
-							<!-- svelte-ignore a11y_autofocus -->
-							<input
-								type="text"
-								class="inp"
-								placeholder="Group name…"
-								bind:value={newGroupName}
-								onkeydown={(e) => {
-									if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
-									if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
-								}}
-								autofocus
-							/>
-						{/if}
-					</div>
-				</div>
+<div class="agx">
+	<!-- Essentials -->
+	<div class="agx-ess">
+		<div class="fx">
+			<label class="fx-l" for="agx-name">Name</label>
+			<input
+				id="agx-name"
+				class="inp"
+				value={profileForm.name}
+				oninput={(e) => onFormChange('name', (e.target as HTMLInputElement).value)}
+				placeholder="My Custom Agent"
+				aria-invalid={nameMissing && !!editingProfile}
+				aria-describedby={nameMissing ? 'agx-name-msg' : undefined}
+			/>
+			{#if nameMissing}
+				<span id="agx-name-msg" class="fx-msg" class:err={!!editingProfile}>Name required to save</span>
 			{/if}
 		</div>
 
-		<div class="set-group">
-			<div class="set-grouphead"><h3><SlidersHorizontal />Behavior</h3></div>
-			<div class="set-row">
-				<div class="lab"><h4>Include partial messages</h4><p>Stream partial text during AI generation for real-time feedback.</p></div>
-				<div class="ctl">
-					<button type="button" class="switch" class:on={profileForm.include_partial_messages} role="switch" aria-checked={profileForm.include_partial_messages} aria-label="Toggle include partial messages" onclick={() => onFormChange('include_partial_messages', !profileForm.include_partial_messages)}><i></i></button>
-				</div>
-			</div>
-		</div>
-
-	{:else if activeTab === 'tools'}
-		<!-- Computer use is a GLOBAL toggle (Settings > Security), not agent
-		     configuration: the picker's computer-use group follows that toggle. -->
-		<ProfileToolConfig
-			{toolSelectionMode}
-			allowedTools={profileForm.allowed_tools}
-			disallowedTools={profileForm.disallowed_tools}
-			surface={toolSurface}
-			loading={toolsLoading}
-			refreshing={toolsRefreshing}
-			{isAdmin}
-			{onToolSelectionModeChange}
-			{onToggleTool}
-			{onToggleGroup}
-			onRefresh={onRefreshTools}
-		/>
-
-	{:else if activeTab === 'agents'}
-		<div class="set-group">
-			<div class="set-grouphead">
-				<h3><Settings />Provider models</h3>
-				<p>Choose the model this agent runs on when another agent on that provider dispatches it. Claude uses subscription models; other rows can pick any provider. Leave a row empty to hide this agent from callers on that provider.</p>
-			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Claude</h4><p>When the caller is on native Claude.</p></div>
-				<div class="ctl">
-					<ModelPicker
-						value={subagentPickerValue(NATIVE_PROVIDER_KEY, profileForm.provider_models[NATIVE_PROVIDER_KEY])}
-						providerScope={NATIVE_PROVIDER_KEY}
-						allowEmpty
-						allowCustom={false}
-						onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
-					/>
-				</div>
-			</div>
-			{#each configuredProviders as provider (provider.id)}
-				{@const display = getProviderDisplay(provider)}
-				<div class="set-row">
-					<div class="lab">
-						<h4>{display.name}{#if display.subtext}<span class="hint"> · {display.subtext}</span>{/if}</h4>
-						<p>{provider.name}</p>
-					</div>
-					<div class="ctl">
-						<ModelPicker
-							value={subagentPickerValue(provider.id, profileForm.provider_models[provider.id])}
-							allowEmpty
-							allowCustom={false}
-							onSelect={(value) => setProviderModel(provider.id, value)}
+		{#if editingProfile}
+			{@const profileId = editingProfile.id}
+			<div class="fx">
+				<span class="fx-l" id="agx-group-l">Group</span>
+				{#if creatingGroup}
+					<div class="fx-line">
+						<!-- svelte-ignore a11y_autofocus -->
+						<input
+							type="text"
+							class="inp grow"
+							placeholder="New group name"
+							aria-label="New group name"
+							bind:value={newGroupName}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') { e.preventDefault(); confirmGroupCreate(profileId); }
+								if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
+							}}
+							autofocus
 						/>
+						<button type="button" class="agx-ib" title="Create group" aria-label="Create group" onclick={() => confirmGroupCreate(profileId)}><Check size={14} /></button>
+						<button type="button" class="agx-ib" title="Cancel" aria-label="Cancel new group" onclick={cancelGroupCreate}><X size={14} /></button>
 					</div>
-				</div>
-			{/each}
-			<!-- Voice is not a provider: a voice call is funded by an OpenAI
-			     Realtime row, but the workers it dispatches can run on any leg.
-			     This picks that leg (native Claude or any provider model) and is
-			     what makes the agent dispatchable from a call at all. -->
-			<div class="set-row voice-row">
-				<div class="lab">
-					<h4>Voice<span class="hint"> · calls</span></h4>
-					<p>Model this agent runs on when the voice agent hands it work. Leave unset to keep it out of voice calls.</p>
-				</div>
-				<div class="ctl">
-					<ModelPicker
-						value={profileForm.provider_models[VOICE_PROVIDER_KEY] || ''}
-						allowEmpty
-						emptyLabel="Not available in voice calls"
-						allowCustom={false}
-						onSelect={(value) => setProviderModel(VOICE_PROVIDER_KEY, value)}
-					/>
-				</div>
-			</div>
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div>
-					<h3><Bot />Available subagents</h3>
-					<p>Choose which DB agents are listed and dispatchable. The current provider further limits this list to agents with a model assigned for it.</p>
-				</div>
-				{#if invocableAgents.length > 0 && !invokeAll}
-					<div class="head-acts">
-						<button type="button" class="lnk" onclick={() => onFormChange('enabled_agents', invocableAgents.map((a) => a.id))}>Select all</button>
-						<button type="button" class="lnk muted" onclick={() => onFormChange('enabled_agents', [])}>Clear</button>
+				{:else}
+					<div class="fx-line">
+						<select
+							class="sel grow"
+							aria-labelledby="agx-group-l"
+							value={currentGroup}
+							onchange={(e) => {
+								const v = (e.target as HTMLSelectElement).value;
+								if (v) onAssignToGroup(profileId, v);
+								else onRemoveFromGroup(profileId);
+							}}
+						>
+							<option value="">No group</option>
+							{#each groups?.profiles?.groups ?? [] as group}
+								<option value={group.name}>{group.name}</option>
+							{/each}
+						</select>
+						<button type="button" class="agx-ib" title="New group" aria-label="New group" onclick={() => { creatingGroup = true; newGroupName = ''; }}><Plus size={14} /></button>
+						{#if currentGroup}
+							<button type="button" class="agx-ib danger" title="Delete group" aria-label="Delete group" onclick={deleteCurrentGroup}><Trash2 size={14} /></button>
+						{/if}
 					</div>
 				{/if}
 			</div>
-			<div class="set-row">
-				<div class="lab"><h4>Roster</h4><p>Offer every eligible agent, or only the ones selected below.</p></div>
-				<div class="ctl">
-					<div class="seg">
-						<button type="button" class:on={invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'all')}>All agents</button>
-						<button type="button" class:on={!invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'custom')}>Selected only</button>
-					</div>
-				</div>
-			</div>
-			{#if invocableAgents.length === 0}
-				<div class="set-row"><div class="lab"><p>No other DB agents to list.</p></div></div>
-			{:else}
-				{#each invocableAgents as agent (agent.id)}
-					{@const isSelected = !invokeAll && profileForm.enabled_agents.includes(agent.id)}
-					<div class="set-row" class:disabled={invokeAll}>
-						<div class="lab">
-							<h4>{agent.name}{#if invokeAll}<span class="hint"> · Available when provider-compatible</span>{/if}</h4>
-							<p>{agent.description || 'No description'} · {providerAssignmentCount(agent)} provider assignment{providerAssignmentCount(agent) === 1 ? '' : 's'}</p>
-						</div>
-						<div class="ctl">
-							<button type="button" class="switch" class:on={isSelected} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} disabled={invokeAll} onclick={() => onToggleAgent(agent.id)}><i></i></button>
-						</div>
-					</div>
-				{/each}
-			{/if}
-		</div>
+		{/if}
 
-		{#if invocableAgents.length > 0}
-			<div class="ed-note">
-				<Bot />
-				<span>
-					{#if invokeAll}
-						All {invocableAgents.length} DB agents may be offered when provider-compatible.
-					{:else if profileForm.enabled_agents.length === 0}
-						No DB subagents are configured for this caller.
-					{:else}
-						{profileForm.enabled_agents.length} of {invocableAgents.length} DB agents selected{allInvocableSelected ? ' (all)' : ''}; provider assignments still apply.
-					{/if}
+		<label class="fx wide">
+			<span class="fx-l">Description</span>
+			<textarea
+				class="fld"
+				rows={2}
+				value={profileForm.description}
+				oninput={(e) => onFormChange('description', (e.target as HTMLTextAreaElement).value)}
+				placeholder="A coding assistant for frontend work"
+			></textarea>
+		</label>
+
+		{#if editingProfile && isAdmin}
+			<div class="fx">
+				{#key editingProfile.id}<AgentIdentitySettings agentId={editingProfile.id} builtin={editingProfile.is_builtin} />{/key}
+			</div>
+		{/if}
+
+		<div class="fx fx-switch">
+			<span class="fx-text">
+				<span class="fx-t">Stream partial messages</span>
+				<span class="fx-msg">Show text as it generates.</span>
+			</span>
+			<button
+				type="button"
+				class="switch"
+				class:on={profileForm.include_partial_messages}
+				role="switch"
+				aria-checked={profileForm.include_partial_messages}
+				aria-label="Stream partial messages"
+				onclick={() => onFormChange('include_partial_messages', !profileForm.include_partial_messages)}
+			><i></i></button>
+		</div>
+	</div>
+
+	<!-- Folding sections -->
+	{#each AGENT_SECTIONS as id (id)}
+		{@const open = openSections.includes(id)}
+		{@const sum = summaries[id]}
+		<section class="dx" class:open id={`agx-sec-${id}`}>
+			<button
+				type="button"
+				class="dx-head"
+				aria-expanded={open}
+				aria-controls={`agx-body-${id}`}
+				onclick={() => onToggleSection(id)}
+			>
+				<ChevronRight size={15} class="dx-chev" />
+				<span class="dx-label">{SECTION_LABELS[id]}</span>
+				<span class="dx-sum">
+					<span class="dx-lead" class:mono={id === 'prompt' && profileForm.system_prompt_content.length > 0}>{sum.lead}</span>
+					{#if sum.rest}<span class="dx-rest">{sum.rest}</span>{/if}
 				</span>
-			</div>
-		{/if}
+			</button>
 
-	{:else if activeTab === 'prompt'}
-		{#if !editingProfile && templates.length > 0}
-			<div class="set-group">
-				<div class="set-grouphead"><h3><FileText />Start from a template</h3><p>Pick a built-in template to fill the prompt below (and its suggested tools). You can edit everything afterward.</p></div>
-				<div class="set-row">
-					<div class="lab"><h4>Template</h4><p>Optional. Choosing one replaces the current prompt.</p></div>
-					<div class="ctl">
-						<select
-							class="sel"
-							value=""
-							onchange={(e) => {
-								const target = e.target as HTMLSelectElement;
-								const id = target.value;
-								if (id) onApplyTemplate(id);
-								target.value = '';
-							}}
-						>
-							<option value="">Select a template…</option>
-							{#each templates as tpl}
-								<option value={tpl.id}>{tpl.name}</option>
-							{/each}
-						</select>
-					</div>
-				</div>
-			</div>
-		{/if}
-		<ProfileSystemPrompt
-			systemPromptContent={profileForm.system_prompt_content}
-			onSystemPromptContentChange={(v) => onFormChange('system_prompt_content', v)}
-		/>
-
-
-	{:else if activeTab === 'advanced'}
-		<!-- ADVANCED TAB -->
-		<div class="set-group">
-			<div class="set-grouphead"><h3>Limits</h3><p>Guardrails applied to every session this agent runs.</p></div>
-			<div class="set-row">
-				<div class="lab"><h4>Max model calls per turn</h4><p>Optional user-set cap. Empty = unlimited.</p></div>
-				<div class="ctl">
-					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
-				</div>
-			</div>
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this agent.</p></div>
-			<div class="set-row stack">
-				<div class="lab"><h4>Working directory</h4><p>Where the agent runs by default.</p></div>
-				<div class="ctl"><input class="inp mono" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
-			</div>
-			<div class="set-row stack">
-				<div class="lab"><h4>Additional directories</h4><p>Extra directories the agent may access, comma-separated.</p></div>
-				<div class="ctl"><input class="inp mono" value={profileForm.add_dirs} oninput={(e) => onFormChange('add_dirs', (e.target as HTMLInputElement).value)} placeholder="/home/user/notes, /home/user/docs" /></div>
-			</div>
-		</div>
-
-		<div class="set-group">
-			<div class="set-grouphead"><h3>Setting sources</h3><p>Which filesystem scopes load into the agent's context: instruction files, skills, agents, and plugins. All on by default; unchecking a scope removes what it contributes.</p></div>
-			{#each SETTING_SOURCE_ROWS as row}
-				<div class="set-row">
-					<div class="lab"><h4>{row.label}</h4><p>{row.hint}</p></div>
-					<div class="ctl">
-						<input
-							type="checkbox"
-							checked={settingSourcesSelected.includes(row.id)}
-							onchange={() => toggleSettingSource(row.id)}
+			{#if open}
+				<div class="dx-body" id={`agx-body-${id}`}>
+					{#if id === 'prompt'}
+						{#if !editingProfile && templates.length > 0}
+							<div class="set-group">
+								<div class="set-row">
+									<div class="lab"><h4>Start from a template</h4><p>Replaces the prompt below.</p></div>
+									<div class="ctl">
+										<select
+											class="sel"
+											aria-label="Prompt template"
+											value=""
+											onchange={(e) => {
+												const target = e.target as HTMLSelectElement;
+												if (target.value) onApplyTemplate(target.value);
+												target.value = '';
+											}}
+										>
+											<option value="">Choose a template…</option>
+											{#each templates as tpl}
+												<option value={tpl.id}>{tpl.name}</option>
+											{/each}
+										</select>
+									</div>
+								</div>
+							</div>
+						{/if}
+						<ProfileSystemPrompt
+							systemPromptContent={profileForm.system_prompt_content}
+							onSystemPromptContentChange={(v) => onFormChange('system_prompt_content', v)}
 						/>
-					</div>
+					{:else if id === 'tools'}
+						<!-- Computer use is a GLOBAL toggle (Settings > Security), not agent
+						     configuration: the picker's computer-use group follows it. -->
+						<ProfileToolConfig
+							{toolSelectionMode}
+							allowedTools={profileForm.allowed_tools}
+							disallowedTools={profileForm.disallowed_tools}
+							surface={toolSurface}
+							loading={toolsLoading}
+							refreshing={toolsRefreshing}
+							{isAdmin}
+							{onToolSelectionModeChange}
+							{onToggleTool}
+							{onToggleGroup}
+							onRefresh={onRefreshTools}
+						/>
+					{:else if id === 'subagents'}
+						<div class="set-group">
+							<div class="set-row keep">
+								<div class="lab">
+									<h4>Roster</h4>
+									<p>Agents this one can hand work to. Each caller's provider still applies.</p>
+								</div>
+								<div class="ctl">
+									<div class="seg" role="radiogroup" aria-label="Subagent roster">
+										<button type="button" role="radio" aria-checked={invokeAll} class:on={invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'all')}>All agents</button>
+										<button type="button" role="radio" aria-checked={!invokeAll} class:on={!invokeAll} onclick={() => onFormChange('agent_invoke_mode', 'custom')}>Selected only</button>
+									</div>
+								</div>
+							</div>
+						</div>
+						{#if invocableAgents.length === 0}
+							<p class="agx-empty">No other agents yet.</p>
+						{:else}
+							{#if !invokeAll}
+								<div class="agx-bulk">
+									<button type="button" class="agx-lnk" onclick={() => onFormChange('enabled_agents', invocableAgents.map((a) => a.id))}>Select all</button>
+									<button type="button" class="agx-lnk muted" onclick={() => onFormChange('enabled_agents', [])}>Clear</button>
+								</div>
+							{/if}
+							<div class="agx-grid" class:dim={invokeAll}>
+								{#each invocableAgents as agent (agent.id)}
+									{@const isSelected = invokeAll || profileForm.enabled_agents.includes(agent.id)}
+									{@const assignments = providerAssignmentCount(agent)}
+									<div class="agx-cell">
+										<span class="agx-cell-t">
+											<span class="agx-cell-n">{agent.name}</span>
+											<span class="agx-cell-d">{assignments} provider{assignments === 1 ? '' : 's'}{agent.description ? ` · ${agent.description}` : ''}</span>
+										</span>
+										<button
+											type="button"
+											class="switch"
+											class:on={isSelected}
+											role="switch"
+											aria-checked={isSelected}
+											aria-label={`Toggle ${agent.name}`}
+											disabled={invokeAll}
+											onclick={() => onToggleAgent(agent.id)}
+										><i></i></button>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					{:else if id === 'models'}
+						<p class="agx-intro">The model this agent runs on when a caller on that provider dispatches it. Leave a row empty to hide it there.</p>
+						<div class="set-group">
+							<div class="set-row">
+								<div class="lab"><h4>Claude</h4><p>Callers on native Claude.</p></div>
+								<div class="ctl">
+									<ModelPicker
+										value={subagentPickerValue(NATIVE_PROVIDER_KEY, profileForm.provider_models[NATIVE_PROVIDER_KEY])}
+										providerScope={NATIVE_PROVIDER_KEY}
+										allowEmpty
+										allowCustom={false}
+										onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
+									/>
+								</div>
+							</div>
+							{#each configuredProviders as provider (provider.id)}
+								{@const display = getProviderDisplay(provider)}
+								<div class="set-row">
+									<div class="lab">
+										<h4>{display.name}{#if display.subtext}<span class="hint">{display.subtext}</span>{/if}</h4>
+										<p>{provider.name}</p>
+									</div>
+									<div class="ctl">
+										<ModelPicker
+											value={subagentPickerValue(provider.id, profileForm.provider_models[provider.id])}
+											allowEmpty
+											allowCustom={false}
+											onSelect={(value) => setProviderModel(provider.id, value)}
+										/>
+									</div>
+								</div>
+							{/each}
+							<!-- Voice is not a provider: a voice call is funded by an OpenAI
+							     Realtime row, but the workers it dispatches can run on any leg.
+							     This picks that leg and is what makes the agent dispatchable from
+							     a call at all. -->
+							<div class="set-row">
+								<div class="lab"><h4>Voice</h4><p>When the voice agent hands it work.</p></div>
+								<div class="ctl">
+									<ModelPicker
+										value={profileForm.provider_models[VOICE_PROVIDER_KEY] || ''}
+										allowEmpty
+										emptyLabel="Not available in voice calls"
+										allowCustom={false}
+										onSelect={(value) => setProviderModel(VOICE_PROVIDER_KEY, value)}
+									/>
+								</div>
+							</div>
+						</div>
+					{:else if id === 'advanced'}
+						<div class="set-group">
+							<div class="set-row">
+								<div class="lab"><h4>Max model calls per turn</h4><p>Empty means unlimited.</p></div>
+								<div class="ctl">
+									<input
+										class="inp num"
+										type="number"
+										min="1"
+										aria-label="Max model calls per turn"
+										value={profileForm.max_turns}
+										oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }}
+										placeholder="Unlimited"
+									/>
+								</div>
+							</div>
+							<div class="set-row stack">
+								<div class="lab"><h4>Working directory</h4></div>
+								<div class="ctl"><input class="inp mono" aria-label="Working directory" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
+							</div>
+							<div class="set-row stack">
+								<div class="lab"><h4>Additional directories</h4><p>Comma-separated.</p></div>
+								<div class="ctl"><input class="inp mono" aria-label="Additional directories" value={profileForm.add_dirs} oninput={(e) => onFormChange('add_dirs', (e.target as HTMLInputElement).value)} placeholder="/home/user/notes, /home/user/docs" /></div>
+							</div>
+						</div>
+						<div class="set-group">
+							<div class="set-grouphead">
+								<h3>Setting sources</h3>
+								<p>Which file scopes load into context. Turning one off removes what it adds.</p>
+							</div>
+							{#each SETTING_SOURCE_ROWS as row}
+								{@const on = settingSourcesSelected.includes(row.id)}
+								<div class="set-row keep">
+									<div class="lab"><h4>{row.label}</h4><p>{row.hint}</p></div>
+									<div class="ctl">
+										<button type="button" class="switch" class:on role="switch" aria-checked={on} aria-label={`${row.label} setting source`} onclick={() => toggleSettingSource(row.id)}><i></i></button>
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
 				</div>
-			{/each}
-		</div>
-	{/if}
+			{/if}
+		</section>
+	{/each}
 </div>
 
 <style>
-	.pf-body {
-		display: block;
-	}
-
-	/* Required asterisk */
-	.req {
-		color: var(--destructive);
-		font-weight: 700;
-	}
-
-	/* Control stacked vertically (control + helper input below) */
-	.ctl-col {
+	.agx {
+		container: agx / inline-size;
+		display: flex;
 		flex-direction: column;
-		align-items: stretch;
-		gap: 8px;
+		min-width: 0;
 	}
-	.ctl-col :global(.inp),
-	.ctl-col :global(.sel) {
+
+	/* ── Essentials ── */
+	.agx-ess {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		gap: 14px 20px;
+		padding: 4px 0 16px;
+	}
+	.fx {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 0;
+	}
+	.fx.wide {
+		grid-column: 1 / -1;
+	}
+	.fx-l {
+		font-size: 12px;
+		font-weight: 500;
+		color: var(--muted-foreground);
+	}
+	.fx .inp {
 		width: 100%;
 	}
-
-	/* Inline control row (select + adjacent icon button / checkbox) */
-	.grp-row {
+	.fx-line {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		width: 100%;
+		gap: 6px;
 	}
-	.grp-row :global(.sel) {
+	.fx-line :global(.grow) {
 		flex: 1;
 		min-width: 0;
 	}
-	/* min-width: 0 here would beat the picker's own 220px floor on specificity
-	   and collapse the trigger to the current label's width. */
-	.grp-row :global(.mpk) {
-		flex: 1;
-		min-width: 220px;
-	}
-
-	/* Square icon button next to a select (new/delete group, remove var) */
-	.icon-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		flex-shrink: 0;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 9px;
+	.fx-msg {
+		font-size: 11.5px;
 		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background 0.12s, color 0.12s, border-color 0.12s;
 	}
-	.icon-btn:hover {
-		background: var(--muted);
-		color: var(--foreground);
-	}
-	.icon-btn.danger {
+	.fx-msg.err {
 		color: var(--destructive);
 	}
-	.icon-btn.danger:hover {
-		background: color-mix(in oklch, var(--destructive) 14%, transparent);
-		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	/* Group header with trailing actions */
-	.grouphead-row {
-		display: flex;
-		align-items: flex-start;
+	.fx-switch {
+		flex-direction: row;
+		align-items: center;
 		justify-content: space-between;
-		gap: 14px;
+		gap: 12px;
+		align-self: start;
 	}
-	.head-acts {
+	.fx-text {
 		display: flex;
-		gap: 14px;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.fx-t {
+		font-size: 13px;
+		font-weight: 550;
+		color: var(--foreground);
+	}
+	.agx-ib {
+		display: grid;
+		place-items: center;
 		flex-shrink: 0;
-		padding-top: 2px;
+		width: 34px;
+		height: 34px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+	.agx-ib:hover {
+		background: var(--hover-overlay, var(--muted));
+		color: var(--foreground);
+	}
+	.agx-ib.danger:hover {
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 	}
 
-	/* Text-link buttons */
-	.lnk {
-		background: none;
+	/* ── Folding sections ── */
+	.dx {
+		border-top: 1px solid var(--border);
+	}
+	.dx-head {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		width: 100%;
+		min-height: 42px;
+		padding: 11px 4px;
 		border: none;
+		background: none;
+		font: inherit;
+		color: var(--foreground);
+		text-align: left;
+		cursor: pointer;
+	}
+	.dx-head:hover .dx-label {
+		color: var(--primary);
+	}
+	.dx-head :global(.dx-chev) {
+		flex-shrink: 0;
+		align-self: center;
+		color: var(--muted-foreground);
+		transition: transform 0.16s;
+	}
+	.dx.open .dx-head :global(.dx-chev) {
+		transform: rotate(90deg);
+	}
+	.dx-label {
+		flex-shrink: 0;
+		width: 88px;
+		font-size: 13px;
+		font-weight: 600;
+	}
+	.dx-sum {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
+		overflow: hidden;
+	}
+	.dx-lead {
+		flex-shrink: 0;
+		color: var(--foreground);
+		font-weight: 500;
+	}
+	.dx-lead.mono {
+		font-family: var(--font-mono, monospace);
+		font-size: 11.5px;
+	}
+	.dx-rest {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.dx-body {
+		padding: 2px 4px 18px 29px;
+	}
+	.dx-head:focus-visible,
+	.agx-ib:focus-visible,
+	.agx-lnk:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+		border-radius: 6px;
+	}
+
+	/* ── Subagents ── */
+	.agx-bulk {
+		display: flex;
+		gap: 14px;
+		margin: 2px 0 8px;
+	}
+	.agx-lnk {
 		padding: 0;
+		border: none;
+		background: none;
 		font: inherit;
 		font-size: 12.5px;
 		font-weight: 600;
-		color: var(--foreground);
+		color: var(--primary);
 		cursor: pointer;
 	}
-	.lnk:hover {
-		text-decoration: underline;
-	}
-	.lnk.muted {
+	.agx-lnk.muted {
 		color: var(--muted-foreground);
 		font-weight: 500;
 	}
-	/* Disabled toggle row (computer use unavailable) */
-	.set-row.disabled .lab h4 {
-		opacity: 0.6;
+	.agx-lnk:hover {
+		text-decoration: underline;
+	}
+	.agx-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+		gap: 4px 20px;
+	}
+	.agx-cell {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 7px 0;
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+	}
+	.agx-cell-t {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+	.agx-cell-n {
+		font-size: 13px;
+		font-weight: 550;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.agx-cell-d {
+		font-size: 11.5px;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.agx-grid.dim .agx-cell-n {
+		opacity: 0.7;
+	}
+	.agx-grid.dim .switch:disabled {
+		opacity: 0.55;
+	}
+	.agx-intro,
+	.agx-empty {
+		margin: 0 0 8px;
+		font-size: 12px;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+	}
+	.inp.num {
+		width: 120px;
 	}
 
+	@container agx (max-width: 560px) {
+		.agx-ess {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.dx-label {
+			width: auto;
+		}
+		.dx-rest {
+			display: none;
+		}
+		.dx-body {
+			padding-left: 4px;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.dx-head :global(.dx-chev) {
+			transition: none;
+		}
+	}
 </style>

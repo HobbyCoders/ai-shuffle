@@ -50,10 +50,10 @@ Extend what agents can do by connecting Model Context Protocol (MCP) servers:
 - Global and project-scoped configurations
 
 ### Agents
-Configurations that control how an agent behaves, under **Build → Agents**:
+Configurations that control how an agent behaves, on the **Agents** page:
 - System prompt and tool permissions
 - Durable memory the agent keeps across sessions
-- Agents can call other agents (the **Agents** tab's roster), each on the model you pick for it
+- Agents can call other agents (the **Subagents** section), each on the model you pick for it
 
 ### Projects
 Organize work into project directories:

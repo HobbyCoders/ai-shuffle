@@ -120,29 +120,34 @@
 	}
 
 	const MODE_HINTS: Record<ToolSelectionMode, string> = {
-		all: 'Every discovered tool is available. The list below is read-only.',
-		none: 'No tools at all. The list below is read-only.',
-		allow: 'Only the checked tools are available.',
-		disallow: 'Every tool except the checked ones is available.'
+		all: 'Every discovered tool. List is read-only.',
+		none: 'No tools at all. List is read-only.',
+		allow: 'Only the checked tools.',
+		disallow: 'Everything except the checked tools.'
 	};
+	const MODE_OPTIONS: { id: ToolSelectionMode; label: string }[] = [
+		{ id: 'all', label: 'All' },
+		{ id: 'allow', label: 'Only selected' },
+		{ id: 'disallow', label: 'All except selected' },
+		{ id: 'none', label: 'None' }
+	];
 </script>
 
 <div class="set-group">
-	<div class="set-grouphead"><h3><Wrench />Tool access</h3><p>Control which tools this agent can use during conversations.</p></div>
-	<div class="set-row">
-		<div class="lab"><h4>Mode</h4><p>{MODE_HINTS[toolSelectionMode]}</p></div>
+	<div class="set-row ts-moderow">
+		<div class="lab"><h4>Access</h4><p>{MODE_HINTS[toolSelectionMode]}</p></div>
 		<div class="ctl">
-			<select
-				class="sel"
-				aria-label="Tool access mode"
-				value={toolSelectionMode}
-				onchange={(e) => onToolSelectionModeChange((e.target as HTMLSelectElement).value as ToolSelectionMode)}
-			>
-				<option value="all">All Tools Allowed</option>
-				<option value="none">Disable All Tools</option>
-				<option value="allow">Allow Only Selected</option>
-				<option value="disallow">Disallow Selected</option>
-			</select>
+			<div class="seg" role="radiogroup" aria-label="Tool access mode">
+				{#each MODE_OPTIONS as opt (opt.id)}
+					<button
+						type="button"
+						role="radio"
+						aria-checked={toolSelectionMode === opt.id}
+						class:on={toolSelectionMode === opt.id}
+						onclick={() => onToolSelectionModeChange(opt.id)}
+					>{opt.label}</button>
+				{/each}
+			</div>
 		</div>
 	</div>
 </div>
@@ -268,24 +273,12 @@
 	</div>
 </div>
 
-<div class="ed-note">
-	<Wrench />
-	<span>
-		{#if toolSelectionMode === 'all'}
-			Every discovered tool is available to this agent.
-		{:else if toolSelectionMode === 'none'}
-			This agent gets no tools at all.
-		{:else if toolSelectionMode === 'allow'}
-			{#if list.length === 0}
-				Nothing selected — an empty allow list leaves this agent with no tools.
-			{:else}
-				{allowedCount} tool{allowedCount === 1 ? '' : 's'} selected.
-			{/if}
-		{:else}
-			{list.length} entr{list.length === 1 ? 'y' : 'ies'} blocked; {allowedCount} still available.
-		{/if}
-	</span>
-</div>
+{#if toolSelectionMode === 'allow' && list.length === 0}
+	<div class="ed-note">
+		<Wrench />
+		<span>Nothing selected, so this agent has no tools.</span>
+	</div>
+{/if}
 
 <style>
 	/* ── Section header: title + search + refresh ── */
@@ -370,8 +363,8 @@
 	.ts-body {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
-		padding: 14px 18px 18px;
+		gap: 8px;
+		padding: 4px 0 0;
 	}
 	.ts-group {
 		border: 1px solid var(--border);
@@ -466,9 +459,12 @@
 	}
 
 	/* ── Tool rows ── */
+	/* Compact cells, several per line, so a 40-tool server stays short. */
 	.ts-tools {
-		display: flex;
-		flex-direction: column;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+		gap: 2px;
+		padding: 6px;
 		border-top: 1px solid var(--border);
 	}
 	.ts-tool {
@@ -476,18 +472,16 @@
 		align-items: flex-start;
 		gap: 10px;
 		width: 100%;
-		padding: 9px 12px;
+		min-width: 0;
+		padding: 7px 8px;
 		background: none;
 		border: none;
-		border-bottom: 1px solid var(--border);
+		border-radius: 7px;
 		font: inherit;
 		color: var(--foreground);
 		text-align: left;
 		cursor: pointer;
 		transition: background 0.12s;
-	}
-	.ts-tool:last-child {
-		border-bottom: none;
 	}
 	.ts-tool:hover:not(:disabled) {
 		background: var(--muted);
@@ -530,6 +524,15 @@
 		font-size: 11.5px;
 		color: var(--muted-foreground);
 		line-height: 1.45;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.ts-tname {
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 	.ts-risk {
 		font-family: var(--font-mono, monospace);

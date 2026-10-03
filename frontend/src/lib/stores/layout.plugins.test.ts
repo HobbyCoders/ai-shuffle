@@ -32,7 +32,9 @@ describe('Manage plugins links', () => {
 	it('route a restored plugins view to the Settings panel, not Build', () => {
 		expect(featurePanelKeyForView('plugins')).toBe('settings');
 		expect(featurePanelKeyForView('settings')).toBe('settings');
-		expect(featurePanelKeyForView('mcp')).toBe('build');
+		expect(featurePanelKeyForView('mcp')).toBe('settings');
+		expect(featurePanelKeyForView('hooks')).toBe('settings');
+		expect(featurePanelKeyForView('profile')).toBe('build');
 	});
 });
 

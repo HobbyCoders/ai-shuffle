@@ -19,13 +19,13 @@ This guide walks you through the essential workflows once [First run](/docs/gett
 
 Agents control how the AI behaves. To create one:
 
-1. Open **Build > Agents** in the sidebar
+1. Open **Agents** in the sidebar
 2. Click **New agent**
 3. Configure:
    - **Name**: a descriptive name
    - **Prompt**: instructions for the agent
    - **Tools**: which tools the agent can use
-4. Save the agent
+4. Changes save as you type. Click **Done** to close the editor
 
 The model, reasoning effort and permission mode are picked per session in the composer, not stored on the agent. You can also choose **Generate** to create an agent from a description.
 

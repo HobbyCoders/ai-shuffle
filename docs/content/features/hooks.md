@@ -10,7 +10,7 @@ Hooks let you run your own code at key points during an AI session. Use them to 
 
 ## Overview
 
-A hook is a piece of logic -- a shell command or a webhook call -- that AI Shuffle runs when a specific event occurs during the agent's workflow. Each hook can be enabled or disabled individually. Manage hooks in **Build → Hooks** (App, Project and Plugin tabs) or through the API.
+A hook is a piece of logic -- a shell command or a webhook call -- that AI Shuffle runs when a specific event occurs during the agent's workflow. Each hook can be enabled or disabled individually. Manage hooks in **Settings → Hooks** or through the API. The list shows app hooks and plugin hooks; pick a project at the top to see its project hooks.
 
 **What runs today:**
 

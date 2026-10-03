@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 
 const mocks = vi.hoisted(() => ({
- get: vi.fn(), put: vi.fn(), getAssistant: vi.fn(), getAgentIdentities: vi.fn(), updateAgentIdentity: vi.fn(),
+ get: vi.fn(), put: vi.fn(), del: vi.fn(), getAssistant: vi.fn(), getAgentIdentities: vi.fn(), updateAgentIdentity: vi.fn(),
  clearFeatureItemId: vi.fn(), openFeaturePage: vi.fn()
 }));
 vi.mock('$lib/api/client', async original => ({
- ...await original<typeof import('$lib/api/client')>(), api: { get: mocks.get, put: mocks.put }
+ ...await original<typeof import('$lib/api/client')>(), api: { get: mocks.get, put: mocks.put, delete: mocks.del }
 }));
 vi.mock('$lib/api/assistant', async original => ({
  ...await original<typeof import('$lib/api/assistant')>(),
@@ -76,5 +76,46 @@ describe('ordinary agent autosave and independently edited identity', () => {
   expect(payload.config).not.toHaveProperty('permission_mode');
   expect(payload.config).not.toHaveProperty('custom_future_key');
   expect(serverAvatar).toBe('orbit');
+ });
+});
+
+describe('agents ledger', () => {
+ const row = () => screen.getByRole('button', { name: /^Researcher/ });
+
+ it('opens an agent in place and collapses it again', async () => {
+  render(ProfileCard);
+  await waitFor(() => expect(row().getAttribute('aria-expanded')).toBe('false'));
+  expect(screen.queryByLabelText('Name')).toBeNull();
+  await fireEvent.click(row());
+  await waitFor(() => expect(row().getAttribute('aria-expanded')).toBe('true'));
+  expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Researcher');
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(screen.queryByLabelText('Name')).toBeNull());
+  expect(row().getAttribute('aria-expanded')).toBe('false');
+ });
+
+ it('opens straight to a section from the spec line', async () => {
+  const { container } = render(ProfileCard);
+  await fireEvent.click(await screen.findByText('0 tools'));
+  await waitFor(() => expect(row().getAttribute('aria-expanded')).toBe('true'));
+  const head = (id: string) => container.querySelector(`#agx-sec-${id} .dx-head`)!;
+  expect(head('tools').getAttribute('aria-expanded')).toBe('true');
+  expect(head('prompt').getAttribute('aria-expanded')).toBe('false');
+ });
+
+ it('deletes only after the inline confirm', async () => {
+  mocks.del.mockResolvedValue({});
+  render(ProfileCard);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Delete Researcher' }));
+  let confirmBox = screen.getByRole('group', { name: 'Confirm delete' });
+  expect(confirmBox.textContent).toContain("can't be undone");
+  await fireEvent.click(within(confirmBox).getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('group', { name: 'Confirm delete' })).toBeNull();
+  expect(mocks.del).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete Researcher' }));
+  confirmBox = screen.getByRole('group', { name: 'Confirm delete' });
+  await fireEvent.click(within(confirmBox).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => expect(mocks.del).toHaveBeenCalledWith('/agents/agent'));
  });
 });
