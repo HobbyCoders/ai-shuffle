@@ -125,4 +125,68 @@ describe('desktop update announcement', () => {
 		expect(notesSummary(null)).toBe('');
 		teardown();
 	});
+
+	it('says once where a downloaded installer was saved (macOS and Linux)', async () => {
+		const { bridge, emit } = makeBridge();
+		(window as Window & { shuffleDesktop?: ShuffleDesktopBridge }).shuffleDesktop = bridge;
+		const { initDesktop } = await import('./desktop');
+		const { notify, notificationHistory } = await import('$lib/stores/notifications');
+		notify.resetLocal();
+		const teardown = initDesktop();
+		await flush();
+
+		const file = '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg';
+		const saved = { ...idle(), installer: file, message: `AI Shuffle 0.9.0 was downloaded and verified. Open ${file} to install it.` };
+		emit(saved);
+		await flush();
+		emit(saved);
+		await flush();
+
+		let history: AppNotification[] = [];
+		notificationHistory.subscribe((h) => (history = h))();
+		const items = history.filter((n) => n.category === 'desktop-update');
+		expect(items).toHaveLength(1);
+		expect(items[0].title).toBe('Installer downloaded');
+		expect(items[0].message).toContain(file);
+		teardown();
+	});
+
+	it('reports a staged update that did not install, with a retry through the shared control', async () => {
+		const { bridge, install, emit } = makeBridge();
+		(window as Window & { shuffleDesktop?: ShuffleDesktopBridge }).shuffleDesktop = bridge;
+		const { initDesktop } = await import('./desktop');
+		const { notify, notificationHistory } = await import('$lib/stores/notifications');
+		notify.resetLocal();
+		const teardown = initDesktop();
+		await flush();
+
+		const busy = { ...ready('1.3.0'), error: 'Busy with active sessions; retry when finished.' };
+		emit(busy);
+		await flush();
+		emit(busy);
+		await flush();
+
+		let history: AppNotification[] = [];
+		notificationHistory.subscribe((h) => (history = h))();
+		const items = history.filter((n) => n.category === 'desktop-update');
+		expect(items).toHaveLength(1);
+		expect(items[0].title).toBe('Update not installed');
+		expect(items[0].severity).toBe('warning');
+		expect(items[0].message).toBe('Busy with active sessions; retry when finished.');
+		const request = vi.fn();
+		window.addEventListener('application-update-request', request);
+		items[0].action?.onClick();
+		expect(request).toHaveBeenCalledOnce();
+		expect(install).not.toHaveBeenCalled();
+		window.removeEventListener('application-update-request', request);
+
+		// A different failure is reported too; a plain "ready" for the same version is not repeated.
+		emit({ ...ready('1.3.0'), error: 'Could not stage the update' });
+		await flush();
+		emit(ready('1.3.0'));
+		await flush();
+		notificationHistory.subscribe((h) => (history = h))();
+		expect(history.filter((n) => n.category === 'desktop-update').map((n) => n.title)).toEqual(['Update not installed', 'Update not installed']);
+		teardown();
+	});
 });

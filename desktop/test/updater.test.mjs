@@ -261,10 +261,12 @@ test('macOS and Linux: installer checks run on launch and daily, offer the relea
  assert.deepEqual(saved, ['/Users/me/Downloads/AI-Shuffle-0.9.0.dmg']);
  assert.equal(updater.current.phase, 'idle');
  assert.match(updater.current.message, /0\.9\.0 was downloaded and verified/);
+ // The web UI announces the saved file; the next check clears it.
+ assert.equal(updater.current.installer, '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg');
  // There is nothing to install in place: no relaunch, ever.
  await updater.install(); assert.deepEqual(calls, []);
  installers.check = async () => ({ kind: 'current' }); await updater.check();
- assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null);
+ assert.equal(updater.current.phase, 'idle'); assert.equal(updater.current.version, null); assert.equal(updater.current.installer, null);
  installers.check = async () => { throw Error('offline'); }; await updater.check();
  assert.equal(updater.current.phase, 'error');
  updater.stop();
@@ -323,30 +325,31 @@ test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase 
  assert.deepEqual(seen, [], 'nothing after stop');
 });
 
-test('an install the owner declines stops nothing and can be confirmed later; a failing confirmation fails closed', async () => {
- const { updater, calls } = fixture(); const order = []; let answer = false;
+test('an install refused by the guard stops nothing, reports why and can run later; a failing guard fails closed', async () => {
+ const { updater, calls } = fixture(); const order = []; let refusal = 'Busy with active sessions; retry when finished.';
  updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
- updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ updater.onInstallGuard(async () => { order.push('guard'); return refusal; });
  updater.onBeforeInstall(async () => { order.push('stop'); });
  updater.onInstallFailed(async () => { order.push('restart'); });
  await updater.install();
- assert.deepEqual(order, ['confirm'], 'declined: the worker and database keep running');
- assert.equal(calls.length, 0); assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.error, null);
- updater.onConfirmInstall(async () => { order.push('confirm'); throw Error('No window to ask in'); });
+ assert.deepEqual(order, ['guard'], 'refused: the worker and database keep running');
+ assert.equal(calls.length, 0); assert.equal(updater.current.phase, 'ready');
+ assert.equal(updater.current.error, refusal, 'the web UI shows the reason');
+ updater.onInstallGuard(async () => { order.push('guard'); throw Error('active-sessions 503'); });
  await updater.install();
- assert.deepEqual(order, ['confirm', 'confirm'], 'nothing was stopped, so nothing is restarted');
- assert.equal(calls.length, 0); assert.match(updater.current.error, /No window to ask in/);
- answer = true; updater.onConfirmInstall(async () => { order.push('confirm'); return answer; });
+ assert.deepEqual(order, ['guard', 'guard'], 'nothing was stopped, so nothing is restarted');
+ assert.equal(calls.length, 0); assert.match(updater.current.error, /active-sessions 503/);
+ refusal = null; updater.onInstallGuard(async () => { order.push('guard'); return refusal; });
  await updater.install();
- assert.deepEqual(order, ['confirm', 'confirm', 'confirm', 'stop']);
+ assert.deepEqual(order, ['guard', 'guard', 'guard', 'stop']);
  assert.equal(calls.at(-1), 'quit');
 });
 
-test('the account policy is read before the owner is asked to confirm an install', async () => {
+test('the account policy is read before the install guard runs', async () => {
  const { updater, calls } = fixture(); let asked = 0;
  updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }));
  updater.setPolicy(async () => false);
- updater.onConfirmInstall(async () => { asked++; return true; });
+ updater.onInstallGuard(async () => { asked++; return null; });
  await updater.install();
  assert.equal(asked, 0); assert.equal(calls.length, 0);
 });

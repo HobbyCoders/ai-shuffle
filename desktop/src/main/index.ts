@@ -251,16 +251,8 @@ async function main(): Promise<void> {
 			const publicKey = readFileSync(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8');
 			updater.useInstallers(new InstallerUpdates({ platform, arch: process.arch, currentVersion: app.getVersion(), publicKey, directory: app.getPath('downloads') }),
 				file => shell.showItemInFolder(file));
-			let offered: string | null = null;
-			updater.subscribe((state) => {
-				// Offer each new release once per launch; the sidebar button keeps offering it.
-				if (state.phase !== 'available' || !state.version || state.version === offered) return;
-				offered = state.version;
-				void dialog.showMessageBox({ type: 'info', title: 'AI Shuffle', message: `AI Shuffle ${state.version} is available`,
-					detail: 'Download the installer now? It is checked against the signed release before it is saved to your Downloads folder.',
-					buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1 })
-					.then(({ response }) => { if (response === 0) void updater.download(); });
-			});
+			// No native offer: the sidebar update button offers the release and starts
+			// the download, and the bell says where the verified installer was saved.
 		} catch (error) {
 			console.error('Installer update checks are unavailable', error);
 		}
@@ -373,21 +365,13 @@ async function main(): Promise<void> {
 		}
 		await postgres?.stop();
 	});
-	// Restarting into an update stops the worker's sessions: ask first while any run.
-	updater.onConfirmInstall(async () => {
-		let active: number | null;
+	// Restarting into an update stops the worker's sessions, so it waits until none
+	// run, as the worker's own install rule does. The web UI shows the refusal.
+	updater.onInstallGuard(async () => {
+		let active: number;
 		try { active = supervisor ? await supervisor.activeSessionCount() : 0; }
-		catch { active = null; }
-		if (active === 0) return true;
-		const activity = active === null ? 'AI Shuffle could not check for active sessions.' : `You have ${active} active session${active === 1 ? '' : 's'}.`;
-		const options = {
-			type: 'warning' as const, title: 'AI Shuffle', message: 'Restart to install the update?',
-			detail: `${activity} Restarting stops ${active === 1 ? 'it' : 'any active sessions'}.`,
-			buttons: ['Stop Sessions and Restart', 'Cancel'], defaultId: 1, cancelId: 1, noLink: true
-		};
-		const parent = window.browserWindow;
-		const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
-		return response === 0;
+		catch { return 'Could not check for active sessions; nothing was restarted. Try again.'; }
+		return active === 0 ? null : 'Busy with active sessions; retry when finished.';
 	});
 	// An install that failed after the step above leaves the stack down: start it again.
 	updater.onInstallFailed(async (error) => {
@@ -398,7 +382,10 @@ async function main(): Promise<void> {
 			dialog.showErrorBox('AI Shuffle could not restart', `The update could not be installed: ${reason}\n\nStarting AI Shuffle again also failed: ${failure instanceof Error ? failure.message : String(failure)}`);
 			return;
 		}
-		dialog.showErrorBox('Update could not be installed', reason);
+		// Back on the worker UI, the update button and the bell show the failure
+		// (the updater keeps it on the staged update). Without that UI there is
+		// nowhere else to say why the update did not install.
+		if (supervisor?.state.phase !== 'ready') dialog.showErrorBox('Update could not be installed', reason);
 	});
 
 	// Set once a quit kills the worker; a graceful stop still settling in the

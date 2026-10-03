@@ -11,6 +11,8 @@ export interface UpdateState {
   running_version?: string | null;
   /** Release name and notes from the signed manifest of the offered update. */
   release?: string | null; notes?: string | null;
+  /** macOS and Linux: the verified installer just saved, for the web UI to announce. */
+  installer?: string | null;
 }
 /**
  * How often the shell trades update state with its worker (the web UI's
@@ -43,7 +45,7 @@ export class Updater {
   private installing = false;
   private beforeInstall: () => Promise<void> = async () => {};
   private installFailed: (error: unknown) => Promise<void> = async () => {};
-  private confirmInstall: () => Promise<boolean> = async () => true;
+  private installGuard: () => Promise<string | null> = async () => null;
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
@@ -89,11 +91,13 @@ export class Updater {
   /** Runs when an install fails after onBeforeInstall began, so the owner can restart what it stopped. */
   onInstallFailed(action: (error: unknown) => Promise<void>): void { this.installFailed = action; }
   /**
-   * Asked before an install stops the worker; false leaves everything running.
-   * The bridge refuses an install while sessions run, but "Restart and update"
-   * calls install() directly, so the owner asks here too.
+   * Checked before an install stops the worker: a reason leaves everything
+   * running and is reported as the update error, which the web UI shows. The
+   * bridge refuses an install while sessions run; install() is also reachable
+   * directly (desktop:update-install), so the same rule applies here. Nothing
+   * asks natively: the in-app update button is the one place to retry.
    */
-  onConfirmInstall(confirm: () => Promise<boolean>): void { this.confirmInstall = confirm; }
+  onInstallGuard(guard: () => Promise<string | null>): void { this.installGuard = guard; }
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
@@ -142,7 +146,7 @@ export class Updater {
   stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {
     if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
-    this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…' });
+    this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…', installer: null });
     try {
       if (!await this.permitted()) { this.set({ phase: 'idle' }); return; }
       if (!this.applications) {
@@ -159,12 +163,12 @@ export class Updater {
   }
   async download(): Promise<void> {
     if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || !['available', 'error'].includes(this.state.phase)) return;
-    this.downloading = true; this.set({ phase: 'downloading', error: null, percent: null, message: 'Preparing update…' });
+    this.downloading = true; this.set({ phase: 'downloading', error: null, percent: null, message: 'Preparing update…', installer: null });
     try {
       if (!await this.permitted()) { this.set({ phase: 'available' }); return; }
       if (!this.applications) {
         const { file, version } = await this.installers!.download((percent, message) => this.set({ percent, message }));
-        this.set({ phase: 'idle', version: null, percent: null, error: null, release: null, notes: null, message: `AI Shuffle ${version} was downloaded and verified. Open ${file} to install it.` });
+        this.set({ phase: 'idle', version: null, percent: null, error: null, release: null, notes: null, message: `AI Shuffle ${version} was downloaded and verified. Open ${file} to install it.`, installer: file });
         this.saved(file);
         return;
       }
@@ -178,7 +182,9 @@ export class Updater {
     this.installing = true; this.set({ error: null, message: null });
     let stopping = false;
     try {
-      if (!await this.permitted() || !await this.confirmInstall()) { this.installing = false; return; }
+      if (!await this.permitted()) { this.installing = false; return; }
+      const refused = await this.installGuard();
+      if (refused) { this.set({ error: refused }); this.installing = false; return; }
       stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();

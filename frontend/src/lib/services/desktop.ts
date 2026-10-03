@@ -43,6 +43,8 @@ export interface DesktopUpdateState {
 	/** Release name and notes from the update's signed manifest; absent on older desktop builds. */
 	release?: string | null;
 	notes?: string | null;
+	/** macOS and Linux: the verified installer the shell just saved; absent on older desktop builds. */
+	installer?: string | null;
 }
 
 /** Release notes flattened to one short line for a notification. */
@@ -173,10 +175,39 @@ function resolveHex(cssColor: string, fallback: string): string {
  * installs according to the current account scope, not the shell alone.
  */
 let announcedUpdateVersion: string | null = null;
+let announcedInstaller: string | null = null;
+let announcedFailure: string | null = null;
 
 async function announceUpdate(state: DesktopUpdateState): Promise<void> {
-	if (!desktop || state.phase !== 'ready') return;
+	if (!desktop) return;
+	// macOS and Linux: a downloaded installer is run by the owner; say where it went.
+	if (state.installer && state.installer !== announcedInstaller) {
+		announcedInstaller = state.installer;
+		const { notify } = await import('$lib/stores/notifications');
+		notify.info(state.message || `The installer was downloaded and verified. Open ${state.installer} to install it.`, {
+			title: 'Installer downloaded', category: 'desktop-update', persist: false
+		});
+		return;
+	}
+	if (state.phase !== 'ready') return;
 	const version = state.version ?? 'new';
+	if (state.error) {
+		// A staged update that did not install (sessions still running, or the
+		// install failed). It stays staged, so the shared control can retry it.
+		const key = `${version}\n${state.error}`;
+		if (announcedFailure === key) return;
+		announcedFailure = key;
+		announcedUpdateVersion = version;
+		const { notify } = await import('$lib/stores/notifications');
+		notify.warning(state.error, {
+			title: 'Update not installed',
+			category: 'desktop-update',
+			persist: false,
+			action: { label: 'Try again', onClick: () => window.dispatchEvent(new Event('application-update-request')) }
+		});
+		return;
+	}
+	announcedFailure = null;
 	if (announcedUpdateVersion === version) return;
 	announcedUpdateVersion = version;
 	const { notify } = await import('$lib/stores/notifications');

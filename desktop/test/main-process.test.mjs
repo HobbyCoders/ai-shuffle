@@ -12,13 +12,13 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }) } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }), installers = null } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
 	const errors = [];
 	const app = {
-		isPackaged: false,
+		isPackaged: !!installers,
 		getAppPath: () => desktopDir,
 		getPath: () => path.join(desktopDir, 'no-user-data'),
 		getVersion: () => '0.0.0-test',
@@ -80,7 +80,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onConfirmInstall() {} start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -103,7 +103,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
 		'./tray': { installTray: (actions, name) => { tray = actions; trayName = name; } },
 		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors, messageBox)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
-		'./installer-updates': { InstallerUpdates: class {}, installerPlatform: () => null },
+		'./installer-updates': { InstallerUpdates: installers ?? class {}, installerPlatform: () => (installers ? 'mac' : null) },
 		'./window': { MainWindow, PARTITION: 'test' },
 		'./worker': { WorkerSupervisor, resolveRuntime: () => ({ mode: 'repo' }) }
 	};
@@ -124,7 +124,7 @@ function electronFake(app, errors, messageBox) {
 		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: (...args) => messageBox(args.at(-1), args.length > 1 ? args[0] : null) },
 		safeStorage: { isEncryptionAvailable: () => false },
 		session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },
-		shell: { showItemInFolder() {}, openPath: async () => '' }
+		shell: { showItemInFolder(file) { app.revealed = [...(app.revealed ?? []), file]; }, openPath: async () => '' }
 	};
 }
 
@@ -229,10 +229,18 @@ test('a failed update install restarts the stack it stopped and reports why', as
 	await main.updater.install();
 	assert.deepEqual(main.pages, ['status', URL_READY], 'stopped for the install, then back to the worker UI');
 	assert.equal(main.worker.state.phase, 'ready');
-	assert.deepEqual(main.errors, [['Update could not be installed', 'Could not stage the update']]);
+	assert.deepEqual(main.errors, [], 'the worker UI is back, so its update button and bell show the failure');
 	assert.equal(main.updater.current.phase, 'ready', 'the staged update can be retried');
 	assert.match(main.updater.current.error, /Could not stage the update/);
 	assert.equal(main.app.quits, 0);
+});
+
+test('a failed install whose worker does not come back is shown natively: there is no web UI to show it', async () => {
+	const main = await launch({ realUpdater: true });
+	failingInstall(main.updater);
+	main.worker.start = async function () { this.state = { ...this.state, phase: 'failed', error: 'port in use' }; this.emit('state', this.state); return this.state; };
+	await main.updater.install();
+	assert.deepEqual(main.errors, [['Update could not be installed', 'Could not stage the update']]);
 });
 
 test('a failed restart after a failed update install is shown, not swallowed', async () => {
@@ -287,38 +295,47 @@ function stagedInstall(updater) {
 	});
 }
 
-test('restarting into an update asks first while sessions run, and a declined restart stops nothing', async () => {
+test('restarting into an update waits for running sessions without a native prompt, and reports why in the update state', async () => {
 	const asked = [];
-	let response = 1;
-	const main = await launch({ realUpdater: true, messageBox: async (options) => { asked.push(options); return { response }; } });
+	const main = await launch({ realUpdater: true, messageBox: async (options) => { asked.push(options); return { response: 0 }; } });
 	stagedInstall(main.updater);
 	main.worker.activeSessionCount = async () => 2;
 	await main.updater.install();
-	assert.equal(asked.length, 1);
-	assert.match(asked[0].detail, /You have 2 active sessions\. Restarting stops any active sessions\./);
-	assert.equal(asked[0].buttons[asked[0].cancelId], 'Cancel');
-	assert.equal(asked[0].defaultId, asked[0].cancelId, 'Enter does not stop the sessions');
-	assert.equal(main.worker.stops, undefined, 'declined: the worker keeps running');
+	assert.deepEqual(asked, [], 'no native confirmation');
+	assert.equal(main.worker.stops, undefined, 'sessions keep running');
 	assert.equal(main.worker.state.phase, 'ready');
 	assert.equal(main.app.quits, 0);
-	// A session count that cannot be read asks too.
+	assert.equal(main.updater.current.phase, 'ready', 'still staged for a retry from the update button');
+	assert.equal(main.updater.current.error, 'Busy with active sessions; retry when finished.');
+	// A session count that cannot be read never restarts either.
 	main.worker.activeSessionCount = async () => { throw new Error('503'); };
 	await main.updater.install();
-	assert.match(asked[1].detail, /could not check for active sessions/);
+	assert.match(main.updater.current.error, /Could not check for active sessions/);
 	assert.equal(main.app.quits, 0);
-	// Confirmed: the stack stops and the app restarts into the update.
-	response = 0;
-	main.worker.activeSessionCount = async () => 1;
+	// With no session running the stack stops and the app restarts into the update.
+	main.worker.activeSessionCount = async () => 0;
 	await main.updater.install();
-	assert.match(asked[2].detail, /You have 1 active session\. Restarting stops it\./);
 	assert.deepEqual(main.worker.stops, ['graceful']);
 	assert.equal(main.app.quits, 1);
-	// With no session running there is nothing to ask.
-	const idle = await launch({ realUpdater: true, messageBox: async (options) => { asked.push(options); return { response: 1 }; } });
-	stagedInstall(idle.updater);
-	await idle.updater.install();
-	assert.equal(asked.length, 3);
-	assert.equal(idle.app.quits, 1);
+	assert.deepEqual(asked, []);
+});
+
+test('packaged macOS/Linux: a found installer is offered only in the web UI, and a download is revealed and announced', async () => {
+	const asked = [];
+	class Installers {
+		async check() { return { kind: 'available', version: '0.9.0', release: '0.9.0', installer: {} }; }
+		async download() { return { file: '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg', version: '0.9.0' }; }
+	}
+	const main = await launch({ realUpdater: true, installers: Installers, messageBox: async (options) => { asked.push(options); return { response: 0 }; } });
+	await main.updater.check();
+	assert.equal(main.updater.current.phase, 'available');
+	assert.deepEqual(asked, [], 'no native "is available" offer');
+	const sent = () => main.window.sent.filter(([channel]) => channel === 'desktop:update-state').map(([, state]) => state);
+	assert.equal(sent().at(-1).phase, 'available', 'the web UI learns of the release');
+	await main.updater.download();
+	assert.deepEqual(main.app.revealed, ['/Users/me/Downloads/AI-Shuffle-0.9.0.dmg']);
+	assert.equal(sent().at(-1).installer, '/Users/me/Downloads/AI-Shuffle-0.9.0.dmg', 'the web UI can say where it went');
+	assert.deepEqual(asked, []);
 });
 
 test('nothing opens and no worker starts before the agent-access disclosure is accepted', async () => {

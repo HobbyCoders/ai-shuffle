@@ -52,7 +52,10 @@ variable and existing D1 deployment permissions. The signing key is the
 The app checks for updates in the background without downloading them. To check
 now, use **Settings → System → Updates** or the sidebar update button. The app
 menu's **Check for Updates…** (Help on Windows and Linux, the app menu on macOS)
-opens that Settings section; the tray has no update item.
+opens that Settings section; the tray has no update item. The app shows no native
+update dialogs: offers, refusals and failures appear in the update button and the
+bell. The one exception is a failed install whose worker does not start again, since
+no web UI is left to show it.
 
 The desktop revalidates its entry page when opening the worker, and the worker
 marks HTML responses as non-cacheable so a new revision does not reuse an old UI.
@@ -64,7 +67,8 @@ Click it to download and build the new revision alongside the running one; the
 button shows progress while dependencies are prepared. Dependencies are cached by
 their manifests. Once ready, click the same button again: **Update and restart**
 stops the worker and database, then switches to the new application and its matching
-native runtimes. Startup readiness confirms activation. Failed downloads/builds do
+native runtimes. While any session runs it does not restart: the button and the bell
+say so, and **Try again** installs once the sessions have finished. Startup readiness confirms activation. Failed downloads/builds do
 not replace the running version. A failed first boot retains the previous files
 but does not automatically run old code over a potentially migrated database.
 PostgreSQL major-version upgrades still require a deliberate data migration; never
@@ -173,7 +177,9 @@ hosted public downloads or GitHub download permissions.
 - Native menu with the usual accelerators, native notifications, and window
   placement that survives restarts. Windows installs take signed source
   updates from the **stable** channel (tagged releases); macOS and Linux check
-  the hub's signed installer list and offer the newer installer.
+  the hub's signed installer list and offer the newer installer in the sidebar
+  update button. Downloading saves the verified installer, shows it in Finder or
+  the file manager, and the bell says where it was saved.
 - The sidebar update button checks, downloads and prepares updates, then offers
   Update and restart. Preview builds keep their updates disabled.
 

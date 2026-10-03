@@ -16,9 +16,11 @@ export default mergeConfig(
 				name: 'update-button-fixture',
 				configureServer(server) {
 					server.middlewares.use(async (req, res, next) => {
-						if (req.url?.split('?')[0] !== '/tests/update-button.html') return next();
+						// update-button.html, and desktop-update-notices.html for verify-desktop-update-notices.mjs.
+						const page = req.url?.split('?')[0].match(/^\/tests\/(update-button|desktop-update-notices)\.html$/)?.[1];
+						if (!page || !req.url) return next();
 						try {
-							const html = await readFile(new URL('./update-button.html', import.meta.url), 'utf8');
+							const html = await readFile(new URL(`./${page}.html`, import.meta.url), 'utf8');
 							res.setHeader('Content-Type', 'text/html');
 							res.end(await server.transformIndexHtml(req.url, html));
 						} catch (error) {
