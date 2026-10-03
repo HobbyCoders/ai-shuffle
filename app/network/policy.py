@@ -77,6 +77,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^mobile_",
         r"^credential_key_state",
         r"^chat_connection:",
+        r"^plugin_oauth:",
         r"^claude_cli_relogin_notice(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",

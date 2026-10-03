@@ -147,7 +147,14 @@ def _summary(head: str, components: Iterable[Any], services: List[str]) -> str:
 
 
 def _declared_services(manifest: Any) -> List[str]:
-    """``extensions["ai.shuffle"].services`` as plain lines: name, access, purpose."""
+    """``extensions["ai.shuffle"].services`` as plain lines: name, access,
+    purpose, and the declared OAuth sign-in (where and which scopes)."""
+    from fluid.context.plugin_authoring import (
+        PluginDraftError,
+        check_service_auth,
+        describe_service_auth,
+    )
+
     extensions = manifest.get("extensions") if isinstance(manifest, dict) else None
     shuffle = extensions.get("ai.shuffle") if isinstance(extensions, dict) else None
     services = shuffle.get("services") if isinstance(shuffle, dict) else None
@@ -157,7 +164,14 @@ def _declared_services(manifest: Any) -> List[str]:
             continue
         access = item.get("access") if item.get("access") in ("read", "write") else "read"
         purpose = item.get("purpose") if isinstance(item.get("purpose"), str) else ""
-        out.append(f"{item['name'][:100]} ({access})" + (f": {purpose[:300]}" if purpose else ""))
+        line = f"{item['name'][:100]} ({access})" + (f": {purpose[:300]}" if purpose else "")
+        if "auth" in item:
+            url = item.get("url") if isinstance(item.get("url"), str) else ""
+            try:
+                line += "; " + describe_service_auth(check_service_auth(item["name"][:100], url, item["auth"]))
+            except PluginDraftError as exc:
+                line += f"; sign-in declaration refused: {exc}"
+        out.append(line[:800])
     return out[:20]
 
 

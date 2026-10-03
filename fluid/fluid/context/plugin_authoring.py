@@ -20,9 +20,10 @@ a version that already exists with different content.
 
 A plugin that needs an outside service declares it under
 ``extensions["ai.shuffle"].services`` by name, provider, API address and
-read/write access. That is a declaration for the reviewer and the agent: the
-credential itself is entered by the owner in the private access card
-(``RequestChatAccess``) and never appears in the plugin.
+read/write access, and optionally an OAuth sign-in (``auth``: public
+endpoints and scope names only). That is a declaration for the reviewer and
+the agent: the credential itself (a key, or the OAuth client and its tokens)
+is entered by the owner privately and never appears in the plugin.
 """
 
 from __future__ import annotations
@@ -265,12 +266,137 @@ def _tools(value: Any, what: str) -> list[str]:
     return out
 
 
-_SERVICE_KEYS = {"name", "provider", "url", "access", "purpose"}
+_SERVICE_KEYS = {"name", "provider", "url", "access", "purpose", "auth"}
+_AUTH_KEYS = {"type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url"}
+_AUTH_URL_KEYS = ("authorize_url", "token_url", "revoke_url")
+MAX_SCOPES = 20
+# RFC 6749 section 3.3 scope-token: printable ASCII without space, '"' or '\'.
+_SCOPE_RE = re.compile(r'^[\x21\x23-\x5b\x5d-\x7e]{1,200}$')
+# Second-level labels under a two-letter country code that are a public
+# suffix of their own (example.co.uk, example.com.au). Without the Public
+# Suffix List this keeps "same registrable domain" strict for the common
+# cases: a country code with one of these takes three labels.
+_CC_SECOND_LEVEL = {"co", "com", "net", "org", "gov", "edu", "ac", "or", "ne", "go", "gob", "mil", "nic"}
 
 
-def check_services(value: Any) -> list[dict[str, str]]:
+def _secret_key_name(key: Any) -> bool:
+    """A field name that would hold an OAuth client secret or another secret."""
+    return isinstance(key, str) and "secret" in re.sub(r"[^a-z]", "", key.lower())
+
+
+def registrable_domain(host: str) -> str:
+    """The part of ``host`` an organisation registers: the last two labels,
+    or three under a country-code second level such as ``co.uk``.
+
+    IP addresses and single-label hosts are returned whole, so they only ever
+    match themselves. A simple rule, deliberately strict: hosts that a full
+    Public Suffix List would group differently are refused, not allowed.
+    """
+    host = host.lower().rstrip(".")
+    labels = host.split(".")
+    if len(labels) < 2 or all(part.isdigit() for part in labels) or ":" in host:
+        return host
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _CC_SECOND_LEVEL:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _https_host(url: Any) -> str | None:
+    """The host of a plain ``https://`` URL with no credentials, query or
+    fragment, else ``None``."""
+    from urllib.parse import urlsplit
+
+    if not isinstance(url, str) or not url.startswith("https://") or any(c in url for c in "?#@ \\"):
+        return None
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises ValueError for a malformed port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        return None
+    return parts.hostname
+
+
+def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any]:
+    """Validate a service's ``auth`` block: how the owner signs in to it.
+
+    Only ``{"type": "oauth2", "authorize_url", "token_url", "scopes": [...],
+    "pkce": true}`` and an optional ``revoke_url``. Every URL is plain
+    ``https://`` with no credentials, query or fragment, on the same
+    registrable domain as the service ``url``. A client secret is refused by
+    name: the owner enters the client on their own device, never in a plugin.
+
+    Raises :class:`PluginDraftError`; returns the block in the exact shape
+    ``build_files`` writes.
+    """
+    if not isinstance(auth, dict):
+        raise PluginDraftError(f"service {sname}: auth must be an object")
+    secret_keys = sorted(k for k in auth if _secret_key_name(k))
+    if secret_keys:
+        raise PluginDraftError(
+            f"service {sname}: auth holds {secret_keys[0][:40]!r}; a plugin never carries an OAuth "
+            "client secret. The owner enters the client privately on their own device"
+        )
+    extra = sorted(str(k)[:40] for k in set(auth) - _AUTH_KEYS)
+    if extra:
+        raise PluginDraftError(f"service {sname}: auth takes only {sorted(_AUTH_KEYS)}; remove {extra}")
+    if auth.get("type") != "oauth2":
+        raise PluginDraftError(f"service {sname}: auth type must be 'oauth2'")
+    if auth.get("pkce") is not True:
+        raise PluginDraftError(f"service {sname}: auth must set \"pkce\": true")
+    service_host = _https_host(service_url) if service_url else None
+    if not service_host:
+        raise PluginDraftError(
+            f"service {sname}: a service with auth needs its https:// API url, so the sign-in "
+            "addresses can be checked against it"
+        )
+    domain = registrable_domain(service_host)
+    out: dict[str, Any] = {"type": "oauth2"}
+    for key in _AUTH_URL_KEYS:
+        value = auth.get(key)
+        if value is None and key == "revoke_url":
+            continue
+        _text(value, f"service {sname} auth {key}", 500, required=True)
+        host = _https_host(value)
+        if not host:
+            raise PluginDraftError(
+                f"service {sname}: auth {key} must be an https:// address with no query, "
+                "fragment or credentials"
+            )
+        if registrable_domain(host) != domain:
+            raise PluginDraftError(
+                f"service {sname}: auth {key} must be on {domain}, the same domain as the service url"
+            )
+        out[key] = value
+    scopes = auth.get("scopes", [])
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        raise PluginDraftError(f"service {sname}: auth scopes must be a list of strings")
+    if len(scopes) > MAX_SCOPES:
+        raise PluginDraftError(f"service {sname}: at most {MAX_SCOPES} auth scopes")
+    if not all(_SCOPE_RE.match(s) for s in scopes):
+        raise PluginDraftError(
+            f"service {sname}: each auth scope is one word of plain text (no spaces or quotes), "
+            "at most 200 characters"
+        )
+    if len(set(scopes)) != len(scopes):
+        raise PluginDraftError(f"service {sname}: auth scopes must be unique")
+    out["scopes"] = list(scopes)
+    out["pkce"] = True
+    return {k: out[k] for k in ("type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url") if k in out}
+
+
+def describe_service_auth(auth: dict[str, Any]) -> str:
+    """One plain line for a reviewer: where the owner signs in and what for."""
+    host = _https_host(auth.get("authorize_url", "")) or "an unknown address"
+    scopes = auth.get("scopes") or []
+    return f"signs in with OAuth at {host}; scopes: {', '.join(scopes) if scopes else 'none'}"
+
+
+def check_services(value: Any) -> list[dict[str, Any]]:
     """Validate ``extensions["ai.shuffle"].services``: which outside services
-    the plugin needs access to, never how to sign in to them.
+    the plugin needs access to and, optionally, how the owner signs in to
+    them (``auth``, see :func:`check_service_auth`). Never a credential.
 
     Raises :class:`PluginDraftError`. Returns the entries in the exact shape
     ``build_files`` writes.
@@ -281,8 +407,14 @@ def check_services(value: Any) -> list[dict[str, str]]:
         raise PluginDraftError("services must be a list of objects")
     if len(value) > MAX_SERVICES:
         raise PluginDraftError(f"at most {MAX_SERVICES} services per plugin")
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     for entry in value:
+        secret_keys = sorted(k for k in entry if _secret_key_name(k))
+        if secret_keys:
+            raise PluginDraftError(
+                f"service entries never hold a secret such as {secret_keys[0][:40]!r}; an OAuth "
+                "client secret or key is entered by the owner in the private access card"
+            )
         extra = sorted(set(entry) - _SERVICE_KEYS)
         if extra:
             raise PluginDraftError(
@@ -303,11 +435,13 @@ def check_services(value: Any) -> list[dict[str, str]]:
         if access not in SERVICE_ACCESS:
             raise PluginDraftError(f"service {sname}: access must be 'read' or 'write'")
         purpose = _oneline(_text(entry.get("purpose"), f"service {sname} purpose", 300, required=True))
-        item = {"name": sname, "provider": str(provider)}
+        item: dict[str, Any] = {"name": sname, "provider": str(provider)}
         if url:
             item["url"] = url
         item["access"] = str(access)
         item["purpose"] = purpose
+        if "auth" in entry:
+            item["auth"] = check_service_auth(sname, url, entry["auth"])
         out.append(item)
     if len({v["name"] for v in out}) != len(out):
         raise PluginDraftError("service names must be unique")

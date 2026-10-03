@@ -125,6 +125,27 @@ async def test_check_then_install_a_folder_waits_for_the_owners_approval(svc, tm
     assert is_approved("notes-helper", root, home=svc.PLUGINS_DIR)
 
 
+async def test_check_shows_where_a_service_signs_in_and_its_scopes(svc, tmp_path):
+    root = _folder(tmp_path / "work" / "notes-helper")
+    manifest = json.loads((root / "plugin.json").read_text(encoding="utf-8"))
+    manifest["extensions"]["ai.shuffle"]["services"][0]["auth"] = {
+        "type": "oauth2", "authorize_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token", "scopes": ["read:org", "repo"],
+        "pkce": True,
+    }
+    _write(root / "plugin.json", json.dumps(manifest))
+    text = _out(await _tools(tmp_path / "work")["CheckPlugin"].handler({"path": "notes-helper"}))
+    assert ("github (read): Read merged pull requests; signs in with OAuth at github.com; "
+            "scopes: read:org, repo") in text
+
+    manifest["extensions"]["ai.shuffle"]["services"][0]["auth"]["client_secret"] = "s3cr3t-value"
+    _write(root / "plugin.json", json.dumps(manifest))
+    checked = await _tools(tmp_path / "work")["CheckPlugin"].handler({"path": "notes-helper"})
+    assert checked.get("isError")
+    assert "never carries an OAuth client secret" in _out(checked)
+    assert "s3cr3t-value" not in _out(checked)
+
+
 async def test_a_folder_that_fails_the_check_is_not_installed(svc, tmp_path):
     root = _folder(tmp_path / "work" / "notes-helper")
     _write(root / "hooks" / "hooks.json", "{}")

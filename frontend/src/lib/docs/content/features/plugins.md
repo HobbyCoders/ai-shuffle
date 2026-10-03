@@ -127,9 +127,11 @@ Rules the validator enforces:
 
 ### Services
 
-A plugin that talks to an outside API declares it under `services`: `name`, `provider` (`cloudflare` or `custom`), `url` (the public `https://` API address; required for `custom`), `access` (`read` or `write`) and `purpose`. No other keys are accepted. The declaration shows a reviewer what the plugin will ask for. It holds no credential.
+A plugin that talks to an outside API declares it under `services`: `name`, `provider` (`cloudflare` or `custom`), `url` (the public `https://` API address; required for `custom`), `access` (`read` or `write`), `purpose`, and optionally `auth`. No other keys are accepted. The declaration shows a reviewer what the plugin will ask for. It holds no credential.
 
-The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess` with the provider and purpose. You enter the key in the private access card; the agent then calls `ChatHttpRequest`, and the worker attaches the key. No model sees it. Plugins cannot sign in with OAuth yet.
+`auth` declares an OAuth 2.0 sign-in: `{"type": "oauth2", "authorize_url": ..., "token_url": ..., "scopes": [...], "pkce": true}`, with an optional `revoke_url`. Every address must be plain `https://` with no query, fragment or credentials, on the same domain as the service `url` (`dash.example.com` and `api.example.com` match; `example.net` does not). Scopes are single words, at most 20. A client secret is never accepted in a plugin, under any key name. The plugin list and `CheckPlugin` show where the plugin signs in and which scopes it asks for, and a plugin update that asks for more scopes needs a new sign-in.
+
+The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess` with the provider and purpose. You enter the key in the private access card; the agent then calls `ChatHttpRequest`, and the worker attaches the key. No model sees it. Signing in to a declared `auth` service from a chat or Settings is not available yet; for now the declaration is checked and shown for review.
 
 ## Plugins from Claude Code and Codex
 
