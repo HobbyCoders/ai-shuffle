@@ -10,12 +10,15 @@ from __future__ import annotations
 from dataclasses import fields
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
 from pathlib import Path
 
 from fluid.codemode.transactions import file_transaction
+
+_log = logging.getLogger(__name__)
 
 # Three tiers, none of which can refuse a save for lack of room:
 #
@@ -258,6 +261,9 @@ class FactStore:
             # fact so replaying an old snapshot cannot renew its lifetime.
             expired = [e for e in doc[bucket] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
             doc[bucket] = [e for e in doc[bucket] if e not in expired]
+            if expired:
+                self._note_loss(doc, "expired_live" if bucket == "entries" else "expired_archived",
+                                len(expired), now)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred"]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
@@ -277,9 +283,27 @@ class FactStore:
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
         doc["archived"] = (rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):]
                            + explicit[max(0, len(explicit) - MAX_ARCHIVED_EXPLICIT):])
+        if len(rest) > MAX_ARCHIVED_MEMORIES:
+            self._note_loss(doc, "archive_dropped", len(rest) - MAX_ARCHIVED_MEMORIES, now)
+        if len(explicit) > MAX_ARCHIVED_EXPLICIT:
+            # The one way a user-requested fact leaves without a Forget. It
+            # used to be silent; the health check reports it.
+            dropped = len(explicit) - MAX_ARCHIVED_EXPLICIT
+            self._note_loss(doc, "explicit_dropped", dropped, now)
+            _log.warning("Memory store %s dropped %d user-saved fact(s) from a full archive",
+                         doc.get("store_id"), dropped)
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
+
+    @staticmethod
+    def _note_loss(doc, kind, count, now):
+        """Count facts that left the store without a Forget (local, not
+        replicated): totals plus the time of the latest one per kind."""
+        losses = doc.get("losses") if isinstance(doc.get("losses"), dict) else {}
+        losses[kind] = int(losses.get(kind, 0) or 0) + int(count)
+        losses[f"last_{kind}_at"] = now
+        doc["losses"] = losses
 
     def reap(self):
         with file_transaction(self.lock):
@@ -367,6 +391,13 @@ class FactStore:
                 if archived_old:
                     doc["archived"] = [e for e in doc["archived"] if e is not old]
                     doc["entries"].append(old)
+                if old.pop("retired_at", None):
+                    # Undoing a retirement is an edit replicas must see, or
+                    # their retired copy would win the next merge.
+                    old.pop("retired_reason", None)
+                    clock = dict(old.get("clock") or {old["origin"]: old.get("revision", 1)})
+                    clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
+                    old.update(clock=clock, revision=old.get("revision", 1) + 1)
                 self._maintain(doc, keep=old["id"])
                 self._write(doc)
                 return self._entry(old)
@@ -403,6 +434,10 @@ class FactStore:
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
+            # A rewrite is a new value: it lives again even if curation had
+            # retired the old one.
+            entry.pop("retired_at", None)
+            entry.pop("retired_reason", None)
             if not protected and not entry["expires_at"]:
                 entry["expires_at"] = now + INFERRED_TTL
             if is_durable:
@@ -461,6 +496,36 @@ class FactStore:
                 # learner delete setting it would let the next maintenance
                 # sweep wipe the journal anyway.
                 doc["forgotten_before"] = time.time()
+            self._write(doc)
+            return True
+
+    def retire(self, memory_id, *, reason, expected_revision=None):
+        """Move one unprotected fact into the archive, where Recall still finds it.
+
+        Automatic curation (the learner, consolidation, health repairs) uses
+        this instead of :meth:`forget`: no deletion barrier, nothing purged,
+        and a later save of the same fact can bring it back. The clock bump
+        makes the retirement win over a replica's older live copy, and
+        ``retired_at`` keeps a merge from moving it back into the live list.
+        A fact the user asked to keep is never retired.
+        """
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            old = next((e for e in doc["entries"] + doc["archived"] if e["id"] == memory_id), None)
+            if old is None or old.get("protected") or old.get("retired_at"):
+                return False
+            if expected_revision is not None and old.get("revision", 1) != expected_revision:
+                raise ValueError("Memory changed since it was read; recall it before retiring it")
+            clock = dict(old.get("clock") or {old.get("origin", doc["store_id"]): old.get("revision", 1)})
+            clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
+            if len(clock) > 64:
+                raise ValueError("Memory has too many concurrent writers; nothing was retired")
+            old.update(clock=clock, revision=old.get("revision", 1) + 1,
+                       retired_at=time.time(), retired_reason=str(reason)[:40])
+            doc["entries"] = [e for e in doc["entries"] if e is not old]
+            if not any(e is old for e in doc["archived"]):
+                doc["archived"].append(old)
+            self._maintain(doc)
             self._write(doc)
             return True
 
@@ -548,8 +613,12 @@ class FactStore:
                 # a stale worker cannot resurrect the forgotten record.
                 entries.pop(key, None)
             doc["tombstones"] = list(tombstones.values())
-            doc["entries"], doc["archived"] = [e for e in entries.values()
-                if not barrier_contains(doc.get("forgotten", ""), "id:" + global_id(e))], []
+            kept = [e for e in entries.values()
+                    if not barrier_contains(doc.get("forgotten", ""), "id:" + global_id(e))]
+            # A retired fact stays archived on every replica; other archived
+            # facts compete for live room again and _maintain re-bounds them.
+            doc["entries"] = [e for e in kept if not e.get("retired_at")]
+            doc["archived"] = [e for e in kept if e.get("retired_at")]
             slots = {}
             for e in doc["entries"]:
                 if e.get("key"):

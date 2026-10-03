@@ -1,6 +1,6 @@
 # Memory architecture
 
-Updated 2026-09-10. The research and pre-change reproductions are in PR #1185;
+Updated 2026-10-03. The research and pre-change reproductions are in PR #1185;
 `tools/research/memory_contract_baseline.json` is historical evidence, not the
 current expected behavior. `memory_contract_probe.py --strict` exercises the
 current contracts with synthetic data.
@@ -53,7 +53,9 @@ Current per-owner defaults:
 
 | Resource | Limit/policy |
 |---|---|
-| Explicit active facts | 256; a full quota rejects a new save without evicting an earlier promise |
+| Explicit active facts | 256; past that the least useful moves to a separate archive of user-saved facts |
+| Archived explicit facts | 256; past that the least useful is dropped, counted in the document's `losses` and logged |
+| Agent-saved (durable) active facts | 120; overflow enters the archive; valid 120 days from the last save or recall |
 | Inferred active facts | 40; overflow enters the archive |
 | Archived facts | 200 |
 | Inferred validity | 90 days; retrieval does not renew validity |
@@ -68,8 +70,13 @@ Current per-owner defaults:
 These defaults are conservative initial policy, not benchmark-derived optimal
 values. Inference is allowed to be lossy; acknowledged explicit saves are not.
 The existing deterministic skill reaper remains separate. Model consolidation
-can propose merges or retirements of inferred facts, but cannot update unknown
-IDs, overwrite a protected fact, or delete one. Consolidation runs only after a
+can propose merges or retirements of inferred and agent-saved facts it was shown,
+but cannot update unknown IDs, overwrite a protected fact, or retire one. A
+learner or consolidation retirement moves the fact to the archive with no
+deletion barrier: Recall still finds it, a later agent save brings it back, and
+the retirement replicates instead of being undone by the next merge. Facts that
+leave without a Forget (expiry, a full archive) are counted in the document's
+`losses`; failed saves are counted in `meta.json` without their text. Consolidation runs only after a
 successful synthesis pass, under the same lock; a failed consolidation is retried
 after six hours instead of waiting a full interval. Inference batches retain
 source-project identity; a forget during a model call invalidates that proposal.

@@ -1,6 +1,7 @@
 """Memory lifecycle contracts: exercise writes before retrieval, never seed consumers."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+from pathlib import Path
 
 import pytest
 
@@ -532,6 +533,10 @@ def test_windows_replace_retry_is_bounded_and_preserves_old_document(tmp_path, m
     real_replace = skills.os.replace
     calls = []
     def replace(src, dst):
+        if Path(dst).name != "memories.json":
+            # The failed save is counted in meta.json; only the memory
+            # document's retries are under test.
+            return real_replace(src, dst)
         calls.append(1)
         if permanent or len(calls) < 3:
             error = PermissionError("simulated Windows sharing violation")

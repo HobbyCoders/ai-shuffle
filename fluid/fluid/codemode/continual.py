@@ -1034,8 +1034,15 @@ class Synthesizer:
                 continue
             changed.append(f"memory:{saved.id}")
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
-            if self._store.delete_memory(match.group(1)):
-                changed.append(f"-memory:{match.group(1)}")
+            # Only facts this pass was shown as editable; a retired fact goes
+            # to the archive, not behind a deletion barrier.
+            if match.group(1) not in revisions:
+                continue
+            try:
+                if self._store.retire_memory(match.group(1), reason="consolidation"):
+                    changed.append(f"-memory:{match.group(1)}")
+            except ValueError as exc:
+                errors.append(f"memory {match.group(1)}: {exc}")
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
@@ -1399,8 +1406,14 @@ class Synthesizer:
                 held.append(f"{saved.id}: {saved.text}")
         self.last_held = held
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
-            if self._store.delete_memory(match.group(1)):
-                changed.append(f"-memory:{match.group(1)}")
+            # The learner retires into the archive. A deletion barrier here
+            # used to stop every later save of the same text, agent saves
+            # included, and Recall could no longer find the fact.
+            try:
+                if self._store.retire_memory(match.group(1), reason="learner"):
+                    changed.append(f"-memory:{match.group(1)}")
+            except ValueError as exc:
+                errors.append(f"memory {match.group(1)}: {exc}")
         for match in _GUIDANCE_RE.finditer(text or ""):
             # Guidance edits are PROPOSED, never applied here.
             # Queue-time validation is cheap; the commit gate (validity →
