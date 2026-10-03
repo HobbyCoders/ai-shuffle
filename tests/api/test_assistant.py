@@ -264,3 +264,37 @@ def test_normal_connector_api_dedicated_credential_is_discoverable(client, monke
     assert "api_user_id" not in source and "config" not in source
     # Creation alone is NOT authorization or a successful OAuth connection.
     assert client.patch("/api/v1/assistant/sources/" + connector["id"], json={"enabled": True}).status_code == 409
+
+
+def test_limits_read_update_and_confirmed_off_switch(client, assistant_fixture):
+    state = client.get("/api/v1/assistant/limits")
+    assert state.status_code == 200
+    body = state.json()
+    assert body["daily_spend_limit_usd"] == 20 and body["max_job_minutes"] == 120
+    assert body["spend_limit_enabled"] and body["job_limit_enabled"] and body["spent_today_usd"] == 0
+    updated = client.patch("/api/v1/assistant/limits", json={"daily_spend_limit_usd": 7.5, "max_job_minutes": 45})
+    assert updated.status_code == 200
+    assert updated.json()["daily_spend_limit_usd"] == 7.5 and updated.json()["max_job_minutes"] == 45
+    # Switching the spending limit off needs an explicit confirmation.
+    refused = client.patch("/api/v1/assistant/limits", json={"spend_limit_enabled": False})
+    assert refused.status_code == 409
+    assert client.get("/api/v1/assistant/limits").json()["spend_limit_enabled"]
+    off = client.put("/api/v1/assistant/limits", json={"spend_limit_enabled": False, "confirm_spend_limit_off": True})
+    assert off.status_code == 200 and not off.json()["spend_limit_enabled"]
+    assert off.json()["daily_spend_limit_usd"] == 7.5  # Kept for when it is switched back on.
+    assert client.patch("/api/v1/assistant/limits", json={"job_limit_enabled": False}).json()["job_limit_enabled"] is False
+    for bad in ({"daily_spend_limit_usd": 0}, {"daily_spend_limit_usd": 1e9}, {"max_job_minutes": 1},
+                {"max_job_minutes": 100000}, {"daily_spend_limit_usd": None}, {"reset": True}):
+        assert client.patch("/api/v1/assistant/limits", json=bad).status_code == 422, bad
+    # The general assistant settings cannot touch the limits.
+    assert client.patch("/api/v1/assistant", json={"daily_spend_limit_usd": 1000}).status_code == 422
+
+
+def test_limits_are_owner_only(client, assistant_fixture):
+    database.create_api_user("foreign", "Limited user", auth.hash_api_key("limited-key"))
+    key = {"Authorization": "Bearer limited-key"}
+    assert client.get("/api/v1/assistant/limits", headers=key).status_code == 403
+    assert client.patch("/api/v1/assistant/limits", json={"daily_spend_limit_usd": 999}, headers=key).status_code == 403
+    assert client.patch("/api/v1/assistant/limits", json={"daily_spend_limit_usd": 999},
+                        headers={"Origin": "http://evil.example"}).status_code == 403
+    assert client.get("/api/v1/assistant/limits").json()["daily_spend_limit_usd"] == 20

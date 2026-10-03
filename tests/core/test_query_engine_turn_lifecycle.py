@@ -237,6 +237,18 @@ async def test_loop_guard_holds_an_unattended_turn(tmp_path):
     b.make_adapter.assert_not_called()
 
 
+async def test_assistant_limit_refuses_the_turn(tmp_path):
+    from app.core import assistant_limits
+
+    with ExitStack() as stack:
+        b = engine_patches(stack, cwd=str(tmp_path))
+        gate = stack.enter_context(patch.object(assistant_limits, "turn_refusal", return_value="Limit reached"))
+        events = await _turn(stack, turn_source="user")
+    assert events == [{"type": "error", "message": "Limit reached", "code": "assistant_limit"}]
+    assert gate.call_args.args[1] == "user"
+    b.make_adapter.assert_not_called()
+
+
 async def test_upload_materialization_failure_refuses(tmp_path):
     from app.core import upload_transfer
 

@@ -1210,6 +1210,10 @@ def build_options_from_profile(
     final_system_prompt = _append_system_block(
         final_system_prompt, build_role_context(session_id),
     )
+    from app.core.assistant_limits import role_context as assistant_limits_context
+    final_system_prompt = _append_system_block(
+        final_system_prompt, assistant_limits_context(session_id),
+    )
     # SDK-shaped tool fields. ``tools`` / ``tools_preset`` feed
     # ``AgentOptions.tools``, which the harness adapter ignores.
     tools_config = config.get("tools")  # Explicit list of tools

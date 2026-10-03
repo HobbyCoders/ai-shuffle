@@ -502,6 +502,8 @@ def _queue(sender_id, data, action, placement=None):
     if ((context.get("payload") or {}).get("_assistant_proactive") is not None
             or (context.get("overrides") or {}).get("_assistant_proactive") is not None):
         raise PermissionError("Background observation cannot start or message sessions.")
+    from app.core import assistant_limits
+    assistant_limits.assert_can_start(sender_id)  # The owner's daily spending limit.
     request_id = _text(data, "request_id", 120)
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.

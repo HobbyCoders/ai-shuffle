@@ -542,6 +542,8 @@ def _run_column_migrations(cursor):
     _migrate_preference_revisions(cursor)
     from app.db.assistant import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
+    from app.db.assistant_limits import create_schema as create_assistant_limits_schema
+    create_assistant_limits_schema(cursor)
 
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):

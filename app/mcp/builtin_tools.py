@@ -2537,10 +2537,11 @@ def create_builtin_tools_server(
 
             return _ok(key_denied_usage_result())
         try:
-            from app.api.usage import get_cached_usage_payload
+            from app.api.usage import get_cached_usage_payload, with_assistant_spend
             from fluid.tools.builtins.usage import _payload as format_usage_payload
 
-            return _ok(format_usage_payload(await get_cached_usage_payload()))
+            raw = await with_assistant_spend(await get_cached_usage_payload(), session_id)
+            return _ok(format_usage_payload(raw))
         except Exception:  # noqa: BLE001 — usage is informational
             logger.debug("GetUsage failed", exc_info=True)
             return _ok({

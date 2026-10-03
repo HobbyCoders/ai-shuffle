@@ -2,7 +2,8 @@
 // avatar only; the agent behind the assistant is built in. Background research has no owner controls (no
 // switch, pause, usage or limits); only the per-source opt-in remains. The
 // owner's details are detected by the server, shown read-only and
-// correctable, with Gmail/GitHub suggestion cards when those are missing. A
+// correctable, with Gmail/GitHub suggestion cards when those are missing. The
+// owner's spending and job time limits sit in their own Limits section. A
 // fake /api/v1/assistant backend lives in this script, so nothing reaches a
 // server or a model provider.
 //
@@ -65,6 +66,13 @@ function fakeBackend() {
 		state.enabled = state.status === 'ready';
 	};
 	const patches = [];
+	// The owner's spending and job time limits (assistant_limits on the server).
+	const limits = {
+		spend_limit_enabled: true, daily_spend_limit_usd: 20, job_limit_enabled: true, max_job_minutes: 120,
+		spent_today_usd: 3.1, day: '2026-10-03', timezone: 'UTC', resets_at: '2026-10-04T00:00:00+00:00',
+		limit_reached: false, warning: false,
+	};
+	const limitPatches = [];
 	function configure(patch) {
 		patches.push(patch);
 		if (patch.introduction) {
@@ -108,9 +116,18 @@ function fakeBackend() {
 			return json(source);
 		}
 		if (path === '/assistant/activity') return json([]);
+		if (path === '/assistant/limits' && request.method() === 'GET') return json(limits);
+		if (path === '/assistant/limits' && request.method() === 'PATCH') {
+			const patch = request.postDataJSON();
+			limitPatches.push(patch);
+			if (patch.spend_limit_enabled === false && patch.confirm_spend_limit_off !== true) return json({ detail: 'Confirm first' }, 409);
+			const { confirm_spend_limit_off: _confirmed, ...changes } = patch;
+			Object.assign(limits, changes);
+			return json(limits);
+		}
 		return json({ detail: `unexpected ${request.method()} ${path}` }, 404);
 	}
-	return { handle, patches, state, detectRequests };
+	return { handle, patches, state, detectRequests, limitPatches };
 }
 
 async function run(viewport) {
@@ -185,6 +202,31 @@ async function run(viewport) {
 	const homeText = () => page.locator('body').textContent();
 	check(!(await homeText()).match(/runs · last 24 hours|in flight|hard billing cap|fixed limits|\$0\.42|\b12\b/), 'no usage panel, cost or limit numbers', (await homeText()).slice(0, 400));
 	check(await page.getByText('No connected sources in use.').isVisible(), 'neutral line before any opt-in');
+	// Limits: today's spend against the owner's limit, two fields, a confirmed off switch.
+	const limitsSection = page.locator('section', { has: page.getByRole('heading', { name: 'Limits' }) });
+	await limitsSection.getByText('of $20.00 spent today').waitFor();
+	check((await limitsSection.innerText()).includes('$3.10'), "today's spend shown", await limitsSection.innerText());
+	check(await limitsSection.getByRole('spinbutton', { name: 'Daily spending limit' }).inputValue() === '20', 'daily limit field');
+	check(await limitsSection.getByRole('combobox', { name: 'Longest background job' }).inputValue() === '120', 'job time field');
+	for (const helper of ['All work, at API prices', 'Applies to each job']) {
+		check(await limitsSection.getByText(helper).isVisible(), `helper "${helper}"`);
+	}
+	const limitTargets = await limitsSection.locator('input,select,[role=switch]').evaluateAll((els) => els.map((el) => el.getBoundingClientRect().height));
+	check(limitTargets.every((h) => h >= 42), 'limit controls are touch sized', limitTargets);
+	await press(limitsSection.getByRole('switch', { name: 'Daily spending limit' }));
+	check(await limitsSection.getByText('Turn off the daily spending limit?').isVisible(), 'switching the limit off asks first');
+	check(backend.limitPatches.length === 0, 'nothing saved before confirming', backend.limitPatches);
+	check(await overflow() <= 0, 'no horizontal overflow while confirming', await overflow());
+	await shoot('limits-confirm');
+	await press(limitsSection.getByRole('button', { name: 'Turn off limit' }));
+	await limitsSection.getByText('spent today · no daily limit').waitFor();
+	assert.deepEqual(backend.limitPatches.at(-1), { spend_limit_enabled: false, confirm_spend_limit_off: true }, `[${name}] off payload`);
+	passed++;
+	await press(limitsSection.getByRole('switch', { name: 'Daily spending limit' }));
+	await limitsSection.getByText('of $20.00 spent today').waitFor();
+	assert.deepEqual(backend.limitPatches.at(-1), { spend_limit_enabled: true }, `[${name}] on payload`);
+	passed++;
+	check(await overflow() <= 0, 'no horizontal overflow on limits', await overflow());
 	// The per-source opt-in is data-access consent and stays.
 	const toggle = page.getByRole('switch', { name: 'Observe Work Gmail' });
 	check(await toggle.getAttribute('aria-checked') === 'false', 'source opt-in offered and off');

@@ -1969,6 +1969,8 @@ def create_postgres_schema(cursor) -> None:
 
     from app.db.assistant import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
+    from app.db.assistant_limits import create_schema as create_assistant_limits_schema
+    create_assistant_limits_schema(cursor)
 
     # ==================================================================
     # SEED DATA

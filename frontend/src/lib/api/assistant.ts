@@ -86,6 +86,29 @@ export const setAssistantSource = (id: string, enabled: boolean) => api.patch<As
 export const getAssistantActivity = () => api.get<AssistantActivity[]>('/assistant/activity?limit=50');
 export const getAgentIdentities = () => api.get<AgentIdentity[]>('/assistant/agents');
 export const updateAgentIdentity = (id: string, patch: { name?: string; avatar_id?: AvatarId }) => api.patch<AgentIdentity>(`/assistant/agents/${encodeURIComponent(id)}/identity`, patch);
+/**
+ * The owner's limits for the assistant and every job it starts, with today's
+ * spend. Spend is in US dollars at API prices, so subscription use is an
+ * estimate. The day resets at midnight in the owner's time zone (else UTC).
+ */
+export interface AssistantLimits {
+ spend_limit_enabled: boolean;
+ daily_spend_limit_usd: number;
+ job_limit_enabled: boolean;
+ max_job_minutes: number;
+ spent_today_usd: number;
+ day: string;
+ timezone: string;
+ resets_at: string;
+ limit_reached: boolean;
+ warning: boolean;
+}
+export type AssistantLimitsPatch = Partial<Pick<AssistantLimits, 'spend_limit_enabled' | 'daily_spend_limit_usd' | 'job_limit_enabled' | 'max_job_minutes'>> & {
+ /** Required with spend_limit_enabled: false. */
+ confirm_spend_limit_off?: boolean;
+};
+export const getAssistantLimits = () => api.get<AssistantLimits>('/assistant/limits');
+export const updateAssistantLimits = (patch: AssistantLimitsPatch) => api.patch<AssistantLimits>('/assistant/limits', patch);
 export function assistantError(error: unknown): string {
  const detail = (error as { detail?: unknown })?.detail;
  return typeof detail === 'string' ? detail : error instanceof Error ? error.message : 'Could not save this change. Please try again.';

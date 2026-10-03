@@ -198,6 +198,9 @@ class AssistantManager:
                 retry_delay = min(60, retry_delay * 2)
                 failed = True
             await self._maybe_retention_sweep()
+            # The owner's spending and job time limits (never raises).
+            from app.core import assistant_limits
+            await assistant_limits.enforce()
             self.detect_owner(DETECTION_INTERVAL_SECONDS)
             # DB outages deny new admission/tools, but must not kill this loop
             # or extend known inference deadlines. Retry with bounded backoff.
@@ -481,6 +484,9 @@ class AssistantManager:
                 await self._observe()
             if not service.proactive_guard_available() or await run_sync(provider_blocker, state["agent_id"]):
                 return
+            from app.core import assistant_limits
+            if await run_sync(assistant_limits.start_refusal, state["home_session_id"]):
+                return  # Today's spending limit is reached.
             run = await run_sync(store.admit_run, service.assistant_id())
             if run:
                 await self._dispatch(run)

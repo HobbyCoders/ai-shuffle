@@ -493,7 +493,27 @@ async def get_session_usage_payload(session_id: Optional[str]) -> dict:
 
     if not await run_sync(_owner_session, session_id):
         return _key_denied_raw_payload()
-    return await get_cached_usage_payload()
+    payload = await get_cached_usage_payload()
+    return await with_assistant_spend(payload, session_id)
+
+
+async def with_assistant_spend(payload: dict, session_id: Optional[str]) -> dict:
+    """Put today's assistant spend in ``session_usage`` for its home and jobs.
+
+    Read-only: the assistant answers "how much have you spent today?" from
+    the real figures, and only the owner can change the limits.
+    """
+    from app.core import assistant_limits
+    from app.db.async_database import run_sync
+
+    try:
+        block = await run_sync(assistant_limits.session_usage, session_id)
+    except Exception:  # noqa: BLE001 - usage is informational
+        logger.debug("GetUsage could not read assistant spend for %s", session_id, exc_info=True)
+        block = None
+    if block is not None:
+        payload = dict(payload, session_usage=block)
+    return payload
 
 
 def session_usage_callback(resolve_session_id: Callable[[], Optional[str]]) -> Callable[[], Any]:

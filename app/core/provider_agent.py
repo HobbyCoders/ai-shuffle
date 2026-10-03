@@ -1780,6 +1780,10 @@ async def dispatch_worker(
 
         create_error: Optional[BaseException] = None
         refusal = api_user_scope.worker_refusal(api_user_id, profile_id)
+        if not refusal:
+            # The owner's daily spending limit for the assistant and its jobs.
+            from app.core import assistant_limits
+            refusal = assistant_limits.start_refusal(context_session_id or parent_session_id)
         if refusal:
             return (
                 parent_row, project_id, worktree_id, worktree_branch,

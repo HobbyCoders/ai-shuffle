@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.auth import require_admin
-from app.core import assistant_introduction as introductions, assistant_service as service
+from app.core import assistant_introduction as introductions, assistant_limits as limits, assistant_service as service
 from app.core.assistant_manager import assistant_manager
-from app.db import assistant as store
+from app.db import assistant as store, assistant_limits as limits_db
 from app.db.async_database import run_sync
 
 router = APIRouter(prefix="/api/v1/assistant", tags=["Assistant"], dependencies=[Depends(require_admin)])
@@ -94,6 +94,20 @@ class Configuration(BaseModel):
         if value is not None and value not in service.AVATAR_PRESETS:
             raise ValueError("Unknown avatar preset")
         return value
+
+
+class LimitsUpdate(BaseModel):
+    """The owner's spending and job time limits; omitted fields keep their value.
+
+    Switching the spending limit off needs ``confirm_spend_limit_off: true``.
+    """
+    model_config = ConfigDict(extra="forbid")
+    spend_limit_enabled: Optional[bool] = None
+    daily_spend_limit_usd: Optional[float] = Field(None, ge=limits_db.SPEND_BOUNDS[0], le=limits_db.SPEND_BOUNDS[1],
+                                                   allow_inf_nan=False)
+    job_limit_enabled: Optional[bool] = None
+    max_job_minutes: Optional[int] = Field(None, ge=limits_db.MINUTE_BOUNDS[0], le=limits_db.MINUTE_BOUNDS[1])
+    confirm_spend_limit_off: Optional[bool] = None
 
 
 class SourceUpdate(BaseModel):
@@ -181,6 +195,28 @@ async def open_assistant():
 @router.post("/resume")
 async def pause_or_resume_assistant():
     return await run_sync(service.get_state)
+
+
+@router.get("/limits")
+async def read_limits():
+    """The owner's limits and today's spend for the assistant and its jobs."""
+    return await run_sync(limits.status)
+
+
+@router.put("/limits")
+@router.patch("/limits")
+async def update_limits(body: LimitsUpdate):
+    changes = body.model_dump(exclude_unset=True)
+    confirmed = changes.pop("confirm_spend_limit_off", None) is True
+    for key, value in changes.items():
+        if value is None:
+            raise HTTPException(422, f"{key} cannot be null")
+    if changes.get("spend_limit_enabled") is False and not confirmed:
+        raise HTTPException(409, "Confirm switching the spending limit off (confirm_spend_limit_off: true)")
+    await _value_error_call(limits_db.update, service.assistant_id(), changes)
+    # Enforce a lowered limit now rather than on the next loop pass.
+    assistant_manager.notify()
+    return await run_sync(limits.status)
 
 
 @router.get("/sources")

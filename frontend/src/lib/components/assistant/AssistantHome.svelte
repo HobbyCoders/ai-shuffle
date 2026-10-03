@@ -14,6 +14,7 @@
  import { isVoiceEnabled } from '$lib/api/voice';
  import { startCallForSession } from '$lib/services/voiceCall';
  import AgentAvatar from './AgentAvatar.svelte';
+ import AssistantLimits from './AssistantLimits.svelte';
 
  // Callers may still pass an agent id; the assistant no longer takes one.
  let { requestedAgentId: _requestedAgentId = null }: { requestedAgentId?: string | null } = $props();
@@ -251,6 +252,7 @@
    {#if !sources.length}<div class="empty"><ShieldCheck size={24} /><div><strong>No sources connected</strong><p>Connect a service in Settings > Plugins, then return here to opt in. Your assistant works without background sources.</p></div></div>
    {:else}<ul class="source-list">{#each sources as source (source.id)}<li><div class="source-icon"><ShieldCheck size={19} /></div><div class="source-copy"><strong>{source.name}</strong><p>{source.type} · {source.available ? `Available on ${remoteHome ? remoteHome.name : 'this worker'}` : 'Unavailable · check connection, grant and agent access'}</p>{#if source.last_observed_at}<small>Last observed {when(source.last_observed_at)}</small>{/if}{#if source.last_error}<p class="source-error">{source.last_error}</p>{/if}</div><button class="source-toggle" role="switch" aria-checked={source.enabled} aria-label={`Observe ${source.name}`} disabled={!!busy || (!source.available && !source.enabled) || !assistant.configured} onclick={() => toggleSource(source)}><span aria-hidden="true"></span><span>{busy === source.id ? 'Saving…' : source.enabled ? 'On' : 'Off'}</span></button></li>{/each}</ul>{/if}
   </section>
+  {#if assistant.configured && !editing}<AssistantLimits />{/if}
   <section class="section" aria-labelledby="activity-heading"><div class="section-heading"><div><span class="eyebrow">IN THE OPEN</span><h2 id="activity-heading">Activity & linked work</h2></div><Activity size={20} /></div>
    {#if !activity.length}<div class="empty"><Activity size={24} /><div><strong>Nothing running in the background</strong><p>{remoteHome ? `Research runs on ${remoteHome.name}, so its activity is listed there.` : 'Linked tasks and research will appear here with their source, outcome and reported cost.'}</p></div></div>
    {:else}<ol class="activity-list">{#each activity as item (item.id)}<li><AgentAvatar avatar={item.avatar_id} size={36} /><div class="activity-copy"><div class="activity-title">{#if item.session_id}<button class="text-button" onclick={() => item.session_id && openSession(item.session_id)}>{item.session_title || item.agent_name || 'Open linked conversation'}<ArrowUpRight size={14} /></button>{:else}<strong>{item.agent_name || 'Background research'}</strong>{/if}<span class="activity-status">{item.status}</span></div><p>{item.kind} · {when(item.created_at)} · {money(item.cost_usd)} reported</p>{#if item.source_ids.length}<small>Sources: {item.source_ids.map(id => sources.find(s => s.id === id)?.name ?? 'Unavailable source').join(', ')}</small>{/if}{#if item.error}<p class="source-error">{item.error}</p>{/if}</div></li>{/each}</ol>{/if}

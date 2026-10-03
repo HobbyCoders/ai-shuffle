@@ -1834,6 +1834,17 @@ async def _stream_to_websocket_impl(
             yield {"type": "error", "message": _held, "code": loop_guard.HOLD_CODE}
             return
 
+    # The owner's assistant limits: past the daily spending limit the
+    # assistant home starts no new turn, nor does an unattended turn in a job
+    # it started (or one past its job time limit).
+    from app.core import assistant_limits
+
+    _limited = await asyncio.to_thread(assistant_limits.turn_refusal, session_id, turn_source)
+    if _limited:
+        logger.warning(f"[WS] Turn refused for session {session_id}: assistant limit")
+        yield {"type": "error", "message": _limited, "code": "assistant_limit"}
+        return
+
     # Cross-install uploads: the turn's blobs were lifted on the SENDING
     # install; write them into the now-resolved working dir and rewrite the
     # prompt's uploader-absolute paths to the local ones. Done here — after the
