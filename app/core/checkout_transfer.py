@@ -331,3 +331,154 @@ def import_checkout(base, destination, state):
         raise ValueError("The receiving checkout changed during resume; ownership was not moved.")
     git(dest, "branch", "--set-upstream-to=origin/" + branch, branch)
     return str(dest)
+
+
+# --- Task worker branches between workers -----------------------------------
+#
+# A Task worker that runs on another worker gets its checkout through origin,
+# the same way a handoff does: the parent pushes ``task/<worker id>`` at its
+# committed HEAD (never forced), the target fetches it with its own
+# credentials, and the parent later removes the ref only while it still points
+# at that base. Reasons and errors are fixed text: Git's stderr and remote URLs
+# can carry tokens, so they are read for classification and never returned.
+
+TASK_BRANCH_PREFIX = "task/"
+
+
+def _task_branch(cwd, branch):
+    if not branch.startswith(TASK_BRANCH_PREFIX) or _run(cwd, "check-ref-format", "refs/heads/" + branch).returncode:
+        raise ValueError("Only task/<worker id> branches move between workers this way.")
+
+
+def _require_sha(sha):
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        raise ValueError("Invalid task base commit.")
+
+
+def origin_identity(cwd):
+    """``remote_identity`` for task transfer, or None when origin is unusable.
+
+    The identity is a hash of the normalized URL, so it can travel to another
+    worker without its credentials.
+    """
+    try:
+        return remote_identity(cwd)
+    except ValueError:
+        return None
+
+
+def _remote_tip(cwd, branch):
+    """``(tip or None, reachable)`` for ``branch`` on origin, as it is now."""
+    listed = _run(cwd, "ls-remote", "origin", "refs/heads/" + branch)
+    if listed.returncode:
+        return None, False
+    fields = listed.stdout.decode(errors="replace").split()
+    return (fields[0] if fields else None), True
+
+
+def _push_refused(stderr, branch):
+    """A plain reason for a failed push, classified without echoing stderr."""
+    text = stderr.decode(errors="replace").lower()
+    if any(mark in text for mark in ("[rejected]", "non-fast-forward", "fetch first", "stale info")):
+        return f"Origin's {branch} changed meanwhile; nothing was forced."
+    if any(mark in text for mark in ("authentication", "permission", "could not read username", "403",
+                                     "access denied", "not allowed", "protected", "hook declined")):
+        return f"Origin refused {branch}. Check this worker's Git credentials and push rights for origin."
+    return f"Could not update {branch} on origin. Check this worker's Git credentials and its connection to origin."
+
+
+def publish_task_branch(cwd, branch, sha) -> dict:
+    """Push commit ``sha`` to origin as ``branch``, without force.
+
+    Returns ``branch``, ``base`` (the SHA), ``remote`` (origin identity hash),
+    ``pushed`` and a plain ``reason`` when it was not pushed. A branch already
+    on origin at ``sha`` counts as pushed, so a retry is safe; one at any other
+    commit is left alone and reported. Never raises for Git failures.
+    """
+    _task_branch(cwd, branch)
+    _require_sha(sha)
+    result: dict = dict(protocol="git-origin-v1", branch=branch, base=sha, remote=None, pushed=False, reason=None)
+    remote = origin_identity(cwd)
+    if remote is None:
+        result["reason"] = ("This project has no usable origin remote on this worker (one fetch and push "
+                            "URL for the same repository), so its branch cannot reach another worker.")
+        return result
+    result["remote"] = remote
+    try:
+        tip, reachable = _remote_tip(cwd, branch)
+        if not reachable:
+            result["reason"] = ("Could not reach origin from this worker. Check its Git credentials "
+                                "and connection to origin.")
+            return result
+        if tip == sha:
+            result["pushed"] = True
+            return result
+        if tip is not None:
+            result["reason"] = f"Origin already has {branch} at another commit; it was left alone and nothing was forced."
+            return result
+        # Push this exact commit, not a moving HEAD, and never force.
+        pushed = _run(cwd, "push", "origin", sha + ":refs/heads/" + branch)
+    except ValueError:  # timed out
+        result["reason"] = "Git timed out reaching origin from this worker. Check its connection to origin and retry."
+        return result
+    if pushed.returncode:
+        result["reason"] = _push_refused(pushed.stderr, branch)
+        return result
+    result["pushed"] = True
+    return result
+
+
+def fetch_task_branch(cwd, branch, sha, remote):
+    """Fetch ``branch`` from origin and require its tip to be ``sha``.
+
+    ``remote`` is the parent's origin identity; a different repository here is
+    refused, never worked around. Leaves only a remote-tracking ref behind.
+    """
+    _task_branch(cwd, branch)
+    _require_sha(sha)
+    local = origin_identity(cwd)
+    if local is None:
+        raise ValueError("This project has no usable origin remote on this worker, so the task branch cannot be fetched.")
+    if local != remote:
+        raise ValueError("This worker's origin is a different repository from the calling worker's origin; "
+                         "clone the project from the same origin to run tasks here.")
+    try:
+        fetched = _run(cwd, "fetch", "--no-tags", "origin",
+                       "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+    except ValueError:
+        raise ValueError(f"Git timed out fetching {branch} from origin on this worker.") from None
+    if fetched.returncode:
+        raise ValueError(f"Could not fetch {branch} from origin on this worker. Check its Git credentials "
+                         "and connection to origin.")
+    tip = _run(cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + branch + "^{commit}")
+    if tip.returncode or tip.stdout.decode().strip() != sha:
+        raise ValueError(f"Origin's {branch} is not at the commit the calling worker sent; refusing to start from it.")
+    return sha
+
+
+def delete_untouched_task_branch(cwd, branch, base) -> dict:
+    """Delete ``branch`` on origin only while its tip is still ``base``.
+
+    The delete carries ``base`` as its expected old value, so origin itself
+    refuses it if anyone pushed meanwhile: no one's commits are deleted.
+    Returns ``deleted`` and a plain ``reason`` when it was left in place.
+    """
+    _task_branch(cwd, branch)
+    _require_sha(base)
+    try:
+        tip, reachable = _remote_tip(cwd, branch)
+        if not reachable:
+            return dict(deleted=False, reason="Could not reach origin from this worker; the branch was left in place.")
+        if tip is None:
+            return dict(deleted=False, reason=f"Origin has no {branch}; there was nothing to delete.")
+        if tip != base:
+            return dict(deleted=False, reason=f"Origin's {branch} has moved past its base commit; it was left alone.")
+        # Compare-and-delete: the lease is the expected old value, checked by
+        # origin under its ref lock, not a forced update.
+        removed = _run(cwd, "push", "--force-with-lease=refs/heads/" + branch + ":" + base,
+                       "origin", ":refs/heads/" + branch)
+    except ValueError:
+        return dict(deleted=False, reason="Git timed out reaching origin; the branch was left in place.")
+    if removed.returncode:
+        return dict(deleted=False, reason=_push_refused(removed.stderr, branch) + " The branch was left in place.")
+    return dict(deleted=True, reason=None)

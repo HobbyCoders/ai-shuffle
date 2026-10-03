@@ -139,6 +139,19 @@ def _caller_checkout(parent_row, expected: Optional[str]) -> Optional[str]:
     return None
 
 
+def _tool_surface(profile_id, tool_allowlist):
+    """The explicit tool surface: the allowlist, else the agent's allow-mode list."""
+    from app.db import database
+
+    if tool_allowlist:
+        return tool_allowlist
+    profile = database.get_profile(profile_id) or {}
+    config = profile.get("config") or {}
+    if config.get("tool_selection_mode", "allow") == "allow":
+        return config.get("allowed_tools")
+    return None
+
+
 def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None):
     """Provision write-capable project workers; explicit research may share.
 
@@ -149,15 +162,8 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     """
     from app.core import checkout_manager, project_resolver
     from app.core.git_service import git_service
-    from app.db import database
 
-    tools = tool_allowlist
-    if not tools:
-        profile = database.get_profile(profile_id) or {}
-        config = profile.get("config") or {}
-        if config.get("tool_selection_mode", "allow") == "allow":
-            tools = config.get("allowed_tools")
-    if _is_shared_surface(tools):
+    if _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
         return None
     if parent_row is None:
         raise WorkerCheckoutError("The calling session is unavailable; refusing worker checkout inheritance.")
@@ -360,3 +366,213 @@ def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
     exists = git_service._run_git(base_path, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=5)
     if exists.returncode != 0:
         git_service.create_branch(base_path, branch, start_point=sha)
+
+
+# --- Workers that run on another worker -------------------------------------
+#
+# Git moves between workers only through origin (``checkout_transfer``). The
+# parent publishes ``task/<worker id>`` at its committed HEAD; the target
+# fetches it and provisions the same isolated checkout a local worker gets.
+# Only identifiers travel: branch, base SHA, project id and an origin identity
+# hash. Paths, URLs and credentials never do.
+
+#: The worker runs in its own ``task/<id>`` checkout fetched from origin.
+REMOTE_BRANCH = "branch"
+#: A research-only surface: no push, the target's base checkout, read-only.
+REMOTE_SHARED = "shared"
+#: No project or not Git: nothing to transfer; run in the target's workspace.
+REMOTE_NONE = "none"
+
+_INVALID_STATE = "The worker checkout description is invalid; nothing was started."
+
+
+@dataclass(frozen=True)
+class RemoteWorkerBranch:
+    """What the parent sends the target about the worker's checkout."""
+
+    mode: str
+    project_v2_id: Optional[str] = None
+    branch: Optional[str] = None
+    base_commit: Optional[str] = None
+    parent_branch: Optional[str] = None
+    remote: Optional[str] = None
+    pushed: bool = False
+    reason: Optional[str] = None
+
+    def to_wire(self) -> Dict[str, Any]:
+        return {key: getattr(self, key) for key in self.__dataclass_fields__}
+
+    @classmethod
+    def from_wire(cls, body: Any) -> "RemoteWorkerBranch":
+        if not isinstance(body, dict) or body.get("mode") not in (REMOTE_BRANCH, REMOTE_SHARED, REMOTE_NONE):
+            raise WorkerCheckoutError(_INVALID_STATE)
+        text = {key: body.get(key) for key in cls.__dataclass_fields__ if key not in ("mode", "pushed")}
+        if any(value is not None and not isinstance(value, str) for value in text.values()):
+            raise WorkerCheckoutError(_INVALID_STATE)
+        return cls(str(body["mode"]), pushed=body.get("pushed") is True, **text)
+
+
+@dataclass(frozen=True)
+class ReceivedWorkerCheckout:
+    """Where a remote worker runs on the target.
+
+    ``checkout`` is set only for an isolated ``task/<id>`` checkout. ``cwd`` is
+    that checkout, the base checkout for a shared surface, or None when the
+    worker should run in this worker's workspace directory.
+    """
+
+    mode: str
+    cwd: Optional[str]
+    checkout: Optional[WorkerCheckout] = None
+
+
+def _state(state) -> RemoteWorkerBranch:
+    return state if isinstance(state, RemoteWorkerBranch) else RemoteWorkerBranch.from_wire(state)
+
+
+def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None) -> RemoteWorkerBranch:
+    """Parent side: push ``task/<worker id>`` at the caller's committed HEAD.
+
+    Same decisions as :func:`prepare_worker_checkout`: research-only surfaces
+    share (no push), no project or no Git checkout means nothing to transfer,
+    and a mismatched or missing bound checkout raises. Uncommitted parent
+    changes are not copied, as locally. The push is never forced; a failed push
+    returns ``pushed=False`` with a plain ``reason`` and the caller refuses.
+    No local branch is created on the parent.
+    """
+    from app.core import checkout_transfer, project_resolver
+    from app.core.git_service import git_service
+
+    row = dict(parent_row or {})
+    has_project = bool(row.get("project_v2_id") or row.get("project_id"))
+    if _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
+        project = project_resolver.resolve_project_v2(row) if has_project else None
+        if not project:
+            return RemoteWorkerBranch(REMOTE_NONE)
+        cwd = project_resolver.resolve_existing_cwd(row)
+        remote = checkout_transfer.origin_identity(cwd) if cwd and git_service.is_git_repo(cwd) else None
+        return RemoteWorkerBranch(REMOTE_SHARED, project_v2_id=project["id"], remote=remote)
+    if parent_row is None:
+        raise WorkerCheckoutError("The calling session is unavailable; refusing worker checkout inheritance.")
+    if not has_project:
+        return RemoteWorkerBranch(REMOTE_NONE)
+    project = project_resolver.resolve_project_v2(row)
+    if not project:
+        raise WorkerCheckoutError("The caller's project is unavailable; refusing shared coding checkout.")
+    expected = row.get("branch") or row.get("worktree_branch")
+    parent_path = _caller_checkout(parent_row, expected)
+    if not parent_path:
+        return RemoteWorkerBranch(REMOTE_NONE)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):
+        raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
+    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    target = expected or _current_branch(parent_path)
+    tip = git_service._run_git(parent_path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
+    sha = tip.stdout.strip()
+    if tip.returncode or not _SHA.fullmatch(sha):
+        raise WorkerCheckoutError("The caller has no valid committed HEAD to fork a worker from.")
+    published = checkout_transfer.publish_task_branch(parent_path, branch, sha)
+    return RemoteWorkerBranch(
+        REMOTE_BRANCH, project_v2_id=project["id"], branch=branch, base_commit=sha,
+        parent_branch=target, remote=published["remote"], pushed=published["pushed"],
+        reason=published["reason"],
+    )
+
+
+def _base_checkout_path(project_id: str) -> Optional[str]:
+    """This worker's base checkout of the project, when it exists on disk."""
+    from app.core import checkout_manager, project_resolver
+    from app.core.config import settings
+    from app.db import checkouts
+
+    runner = settings.effective_instance_id
+    if not checkouts.has_active_base_checkout(project_id, runner):
+        return None
+    row = project_resolver._local_checkout(project_id, runner)
+    path = checkout_manager._resolve_checkout_path(row["path"]) if row and row.get("path") else None
+    return path if path and os.path.isdir(path) else None
+
+
+def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
+    """Target side: fetch the parent's ``task/<id>`` and provision its checkout.
+
+    Refuses by name when the project is not checked out here or this origin is
+    a different repository. The new checkout must sit at exactly the SHA the
+    parent sent; any failure reclaims what this call created.
+    """
+    from app.core import checkout_manager, checkout_transfer
+    from app.core.git_service import git_service
+    from app.db import projects_v2
+
+    sent = _state(state)
+    if sent.mode == REMOTE_NONE:
+        return ReceivedWorkerCheckout(REMOTE_NONE, None)
+    project = projects_v2.get_project_v2(sent.project_v2_id) if sent.project_v2_id else None
+    base = _base_checkout_path(project["id"]) if project else None
+    if not project or not base:
+        raise WorkerCheckoutError("This project is not checked out on this worker; open or clone it here "
+                                  "first. Nothing was started.")
+    if not git_service.is_git_repo(base):
+        raise WorkerCheckoutError("This worker's checkout of the project is not a Git repository; nothing was started.")
+    if sent.remote is not None and checkout_transfer.origin_identity(base) != sent.remote:
+        raise WorkerCheckoutError("This worker's origin is a different repository from the calling worker's "
+                                  "origin; clone the project from the same origin to run tasks here. "
+                                  "Nothing was started.")
+    if sent.mode == REMOTE_SHARED:
+        return ReceivedWorkerCheckout(REMOTE_SHARED, base)
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id or ""):
+        raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
+    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    sha = sent.base_commit or ""
+    if sent.branch != branch or not _SHA.fullmatch(sha):
+        raise WorkerCheckoutError("The worker checkout description does not match this worker; nothing was started.")
+    if not sent.pushed or sent.remote is None:
+        raise WorkerCheckoutError(f"The calling worker did not publish {branch} to origin; nothing was started.")
+    with _project_lock(project["id"]):
+        try:
+            checkout_transfer.fetch_task_branch(base, branch, sha, sent.remote)
+        except ValueError as exc:
+            raise WorkerCheckoutError(f"{exc} Nothing was started.") from None
+        # The local ref first, at the fetched SHA, so ensure_checkout adopts it
+        # instead of forking from an origin/<base> tip.
+        if not git_service.create_branch(base, branch, start_point=sha):
+            raise WorkerCheckoutError(f"Could not create dedicated worker branch {branch}; refusing to reuse it.")
+        path = None
+        try:
+            path = checkout_manager.ensure_checkout(project, branch=branch, provision_runtime=False)
+            if not path:
+                raise WorkerCheckoutError(f"Could not provision dedicated checkout for {branch}; nothing was started.")
+            checkout_manager._require_branch_binding(path, branch)
+            actual = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
+            if actual.returncode or actual.stdout.strip() != sha:
+                raise WorkerCheckoutError(f"Dedicated checkout {path} does not match the commit the calling "
+                                          "worker sent; refusing launch.")
+        except BaseException:
+            # Nothing has run in it yet: reclaim what this call created.
+            _reclaim(base, project["id"], path, branch, sha)
+            raise
+    checkout = WorkerCheckout(path, branch, sha, project["id"], sent.parent_branch)
+    return ReceivedWorkerCheckout(REMOTE_BRANCH, path, checkout)
+
+
+def release_worker_branch(state) -> Dict[str, Any]:
+    """Parent side: delete the published ``task/<id>`` on origin if untouched.
+
+    Compare-and-delete against the base SHA, so a branch carrying anyone's new
+    commits stays. Returns ``deleted`` and a plain ``reason``; never raises for
+    Git failures.
+    """
+    from app.core import checkout_transfer
+
+    sent = _state(state)
+    if sent.mode != REMOTE_BRANCH or not sent.pushed or not sent.branch or not sent.base_commit:
+        return {"deleted": False, "reason": "Nothing was published to origin for this worker."}
+    base = _base_checkout_path(sent.project_v2_id) if sent.project_v2_id else None
+    if not base:
+        return {"deleted": False,
+                "reason": "This project is not checked out on this worker; the branch was left in place."}
+    try:
+        return checkout_transfer.delete_untouched_task_branch(base, sent.branch, sent.base_commit)
+    except ValueError as exc:
+        return {"deleted": False, "reason": str(exc)}
