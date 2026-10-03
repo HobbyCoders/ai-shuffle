@@ -18,7 +18,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import asyncssh
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
@@ -68,6 +68,11 @@ class GrantSubmission(BaseModel):
     saved_id: str = Field(default="", max_length=32)
     minutes: int = Field(default=60, ge=1, le=480)
     save_connection: StrictBool = False
+    # A plugin service request is answered with the owner's sign-in, not a
+    # connection: ``sign_in`` true, and ``writable`` only where the plugin
+    # declares write access.
+    sign_in: StrictBool = False
+    writable: StrictBool = False
 
 
 @dataclass(repr=False)
@@ -91,6 +96,8 @@ class Grant:
     origin: chat_services.Origin | None = None
     header: tuple[str, str] | None = None
     secret: str = ""
+    # A plugin service grant: the declared sign-in whose token is attached.
+    plugin: Any = None  # app.core.plugin_oauth.OAuthConfig
     revoked: bool = False
     ready: bool = True
     saved_id: str = ""
@@ -98,9 +105,12 @@ class Grant:
     tasks: set = field(default_factory=set)
 
     def public(self):
-        return {key: getattr(self, key) for key in (
+        result = {key: getattr(self, key) for key in (
             "id", "label", "kind", "target", "expires_at", "writable", "fingerprint"
         )}
+        if self.plugin is not None:
+            result.update(plugin=self.plugin.plugin_id, service=self.plugin.service)
+        return result
 
     def model_public(self):
         # User-entered connection details never become durable tool results.
@@ -136,6 +146,8 @@ class AccessRequest:
     suggested_path: str = ""
     service_provider: str = ""
     suggested_url: str = ""
+    plugin_id: str = ""
+    plugin_service: str = ""
     timer: asyncio.TimerHandle | None = None
 
     def model_pending(self):
@@ -149,6 +161,10 @@ class AccessRequest:
         if self.kind == "service":
             result.update(status="awaiting_user", service_provider=self.service_provider,
                           suggested_url=self.suggested_url)
+            if self.plugin_id:
+                # The card offers "sign in" for this plugin service; its state
+                # comes from GET /api/v1/plugins/oauth/status.
+                result.update(plugin=self.plugin_id, service=self.plugin_service)
         return result
 
 
@@ -321,8 +337,20 @@ class Broker:
             raise RequestUnavailable("Session ownership changed.")
 
     async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = "",
-                      service_provider: str = "", suggested_url: str = ""):
+                      service_provider: str = "", suggested_url: str = "", plugin: str = "",
+                      service: str = ""):
         owner = await session_owner(session_id)
+        if not isinstance(plugin, str) or not isinstance(service, str):
+            raise AccessDenied("Name an installed plugin and one service it declares.")
+        if plugin or service:
+            if kind != "service" or not (plugin and service):
+                raise AccessDenied("A plugin sign-in request needs kind service, the plugin id and the service name.")
+            if service_provider or suggested_url:
+                raise AccessDenied("A plugin service's address comes from the plugin; omit service_provider and suggested_url.")
+            config = await _plugin_config(plugin, service)
+            # The declared address, shown on the card; the plugin chose it, not the model.
+            service_provider = "custom"
+            suggested_url = chat_services.parse_origin(config.service_url).url
         if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
             raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
         if not isinstance(suggested_path, str) or (suggested_path and (
@@ -336,7 +364,7 @@ class Broker:
             raise AccessDenied("Specify a service provider and a public HTTPS API base address.")
         if (service_provider or suggested_url) and kind != "service":
             raise AccessDenied("Service setup hints are only available for service requests.")
-        if kind == "service":
+        if kind == "service" and not plugin:
             service_provider = service_provider or ("cloudflare" if suggested_url.rstrip("/") == CLOUDFLARE_API_URL else "custom")
             if service_provider not in {"cloudflare", "custom"}:
                 raise AccessDenied("Choose cloudflare or custom for the service provider.")
@@ -356,14 +384,15 @@ class Broker:
                 suggested_url = CLOUDFLARE_API_URL
         for pending in self._live_requests(session_id, owner):
             if (kind == "service" and pending.kind == kind and pending.purpose == purpose.strip()
-                    and pending.service_provider == service_provider and pending.suggested_url == suggested_url):
+                    and pending.service_provider == service_provider and pending.suggested_url == suggested_url
+                    and pending.plugin_id == plugin and pending.plugin_service == service):
                 return pending.model_pending()
             raise AccessDenied("A private access request is already awaiting the user.")
         duration = SERVICE_PREPARATION_SECONDS if kind == "service" else 240
         request = AccessRequest(uuid.uuid4().hex, session_id, owner, kind, purpose.strip(),
                                 time.time() + duration, asyncio.get_running_loop().create_future(),
                                 suggested_path=suggested_path, service_provider=service_provider,
-                                suggested_url=suggested_url)
+                                suggested_url=suggested_url, plugin_id=plugin, plugin_service=service)
         self.requests[request.id] = request
         self._notify(session_id, owner)
         if kind == "service":
@@ -397,7 +426,17 @@ class Broker:
         try:
             from app.core import chat_vault
             from app.db.async_database import run_sync
-            if submission.saved_id:
+            plugin = None
+            if request.plugin_id or submission.sign_in:
+                # Answered only with the owner's sign-in to the declared service:
+                # never a typed key, a saved connection or another address.
+                if (not (request.plugin_id and submission.sign_in) or submission.connection is not None
+                        or submission.saved_id or submission.save_connection):
+                    raise AccessDenied("This request is for a plugin's service: answer it by signing in.")
+                plugin = await _plugin_config(request.plugin_id, request.plugin_service)
+                spec = GrantInput(kind="service", label=f"{plugin.service} ({plugin.plugin_id})"[:80],
+                                  url=plugin.service_url, writable=submission.writable)
+            elif submission.saved_id:
                 if submission.connection is not None or submission.save_connection:
                     raise AccessDenied("Choose either a saved connection or new private inputs.")
                 spec = await run_sync(chat_vault.load, request.owner, submission.saved_id)
@@ -406,7 +445,7 @@ class Broker:
             if spec is None or request.kind != spec.kind:
                 raise AccessDenied("The requested resource type changed.")
             spec = spec.model_copy(update={"minutes": submission.minutes})
-            grant = await self.create(session_id, spec, request=request)
+            grant = await self.create(session_id, spec, request=request, plugin=plugin)
             await self._check_request(request)
             saved_id = submission.saved_id
             if submission.save_connection:
@@ -529,7 +568,8 @@ class Broker:
             connect_timeout=10, login_timeout=10,
         )
 
-    async def create(self, session_id: str, spec: GrantInput, *, request: AccessRequest | None = None) -> dict:
+    async def create(self, session_id: str, spec: GrantInput, *, request: AccessRequest | None = None,
+                     plugin=None) -> dict:
         owner = await session_owner(session_id)
         if sum(g.session_id == session_id for g in self.grants.values()) >= 8:
             raise AccessDenied("A session may have at most eight active grants.")
@@ -555,6 +595,21 @@ class Broker:
                     raise AccessDenied("Choose a folder, not a file or symbolic link.") from None
                 except PermissionError:
                     raise AccessDenied("The worker cannot read this folder. Choose a folder its account can access.") from None
+            elif spec.kind == "service" and plugin is not None:
+                # The plugin's declared address; the token is fetched per request.
+                origin = chat_services.parse_origin(plugin.service_url)
+                if spec.writable and plugin.access != "write":
+                    raise AccessDenied("This plugin declares read-only access to this service; grant it read-only.")
+                from app.core import plugin_oauth
+                from app.db.async_database import run_sync
+                try:
+                    state = (await run_sync(plugin_oauth.status, plugin))["state"]
+                except plugin_oauth.PluginOAuthError as exc:
+                    raise AccessDenied(str(exc)) from None
+                if state != "signed_in":
+                    raise AccessDenied(f"Sign in to {plugin.service} first, then grant access.")
+                await chat_services.verify_origin(origin)
+                grant.origin, grant.plugin, grant.target = origin, plugin, origin.url
             elif spec.kind == "service":
                 origin = chat_services.parse_origin(spec.url.strip())
                 header = chat_services.credential_header(
@@ -809,6 +864,9 @@ class Broker:
             # The approval card shows exactly what is sent; the credential is never an argument.
             arguments = {"method": method, "path": path, "body": body,
                          "content_type": (content_type or "application/json") if body else ""}
+            if grant.plugin is not None:
+                # Refuse before asking for approval when the plugin changed.
+                await _current_plugin(grant)
         elif operation in ("list", "read", "write"):
             if grant.kind != "folder" or grant.root is None:
                 raise AccessDenied("This operation requires a folder grant.")
@@ -836,6 +894,8 @@ class Broker:
                 work = chat_shell.run(root, grant.writable, arguments["command"])
             elif operation == "command":
                 work = self.remote_command(grant, arguments["command"])
+            elif grant.plugin is not None:
+                work = _plugin_http(grant, arguments)
             else:
                 work = chat_services.perform(grant.origin, grant.header, grant.secret, arguments["method"],
                                              arguments["path"], arguments["body"], arguments["content_type"],
@@ -891,6 +951,53 @@ class Broker:
 
 
 broker = Broker()
+
+
+async def _plugin_config(plugin_id: str, service: str):
+    """The sign-in an installed, switched-on and approved plugin declares for
+    ``service``; refusals are plain AccessDenied wording without secrets."""
+    from app.core import plugin_oauth
+    from app.db.async_database import run_sync
+    try:
+        return await run_sync(plugin_oauth.installed_config, plugin_id, service)
+    except plugin_oauth.PluginOAuthError as exc:
+        raise AccessDenied(str(exc)) from None
+
+
+async def _current_plugin(grant: Grant):
+    """The grant's plugin service as declared now; refused when the plugin was
+    turned off or its declaration (address, endpoints, scopes, access) changed."""
+    current = await _plugin_config(grant.plugin.plugin_id, grant.plugin.service)
+    if current != grant.plugin:
+        raise AccessDenied("The plugin's declaration for this service changed. Request access again.")
+    return current
+
+
+def _sign_in_problem(service: str, exc: BaseException) -> AccessDenied:
+    return AccessDenied(f"The sign-in for {service} could not be used. {exc}")
+
+
+async def _plugin_http(grant: Grant, arguments: dict) -> dict:
+    """One request with the plugin service's access token. On a 401 the token
+    is refreshed once and the request sent once more. The token is attached
+    here and redacted from what is returned; it never reaches a tool result,
+    an exception message or a log."""
+    from app.core import plugin_oauth
+    config = await _current_plugin(grant)
+    request = (arguments["method"], arguments["path"], arguments["body"], arguments["content_type"])
+    try:
+        token = await plugin_oauth.access_token_for_use(config)
+    except plugin_oauth.PluginOAuthError as exc:
+        raise _sign_in_problem(config.service, exc) from None
+    result = await chat_services.perform(grant.origin, ("Authorization", f"Bearer {token}"), token, *request)
+    if result["status"] != 401:
+        return result
+    try:
+        fresh = await plugin_oauth.access_token_for_use(config, force_refresh=True)
+    except plugin_oauth.PluginOAuthError as exc:
+        raise _sign_in_problem(config.service, exc) from None
+    return await chat_services.perform(grant.origin, ("Authorization", f"Bearer {fresh}"), fresh, *request,
+                                       also_redact=(token,))
 
 
 async def _defer_if_away(session_id: str, action: str) -> None:

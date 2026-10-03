@@ -99,6 +99,8 @@ class Service:
         self.dripping = asyncio.Event()
         self.drip_closed = asyncio.Event()
         self.port = 0
+        # Authorization header values answered with 401 (an expired token).
+        self.rejected: set[str] = set()
 
     async def handle(self, reader, writer):
         self.connections += 1
@@ -125,7 +127,10 @@ class Service:
         )
         extra = {}
         status = "200 OK"
-        if target.startswith("/api/echo"):
+        if headers.get("authorization") in self.rejected:
+            status = "401 Unauthorized"
+            payload = json.dumps({"rejected": headers["authorization"]}).encode()
+        elif target.startswith("/api/echo"):
             payload = json.dumps(
                 {
                     "headers": headers,

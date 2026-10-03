@@ -26,7 +26,7 @@ Provider response bodies, codes, tokens and client secrets never reach a log,
 an exception message or a value meant for the model.
 
 Entry points for the sign-in routes and ``ChatHttpRequest`` (slice 2):
-:func:`config_from_manifest`, :func:`start_sign_in`,
+:func:`installed_config`, :func:`config_from_manifest`, :func:`start_sign_in`,
 :func:`complete_sign_in`, :func:`access_token_for_use`, :func:`sign_out`,
 :func:`status`, and the client functions :func:`save_client`,
 :func:`delete_client`.
@@ -63,6 +63,8 @@ _SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _CLIENT_ID_RE = re.compile(r"^[\x21-\x7e]{1,512}$")
 
 _MESSAGES = {
+    "not_installed": "That plugin is not installed on this worker.",
+    "plugin_off": "Turn this plugin on in Settings > Plugins before signing in to its services.",
     "not_declared": "This plugin does not declare a sign-in for that service.",
     "invalid_declaration": "This plugin's sign-in declaration is not valid, so it cannot be used.",
     "invalid_client": "The OAuth client ID or secret is not in a usable form.",
@@ -102,6 +104,7 @@ class OAuthConfig:
     token_url: str
     scopes: tuple[str, ...]
     revoke_url: str = ""
+    access: str = "read"  # declared: "read" (GET/HEAD) or "write"
 
 
 def _check_ids(plugin_id: Any, service: Any) -> None:
@@ -141,7 +144,70 @@ def config_from_manifest(plugin_id: str, manifest: Mapping[str, Any], service: s
         plugin_id=plugin_id, service=service, service_url=str(url),
         authorize_url=auth["authorize_url"], token_url=auth["token_url"],
         scopes=tuple(auth["scopes"]), revoke_url=auth.get("revoke_url", ""),
+        access="write" if entries[0].get("access") == "write" else "read",
     )
+
+
+def _installed_manifest(plugin_id: str, *, require_on: bool) -> Mapping[str, Any]:
+    from pathlib import Path
+
+    from app.core.plugin_service import get_plugin_service, plugin_record
+
+    if not isinstance(plugin_id, str) or not _PLUGIN_ID_RE.match(plugin_id):
+        raise PluginOAuthError("not_installed")
+    try:
+        details = get_plugin_service().get_plugin_details(plugin_id)
+    except Exception:  # noqa: BLE001 - an unreadable install reads as missing
+        details = None
+    install_path = getattr(details, "install_path", "") if details is not None else ""
+    if not install_path:
+        raise PluginOAuthError("not_installed")
+    # Enabled AND approved: an agent's install or an authored draft waiting
+    # for review (approval "pending") never reaches a sign-in.
+    if require_on and (getattr(details, "enabled", False) is not True
+                       or getattr(details, "approval", None) == "pending"):
+        raise PluginOAuthError("plugin_off")
+    name, _, source = plugin_id.rpartition("@")
+    record = plugin_record(Path(install_path), name, source, getattr(details, "version", None))
+    manifest = getattr(record, "manifest", None)
+    if not isinstance(manifest, Mapping):
+        raise PluginOAuthError("not_declared")
+    return manifest
+
+
+def installed_config(plugin_id: str, service: str, *, require_on: bool = True) -> OAuthConfig:
+    """The sign-in an installed (user-scope) plugin declares for ``service``,
+    read from the plugin as it is on disk now.
+
+    With ``require_on`` (the default) the plugin must be switched on and
+    approved. Refuses ``not_installed``, ``plugin_off``, ``not_declared`` or
+    ``invalid_declaration``. Blocking: call through ``run_sync``.
+    """
+    return config_from_manifest(plugin_id, _installed_manifest(plugin_id, require_on=require_on), service)
+
+
+def plugin_ready(plugin_id: str) -> bool:
+    """Whether an installed plugin is switched on and approved, so its
+    sign-ins can start and its grants can be used."""
+    try:
+        _installed_manifest(plugin_id, require_on=True)
+    except PluginOAuthError as exc:
+        return exc.reason != "plugin_off"
+    return True
+
+
+def installed_services(plugin_id: str) -> list[str]:
+    """Names of the services an installed plugin declares a sign-in for, in
+    manifest order, whether or not the declaration is valid."""
+    manifest = _installed_manifest(plugin_id, require_on=False)
+    extensions = manifest.get("extensions")
+    shuffle = extensions.get("ai.shuffle") if isinstance(extensions, Mapping) else None
+    services = shuffle.get("services") if isinstance(shuffle, Mapping) else None
+    names = [
+        s["name"] for s in (services if isinstance(services, list) else [])
+        if isinstance(s, dict) and "auth" in s and isinstance(s.get("name"), str) and _SERVICE_RE.match(s["name"])
+    ]
+    return list(dict.fromkeys(names))[:20]
 
 
 # ─── client and tokens ───────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ from app.api import tools as tools_api
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
 from app.api import network as network_api
+from app.api import plugin_oauth as plugin_oauth_api
 
 # Import middleware
 from app.middleware.csrf import CSRFProtectionMiddleware
@@ -569,6 +570,8 @@ app.include_router(github.router)
 app.include_router(github_inbox.router)
 app.include_router(git.router)
 app.include_router(git_operations.router)
+# Before plugins.router: its catch-all /{plugin_id:path} would take /oauth/*.
+app.include_router(plugin_oauth_api.router)
 app.include_router(plugins.router)
 app.include_router(notes.router)
 app.include_router(hooks.router)

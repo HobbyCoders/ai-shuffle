@@ -37,7 +37,11 @@ and can be reopened without rushing setup. Do not poll, re-request, or assume
 consent. Continue only after the user confirms readiness, then call ChatResources
 for the approved handle. Identical retries reuse pending preparation without
 extending it; cancelled or expired cards require a new request with user consent.
-No generic OAuth is available; do not promise it or collect OAuth client secrets.
+When an installed plugin declares a sign-in for the service, pass plugin (its
+id) and service (the declared name) instead of the hints: the card lets the
+user sign in, and ChatHttpRequest then attaches that sign-in's token to the
+plugin's declared address only. There is no other OAuth; never collect OAuth
+client secrets or tokens.
 Grants expire and are lost on restart. Supported resources are SSH machines,
 Linux or macOS folders and HTTPS API services. A service grant holds one API key or token
 which ChatHttpRequest attaches for you; you never see it, and responses are
@@ -77,7 +81,8 @@ def create_chat_access_server(session_id: str):
                 result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""),
                                               suggested_path=args.get("suggested_path", ""),
                                               service_provider=args.get("service_provider", ""),
-                                              suggested_url=args.get("suggested_url", ""))
+                                              suggested_url=args.get("suggested_url", ""),
+                                              plugin=args.get("plugin", ""), service=args.get("service", ""))
             elif operation == "resources":
                 # Grant metadata only: pending command/write contents belong to
                 # the approval UI, saved connections to the access panel.
@@ -92,7 +97,7 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private access card for an SSH machine, Linux or macOS folder, or HTTPS API service. Explain why access is needed. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, not access; preparation lasts 24 hours and identical retries resume it. The user explicitly submits private inputs when ready. After the user confirms readiness, call ChatResources for the approved handle; do not poll or assume consent. For folders, suggested_path is a known absolute path on the owning worker. For services, service_provider chooses cloudflare or custom; suggested_url is a known PUBLIC HTTPS API base without credentials/query/fragment. Cloudflare prefills its official endpoint. Hints grant no access. Never put secrets or private connection details in tool arguments, and do not promise generic OAuth.", {
+    @tool("RequestChatAccess", "Show a private access card for an SSH machine, Linux or macOS folder, or HTTPS API service. Explain why access is needed. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, not access; preparation lasts 24 hours and identical retries resume it. The user explicitly submits private inputs when ready. After the user confirms readiness, call ChatResources for the approved handle; do not poll or assume consent. For folders, suggested_path is a known absolute path on the owning worker. For services, service_provider chooses cloudflare or custom; suggested_url is a known PUBLIC HTTPS API base without credentials/query/fragment. Cloudflare prefills its official endpoint. For a service an installed plugin declares a sign-in for, pass plugin and service instead of the hints; the user signs in from the card. Hints grant no access. Never put secrets or private connection details in tool arguments, and do not promise generic OAuth.", {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
@@ -100,6 +105,8 @@ def create_chat_access_server(session_id: str):
             "suggested_path": {"type": "string", "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown."},
             "service_provider": {"type": "string", "enum": ["cloudflare", "custom"], "description": "Service only: known provider preset, or custom. Omit for other kinds."},
             "suggested_url": {"type": "string", "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown."},
+            "plugin": {"type": "string", "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints."},
+            "service": {"type": "string", "description": "Service only: the service name that plugin declares. Use with plugin."},
         },
         "required": ["kind", "purpose"],
     })

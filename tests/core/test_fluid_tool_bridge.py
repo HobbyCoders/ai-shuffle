@@ -76,6 +76,14 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
                 "type": "string",
                 "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown.",
             },
+            "plugin": {
+                "type": "string",
+                "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints.",
+            },
+            "service": {
+                "type": "string",
+                "description": "Service only: the service name that plugin declares. Use with plugin.",
+            },
         },
         "required": ["kind", "purpose"],
     }

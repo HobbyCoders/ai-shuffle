@@ -358,7 +358,11 @@ async def perform(
     body: str,
     content_type: str,
     pin: str = "",
+    also_redact: tuple[str, ...] = (),
 ) -> dict:
+    """Send one request with the credential header. ``also_redact`` names
+    earlier credentials (a token replaced by a refresh) kept out of the result
+    as well."""
     url = request_url(origin, path)
     headers = {
         "Accept": "*/*",
@@ -368,7 +372,10 @@ async def perform(
     }
     if body:
         headers["Content-Type"] = content_type or "application/json"
-    needles = _needles(secret, header[1])
+    needles = sorted(
+        set(_needles(secret, header[1])).union(*(_needles(old, old) for old in also_redact if old)),
+        key=len, reverse=True,
+    )
     keep = LIMIT + max((len(n) for n in needles), default=0)
     try:
         async with (

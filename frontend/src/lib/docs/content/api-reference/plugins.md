@@ -1,6 +1,6 @@
 <!--
 title: Plugins
-description: Plugin marketplaces, installing, enabling and updating plugins, automatic updates, file-based agents and connector plugin runtimes
+description: Plugin marketplaces, installing, enabling and updating plugins, automatic updates, file-based agents, connector plugin runtimes and service sign-in
 order: 11
 -->
 
@@ -480,3 +480,64 @@ curl -X POST http://localhost:8000/api/v1/plugins/runtime/telegram%40shuffle-con
 ```
 
 Returns `409` if there is no previous version, if any connection of this type is active or has an enabled automation (disable the connections and pause the automations first), or if the previous version fails its integrity check.
+
+## Service sign-in (OAuth)
+
+A plugin can declare an outside service it needs and how the owner signs in to it: `extensions["ai.shuffle"].services[].auth` with OAuth 2.0 authorization code and PKCE, public endpoints and scope names only (see [Plugin format](/docs/features/plugins)). The owner supplies the OAuth client and signs in through these endpoints. The client and the tokens are stored encrypted on this worker and are never copied to other devices; each worker signs in on its own. No endpoint returns a client secret, an authorization code or a token.
+
+Only a plugin that is switched on and approved can start a sign-in. An agent cannot sign in, enter a client or read a token; it asks with `RequestChatAccess(kind="service", plugin, service)` and receives a grant handle (see [Private Access](/docs/api-reference/sessions#private-access)).
+
+**Return address.** The sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. Register that exact URL as a redirect URI in the provider's OAuth app. It must be `https://` or `http://localhost` (or `127.0.0.1`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://localhost:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address you did not register. `GET /status` shows the address for the current connection in `redirect_uri`.
+
+**Auth:** Owner only. `PUT /client` additionally needs the desktop app window, the worker's HTTPS address or a browser on the worker's own machine, as for private access inputs; other connections get `403`.
+
+### GET /api/v1/plugins/oauth/status
+
+Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lists every service the plugin declares a sign-in for.
+
+```json
+{
+  "plugin_id": "dns-reader@my-marketplace",
+  "enabled": true,
+  "redirect_uri": "https://shuffle.example.com/api/v1/plugins/oauth/callback",
+  "services": [
+    {
+      "plugin_id": "dns-reader@my-marketplace",
+      "service": "cloudflare",
+      "state": "signed_in",
+      "reason": "",
+      "client_configured": true,
+      "client_id": "abc123",
+      "requested_scopes": ["zone:read"],
+      "scopes": ["zone:read"],
+      "missing_scopes": [],
+      "expires_at": 1790000000.0,
+      "can_refresh": true,
+      "access": "read",
+      "authorize_host": "dash.cloudflare.com"
+    }
+  ]
+}
+```
+
+`enabled` is true when the plugin is switched on and approved. `state` is `not_configured` (no OAuth client yet), `signed_out`, `signed_in`, `needs_sign_in` or `invalid` (the plugin's declaration fails validation and cannot be used). For `needs_sign_in`, `reason` is `scopes_widened`, `endpoint_changed`, `client_changed`, `expired` or `unreadable`. `access` is the declared access, `read` (GET and HEAD) or `write`. Returns `404` for a plugin that is not installed or a service it does not declare a sign-in for.
+
+### PUT /api/v1/plugins/oauth/client
+
+Save the OAuth client for a plugin service: `{"plugin": "...", "service": "...", "client_id": "...", "client_secret": "..."}`. `client_secret` is optional (leave it out for a public client). Saving a different `client_id` removes the existing sign-in. Returns the service entry from `GET /status`. Validation errors return `422` and never echo the secret; a malformed client returns `400`; locked credential storage returns `409`.
+
+### DELETE /api/v1/plugins/oauth/client
+
+Query: `plugin` and `service`. Removes the client and its sign-in, also for a plugin that has been uninstalled. Returns `{"deleted": true}` when a client was saved.
+
+### POST /api/v1/plugins/oauth/start
+
+Body: `{"plugin": "...", "service": "..."}`. Returns `authorization_url` (open it in the same browser), `flow_id`, `redirect_uri` and `expires_in` (600 seconds). Sets an HttpOnly cookie scoped to the callback path that ties the sign-in to this browser. The pending sign-in is also tied to the owner session that started it, can be used once, and expires after 10 minutes. Returns `409` when the plugin is off or not approved, or when no client is saved, `400` for a return address that is not HTTPS or localhost, and `429` when 64 sign-ins are already waiting.
+
+### GET /api/v1/plugins/oauth/callback
+
+The provider sends the browser here. Not called directly. It needs the `state` from a pending sign-in, the cookie set by `/start` and the same owner session; an unknown, used or expired `state`, another browser or another session gets `400`. The plugin must still be switched on, approved and declare the same sign-in, or nothing is saved. On success the worker exchanges the code with the provider and stores the tokens. The response is a small page (`Cache-Control: no-store`, no referrer) that posts `{"type": "plugin-oauth", "flow_id", "plugin_id", "service", "state", "error"}` to the window that opened it and closes. It never carries the code or a token.
+
+### POST /api/v1/plugins/oauth/sign-out
+
+Body: `{"plugin": "...", "service": "..."}`. Removes the saved tokens, then revokes them at the provider when the plugin declares a `revoke_url`. Returns `{"signed_out": true, "revoked": true}`; `revoked` is false when there is no revocation endpoint or the provider could not be reached. For a plugin that is no longer installed, the local tokens are still removed.
