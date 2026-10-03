@@ -13,11 +13,12 @@ export type DesktopCommand =
 	| 'command-palette'
 	| 'toggle-sidebar'
 	| 'open-settings'
+	| 'open-updates'
 	| 'focus-composer'
 	| 'find';
 
 export interface MenuActions {
-	/** Preview builds do not check for or install stable updates. */
+	/** Preview builds do not check for or install stable updates, so they hide the item. */
 	updatesEnabled?: boolean;
 	command(name: DesktopCommand): void;
 	restartWorker(): void;
@@ -25,7 +26,8 @@ export interface MenuActions {
 	showLogs(): void;
 	showPostgresLogs(): void;
 	openInBrowser(): void;
-	checkForUpdates(): void;
+	/** Show the window on the in-app Updates section; updates are checked there, not natively. */
+	openUpdates(): void;
 	reload(): void;
 	openDocs(): void;
 	/** The "agents run as you" disclosure. */
@@ -41,7 +43,7 @@ export function installMenu(actions: MenuActions): void {
 					label: app.name,
 					submenu: [
 						{ role: 'about' },
-						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.checkForUpdates() },
+						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.openUpdates() },
 						{ type: 'separator' },
 						{ label: 'Settings…', accelerator: 'Cmd+,', click: () => actions.command('open-settings') },
 						{ type: 'separator' },
@@ -137,7 +139,7 @@ export function installMenu(actions: MenuActions): void {
 				? []
 				: ([
 						{ type: 'separator' },
-						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.checkForUpdates() },
+						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.openUpdates() },
 						{ label: `AI Shuffle Desktop ${app.getVersion()}`, enabled: false }
 					] as MenuItemConstructorOptions[]))
 		]

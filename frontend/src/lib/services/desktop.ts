@@ -56,6 +56,7 @@ export type DesktopCommand =
 	| 'command-palette'
 	| 'toggle-sidebar'
 	| 'open-settings'
+	| 'open-updates'
 	| 'focus-composer'
 	| 'find'
 	| 'open-docs';
@@ -126,6 +127,12 @@ async function runCommand(command: string): Promise<void> {
 	if (command === 'focus-composer') {
 		const editor = document.querySelector<HTMLElement>('[data-composer-editor], .ProseMirror');
 		editor?.focus();
+		return;
+	}
+	if (command === 'open-updates') {
+		// The shell's "Check for Updates…" lands on the in-app Updates section.
+		const { openSettings } = await import('$lib/settings/navigation.svelte');
+		openSettings({ category: 'system', anchor: 'system.checkUpdates' });
 		return;
 	}
 	if (command === 'open-docs') {

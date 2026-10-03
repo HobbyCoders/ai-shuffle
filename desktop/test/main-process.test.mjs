@@ -86,6 +86,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	let updater;
 	let menu;
 	let tray;
+	let trayName;
 	let ipc;
 	const replacements = {
 		electron: electronFake(app, errors, messageBox),
@@ -100,7 +101,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./disclosure': { AGENT_ACCESS: {}, agentAccessDetail: () => '', DisclosureStore: { forProfile: () => ({}) }, ensureAgentAccessAcknowledged: acknowledge },
 		'./postgres': { PostgresSupervisor, resolvePostgresBinaries: () => ({}) },
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
-		'./tray': { installTray: (actions) => { tray = actions; } },
+		'./tray': { installTray: (actions, name) => { tray = actions; trayName = name; } },
 		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors, messageBox)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
 		'./installer-updates': { InstallerUpdates: class {}, installerPlatform: () => null },
 		'./window': { MainWindow, PARTITION: 'test' },
@@ -114,7 +115,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}, { filename: file });
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, serviceWorkerClears, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get ipc() { return ipc; }, get updater() { return updater; } };
+	return { app, appEvents, pages, errors, serviceWorkerClears, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get trayName() { return trayName; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
 
 function electronFake(app, errors, messageBox) {
@@ -194,6 +195,21 @@ test('Worker Status… while the worker runs offers a way back to the worker UI'
 	await main.window.showPage('status');
 	await main.ipc.worker.openUi();
 	assert.deepEqual(main.pages, ['status', URL_READY, 'status']);
+});
+
+test("the menu's Check for Updates shows the window on the in-app Updates screen and runs no native check", async () => {
+	const asked = [];
+	const main = await launch({ messageBox: async (options) => { asked.push(options); return { response: 1 }; } });
+	assert.equal(main.menu.checkForUpdates, undefined, 'the native dialog check is gone');
+	assert.equal(main.menu.updatesEnabled, true, 'stable builds still show the item');
+	main.window.sent.length = 0;
+	main.menu.openUpdates();
+	for (let i = 0; i < 5; i++) await tick();
+	assert.equal(main.window.browserWindow.shown, true);
+	assert.deepEqual(main.window.sent, [['desktop:command', 'open-updates']]);
+	assert.deepEqual(asked, []);
+	// The tray shows the product name, not the package name app.name reports.
+	assert.equal(main.trayName, 'AI Shuffle');
 });
 
 /** A staged source update whose install step fails after the pre-install stop. */

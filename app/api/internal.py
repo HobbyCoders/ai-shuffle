@@ -85,8 +85,8 @@ class DesktopUpdateAction(BaseModel):
 
 @router.get("/desktop/update-workers")
 async def desktop_update_workers(request: Request):
-    """The same update snapshot and plan the sidebar button reads, for the
-    desktop's native Check for Updates."""
+    """The same update snapshot and plan the sidebar button reads. Only older
+    desktop shells call it, from their native Check for Updates dialog."""
     require_desktop(request)
     from app.core.update_workers import snapshot
     return await snapshot()
@@ -95,7 +95,7 @@ async def desktop_update_workers(request: Request):
 @router.post("/desktop/update-action")
 async def desktop_update_action(body: DesktopUpdateAction, request: Request):
     """The same dispatch as the web button: the account's all-workers scope,
-    readiness rule and refusals apply to the native menu too."""
+    readiness rule and refusals apply to older desktop shells' native menu too."""
     require_desktop(request)
     from fastapi import HTTPException
     from app.core.update_workers import dispatch

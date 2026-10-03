@@ -49,11 +49,10 @@ credential or an upstream signed URL. The publisher uses the `ACCOUNT_HUB_DATABA
 variable and existing D1 deployment permissions. The signing key is the
 `DESKTOP_APPLICATION_SIGNING_KEY` GitHub secret; its public half ships with the launcher.
 
-The app checks for updates in the background without downloading them. **Check for
-updates** in the native menu or tray reports its result in a dialog, including
-errors and checks that find no newer version. Downloading or restarting from that
-dialog requires a separate choice and affects this desktop. Use the sidebar update
-button when updating all online workers.
+The app checks for updates in the background without downloading them. To check
+now, use **Settings → System → Updates** or the sidebar update button. The app
+menu's **Check for Updates…** (Help on Windows and Linux, the app menu on macOS)
+opens that Settings section; the tray has no update item.
 
 The desktop revalidates its entry page when opening the worker, and the worker
 marks HTML responses as non-cacheable so a new revision does not reuse an old UI.

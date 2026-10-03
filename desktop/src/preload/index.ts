@@ -46,7 +46,7 @@ const bridge = {
 	},
 
 	shell: {
-		/** Fired for menu items and tray actions: `new-session`, `command-palette`, `toggle-sidebar`, `open-settings`, `focus-composer`, `find`, `open-docs`. */
+		/** Fired for menu items and tray actions: `new-session`, `command-palette`, `toggle-sidebar`, `open-settings`, `open-updates`, `focus-composer`, `find`, `open-docs`. */
 		onCommand: (listener: Listener<string>) => subscribe('desktop:command', listener)
 	},
 

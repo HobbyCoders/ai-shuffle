@@ -52,7 +52,7 @@ describe('desktop menu commands and window state', () => {
 		});
 	});
 
-	it('routes menu commands to the sidebar, docs, composer and registered shortcuts, and ignores unknown ones', async () => {
+	it('routes menu commands to the sidebar, docs, updates, composer and registered shortcuts, and ignores unknown ones', async () => {
 		const shell = wire();
 		const { initDesktop } = await import('./desktop');
 		const { layout } = await import('$lib/stores/layout.svelte');
@@ -74,13 +74,17 @@ describe('desktop menu commands and window state', () => {
 
 		shell.command('toggle-sidebar');
 		shell.command('open-docs');
+		shell.command('open-updates');
 		shell.command('new-session');
 		shell.command('focus-composer');
 		shell.command('not-a-command');
-		await flush();
+		// The settings navigation module loads lazily on first use.
+		await vi.waitFor(() => expect(openFeaturePage).toHaveBeenCalledTimes(2));
 
 		expect(toggleSidebar).toHaveBeenCalledOnce();
-		expect(openFeaturePage).toHaveBeenCalledExactlyOnceWith('docs');
+		expect(openFeaturePage).toHaveBeenCalledWith('docs');
+		// The app menu's Check for Updates lands on Settings > System > Updates, not a native dialog.
+		expect(openFeaturePage).toHaveBeenCalledWith('settings', 'category=system&anchor=system.checkUpdates');
 		expect(newChat).toHaveBeenCalledOnce();
 		expect(spotlight).not.toHaveBeenCalled();
 		expect(document.activeElement).toBe(editor);

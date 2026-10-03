@@ -17,7 +17,7 @@ function load({ empty = false, platform = 'linux' } = {}) {
 	}
 	const image = { isEmpty: () => empty, resize: (size) => ({ ...image, size }) };
 	const electron = {
-		app: { getAppPath: () => desktopDir, name: 'AI Shuffle' },
+		app: { getAppPath: () => desktopDir, name: 'ai-shuffle-desktop' },
 		Menu: { buildFromTemplate: (template) => template },
 		nativeImage: { createFromPath: (file) => ({ ...image, file }) },
 		Tray
@@ -33,32 +33,36 @@ function load({ empty = false, platform = 'linux' } = {}) {
 function recorder(extra = {}) {
 	const calls = [];
 	const actions = {};
-	for (const name of ['show', 'restartWorker', 'openWorkerStatus', 'openInBrowser', 'checkForUpdates', 'forceQuit']) actions[name] = () => calls.push(name);
+	for (const name of ['show', 'restartWorker', 'openWorkerStatus', 'openInBrowser', 'forceQuit']) actions[name] = () => calls.push(name);
 	return { calls, actions: { ...actions, ...extra } };
 }
 
-test('the tray menu runs each action, and its Quit is the forcing quit, not the plain role', () => {
+test('the tray menu runs each action under the product name, and its Quit is the forcing quit, not the plain role', () => {
 	const { installTray, trays } = load();
 	const { calls, actions } = recorder();
-	const tray = installTray(actions);
+	// The package name (app.name in stable builds) must not leak into the menu.
+	const tray = installTray(actions, 'AI Shuffle');
 	assert.equal(tray, trays[0]);
 	assert.equal(tray.tooltip, 'AI Shuffle');
 	assert.equal(tray.image.size.width, 16);
 	const items = tray.menu.filter((item) => item.type !== 'separator');
-	assert.deepEqual(Array.from(items, (item) => item.label), ['Open AI Shuffle', 'Open in Browser', 'Restart Worker', 'Check for Updates…', 'Worker Status', 'Quit']);
+	assert.deepEqual(Array.from(items, (item) => item.label), ['Open AI Shuffle', 'Open in Browser', 'Restart Worker', 'Worker Status', 'Quit']);
 	for (const item of items) item.click();
-	assert.deepEqual(calls, ['show', 'openInBrowser', 'restartWorker', 'checkForUpdates', 'openWorkerStatus', 'forceQuit']);
+	assert.deepEqual(calls, ['show', 'openInBrowser', 'restartWorker', 'openWorkerStatus', 'forceQuit']);
 	const quit = items.at(-1);
 	assert.equal(quit.role, undefined, 'role "quit" would wait on a wedged worker');
-	assert.equal(items[3].enabled, true);
+	// Updates are checked in the app's own Settings screen, never from the tray.
+	assert.equal(tray.menu.some((item) => /update/i.test(item.label ?? '')), false);
+	// No doubled, leading or trailing separators.
+	const kinds = tray.menu.map((item) => item.type ?? 'item');
+	assert.notEqual(kinds[0], 'separator');
+	assert.notEqual(kinds.at(-1), 'separator');
+	assert.equal(kinds.some((kind, i) => kind === 'separator' && kinds[i + 1] === 'separator'), false);
 	tray.emit('click');
 	assert.equal(calls.at(-1), 'show');
 });
 
-test('builds without update checks grey the item out; a missing icon means no tray; macOS uses the menu-bar size', () => {
-	const { installTray } = load();
-	const tray = installTray(recorder({ updatesEnabled: false }).actions);
-	assert.equal(tray.menu.find((item) => item.label === 'Check for Updates…').enabled, false);
-	assert.equal(load({ empty: true }).installTray(recorder().actions), null);
-	assert.equal(load({ platform: 'darwin' }).installTray(recorder().actions).image.size.width, 18);
+test('a missing icon means no tray; macOS uses the menu-bar size', () => {
+	assert.equal(load({ empty: true }).installTray(recorder().actions, 'AI Shuffle'), null);
+	assert.equal(load({ platform: 'darwin' }).installTray(recorder().actions, 'AI Shuffle').image.size.width, 18);
 });

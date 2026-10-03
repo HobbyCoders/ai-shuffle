@@ -449,13 +449,11 @@ export function requestBrowserHandoff(port: number, listener: string | null): Pr
 }
 
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
-export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'source-lease'
-	| 'update-workers' | 'update-action';
-const LIFECYCLE_POSTS: ReadonlySet<LifecycleAction> = new Set(['stop-sessions', 'update-bridge', 'update-action']);
+export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'source-lease';
+const LIFECYCLE_POSTS: ReadonlySet<LifecycleAction> = new Set(['stop-sessions', 'update-bridge']);
 export function requestLifecycle(port: number, token: string, action: LifecycleAction, state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
-	// A lease envelope is up to 4 KiB on its own (the hub's header limit). The
-	// update snapshot and receipt carry each worker's release notes and reasons.
-	const limit = action === 'source-lease' ? 16_384 : action === 'update-workers' || action === 'update-action' ? 262_144 : 4096;
+	// A lease envelope is up to 4 KiB on its own (the hub's header limit).
+	const limit = action === 'source-lease' ? 16_384 : 4096;
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
@@ -756,22 +754,6 @@ export class WorkerSupervisor extends EventEmitter {
 	async exchangeUpdateState(state: object): Promise<Record<string, unknown>> {
 		if (this._state.external || this._state.phase !== 'ready') return {};
 		return this.lifecycleRequest('update-bridge', state);
-	}
-
-	/**
-	 * The worker's update snapshot and plan (what the sidebar button reads), or
-	 * null when this app does not own a ready worker: the caller then falls
-	 * back to the local updater.
-	 */
-	async updateWorkers(): Promise<Record<string, unknown> | null> {
-		if (this._state.external || this._state.phase !== 'ready') return null;
-		return this.lifecycleRequest('update-workers');
-	}
-
-	/** Dispatch an update action through the worker, with the account's all-workers scope. */
-	async updateAction(action: 'check' | 'download' | 'install'): Promise<Record<string, unknown>> {
-		if (this._state.external || this._state.phase !== 'ready') throw new Error('The worker is not running');
-		return this.lifecycleRequest('update-action', { action });
 	}
 
 	async updatesAllowed(): Promise<boolean> {

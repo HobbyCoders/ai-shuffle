@@ -9,29 +9,29 @@ export interface TrayActions {
 	show(): void;
 	restartWorker(): void;
 	openWorkerStatus(): void;
-	updatesEnabled?: boolean;
 	openInBrowser(): void;
-	checkForUpdates(): void;
 	/** Quit, killing the worker if its graceful stop fails or hangs. */
 	forceQuit(): void;
 }
 
-export function installTray(actions: TrayActions): Tray | null {
+/**
+ * `name` is the product name to show. Not `app.name`: that is the package name
+ * ("ai-shuffle-desktop") in stable builds, and changing it would move the profile.
+ */
+export function installTray(actions: TrayActions, name: string): Tray | null {
 	const iconPath = path.join(app.getAppPath(), 'build', 'icon.png');
 	let image = nativeImage.createFromPath(iconPath);
 	if (image.isEmpty()) return null;
 	const size = process.platform === 'darwin' ? 18 : 16;
 	image = image.resize({ width: size, height: size });
 	tray = new Tray(image);
-	tray.setToolTip(app.name);
+	tray.setToolTip(name);
 	tray.setContextMenu(
 		Menu.buildFromTemplate([
-			{ label: `Open ${app.name}`, click: () => actions.show() },
+			{ label: `Open ${name}`, click: () => actions.show() },
 			{ label: 'Open in Browser', click: () => actions.openInBrowser() },
 			{ type: 'separator' },
 			{ label: 'Restart Worker', click: () => actions.restartWorker() },
-			{ label: 'Check for Updates…', enabled: actions.updatesEnabled !== false, click: () => actions.checkForUpdates() },
-			{ type: 'separator' },
 			{ label: 'Worker Status', click: () => actions.openWorkerStatus() },
 			{ type: 'separator' },
 			// Not role 'quit': this one still quits when the worker is wedged.
