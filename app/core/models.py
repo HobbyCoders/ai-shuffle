@@ -1420,6 +1420,12 @@ class AutomationCreate(BaseModel):
     # UI flow; the create response always carries the real ``is_enabled`` so the
     # client can render truthfully.
     enabled: bool = False
+    # The model its runs use: the model picker's value (a native Claude id such
+    # as ``sonnet``, or ``prov:<providerId>:<modelId>``), or a bare model id
+    # with ``provider_id``. Omitted = use the agent's saved model, then the app
+    # default. Validated against the providers and their model lists.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
 
 
 class AutomationUpdate(BaseModel):
@@ -1442,6 +1448,9 @@ class AutomationUpdate(BaseModel):
     max_runs_per_day: Optional[int] = None
     requires_approval: Optional[bool] = None
     is_enabled: Optional[bool] = None
+    # Same shape as on create. Send ``model: null`` to clear the choice.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
 
 
 class Automation(BaseModel):
@@ -1473,6 +1482,20 @@ class Automation(BaseModel):
     requires_approval: bool = False
     created_at: datetime
     updated_at: datetime
+    # The stored model choice (picker value) and the provider it binds; both
+    # null when the automation has no choice of its own.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
+    # What a run would use right now. ``model_source`` is ``automation`` for an
+    # explicit choice, or the fallback: ``agent`` (the agent's saved model) or
+    # ``default`` (the app default). ``effective_model`` may be null for an
+    # agent bound to a provider with no saved model (the provider's default
+    # applies). ``model_error`` is set when the stored choice is no longer
+    # available; runs fail with it instead of switching models.
+    effective_model: Optional[str] = None
+    effective_provider_id: Optional[str] = None
+    model_source: Optional[str] = None
+    model_error: Optional[str] = None
     # Advice returned by create/update, e.g. "use an API key for scheduled
     # runs" while Claude Code runs on the user's subscription.
     notices: List[str] = Field(default_factory=list)

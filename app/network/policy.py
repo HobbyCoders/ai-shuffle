@@ -273,7 +273,7 @@ _register(Collection(
     fields=("id", "name", "description", "trigger_type", "trigger_config", "prompt", "profile_id",
             "project_id", "output_config", "max_turns", "timeout_seconds", "max_cost_per_run",
             "max_cost_per_day", "max_cost_total", "max_runs_per_day", "is_enabled", "requires_approval",
-            "action_steps", "triggers", "owner_device_id", "created_at", "updated_at"),
+            "action_steps", "triggers", "owner_device_id", "model", "provider_id", "created_at", "updated_at"),
     json_fields=("trigger_config", "output_config"), encrypted=("triggers", "trigger_config"),
     local_fields=("status", "last_run_at", "last_error", "run_count", "failure_count", "total_cost_used"),
     resource="automations", priority=80,

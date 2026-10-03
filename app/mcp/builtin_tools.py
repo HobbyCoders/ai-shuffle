@@ -1654,6 +1654,12 @@ def create_builtin_tools_server(
                 "timezone": {"type": "string", "description": "IANA timezone (default UTC)."},
                 "max_cost_per_run": {"type": "number"},
                 "max_runs_per_day": {"type": "integer"},
+                "model": {
+                    "type": "string",
+                    "description": "Model each run uses: a Claude model (e.g. 'sonnet') or "
+                                   "'prov:<providerId>:<modelId>'. Omit to use the agent's "
+                                   "saved model (or the app default).",
+                },
             },
             "required": ["name", "expression", "prompt"],
         },
@@ -1668,6 +1674,14 @@ def create_builtin_tools_server(
         prompt = (args.get("prompt") or "").strip()
         if not name or not expression or not prompt:
             return _err("name, expression, and prompt are required.")
+        try:
+            from app.core.automation_service import normalize_model_choice
+
+            model, model_provider_id = await asyncio.to_thread(
+                normalize_model_choice, args.get("model")
+            )
+        except ValueError as e:
+            return _err(str(e))
         try:
             from app.db import automations as auto_db
             from app.core.automation_manager import automation_manager
@@ -1687,6 +1701,8 @@ def create_builtin_tools_server(
                 project_id=project_id,
                 max_cost_per_run=args.get("max_cost_per_run"),
                 max_runs_per_day=args.get("max_runs_per_day"),
+                model=model,
+                provider_id=model_provider_id,
             )
             if not row:
                 return _err("automation not created.")

@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 91
+SCHEMA_VERSION = 92
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1135,6 +1135,12 @@ def create_postgres_schema(cursor) -> None:
             -- Worker network: the device that fires this automation. A synced
             -- definition with no local owner stays inactive until assigned.
             owner_device_id TEXT,
+            -- Run model choice (v92): the picker value and the provider it
+            -- binds. NULL = no choice; runs use the agent's saved model.
+            -- No FK on provider_id: a removed provider must fail the run
+            -- with a clear error, not silently clear the choice.
+            model TEXT,
+            provider_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE RESTRICT,

@@ -16,13 +16,32 @@ from app.core.models import (
     AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES,
 )
 from app.api.auth import require_admin
-from app.core.automation_service import reveal_webhook_secrets
+from app.core.automation_service import (
+    ModelLookups,
+    reveal_webhook_secrets,
+    with_model_resolution,
+)
 from app.db import database
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
+
+
+def _presented(automation, lookups=None):
+    """Owner-facing shape: webhook secrets revealed, effective model attached.
+
+    Blocking (the model report reads the agent and provider) — call it inside
+    the route's existing thread hop rather than adding one.
+    """
+    if not automation:
+        return automation
+    return with_model_resolution(reveal_webhook_secrets(automation), lookups)
+
+
+async def _present(automation):
+    return await run_sync(_presented, automation)
 
 
 async def _with_notices(automation):
@@ -56,8 +75,15 @@ async def list_automations(token: str = Depends(require_admin)):
     plaintext: the edit form is filled from this list and must show a secret
     the owner can sign with. Run records never carry secrets.
     """
-    automations = await run_sync(database.get_all_automations)
-    return [reveal_webhook_secrets(a) for a in automations]
+
+    def _load():
+        # One hop for the list and every row's model resolution; the agents
+        # and providers are read once for the whole list.
+        rows = database.get_all_automations()
+        lookups = ModelLookups().prefetch() if rows else None
+        return [_presented(a, lookups) for a in rows]
+
+    return await run_sync(_load)
 
 
 @router.post("", response_model=Automation, status_code=status.HTTP_201_CREATED)
@@ -101,10 +127,12 @@ async def create_automation_endpoint(
             requires_approval=data.requires_approval,
             action_steps=data.action_steps,
             enabled=data.enabled,
+            model=data.model,
+            provider_id=data.provider_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    return await _with_notices(reveal_webhook_secrets(created))
+    return await _with_notices(await _present(created))
 
 
 @router.get("/trigger-types")
@@ -173,10 +201,10 @@ async def deny_run_endpoint(approval_id: str, token: str = Depends(require_admin
 @router.get("/{automation_id}", response_model=Automation)
 async def get_automation(automation_id: str, token: str = Depends(require_admin)):
     """Get an automation by ID."""
-    automation = await run_sync(database.get_automation, automation_id)
+    automation = await run_sync(lambda: _presented(database.get_automation(automation_id)))
     if not automation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return reveal_webhook_secrets(automation)
+    return automation
 
 
 @router.patch("/{automation_id}", response_model=Automation)
@@ -207,7 +235,7 @@ async def update_automation_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
-    return await _with_notices(reveal_webhook_secrets(result))
+    return await _with_notices(await _present(result))
 
 
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -243,16 +271,16 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
         # response read, so it belongs to this same hop. When the scheduler
         # does run it may stamp the row (next_run_at), so that path has to
         # re-read *after* the await — see below.
-        return has_scheduled, None if has_scheduled else database.get_automation(automation_id)
+        return has_scheduled, None if has_scheduled else _presented(database.get_automation(automation_id))
 
     has_scheduled, automation = await run_sync(_enable)
 
     from app.core.automation_manager import automation_manager
     if has_scheduled:
         await automation_manager.schedule_automation(automation_id)
-        automation = await run_sync(database.get_automation, automation_id)
+        automation = await run_sync(lambda: _presented(database.get_automation(automation_id)))
 
-    return reveal_webhook_secrets(automation)
+    return automation
 
 
 @router.post("/{automation_id}/disable", response_model=Automation)
@@ -270,9 +298,9 @@ async def disable_automation(automation_id: str, token: str = Depends(require_ad
 
     def _disable():
         database.update_automation(automation_id, is_enabled=False, status="idle")
-        return database.get_automation(automation_id)
+        return _presented(database.get_automation(automation_id))
 
-    return reveal_webhook_secrets(await run_sync(_disable))
+    return await run_sync(_disable)
 
 
 @router.post("/{automation_id}/trigger")

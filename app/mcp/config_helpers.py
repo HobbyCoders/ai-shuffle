@@ -118,4 +118,5 @@ def _automation_summary(auto: dict) -> dict:
         "failure_count": auto.get("failure_count", 0),
         "total_cost_used": auto.get("total_cost_used", 0),
         "requires_approval": auto.get("requires_approval", False),
+        "model": auto.get("model"),
     }

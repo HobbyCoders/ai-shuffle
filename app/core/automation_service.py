@@ -5,7 +5,7 @@ Automation service — business logic for CRUD, budget checking, and prompt rend
 import logging
 import re
 import secrets
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.core import encryption
 from app.core.config import settings
@@ -269,6 +269,311 @@ def reveal_webhook_secrets(automation: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Model choice
+# ---------------------------------------------------------------------------
+#
+# Agents do not pin a model; a session gets one when it is created. An
+# automation mints its run sessions itself, so it stores the choice the owner
+# would otherwise make in the composer: ``model`` holds the picker's value (a
+# native Claude alias / ``claude-*`` id, or a ``prov:<providerId>:<modelId>``
+# composite) and ``provider_id`` the provider that value binds (NULL = native
+# Claude). The run passes ``model`` to ``create_session`` exactly as the
+# composer's new-session path does, so every turn of the run resolves from the
+# session row.
+#
+# An automation with no stored choice keeps running the way it always has: the
+# session is created unbound and resolution falls back to the agent's legacy
+# ``config.model`` / ``config.provider``, then to ``DEFAULT_MODEL``.
+# :func:`resolve_automation_model` reports which of those a run would use.
+
+#: ``model_source`` values. ``automation`` / ``step`` are explicit choices;
+#: ``agent`` and ``default`` are the legacy fallbacks.
+MODEL_SOURCE_STEP = "step"
+MODEL_SOURCE_AUTOMATION = "automation"
+MODEL_SOURCE_AGENT = "agent"
+MODEL_SOURCE_DEFAULT = "default"
+
+
+def normalize_model_choice(
+    model: Optional[str],
+    provider_id: Optional[str] = None,
+    *,
+    stored: Iterable[Optional[str]] = (),
+) -> Tuple[Optional[str], Optional[str]]:
+    """Canonicalize a requested ``(model, provider_id)`` pick.
+
+    Returns ``(selection, provider_id)`` where ``selection`` is the picker
+    value stored on the automation and passed to ``create_session``. Both
+    empty means "no choice" and returns ``(None, None)``. Raises
+    ``ValueError`` with a plain-language reason when the pick is malformed or
+    not available right now.
+
+    ``stored`` lists selections already saved on the automation. Re-sending one
+    of them unchanged skips the availability check: the edit form sends every
+    field on save, and an unrelated edit must not be refused because the saved
+    model went away (the run reports that instead).
+    """
+    from app.core.query_options import decode_provider_model
+
+    clean_model = (model or "").strip()
+    clean_provider = (provider_id or "").strip()
+    if not clean_model:
+        if clean_provider:
+            raise ValueError("Pick a model for that provider.")
+        return None, None
+
+    decoded = decode_provider_model(clean_model)
+    if decoded is not None:
+        pid, mid = decoded
+        if clean_provider and clean_provider != pid:
+            raise ValueError(
+                f"The model '{mid}' belongs to provider '{pid}', not '{clean_provider}'."
+            )
+        selection, bound = clean_model, pid
+    elif clean_provider:
+        selection, bound = f"prov:{clean_provider}:{clean_model}", clean_provider
+    else:
+        selection, bound = clean_model, None
+
+    if selection in {s for s in stored if s}:
+        return selection, bound
+    problem = model_choice_problem(selection)
+    if problem:
+        raise ValueError(problem)
+    return selection, bound
+
+
+class ModelLookups:
+    """Agent and provider reads for model resolution.
+
+    One instance answers repeated lookups from memory. ``prefetch()`` loads
+    both tables in two queries, so resolving a whole list of automations costs
+    the same no matter how many there are.
+    """
+
+    def __init__(self) -> None:
+        self._profiles: Dict[str, Any] = {}
+        self._providers: Dict[str, Any] = {}
+        self._complete = False
+
+    def prefetch(self) -> "ModelLookups":
+        self._profiles = {p["id"]: p for p in database.get_all_profiles()}
+        self._providers = {
+            p["id"]: p for p in database.get_all_model_providers(include_token=False)
+        }
+        self._complete = True
+        return self
+
+    def profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        if self._complete or profile_id in self._profiles:
+            return self._profiles.get(profile_id)
+        row = database.get_profile(profile_id)
+        self._profiles[profile_id] = row
+        return row
+
+    def provider(self, provider_id: str) -> Optional[Dict[str, Any]]:
+        if self._complete or provider_id in self._providers:
+            return self._providers.get(provider_id)
+        row = database.get_model_provider(provider_id, include_token=False)
+        self._providers[provider_id] = row
+        return row
+
+
+def model_choice_problem(
+    selection: str, lookups: Optional[ModelLookups] = None
+) -> Optional[str]:
+    """Why a stored model choice cannot run right now, or ``None`` if it can.
+
+    A provider pick must name an enabled provider that still lists the model
+    (the same checks the composer's model override gets at turn time). A bare
+    pick must be a native Claude model, since that is the only leg a bare id
+    reaches.
+    """
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+
+    decoded = decode_provider_model(selection)
+    if decoded is not None:
+        from app.core.provider_agent import validate_provider_model
+
+        pid, mid = decoded
+        if lookups is not None:
+            validation = validate_provider_model(
+                pid, mid, provider_row=lookups.provider(pid), require_servable=False
+            )
+        else:
+            validation = validate_provider_model(pid, mid, require_servable=False)
+        if not validation.ok:
+            return validation.reason or f"Model '{mid}' is not available on provider '{pid}'."
+        return None
+    if not is_native_claude_model(selection):
+        return (
+            f"'{selection}' is not a Claude model. Pick a provider model "
+            "instead (choose it from that provider's list)."
+        )
+    return None
+
+
+def split_model_selection(selection: str) -> Tuple[str, Optional[str]]:
+    """``(model_id, provider_id)`` for a picker value."""
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(selection)
+    if decoded is not None:
+        return decoded[1], decoded[0]
+    return selection, None
+
+
+def resolve_automation_model(
+    automation: Dict[str, Any],
+    step: Optional[Dict[str, Any]] = None,
+    lookups: Optional[ModelLookups] = None,
+) -> Dict[str, Any]:
+    """The model and provider a run (or a ``send_prompt`` step) would use.
+
+    Returns a dict with:
+
+    - ``selection``: the explicit picker value to stamp on the run's session,
+      or ``None`` when there is no explicit choice (fallback);
+    - ``model`` / ``provider_id``: the effective model id and provider
+      (``provider_id`` ``None`` = native Claude; ``model`` may be ``None`` for
+      a provider-bound agent with no saved model, which then runs on the
+      provider's own default);
+    - ``source``: ``step`` / ``automation`` (explicit) or ``agent`` /
+      ``default`` (fallback);
+    - ``error``: a plain-language reason when an explicit choice is no longer
+      available, else ``None``. A run with an error must fail rather than fall
+      through to another model.
+
+    Blocking (profile/provider reads) — call off the event loop.
+    """
+    lookups = lookups or ModelLookups()
+    step = step or {}
+    step_model = (step.get("model") or "").strip()
+    automation_model = (automation.get("model") or "").strip()
+    if step_model:
+        selection, source = step_model, MODEL_SOURCE_STEP
+    elif automation_model:
+        selection, source = automation_model, MODEL_SOURCE_AUTOMATION
+    else:
+        selection, source = None, None
+
+    if selection:
+        model_id, provider_id = split_model_selection(selection)
+        problem = model_choice_problem(selection, lookups)
+        return {
+            "selection": selection,
+            "model": model_id,
+            "provider_id": provider_id,
+            "source": source,
+            "error": (
+                f"This automation's model is no longer available: {problem} "
+                "Pick another model in the automation's settings."
+            ) if problem else None,
+        }
+
+    # Fallback: mirror what an unbound session resolves to
+    # (query_options.build_options_from_profile): the agent's legacy
+    # config.provider (stamped by create_session) and config.model, then the
+    # app default for a native agent with nothing saved.
+    profile_id = step.get("profile_id") or automation.get("profile_id")
+    config: Dict[str, Any] = {}
+    if profile_id:
+        try:
+            profile = lookups.profile(profile_id)
+            config = (profile or {}).get("config") or {}
+        except Exception:  # noqa: BLE001 — reporting only; the run resolves for real
+            logger.debug("Could not read agent %s for model reporting", profile_id, exc_info=True)
+    provider_id = (config.get("provider") or "").strip() or None
+    model_id = (config.get("model") or "").strip() or None
+    if model_id:
+        return {"selection": None, "model": model_id, "provider_id": provider_id,
+                "source": MODEL_SOURCE_AGENT, "error": None}
+    if provider_id:
+        from app.core.provider_agent import default_model_for_provider
+
+        row = None
+        try:
+            row = lookups.provider(provider_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not read provider %s for model reporting", provider_id, exc_info=True)
+        return {"selection": None, "model": default_model_for_provider(row),
+                "provider_id": provider_id, "source": MODEL_SOURCE_AGENT, "error": None}
+    from app.core.model_registry import DEFAULT_MODEL
+
+    return {"selection": None, "model": DEFAULT_MODEL, "provider_id": None,
+            "source": MODEL_SOURCE_DEFAULT, "error": None}
+
+
+def with_model_resolution(automation: Any, lookups: Optional[ModelLookups] = None) -> Any:
+    """Attach the effective model fields the API reports for an automation.
+
+    Pass one prefetched :class:`ModelLookups` when presenting a list.
+    Blocking — call off the event loop.
+    """
+    if not isinstance(automation, dict):
+        return automation
+    resolved = resolve_automation_model(automation, lookups=lookups)
+    return {
+        **automation,
+        "effective_model": resolved["model"],
+        "effective_provider_id": resolved["provider_id"],
+        "model_source": resolved["source"],
+        "model_error": resolved["error"],
+    }
+
+
+def _normalize_step_models(
+    action_steps: Optional[List[Dict[str, Any]]],
+    stored_steps: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Canonicalize each ``send_prompt`` step's optional model pick in place.
+
+    ``stored_steps`` are the automation's saved steps; a model already used by
+    one of them is accepted unchanged (see :func:`normalize_model_choice`).
+    """
+    stored = [
+        s.get("model") for s in (stored_steps or []) if isinstance(s, dict)
+    ]
+    for i, step in enumerate(action_steps or []):
+        if not isinstance(step, dict) or step.get("type") != "send_prompt":
+            continue
+        if not (step.get("model") or step.get("provider_id")):
+            step.pop("model", None)
+            step.pop("provider_id", None)
+            continue
+        try:
+            selection, provider_id = normalize_model_choice(
+                step.get("model"), step.get("provider_id"), stored=stored
+            )
+        except ValueError as e:
+            raise ValueError(f"Action step {i + 1}: {e}") from None
+        step["model"] = selection
+        step["provider_id"] = provider_id
+
+
+def model_choice_errors_for_run(automation: Dict[str, Any]) -> Optional[str]:
+    """The first unavailable explicit model choice a run would hit, or ``None``.
+
+    Checked before the run starts anything, so a removed provider or model
+    fails the run with a clear reason instead of half-running it.
+    Blocking — call off the event loop.
+    """
+    if (automation.get("prompt") or "").strip():
+        error = resolve_automation_model(automation)["error"]
+        if error:
+            return error
+    for i, step in enumerate(automation.get("action_steps") or []):
+        if not isinstance(step, dict) or step.get("type") != "send_prompt":
+            continue
+        resolved = resolve_automation_model(automation, step)
+        if resolved["error"]:
+            if resolved["source"] == MODEL_SOURCE_STEP:
+                return f"Action step {i + 1}: {resolved['error']}"
+            return resolved["error"]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------
 
@@ -291,8 +596,14 @@ async def create_automation(
     action_steps: Optional[List[Dict[str, Any]]] = None,
     triggers: Optional[List[Dict[str, Any]]] = None,
     enabled: bool = False,
+    model: Optional[str] = None,
+    provider_id: Optional[str] = None,
 ) -> Dict:
     """Create a new automation.
+
+    ``model`` / ``provider_id`` are the optional model choice for its runs (see
+    :func:`normalize_model_choice`); omitted, runs fall back to the agent's
+    saved model or the app default.
 
     ``enabled`` sets the initial ``is_enabled`` state (default ``False`` to
     preserve the create-then-enable UI flow). When ``True`` and the automation
@@ -343,6 +654,9 @@ async def create_automation(
             if not project:
                 raise ValueError(f"Project not found: {project_id}")
 
+        selection, bound_provider = normalize_model_choice(model, provider_id)
+        _normalize_step_models(action_steps)
+
         # Generate automation ID
         automation_id = f"auto-{secrets.token_hex(4)}"
 
@@ -366,6 +680,8 @@ async def create_automation(
             requires_approval=requires_approval,
             action_steps=action_steps,
             enabled=enabled,
+            model=selection,
+            provider_id=bound_provider,
         )
 
     automation_id, automation = await run_sync(_create_blocking)
@@ -422,6 +738,22 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
             project = database.get_project(kwargs["project_id"])
             if not project:
                 raise ValueError(f"Project not found: {kwargs['project_id']}")
+
+        # Model choice: either field may be sent alone. A model sent without a
+        # provider is a complete pick (a native id or a ``prov:`` composite),
+        # so it replaces the stored provider; a provider alone re-binds the
+        # stored model id to it. Empty model clears the choice (fallback).
+        if "model" in kwargs or "provider_id" in kwargs:
+            if "model" in kwargs:
+                req_model, req_provider = kwargs.get("model"), kwargs.get("provider_id")
+            else:
+                req_model = split_model_selection(existing.get("model") or "")[0] if existing.get("model") else None
+                req_provider = kwargs.get("provider_id")
+            kwargs["model"], kwargs["provider_id"] = normalize_model_choice(
+                req_model, req_provider, stored=(existing.get("model"),)
+            )
+        if kwargs.get("action_steps") is not None:
+            _normalize_step_models(kwargs["action_steps"], existing.get("action_steps"))
 
         # Handle triggers array — validate and encrypt webhook secrets
         trigger_changed = False

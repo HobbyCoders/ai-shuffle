@@ -4,6 +4,7 @@
 
 import { api } from './client';
 import { apiOrigin } from './runtime';
+import { encodeProviderModel, getModelLabel } from '$lib/constants/models';
 
 // ============================================================================
 // Types
@@ -47,6 +48,9 @@ export interface ActionStep {
 	// send_prompt fields
 	prompt?: string;
 	profile_id?: string;
+	/** Model for this step (picker value); omitted = the automation's model. */
+	model?: string | null;
+	provider_id?: string | null;
 	max_turns?: number;
 	// webhook_call fields
 	url?: string;
@@ -75,6 +79,13 @@ export interface AutomationCreate {
 	max_cost_total?: number | null;
 	max_runs_per_day?: number | null;
 	requires_approval?: boolean;
+	/**
+	 * Model its runs use: the model picker's value (a Claude id such as
+	 * `sonnet`, or `prov:<providerId>:<modelId>`). null = no choice of its own;
+	 * runs use the agent's saved model, then the app default.
+	 */
+	model?: string | null;
+	provider_id?: string | null;
 }
 
 export interface AutomationUpdate {
@@ -96,7 +107,17 @@ export interface AutomationUpdate {
 	action_steps?: ActionStep[] | null;
 	requires_approval?: boolean;
 	is_enabled?: boolean;
+	/** Same shape as on create; send null to clear the choice. */
+	model?: string | null;
+	provider_id?: string | null;
 }
+
+/**
+ * Where a run's model comes from: the automation's (or step's) own choice, or
+ * the fallback for automations without one (the agent's saved model, then the
+ * app default).
+ */
+export type AutomationModelSource = 'automation' | 'step' | 'agent' | 'default';
 
 export interface Automation {
 	id: string;
@@ -126,8 +147,41 @@ export interface Automation {
 	requires_approval: boolean;
 	created_at: string;
 	updated_at: string;
+	/** Stored model choice (picker value) and the provider it binds. */
+	model?: string | null;
+	provider_id?: string | null;
+	/** The model a run would use now; null on a provider whose default is unset. */
+	effective_model?: string | null;
+	effective_provider_id?: string | null;
+	model_source?: AutomationModelSource | null;
+	/** Set when the stored choice is no longer available; runs fail with it. */
+	model_error?: string | null;
 	/** Advice from create/update, e.g. use an API key for scheduled runs. */
 	notices?: string[];
+}
+
+/**
+ * Short label for the model an automation's runs use, e.g. `Opus` for its own
+ * choice, `Sonnet (agent)` / `Sonnet (default)` for the fallback, and
+ * `Model unavailable` when the stored choice is gone.
+ */
+export function automationModelLabel(automation: Pick<
+	Automation,
+	'model' | 'effective_model' | 'effective_provider_id' | 'model_source' | 'model_error'
+>): string {
+	if (automation.model_error) return 'Model unavailable';
+	if (automation.model) return getModelLabel(automation.model);
+	const effective = automation.effective_model;
+	const name = effective
+		? getModelLabel(
+				automation.effective_provider_id
+					? encodeProviderModel(automation.effective_provider_id, effective)
+					: effective
+			)
+		: 'Provider default';
+	if (automation.model_source === 'agent') return `${name} (agent)`;
+	if (automation.model_source === 'default') return `${name} (default)`;
+	return name;
 }
 
 /**

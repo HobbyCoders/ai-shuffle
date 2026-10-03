@@ -8,7 +8,12 @@
 	 * meta). Reuses AutomationsCard's data + handlers; only the list view is new.
 	 * Theme tokens only — never the mockup palette.
 	 */
-	import type { Automation, AutomationApproval, TriggerType } from '$lib/api/automations';
+	import {
+		automationModelLabel,
+		type Automation,
+		type AutomationApproval,
+		type TriggerType
+	} from '$lib/api/automations';
 	import type { Profile } from '$lib/api/client';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
@@ -241,6 +246,7 @@
 								<div class="as-meta">
 									{#each triggerTags(a) as tag}<span class="as-tag">{tag}</span>{/each}
 									{#if profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
+									<span class="as-tag" class:as-tag-warn={!!a.model_error} title={a.model_error || 'Model its runs use'}>{automationModelLabel(a)}</span>
 									<span class="as-stat as-stat--{stat.tone}">{stat.text}</span>
 								</div>
 								<RowActionMenu
@@ -372,6 +378,7 @@
 	.as-badge--warn { color: var(--warning, #d97706); background: color-mix(in oklch, var(--warning, #d97706) 14%, transparent); }
 
 	.as-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; font-family: var(--font-mono, monospace); }
+	.as-tag.as-tag-warn { color: var(--destructive); }
 	.as-tag { font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 	.as-stat { font-size: 0.6875rem; white-space: nowrap; color: var(--muted-foreground); }
 	.as-stat--live { color: var(--primary); }

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Automation } from '$lib/api/automations';
+	import { automationModelLabel, type Automation } from '$lib/api/automations';
 	import { slide } from 'svelte/transition';
 	import {
 		CalendarClock,
@@ -109,6 +109,8 @@
 						<span class="fp-meta-chip">{formatCost(automation.total_cost_used)}</span>
 						<span class="fp-meta-sep">|</span>
 						<span class="fp-meta-chip">{automation.run_count} runs</span>
+						<span class="fp-meta-sep">|</span>
+						<span class="fp-meta-chip" title={automation.model_error || 'Model its runs use'}>{automationModelLabel(automation)}</span>
 					</div>
 				</button>
 

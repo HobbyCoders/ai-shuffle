@@ -86,10 +86,14 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             query count is unchanged; it just no longer costs two separate
             stalls of the event loop mid-turn.
             """
+            from app.core.automation_service import with_model_resolution
+
             auto = database.get_automation(args["automation_id"])
             if not auto:
                 return None, []
-            return auto, database.get_automation_runs(args["automation_id"], limit=5)
+            # Effective model + whether it is the automation's own choice or
+            # the agent/app fallback, as the REST read reports it.
+            return with_model_resolution(auto), database.get_automation_runs(args["automation_id"], limit=5)
 
         auto, runs = await run_sync(_load)
         if not auto:
@@ -183,6 +187,17 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "type": "boolean",
                     "description": "If true, each run requires manual approval before executing.",
                 },
+                "model": {
+                    "type": "string",
+                    "description": "Model its runs use: a Claude model (e.g. 'sonnet', 'opus') or "
+                                   "'prov:<providerId>:<modelId>' for a provider model. With "
+                                   "provider_id, a bare model id from that provider's list. "
+                                   "Omit to use the agent's saved model (or the app default).",
+                },
+                "provider_id": {
+                    "type": "string",
+                    "description": "Provider for 'model' when it is a bare model id. Omit for Claude.",
+                },
                 "enabled": {
                     "type": "boolean",
                     "description": "Whether the automation is active on creation (default true). "
@@ -239,6 +254,15 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             elif trigger_type == "webhook":
                 trigger_config = {"secret": _secrets.token_urlsafe(32)}
 
+            from app.core.automation_service import normalize_model_choice
+
+            try:
+                model, provider_id = normalize_model_choice(
+                    args.get("model"), args.get("provider_id")
+                )
+            except ValueError as e:
+                return str(e), None, None, None
+
             # Enforce budget defaults if not provided
             max_cost = args.get("max_cost_per_run")
             if max_cost is None:
@@ -267,6 +291,8 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 max_runs_per_day=args.get("max_runs_per_day"),
                 requires_approval=args.get("requires_approval", False),
                 enabled=enabled,
+                model=model,
+                provider_id=provider_id,
             )
             return None, created, auto_id, max_cost
 
@@ -301,6 +327,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             "enabled": is_enabled,
             "scheduled": scheduled,
             "max_cost_per_run": max_cost_per_run,
+            "model": auto.get("model"),
         }
 
         if trigger_type == "cron":
@@ -343,7 +370,8 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
 
     @tool(
         "updateAutomation",
-        "Update properties of an existing automation.",
+        "Update properties of an existing automation. Pass model='' to clear its "
+        "model choice so runs use the agent's saved model again.",
         {
             "type": "object",
             "properties": {
@@ -358,6 +386,17 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "max_cost_per_day": {"type": "number"},
                 "max_runs_per_day": {"type": "integer"},
                 "requires_approval": {"type": "boolean"},
+                "model": {
+                    "type": "string",
+                    "description": "Model its runs use: a Claude model (e.g. 'sonnet', 'opus') or "
+                                   "'prov:<providerId>:<modelId>' for a provider model. With "
+                                   "provider_id, a bare model id from that provider's list. "
+                                   "Omit to use the agent's saved model (or the app default).",
+                },
+                "provider_id": {
+                    "type": "string",
+                    "description": "Provider for 'model' when it is a bare model id. Omit for Claude.",
+                },
             },
             "required": ["automation_id"],
         },
@@ -390,6 +429,24 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                           "max_cost_per_day", "max_runs_per_day", "requires_approval"):
                 if field in args and args[field] is not None:
                     kwargs[field] = args[field]
+
+            # Model choice: '' clears it. A provider alone re-binds the stored
+            # model id to that provider (same rule as the REST update).
+            if "model" in args or args.get("provider_id"):
+                from app.core.automation_service import split_model_selection, normalize_model_choice
+
+                if "model" in args:
+                    req_model = args.get("model")
+                elif existing.get("model"):
+                    req_model = split_model_selection(existing["model"])[0]
+                else:
+                    req_model = None
+                try:
+                    kwargs["model"], kwargs["provider_id"] = normalize_model_choice(
+                        req_model, args.get("provider_id")
+                    )
+                except ValueError as e:
+                    return str(e), None, None
 
             if not kwargs:
                 return "No fields provided to update.", None, None

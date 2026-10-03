@@ -40,6 +40,11 @@ class AutomationRow(TypedDict):
     failure_count: int
     requires_approval: bool
     action_steps: Optional[List[Dict[str, Any]]]
+    # The run model the owner picked (picker value: a native Claude id or a
+    # ``prov:<providerId>:<modelId>`` composite) and the provider it binds.
+    # NULL = no choice; runs fall back to the agent's saved model.
+    model: Optional[str]
+    provider_id: Optional[str]
     created_at: str
     updated_at: str
 
@@ -144,6 +149,8 @@ def create_automation(
     action_steps: Optional[List[Dict[str, Any]]] = None,
     triggers: Optional[List[Dict[str, Any]]] = None,
     enabled: bool = False,
+    model: Optional[str] = None,
+    provider_id: Optional[str] = None,
 ) -> Optional[AutomationRow]:
     """Create a new automation.
 
@@ -152,6 +159,9 @@ def create_automation(
     but every caller can now opt an automation into being live at creation —
     previously the INSERT omitted ``is_enabled`` entirely, so EVERY automation
     was created disabled regardless of caller intent and silently never fired.
+
+    ``model`` / ``provider_id`` are stored as given; callers validate them
+    (``automation_service.normalize_model_choice``).
     """
     now = datetime.now(timezone.utc).isoformat()
     if output_config is None:
@@ -166,14 +176,15 @@ def create_automation(
                (id, name, description, trigger_type, trigger_config, prompt,
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-                requires_approval, action_steps, triggers, is_enabled, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                requires_approval, action_steps, triggers, is_enabled, model, provider_id,
+                created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt or "", profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
              max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
              requires_approval, json.dumps(action_steps) if action_steps else None,
-             json.dumps(triggers), bool(enabled),
+             json.dumps(triggers), bool(enabled), model or None, provider_id or None,
              now, now)
         )
     return get_automation(automation_id)
@@ -262,7 +273,7 @@ def update_automation(automation_id: str, **kwargs) -> Optional[AutomationRow]:
                 "max_turns", "timeout_seconds", "max_cost_per_run", "max_cost_per_day",
                 "max_cost_total", "max_runs_per_day", "is_enabled", "status",
                 "last_run_at", "last_error", "run_count", "failure_count",
-                "total_cost_used", "requires_approval"):
+                "total_cost_used", "requires_approval", "model", "provider_id"):
         if key in kwargs:
             updates.append(f"{key} = %s")
             values.append(kwargs[key])

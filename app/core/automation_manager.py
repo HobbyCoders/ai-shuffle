@@ -914,6 +914,16 @@ class AutomationManager:
             tokens_in = 0
             tokens_out = 0
 
+            # A stored model choice that is no longer available (provider
+            # removed or disabled, model dropped from its list) fails the run
+            # here, before anything starts, with the reason recorded on the
+            # run. It must never fall through to some other model.
+            from app.core.automation_service import model_choice_errors_for_run
+
+            model_error = await run_sync(model_choice_errors_for_run, automation)
+            if model_error:
+                raise ValueError(model_error)
+
             # Execute prompt if present — as a REAL streaming chat session.
             # The run mints a fresh automation-badged session (AFTER the
             # cross-install fire claim in _on_schedule_trigger and the budget
@@ -1129,6 +1139,8 @@ class AutomationManager:
         """
         from app.core import turn_manager
 
+        from app.core.automation_service import resolve_automation_model
+
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
         timeout_seconds = automation.get("timeout_seconds", 300)
@@ -1136,6 +1148,17 @@ class AutomationManager:
         # ``running``; project resolution (possibly a clone) ran since.
         if self._shutdown_begun():
             raise _ShutdownBeforeTurn()
+
+        # The model this run's session is bound to. An explicit choice is
+        # stamped on the session row at birth, exactly like the composer's
+        # pick on a new session (``create_session(model=...)``), so this turn
+        # and every later one (failover retry, auto-continue) resolve from the
+        # row. No choice leaves the row unbound: the agent's saved model, then
+        # the app default, as before.
+        model_resolution = await run_sync(resolve_automation_model, automation)
+        if model_resolution["error"]:
+            raise ValueError(model_resolution["error"])
+        model_selection = model_resolution["selection"]
 
         # 1. Fresh badged session. This runs only AFTER the cross-install
         #    fire claim (_on_schedule_trigger) and budget check (_execute),
@@ -1161,6 +1184,11 @@ class AutomationManager:
                 project_id=project_id,
                 title=title,
                 automation_id=automation_id,
+                model=model_selection,
+                # An explicit native pick must stay native even when the agent
+                # still carries a legacy provider; a ``prov:`` pick binds its
+                # own provider. Only an unbound run derives it from the agent.
+                derive_provider_from_profile=model_selection is None,
             )
             # Bind the session to its project_v2 when the v2 path owns this run.
             # create_session does not take the column, so persist it directly (the
@@ -1356,15 +1384,29 @@ class AutomationManager:
                     rendered = render_prompt(prompt_text, {**trigger_data, "response": response_text})
                     from app.core import account_failover
 
-                    # Isolated read between two awaits — one hop.
-                    automation = await run_sync(database.get_automation, automation_id)
+                    from app.core.automation_service import resolve_automation_model
+
+                    def _load_step_context():
+                        """Automation re-read + the step's model resolution — one hop."""
+                        row = database.get_automation(automation_id)
+                        return row, resolve_automation_model(row or {}, step)
+
+                    automation, step_model = await run_sync(_load_step_context)
                     profile_id = step.get("profile_id") or (automation.get("profile_id") if automation else None)
                     max_turns = step.get("max_turns", 1)
+                    if step_model["error"]:
+                        raise ValueError(step_model["error"])
+                    step_overrides: Dict[str, Any] = {"max_turns": max_turns}
+                    # The step's own model, else the automation's. No explicit
+                    # choice leaves the override out, so resolution falls back
+                    # to the agent's saved model as before.
+                    if step_model["selection"]:
+                        step_overrides["model"] = step_model["selection"]
 
                     result = await account_failover.execute_query_with_failover(
                         prompt=rendered,
                         profile_id=profile_id,
-                        overrides={"max_turns": max_turns},
+                        overrides=step_overrides,
                         automation_id=automation_id,
                     )
                     # Update response_text for subsequent steps

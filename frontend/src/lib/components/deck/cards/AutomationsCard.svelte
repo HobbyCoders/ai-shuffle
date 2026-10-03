@@ -116,6 +116,8 @@
 	let formMaxTurns = $state('1');
 	let formTimeoutSeconds = $state('300');
 	let formRequiresApproval = $state(false);
+	// The model picker's value; '' = no choice (agent's saved model / app default).
+	let formModel = $state('');
 	let formActionSteps: ActionStep[] = $state([]);
 
 	// Test result
@@ -216,6 +218,7 @@
 		formMaxTurns = '1';
 		formTimeoutSeconds = '300';
 		formRequiresApproval = false;
+		formModel = '';
 		formActionSteps = [];
 		formError = '';
 		testResult = null;
@@ -254,6 +257,7 @@
 		formMaxTurns = automation.max_turns != null ? String(automation.max_turns) : '';
 		formTimeoutSeconds = automation.timeout_seconds != null ? String(automation.timeout_seconds) : '';
 		formRequiresApproval = automation.requires_approval;
+		formModel = automation.model || '';
 		formError = '';
 		testResult = null;
 		currentView = 'edit';
@@ -324,7 +328,9 @@
 			max_cost_per_day: formMaxCostPerDay ? parseFloat(formMaxCostPerDay) : null,
 			max_cost_total: formMaxCostTotal ? parseFloat(formMaxCostTotal) : null,
 			max_runs_per_day: formMaxRunsPerDay ? parseInt(formMaxRunsPerDay) : null,
-			requires_approval: formRequiresApproval
+			requires_approval: formRequiresApproval,
+			// null clears the choice on edit (PATCH skips undefined keys).
+			model: formModel || null
 		};
 	}
 
@@ -512,7 +518,7 @@
 	}
 	let remoteChange = $state('');
 	let remoteBaseline = '';
-	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formActionSteps]); }
+	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formActionSteps]); }
 	watchResources(['automations'], async () => {
 		const selected = selectedAutomation;
 		const snapshot = remoteSnapshot();
@@ -584,6 +590,7 @@
 			<AutomationForm
 				currentView={currentView as 'create' | 'edit'}
 				selectedAutomationId={selectedAutomation?.id ?? null}
+				savedAutomation={currentView === 'edit' ? selectedAutomation : null}
 				{formError}
 				{formName}
 				{formDescription}
@@ -600,6 +607,7 @@
 				{formMaxTurns}
 				{formTimeoutSeconds}
 				{formRequiresApproval}
+				{formModel}
 				{formActionSteps}
 				{profiles}
 				{projects}
@@ -627,6 +635,7 @@
 				onUpdateFormMaxTurns={(val) => formMaxTurns = val}
 				onUpdateFormTimeoutSeconds={(val) => formTimeoutSeconds = val}
 				onUpdateFormRequiresApproval={(val) => formRequiresApproval = val}
+				onUpdateFormModel={(val) => formModel = val}
 				onUpdateFormActionSteps={(val) => formActionSteps = val}
 				onToggleSection={toggleSection}
 				onToggleTriggerExpand={toggleTriggerExpand}

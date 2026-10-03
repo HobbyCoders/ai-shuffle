@@ -1,10 +1,13 @@
 <script lang="ts">
-	import type {
-		TriggerItem,
-		ActionStep,
-		ActionStepType,
-		OutputType
+	import {
+		automationModelLabel,
+		type Automation,
+		type TriggerItem,
+		type ActionStep,
+		type ActionStepType,
+		type OutputType
 	} from '$lib/api/automations';
+	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
@@ -46,7 +49,11 @@
 		formMaxTurns: string;
 		formTimeoutSeconds: string;
 		formRequiresApproval: boolean;
+		/** Model picker value; '' = no choice of its own. */
+		formModel: string;
 		formActionSteps: ActionStep[];
+		/** The saved automation when editing, for its fallback / unavailable model. */
+		savedAutomation?: Automation | null;
 		profiles: Profile[];
 		projects: Project[];
 		connectors: Connector[];
@@ -73,6 +80,7 @@
 		onUpdateFormMaxTurns: (val: string) => void;
 		onUpdateFormTimeoutSeconds: (val: string) => void;
 		onUpdateFormRequiresApproval: (val: boolean) => void;
+		onUpdateFormModel: (val: string) => void;
 		onUpdateFormActionSteps: (val: ActionStep[]) => void;
 		onToggleSection: (id: string) => void;
 		onToggleTriggerExpand: (idx: number) => void;
@@ -98,7 +106,9 @@
 		formMaxTurns,
 		formTimeoutSeconds,
 		formRequiresApproval,
+		formModel,
 		formActionSteps,
+		savedAutomation = null,
 		profiles,
 		projects,
 		connectors,
@@ -125,6 +135,7 @@
 		onUpdateFormMaxTurns,
 		onUpdateFormTimeoutSeconds,
 		onUpdateFormRequiresApproval,
+		onUpdateFormModel,
 		onUpdateFormActionSteps,
 		onToggleSection,
 		onToggleTriggerExpand,
@@ -148,6 +159,20 @@
 		if (profile?.config?.provider) return '';
 		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
 	});
+
+	// What the Model row says under the picker. With no choice of its own, an
+	// edited automation shows what its runs use now (the server reports it); an
+	// unchanged choice that is gone shows why runs fail.
+	const modelHint = $derived.by(() => {
+		const unchanged = savedAutomation && (savedAutomation.model || '') === formModel;
+		if (unchanged && savedAutomation?.model_error) return savedAutomation.model_error;
+		if (formModel) return 'Every run uses this model.';
+		if (unchanged && savedAutomation) return `Runs use ${automationModelLabel(savedAutomation)}.`;
+		return "Runs use the agent's saved model, or the app default.";
+	});
+	const modelHintIsError = $derived(
+		!!savedAutomation?.model_error && (savedAutomation.model || '') === formModel
+	);
 
 	function addActionStep(type: ActionStepType = 'connector_action') {
 		const defaults: Record<ActionStepType, ActionStep> = {
@@ -376,6 +401,17 @@
 											</select>
 										</div>
 										<div class="af-mini-field">
+											<label class="af-mini-label" for="auto-step-model-{i}">Model (optional)</label>
+											<ModelPicker
+												id="auto-step-model-{i}"
+												value={step.model || ''}
+												allowEmpty
+												emptyLabel="Same as automation"
+												allowCustom={false}
+												onSelect={(v) => { updateActionStep(i, { ...step, model: v || undefined, provider_id: undefined }); }}
+											/>
+										</div>
+										<div class="af-mini-field">
 											<label class="af-mini-label" for="auto-step-maxturns-{i}">Max turns</label>
 											<input type="number" class="af-input" id="auto-step-maxturns-{i}"
 												min="1" max="25"
@@ -452,6 +488,19 @@
 						{/each}
 					</select>
 				{/if}
+			</div>
+		</div>
+		<div class="set-row" data-testid="automation-model-row">
+			<div class="lab"><h4>Model</h4><p class:model-error={modelHintIsError}>{modelHint}</p></div>
+			<div class="ctl">
+				<ModelPicker
+					id="automation-model"
+					value={formModel}
+					allowEmpty
+					emptyLabel="Agent default"
+					allowCustom={false}
+					onSelect={onUpdateFormModel}
+				/>
 			</div>
 		</div>
 		<div class="set-row">
@@ -613,6 +662,10 @@
 		text-decoration: underline;
 	}
 
+	.lab .model-error {
+		color: var(--destructive);
+	}
+
 	/* Narrow numeric inputs in budget rows */
 	.ctl :global(.inp.num) {
 		min-width: 0;
@@ -683,6 +736,11 @@
 		border-radius: 10px;
 		overflow: hidden;
 		margin-bottom: 8px;
+	}
+	/* A step's open model picker must not be clipped by its card (the editor
+	   shell does the same for `.set-group`). */
+	.af-item-card:has(:global(.mpk-panel)) {
+		overflow: visible;
 	}
 	.af-item-header {
 		display: flex;

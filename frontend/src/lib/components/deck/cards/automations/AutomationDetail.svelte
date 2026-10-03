@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Automation, AutomationRun } from '$lib/api/automations';
+	import { automationModelLabel, type Automation, type AutomationRun } from '$lib/api/automations';
 	import { fade, slide } from 'svelte/transition';
 	import {
 		ArrowLeft,
@@ -69,7 +69,15 @@
 				{#each (automation.triggers || [{ type: automation.trigger_type }]) as trig}
 					<span class="card-badge card-badge--muted">{triggerTypeLabel(trig.type)}</span>
 				{/each}
+				<span
+					class="card-badge {automation.model_error ? 'card-badge--warning' : 'card-badge--muted'}"
+					data-testid="automation-model-badge"
+					title={automation.model_error || 'Model its runs use'}
+				>{automationModelLabel(automation)}</span>
 			</div>
+			{#if automation.model_error}
+				<p class="auto-detail-desc auto-model-error" role="alert">{automation.model_error}</p>
+			{/if}
 			{#if automation.description}
 				<p class="auto-detail-desc">{automation.description}</p>
 			{/if}
@@ -173,6 +181,10 @@
 		font-size: var(--text-sm, 0.75rem);
 		color: var(--text-secondary, var(--muted-foreground));
 		margin: 4px 0 0 0;
+	}
+
+	.auto-detail-desc.auto-model-error {
+		color: var(--destructive);
 	}
 
 	.auto-detail-header-actions {

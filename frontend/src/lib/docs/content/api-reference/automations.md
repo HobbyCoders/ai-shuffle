@@ -71,6 +71,8 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `trigger_config` | object | No | Trigger-specific configuration (see below) |
 | `triggers` | object[] | No | Several triggers, each `{"type": ..., "config": {...}}`. Replaces `trigger_type`/`trigger_config` |
 | `profile_id` | string | Yes | Agent to run (an agent id from `GET /api/v1/agents`) |
+| `model` | string | No | Model every run uses: a Claude model such as `sonnet`, or `prov:<providerId>:<modelId>` for a provider model. Omit to use the agent's saved model, then the app default |
+| `provider_id` | string | No | Provider for a bare provider model id in `model` (`"model": "gpt-5.6", "provider_id": "openai"`). Omit for Claude |
 | `project_id` | string | No | Project context |
 | `output_config` | object | No | Where to send results |
 | `max_cost_per_run` | number | No | Expected USD cost per run. Checked after the run: a costlier run is logged, not stopped |
@@ -82,7 +84,36 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `requires_approval` | boolean | No | Require manual approval |
 | `enabled` | boolean | No | Enable on create (default: false) |
 
-Send `trigger_type` or `triggers`; one of them is required. Returns `201` with the automation. Returns `400` when there is no trigger, an interval is under 60 seconds, or the agent or project does not exist, and `422` for an unknown trigger type or a field out of range (`max_turns` below 1, `timeout_seconds` below 10).
+Send `trigger_type` or `triggers`; one of them is required. Returns `201` with the automation. Returns `400` when there is no trigger, an interval is under 60 seconds, the agent or project does not exist, or the model is not available (unknown or disabled provider, a model that provider does not list, or a bare id that is not a Claude model), and `422` for an unknown trigger type or a field out of range (`max_turns` below 1, `timeout_seconds` below 10).
+
+### Model choice
+
+Agents do not pin a model. A run creates its session with the automation's `model`, the same way a new chat stores the model you pick, so every turn of the run uses it. A `send_prompt` action step can carry its own `model` (and `provider_id`); without one it uses the automation's.
+
+An automation without a `model` keeps working as before: runs use the agent's saved model, then the app default. Every automation response reports what a run would use now:
+
+| Field | Description |
+|-------|-------------|
+| `model` | The stored choice, normalized to the picker value (`prov:<providerId>:<modelId>` for a provider model), or `null` |
+| `provider_id` | The provider that choice binds, or `null` for Claude |
+| `effective_model` | The model a run would use. `null` when the agent's provider has no default model set |
+| `effective_provider_id` | That model's provider, or `null` for Claude |
+| `model_source` | `automation` for the automation's own choice, or the fallback: `agent` (the agent's saved model) or `default` (the app default) |
+| `model_error` | Set when the stored choice is no longer available, otherwise `null` |
+
+If the stored model is no longer available (its provider was removed or disabled, or the model was dropped from the provider's list), runs do not switch to another model. They fail with `model_error` as the run's `error` until you pick another model.
+
+```json
+{
+  "id": "auto_abc123",
+  "model": null,
+  "provider_id": null,
+  "effective_model": "sonnet",
+  "effective_provider_id": null,
+  "model_source": "default",
+  "model_error": null
+}
+```
 
 ### Trigger Configurations
 
@@ -147,6 +178,8 @@ Get automation details.
 ### PATCH /api/v1/automations/{automation_id}
 
 Update an automation. Send only the fields to change; `triggers` replaces the whole list. Returns `404` for an unknown automation and `400` for the same problems as create. A webhook trigger sent without a `secret` gets a new one, so send the current secret back to keep it.
+
+Send `"model": null` to clear the model choice so runs use the agent's saved model again. Sending the stored `model` back unchanged is accepted even if that model is no longer available, so other edits still save.
 
 **Auth:** Owner only
 

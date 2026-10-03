@@ -312,7 +312,14 @@ def _savepoint(cursor, name: str):
 #     cleared first, so such a row stays unable to receive push), and the
 #     ``rate_limits`` / ``request_log`` tables the removed rate-limit feature
 #     left behind.
-SCHEMA_VERSION = 91
+# 92 (2026-10-03): automations carry their own run model. Nullable
+#     ``automations.model`` (the picker value: a native Claude id or a
+#     ``prov:<providerId>:<modelId>`` composite) and ``automations.provider_id``.
+#     NULL on every pre-existing row, which keeps those automations on the
+#     fallback they already used (the agent's saved model, then the app
+#     default). Additive; lands via the always-run guarded ADD COLUMN in
+#     _run_column_migrations.
+SCHEMA_VERSION = 92
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -808,6 +815,13 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
         migrations_applied.append("automations.action_steps")
+
+    # (v92) Per-automation run model choice. NULL = fall back as before.
+    if table_exists(cursor, "automations"):
+        for column in ("model", "provider_id"):
+            if not column_exists(cursor, "automations", column):
+                cursor.execute(f"ALTER TABLE automations ADD COLUMN {column} TEXT")
+                migrations_applied.append(f"automations.{column}")
 
     # Add triggers JSON column for multi-trigger support (v37)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "triggers"):
