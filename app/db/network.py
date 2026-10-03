@@ -250,6 +250,7 @@ def create_schema(cursor) -> None:
             version TEXT,
             platform TEXT,
             incarnation INTEGER NOT NULL DEFAULT 1,
+            instance_id TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
@@ -272,12 +273,16 @@ def _ensure_columns(cursor) -> None:
     names; the SQLite shim has no ``IF NOT EXISTS`` for columns, so it asks
     the catalog first.
     """
+    additive = (("network_members", "last_incarnation_accepted", "INTEGER"),
+                ("network_presence", "instance_id", "TEXT"))
     if type(cursor).__module__.startswith("psycopg2"):
-        cursor.execute("ALTER TABLE network_members ADD COLUMN IF NOT EXISTS last_incarnation_accepted INTEGER")
+        for table, column, kind in additive:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")
         return
     from app.db.base import column_exists
-    if not column_exists(cursor, "network_members", "last_incarnation_accepted"):
-        cursor.execute("ALTER TABLE network_members ADD COLUMN last_incarnation_accepted INTEGER")
+    for table, column, kind in additive:
+        if not column_exists(cursor, table, column):
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 # ---------------------------------------------------------------------------

@@ -1119,6 +1119,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         plaintext = _prepare_mirror(cursor, coll, plaintext)
         row = materialize(cursor, coll, env.record_id, plaintext)
         _after_mirror(cursor, coll, plaintext)
+        if coll.name == "presence":
+            _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
         local_hash = env.content_hash
         if row is not None:
             try:
@@ -1656,6 +1658,8 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                 prepared = _prepare_mirror(cursor, coll, item["record"])
                 row = materialize(cursor, coll, item["record_id"], prepared)
                 _after_mirror(cursor, coll, prepared)
+                if coll.name == "presence":
+                    _learn_presence_alias(cursor, ctx, prepared, item["origin_device_id"])
                 local_hash = content_hash(coll, item["record"])
                 if row is not None:
                     try:
@@ -1718,6 +1722,13 @@ def admit_device(*, device_id: str, signing_public: bytes, encryption_public: by
                  legacy_instance_id: Optional[str] = None) -> dict:
     """Issue a certificate for a new device and publish it. Returns the join response."""
     ctx = require_context()
+    holder = _active_alias_holder(ctx, legacy_instance_id, device_id) if legacy_instance_id else None
+    if holder is not None:
+        # The account hub relays the description and the proof does not cover
+        # this field: never hand another device's install id to a newcomer.
+        logger.warning("Device %s presented an instance id that belongs to %s; admitting it without one",
+                       device_id, holder)
+        legacy_instance_id = None
     with get_db() as conn:
         cursor = conn.cursor()
         state = store.lock_state(cursor)
@@ -1951,19 +1962,24 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
         "version": version,
         "platform": identity_mod.platform_name(),
         "incarnation": ctx.identity.incarnation,
+        # This install's own instance id, signed by this device's stream:
+        # peers adopt it as the member's alias when its certificate has none.
+        "instance_id": _own_instance_id(),
         "updated_at": envelope_mod.now_iso(),
     }
     changed = False
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO network_presence (device_id, endpoints, capabilities, version, platform, incarnation, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """INSERT INTO network_presence (device_id, endpoints, capabilities, version, platform, incarnation,
+                                             instance_id, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (device_id) DO UPDATE SET endpoints = EXCLUDED.endpoints,
                    capabilities = EXCLUDED.capabilities, version = EXCLUDED.version, platform = EXCLUDED.platform,
-                   incarnation = EXCLUDED.incarnation, updated_at = EXCLUDED.updated_at""",
+                   incarnation = EXCLUDED.incarnation, instance_id = EXCLUDED.instance_id,
+                   updated_at = EXCLUDED.updated_at""",
             (row["device_id"], json.dumps(row["endpoints"]), json.dumps(row["capabilities"]), row["version"],
-             row["platform"], row["incarnation"], row["updated_at"]))
+             row["platform"], row["incarnation"], row["instance_id"], row["updated_at"]))
         changed = record(cursor, "presence", ctx.device_id, row, ctx=ctx) is not None
         # Upgrade old local-only renames without asking the user to rename again.
         # Only seed our own name: a peer's cached hostname is not authoritative.
@@ -1977,6 +1993,109 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     if changed:
         kick()
     return changed
+
+
+def _own_instance_id() -> Optional[str]:
+    from app.core.config import settings
+    try:
+        return (settings.effective_instance_id or "").strip() or None
+    except Exception:  # noqa: BLE001 — an unreadable id file must not stop presence
+        logger.debug("Instance id unavailable", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Instance-id aliases
+#
+# A member's legacy instance id lets rows keyed by an install's instance id
+# (usage rows, sessions, ``get_install(<instance id>)``) resolve to its device.
+# The admitting member writes it into the certificate from the joiner's
+# description. Account (hub) joins sent no instance id until this build, so
+# every worker admitted through the account had none. The certificate cannot
+# be reissued by the device itself; instead each device fills in its OWN alias
+# locally at startup and publishes it in its presence record, which its peers
+# accept only from that device's own signed stream. An alias is only ever
+# added where none is recorded: a value from a certificate is never replaced,
+# and an id another device already holds is never taken over.
+# ---------------------------------------------------------------------------
+
+MAX_INSTANCE_ID_LENGTH = 200
+
+
+def _active_alias_holder(ctx: NetworkContext, instance_id: str, device_id: str) -> Optional[str]:
+    """The ACTIVE member other than ``device_id`` that the map gives ``instance_id`` to, if any.
+
+    A revoked holder does not count: a worker that was removed and joined
+    again under a new device key keeps its install id.
+    """
+    holder = ctx.legacy_instance_map.get(instance_id)
+    if holder is None or holder == device_id:
+        return None
+    member = ctx.member(holder)
+    return holder if member is not None and member.status == membership.STATUS_ACTIVE else None
+
+
+def _adopt_member_alias(cursor, ctx: NetworkContext, device_id: str, instance_id: str) -> bool:
+    """Record ``instance_id`` as ``device_id``'s alias when nothing contradicts it."""
+    if not instance_id or len(instance_id) > MAX_INSTANCE_ID_LENGTH:
+        return False
+    member = store.get_member(device_id, _conn=_CursorConn(cursor))
+    if member is None or member.get("status") != membership.STATUS_ACTIVE:
+        return False
+    if member.get("legacy_instance_id"):
+        # The certificate (or an earlier repair) already names one.
+        return False
+    holder = _active_alias_holder(ctx, instance_id, device_id)
+    if holder is None:
+        cursor.execute("SELECT device_id FROM network_members WHERE legacy_instance_id = %s AND device_id <> %s "
+                       "AND status = %s", (instance_id, device_id, membership.STATUS_ACTIVE))
+        found = cursor.fetchone()
+        holder = found["device_id"] if found else None
+    if holder is not None:
+        logger.warning("Device %s claims an instance id that active member %s holds; alias not recorded",
+                       device_id, holder)
+        return False
+    cursor.execute("UPDATE network_members SET legacy_instance_id = %s, updated_at = %s "
+                   "WHERE device_id = %s AND legacy_instance_id IS NULL",
+                   (instance_id, envelope_mod.now_iso(), device_id))
+    if ctx.legacy_instance_map.get(instance_id) != device_id:
+        ctx.legacy_instance_map[instance_id] = device_id
+        store.update_state(_conn=_CursorConn(cursor), legacy_instance_map=ctx.legacy_instance_map)
+    logger.info("Recorded instance id alias for device %s", device_id)
+    return True
+
+
+def _learn_presence_alias(cursor, ctx: NetworkContext, presence: Mapping[str, Any], origin_device_id: str) -> None:
+    """A peer's presence names its own instance id; trust it only from that peer."""
+    device_id = presence.get("device_id") if presence else None
+    instance_id = presence.get("instance_id") if presence else None
+    if not isinstance(device_id, str) or not isinstance(instance_id, str):
+        return
+    if device_id != origin_device_id or device_id == ctx.device_id:
+        # Only the device itself may name its alias; this worker names its own.
+        return
+    _adopt_member_alias(cursor, ctx, device_id, instance_id.strip())
+
+
+def heal_own_instance_alias() -> bool:
+    """Fill in this worker's own instance id on its own member row when it is missing.
+
+    Only this device's row, only with this install's instance id, and only
+    when no alias is recorded and no other device holds that id. Approval is
+    unchanged: the row belongs to an active member either way; this only lets
+    lookups by instance id find it. Returns True when the row was repaired.
+    """
+    ctx = context()
+    instance_id = _own_instance_id()
+    if ctx is None or not instance_id:
+        return False
+    with get_db() as conn:
+        cursor = conn.cursor()
+        store.lock_state(cursor)
+        repaired = _adopt_member_alias(cursor, ctx, ctx.device_id, instance_id)
+    if repaired:
+        kick()
+    return repaired
 
 
 def presence_of(device_id: str) -> Optional[dict]:

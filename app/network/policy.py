@@ -156,9 +156,10 @@ _register(Collection(
 
 _register(Collection(
     name="presence", table="network_presence", keys=("device_id",),
-    fields=("device_id", "endpoints", "capabilities", "version", "platform", "incarnation", "updated_at"),
+    fields=("device_id", "endpoints", "capabilities", "version", "platform", "incarnation", "instance_id",
+            "updated_at"),
     json_fields=("endpoints", "capabilities"), priority=1,
-    notes="Each device publishes its own reachability and capabilities; last writer wins per device."))
+    notes="Each device publishes its own reachability, capabilities and install id; last writer wins per device."))
 
 _register(Collection(
     name="member_names", table="network_member_names", keys=("device_id",),

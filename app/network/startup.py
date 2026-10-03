@@ -59,6 +59,15 @@ def initialize() -> Optional[engine.NetworkContext]:
             backfill_owner_device_ids(ctx.device_id)
     if ctx is not None:
         try:
+            # Workers admitted through the account before their joins carried
+            # an instance id have none on their own member row, so lookups by
+            # this install's id (``cluster.register_self`` among them) missed
+            # it. Peers learn the id from this device's next presence record.
+            if engine.heal_own_instance_alias():
+                logger.info("Recorded this install's instance id on its own network membership")
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not record this install's instance id on its membership", exc_info=True)
+        try:
             from app.network import blobs
             blobs.backfill_attachment_hashes()
         except Exception:  # noqa: BLE001
