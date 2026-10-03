@@ -226,6 +226,18 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         wire["reportPath"] = record.get("report_path")
     if record.get("report_chars") is not None:
         wire["reportChars"] = record.get("report_chars")
+    # A Task child running on ANOTHER worker: which one, what its mirrored
+    # session is doing, and since when that worker cannot be reached. Additive:
+    # only remote records carry them, so every local task keeps its shape.
+    if record.get("remote_device_id"):
+        wire["worker"] = {
+            "deviceId": record.get("remote_device_id"),
+            "name": record.get("worker_name") or record.get("remote_device_id"),
+        }
+        if record.get("worker_state"):
+            wire["workerState"] = record.get("worker_state")
+        if record.get("unreachable_since"):
+            wire["unreachableSince"] = record.get("unreachable_since")
     return wire
 
 
@@ -936,11 +948,16 @@ class TaskRegistry:
         agent: Optional[str] = None,
         model: Optional[str] = None,
         name: Optional[str] = None,
+        remote_device_id: Optional[str] = None,
+        worker_name: Optional[str] = None,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
         ``name`` is the roster name a Task-tool worker is addressed by (see
         ``to_wire``); ``agent`` stays the agent type's display name.
+        ``remote_device_id``/``worker_name`` mark a Task child that runs on
+        another worker (``app.core.remote_task``); the durable row keeps the
+        device so the record survives this worker's restart.
 
         Re-registering preserves the original ``started_at``. A fresh
         ``TaskStartedMessage`` for a CLEANLY-COMPLETED task is a genuine RESUME
@@ -981,6 +998,10 @@ class TaskRegistry:
                 existing["model"] = model
             if name and not existing.get("name"):
                 existing["name"] = name
+            if remote_device_id and not existing.get("remote_device_id"):
+                existing["remote_device_id"] = remote_device_id
+            if worker_name:
+                existing["worker_name"] = worker_name
             # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
@@ -1020,6 +1041,9 @@ class TaskRegistry:
             "started_at": now,
             "updated_at": now,
         }
+        if remote_device_id:
+            bucket[task_id]["remote_device_id"] = remote_device_id
+            bucket[task_id]["worker_name"] = worker_name
         self._persist_task_state(session_id, task_id)
 
     def update_task(
@@ -1176,10 +1200,36 @@ class TaskRegistry:
                     "agent": record.get("agent"),
                     "name": record.get("name"),
                     "model": record.get("model"),
+                    "remote_device_id": record.get("remote_device_id"),
                 },
             )
         except Exception:
             logger.debug("task persistence snapshot failed", exc_info=True)
+
+    def update_remote_status(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        worker_state: Optional[str] = None,
+        unreachable_since: Optional[str] = None,
+    ) -> bool:
+        """Refresh what a remote Task child's record says about its worker.
+
+        ``worker_state`` is the child's mirrored runtime state (working,
+        parked, permission, question, idle); ``unreachable_since`` is when its
+        worker stopped answering, None once it answers again. Display only:
+        the status stays ``running`` until the child's report arrives, so the
+        park, the running count and the wake are unchanged. Nothing is
+        persisted (``app.db.remote_tasks`` holds the durable contact record).
+        Returns False for an unknown or local task.
+        """
+        record = self._tasks.get(session_id, {}).get(task_id)
+        if record is None or not record.get("remote_device_id"):
+            return False
+        record["worker_state"] = worker_state or record.get("worker_state")
+        record["unreachable_since"] = unreachable_since
+        return True
 
     # ------------------------------------------------------------------
     # Rebuild from the durable mirror after a restart
@@ -1194,11 +1244,14 @@ class TaskRegistry:
         agent" although the worker's transcript was intact. These rows put the
         records back so the same tools find them again.
 
-        Only terminal rows are loaded and a record already in memory always
-        wins. A row the boot reconcile stamped ``server_restart`` comes back as
-        ``interrupted`` (``restored_status``), which the resume path accepts.
-        Nothing is persisted, chipped or announced from here: the rows already
-        hold this truth. Returns the number of records added.
+        Only terminal rows are loaded, plus Task children still running on
+        another worker (``remote_device_id``): this restart did not stop them,
+        so they come back ``running`` and their report settles them as before.
+        A record already in memory always wins. A row the boot reconcile
+        stamped ``server_restart`` comes back as ``interrupted``
+        (``restored_status``), which the resume path accepts. Nothing is
+        persisted, chipped or announced from here: the rows already hold this
+        truth. Returns the number of records added.
         """
         if not session_id:
             return 0
@@ -1207,7 +1260,8 @@ class TaskRegistry:
         for row in rows or []:
             task_id = row.get("task_id")
             status = restored_status(row.get("status"), row.get("reason"))
-            if not task_id or task_id in bucket or status == "running":
+            remote = row.get("remote_device_id")
+            if not task_id or task_id in bucket or (status == "running" and not remote):
                 continue
             bucket[task_id] = {
                 "task_id": task_id,
@@ -1226,6 +1280,9 @@ class TaskRegistry:
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }
+            if remote:
+                bucket[task_id]["remote_device_id"] = remote
+                bucket[task_id]["worker_name"] = row.get("worker_name")
             added += 1
         if not bucket:
             self._tasks.pop(session_id, None)
@@ -1237,7 +1294,14 @@ class TaskRegistry:
         try:
             from app.db import background_tasks as background_tasks_db
 
-            return background_tasks_db.list_session_terminal_background_tasks(session_id)
+            rows = background_tasks_db.list_session_terminal_background_tasks(session_id)
+            if any(row.get("remote_device_id") for row in rows):
+                from app.core.remote_task import worker_display_name
+
+                for row in rows:
+                    if row.get("remote_device_id"):
+                        row["worker_name"] = worker_display_name(row["remote_device_id"])
+            return rows
         except Exception:  # noqa: BLE001 — a failed read leaves the registry as it was
             logger.debug("durable task hydrate failed for %s", session_id, exc_info=True)
             return None
@@ -1605,6 +1669,7 @@ class TaskRegistry:
             "agent": row.get("agent"),
             "name": row.get("roster_name"),
             "model": row.get("model"),
+            "remote_device_id": row.get("remote_device_id"),
         })
 
     def get_task_tool_use_id(self, session_id: str, task_id: str) -> Optional[str]:

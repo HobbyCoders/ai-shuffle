@@ -102,6 +102,11 @@ class WorkerRecord:
     background: bool = False
     #: Explicit message continuation; guarded against an earlier dispatch cleanup.
     continuation_turn_id: Optional[str] = None
+    #: The worker (device id) a Task child runs on when it is NOT this one
+    #: (``app.core.remote_task``). Its session, process and prompts live
+    #: there, so teardown never kills anything here: see
+    #: :func:`_stop_remote_worker`.
+    remote_device_id: Optional[str] = None
 
 
 # parent_session_id -> {worker_session_id: WorkerRecord}
@@ -292,6 +297,23 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
     if interrupted:
         return "interrupted"
     return "idle"
+
+
+async def _stop_remote_worker(record: WorkerRecord, *, reason: str) -> str:
+    """Stop a Task child that runs on another worker. Never raises.
+
+    Its session, process tree and approval prompts belong to that worker, so
+    nothing here may be killed or settled on its behalf (the mirrored session
+    is read-only). Reaching the child on its worker (the ``interrupt`` control
+    action with ``stop_background``) is slice S8 of the cross-worker design;
+    until then the parent's record settles as stopped and the child keeps
+    running there. Its later report does not wake a parent the user stopped.
+    """
+    logger.info(
+        "ProviderAgent supervisor: %s runs on worker %s; stopping it there is not "
+        "supported yet (reason=%s)", record.worker_session_id, record.remote_device_id, reason,
+    )
+    return "remote_not_stopped"
 
 
 async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
@@ -530,19 +552,22 @@ async def teardown_worker(
     parent_session_id = record.parent_session_id
     record.torn_down = True
     record.torn_down_reason = reason
-    if record.continuation_turn_id:
+    if record.continuation_turn_id and not record.remote_device_id:
         # A continuation may still be queued or parked, with no live runtime to
         # clear its queue or stop descendants when the interrupt is delivered.
         from app.core.query_session_lifecycle import stop_all_background_tasks
         await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
     await _settle_card(record, preview, summary)
 
-    outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
-    # AFTER the kill, so the runtime has stopped appending to the event log the
-    # flush reads, and BEFORE the registry row goes terminal, so the worker's
-    # own rows are settled by the time anything reads the pair.
-    await settle_killed_worker(record.worker_session_id, reason)
-    await _cancel_worker_prompts(record)
+    if record.remote_device_id:
+        outcome = await _stop_remote_worker(record, reason=reason)
+    else:
+        outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
+        # AFTER the kill, so the runtime has stopped appending to the event log
+        # the flush reads, and BEFORE the registry row goes terminal, so the
+        # worker's own rows are settled by the time anything reads the pair.
+        await settle_killed_worker(record.worker_session_id, reason)
+        await _cancel_worker_prompts(record)
 
     try:
         from app.core.task_registry import task_registry

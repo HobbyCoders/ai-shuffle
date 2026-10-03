@@ -623,6 +623,9 @@ def start_background_tasks() -> List[asyncio.Task]:
     # at boot and retried until their parent acknowledges them.
     from app.core import remote_task
     tasks.append(asyncio.create_task(remote_task.delivery_loop(), name="remote-task-reports"))
+    # Task children this worker sent elsewhere: re-attached after a boot and
+    # their workers checked, so a quiet worker shows as unreachable.
+    tasks.append(asyncio.create_task(remote_task.tracking_loop(), name="remote-task-tracking"))
 
     # License lease renewal (daily, jittered backoff). Idle in beta mode.
     from app.core import license as licensing

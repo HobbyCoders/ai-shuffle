@@ -597,6 +597,18 @@ class WorkerFeed:
 
     # -- follow lifecycle -------------------------------------------------
 
+    def resume_at(self, cursor: int) -> None:
+        """Re-attach to a card this worker already started, past ``cursor``.
+
+        For a feed rebuilt after a restart (a Task child on another worker
+        outlives this process): its card exists in the parent's log, so
+        :meth:`started` is not repeated, and rows at or below ``cursor`` were
+        either forwarded before the restart or are skipped rather than
+        duplicated. The worker session keeps the full transcript.
+        """
+        self._started = True
+        self._cursor = max(self._cursor, int(cursor or 0))
+
     def start_following(self) -> None:
         """Join this parent's SHARED poll loop (idempotent, never raises).
 
@@ -665,7 +677,9 @@ class WorkerFeedGroup:
     def add(self, feed: WorkerFeed) -> None:
         """Add a member, starting the loop if this is the first one."""
         self._feeds[feed.worker_session_id] = feed
-        if self._task is None:
+        # A loop that ended (its event loop closed under it) is restarted, or
+        # the new member would never be read.
+        if self._task is None or self._task.done():
             try:
                 self._task = asyncio.get_running_loop().create_task(self._loop())
             except RuntimeError:

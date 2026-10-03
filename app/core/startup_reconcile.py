@@ -84,22 +84,30 @@ def _clear_stale_parked_markers() -> int:
 
     The marker means "parent turn ended with background work still running";
     that work ran inside the previous server process, so on a fresh boot every
-    own-instance marker is an orphan. Returns the number cleared.
+    own-instance marker is an orphan. The exception is a session parked on a
+    Task child running on another worker: the restart did not stop that child,
+    and its report wakes the session as before. Returns the number cleared.
     """
     _ph = ph()
     instance_id = settings.effective_instance_id
+    remote_work = (
+        "EXISTS (SELECT 1 FROM background_tasks b WHERE b.session_id = sessions.id "
+        "AND b.status = 'running' AND b.remote_device_id IS NOT NULL)"
+    )
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             f"""SELECT id, parked_task_kind FROM sessions
-                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL""",
+                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL
+                   AND NOT {remote_work}""",
             (instance_id,),
         )
         rows = cursor.fetchall()
         if rows:
             cursor.execute(
                 f"""UPDATE sessions SET parked_task_kind = NULL
-                     WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL""",
+                     WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL
+                       AND NOT {remote_work}""",
                 (instance_id,),
             )
 

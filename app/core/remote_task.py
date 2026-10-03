@@ -24,10 +24,23 @@ boot). The parent accepts it once, only from the worker it sent the child to,
 stores it with local Task reports and wakes the session that called Task
 (:func:`handle_task_report`).
 
+While it runs, the parent tracks the child like a local background Task
+(:func:`track_dispatch`): a ``task_registry`` record carrying the worker
+(TaskList, TaskGet, ListAgents, the running count, the park gate), a
+supervisor record and a progress card fed from the child's mirrored session
+events. The durable ``background_tasks`` row keeps ``remote_device_id``, so a
+restart here neither kills the record nor clears the park; :func:`reattach`
+rebuilds the rest. :func:`check_targets` asks each target with
+``task-status`` (:func:`handle_task_status`) and records contact or since
+when it has been unreachable (``app.db.remote_tasks``).
+
 Not here yet (later slices of docs/reviews/cross-worker-subagents-2026-10-03.md):
-the parent's registry row, supervisor record and mirrored progress card (S7),
-stop (S8), resume by message (S9) and approval routing (S10). Until S10 a remote child runs with Away handling: an
-approval it needs is deferred, never granted, and listed in its final reply.
+stop reaching the child (S8, ``provider_agent_supervisor._stop_remote_worker``),
+resume by message (S9, refused in ``agent_messaging.make_message``), approval
+routing (S10) and the notice after a long silence (S12, from
+``remote_tasks.unreachable_since``). Until S10 a remote child runs with Away
+handling: an approval it needs is deferred, never granted, and listed in its
+final reply.
 """
 from __future__ import annotations
 
@@ -312,7 +325,7 @@ async def dispatch_remote(
         remote_tasks.record_dispatch, worker_session_id=worker_id,
         target_device_id=worker["device_id"], owner_session_id=caller_session_id,
         root_session_id=root_session_id, tool_use_id=launch_tool_use_id, mode=mode,
-        label=label, agent=result_agent)
+        label=label, agent=result_agent, target_name=name)
 
     async def never_started() -> None:
         await release()
@@ -341,9 +354,11 @@ async def dispatch_remote(
         return {"ok": False, "error": (
             f"{name} gave an invalid answer; the subagent may have started there. Check that "
             "worker before dispatching it again.")}
-    # S7 attaches here: the registry row, supervisor record and mirrored feed
-    # for this child, keyed by ``worker_id`` on the owner ``caller_session_id``
-    # (``remote_tasks.record_dispatch`` above is the durable part).
+    await track_dispatch(
+        worker_id=worker_id, target_device_id=worker["device_id"], worker_name=name,
+        root_session_id=root_session_id, owner_session_id=caller_session_id, label=label,
+        agent_name=agent_name, roster_name=roster_name, provider_id=provider_id,
+        model_id=model_id, prompt=prompt, launch_tool_use_id=launch_tool_use_id)
     return remote_receipt(answer, worker=worker, worker_id=worker_id, result_agent=result_agent,
                           model_id=model_id, label=label, mode=mode)
 
@@ -377,7 +392,7 @@ def remote_receipt(answer: Mapping[str, Any], *, worker: Mapping[str, Any], work
                "worker is not supported yet. " if mode == "sync" else "")
             + "End the turn now unless you have genuinely disjoint work; you will be woken with "
             "its report when it finishes, even if that worker is briefly unreachable. "
-            "TaskList/TaskGet do not track it yet. Approvals it needs are held back there "
+            "TaskList/TaskGet show it with its worker. Approvals it needs are held back there "
             "(never granted) and listed in its report."
         ),
     }
@@ -1024,7 +1039,13 @@ def _wake_summary(report: _Report, report_path: Optional[str]) -> str:
 
 
 async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
-    """``task-report`` control action: store the report, wake the caller once."""
+    """``task-report`` control action: store the report, wake the caller once.
+
+    The tracked record settles first (registry rows, card, supervisor), as a
+    local background worker's do before its wake. A record this worker already
+    settled (the user stopped it here) keeps its status, and the report is
+    stored without waking anyone.
+    """
     from app.core import turn_scheduler
     from app.core.task_dispatch import write_task_report
     from app.db import database, remote_tasks
@@ -1032,18 +1053,16 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
 
     report = await run_sync(accept_task_report, body, from_device)
     key = report.worker_session_id
-    entry = _report_locks.setdefault(key, [asyncio.Lock(), 0])
-    entry[1] += 1
-    try:
-        async with entry[0]:
-            current = await run_sync(remote_tasks.get_dispatch, key)
-            if current and current.get("completion_id"):
-                return {"delivered": True, "duplicate": True}
-            owner = report.dispatch["owner_session_id"]
-            owner_row = await run_sync(database.get_session, owner)
-            path = None
-            if owner_row is not None:
-                path = await run_sync(write_task_report, owner_row, key, report.report)
+    async with _tracking_lock(key):
+        current = await run_sync(remote_tasks.get_dispatch, key)
+        if current and current.get("completion_id"):
+            return {"delivered": True, "duplicate": True}
+        owner = report.dispatch["owner_session_id"]
+        owner_row = await run_sync(database.get_session, owner)
+        path = None
+        if owner_row is not None:
+            path = await run_sync(write_task_report, owner_row, key, report.report)
+            if await _settle_tracked(report.dispatch, report, path):
                 frame = {
                     "task_id": key,
                     "status": _WAKE_STATUS[report.status],
@@ -1052,12 +1071,391 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
                 }
                 await turn_scheduler.on_remote_task_terminal(owner, frame)
             else:
-                logger.info("remote_task: report for %s arrived after its caller %s was deleted",
-                            key, owner)
-            await run_sync(remote_tasks.mark_delivered, key, completion_id=report.completion_id,
-                           status=report.status, report_path=path)
-            return {"delivered": True, "duplicate": False}
+                logger.info("remote_task: report for %s stored; it was already settled here",
+                            key)
+        else:
+            logger.info("remote_task: report for %s arrived after its caller %s was deleted",
+                        key, owner)
+        await run_sync(remote_tasks.mark_delivered, key, completion_id=report.completion_id,
+                       status=report.status, report_path=path)
+        return {"delivered": True, "duplicate": False}
+
+
+@contextlib.asynccontextmanager
+async def _tracking_lock(key: str):
+    """One tracking change per remote child at a time: its start, re-attach and report."""
+    entry = _report_locks.setdefault(key, [asyncio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
     finally:
         entry[1] -= 1
         if entry[1] <= 0:
             _report_locks.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
+# Parent side: track the child like a local background Task
+# ---------------------------------------------------------------------------
+
+TASK_STATUS_ACTION = "task-status"
+STATUS_TIMEOUT = 15.0
+#: How often the parent asks each target about the children it runs.
+TRACK_SECONDS = 60.0
+MAX_STATUS_IDS = 200
+#: What a target says about a child: its ``remote_task_children`` state, or
+#: ``unknown`` when it has no such child for the asking worker.
+CHILD_UNKNOWN = "unknown"
+
+
+def worker_display_name(device_id: Optional[str]) -> str:
+    """The worker's name as this account knows it, else its device id. Never raises."""
+    if not device_id:
+        return ""
+    try:
+        from app.network import engine
+
+        ctx = engine.context()
+        member = ctx.member(device_id) if ctx else None
+        if member is not None and member.name:
+            return str(member.name)
+    except Exception:  # noqa: BLE001 — a name is cosmetic
+        logger.debug("remote_task: name lookup failed for %s", device_id, exc_info=True)
+    return str(device_id)
+
+
+def _model_label(provider_id: Optional[str], model_id: Optional[str]) -> str:
+    """The registry's "<provider> · <model>" label, as for a local worker. Blocking."""
+    from app.core.provider_agent import _provider_display_name
+
+    return f"{_provider_display_name(provider_id)} · {model_id or 'inherit'}"
+
+
+def _register(*, worker_id: str, root_session_id: str, owner_session_id: str, label: str,
+              agent: Optional[str], roster_name: Optional[str], model_label: Optional[str],
+              target_device_id: str, worker_name: str) -> None:
+    """The registry records a local background dispatch would have.
+
+    One on the root (what the UI renders and the park gate reads) and, for a
+    nested caller, one on the caller; the launch key admits the completion to
+    the caller's own wake lane. The task id, launch key and card join key are
+    all the worker session id, as for a local worker.
+    """
+    from app.core.task_registry import task_registry
+
+    for session_id in dict.fromkeys((root_session_id, owner_session_id)):
+        task_registry.start_task(
+            session_id, worker_id, "agent", label, summary=label, model=model_label,
+            tool_use_id=worker_id, agent=agent, name=roster_name,
+            remote_device_id=target_device_id, worker_name=worker_name)
+    task_registry.mark_background_launch(owner_session_id, worker_id)
+
+
+async def _follow(*, worker_id: str, target_device_id: str, root_session_id: str, label: str,
+                  provider_id: Optional[str], model_id: Optional[str], agent_name: Optional[str],
+                  prompt: Optional[str], launch_tool_use_id: Optional[str],
+                  resume_cursor: Optional[int]) -> None:
+    """Supervisor record plus a progress card fed from the child's mirrored events.
+
+    ``resume_cursor`` None starts a new card; a number re-attaches the card a
+    previous process started, past that event (see ``WorkerFeed.resume_at``).
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.provider_agent_feed import WorkerFeed
+
+    if supervisor.get_worker(root_session_id, worker_id) is not None:
+        return
+    feed = WorkerFeed(
+        parent_session_id=root_session_id, worker_session_id=worker_id, task_id=worker_id,
+        label=label, provider_id=provider_id, model_id=model_id, agent_name=agent_name,
+        prompt=prompt, launch_tool_use_id=launch_tool_use_id)
+    # Always background: the turn-end teardown spares it, as it spares a local
+    # background worker; Stop and stop-all reach it through the supervisor.
+    supervisor.register_worker(supervisor.WorkerRecord(
+        parent_session_id=root_session_id, worker_session_id=worker_id, task_id=worker_id,
+        tool_use_id=worker_id, provider_id=provider_id or "", model_id=model_id or "",
+        label=label, feed=feed, background=True, remote_device_id=target_device_id))
+    if resume_cursor is None:
+        await feed.started()
+    else:
+        feed.resume_at(resume_cursor)
+    # The child's events reach this worker by catalog sync; the feed reads
+    # them from the local mirror exactly as it reads a local worker's log.
+    feed.start_following()
+
+
+async def track_dispatch(*, worker_id: str, target_device_id: str, worker_name: str,
+                         root_session_id: str, owner_session_id: str, label: str,
+                         agent_name: Optional[str], roster_name: Optional[str],
+                         provider_id: Optional[str], model_id: Optional[str],
+                         prompt: Optional[str], launch_tool_use_id: Optional[str]) -> None:
+    """Make a child another worker accepted show up like a local background Task.
+
+    Never raises: the child is running either way, and its report still wakes
+    the caller. A report that already came back (a very fast child) wins.
+    """
+    from app.db import remote_tasks
+
+    try:
+        model_label = await asyncio.to_thread(_model_label, provider_id, model_id)
+        async with _tracking_lock(worker_id):
+            dispatch = await asyncio.to_thread(remote_tasks.get_dispatch, worker_id)
+            if dispatch is None or dispatch.get("completion_id"):
+                return
+            _register(worker_id=worker_id, root_session_id=root_session_id,
+                      owner_session_id=owner_session_id, label=label, agent=agent_name,
+                      roster_name=roster_name, model_label=model_label,
+                      target_device_id=target_device_id, worker_name=worker_name)
+            await _follow(worker_id=worker_id, target_device_id=target_device_id,
+                          root_session_id=root_session_id, label=label, provider_id=provider_id,
+                          model_id=model_id, agent_name=agent_name, prompt=prompt,
+                          launch_tool_use_id=launch_tool_use_id, resume_cursor=None)
+    except Exception:  # noqa: BLE001 — tracking is display; the report still arrives
+        logger.exception("remote_task: could not track child %s on %s", worker_id, target_device_id)
+
+
+def _child_cursor(worker_session_id: str) -> int:
+    """The newest mirrored event of a child here (0 when none). Blocking."""
+    from app.db import session_events
+
+    try:
+        return int(session_events.get_max_seq(worker_session_id) or 0)
+    except Exception:  # noqa: BLE001 — start from the beginning of the mirror
+        return 0
+
+
+async def reattach(dispatch: Mapping[str, Any]) -> bool:
+    """Rebuild one undelivered child's tracking after this worker restarted.
+
+    The durable row comes back running (``ensure_hydrated``); this adds the
+    caller's launch key, the supervisor record and the card's feed, resumed
+    at the newest mirrored event. A record this worker already settled, a
+    deleted caller or a child already attached is left alone. True when it
+    attached.
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.task_registry import task_registry
+    from app.db import database, remote_tasks
+
+    worker_id = dispatch["worker_session_id"]
+    root = dispatch["root_session_id"]
+    owner = dispatch["owner_session_id"]
+    async with _tracking_lock(worker_id):
+        if supervisor.get_worker(root, worker_id) is not None:
+            return False
+        current = await asyncio.to_thread(remote_tasks.get_dispatch, worker_id)
+        if not current or current.get("completion_id"):
+            return False
+        if await asyncio.to_thread(database.get_session, owner) is None:
+            return False
+        for session_id in dict.fromkeys((root, owner)):
+            await task_registry.ensure_hydrated(session_id)
+        record = task_registry.get_task(root, worker_id)
+        if record is not None and record.get("status") != "running":
+            return False
+        target = current["target_device_id"]
+        name = worker_display_name(target)
+        _register(worker_id=worker_id, root_session_id=root, owner_session_id=owner,
+                  label=current.get("label") or "Task worker",
+                  agent=(record or {}).get("agent") or current.get("agent"),
+                  roster_name=(record or {}).get("name"), model_label=(record or {}).get("model"),
+                  target_device_id=target, worker_name=name)
+        cursor = await asyncio.to_thread(_child_cursor, worker_id)
+        await _follow(worker_id=worker_id, target_device_id=target, root_session_id=root,
+                      label=current.get("label") or "Task worker", provider_id=None, model_id=None,
+                      agent_name=(record or {}).get("agent") or current.get("agent"), prompt=None,
+                      launch_tool_use_id=current.get("tool_use_id"), resume_cursor=cursor)
+        return True
+
+
+async def reattach_all() -> int:
+    """:func:`reattach` every child still owed a report here. Returns how many attached."""
+    from app.db import remote_tasks
+
+    attached = 0
+    for dispatch in await asyncio.to_thread(remote_tasks.tracked_dispatches):
+        try:
+            attached += bool(await reattach(dispatch))
+        except Exception:  # noqa: BLE001 — one child never blocks the others
+            logger.warning("remote_task: could not re-attach %s", dispatch.get("worker_session_id"),
+                           exc_info=True)
+    return attached
+
+
+async def _settle_tracked(dispatch: Mapping[str, Any], report: "_Report",
+                          report_path: Optional[str]) -> bool:
+    """Settle the child's registry records, card and supervisor record.
+
+    Returns False when this worker had already settled the record (a Stop
+    here, or a watchdog): its status stands and the report must not wake
+    anyone. A record that is missing (the report beat its tracking) is created
+    first, so TaskList still lists the finished child.
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.provider_agent import _completion_summary
+    from app.core.provider_agent_feed import WorkerFeed
+    from app.core.task_registry import USER_STOP_REASON, task_registry
+
+    worker_id = dispatch["worker_session_id"]
+    root = dispatch["root_session_id"]
+    owner = dispatch["owner_session_id"]
+    for session_id in dict.fromkeys((root, owner)):
+        await task_registry.ensure_hydrated(session_id)
+    record = task_registry.get_task(root, worker_id)
+    tracked = supervisor.get_worker(root, worker_id)
+    if record is not None and record.get("status") != "running":
+        if tracked is not None:
+            supervisor.unregister_worker(root, worker_id)
+        return False
+    if record is None:
+        _register(worker_id=worker_id, root_session_id=root, owner_session_id=owner,
+                  label=dispatch.get("label") or "Task worker", agent=dispatch.get("agent"),
+                  roster_name=None, model_label=None,
+                  target_device_id=dispatch["target_device_id"], worker_name=report.worker_name)
+        record = task_registry.get_task(root, worker_id) or {}
+    status = _WAKE_STATUS[report.status]
+    if tracked is not None and tracked.feed is not None:
+        feed = tracked.feed
+        await feed.stop_following(final_drain=True)
+    else:
+        # No live feed (the report beat its tracking): settle the card only.
+        feed = WorkerFeed(parent_session_id=root, worker_session_id=worker_id, task_id=worker_id,
+                          label=dispatch.get("label"))
+    await feed.completed(status, result_preview=report.report,
+                         summary=record.get("model") or dispatch.get("label"))
+    summary = _completion_summary(report.report)
+    for session_id in dict.fromkeys((root, owner)):
+        task_registry.complete_task(
+            session_id, worker_id, status, summary=summary,
+            reason=USER_STOP_REASON if report.status == "stopped" else None,
+            report_path=report_path, report_chars=len(report.report))
+    supervisor.unregister_worker(root, worker_id)
+    return True
+
+
+async def _ask_status(target_device_id: str, ids: List[str]) -> Optional[Dict[str, Optional[str]]]:
+    """``{id: state}`` from the target, or None when it could not be reached.
+
+    A refusal is an answer: the target is reachable (an older release refuses
+    the action by name), so its children keep their last known state.
+    """
+    from app.network import control
+
+    try:
+        answer = await control.call(target_device_id, TASK_STATUS_ACTION,
+                                    {"version": WIRE_VERSION, "worker_session_ids": ids},
+                                    timeout=STATUS_TIMEOUT)
+    except control.ControlRefused:
+        return {worker_id: None for worker_id in ids}
+    except Exception as exc:  # noqa: BLE001 — unreachable, off-network: quiet
+        logger.info("remote_task: %s did not answer task-status: %s", target_device_id, exc)
+        return None
+    children = answer.get("children") if isinstance(answer, dict) else None
+    states: Dict[str, Optional[str]] = {}
+    for worker_id in ids:
+        entry = children.get(worker_id) if isinstance(children, dict) else None
+        state = entry.get("state") if isinstance(entry, dict) else None
+        states[worker_id] = state if isinstance(state, str) and len(state) <= 40 else None
+    return states
+
+
+def _mirrored_states(worker_ids: List[str]) -> Dict[str, Optional[str]]:
+    """Each child's runtime state from the local mirror of its session. Blocking."""
+    try:
+        from app.network import session_runtime
+
+        rows = session_runtime.for_sessions(worker_ids)
+    except Exception:  # noqa: BLE001 — the state is display only
+        logger.debug("remote_task: mirrored runtime read failed", exc_info=True)
+        return {}
+    return {worker_id: (rows.get(worker_id) or {}).get("state") for worker_id in worker_ids}
+
+
+async def check_targets() -> int:
+    """Ask each target about the children it runs for this worker.
+
+    A target that answers clears ``unreachable_since`` and records each
+    child's state as it reports it; one that cannot be reached keeps the first
+    time it went quiet. The registry records show the worker's state and that
+    time; their status stays ``running`` until the report arrives (the notice
+    after a long silence is S12). Returns how many children are unreachable.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+
+    rows = await asyncio.to_thread(remote_tasks.tracked_dispatches)
+    by_target: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_target.setdefault(row["target_device_id"], []).append(row)
+    quiet = 0
+    for target, group in by_target.items():
+        for start in range(0, len(group), MAX_STATUS_IDS):
+            chunk = group[start:start + MAX_STATUS_IDS]
+            ids = [row["worker_session_id"] for row in chunk]
+            states = await _ask_status(target, ids)
+            if states is None:
+                since = await asyncio.to_thread(remote_tasks.note_unreachable, ids)
+                quiet += len(since)
+            else:
+                await asyncio.to_thread(remote_tasks.note_contact, states)
+                since = {}
+            mirrored = await asyncio.to_thread(_mirrored_states, ids)
+            for row in chunk:
+                worker_id = row["worker_session_id"]
+                for session_id in dict.fromkeys((row["root_session_id"], row["owner_session_id"])):
+                    task_registry.update_remote_status(
+                        session_id, worker_id, worker_state=mirrored.get(worker_id),
+                        unreachable_since=since.get(worker_id))
+    return quiet
+
+
+async def tracking_loop() -> None:
+    """Re-attach children still running elsewhere after a boot, then check
+    their targets every :data:`TRACK_SECONDS`. Runs until cancelled."""
+    await asyncio.sleep(5.0)
+    reattached = False
+    while True:
+        try:
+            if not reattached:
+                await reattach_all()
+                reattached = True
+            await check_targets()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — try again next round
+            logger.warning("remote_task: tracking pass failed", exc_info=True)
+        await asyncio.sleep(TRACK_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Target side: answer task-status for the children a worker started here
+# ---------------------------------------------------------------------------
+
+def answer_task_status(body: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
+    """Each asked child's state, only for children ``from_device`` started. Blocking.
+
+    Raises ``PermissionError`` / ``ValueError`` (a named refusal).
+    """
+    from app.db import remote_tasks
+
+    _require_worker_member(from_device)
+    if not isinstance(body, dict) or body.get("version") != WIRE_VERSION:
+        raise ValueError("Unsupported status request version")
+    ids = body.get("worker_session_ids")
+    if (not isinstance(ids, list) or not ids or len(ids) > MAX_STATUS_IDS
+            or any(not isinstance(i, str) or not i.strip() or len(i) > 64 for i in ids)):
+        raise ValueError(f"worker_session_ids must list 1 to {MAX_STATUS_IDS} ids")
+    ids = list(dict.fromkeys(ids))
+    rows = remote_tasks.children_for(ids, from_device)
+    return {"children": {
+        worker_id: {"state": rows[worker_id]["state"] if worker_id in rows else CHILD_UNKNOWN}
+        for worker_id in ids
+    }}
+
+
+async def handle_task_status(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """``task-status`` control action."""
+    from app.db.async_database import run_sync
+
+    return await run_sync(answer_task_status, body, from_device)

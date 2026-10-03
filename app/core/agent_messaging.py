@@ -66,19 +66,23 @@ def peer_rows(session_id: str | None) -> list[dict]:
             or target in seen
         ):
             continue
-        rows.append(
-            {
-                # The roster name fluid derived from the task, else
-                # the agent type, else the subject.
-                "name": task.get("name") or task.get("agent") or task["subject"] or target,
-                "ref": target,
-                "worker_session_id": target,
-                "task_id": target,
-                "status": task["status"],
-                "kind": "subagent",
-                "description": task["subject"],
-            }
-        )
+        row = {
+            # The roster name fluid derived from the task, else
+            # the agent type, else the subject.
+            "name": task.get("name") or task.get("agent") or task["subject"] or target,
+            "ref": target,
+            "worker_session_id": target,
+            "task_id": target,
+            "status": task["status"],
+            "kind": "subagent",
+            "description": task["subject"],
+        }
+        if task.get("worker"):
+            # A Task child running on another worker (app.core.remote_task).
+            row["worker"] = task["worker"].get("name")
+            if task.get("unreachableSince"):
+                row["unreachable_since"] = task["unreachableSince"]
+        rows.append(row)
         seen.add(target)
     return rows
 
@@ -164,6 +168,14 @@ def make_message(supplier):
             )
         row = matches[0]
         target = row["worker_session_id"]
+        if row.get("worker"):
+            # Its session belongs to that worker; nothing here may queue a turn
+            # on the read-only mirror. Messaging it is slice S9.
+            return ToolOutcome(
+                text=(f"{row['name']} runs on {row['worker']}; sending it a message is not "
+                      "supported yet. Its report comes back here when it finishes."),
+                is_error=True,
+            )
         resuming = row["status"] != "running"
         if resuming:
             error = await resume_unavailable(target, row)

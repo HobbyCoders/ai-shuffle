@@ -977,6 +977,7 @@ def create_postgres_schema(cursor) -> None:
             agent TEXT,
             roster_name TEXT,
             model TEXT,
+            remote_device_id TEXT,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (task_id, session_id)

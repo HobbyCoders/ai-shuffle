@@ -76,8 +76,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
                     started_at, updated_at, summary, reason, report_path, report_chars,
-                    agent, roster_name, model
-                ) VALUES ({", ".join([_ph] * 18)})
+                    agent, roster_name, model, remote_device_id
+                ) VALUES ({", ".join([_ph] * 19)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -94,7 +94,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     report_chars = EXCLUDED.report_chars,
                     agent = EXCLUDED.agent,
                     roster_name = EXCLUDED.roster_name,
-                    model = EXCLUDED.model""",
+                    model = EXCLUDED.model,
+                    remote_device_id = EXCLUDED.remote_device_id""",
             [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
@@ -114,6 +115,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 (_task_text(snapshot.get("agent")) or "")[:256] or None,
                 (_task_text(snapshot.get("name")) or "")[:256] or None,
                 (_task_text(snapshot.get("model")) or "")[:256] or None,
+                snapshot.get("remote_device_id") or None,
             ) for snapshot in snapshots],
         )
 
@@ -156,7 +158,10 @@ def mark_stale_background_tasks_killed(
     """Boot reconcile: mark THIS install's non-terminal rows killed.
 
     Background work never survives a server restart, so any own-instance row
-    still "running" at boot was stranded by the previous process. Mirrors
+    still "running" at boot was stranded by the previous process. The one
+    exception is a Task child running on another worker (``remote_device_id``
+    set): the restart did not stop it and its report still comes back, so its
+    row stays running. Mirrors
     ``startup_reconcile._clear_stale_parked_markers`` (instance-scoped; peer
     installs' rows are never touched). Each flipped row is stamped with reason
     ``server_restart`` (and ``summary`` when given) so a later read can tell a
@@ -179,6 +184,7 @@ def mark_stale_background_tasks_killed(
                        reason = {_ph}, summary = COALESCE({_ph}, summary)
                  WHERE instance_id = {_ph}
                    AND status NOT IN ({terminal_list})
+                   AND remote_device_id IS NULL
              RETURNING task_id, session_id, tool_use_id, title, kind, agent,
                        roster_name, model, started_at""",
             (SERVER_RESTART_REASON, summary, instance_id),
@@ -193,9 +199,11 @@ def list_session_terminal_background_tasks(
 
     After a restart the in-memory registry is empty, so a parent asking for its
     workers (``TaskList``, ``ListAgents``, ``SendMessage``) has only these rows
-    left. Only terminal rows: a non-terminal one belongs to live work (another
-    install's, or this process's own, which is already in memory). Bounded so a
-    long-lived session cannot pull its whole history into memory.
+    left. Only terminal rows, plus Task children running on another worker
+    (``remote_device_id`` set): any other non-terminal row belongs to live work
+    (another install's, or this process's own, which is already in memory),
+    whereas a remote child keeps running across this worker's restart. Bounded
+    so a long-lived session cannot pull its whole history into memory.
     """
     _ph = ph()
     terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
@@ -204,10 +212,10 @@ def list_session_terminal_background_tasks(
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path,
-                       report_chars, agent, roster_name, model
+                       report_chars, agent, roster_name, model, remote_device_id
                   FROM background_tasks
                  WHERE session_id = {_ph}
-                   AND status IN ({terminal_list})
+                   AND (status IN ({terminal_list}) OR remote_device_id IS NOT NULL)
                  ORDER BY updated_at DESC
                  LIMIT {_ph}""",
             (session_id, int(limit)),
@@ -224,7 +232,9 @@ def list_stale_nonterminal_background_tasks(
     settle_stale_background_task_rows``): a non-terminal row this old whose
     task the in-memory registry no longer knows can never settle on its own —
     the boot reconcile only runs at boot, and an install can stay up for weeks.
-    Read-only; instance-scoped like the boot sweep. Returns dicts with
+    Read-only; instance-scoped like the boot sweep. A Task child running on
+    another worker is never stale here: its row settles when its report
+    arrives. Returns dicts with
     ``task_id``, ``session_id``, ``tool_use_id``, ``title``, ``status``.
     """
     _ph = ph()
@@ -239,6 +249,7 @@ def list_stale_nonterminal_background_tasks(
                   FROM background_tasks
                  WHERE instance_id = {_ph}
                    AND status NOT IN ({terminal_list})
+                   AND remote_device_id IS NULL
                    AND updated_at < NOW() - make_interval(secs => {_ph})""",
             (instance_id, older_than_seconds),
         )
@@ -293,7 +304,7 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path, report_chars,
-                       agent, roster_name, model
+                       agent, roster_name, model, remote_device_id
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),
