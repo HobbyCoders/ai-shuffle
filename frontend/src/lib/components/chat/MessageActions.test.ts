@@ -48,6 +48,14 @@ describe('MessageActions gating', () => {
 		await fireEvent.click(screen.getByTitle('Copy'));
 		expect(onCopy).toHaveBeenCalledWith('Plan\n\nFix the build\nsee docs');
 	});
+
+	it('hands over the Markdown source verbatim when asked to copy markdown', async () => {
+		const onCopy = vi.fn();
+		const source = '# Plan\n\n- **Fix** the `build`';
+		render(MessageActions, { ...base, messageRole: 'assistant', copyAs: 'markdown', messageContent: source, onCopy });
+		await fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
+		expect(onCopy).toHaveBeenCalledWith(source);
+	});
 });
 
 describe('MessageActions rewind', () => {

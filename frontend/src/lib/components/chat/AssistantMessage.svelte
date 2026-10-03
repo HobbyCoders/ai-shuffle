@@ -64,6 +64,13 @@
 	// Show Read button only on final messages with content
 	const canRead = $derived(Boolean(!streaming && content && content.length > 0 && hasFinalMetadata));
 
+	// Copy is offered on every settled text block, not only the turn's final
+	// one: each block is what the reader sees as one message, and commentary
+	// between tool calls is worth copying too. Hidden while streaming so a
+	// press never copies a half-written reply.
+	const canCopy = $derived(Boolean(!streaming && content?.trim()));
+	const showFooter = $derived(Boolean(!streaming && (metadata || canCopy)));
+
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
 	let showActionsOnMobile = $state(false);
@@ -508,32 +515,33 @@
 			</div>
 		</div>
 		<HtmlPreviews content={_twBestContent} {streaming} {sessionId} />
-		{#if metadata && !streaming}
-			<div class="ameta">
-				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
-				{#if metadata.usage_estimated}
+		{#if showFooter}
+			<div class="ameta" class:is-actions-only={!metadata}>
+				{#if metadata && timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
+				{#if metadata?.usage_estimated}
 					<!-- The turn's token counts (and so its cost) were estimated by
 					     the harness: the provider reported no usage, or the reply
 					     was stopped before it arrived. -->
 					<UsageEstimatedBadge />
 				{/if}
-				{#if metadata.total_cost_usd}
+				{#if metadata?.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
-				{:else if metadata.cost_usd}
+				{:else if metadata?.cost_usd}
 					<span>{formatCost(metadata.cost_usd as number)}</span>
 				{/if}
-				{#if metadata.duration_ms}
+				{#if metadata?.duration_ms}
 					<span>{((metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
 				{/if}
-				{#if metadata.tokens_out && metadata.duration_ms && (metadata.duration_ms as number) > 0}
+				{#if metadata?.tokens_out && metadata?.duration_ms && (metadata.duration_ms as number) > 0}
 					<span>{((metadata.tokens_out as number) / ((metadata.duration_ms as number) / 1000)).toFixed(1)} t/s</span>
 				{/if}
-				{#if content && hasFinalMetadata}
+				{#if canCopy}
 					<div class="assistant-actions" class:is-visible={showActions}>
 						<MessageActions
 							{sessionId}
 							messageContent={content}
 							messageRole="assistant"
+							copyAs="markdown"
 							{messageUuid}
 							{canRead}
 							isStreaming={streaming}
@@ -602,6 +610,15 @@
 		color: var(--subtle-foreground);
 	}
 
+	/* A mid-turn block has no stats, only the copy button: sit it closer to
+	   the prose it belongs to, as the user bubble's actions do. */
+	.ameta.is-actions-only {
+		margin-top: 4px;
+	}
+
+	/* Space is always reserved so revealing the controls on hover never
+	   reflows the transcript — only opacity changes. Keyboard focus reveals
+	   them too, so tabbing onto the button never lands on something invisible. */
 	.assistant-actions {
 		margin-left: auto;
 		opacity: 0;
@@ -609,21 +626,31 @@
 		transition: opacity 0.12s ease;
 	}
 
-	.assistant-actions.is-visible {
+	.assistant-actions.is-visible,
+	.assistant-actions:focus-within {
 		opacity: 1;
 		pointer-events: auto;
 	}
 
+	/* Touch: the controls stay visible, and the row is a full 44px with the
+	   button inset 6px from the edge. The message container clips overflow,
+	   so this is what leaves room for the button's invisible 44px hit area
+	   (MessageActions) instead of cutting it off at the right and bottom. */
 	@media (max-width: 639px) {
 		.ameta {
-			min-height: 36px;
+			min-height: 44px;
 			gap: 9px;
 		}
 
 		.assistant-actions {
 			opacity: 1;
 			pointer-events: auto;
+			margin-right: 6px;
 		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.assistant-actions { transition: none; }
 	}
 
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */

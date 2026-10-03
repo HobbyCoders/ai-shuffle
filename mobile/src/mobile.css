@@ -308,6 +308,51 @@ html:root[data-platform='mobile'] .dock-left .voice-btn-wrapper {
 	border-radius: 12px;
 }
 
+/* ── frontend/src/lib/components/chat/MessageActions.svelte ────────────────── */
+/* ── frontend/src/lib/components/chat/AssistantMessage.svelte ──────────────── */
+/* ── frontend/src/lib/components/chat/UserMessage.svelte ───────────────────── */
+
+/* The phone has no hover, so message actions (copy, read aloud, rewind) are
+   always visible, at every width — the components' own narrow-window media
+   query only covers phones in portrait. Each button is 32px with an invisible
+   44px hit area, on a 44px pitch so neighbouring targets never overlap.
+   `.action-btn` is scoped under `.message-actions`: the Git panel uses the
+   same class name. */
+html:root[data-platform='mobile'] .message-actions {
+	gap: 12px;
+}
+
+html:root[data-platform='mobile'] .message-actions .action-btn {
+	position: relative;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+}
+
+html:root[data-platform='mobile'] .message-actions .action-btn::after {
+	content: '';
+	position: absolute;
+	inset: -6px;
+}
+
+html:root[data-platform='mobile'] .useractions,
+html:root[data-platform='mobile'] .assistant-actions {
+	opacity: 1;
+	pointer-events: auto;
+	user-select: auto;
+}
+
+/* The assistant message container clips overflow: a full 44px row and a 6px
+   inset from the right edge leave room for the hit area. */
+html:root[data-platform='mobile'] .ameta {
+	min-height: 44px;
+	gap: 9px;
+}
+
+html:root[data-platform='mobile'] .assistant-actions {
+	margin-right: 6px;
+}
+
 /* ── frontend/src/lib/components/chat/ProfileSelector.svelte ───────────────── */
 
 /* Mobile shell layout adjustments */

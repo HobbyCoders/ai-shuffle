@@ -47,10 +47,10 @@ describe('AssistantMessage footer and actions', () => {
 		expect(view.container.querySelectorAll('.animate-pulse')).toHaveLength(0);
 	});
 
-	it('does not offer read-aloud for an intermediate message without completion metadata', () => {
+	it('offers copy but not read-aloud on an intermediate message without completion metadata', () => {
 		render(AssistantMessage, { content: 'Thinking out loud', streaming: false, metadata: { model: 'x' } });
 		expect(screen.queryByTitle('Read aloud')).toBeNull();
-		expect(screen.queryByTitle('Copy')).toBeNull();
+		expect(screen.getByRole('button', { name: 'Copy message' })).toBeTruthy();
 	});
 
 	it('reads the reply aloud as plain speech text and stops on the second press', async () => {
@@ -77,5 +77,49 @@ describe('AssistantMessage footer and actions', () => {
 		await waitFor(() => expect(console.error).toHaveBeenCalledWith('Failed to generate TTS:', expect.any(Error)));
 		expect(screen.getByTitle('Read aloud')).toBeTruthy();
 		expect(FakeAudio.last).toBeNull();
+	});
+});
+
+describe('AssistantMessage copy', () => {
+	const markdown = [
+		'## Plan', '', '- **Fix** the `build`', '- see [docs](https://x.test)', '',
+		'```ts', 'const a = 1;', '```'
+	].join('\n');
+
+	it('copies the Markdown source of a settled block, with or without turn metadata', async () => {
+		const writeText = vi.fn(async () => {});
+		vi.stubGlobal('navigator', { clipboard: { writeText } });
+		for (const metadata of [undefined, finalMeta]) {
+			const view = render(AssistantMessage, { content: markdown, streaming: false, metadata });
+			const button = screen.getByRole('button', { name: 'Copy message' });
+			await fireEvent.click(button);
+			expect(writeText).toHaveBeenLastCalledWith(markdown);
+			expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy();
+			view.unmount();
+		}
+	});
+
+	it('hides copy while the block is streaming and shows it once it settles', async () => {
+		const view = render(AssistantMessage, { content: 'Half a sen', streaming: true });
+		expect(screen.queryByRole('button', { name: 'Copy message' })).toBeNull();
+		await view.rerender({ content: 'Half a sentence, now whole.', streaming: false });
+		expect(screen.getByRole('button', { name: 'Copy message' })).toBeTruthy();
+	});
+
+	it('renders no footer for an empty block', () => {
+		const view = render(AssistantMessage, { content: '   ', streaming: false });
+		expect(screen.queryByRole('button', { name: 'Copy message' })).toBeNull();
+		expect(view.container.querySelector('.ameta')).toBeNull();
+	});
+
+	it('reserves the action row and reveals it on hover without remounting it', async () => {
+		const view = render(AssistantMessage, { content: 'Reply', streaming: false });
+		const row = view.container.querySelector('.assistant-actions')!;
+		expect(row.classList.contains('is-visible')).toBe(false);
+		await fireEvent.mouseEnter(view.container.querySelector('.message-container')!);
+		expect(view.container.querySelector('.assistant-actions')).toBe(row);
+		expect(row.classList.contains('is-visible')).toBe(true);
+		await fireEvent.mouseLeave(view.container.querySelector('.message-container')!);
+		expect(row.classList.contains('is-visible')).toBe(false);
 	});
 });

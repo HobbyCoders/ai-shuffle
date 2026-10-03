@@ -4,14 +4,19 @@
 	 * MessageActions - Hover-only action buttons for chat messages
 	 *
 	 * Provides Copy, Read (for assistant messages), and Rewind functionality.
-	 * All buttons are only visible when hovering over the parent message container.
+	 * The parent decides when the row is shown (hover/focus on desktop, always
+	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
+	import { onDestroy } from 'svelte';
 	import { executeRewind } from '$lib/api/client';
 
 	interface Props {
 		sessionId?: string | null;
 		messageContent: string;
 		messageRole: 'user' | 'assistant';
+		/** 'plain' strips Markdown syntax (user prompts); 'markdown' copies the
+		 *  source verbatim (assistant replies, so formatting survives a paste). */
+		copyAs?: 'plain' | 'markdown';
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		rewindEligible?: boolean;
@@ -29,6 +34,7 @@
 		sessionId,
 		messageContent,
 		messageRole,
+		copyAs = 'plain',
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
 		rewindEligible = true,
@@ -43,6 +49,8 @@
 	}: Props = $props();
 
 	let copied = $state(false);
+	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+	onDestroy(() => { if (copiedTimer) clearTimeout(copiedTimer); });
 	let copyError = $state('');
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
@@ -99,15 +107,17 @@
 	async function handleCopy() {
 		copied = false;
 		copyError = '';
-		const textToCopy = prepareTextForCopy(messageContent);
+		const textToCopy = copyAs === 'markdown' ? messageContent : prepareTextForCopy(messageContent);
 		if (onCopy) {
 			onCopy(textToCopy);
 		} else {
 			try {
 				await copyText(textToCopy);
 				copied = true;
-				setTimeout(() => {
+				if (copiedTimer) clearTimeout(copiedTimer);
+				copiedTimer = setTimeout(() => {
 					copied = false;
+					copiedTimer = null;
 				}, 2000);
 			} catch (e) {
 				copyError = COPY_ERROR_MESSAGE;
@@ -192,20 +202,23 @@
 	{#if copyError}<span role="alert" class="text-xs text-destructive">{copyError}</span>{/if}
 	<!-- Copy button -->
 	<button
+		type="button"
 		class="action-btn"
 		onclick={handleCopy}
 		title="Copy"
+		aria-label={copied ? 'Copied' : 'Copy message'}
 	>
 		{#if copied}
-			<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 			</svg>
 		{:else}
-			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 			</svg>
 		{/if}
 	</button>
+	<span class="sr-only" aria-live="polite">{copied ? 'Copied to clipboard' : ''}</span>
 
 	<!-- Read button (assistant only) -->
 	{#if canRead && !isStreaming}
@@ -345,6 +358,17 @@
 		color: var(--foreground);
 	}
 
+	.action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+		color: var(--foreground);
+	}
+
+	.action-btn:active {
+		background-color: var(--muted);
+		transform: scale(0.94);
+	}
+
 	.msg-action-btn:hover {
 		background: var(--hover-overlay);
 	}
@@ -354,11 +378,32 @@
 		outline-offset: 2px;
 	}
 
+	/* Touch: a 32px visual button with an invisible 44px hit area, so the
+	   footer row keeps its height while the target meets touch guidelines.
+	   This covers narrow web windows; the phone app's shell applies the same
+	   rules at every width from mobile/src/mobile.css. */
 	@media (max-width: 639px) {
+		/* 32px buttons on a 44px pitch, so neighbouring targets never overlap. */
+		.message-actions {
+			gap: 12px;
+		}
+
 		.action-btn {
+			position: relative;
 			width: 32px;
 			height: 32px;
 			padding: 0;
 		}
+
+		.action-btn::after {
+			content: '';
+			position: absolute;
+			inset: -6px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.action-btn { transition: none; }
+		.action-btn:active { transform: none; }
 	}
 </style>
