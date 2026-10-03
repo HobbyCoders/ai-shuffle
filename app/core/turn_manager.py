@@ -134,6 +134,15 @@ def _kick(session_id: str) -> None:
 # carries no prompt of its own.
 _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 
+# Turns whose text the OWNER wrote (typed, or a spoken transcript). Only these
+# may answer a yes/no question the assistant is waiting on.
+_OWNER_ANSWER_SOURCES = ("user", "queue")
+# Payload flag on a turn a voice call handed to chat. Its text came from a voice
+# model or wraps the call transcript, so it neither answers, declines nor
+# counts as an unclear reply to a pending question; spoken approvals are
+# decided on the voice side from the caller's own audio.
+VOICE_DELEGATION = "voice_delegation"
+
 # Sources whose ``overrides`` carry a PERSON's current pick of model / effort /
 # permission mode, so the session's stored binding follows them. An
 # automation, a wakeup replay, and a Task worker all run with overrides that
@@ -316,6 +325,13 @@ async def submit_async(
     the start and silently drops the nudge from a worker thread. Ordering is
     unchanged: the turn is durably ``queued`` before the kick.
     """
+    if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):
+        # The owner's own message is the only thing that can answer a question
+        # the assistant is waiting on (app/core/assistant_confirm). The turn
+        # still runs, so the assistant sees the reply.
+        from app.core import assistant_confirm
+
+        await assistant_confirm.on_owner_message(session_id, prompt)
     turn_id = await asyncio.to_thread(
         _submit_blocking,
         session_id,

@@ -1840,7 +1840,8 @@ class VoiceBridge:
                 project_id=latest.get("project_id"),
                 worktree_id=latest.get("worktree_id"),
                 overrides=dict(latest.get("overrides") or {}),
-                payload={"api_user_id": api_user_id} if api_user_id else None,
+                # The voice model wrote this message: never an owner answer.
+                payload={"voice_delegation": True, **({"api_user_id": api_user_id} if api_user_id else {})},
             )
         except Exception as exc:  # noqa: BLE001 — surfaced to the model
             logger.warning(

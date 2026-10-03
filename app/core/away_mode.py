@@ -11,6 +11,13 @@ as the permission mode. While it is on:
   confirmation) is NOT granted. It is deferred with a clear result instead of
   waiting on a card nobody is watching. Away mode never widens permissions.
 * Each turn carries a short reminder telling the model the owner is away.
+
+Chats the owner's assistant starts with StartSession get Away-style handling
+without the flag (:func:`assistant_work`): their questions are answered the
+same way, and their approval prompts are raised in the assistant's
+conversation (``provider_agent_approvals``) where the owner answers the real
+card. Anything that cannot be routed there, such as a private-access request,
+is deferred exactly as Away mode defers it. Nothing more is ever granted.
 """
 
 from __future__ import annotations
@@ -40,6 +47,23 @@ DEFERRED_MESSAGE = (
     "never grants it. Do not retry it or reach the same effect another way: "
     "continue with work that does not need it, and list it as 'deferred — "
     "needs owner approval' in your final 'Decisions made for you' table."
+)
+
+ASSISTANT_WORK_NOTE = (
+    "<system-reminder>\n"
+    "The owner's assistant started this chat. Do not ask questions: any question "
+    "is answered with its recommended option, so state the assumptions you make. "
+    "Approvals you need are shown to the owner in the assistant's conversation. "
+    "Your final reply goes back to the assistant automatically; do not also send "
+    "it with MessageSession.\n"
+    "</system-reminder>"
+)
+
+REPORTED_AWAY_NOTE = (
+    "<system-reminder>\n"
+    "Your final reply goes back to the owner's assistant automatically; list any "
+    "deferred approvals in it.\n"
+    "</system-reminder>"
 )
 
 OPEN_ENDED_ANSWER = (
@@ -83,6 +107,65 @@ def is_away(session_id: Optional[str]) -> bool:
 
 async def is_away_async(session_id: Optional[str]) -> bool:
     return await asyncio.to_thread(is_away, session_id)
+
+
+def assistant_work(session_id: Optional[str]) -> bool:
+    """Whether ``session_id`` is a local chat the owner's assistant started.
+
+    Never raises (False on error): an unknown chat keeps ordinary behaviour.
+    """
+    if not session_id:
+        return False
+    try:
+        from app.core.session_orchestration import started_by_home
+
+        return started_by_home(session_id) is not None
+    except Exception:  # noqa: BLE001 — absent marker means an ordinary chat
+        logger.debug("assistant_work check failed for %s", session_id, exc_info=True)
+        return False
+
+
+def answers_questions(session_id: Optional[str]) -> bool:
+    """Whether questions in ``session_id`` get recommended defaults at once."""
+    return is_away(session_id) or assistant_work(session_id)
+
+
+async def answers_questions_async(session_id: Optional[str]) -> bool:
+    if await is_away_async(session_id):
+        return True
+    return await asyncio.to_thread(assistant_work, session_id)
+
+
+def turn_note(session_id: Optional[str]) -> Optional[str]:
+    """The per-turn reminder: Away mode, assistant-started work, the owner's
+    pending yes/no questions in the assistant's home, or None."""
+    notes = [note for note in (_mode_note(session_id), _confirm_note(session_id)) if note]
+    return "\n\n".join(notes) if notes else None
+
+
+def _confirm_note(session_id: Optional[str]) -> Optional[str]:
+    try:
+        from app.core import assistant_confirm
+        from app.core.assistant_service import is_primary_session
+
+        return assistant_confirm.context_note(session_id) if is_primary_session(session_id) else None
+    except Exception:  # noqa: BLE001 — the reminder is best-effort
+        logger.debug("confirmation note failed for %s", session_id, exc_info=True)
+        return None
+
+
+def _mode_note(session_id: Optional[str]) -> Optional[str]:
+    if is_away(session_id):
+        try:
+            from app.core.session_orchestration import _start_turn
+
+            start = _start_turn(session_id) if session_id else None
+        except Exception:  # noqa: BLE001 — the reminder is best-effort
+            start = None
+        if ((start or {}).get("payload") or {}).get("orchestration_report_device"):
+            return CONTEXT_NOTE + "\n\n" + REPORTED_AWAY_NOTE
+        return CONTEXT_NOTE
+    return ASSISTANT_WORK_NOTE if assistant_work(session_id) else None
 
 
 def _labels(question: Dict[str, Any]) -> List[str]:
@@ -166,7 +249,7 @@ async def answer_if_away(
     session_id: Optional[str], questions: List[Dict[str, Any]]
 ) -> Optional[str]:
     """The immediate tool result for ``questions`` when away, else ``None``."""
-    if not questions or not await is_away_async(session_id):
+    if not questions or not await answers_questions_async(session_id):
         return None
     answers = auto_answers(questions)
     if not answers:
@@ -179,9 +262,10 @@ async def defer_if_away(session_id: Optional[str], action: str) -> Optional[str]
     """``DEFERRED_MESSAGE`` (recorded on the session) when away, else ``None``.
 
     Callers use this only where a PERSON would otherwise be asked; it never
-    allows anything.
+    allows anything. A chat the owner's assistant started is deferred the same
+    way when a prompt reaches it here instead of the assistant's conversation.
     """
-    if not await is_away_async(session_id):
+    if not await answers_questions_async(session_id):
         return None
     await record_decision(
         str(session_id),

@@ -96,7 +96,7 @@ async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, sel
     monkeypatch.setattr(voice_stream, "_turn_reply", lambda session, turn: "Done" if (session, turn) == ("s1", "turn-1") else "wrong turn")
     assert await voice_stream.delegate_to_selected_model("s1", "user: test") == "Done"
     assert submit.await_args.args == ("s1", "user")
-    assert submit.await_args.kwargs["payload"] == {"user_message_already_recorded":True}
+    assert submit.await_args.kwargs["payload"] == {"user_message_already_recorded": True, "voice_delegation": True}
     overrides = submit.await_args.kwargs["overrides"]
     assert (overrides["provider"], overrides["model"], overrides["effort"]) == (provider, selected, "high")
     assert overrides["permission_mode"] == "default" and overrides["fast"] is True

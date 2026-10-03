@@ -179,7 +179,10 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
                      system_prompt_append=instructions)
     # VoiceStream flushes the spoken exchange before handing off. Keep the
     # context for the engine without adding a second giant user bubble.
-    payload: dict = {"user_message_already_recorded": True}
+    # ``voice_delegation``: this prompt was written by a voice model (the
+    # Realtime ``submit_to_chat`` request) or wraps the call transcript (Live).
+    # It is never the owner's own answer to an assistant_confirm question.
+    payload: dict = {"user_message_already_recorded": True, "voice_delegation": True}
     # The delegated turn runs as the key that owns the session, never as the
     # owner (a key may open the audio socket on its own session).
     api_user_id = await run_sync(api_user_scope.session_api_user_id, row)

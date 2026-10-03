@@ -370,6 +370,11 @@ def _orchestration_start_handler():
     return handle_remote_start
 
 
+def _orchestration_report_handler():
+    from app.core.session_orchestration import handle_remote_report
+    return handle_remote_report
+
+
 def _application_update_handler():
     from app.core.update_workers import peer_action
     return peer_action
@@ -420,6 +425,7 @@ _LAZY_HANDLERS = {
     "handoff": _handoff_handler,
     "application-update": _application_update_handler,
     "orchestration-start": _orchestration_start_handler,
+    "orchestration-report": _orchestration_report_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "project-git": _project_git_handler,

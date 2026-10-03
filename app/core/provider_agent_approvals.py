@@ -43,6 +43,11 @@ may not have a live socket:
 Neither leg is required for correctness: the durable row plus the parent's
 ``interaction.requested`` log event let any device restore the prompt.
 
+The same rule covers a chat the owner's assistant started with StartSession
+(:func:`assistant_route`): it is not a Task child, but its approvals belong in
+the assistant's conversation, where the owner answers the real card. A peer
+message or report can never answer it.
+
 Scope: the permission path only. ``AskUserQuestion`` (a different handler with
 its own TTL) is not redirected; ``query_options`` withholds it from workers.
 """
@@ -87,6 +92,7 @@ class WorkerApprovalRoute:
     label: str = ""
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
+    requester: str = "ProviderAgent worker"
 
     @property
     def display_label(self) -> str:
@@ -224,7 +230,7 @@ def tagged_description(route: WorkerApprovalRoute, description: Optional[str]) -
     A caller-provided description is preserved after a blank line.
     """
     binding = route.binding
-    tag = f"Requested by ProviderAgent worker “{route.display_label}”"
+    tag = f"Requested by {route.requester} “{route.display_label}”"
     if binding:
         tag = f"{tag} ({binding})"
     tag += "."
@@ -339,6 +345,70 @@ def redirect_kwargs(
     return out
 
 
+ASSISTANT_REQUESTER = "a chat your assistant started"
+
+
+def assistant_route(
+    session_id: Optional[str], worker_route: Optional[WorkerApprovalRoute] = None,
+) -> Optional[WorkerApprovalRoute]:
+    """Route approvals of a chat the owner's assistant started to its home.
+
+    ``worker_route`` is set when the asker is a Task worker whose parent is that
+    chat; its prompt goes one level further up, to the assistant. None for
+    every other session, and when that chat is in Away mode itself (Away then
+    defers the prompt as usual). Never raises.
+    """
+    chat = worker_route.parent_session_id if worker_route else session_id
+    if not session_id or not chat:
+        return None
+    try:
+        from app.core.away_mode import is_away
+        from app.core.session_orchestration import started_by_home
+        from app.db import sessions
+
+        home = started_by_home(chat)
+        if not home or is_away(chat):
+            return None
+        title = str((sessions.get_session(chat) or {}).get("title") or "").strip() or "Started chat"
+    except Exception:  # noqa: BLE001 — an ordinary prompt stays where it is
+        logger.debug("Assistant approval route lookup failed for %s", session_id, exc_info=True)
+        return None
+    label = f"{worker_route.display_label} in {title}" if worker_route else title
+    return WorkerApprovalRoute(
+        worker_session_id=session_id, parent_session_id=home, label=label,
+        provider_id=worker_route.provider_id if worker_route else None,
+        model_id=worker_route.model_id if worker_route else None,
+        requester=ASSISTANT_REQUESTER,
+    )
+
+
+def _assistant_confirm(
+    target: Optional[str], kwargs: Dict[str, Any], route: Optional[WorkerApprovalRoute],
+) -> Optional[Dict[str, Any]]:
+    """The ``assistant_confirm`` marker when the prompt lands on the assistant's
+    home: the owner answers it in the conversation (app/core/assistant_confirm).
+    None for every other session. Never raises."""
+    if not target:
+        return None
+    try:
+        from app.core import assistant_confirm
+        from app.core.assistant_service import is_primary_session
+
+        if not is_primary_session(target):
+            return None
+        chat = None
+        if route is not None and route.requester == ASSISTANT_REQUESTER:
+            chat = route.label
+        return assistant_confirm.marker(
+            kwargs.get("tool_name") or "", kwargs.get("tool_input"),
+            chat_title=chat,
+            chat_session_id=route.worker_session_id if route is not None else None,
+        )
+    except Exception:  # noqa: BLE001 — an ordinary card is the fallback
+        logger.debug("assistant confirm marker failed for %s", target, exc_info=True)
+        return None
+
+
 async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
     """Raise a permission prompt, on the parent when the caller is a worker.
 
@@ -353,11 +423,21 @@ async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
     ``request_permission``'s own arms.
     """
     route = get_route(kwargs.get("session_id"))
+    assistant = await asyncio.to_thread(assistant_route, kwargs.get("session_id"), route)
+    if assistant is not None:
+        route = assistant
+    target = route.parent_session_id if route is not None else kwargs.get("session_id")
+    confirm = await asyncio.to_thread(_assistant_confirm, target, kwargs, route)
     if route is None:
+        if confirm is not None:
+            kwargs = {**kwargs, "assistant_confirm": confirm}
         return await request_fn(**kwargs)
 
     try:
-        return await request_fn(**redirect_kwargs(route, kwargs))
+        redirected = redirect_kwargs(route, kwargs)
+        if confirm is not None:
+            redirected["assistant_confirm"] = confirm
+        return await request_fn(**redirected)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 — a tool call must always resolve

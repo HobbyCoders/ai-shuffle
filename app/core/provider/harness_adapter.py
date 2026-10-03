@@ -1691,11 +1691,11 @@ class HarnessAdapter(ProviderAdapter):
             return None
 
     def _away_note(self) -> Optional[str]:
-        """The Away-mode reminder while the owner is away, else ``None``."""
+        """The Away-mode (or assistant-started chat) reminder, else ``None``."""
         try:
-            from app.core.away_mode import CONTEXT_NOTE, is_away
+            from app.core.away_mode import turn_note
 
-            return CONTEXT_NOTE if is_away(self._resolve_app_session_id()) else None
+            return turn_note(self._resolve_app_session_id())
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] away note failed", exc_info=True)
             return None

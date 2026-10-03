@@ -277,8 +277,8 @@ class UserQuestionHandler:
         # Away mode: the owner is not watching, so answer with the recommended
         # options at once instead of posting a card nobody will see.
         try:
-            from app.core.away_mode import auto_answers, is_away_async, record_answers
-            if await is_away_async(session_id):
+            from app.core.away_mode import answers_questions_async, auto_answers, record_answers
+            if await answers_questions_async(session_id):
                 answers = auto_answers(questions)
                 if answers:
                     await record_answers(session_id, questions, answers)

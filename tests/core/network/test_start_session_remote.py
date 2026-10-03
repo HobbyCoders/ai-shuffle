@@ -264,3 +264,120 @@ def test_start_session_schema_offers_worker():
     spec = next(s for s, _ in SPECS if s.name == "StartSession")
     assert spec.input_schema["properties"]["worker"]["type"] == "string"
     assert spec.input_schema["required"] == ["title", "prompt", "request_id"]
+
+
+# ---------------------------------------------------------------------------
+# The owner's assistant names a project; the chat reports back across workers
+# ---------------------------------------------------------------------------
+
+def _as_assistant_home(monkeypatch, home="caller"):
+    from app.core import assistant_service
+    monkeypatch.setattr(assistant_service, "is_primary_session", lambda sid: sid == home)
+    monkeypatch.setattr(assistant_service, "get_primary_session_id", lambda: home)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+
+
+def _project_on(a, b, tmp_path, *, checked_out_on_a=True):
+    from app.core.config import settings
+    from app.db import checkouts, projects_v2
+    for worker in (a, b):
+        with worker.active():
+            project = projects_v2.upsert_project("git:shuffle", name="ai-shuffle")
+    if checked_out_on_a:
+        with a.active():
+            checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(tmp_path))
+    return project
+
+
+async def test_assistant_project_runs_on_the_worker_with_the_checkout_and_reports_back(
+        workers, monkeypatch, kicks, tmp_path):
+    from app.core import away_mode
+    from app.db import session_events
+    a, b, _ = network(workers, monkeypatch)
+    _as_assistant_home(monkeypatch)
+    project = _project_on(a, b, tmp_path)
+    with b.active():
+        outcome = await start({"title": "Fix the flaky test", "prompt": "Fix it.", "request_id": "p1",
+                               "project": "ai-shuffle"})
+        assert not outcome.is_error, outcome.text
+        result = json.loads(outcome.text)
+        assert result["worker"]["name"] == "Unraid"
+        assert "reports back to you automatically" in result["note"] and "Away mode" in result["note"]
+        [receipt] = receipts()
+        assert receipt["payload"]["report_to"] == "caller"
+    new_id = result["session_id"]
+    with a.active():
+        row = database.get_session(new_id)
+        assert row["project_v2_id"] == project["id"] and row["away_mode"]
+        [turn] = agent_turns(new_id)
+        assert turn["payload"]["orchestration_report_device"] == b.device_id
+        assert away_mode.is_away(new_id)
+        # Away mode there defers approvals (never grants them).
+        assert turns.start_turn(turn["id"])
+        session_events.append_events(new_id, [{"type": "message.user", "turn_id": turn["id"],
+                                               "payload": {"content": "Fix it."}}])
+        assert await away_mode.defer_if_away(new_id, "permission for Bash") == away_mode.DEFERRED_MESSAGE
+        session_events.append_events(new_id, [{"type": "assistant.text_delta", "turn_id": turn["id"],
+                                               "payload": {"text": "Fixed; push deferred."}}])
+        assert turns.settle_turn(turn["id"], "completed")
+
+    real_call = control.call
+
+    async def deliver(device_id, action, body, **kwargs):
+        if action != orch.REPORT_ACTION:
+            return await real_call(device_id, action, body, **kwargs)
+        assert device_id == b.device_id
+        with b.active():
+            return await control.handle(action, body, from_device=a.device_id)
+    monkeypatch.setattr(control, "call", deliver)
+    with a.active():
+        await orch.report_settled_start(new_id, turns.get_turn(turn["id"]), "completed")
+    with b.active():
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM turns WHERE session_id='caller' AND source='unpark'")
+            [wake] = [turns._row(r) for r in cursor.fetchall()]
+    assert "<kind>session</kind>" in wake["prompt"] and "Fixed; push deferred." in wake["prompt"]
+    assert "on Unraid" in wake["prompt"] and "permission for Bash" in wake["prompt"]
+    assert wake["payload"]["orchestration_root"] == receipt["parent_turn_id"]
+
+
+async def test_reports_are_only_taken_from_the_worker_that_holds_the_chat(workers, monkeypatch, kicks, tmp_path):
+    a, b, _ = network(workers, monkeypatch)
+    _as_assistant_home(monkeypatch)
+    _project_on(a, b, tmp_path)
+    with b.active():
+        result = json.loads((await start({"title": "T", "prompt": "P", "request_id": "p2",
+                                          "project": "ai-shuffle"})).text)
+        report = {"status": "completed", "summary": "done", "agent_message_turn_id": "t1"}
+        with pytest.raises(PermissionError):
+            orch.accept_remote_report({"session_id": result["session_id"], "report": report}, b.device_id)
+        with pytest.raises(PermissionError):
+            orch.accept_remote_report({"session_id": "some-other-chat", "report": report}, a.device_id)
+        with pytest.raises(ValueError, match="status"):
+            orch.accept_remote_report({"session_id": result["session_id"],
+                                       "report": {**report, "status": "approved"}}, a.device_id)
+
+
+async def test_assistant_project_with_no_online_checkout_is_refused(workers, monkeypatch, kicks, tmp_path):
+    _a, b, _ = network(workers, monkeypatch, online=False)
+    _as_assistant_home(monkeypatch)
+    _project_on(_a, b, tmp_path)
+    with b.active():
+        before = len(database.get_sessions(limit=100))
+        outcome = await start({"title": "T", "prompt": "P", "request_id": "p3", "project": "ai-shuffle"})
+        assert outcome.is_error and "No online worker has ai-shuffle checked out" in outcome.text
+        assert "Unraid (offline)" in outcome.text
+        assert len(database.get_sessions(limit=100)) == before and receipts() == []
+
+
+async def test_ordinary_remote_start_keeps_its_old_body(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    with b.active():
+        result = json.loads((await start(ARGS)).text)
+    assert "report back" not in result["note"]
+    with a.active():
+        row = database.get_session(result["session_id"])
+        assert not row.get("away_mode")
+        [turn] = agent_turns(result["session_id"])
+        assert "orchestration_report_device" not in turn["payload"]

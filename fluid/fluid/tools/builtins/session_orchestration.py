@@ -88,7 +88,8 @@ SPECS = (
         "It shares your checkout initially: coordinate file ownership or have it select a separate branch. "
         "You may orchestrate these peers without requesting subagents. Prefer an existing relevant "
         "session when possible. No automatic parent completion notification is registered; "
-        "ask it to report back with MessageSession. Use a stable request_id and reuse it on retries. "
+        "ask it to report back with MessageSession. In the owner's assistant conversation it reports "
+        "back automatically instead. Use a stable request_id and reuse it on retries. "
         "Autonomous chains are bounded to 4 new sessions, 32 total actions and 8 hops; "
         "only new user input starts a fresh budget. "
         "Omit worker to start on this worker. Pass worker (an exact worker name or device id) "
@@ -99,11 +100,15 @@ SPECS = (
         "no private-access grants. It cannot start further chats or MessageSession you back; "
         "the user sees it in the sidebar. An offline or unknown worker is refused, never "
         "replaced by this one. "
+        "project (owner's assistant conversation only): a registered project's name, id or path; "
+        "the chat runs in its checkout on a worker that has it, picked automatically unless worker "
+        "is set. It grants no access. "
         + _COMMON), input_schema={"type": "object", "properties": {
             "title": {"type": "string", "maxLength": 160},
             "prompt": {"type": "string", "maxLength": 8000},
             "request_id": {"type": "string", "maxLength": 120},
-            "worker": {"type": "string", "minLength": 1, "maxLength": 200}},
+            "worker": {"type": "string", "minLength": 1, "maxLength": 200},
+            "project": {"type": "string", "minLength": 1, "maxLength": 500}},
             "required": ["title", "prompt", "request_id"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("start")),
     _management_tool("SettleSession", "settle",

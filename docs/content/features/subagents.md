@@ -68,13 +68,53 @@ permits bypassing a denial or delegating prohibited work.
 
 Stopped, archived, hidden, voice, subagent, other-owner and other-worker sessions
 are not eligible. Starting independent sessions is available only from eligible
-top-level chats. No automatic parent completion notification is registered: ask a
-peer to report back with MessageSession when needed.
+top-level chats. Outside the personal assistant's conversation no automatic
+parent completion notification is registered: ask a peer to report back with
+MessageSession when needed.
 
 Use a stable `request_id` for each start/message and reuse it on retries. Durable
 limits bound each autonomous chain to **4 new sessions, 32 total actions and 8
 hops**; only new user input starts a fresh budget. Existing `Task`, `Swarm`,
 `ListAgents` and `SendMessage` retain their parent/subagent semantics.
+
+### Work the personal assistant starts
+
+Chats that the personal assistant starts from its own conversation behave
+differently in four ways. Chats started from any other conversation are
+unchanged.
+
+- **They report back.** When a started chat finishes, fails or is stopped, the
+  assistant is woken with its report, the same way a finished `Task` wakes its
+  parent; if the assistant is mid-reply, the report joins that reply. The
+  assistant is asked to answer in at most three short lines. Work you type into
+  the started chat yourself is not reported. A report never grants a fresh
+  start budget: the 4-session and 32-action limits still reset only when you
+  send a message.
+- **They can run in a named project.** `StartSession` takes an optional
+  `project` (a registered project's name, id or checkout path) in the
+  assistant's conversation only. The chat runs on this worker when the project
+  is checked out here, otherwise on an online worker that has it, using that
+  checkout. An unknown project is refused with the list of registered names, and
+  a project nobody has checked out is refused without starting anything. Naming
+  a project grants no access.
+- **Questions don't stall them.** A question the started chat asks is answered
+  with its recommended option and recorded, as in Away mode.
+- **Approvals are asked in the conversation.** When the assistant, a subagent
+  under it, or a chat it started needs your approval, the assistant asks one
+  plain question ("Do you authorize me to run `git push` for “Fix the flaky
+  test”?"). Only your own next message typed in the assistant's conversation
+  answers it; work a voice call hands to the chat never does. A plain yes
+  approves that one request; a plain no declines it. A hedged, delegating or unrelated reply is not an answer: the
+  assistant asks once more, and a second unclear reply declines. One question is
+  asked at a time, each yes covers only its own request, and an unanswered
+  question lapses after 15 minutes. Peer messages, reports and tool output can
+  never approve anything. What needs approval at all is unchanged. Entering a
+  secret still uses the private access card.
+
+A chat started on another worker cannot send its approvals back, so it runs in
+Away mode there: approvals are deferred, never granted, and listed in its report
+for you to approve in that chat. Both workers need this release; an older worker
+starts the chat but it will not report back.
 
 ## Session organization
 

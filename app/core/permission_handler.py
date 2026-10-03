@@ -68,6 +68,10 @@ class PermissionRequest:
     # None, so the non-worker path is unchanged.
     provider_agent: Optional[Dict[str, Any]] = None
 
+    # Set ONLY on a prompt the owner answers in the assistant's conversation
+    # (see app/core/assistant_confirm): ``{question, chat_session_id?}``.
+    assistant_confirm: Optional[Dict[str, Any]] = None
+
     # Request lifecycle state: "pending" | "deferred"
     state: str = "pending"
 
@@ -161,6 +165,7 @@ class PermissionHandler:
         provider_agent: Optional[Dict[str, Any]] = None,
         mode_managed: bool = False,
         skip_saved_rules: bool = False,
+        assistant_confirm: Optional[Dict[str, Any]] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
@@ -191,6 +196,9 @@ class PermissionHandler:
             skip_saved_rules: always put the call to a person, even when a
                 saved rule would decide it (the first computer-use grant in a
                 session).
+            assistant_confirm: ``{question, ...}`` when the owner answers
+                this in the assistant's conversation (app/core/assistant_confirm);
+                the row then waits ``assistant_confirm.TTL_SECONDS``.
 
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
@@ -212,6 +220,7 @@ class PermissionHandler:
             provider_agent=provider_agent,
             mode_managed=mode_managed,
             skip_saved_rules=skip_saved_rules,
+            assistant_confirm=assistant_confirm,
         )
 
     # ------------------------------------------------------------------
@@ -239,6 +248,7 @@ class PermissionHandler:
         decision_reason: Optional[str],
         blocked_path: Optional[str],
         provider_agent: Optional[Dict[str, Any]] = None,
+        assistant_confirm: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Assemble the JSONB payload persisted on a permission interaction row.
 
@@ -266,6 +276,7 @@ class PermissionHandler:
             ("decision_reason", decision_reason),
             ("blocked_path", blocked_path),
             ("provider_agent", provider_agent),
+            ("assistant_confirm", assistant_confirm),
         ):
             if value is not None:
                 payload[key] = value
@@ -315,6 +326,8 @@ class PermissionHandler:
             "blocked_path",
             # Worker tag — present only on a redirected worker prompt.
             "provider_agent",
+            # Present only on a prompt answered in the assistant's conversation.
+            "assistant_confirm",
         ):
             if payload.get(key) is not None:
                 d[key] = payload[key]
@@ -338,6 +351,7 @@ class PermissionHandler:
         provider_agent: Optional[Dict[str, Any]] = None,
         mode_managed: bool = False,
         skip_saved_rules: bool = False,
+        assistant_confirm: Optional[Dict[str, Any]] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """Table-backed request_permission."""
         from app.core import interaction_wait
@@ -369,13 +383,16 @@ class PermissionHandler:
         payload = self._build_permission_payload(
             request_id, profile_id, tool_name, tool_input, tool_use_id,
             agent_id, title, display_name, description, decision_reason,
-            blocked_path, provider_agent,
+            blocked_path, provider_agent, assistant_confirm,
         )
         if mode_managed and not provider_agent:
             payload["mode_managed"] = True
+        ttl_seconds = PERMISSION_TTL_SECONDS
+        if assistant_confirm is not None:
+            from app.core.assistant_confirm import TTL_SECONDS as ttl_seconds
         row = await asyncio.to_thread(
             interactions.create_interaction,
-            session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS,
+            session_id, PERMISSION_KIND, payload, ttl_seconds,
         )
         interaction_id = row["id"]
 
@@ -398,6 +415,7 @@ class PermissionHandler:
             decision_reason=decision_reason,
             blocked_path=blocked_path,
             provider_agent=provider_agent,
+            assistant_confirm=assistant_confirm,
         )
         await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -458,7 +476,7 @@ class PermissionHandler:
             if state and state.is_connected:
                 await self.resolve_mode_permissions(session_id, state)
         result_row = await interaction_wait.await_interaction(
-            interaction_id, session_id, float(PERMISSION_TTL_SECONDS)
+            interaction_id, session_id, float(ttl_seconds)
         )
 
         state = (result_row or {}).get("state")
@@ -782,6 +800,7 @@ class PermissionHandler:
                     decision_reason=payload.get("decision_reason"),
                     blocked_path=payload.get("blocked_path"),
                     provider_agent=payload.get("provider_agent"),
+                    assistant_confirm=payload.get("assistant_confirm"),
                 )
                 await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -833,6 +852,9 @@ class PermissionHandler:
         # redirected onto its parent. Absent on every ordinary request.
         if request.provider_agent is not None:
             permission_event["provider_agent"] = request.provider_agent
+        # The client shows this as the assistant's question, not a card.
+        if request.assistant_confirm is not None:
+            permission_event["assistant_confirm"] = request.assistant_confirm
 
         # ── Delivery leg 1: the origin socket that owns this query ───────────
         # Best-effort: a dead/closing socket must never propagate out of here,
