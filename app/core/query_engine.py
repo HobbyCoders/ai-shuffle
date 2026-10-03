@@ -2301,6 +2301,32 @@ async def _stream_to_websocket_impl(
                         updated[FLUID_ANSWER_KEY] = fluid_answer_from_envelope(answers)
                     return PermissionResultAllow(updated_input=updated)
 
+                # A high-risk call in an owner's-assistant session: the adapter
+                # set this flag from app.core.assistant_permissions, never the
+                # model. It goes to the owner whatever the mode, past saved
+                # rules; routing puts it in the assistant's conversation, where
+                # only a firm yes approves it (app.core.assistant_confirm).
+                if getattr(context, "assistant_owner", False):
+                    result = await _request_permission(
+                        request_id=f"perm-{_sid}-{uuid.uuid4().hex[:8]}",
+                        session_id=_sid,
+                        profile_id=_profile_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        broadcast_func=_broadcast,
+                        tool_use_id=_ctx_tool_use_id,
+                        agent_id=_ctx_agent_id,
+                        title=_ctx_title,
+                        display_name=_ctx_display_name,
+                        description=_ctx_description,
+                        decision_reason=_ctx_decision_reason,
+                        blocked_path=_ctx_blocked_path,
+                        skip_saved_rules=True,
+                    )
+                    if isinstance(result, _DeferSentinel):
+                        return PermissionResultDeny(message="Not approved: the owner was not available to answer.")
+                    return result
+
                 # Computer use: request_access is the single approval gate (keyed to
                 # permission mode); individual actions are auto-allowed here — they
                 # enforce the granted state themselves, so we never prompt per click.

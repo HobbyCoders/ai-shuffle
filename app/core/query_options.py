@@ -1065,6 +1065,17 @@ def build_options_from_profile(
     # depend on which branch happened to fetch the row.
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
+    # The owner's assistant (its home, the chats it starts and their Task
+    # workers) runs in Bypass, whatever the row says: ordinary work goes ahead
+    # and the app asks the owner for the high-risk calls itself
+    # (``app.core.assistant_permissions``). Research turns keep their ceiling.
+    assistant_scope = None
+    if session_id and overrides.get("_assistant_proactive") is None and session_mode != "chat":
+        from app.core.assistant_permissions import scope_for_session
+        assistant_scope = scope_for_session(session_id, working_dir)
+        if assistant_scope is not None:
+            permission_mode = "bypassPermissions"
+
     # Stderr callback for AgentOptions.stderr (SDK-shaped; the harness adapter
     # ignores it). Lazy %-formatting avoids f-string overhead when debug is off.
     def stderr_callback(line: str):
@@ -1785,6 +1796,7 @@ def build_options_from_profile(
     options.aih_profile_id = profile.get("id")
     options.aih_assistant_proactive = assistant_proactive
     options.aih_assistant_home = assistant_home
+    options.aih_assistant_scope = assistant_scope
     # Durable turn provenance must also survive SDK option rebuilding.
 
     # The volatile half of the app's <env> block — execution mode and the

@@ -1177,6 +1177,11 @@ class HarnessAdapter(ProviderAdapter):
         # (see _workflow_prompt_blocks). Only stamped when true.
         if getattr(sdk_options, "aih_assistant_home", False):
             opts.extra["assistant_home"] = True
+        # The owner's assistant and the work it starts: the app asks the owner
+        # for high-risk calls on every seam below (app.core.assistant_permissions).
+        assistant_scope = getattr(sdk_options, "aih_assistant_scope", None)
+        if assistant_scope:
+            opts.extra["assistant_scope"] = dict(assistant_scope)
         # Whether the install's gh CLI is present and signed in (stamped by
         # query_options as ``aih_github_connected``, behind a TTL cache). Only
         # forwarded when true — the prompt's "# GitHub" section exists solely to
@@ -1968,6 +1973,9 @@ class HarnessAdapter(ProviderAdapter):
                 denial = await denial
             if denial:
                 return denial
+            if self._owner_needed(name, tool_input):
+                # The CLI never prompts in Bypass, so the owner is asked here.
+                return await self._ask_owner(name, tool_input)
             if self.permission_mode == "bypassPermissions":
                 return None
             try:
@@ -2282,6 +2290,41 @@ class HarnessAdapter(ProviderAdapter):
         )
         return type(result).__name__ == "PermissionResultAllow"
 
+    def _owner_needed(self, tool_name: str, tool_input: Any, spec_risk: Optional[str] = None) -> bool:
+        """Whether this call in an owner's-assistant session needs the owner's yes."""
+        from app.core.assistant_permissions import needs_owner
+
+        return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk)
+
+    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+        """Put a high-risk assistant call to the owner; None when approved.
+
+        The approver routes it to the assistant's conversation, where only
+        the owner's firm yes approves it (``app.core.assistant_confirm``).
+        With no approver attached nobody can be asked, so it is denied.
+        """
+        from types import SimpleNamespace
+
+        from app.core.assistant_permissions import ASK_REASON, NO_OWNER_DENIAL
+
+        if self._can_use_tool is None:
+            return NO_OWNER_DENIAL
+        try:
+            result = await self._can_use_tool(
+                self._permission_tool_name(tool_name), tool_input,
+                SimpleNamespace(tool_use_id=None, agent_id=None, delegated=self._is_delegated,
+                                assistant_owner=True, decision_reason=ASK_REASON),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed ask never turns into an allow
+            logger.warning("[HarnessAdapter] owner approval failed for %s; denying", tool_name, exc_info=True)
+            return "Denied: the owner's approval could not be requested."
+        if type(result).__name__ == "PermissionResultAllow":
+            return None
+        message = getattr(result, "message", None)
+        return message if isinstance(message, str) and message else "Denied: the owner did not approve this."
+
     async def _saved_rule_decision(
         self, tool_name: str, tool_input: Optional[Dict[str, Any]]
     ) -> Optional[str]:
@@ -2320,7 +2363,11 @@ class HarnessAdapter(ProviderAdapter):
         """
         allow: Optional[bool] = None
         message: Optional[str] = None
-        if self.permission_mode != "bypassPermissions":
+        if self._owner_needed(self._permission_tool_name(ev.name), ev.input):
+            from app.core.assistant_permissions import NO_OWNER_DENIAL
+
+            allow, message = False, NO_OWNER_DENIAL
+        elif self.permission_mode != "bypassPermissions":
             try:
                 saved = await self._saved_rule_decision(ev.name, ev.input)
             except Exception:  # noqa: BLE001 — fail closed, see the docstring
@@ -2363,7 +2410,11 @@ class HarnessAdapter(ProviderAdapter):
         here). See ``_saved_rule_decision`` for the rule keys."""
         allow = True
         message: Optional[str] = None
-        if self.permission_mode != "bypassPermissions":
+        if self._owner_needed(self._permission_tool_name(ev.name), ev.input, getattr(ev, "risk", None)):
+            from app.core.assistant_permissions import NO_OWNER_DENIAL
+
+            allow, message = False, NO_OWNER_DENIAL
+        elif self.permission_mode != "bypassPermissions":
             try:
                 if await self._saved_rule_decision(ev.name, ev.input) == "deny":
                     allow, message = False, SAVED_RULE_DENIAL
@@ -2436,6 +2487,9 @@ class HarnessAdapter(ProviderAdapter):
                 SimpleNamespace(
                     tool_use_id=ev.tool_use_id, agent_id=None,
                     delegated=self._is_delegated,
+                    # A high-risk call in an owner's-assistant session goes to
+                    # the owner whatever the mode (app.core.assistant_permissions).
+                    assistant_owner=self._owner_needed(tool_name, ev.input, getattr(ev, "risk", None)),
                     **_prompt_enrichment(tool_name, ev),
                 ),
             )
@@ -3993,7 +4047,28 @@ class HarnessAdapter(ProviderAdapter):
 
         if not builtins_registered and not recorded and not inproc_servers and not external_mcp:
             return None
+        if not native and _assistant_scope(options) is not None:
+            # The claude CLI skips PreToolUse for the bundled app tools and
+            # this leg has no permission engine, so the owner check for them
+            # runs at dispatch (the native leg asks through its engine).
+            self._guard_assistant_dispatch(registry, options)
         return registry
+
+    def _guard_assistant_dispatch(self, registry: ToolRegistry, options: SessionOptions) -> None:
+        from fluid.tools.registry import ToolOutcome
+
+        dispatch = registry.dispatch
+
+        async def guarded_dispatch(name, input, ctx=None, **kwargs):
+            from app.core.assistant_permissions import needs_owner
+
+            if needs_owner(name, input, _assistant_scope(options)):
+                denial = await self._ask_owner(name, input)
+                if denial:
+                    return ToolOutcome(text=denial, is_error=True)
+            return await dispatch(name, input, ctx, **kwargs)
+
+        registry.dispatch = guarded_dispatch  # type: ignore[method-assign]
 
     def _build_permissions(self, options: SessionOptions):
         """The native leg's PermissionEngine for ``options.permission_mode``.
@@ -4004,6 +4079,11 @@ class HarnessAdapter(ProviderAdapter):
         """
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
+        scope = _assistant_scope(options)
+        if scope is not None:
+            return _AssistantPermissionEngine(
+                scope, approval_policy=policy, rules=_chat_mode_rules(options)
+            )
         return PermissionEngine(
             approval_policy=policy, rules=_chat_mode_rules(options)
         )
@@ -4687,6 +4767,34 @@ def _session_mode(options: SessionOptions) -> str:
     """The session's sidepanel lane — ``'code'`` when nothing said otherwise."""
     value = options.extra.get("session_mode")
     return value if isinstance(value, str) and value else "code"
+
+
+def _assistant_scope(options: Optional[SessionOptions]) -> Optional[Dict[str, Any]]:
+    """The owner's-assistant scope stamped on these options, or None."""
+    scope = ((getattr(options, "extra", None) or {}) if options is not None else {}).get("assistant_scope")
+    return scope if isinstance(scope, dict) and scope else None
+
+
+class _AssistantPermissionEngine(PermissionEngine):
+    """The native engine for the owner's assistant: its mode (Bypass), except
+    that a high-risk call asks (``app.core.assistant_permissions``). The ask
+    reaches the app's approver, which puts it to the owner past any mode or
+    saved rule. A deny from a rule still wins."""
+
+    def __init__(self, scope: Dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.assistant_scope = scope
+
+    def decide(self, spec, input, *, cwd=None):
+        from app.core.assistant_permissions import needs_owner
+        from fluid.permissions.engine import Verdict
+
+        verdict = super().decide(spec, input, cwd=cwd)
+        if verdict.decision == "deny":
+            return verdict
+        if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk):
+            return Verdict("ask", "policy", verdict.risk, verdict.rule)
+        return verdict
 
 
 def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
