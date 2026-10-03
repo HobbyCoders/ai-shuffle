@@ -53,29 +53,30 @@ Current per-owner defaults:
 
 | Resource | Limit/policy |
 |---|---|
-| Explicit active facts | 256; past that the least useful moves to a separate archive of user-saved facts |
-| Archived explicit facts | 256; past that the least useful is dropped, counted in the document's `losses` and logged |
+| User-saved (explicit) facts | 512, live and archived together. At 512 a new user-saved fact, or an agent fact promoted to one, is refused with "Memory is full: … Forget or merge one first; nothing was saved." Corrections of a saved fact still work. Nothing already saved is archived or dropped to make room, and a merge never trims them; a merged store above 512 refuses new ones until enough are forgotten |
 | Agent-saved (durable) active facts | 120; overflow enters the archive; valid 120 days from the last save or recall |
 | Inferred active facts | 40; overflow enters the archive |
-| Archived facts | 200 |
-| Inferred validity | 90 days; retrieval does not renew validity |
+| Archived facts | 200 agent-saved and learned facts; when full the least useful learned facts go first, then agent-saved ones, counted in the store's loss counters. User-saved facts in the archive (from older versions) do not count and are never dropped |
+| Inferred validity | 90 days; retrieval does not renew validity. Facts naming one branch or worktree: 14 days |
+| Expiry | An expired agent-saved or learned fact moves to the archive, where Recall still finds it; saving it again brings it back with a fresh lifetime. It is removed for good 365 days after its expiry date, counted as `expired_archived`. User-saved facts never expire |
 | Retained fact revisions | At most 2, for at most 30 days |
 | Fact text | 500 characters; oversize saves fail rather than truncate meaning |
 | Fact document | 2 MiB; commit rejected if exceeded |
-| Prompt fact lines | 8,000 characters. Unprotected facts (inferred or harvested) claim up to 3,000 first; the rest goes to profile facts, then other protected facts |
+| Prompt fact lines | 8,000 characters. Unprotected facts (inferred or harvested) claim up to 3,000 first; the rest goes to profile facts, then other protected facts. A closing note counts what is left out that Recall finds in that session: live facts omitted for space and archived facts in scope ("(144 saved facts omitted for space and 12 archived; Recall finds them by keyword.)"). Other projects' facts and setup receipts for other checkouts have their own notes; another worker's environment facts are neither shown nor counted |
 | Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, the oldest unsynthesized lines (never explicit ones) are dropped down to half the cap with a warning; events may still be skipped under lock contention |
 | Model-assisted inference | At most 48 attempted calls per UTC day, per store; input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice, then the skill library); output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
 | Recent deletion records | 256, plus a fixed 16 KiB monotonic deletion filter (32 KiB as hexadecimal JSON) |
 
 These defaults are conservative initial policy, not benchmark-derived optimal
-values. Inference is allowed to be lossy; acknowledged explicit saves are not.
+values. Inference is allowed to be lossy; acknowledged explicit saves are not:
+the explicit tier refuses a save rather than lose one it already holds.
 The existing deterministic skill reaper remains separate. Model consolidation
 can propose merges or retirements of inferred and agent-saved facts it was shown,
 but cannot update unknown IDs, overwrite a protected fact, or retire one. A
 learner or consolidation retirement moves the fact to the archive with no
 deletion barrier: Recall still finds it, a later agent save brings it back, and
 the retirement replicates instead of being undone by the next merge. Facts that
-leave without a Forget (expiry, a full archive) are counted in the document's
+leave without a Forget (the end of archive retention, a full archive) are counted in the document's
 `losses`; failed saves are counted in `meta.json` without their text. Consolidation runs only after a
 successful synthesis pass, under the same lock; a failed consolidation is retried
 after six hours instead of waiting a full interval. Inference batches retain
@@ -91,7 +92,8 @@ app's maintenance loop runs it once an hour per store and again after a
 curation pass (`app/core/fluid_memory.py`). It reports nine signals, each
 healthy or needing attention with one sentence: whether the learner produces
 facts given recent sessions, facts never recalled or shown, unconfirmed
-harvests and how often they are rewritten, duplicate groups, capacity, how much
+harvests and how often they are rewritten, duplicate groups, capacity (it warns
+at 90% of the 512 user-saved facts, before saves are refused), how much
 each project's snapshot leaves out, failed curation passes, user-saved facts
 lost without a Forget, and failed saves. The result is kept in
 `memory-health.json` beside the store; it is local to the worker and is not
@@ -122,6 +124,22 @@ trust and owner checks as local writes. Equal or unequal-length concurrent edits
 are detected by their causal clocks rather than timestamps. Unresolved
 contradictions are withheld; a user correction can resolve them against a known
 revision. An older replica cannot overwrite a causally newer value.
+
+Environment facts the harness harvests from tool output (whether pytest is
+importable from the worker's Python and where, missing `node_modules`, the
+browser host) describe one worker. They are stored per worker: each carries
+the store ID of the worker that harvested it, a harvest matches only that
+worker's own copy, and each worker's copy of a key is its own slot, so two
+workers no longer rewrite one shared fact with their own paths. They replicate
+like any fact but are shown in the snapshot, found by Recall, curated and
+checked by the health check only on the worker they describe; elsewhere they
+are hidden and not counted. That is simpler and safer than labelling them with
+a worker name, which Fluid does not reliably know, and a path from another
+machine is noise there. The first per-worker harvest of a key archives the
+shared copy older versions kept under it. A fact the user saves is always
+shared: a user-requested save of a harvested fact drops its worker binding,
+and harvests never rewrite it; an agent confirming a harvest keeps it on its
+worker.
 
 A deletion is monotonic for the deleted ID. Compaction keeps a fixed-size filter
 instead of an unbounded tombstone log. This is deliberately conservative: filter

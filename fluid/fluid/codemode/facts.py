@@ -20,23 +20,31 @@ from fluid.codemode.transactions import file_transaction
 
 _log = logging.getLogger(__name__)
 
-# Three tiers, none of which can refuse a save for lack of room:
+# Three tiers:
 #
 # * explicit (``protected``): the user asked for it or corrected a fact. No
-#   TTL and never touched by the learner; past MAX_EXPLICIT live entries the
-#   least useful moves to the searchable archive rather than refusing a save.
+#   TTL, never touched by the learner, never removed or archived by any
+#   automatic path. At MAX_EXPLICIT user-saved facts (live and archived
+#   together) a new one is refused with a reason the agent can relay;
+#   nothing already saved is dropped to make room.
 # * durable (``durable``): an agent decided a fact was worth keeping
 #   (Remember without ``user_requested``). Longer TTL than inferred, renewed
 #   when recalled or re-saved, curated by consolidation, and archived past
 #   MAX_DURABLE. The store filled its 256-slot explicit quota in three weeks
 #   when every agent save was explicit, then refused every new save.
 # * inferred: learner output and tool harvests, as before.
-MAX_EXPLICIT = 256
+#
+# Durable and inferred facts never refuse a save for lack of room.
+MAX_EXPLICIT = 512
 MAX_DURABLE = 120
-# Archived explicit facts are kept apart from the shared archive so an
-# inference flood can never trim a fact the user asked for.
-MAX_ARCHIVED_EXPLICIT = 256
+EXPLICIT_FULL_MESSAGE = (
+    "Memory is full: {cap} facts are saved at the user's request. Forget or merge "
+    "one first; nothing was saved.")
 DURABLE_TTL = 120 * 86400
+# An unprotected fact moves to the archive when it expires and is removed
+# for good this long after its expiry date, so an expiry can be undone by
+# saving the fact again for a year. Recall finds it until then.
+ARCHIVE_RETENTION = 365 * 86400
 # Recalls count as this much recent activity each (capped), so a fact that
 # keeps being looked up outranks one that was merely written recently.
 USE_CREDIT = 7 * 86400
@@ -160,6 +168,19 @@ def global_id(entry):
     return f"{entry['origin']}:{str(entry['id']).split(':')[-1]}"
 
 
+def visible_on(entry, store_id):
+    """Whether a fact applies on the worker whose store is ``store_id``.
+
+    Environment facts harvested from tool output (interpreter and checkout
+    paths, where the browser runs) carry the ``worker`` (store ID) they
+    describe. They replicate like any fact but are shown, recalled and
+    curated only on that worker, so two workers no longer overwrite one
+    shared copy with their own paths. Every other fact has no ``worker``
+    and is shared.
+    """
+    return not entry.get("worker") or entry.get("worker") == store_id
+
+
 class FactStore:
     def __init__(self, root: Path, owner="local"):
         self.root, self.owner = Path(root), owner
@@ -257,41 +278,43 @@ class FactStore:
             for e in doc[bucket]:
                 e["history"] = [h for h in e.get("history", []) if h.get("at", 0) > now - HISTORY_TTL][-MAX_HISTORY:]
                 self._classify(e, now)
-            # Expiry does not become a forget tombstone. It travels with the
-            # fact so replaying an old snapshot cannot renew its lifetime.
-            expired = [e for e in doc[bucket] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
-            doc[bucket] = [e for e in doc[bucket] if e not in expired]
-            if expired:
-                self._note_loss(doc, "expired_live" if bucket == "entries" else "expired_archived",
-                                len(expired), now)
+        # Expiry does not become a forget tombstone. It travels with the fact
+        # so replaying an old snapshot cannot renew its lifetime. An expired
+        # live fact moves to the archive, where Recall still finds it and a
+        # save brings it back; ARCHIVE_RETENTION after its expiry it is
+        # removed for good. User-saved facts never expire.
+        expired = [e for e in doc["entries"] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
+        if expired:
+            gone = {id(e) for e in expired}
+            doc["entries"] = [e for e in doc["entries"] if id(e) not in gone]
+            doc["archived"] += expired
+        ended = [e for e in doc["archived"] if not e.get("protected")
+                 and e.get("expires_at", now + 1) + ARCHIVE_RETENTION <= now]
+        if ended:
+            gone = {id(e) for e in ended}
+            doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
+            self._note_loss(doc, "expired_archived", len(ended), now)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred"]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
         overflow = ranked[:max(0, len(inferred) - MAX_MEMORIES)]
-        for name, cap in (("durable", MAX_DURABLE), ("explicit", MAX_EXPLICIT)):
-            group = [e for e in live if tier(e) == name]
-            ranked = sorted(group, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
-            overflow += ranked[:max(0, len(group) - cap)]
+        durable = [e for e in live if tier(e) == "durable"]
+        ranked = sorted(durable, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
+        overflow += ranked[:max(0, len(durable) - MAX_DURABLE)]
         gone = {id(e) for e in overflow}
         doc["entries"] = [e for e in live if id(e) not in gone]
         archived = doc["archived"] + overflow
-        # An archived explicit fact leaves only by an explicit Forget or by
-        # MAX_ARCHIVED_EXPLICIT newer ones; the shared archive gives up
-        # inferred facts before durable ones, least useful first.
-        explicit = sorted((e for e in archived if e.get("protected")), key=lambda e: (usefulness(e), str(e.get("id"))))
+        # User-saved facts are never trimmed: a full explicit tier refuses
+        # the next save instead (see save). Archived explicit facts (from
+        # older versions, which archived past 256) stay until a Forget. The
+        # shared archive gives up inferred facts before durable ones, least
+        # useful first.
+        explicit = [e for e in archived if e.get("protected")]
         rest = sorted((e for e in archived if not e.get("protected")),
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
-        doc["archived"] = (rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):]
-                           + explicit[max(0, len(explicit) - MAX_ARCHIVED_EXPLICIT):])
+        doc["archived"] = rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):] + explicit
         if len(rest) > MAX_ARCHIVED_MEMORIES:
             self._note_loss(doc, "archive_dropped", len(rest) - MAX_ARCHIVED_MEMORIES, now)
-        if len(explicit) > MAX_ARCHIVED_EXPLICIT:
-            # The one way a user-requested fact leaves without a Forget. It
-            # used to be silent; the health check reports it.
-            dropped = len(explicit) - MAX_ARCHIVED_EXPLICIT
-            self._note_loss(doc, "explicit_dropped", dropped, now)
-            _log.warning("Memory store %s dropped %d user-saved fact(s) from a full archive",
-                         doc.get("store_id"), dropped)
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
@@ -330,15 +353,24 @@ class FactStore:
             return self._prepare()
 
     def entries(self, archived=False):
-        return [self._entry(e) for e in self.snapshot()["archived" if archived else "entries"]]
+        """Facts that apply on this worker (see :func:`visible_on`)."""
+        doc = self.snapshot()
+        return [self._entry(e) for e in doc["archived" if archived else "entries"]
+                if visible_on(e, doc["store_id"])]
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
-             durable=None, key=None, expected_revision=None, source_session=None, restore=False):
+             durable=None, key=None, expected_revision=None, source_session=None, restore=False,
+             per_worker=False):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
         is an agent's own save. Neither (the learner, harvests) keeps a
         rewritten fact's existing tier and never downgrades one.
+
+        ``per_worker`` marks an environment fact about this worker: it is
+        matched by key or text only against this worker's own copy, and
+        replaces the shared copy older versions kept under the same key. A
+        user-requested save of such a fact makes it shared again.
         """
         text = validate_text(text)
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,96}", key)):
@@ -357,12 +389,18 @@ class FactStore:
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
             all_entries = doc["entries"] + doc["archived"]
+            local = doc["store_id"]
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
-            if memory_id and old is None:
+            if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
             if old is None:
-                old = next((e for e in all_entries if e.get("scope", "global") == (scope or "global") and
-                            ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
+                # Another worker's environment fact is never this save's
+                # target. A per-worker save matches this worker's copy, or a
+                # fact the user saved under that key, which it may not rewrite.
+                old = next((e for e in all_entries if e.get("scope", "global") == (scope or "global")
+                            and ((e.get("worker") == local or (e.get("protected") and not e.get("worker")))
+                                 if per_worker else visible_on(e, local))
+                            and ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
             now = time.time()
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if old and old.get("protected") and not protected:
@@ -382,6 +420,14 @@ class FactStore:
             if (old and not old.get("conflicted") and old["text"] == text
                     and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
+                    if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
+                        # Observed again after it expired into the archive:
+                        # it is current again, with a fresh lifetime.
+                        old["expires_at"] = now + lifetime(old)
+                        doc["archived"] = [e for e in doc["archived"] if e is not old]
+                        doc["entries"].append(old)
+                        self._maintain(doc, keep=old["id"])
+                        self._write(doc)
                     return self._entry(old)
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
@@ -403,6 +449,11 @@ class FactStore:
                 return self._entry(old)
             if old and old.get("protected") and expected_revision is None:
                 raise ValueError("Recall the existing fact and supply its revision before correcting it")
+            if protected and not (old and old.get("protected")):
+                # A new user-saved fact (or one promoted from agent-saved)
+                # needs a free slot. Corrections of a user-saved fact do not.
+                if sum(1 for e in all_entries if e.get("protected")) >= MAX_EXPLICIT:
+                    raise ValueError(EXPLICIT_FULL_MESSAGE.format(cap=MAX_EXPLICIT))
             entry = dict(old) if old else {
                 "id": f"m{doc['next_id']}", "origin": doc["store_id"],
                 "created_at": now, "revision": 0, "uses": 0,
@@ -434,10 +485,18 @@ class FactStore:
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
+            # A rewrite of a fact that already expired into the archive is a
+            # new observation, not a continuation of the old lifetime.
+            if not protected and entry["expires_at"] and entry["expires_at"] <= now:
+                entry["expires_at"] = now + INFERRED_TTL
             # A rewrite is a new value: it lives again even if curation had
             # retired the old one.
             entry.pop("retired_at", None)
             entry.pop("retired_reason", None)
+            if per_worker and not protected:
+                entry["worker"] = local
+            elif protected:
+                entry.pop("worker", None)  # what the user states is shared
             if not protected and not entry["expires_at"]:
                 entry["expires_at"] = now + INFERRED_TTL
             if is_durable:
@@ -455,6 +514,15 @@ class FactStore:
             if not present:
                 doc["entries"].append(entry)
             doc["archived"] = [e for e in doc["archived"] if e["id"] != entry["id"]]
+            if per_worker and entry.get("key"):
+                # The copy older versions shared between workers under this
+                # key goes to the archive, so it stops being shown everywhere.
+                for shared in [e for e in doc["entries"] if not e.get("worker") and e is not entry
+                               and e.get("key") == entry["key"]
+                               and e.get("scope", "global") == entry["scope"]
+                               and e.get("provenance") == "tool"
+                               and not e.get("protected") and not e.get("durable")]:
+                    self._retire_entry(doc, shared, "per-worker")
             self._maintain(doc, keep=entry["id"])
             self._write(doc)
             return self._entry(entry)
@@ -516,18 +584,22 @@ class FactStore:
                 return False
             if expected_revision is not None and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retiring it")
-            clock = dict(old.get("clock") or {old.get("origin", doc["store_id"]): old.get("revision", 1)})
-            clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
-            if len(clock) > 64:
-                raise ValueError("Memory has too many concurrent writers; nothing was retired")
-            old.update(clock=clock, revision=old.get("revision", 1) + 1,
-                       retired_at=time.time(), retired_reason=str(reason)[:40])
-            doc["entries"] = [e for e in doc["entries"] if e is not old]
-            if not any(e is old for e in doc["archived"]):
-                doc["archived"].append(old)
+            self._retire_entry(doc, old, reason)
             self._maintain(doc)
             self._write(doc)
             return True
+
+    @staticmethod
+    def _retire_entry(doc, old, reason):
+        clock = dict(old.get("clock") or {old.get("origin", doc["store_id"]): old.get("revision", 1)})
+        clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
+        if len(clock) > 64:
+            raise ValueError("Memory has too many concurrent writers; nothing was retired")
+        old.update(clock=clock, revision=old.get("revision", 1) + 1,
+                   retired_at=time.time(), retired_reason=str(reason)[:40])
+        doc["entries"] = [e for e in doc["entries"] if e is not old]
+        if not any(e is old for e in doc["archived"]):
+            doc["archived"].append(old)
 
     def note_recalled(self, ids):
         if not ids:
@@ -589,6 +661,9 @@ class FactStore:
                     raise ValueError("Invalid memory key")
                 if entry.get("provenance") not in ("user", "session", "manual", "tool"):
                     raise ValueError("Invalid memory provenance")
+                if entry.get("worker") is not None and not (
+                        isinstance(entry["worker"], str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", entry["worker"])):
+                    raise ValueError("Invalid memory worker")
                 old = entries.get(entry["id"])
                 incoming_clock = entry.get("clock") or {entry["origin"]: entry.get("revision", 1)}
                 if not isinstance(incoming_clock, dict) or len(incoming_clock) > 64 or any(type(v) is not int or v < 0 for v in incoming_clock.values()):
@@ -622,7 +697,8 @@ class FactStore:
             slots = {}
             for e in doc["entries"]:
                 if e.get("key"):
-                    slots.setdefault((e.get("scope", "global"), e["key"]), []).append(e)
+                    # Each worker's copy of an environment fact is its own slot.
+                    slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
             for group in slots.values():
                 if len({e["text"] for e in group}) > 1:
                     for e in group:

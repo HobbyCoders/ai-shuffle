@@ -185,6 +185,19 @@ def test_user_facts_near_their_cap_need_attention(tmp_path, monkeypatch):
         store.save_memory(f"User preference {i}", protected=True)
     s = signal(memory_health.check(store), "capacity")
     assert s["state"] == "attention" and "9 of 10" in s["reason"]
+    assert "new ones are refused" in s["reason"]
+    store.save_memory("User preference 9", protected=True)
+    s = signal(memory_health.check(store), "capacity")
+    assert s["state"] == "attention" and s["reason"].startswith("Memory is full")
+    assert s["detail"]["user_saved"] == 10
+
+
+def test_user_facts_well_below_their_cap_are_healthy(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 10)
+    store = SkillStore(tmp_path)
+    for i in range(8):
+        store.save_memory(f"User preference {i}", protected=True)
+    assert signal(memory_health.check(store), "capacity")["state"] == "healthy"
 
 
 def test_a_nearly_full_memory_file_needs_attention(tmp_path, monkeypatch):
@@ -234,12 +247,13 @@ def test_user_fact_that_vanished_without_a_forget_needs_attention(tmp_path):
     assert signal(after, "protected")["state"] == "healthy"
 
 
-def test_user_fact_dropped_for_space_needs_attention(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_EXPLICIT", 1)
-    monkeypatch.setattr(facts, "MAX_ARCHIVED_EXPLICIT", 1)
+def test_user_fact_dropped_for_space_by_an_older_version_needs_attention(tmp_path):
     store = SkillStore(tmp_path)
-    for i in range(3):
-        store.save_memory(f"User preference {i}", protected=True)
+    store.save_memory("User preference 0", protected=True)
+    # Versions before the refusal rule dropped archived user facts and
+    # counted it; a recent drop is still reported after the upgrade.
+    edit(store, lambda doc: doc.update(losses={"explicit_dropped": 1,
+                                               "last_explicit_dropped_at": time.time()}))
     s = signal(memory_health.check(store), "protected")
     assert s["state"] == "attention" and "dropped for space" in s["reason"]
 

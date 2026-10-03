@@ -1312,7 +1312,7 @@ Owner only. The state of the installation owner's long-term memory on this worke
 }
 ```
 
-`state` is `healthy` or `attention`. Signals that need attention come first. `id` is one of `learner`, `usage`, `unconfirmed`, `duplicates`, `capacity`, `snapshot`, `curation`, `protected` or `saves`; `detail` holds the counts behind `reason` and differs per signal. `repairs` lists the last 30 days, newest first; `kind` is `duplicates` or `unconfirmed`. When a check turns to `attention`, the owner gets one notification (category `memory_health`) for that stretch, at most once a day.
+`state` is `healthy` or `attention`. Signals that need attention come first. `id` is one of `learner`, `usage`, `unconfirmed`, `duplicates`, `capacity`, `snapshot`, `curation`, `protected` or `saves`; `detail` holds the counts behind `reason` and differs per signal. `capacity` needs attention from 90% of the 512 facts the user can ask to keep; at 512 new ones are refused until one is forgotten, and nothing already saved is dropped. `repairs` lists the last 30 days, newest first; `kind` is `duplicates` or `unconfirmed`. When a check turns to `attention`, the owner gets one notification (category `memory_health`) for that stretch, at most once a day.
 
 ## Logs
 

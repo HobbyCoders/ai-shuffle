@@ -245,6 +245,10 @@ def harvest_tool_facts(name: str, output: str) -> list[tuple[str, str]]:
 def write_harvested_facts(store, project: str | None, facts) -> list[str]:
     """Save harvested facts as unprotected tool-provenance memories.
 
+    Each fact describes this worker (its interpreter, checkout, browser
+    host), so it is stored per worker: another worker's harvest under the
+    same key is its own fact, shown and recalled only on that worker.
+
     Same text under the same key is a no-op save, so calling this every turn
     costs nothing once the state is recorded. A key the user has protected by
     an explicit Remember is left alone (``save`` refuses to overwrite it, and
@@ -257,6 +261,7 @@ def write_harvested_facts(store, project: str | None, facts) -> list[str]:
         try:
             saved = store.save_memory(
                 text, scope=project, provenance="tool", protected=False, key=_safe_key(key),
+                per_worker=True,
             )
         except Exception as exc:  # noqa: BLE001 — a fact is never worth a turn
             _log.debug("runtime fact %s not saved: %s", key, exc)

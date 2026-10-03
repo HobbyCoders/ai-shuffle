@@ -205,35 +205,27 @@ def test_memory_footer_counts_scope_and_space_drops_separately(tmp_path):
     assert "saved facts omitted for space" in everything
 
 
-def test_full_explicit_tier_archives_least_used_instead_of_refusing(tmp_path, monkeypatch):
+def test_full_explicit_tier_refuses_instead_of_archiving(tmp_path, monkeypatch):
     monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
     store = SkillStore(tmp_path)
     for i in range(2):
         store.save_memory(f"Explicit preference {i}", protected=True)
-    store.note_memories_recalled(["m1"])  # m1 earns its place; m2 is least used
-    saved = store.save_memory("Extra explicit preference", protected=True)
-    assert saved.protected
-    assert {e.text for e in store.memories()} == {"Explicit preference 0", "Extra explicit preference"}
-    archived = store.archived_memories()
-    assert [(e.text, e.protected) for e in archived] == [("Explicit preference 1", True)]
-    # Still searchable, and an explicit fact in the archive never expires.
-    assert [e.text for e, was_archived in store.search_memories("preference 1") if was_archived] == ["Explicit preference 1"]
+    with pytest.raises(ValueError, match="Memory is full"):
+        store.save_memory("Extra explicit preference", protected=True)
+    assert {e.text for e in store.memories()} == {"Explicit preference 0", "Explicit preference 1"}
+    assert not store.archived_memories()
 
 
-def test_saving_never_refuses_for_room_in_any_tier(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_EXPLICIT", 3)
+def test_agent_and_learned_saves_never_refuse_for_room(tmp_path, monkeypatch):
     monkeypatch.setattr(facts, "MAX_DURABLE", 3)
     store = SkillStore(tmp_path)
     for i in range(10):
-        store.save_memory(f"User fact {i}", protected=True)
         store.save_memory(f"Agent fact {i}", durable=True)
         store.save_memory(f"Learned fact {i}")
     live = store.memories()
-    assert sum(e.protected for e in live) == 3
     assert sum(e.durable for e in live) == 3
     # The fact saved last is never the one archived to make room for itself.
-    assert {"User fact 9", "Agent fact 9", "Learned fact 9"} <= {e.text for e in live}
-    assert sum(e.protected for e in store.archived_memories()) == 7
+    assert {"Agent fact 9", "Learned fact 9"} <= {e.text for e in live}
 
 
 def test_durable_tier_lifetime_renews_on_recall_and_resave(tmp_path, monkeypatch):
@@ -250,7 +242,9 @@ def test_durable_tier_lifetime_renews_on_recall_and_resave(tmp_path, monkeypatch
     assert again.revision == saved.revision  # renewal is not an edit
     assert again.expires_at == clock[0] + facts.DURABLE_TTL
     clock[0] += facts.DURABLE_TTL + 1  # nothing touched it for a whole TTL
-    assert store.memories() == [] and store.archived_memories() == []
+    assert store.memories() == [] and [e.id for e in store.archived_memories()] == [saved.id]
+    clock[0] += facts.ARCHIVE_RETENTION
+    assert store.archived_memories() == []
 
 
 def test_branch_specific_facts_get_a_short_lifetime(tmp_path, monkeypatch):
@@ -314,13 +308,16 @@ def test_legacy_explicit_facts_split_into_user_and_agent_tiers(tmp_path):
 
 
 def test_replica_with_more_explicit_facts_than_the_cap_merges(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
     a, b = SkillStore(tmp_path / "a", owner="o"), SkillStore(tmp_path / "b", owner="o")
     for i in range(4):
         a.save_memory(f"User asked fact {i}", protected=True)
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 2)
     b._facts.merge(a._facts.export())  # previously raised the quota error
-    assert sum(e.protected for e in b.memories()) == 2
-    assert len(b.archived_memories()) == 2
+    # Nothing a user saved is trimmed by a merge; the next new one is refused.
+    assert sum(e.protected for e in b.memories()) == 4
+    assert not b.archived_memories()
+    with pytest.raises(ValueError, match="Memory is full"):
+        b.save_memory("One more user fact", protected=True)
 
 
 def test_learner_budget_leaves_room_for_consolidation(tmp_path, monkeypatch):
@@ -363,6 +360,9 @@ def test_expiry_is_not_refreshed_by_reads_or_replay(tmp_path, monkeypatch):
     assert not a.memories()
     b._facts.merge(stale)
     assert not b.memories()
+    # Expired facts wait in the archive on both sides until retention ends.
+    assert [e.text for e in a.archived_memories()] == ["Time-bound observation"]
+    assert [e.text for e in b.archived_memories()] == ["Time-bound observation"]
 
 
 def test_sync_retains_archive_and_applies_ingress_limits(tmp_path):

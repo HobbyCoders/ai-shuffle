@@ -188,6 +188,12 @@ def _near_duplicate_groups(entries: list[dict]) -> list[list[str]]:
     return [sorted(c) for c in clusters.values() if len(c) > 1]
 
 
+def _local(doc: dict, bucket: str = "entries") -> list[dict]:
+    """Facts that apply on this worker. Another worker's environment facts
+    replicate here but are judged and repaired only on their own worker."""
+    return [e for e in doc[bucket] if facts.visible_on(e, doc.get("store_id"))]
+
+
 def _keeper_order(e: dict):
     # Replicated fields only, so every worker keeps the same copy and the
     # retirements cannot cross (each side retiring the other's keeper).
@@ -203,7 +209,7 @@ def repair(store, *, now: float | None = None) -> list[dict]:
     done: list[dict] = []
     doc = store._facts.snapshot()
     merged = []
-    for group in _exact_duplicate_groups(doc["entries"]):
+    for group in _exact_duplicate_groups(_local(doc)):
         _keeper, *rest = sorted(group, key=_keeper_order)
         for e in rest:
             if e.get("protected"):
@@ -216,7 +222,7 @@ def repair(store, *, now: float | None = None) -> list[dict]:
     if merged:
         done.append({"kind": "duplicates", "count": len(merged), "at": now, "ids": merged})
     doc = store._facts.snapshot()
-    live = [e for e in doc["entries"] if not e.get("conflicted")]
+    live = [e for e in _local(doc) if not e.get("conflicted")]
     shown = set()
     for plan in _snapshot_plans(store, live).values():
         shown.update(plan["shown_ids"])
@@ -254,15 +260,15 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     now = time.time() if now is None else now
     previous = previous or {}
     doc = store._facts.snapshot()
-    live = [e for e in doc["entries"]]
-    archived = doc["archived"]
+    live = _local(doc)
     plans = _snapshot_plans(store, [e for e in live if not e.get("conflicted")])
     signals = [
         _learner_signal(store, now, learning_enabled),
         _usage_signal(live, plans, now),
         _unconfirmed_signal(live, now),
         _duplicates_signal(live),
-        _capacity_signal(store, live, archived),
+        # Capacity is the whole document, every worker's facts included.
+        _capacity_signal(store, doc["entries"], doc["archived"]),
         _snapshot_signal(plans),
         _curation_signal(store, now),
     ]
@@ -365,20 +371,22 @@ def _capacity_signal(store, live, archived) -> dict:
         size = (Path(store.root) / "memories.json").stat().st_size
     except OSError:
         size = 0
+    user_saved = tiers["explicit"] + archived_explicit
     detail = {**tiers, "explicit_cap": facts.MAX_EXPLICIT, "durable_cap": facts.MAX_DURABLE,
               "inferred_cap": MAX_MEMORIES, "archived": len(archived),
-              "archived_explicit": archived_explicit, "archived_explicit_cap": facts.MAX_ARCHIVED_EXPLICIT,
+              "archived_explicit": archived_explicit, "user_saved": user_saved,
               "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES}
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
         return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.", **detail)
-    if archived_explicit >= FULL_SHARE * facts.MAX_ARCHIVED_EXPLICIT:
+    if user_saved >= facts.MAX_EXPLICIT:
         return _signal("capacity", True,
-                       "The archive of user-saved facts is nearly full; the oldest will be dropped.", **detail)
-    if tiers["explicit"] >= FULL_SHARE * facts.MAX_EXPLICIT:
+                       f"Memory is full: {user_saved} user-saved facts; new ones are refused "
+                       "until one is forgotten or merged.", **detail)
+    if user_saved >= FULL_SHARE * facts.MAX_EXPLICIT:
         return _signal("capacity", True,
-                       f"User-saved facts are at {tiers['explicit']} of {facts.MAX_EXPLICIT}; "
-                       "the least used move to the archive.", **detail)
+                       f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; "
+                       "at the limit new ones are refused.", **detail)
     return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
 
 
