@@ -22,6 +22,8 @@ on:
     paths:
       - 'android/**'
       - '.github/workflows/android.yml'
+      - '.github/workflows/deploy-site.yml'
+      - '.github/workflows/deploy-hub.yml'
       - 'scripts/ci/require-full-ci.py'
       - 'scripts/ci/android-inputs.py'
   workflow_dispatch:
@@ -99,6 +101,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Cloudflare deploy guard and configuration tests
+        working-directory: .
+        run: python3 android/ci/test-cloudflare-deploy.py
       # The website Worker shares the hostname, so it is checked in the same job.
       - name: Website Worker tests
         working-directory: android/site
