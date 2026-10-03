@@ -52,7 +52,9 @@ describe('ChatView — lane heroes', () => {
 	});
 
 	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
-		expect(codeOnly).toContain('$assistantState?.home_session_id === $activeSession.sessionId');
+		// The home is identified once, in MainPanel, and arrives as a flag.
+		expect(codeOnly).toContain('const primaryAssistant = $derived(assistantMode ? $assistantState : null)');
+		expect(codeOnly).not.toContain('home_session_id');
 		const primary = codeOnly.indexOf('{#if primaryAssistant}');
 		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
 		expect(primary).toBeGreaterThan(-1);

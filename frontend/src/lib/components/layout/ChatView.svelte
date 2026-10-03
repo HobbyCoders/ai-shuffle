@@ -3,7 +3,13 @@
 	/** Chat surface for code, chat and voice. Lane-specific heroes share one
 	 * persistent editor. A live voice call adds compact controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
-	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
+	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
+	import { sessions } from '$lib/stores/app-data.svelte';
+	import { openSession } from '$lib/services/session-navigation';
+	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
+	import { buildBackgroundJobs, type BackgroundJob } from '$lib/utils/background-work';
+	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
+	import { isAssistantConfirm } from '$lib/utils/assistant-confirm';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -23,12 +29,14 @@
 	import { classifyChatSurface } from './chat-empty-state';
 
 	interface Props {
+		/** The open chat is the assistant's home (decided once, in MainPanel). */
+		assistantMode?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 	}
 
-	let { onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
+	let { assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -50,7 +58,38 @@
 	// hero with the session's own title + a "cleared" hint instead of the
 	// brand-new "Let's build your project" workspace picker.
 	const isClearedSession = $derived(chatSurface === 'cleared');
-	const primaryAssistant = $derived($activeSession.sessionId && $assistantState?.home_session_id === $activeSession.sessionId ? $assistantState : null);
+	const primaryAssistant = $derived(assistantMode ? $assistantState : null);
+
+	// The assistant's background work, as plain lines beside its composer.
+	const backgroundJobs = $derived(
+		assistantMode
+			? buildBackgroundJobs({
+				tasks: $activeSession.activeTasks ?? [],
+				messages: $activeSession.messages,
+				sessions: $sessions,
+				streaming: $streamingSessions
+			})
+			: []
+	);
+	function openJob(job: BackgroundJob) {
+		if (job.sessionId) openSession(job.sessionId);
+	}
+	async function stopJob(job: BackgroundJob): Promise<boolean> {
+		try {
+			if (job.stop.kind === 'task') {
+				const home = $activeSession.sessionId;
+				if (!home) return false;
+				const result = await stopSessionTask(home, job.stop.taskId);
+				if (!result.ok) notify.error('Could not stop that job. It may have finished.');
+				return result.ok;
+			}
+			await interruptSession(job.stop.sessionId);
+			return true;
+		} catch {
+			notify.error('Could not stop that job. It may have finished.');
+			return false;
+		}
+	}
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
 	// The lane this surface belongs to. The store carries it for BOTH an opened
@@ -96,11 +135,12 @@
 	// the agent's respond_approval finds nothing to answer. So the modal's
 	// permission leg is suppressed for exactly the sessions/timespan the spoken
 	// leg covers; it returns the moment the call ends. Questions are unaffected.
-	const showPermissionModal = $derived(
-		!voiceCallActive &&
-			$activeSession.pendingPermissions &&
-			$activeSession.pendingPermissions.length > 0
-	);
+	// A request the assistant asks in words (`assistant_confirm`) never opens
+	// the dialog: it reads as the assistant's question in the transcript and is
+	// answered by typing or saying yes or no (MessageArea renders it). Every
+	// other request keeps the dialog, in the home too.
+	const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));
+	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
 
 	// A call that ends by itself (transport error, or the VW5 length cap) unmounts
 	// the dock that was showing the reason, so surface it as a toast instead —
@@ -239,7 +279,7 @@
 				{#if primaryAssistant}
 					<div class="cleared-hero">
 						<h1 class="cleared-title">{primaryAssistant.introduction.preferred_name ? `Hello, ${primaryAssistant.introduction.preferred_name}.` : 'Where shall we begin?'}</h1>
-						<p class="cleared-hint">Message {primaryAssistant.assistant_name} here. Plan together, pick up a task, or start a call — this conversation stays with you.</p>
+						<p class="cleared-hint">Just say what you need.</p>
 					</div>
 				{:else if isClearedSession}
 					<!-- Bound existing session with an empty transcript (cleared via the
@@ -295,7 +335,7 @@
 				     component destruction prevents a Svelte 5 reactivity edge case
 				     where the recreated component loses reactive updates during
 				     new session creation (sessionId: undefined → new ID). -->
-				<MessageArea />
+				<MessageArea {assistantMode} />
 			</div>
 		</div>
 	{/if}
@@ -311,9 +351,12 @@
 			{#if voiceCallActive && $activeSession.sessionId}
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
+			{#if assistantMode}
+				<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
+			{/if}
 			{#key $sessionOwnerBoundary}
 				<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
-				<ChatInput compact={!showEmptyHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
+				<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
 			{/key}
 		</div>
 	{/if}
@@ -332,7 +375,7 @@
 			<div class="modal-backdrop"></div>
 			<div class="modal-content">
 				<div class="modal-card-wrapper">
-					<PermissionQueue requests={$activeSession.pendingPermissions} onRespond={handlePermissionResponse} />
+					<PermissionQueue requests={dialogPermissions} onRespond={handlePermissionResponse} />
 				</div>
 			</div>
 		</div>

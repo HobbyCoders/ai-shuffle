@@ -13,6 +13,14 @@ sessionOwnerBoundary.subscribe(() => {
  assistantState.set(null);
  agentIdentities.set([]);
 });
+/**
+ * True when `sessionId` is the assistant's home conversation. The chat view's
+ * "assistant mode" is derived from this one check, in one place (MainPanel),
+ * and passed down as a flag.
+ */
+export function isAssistantHome(sessionId: string | null | undefined, state: AssistantState | null | undefined): boolean {
+ return !!sessionId && !!state?.home_session_id && state.home_session_id === sessionId;
+}
 export function acceptAssistant(state: AssistantState) {
  revision++;
  assistantState.set(state);

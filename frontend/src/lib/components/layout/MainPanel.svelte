@@ -53,6 +53,7 @@
 	import AssistantHome from '$lib/components/assistant/AssistantHome.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
+	import { assistantState, isAssistantHome } from '$lib/stores/assistant';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import SwarmDropdown from '$lib/components/chat/SwarmDropdown.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -219,6 +220,9 @@
 	const activeTab = $derived(
 		$activeView?.type === 'session' ? $activeSession : null
 	);
+	// Assistant mode: the open chat is the assistant's home. Decided here, once,
+	// and passed down; the header, composer and transcript read only this flag.
+	const assistantMode = $derived(isAssistantHome(activeTab?.sessionId, $assistantState));
 	const sessionBrowser = $derived(browserPanel.forSession(activeTab?.sessionId ?? null));
 
 
@@ -866,7 +870,9 @@
 	instance with its existing handlers.
 -->
 {#snippet downloadAction()}
-	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
+	<!-- The assistant's home keeps no transcript download, Git or swarm controls;
+	     the job chats it starts keep theirs. -->
+	{#if !assistantMode && $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
 		<ChatExportActions sessionId={activeTab.sessionId} />
 	{/if}
 {/snippet}
@@ -878,11 +884,12 @@
 			     the dialog and its button reads the pending count
 			     (chatAccessSummary). Chat-lane and projectless sessions have no git
 			     cluster, so ChatAccess renders its own Access button there. -->
-			<ChatAccess sessionId={activeTab.sessionId} trigger={privateAccessTrigger(headerGitInput)} />
+			<ChatAccess sessionId={activeTab.sessionId} trigger={assistantMode ? 'button' : privateAccessTrigger(headerGitInput)} />
+			<!-- The home keeps swarm state hydrated but shows no dropdown. -->
 			<SwarmDropdown
 				sessionId={activeTab.sessionId}
 				standalone
-				hydrateOnly={shouldShowHeaderGitActions({
+				hydrateOnly={assistantMode || shouldShowHeaderGitActions({
 					viewType: $activeView?.type, hasProject: !!activeProject,
 					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
 					isRemote: activeIsRemote, sessionMode: activeTab.mode
@@ -894,7 +901,7 @@
 			/>
 		{/key}
 	{/if}
-	{#if activeTab && shouldShowHeaderGitActions({
+	{#if activeTab && !assistantMode && shouldShowHeaderGitActions({
 		viewType: $activeView?.type,
 		hasProject: !!activeProject,
 		githubAuthenticated: $githubAuthenticated,
@@ -969,6 +976,7 @@
 				<div class="chat-row">
 					<div class="chat-browser-underlay">
 					<ChatView
+						{assistantMode}
 						onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
 							? () => browserPanel.toggle(activeTab?.sessionId ?? null)
 							: undefined}

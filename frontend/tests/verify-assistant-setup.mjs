@@ -1,5 +1,5 @@
-// Real-browser check of the minimal Assistant setup (issue #1608): name,
-// avatar and agent only. Background research has no owner controls (no
+// Real-browser check of the minimal Assistant setup (issue #1608): name and
+// avatar only; the agent behind the assistant is built in. Background research has no owner controls (no
 // switch, pause, usage or limits); only the per-source opt-in remains. The
 // owner's details are detected by the server, shown read-only and
 // correctable, with Gmail/GitHub suggestion cards when those are missing. A
@@ -76,7 +76,8 @@ function fakeBackend() {
 			return;
 		}
 		let id = patch.agent_id;
-		if (patch.create_agent) {
+		// The server runs the assistant on its built-in agent; the page sends none.
+		if (patch.create_agent || (!id && !state.agent_id)) {
 			const existing = identities.find((a) => a.dedicated);
 			id = existing?.id ?? 'assistant';
 			if (!existing) identities.push({ id, name: 'Assistant', avatar_id: 'robot', dedicated: true });
@@ -141,8 +142,9 @@ async function run(viewport) {
 	const nameInput = page.getByRole('textbox', { name: 'Assistant name' });
 	await nameInput.waitFor();
 	check(await nameInput.inputValue() === 'Assistant', 'name defaults to Assistant');
-	check(await page.getByRole('radio', { name: /A dedicated assistant agent/ }).isChecked(), 'dedicated agent is the default');
-	check(await page.getByRole('combobox', { name: 'Assistant agent' }).count() === 0, 'agent picker hidden until asked for');
+	check(await page.getByRole('radio').count() === 0, 'no agent-kind choice');
+	check(await page.getByRole('combobox').count() === 0, 'no agent picker');
+	check(await page.getByRole('button', { name: /Manage agents/ }).count() === 0, 'no Manage agents link');
 	const avatars = page.getByRole('button', { name: / avatar$/ });
 	check(await avatars.count() === 16, '16 avatar presets', await avatars.count());
 	const pressed = page.locator('.avatar-picker button[aria-pressed="true"]');
@@ -165,27 +167,17 @@ async function run(viewport) {
 	check(await overflow() <= 0, 'no horizontal overflow on setup', await overflow());
 	await shoot('setup');
 
-	// "One of my agents" stays available and does not lose the drafted identity.
-	await press(page.getByRole('radio', { name: /One of my agents/ }));
-	const picker = page.getByRole('combobox', { name: 'Assistant agent' });
-	check(await picker.isVisible(), 'agent picker shown for one of my agents');
-	await picker.selectOption('reviewer');
-	await page.waitForTimeout(80);
-	check(await nameInput.inputValue() === 'Reviewer', 'picking an agent shows its name');
-	await press(page.getByRole('radio', { name: /A dedicated assistant agent/ }));
-	check(await picker.count() === 0, 'agent picker hidden again');
-	check(await nameInput.inputValue() === 'Assistant', 'dedicated choice restores the default name');
-
 	await nameInput.fill('Juniper');
 	await press(page.getByRole('button', { name: 'fox avatar' }));
 	check(await page.getByRole('button', { name: 'fox avatar' }).getAttribute('aria-pressed') === 'true', 'avatar choice registers');
 	await press(page.getByRole('button', { name: 'Create assistant' }));
 	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
 	check(backend.patches.length === 1, 'one save request', backend.patches);
-	assert.deepEqual(backend.patches[0], { create_agent: true, assistant_name: 'Juniper', avatar_id: 'fox' }, `[${name}] save payload`);
+	assert.deepEqual(backend.patches[0], { assistant_name: 'Juniper', avatar_id: 'fox' }, `[${name}] save payload`);
 	passed++;
 	check(await page.getByRole('heading', { level: 1 }).textContent() === 'Juniper', 'home shows the new name');
-	check(await page.getByText(/Assistant created/).isVisible(), 'creation confirmed');
+	check(await page.getByText(/Assistant ready/).isVisible(), 'creation confirmed');
+	check(await page.getByRole('button', { name: /Open agent settings/ }).count() === 0, 'no agent settings link');
 	check(await overflow() <= 0, 'no horizontal overflow on home', await overflow());
 	for (const label of [/Pause/, /Resume/, /Review & enable/]) {
 		check(await page.getByRole('button', { name: label }).count() === 0, `no ${label.source} button`);
@@ -231,14 +223,14 @@ async function run(viewport) {
 	check(await about.locator('input').count() === 0, 'back to read-only after saving');
 	check((await page.getByRole('heading', { level: 1 }).locator('..').textContent()).includes('Hello, Ada Lovelace.'), 'greeting uses the corrected name');
 
-	// Editing reopens on the dedicated agent rather than offering a second one.
+	// Editing changes only the name and face; no agent fields are ever sent.
 	await press(page.getByRole('button', { name: 'Edit assistant' }));
-	check(await page.getByRole('radio', { name: /A dedicated assistant agent/ }).isChecked(), 'edit keeps the dedicated agent');
-	check(await page.getByText(/Uses Juniper, the agent setup made earlier/).isVisible(), 'edit names the existing dedicated agent');
+	check(await page.getByRole('radio').count() === 0, 'edit offers no agent choice');
+	check(await nameInput.inputValue() === 'Juniper', 'edit starts from the saved name');
 	await press(page.getByRole('button', { name: 'Save assistant' }));
 	await page.getByRole('button', { name: 'Open conversation' }).waitFor();
 	const resave = backend.patches.at(-1);
-	check(resave.agent_id === 'assistant' && !('create_agent' in resave), 'second save reuses the agent', resave);
+	check(!('agent_id' in resave) && !('create_agent' in resave), 'second save sends no agent fields', resave);
 	check(errors.length === 0, 'no page errors or failed requests', errors);
 	await context.close();
 }

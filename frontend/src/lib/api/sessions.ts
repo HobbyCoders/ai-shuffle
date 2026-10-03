@@ -390,6 +390,14 @@ export async function stopSessionTask(sessionId: string, taskId: string): Promis
 	);
 }
 
+/**
+ * Interrupt another chat's running turn (the assistant's background-work
+ * Stop for a chat it started). Rejects when nothing is running there.
+ */
+export async function interruptSession(sessionId: string): Promise<{ status: string; session_id: string }> {
+	return api.post(`/session/${encodeURIComponent(sessionId)}/interrupt`);
+}
+
 export interface ResumeSessionResponse {
 	turn_id: string;
 	session_id: string;

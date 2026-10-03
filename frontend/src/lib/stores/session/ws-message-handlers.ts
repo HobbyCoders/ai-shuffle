@@ -1080,6 +1080,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					description: data.description as string | undefined,
 					decision_reason: data.decision_reason as string | undefined,
 					blocked_path: data.blocked_path as string | undefined,
+					// Asked in the assistant's conversation instead of on a card.
+					...(data.assistant_confirm && typeof data.assistant_confirm === 'object'
+						? { assistant_confirm: data.assistant_confirm as PermissionRequestType['assistant_confirm'] }
+						: {}),
 				} as PermissionRequestType;
 
 				// The same prompt now arrives twice by design: once on the origin

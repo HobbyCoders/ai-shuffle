@@ -67,12 +67,14 @@
 
 	interface Props {
 		compact?: boolean;
+		/** The assistant's home: just the box, attach, voice, stash, model and Stop. */
+		assistantMode?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 	}
 
-	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
+	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
 	// ChatView remounts the editor when its account changes. Teardown and
 	// already queued callbacks must not write the previous account's text.
 	const ownerEpoch = sessionOwnerEpoch();
@@ -110,7 +112,7 @@
 	// repository; chat and voice are plain conversations with nothing to point
 	// work at, so promising "a task" there would be a lie.
 	const composerPlaceholder = $derived(
-		composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything'
+		assistantMode ? 'What can I do for you?' : composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything'
 	);
 
 	// Voice passes local file references to its worker rather than uploading
@@ -1268,7 +1270,10 @@
 
 			     Chat still requires an agent. ContextPillBar keeps its selector
 			     visible while hiding the repository and execution controls. -->
-			<div class="context-pill-row"><ContextPillBar /></div>
+			{#if !assistantMode}
+				<!-- The assistant picks project, branch and runner itself. -->
+				<div class="context-pill-row"><ContextPillBar /></div>
+			{/if}
 
 			<!-- The box: a flat hairline rectangle holding the editor, the send
 			     cluster on the right, and the bare-text controls row. -->
@@ -1384,7 +1389,8 @@
 				     component's recording state and render inside the form. -->
 				<ControlsDock
 					bind:this={controlsDockRef}
-					{onBrowserToggle}
+					{assistantMode}
+					onBrowserToggle={assistantMode ? undefined : onBrowserToggle}
 					{onBrowserPreload}
 					{browserOpen}
 					{isUploading}

@@ -19,6 +19,7 @@
 	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
 	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
 	import { assistantState, refreshAssistant } from '$lib/stores/assistant';
+	import { openAssistant as openAssistantHome } from '$lib/api/assistant';
 	import {
 		Search,
 		ListFilter,
@@ -447,7 +448,9 @@
 	}
 
 	// --- assistant -----------------------------------------------------------
-	const assistantReady = $derived($assistantState?.status === 'ready' && !!$assistantState?.home_session_id);
+	// Once the assistant exists the row always opens its conversation. Research
+	// sources and the home's existence do not gate it (the home is made on open).
+	const assistantReady = $derived(!!$assistantState?.configured);
 	const assistantName = $derived($assistantState?.assistant_name?.trim() || 'Assistant');
 	const assistantOpen = $derived(
 		currentType === 'assistant' ||
@@ -460,14 +463,31 @@
 		!assistantReady ? 'Set up your assistant' : assistantWorking ? 'Working…' : 'Your ongoing conversation'
 	);
 
-	/** Set up: open the one conversation. Not yet: open its settings. */
-	function openAssistant() {
-		const home = $assistantState?.home_session_id;
-		if (assistantReady && home) {
-			sheet = null;
-			onOpenSession(home);
-		} else {
+	/** Exists: open the one conversation, creating it first if needed. Not yet: open setup. */
+	let assistantOpening = false;
+	async function openAssistant() {
+		if (!assistantReady) {
 			pickFeature('assistant');
+			return;
+		}
+		sheet = null;
+		const home = $assistantState?.home_session_id;
+		if (home) {
+			onOpenSession(home);
+			return;
+		}
+		if (assistantOpening) return;
+		assistantOpening = true;
+		try {
+			const opened = await openAssistantHome();
+			onOpenSession(opened.session_id);
+			// Pick up the new home id so the row marks itself current.
+			void refreshAssistant().catch(() => {});
+		} catch {
+			// The setup page explains what is missing (worker offline, agent gone).
+			pickFeature('assistant');
+		} finally {
+			assistantOpening = false;
 		}
 	}
 
@@ -772,8 +792,8 @@
 					tabindex="0"
 					aria-label="Open your assistant"
 					aria-current={assistantOpen ? 'page' : undefined}
-					onclick={openAssistant}
-					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAssistant(); } }}
+					onclick={() => void openAssistant()}
+					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openAssistant(); } }}
 				>
 					<span class="av">
 						<AgentAvatar avatar={$assistantState?.avatar_id ?? 'robot'} size={34} />

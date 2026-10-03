@@ -21,6 +21,7 @@
 		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
 		effortExplanation = NO_ADJUSTABLE_EFFORT, effortKnown = true,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
+		showSetup = true, showEffort = true,
 		permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect
 	}: Props = $props();
 
@@ -147,9 +148,10 @@
 					<span class="control-label">Model</span><strong>{modelLabel}</strong>{#if modelLocked}<Lock size={16} aria-hidden="true" />{:else}<ChevronRight size={16} aria-hidden="true" />{/if}
 				</button>
 				{#if modelNotice}<p class="model-notice">{modelNotice}</p>{/if}
-				{#if open}
+				{#if open && showSetup}
 					<ContextPillBar sheetMode />
 				{/if}
+				{#if showEffort}
 				<div class="quick-setting" role="group" aria-label="Reasoning effort">
 					<div class="setting-label"><span>Reasoning effort</span><small>{!effortKnown ? (effortValue ?? 'Unknown') : !effortOptions.length ? 'Not adjustable' : effortValue ? '' : 'Auto'}</small></div>
 					{#if !effortOptions.length}
@@ -163,6 +165,7 @@
 					</div>
 					{/if}
 				</div>
+				{/if}
 				{#if showCodeControls}
 					<div class="quick-setting" role="group" aria-label="Tool access" aria-busy={permissionUpdating}>
 						<div class="setting-label"><span>Tool access</span></div>
@@ -176,7 +179,7 @@
 						<p class="setting-description" aria-live="polite">{permissionUpdating ? 'Saving tool access…' : `${permissionLabel} · ${permissionDescription}`}</p>
 					</div>
 				{/if}
-				{#if fastSupported && !modelLocked}
+				{#if showEffort && fastSupported && !modelLocked}
 					<div class="fast-row">
 						<div class="fast-copy"><span><Zap size={14} aria-hidden="true" />Fast mode</span><small id={`${panelId}-fast-help`}>Higher price; switching clears the prompt cache.</small></div>
 						<button type="button" class="fast-switch" role="switch" aria-label="Fast mode" aria-describedby={`${panelId}-fast-help`} aria-checked={fastEnabled} onclick={() => onToggleFast?.()}><span></span></button>

@@ -7,7 +7,8 @@ describe('voice composer parity', () => {
 		const view = source('components/layout/ChatView.svelte');
 		expect(view.match(/<ChatInput /g)).toHaveLength(1);
 		expect(view).toContain('const showComposer = true;');
-		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*\{#key \$sessionOwnerBoundary\}\s*<QuestionTray[^>]+\/>\s*<ChatInput/);
+		// The assistant's background work strip may sit between the call panel and the composer.
+		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*(?:\{#if assistantMode\}\s*<BackgroundWorkStrip[^>]+\/>\s*\{\/if\}\s*)?\{#key \$sessionOwnerBoundary\}\s*<QuestionTray[^>]+\/>\s*<ChatInput/);
 	});
 	it('uses code context and permission controls for voice on desktop and mobile', () => {
   expect(source('components/chat/ChatInput.svelte')).toContain('<ContextPillBar />');
@@ -15,7 +16,7 @@ describe('voice composer parity', () => {
   expect(source('components/chat/ContextPillBar.svelte')).toContain("{#if $activeSession.mode !== 'chat'}");
 		const dock = source('components/chat/ControlsDock.svelte');
 		expect(dock).toContain("$activeSession.mode !== 'chat'");
-		expect(dock).toContain('showCodeControls={isCodeLane}');
+		expect(dock).toContain('showCodeControls={isCodeLane && !assistantMode}');
 		expect(dock).toContain('const showAttach = true;');
 	});
 	it('restores failed sends only to the originating draft', () => {

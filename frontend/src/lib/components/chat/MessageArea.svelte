@@ -62,7 +62,6 @@
 	import {
 		createTranscriptModelBuilder,
 		hasLinkedSubagent as hasLinkedSubagentIn,
-		type DisplayItem,
 		type TranscriptModel
 	} from '$lib/utils/work-log';
 	import {
@@ -106,6 +105,9 @@
 	import PendingMessages from './PendingMessages.svelte';
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import ActiveTasks from './ActiveTasks.svelte';
+	import AssistantDetails from './AssistantDetails.svelte';
+	import { foldAssistantTranscript, isStreamingProse, type AssistantViewItem } from '$lib/utils/assistant-transcript';
+	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 
@@ -117,9 +119,18 @@
 	// off-screen messages keep content-visibility for the paint/layout perf win.
 	const LIVE_TAIL = 8;
 
+	interface Props {
+		/** The assistant's home: prose first, everything else behind "Details". */
+		assistantMode?: boolean;
+	}
+
+	let { assistantMode = false }: Props = $props();
+
 	/** Exhaustive keyed identity for every presentation-model variant. */
-	function displayItemKey(item: DisplayItem): string {
+	function displayItemKey(item: AssistantViewItem): string {
 		switch (item.kind) {
+			case 'details':
+				return item.key;
 			case 'message':
 				return `message-${item.message.id || item.index}`;
 			case 'system_group':
@@ -353,8 +364,17 @@
 	// Background tasks do NOT gate the dots — the main turn streams concurrently
 	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
+	// The approval the assistant is asking in words, if any (assistant_confirm).
+	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
+
 	const showGapIndicator = $derived(
-		shouldShowGapIndicator(
+		assistantMode
+			// Its work rows are folded away, so the dots stand in for them until
+			// the assistant's own words are streaming.
+			? $activeSession.isStreaming
+				&& !assistantQuestion
+				&& !isStreamingProse($activeSession.messages[lastStreamingMessageIndex])
+			: shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
 			chatPrefs?.showThinkingBlocks !== false
@@ -480,7 +500,10 @@
 		return model;
 	});
 
-	const displayItems: DisplayItem[] = $derived(transcript.items);
+	// Assistant mode folds the same model; ordinary chats use it as built.
+	const assistantView = $derived(assistantMode ? foldAssistantTranscript(transcript.items, latestTurnUnsettled) : null);
+	const displayItems: AssistantViewItem[] = $derived(assistantView?.items ?? transcript.items);
+	const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(assistantView?.itemIndexByTurnId ?? transcript.itemIndexByTurnId);
 	// Per-row reads go through these rather than `transcript` (#1282). The
 	// streaming fast path in createTranscriptModelBuilder keeps both arrays by
 	// identity while only the tail text grows, so these deriveds do not notify and
@@ -739,7 +762,7 @@
 				turnVisibility,
 				readingLine,
 				(turnId) => {
-					const itemIndex = transcript.itemIndexByTurnId.get(turnId);
+					const itemIndex = itemIndexByTurnId.get(turnId);
 					return itemIndex === undefined || itemIndex >= mountedStart;
 				}
 			);
@@ -763,7 +786,7 @@
 		if (!item) return;
 		// The target turn may be older than the mounted window — mount back to it
 		// first, otherwise the rail would silently refuse to move.
-		const itemIndex = transcript.itemIndexByTurnId.get(item.id);
+		const itemIndex = itemIndexByTurnId.get(item.id);
 		if (itemIndex !== undefined) await ensureItemMounted(itemIndex);
 		if (!containerRef) return;
 		const anchor = document.getElementById(turnAnchorId(item.id));
@@ -1880,6 +1903,8 @@
 						row={messageBody}
 						{observeTurnAnchor}
 					/>
+				{:else if item.kind === 'details'}
+					<AssistantDetails entries={item.entries} live={item.live} row={messageBody} />
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} />
@@ -1901,6 +1926,20 @@
 					onRemove={(id) => activeSession.unsendQueuedMessage(id)}
 					onInterrupt={() => activeSession.interruptForQueuedMessages()}
 				/>
+			{/if}
+
+			<!-- Approval in words: the oldest in-conversation request is the
+			     assistant asking, answered with a plain yes or no in the message box.
+			     No card, no buttons. The request itself says so (assistant_confirm). -->
+			{#if assistantQuestion}
+				<div class="assistant-ask" data-permission-request={assistantQuestion.request.request_id}>
+					<AssistantMessage
+						content={assistantQuestion.text}
+						timestamp={assistantQuestion.request.created_at}
+						sessionId={activeSessionId}
+						profileName={sessionProfile?.name ?? 'Assistant'}
+					/>
+				</div>
 			{/if}
 
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
@@ -1925,7 +1964,10 @@
 			<!-- In-flight background tasks: a collapsible line pinned to the history
 			     tail (spinner + "N running tasks"; expands to a |__ tree with per-task
 			     stop). Renders nothing when there are no tasks. -->
-			<ActiveTasks tasks={$activeSession.activeTasks ?? []} onStop={handleStopTask} />
+			{#if !assistantMode}
+				<!-- The assistant's home shows its background work beside the composer instead. -->
+				<ActiveTasks tasks={$activeSession.activeTasks ?? []} onStop={handleStopTask} />
+			{/if}
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
 			<div

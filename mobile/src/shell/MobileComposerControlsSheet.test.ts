@@ -225,6 +225,16 @@ describe('integrated mobile composer controls', () => {
 		expect(container.querySelector('select')).toBeNull();
 	});
 
+	it('keeps only the model picker in the assistant\'s home', () => {
+		render(MobileComposerControlsSheet, { props: props({ showCodeControls: false, showSetup: false, showEffort: false, fastSupported: true }) });
+		expect(screen.getByRole('button', { name: /model: sonnet/i })).toBeTruthy();
+		expect(screen.queryByRole('toolbar', { name: 'Session context' })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Agent:/ })).toBeNull();
+		expect(screen.queryByRole('group', { name: 'Reasoning effort' })).toBeNull();
+		expect(screen.queryByRole('group', { name: 'Tool access' })).toBeNull();
+		expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull();
+	});
+
 	it('lets a fresh chat choose its required agent without exposing code controls', async () => {
 		appMode.set('chat');
 		activeSession.newChat();

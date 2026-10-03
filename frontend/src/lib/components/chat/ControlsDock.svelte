@@ -78,9 +78,14 @@
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
 		inertToolbar?: boolean;
+		/**
+		 * The assistant's home: voice, attach and the model picker only. No
+		 * permission or Away menu, effort tag or context ring.
+		 */
+		assistantMode?: boolean;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, assistantMode = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -467,7 +472,7 @@
 		>
 			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
 		</button>
-		{#if isCodeLane}
+		{#if isCodeLane && !assistantMode}
 			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
 				<button
 					type="button"
@@ -596,7 +601,7 @@
 
 	<!-- Mobile: usage ring on the right. Settings lives in dock-left. -->
 	<div class="mobile-controls">
-		<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		{#if !assistantMode}<ContextUsageBar onOpenChange={onUsageOpenChange} />{/if}
 	</div>
 
 	<!-- Right group (desktop): model · effort · ring -->
@@ -639,6 +644,7 @@
 			{/if}
 		</div>
 
+		{#if !assistantMode}
 		<div class="dock-pop-wrap" bind:this={effortWrapRef}>
 			<button
 				type="button"
@@ -676,6 +682,7 @@
 
 		<!-- Context-usage ring (16px SVG arc + its popover) -->
 		<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		{/if}
 	</div>
 </div>
 
@@ -706,7 +713,9 @@
 	permissionValue={permissionValue}
 	{permissionUpdating}
 	onPermissionSelect={selectPermission}
-	showCodeControls={isCodeLane}
+	showCodeControls={isCodeLane && !assistantMode}
+	showSetup={!assistantMode}
+	showEffort={!assistantMode}
 />
 {/if}
 

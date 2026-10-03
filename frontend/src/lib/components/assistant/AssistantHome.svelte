@@ -1,10 +1,10 @@
 <script lang="ts">
- /** Assistant is a home for one existing agent, not a new conversation mode. */
+ /** The assistant runs on one built-in agent; the owner names it and gives it a face. */
  import { onMount } from 'svelte';
- import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Plus, Check, Activity, ChevronRight, Mail, Github } from 'lucide-svelte';
+ import { ArrowUpRight, MessageSquare, AudioLines, Settings2, RefreshCw, ShieldCheck, Check, Activity, ChevronRight, Mail, Github } from 'lucide-svelte';
  import { AVATARS, DEFAULT_ASSISTANT_NAME, randomAvatar, configureAssistant, openAssistant, getAssistantSources, getAssistantActivity, setAssistantSource, assistantError, type AssistantSource, type AssistantActivity, type AssistantPatch, type AvatarId, type AssistantIntroduction } from '$lib/api/assistant';
- import { assistantState, agentIdentities, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
- import { appData, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
+ import { assistantState, acceptAssistant, refreshAssistant } from '$lib/stores/assistant';
+ import { appData, sessions } from '$lib/stores/app-data.svelte';
  import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
  import { callBusyReason, explainBlockedCall, prefersTouch } from '$lib/components/chat/call-gate';
  import { layout } from '$lib/stores/layout.svelte';
@@ -15,8 +15,8 @@
  import { startCallForSession } from '$lib/services/voiceCall';
  import AgentAvatar from './AgentAvatar.svelte';
 
- let { requestedAgentId = null }: { requestedAgentId?: string | null } = $props();
- const requestedId = $derived(requestedAgentId);
+ // Callers may still pass an agent id; the assistant no longer takes one.
+ let { requestedAgentId: _requestedAgentId = null }: { requestedAgentId?: string | null } = $props();
  const assistant = $derived($assistantState);
  const owner = sessionOwnerEpoch();
  let disposed = false;
@@ -30,20 +30,12 @@
  let sources = $state<AssistantSource[]>([]);
  let activity = $state<AssistantActivity[]>([]);
  let editing = $state(false);
- // 'dedicated' is the agent setup creates (or already created) for the
- // assistant; 'mine' is any existing agent the owner picks instead.
- let agentChoice = $state<'dedicated' | 'mine'>('dedicated');
- let agentId = $state('');
  let assistantName = $state('');
  let avatar = $state<AvatarId>('robot');
- // Picked once per page so toggling the agent choice does not reshuffle it.
+ // Picked once per page so reopening setup does not reshuffle it.
  const suggestedAvatar = randomAvatar();
- const dedicatedAgent = $derived($agentIdentities.find(a => a.dedicated));
- const chosenAgent = $derived($profiles.find(p => p.id === agentId));
- const identityEditable = $derived(agentChoice === 'dedicated' || (!!chosenAgent && !chosenAgent.is_builtin));
- const canSave = $derived(agentChoice === 'dedicated' || !!agentId);
- const hasAgent = $derived(!!assistant?.agent);
- const statusText = $derived(!assistant ? '' : !assistant.configured ? 'Not set up' : assistant.status === 'agent_unavailable' ? 'Agent unavailable' : 'Ready');
+ const hasAgent = $derived(!!assistant?.configured);
+ const statusText = $derived(!assistant ? '' : !assistant.configured ? 'Not set up' : assistant.status === 'agent_unavailable' ? 'Unavailable' : 'Ready');
  // Research is automatic; the only owner-facing line is which sources it uses.
  // Counted from the live source list so an opt-in shows up without a reload.
  const inUse = $derived(!assistant || ['unconfigured', 'agent_unavailable', 'guard_unavailable'].includes(assistant.status) ? 0 : sources.filter(s => s.enabled && s.available).length);
@@ -78,7 +70,6 @@
  });
  let touch = $state(false);
 
- let loaded = false;
  async function load() {
   if (refreshing) return;
   refreshing = true;
@@ -88,11 +79,7 @@
    sources = nextSources; activity = nextActivity; error = '';
    // Setup opens on any successful load, not just the first: a failed first load
    // followed by a retry or poll must still lead an unconfigured owner into setup.
-   const firstLoad = !loaded; loaded = true;
-   if (!editing && (!$assistantState?.configured || (firstLoad && requestedId))) {
-    beginEdit();
-    if (requestedId && $profiles.some(p => p.id === requestedId)) { agentChoice = 'mine'; agentId = requestedId; selectAgent(); }
-   }
+   if (!editing && !$assistantState?.configured) beginEdit();
   } catch (e) { if (current()) error = assistantError(e); }
   finally { if (current()) { loading = false; refreshing = false; } }
  }
@@ -106,30 +93,14 @@
   const unsubscribe = resourceSync.subscribe(['assistant'], () => { if (!busy && !editing) return load(); });
   return () => { disposed = true; clearInterval(tick); unsubscribe(); };
  });
- function selectAgent() {
-  const identity = $agentIdentities.find(a => a.id === agentId);
-  assistantName = identity?.name ?? $profiles.find(p => p.id === agentId)?.name ?? '';
-  avatar = identity?.avatar_id ?? 'robot';
- }
- function selectDedicated() {
-  assistantName = dedicatedAgent?.name ?? DEFAULT_ASSISTANT_NAME;
-  avatar = dedicatedAgent?.avatar_id ?? suggestedAvatar;
- }
- function chooseAgentKind(kind: 'dedicated' | 'mine') {
-  agentChoice = kind;
-  if (kind === 'dedicated') selectDedicated();
-  else if (agentId) selectAgent();
- }
  function beginEdit() {
   if (!assistant) return;
-  if (assistant.agent_id) {
-   agentChoice = assistant.agent?.dedicated ? 'dedicated' : 'mine';
-   agentId = assistant.agent?.dedicated ? '' : assistant.agent_id;
+  if (assistant.configured) {
    assistantName = assistant.assistant_name ?? '';
    avatar = assistant.avatar_id;
   } else {
-   agentChoice = 'dedicated'; agentId = '';
-   selectDedicated();
+   assistantName = assistant.assistant_name?.trim() || DEFAULT_ASSISTANT_NAME;
+   avatar = suggestedAvatar;
   }
   editing = true; error = ''; notice = '';
  }
@@ -141,18 +112,14 @@
  }
  async function save(event: SubmitEvent) {
   event.preventDefault();
-  if (!canSave) return;
-  const target = agentChoice === 'dedicated' ? dedicatedAgent?.id : agentId;
-  const created = agentChoice === 'dedicated' && !target;
+  const created = !assistant?.configured;
   await act('save', async () => {
-   const patch: AssistantPatch = {
-    ...(created ? { create_agent: true } : { agent_id: target }),
-    ...(identityEditable ? { assistant_name: assistantName.trim() || DEFAULT_ASSISTANT_NAME, avatar_id: avatar } : {})
-   };
+   // Name and face only: the agent behind the assistant is built in.
+   const patch: AssistantPatch = { assistant_name: assistantName.trim() || DEFAULT_ASSISTANT_NAME, avatar_id: avatar };
    const next = await configureAssistant(patch);
    if (!current()) return;
    acceptAssistant(next); editing = false;
-   notice = created ? 'Assistant created. Open the conversation whenever you’re ready.' : 'Assistant saved. Existing prompts, models and permissions are unchanged.';
+   notice = created ? 'Assistant ready. Say hello anytime.' : 'Saved.';
    await appData.loadProfiles();
    await load();
    // The server reads the owner's details for a new assistant; show them.
@@ -209,10 +176,10 @@
   <div class="loading" role="status"><span class="skeleton orb"></span><span class="skeleton line"></span><span class="skeleton line short"></span><p>Getting your assistant ready…</p></div>
  {:else if assistant}
   <header class="hero">
-   <div class="portrait"><AgentAvatar avatar={editing && identityEditable ? avatar : assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
+   <div class="portrait"><AgentAvatar avatar={editing ? avatar : assistant.avatar_id} size={100} /><span class="portrait-orbit" aria-hidden="true"></span></div>
    <div class="hero-copy"><div class="status" class:enabled={assistant.configured && assistant.status !== 'agent_unavailable'}><span aria-hidden="true"></span>{statusText}</div>
     <h1>{hasAgent ? assistant.assistant_name : 'A familiar face. A lasting conversation.'}</h1>
-    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off on this worker. Your assistant’s name, agent and avatar sync across workers; each worker keeps its own persistent conversation, with access you control.` : 'Give it a name and a face. Each worker gets its own lasting conversation, with the same name, agent and avatar. You can change any of this later.'}</p>
+    <p>{hasAgent ? `${assistant.introduction.preferred_name ? `Hello, ${assistant.introduction.preferred_name}. ` : ''}Pick up where you left off.` : 'Give it a name and a face.'}</p>
     {#if hasAgent && !editing}
      <div class="hero-actions"><button class="primary" disabled={!!busy} onclick={() => conversation()}><MessageSquare size={17} />{busy === 'open' ? 'Opening…' : 'Open conversation'}<ArrowUpRight size={16} /></button>
       {#if voiceEnabled}<button class="secondary" class:blocked={!!callBlocked} disabled={!!busy || (!!callBlocked && !touch)} aria-disabled={callBlocked ? 'true' : undefined} title={callBlocked ?? undefined} onclick={startCall}><AudioLines size={17} />{busy === 'voice' ? 'Connecting…' : 'Start call'}</button>{/if}
@@ -227,22 +194,11 @@
    <form class="setup" onsubmit={save}>
     <fieldset disabled={!!busy}>
      <div class="section-heading"><div><span class="eyebrow">01 / IDENTITY</span><h2>{assistant.configured ? 'Make it yours' : 'Meet your assistant'}</h2></div></div>
-     <label class="name-field">Assistant name<input required={identityEditable} disabled={!identityEditable} maxlength="80" bind:value={assistantName} placeholder={DEFAULT_ASSISTANT_NAME} /></label>
+     <label class="name-field">Assistant name<input required maxlength="80" bind:value={assistantName} placeholder={DEFAULT_ASSISTANT_NAME} /></label>
      <span class="field-label" id="avatar-label">Avatar</span>
-     <div class="avatar-picker" role="group" aria-labelledby="avatar-label">{#each AVATARS as choice}<button type="button" class:selected={avatar === choice} aria-pressed={avatar === choice} aria-label={`${choice} avatar`} title={choice} disabled={!identityEditable} onclick={() => avatar = choice}><AgentAvatar avatar={choice} size={44} /></button>{/each}</div>
+     <div class="avatar-picker" role="group" aria-labelledby="avatar-label">{#each AVATARS as choice}<button type="button" class:selected={avatar === choice} aria-pressed={avatar === choice} aria-label={`${choice} avatar`} title={choice} onclick={() => avatar = choice}><AgentAvatar avatar={choice} size={44} /></button>{/each}</div>
 
-     <div class="section-heading"><div><span class="eyebrow">02 / AGENT</span><h2>What runs it</h2></div><button type="button" class="text-button" onclick={() => layout.openFeaturePage('profile')}><Plus size={15} />Manage agents</button></div>
-     <div class="agent-choices" role="radiogroup" aria-label="Assistant agent kind">
-      <label class="choice" class:selected={agentChoice === 'dedicated'}><input type="radio" name="agent-kind" value="dedicated" checked={agentChoice === 'dedicated'} onchange={() => chooseAgentKind('dedicated')} /><span><strong>A dedicated assistant agent</strong><small>{dedicatedAgent ? `Uses ${dedicatedAgent.name}, the agent setup made earlier.` : 'Setup creates a new agent on your default text model (Settings > Default models > Text tasks).'} You can change its instructions and tools in Agents.</small></span></label>
-      <label class="choice" class:selected={agentChoice === 'mine'}><input type="radio" name="agent-kind" value="mine" checked={agentChoice === 'mine'} onchange={() => chooseAgentKind('mine')} /><span><strong>One of my agents</strong><small>Keeps that agent’s prompts, models and permissions. Switching later moves your home conversation to the new agent.</small></span></label>
-     </div>
-     {#if agentChoice === 'mine'}
-      <label>Assistant agent<select required bind:value={agentId} onchange={selectAgent}><option value="" disabled>Choose an existing agent</option>{#each $profiles as agent (agent.id)}<option value={agent.id}>{agent.name}{agent.is_builtin ? ' · built-in' : ''}</option>{/each}</select></label>
-      {#if !$profiles.length}<p class="message">No agents yet. Use a dedicated assistant agent, or create one in Agents.</p>{/if}
-      {#if chosenAgent?.is_builtin}<p class="micro">Built-in identity is protected. Create a custom agent in Agents to give it a new name and avatar.</p>{/if}
-     {/if}
-
-     <div class="form-actions"><button type="submit" class="primary" disabled={!canSave || !!busy}>{busy === 'save' ? 'Saving…' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
+     <div class="form-actions"><button type="submit" class="primary" disabled={!!busy}>{busy === 'save' ? 'Saving…' : assistant.configured ? 'Save assistant' : 'Create assistant'}<Check size={16} /></button>{#if assistant.configured}<button type="button" class="secondary" onclick={() => editing = false}>Cancel</button>{/if}</div>
     </fieldset>
    </form>
   {:else if assistant.configured}
@@ -257,7 +213,6 @@
       <button class="text-button" disabled={!!busy} onclick={() => beginEdit()}>Edit setup<ChevronRight size={14} /></button>
      </div>
     </section>
-    <section class="identity-note"><AgentAvatar avatar={assistant.avatar_id} size={48} /><h2>Same agent.<br />More continuity.</h2><p class="muted">Your instructions, models, tools and permissions stay in Agents. Home adds a lasting conversation and read-only research on the sources you opt in.</p><button class="text-button" onclick={() => layout.openFeaturePage('profile', assistant.agent_id)}>Open agent settings<ArrowUpRight size={15} /></button></section>
    </div>
   {/if}
 
@@ -320,7 +275,7 @@
  button { cursor:pointer; transition:background .2s, border-color .2s, transform .2s; }
  button:active:not(:disabled) { transform:translateY(1px); }
  button:disabled,button.blocked,fieldset:disabled { opacity:.55; cursor:not-allowed; }
- button:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
+ button:focus-visible,input:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
  .primary,.secondary,.icon-button,.text-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; border-radius:8px; border:1px solid transparent; font-size:12px; font-weight:550; }
  .primary { background:var(--primary); color:var(--primary-foreground); padding:0 18px; }
  .primary:hover:not(:disabled) { filter:brightness(1.08); }
@@ -333,10 +288,8 @@
  .muted { font-size:12px; color:var(--muted-foreground); line-height:1.8; margin:10px 0 18px; }
  h2 { font-size:18px; font-weight:550; letter-spacing:-.025em; margin:7px 0 0; }
  .section-heading> :global(svg) { color:var(--primary); flex:none; }
- .overview { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr); border:1px solid var(--border); border-radius:14px; background:var(--card); overflow:hidden; }
+ .overview { display:grid; grid-template-columns:minmax(0,1fr); border:1px solid var(--border); border-radius:14px; background:var(--card); overflow:hidden; }
  .research-panel { padding:26px; }
- .identity-note { padding:26px; border-left:1px solid var(--border); background:color-mix(in oklch,var(--primary) 3%,var(--background)); }
- .identity-note h2 { font-family:var(--font-display); font-size:25px; font-weight:400; margin-top:16px; }
  .panel-actions { margin-top:20px; flex-wrap:wrap; }
  .section { padding-top:34px; margin-top:30px; border-top:1px solid var(--border); }
  .count { display:inline-block; border:1px solid var(--border); color:var(--muted-foreground); border-radius:5px; padding:2px 6px; font-family:var(--font-mono); font-size:10px; vertical-align:middle; margin-left:6px; }
@@ -365,18 +318,12 @@
  fieldset { border:0; padding:0; margin:0; min-width:0; }
  .setup .section-heading:not(:first-child) { margin:32px 0 18px; padding-top:24px; border-top:1px solid var(--border); }
  label,.field-label { display:flex; flex-direction:column; gap:8px; font-size:12px; font-weight:500; margin:16px 0; }
- input,select { width:100%; border:1px solid var(--border); background:var(--background); color:var(--foreground); border-radius:7px; padding:11px 12px; font:inherit; min-height:44px; }
- input:hover,select:hover { border-color:var(--input-border-hover); }
+ input { width:100%; border:1px solid var(--border); background:var(--background); color:var(--foreground); border-radius:7px; padding:11px 12px; font:inherit; min-height:44px; }
+ input:hover { border-color:var(--input-border-hover); }
  input:disabled { color:var(--muted-foreground); cursor:not-allowed; }
  .name-field { max-width:420px; }
  .avatar-picker { display:grid; grid-template-columns:repeat(4,max-content); gap:8px; margin:0 0 8px; }
  .avatar-picker button { display:flex; align-items:center; justify-content:center; border:1px solid transparent; border-radius:12px; padding:6px; background:transparent; }
- .agent-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
- .choice { flex-direction:row; align-items:flex-start; gap:12px; margin:0; padding:16px; border:1px solid var(--border); border-radius:10px; background:var(--background); cursor:pointer; font-weight:400; }
- .choice.selected { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 5%,var(--background)); }
- .choice input { width:18px; height:18px; min-height:0; padding:0; margin:1px 0 0; accent-color:var(--primary); flex:none; }
- .choice strong { display:block; font-size:12px; font-weight:550; }
- .choice small { display:block; margin-top:6px; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
  .avatar-picker button.selected,.avatar-picker button:hover:not(:disabled) { border-color:var(--primary); background:color-mix(in oklch,var(--primary) 6%,transparent); color:var(--foreground); }
  .form-actions { margin-top:24px; }
  .about-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 24px; margin:18px 0 0; }
@@ -396,7 +343,7 @@
  :global(.spin) { animation:spin 1s linear infinite; }
  @keyframes spin { to { transform:rotate(360deg); } } @keyframes pulse { to { opacity:.4; } }
  @media(min-width:800px) { .hero { animation:arrive .35s ease-out; } @keyframes arrive { from { opacity:0; transform:translateY(8px); } } }
- @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .overview { grid-template-columns:1fr; } .identity-note { border-left:0; border-top:1px solid var(--border); } .identity-note h2 br { display:none; } .research-panel,.identity-note,.setup { padding:20px; } .agent-choices,.about-list { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
+ @media(max-width:760px) { .assistant-home { padding-top:20px; } .hero { grid-template-columns:1fr; gap:14px; padding:24px 0 30px; } .portrait { justify-self:start; min-height:108px; margin-left:4px; } .portrait-orbit { width:118px; height:118px; } .hero-copy>p { font-size:13px; } h1 { font-size:34px; } .research-panel,.setup { padding:20px; } .about-list { grid-template-columns:1fr; } .section-heading { flex-wrap:wrap; gap:8px; } .section-heading .text-button { font-size:11px; } .section { margin-top:24px; padding-top:24px; } }
  @media(max-width:430px) { .avatar-picker { gap:4px; } .empty { padding:18px; } }
  @media(prefers-reduced-motion:reduce) { .hero,.skeleton,:global(.spin) { animation:none!important; } button,.source-toggle>span:first-child::after { transition:none; } }
 </style>

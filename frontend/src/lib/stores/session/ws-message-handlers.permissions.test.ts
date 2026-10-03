@@ -72,6 +72,15 @@ describe('permission queue frames', () => {
 		expect(h.attention().has('bg')).toBe(false);
 	});
 
+	it('keeps the assistant_confirm wording on a live request and adds nothing to ordinary ones', () => {
+		const h = harness();
+		const confirm = { question: 'Do you authorize me to run `git push`? Please answer yes or no.', chat_session_id: 'chat-1' };
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'ask', tool_name: 'Bash', tool_input: { command: 'git push' }, assistant_confirm: confirm });
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'card', tool_name: 'Bash', tool_input: { command: 'ls' } });
+		expect(h.state().pendingPermissions[0].assistant_confirm).toEqual(confirm);
+		expect(h.state().pendingPermissions[1]).not.toHaveProperty('assistant_confirm');
+	});
+
 	it('accepts the requeue reply, which names requeued_ids and no resolved_ids (backend requeue_deferred_permissions)', () => {
 		const h = harness({ pendingPermissions: [perm('a')], deferredPermissions: [perm('d')] });
 		// Regression: `resolved_ids` is absent on this frame; the handler used to

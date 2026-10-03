@@ -89,7 +89,7 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet, post: mocks.apiPost },
 	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
-vi.mock('$lib/api/assistant', () => ({ getAssistant: vi.fn().mockResolvedValue(null), getAgentIdentities: vi.fn().mockResolvedValue([]) }));
+vi.mock('$lib/api/assistant', () => ({ getAssistant: vi.fn().mockResolvedValue(null), getAgentIdentities: vi.fn().mockResolvedValue([]), openAssistant: vi.fn() }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
@@ -1519,6 +1519,7 @@ describe('Sidebar unified conversation history', () => {
 
 describe('Sidebar assistant row', () => {
 	const ready = {
+		configured: true,
 		status: 'ready',
 		home_session_id: 'home',
 		assistant_name: 'Juniper',
@@ -1552,6 +1553,37 @@ describe('Sidebar assistant row', () => {
 		expect(cardIds()).toEqual(['active']);
 		await fireEvent.keyDown(row, { key: 'Enter' });
 		expect(onOpenSession).toHaveBeenCalledWith('home');
+		expect(onOpenFeature).not.toHaveBeenCalled();
+	});
+
+	it('opens the conversation without research sources, creating the home when there is none', async () => {
+		const { openAssistant } = await import('$lib/api/assistant');
+		vi.mocked(openAssistant).mockResolvedValue({ session_id: 'new-home', home_session_id: 'new-home' });
+		const onOpenSession = vi.fn();
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
+		acceptAssistant({ ...ready, status: 'no_sources', research_sources: 0, home_session_id: null } as unknown as AssistantState);
+		await tick();
+
+		const row = screen.getByRole('button', { name: 'Open your assistant' });
+		expect(row.textContent).not.toContain('Set up your assistant');
+		await fireEvent.click(row);
+		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('new-home'));
+		expect(openAssistant).toHaveBeenCalledTimes(1);
+		expect(onOpenFeature).not.toHaveBeenCalled();
+	});
+
+	it('opens an existing home directly even when no source is switched on', async () => {
+		const { openAssistant } = await import('$lib/api/assistant');
+		vi.mocked(openAssistant).mockClear();
+		const onOpenSession = vi.fn();
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
+		acceptAssistant({ ...ready, status: 'no_sources', research_sources: 0 } as unknown as AssistantState);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open your assistant' }));
+		expect(onOpenSession).toHaveBeenCalledWith('home');
+		expect(openAssistant).not.toHaveBeenCalled();
 		expect(onOpenFeature).not.toHaveBeenCalled();
 	});
 

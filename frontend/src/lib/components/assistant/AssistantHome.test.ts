@@ -60,35 +60,32 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-async function useMine() {
- await fireEvent.click(await screen.findByRole('radio', { name: /One of my agents/ }));
-}
-async function choose() {
- await useMine();
- const select = await screen.findByRole('combobox', { name: 'Assistant agent' });
- await fireEvent.change(select, { target: { value: 'guide' } });
-}
 describe('Assistant home', () => {
  it('starts unconfigured with no ambient call or invented sources', async () => {
-  render(AssistantHome); await choose();
+  render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
   expect(screen.getByText('No sources connected')).toBeTruthy();
   expect(mocks.configureAssistant).not.toHaveBeenCalled(); expect(mocks.startCallForSession).not.toHaveBeenCalled();
   expect(mocks.openAssistant).not.toHaveBeenCalled();
  });
- it('defaults to a new dedicated agent named Assistant with a preset avatar', async () => {
+ it('offers no agent choice, agent picker or agent links', async () => {
+  render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
+  expect(screen.queryByRole('radiogroup')).toBeNull();
+  expect(screen.queryAllByRole('radio')).toHaveLength(0);
+  expect(screen.queryByRole('combobox')).toBeNull();
+  expect(screen.queryByRole('button', { name: /Manage agents/ })).toBeNull();
+  expect(screen.queryByText(/What runs it|dedicated assistant agent|One of my agents/)).toBeNull();
+ });
+ it('defaults to Assistant with a preset avatar and sends only name and avatar', async () => {
   render(AssistantHome);
   const name = await screen.findByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement;
   expect(name.value).toBe('Assistant');
-  expect((screen.getByRole('radio', { name: /A dedicated assistant agent/ }) as HTMLInputElement).checked).toBe(true);
-  expect(screen.queryByRole('combobox', { name: 'Assistant agent' })).toBeNull();
   const pressed = screen.getAllByRole('button', { pressed: true });
   expect(pressed).toHaveLength(1);
   const avatar = pressed[0].getAttribute('aria-label')!.replace(' avatar', '');
   expect(AVATARS).toContain(avatar);
   await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
-  const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toEqual({ create_agent: true, assistant_name: 'Assistant', avatar_id: avatar });
+  expect(mocks.configureAssistant.mock.calls[0][0]).toEqual({ assistant_name: 'Assistant', avatar_id: avatar });
  });
  it('has no introduction form, research switch, limit fields or limit numbers', async () => {
   render(AssistantHome); await screen.findByRole('textbox', { name: 'Assistant name' });
@@ -100,25 +97,13 @@ describe('Assistant home', () => {
   expect(screen.queryByText(/12 passes|admission limit/)).toBeNull();
   expect(screen.getAllByRole('button', { name: / avatar$/ })).toHaveLength(AVATARS.length);
  });
- it('reuses the dedicated agent setup already made instead of creating another', async () => {
-  mocks.getAgentIdentities.mockResolvedValue([{ id: 'assistant', name: 'Juniper', avatar_id: 'owl', dedicated: true }]);
+ it('saves an edited name and avatar without agent fields or limits', async () => {
   render(AssistantHome);
-  await waitFor(() => expect((screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement).value).toBe('Juniper'));
-  expect(screen.getByRole('button', { name: 'owl avatar' }).getAttribute('aria-pressed')).toBe('true');
-  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
-  await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
-  const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toMatchObject({ agent_id: 'assistant', assistant_name: 'Juniper', avatar_id: 'owl' });
-  expect(patch).not.toHaveProperty('create_agent');
- });
- it('saves only explicit identity for one of my agents; does not send agent config or limits', async () => {
-  render(AssistantHome); await choose();
-  await fireEvent.input(screen.getByRole('textbox', { name: 'Assistant name' }), { target: { value: 'Dotty' } });
+  await fireEvent.input(await screen.findByRole('textbox', { name: 'Assistant name' }), { target: { value: 'Dotty' } });
   await fireEvent.click(screen.getByRole('button', { name: 'spark avatar' }));
   await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
   await waitFor(() => expect(mocks.configureAssistant).toHaveBeenCalledTimes(1));
-  const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch).toEqual({ agent_id: 'guide', assistant_name: 'Dotty', avatar_id: 'spark' });
+  expect(mocks.configureAssistant.mock.calls[0][0]).toEqual({ assistant_name: 'Dotty', avatar_id: 'spark' });
   expect(mocks.setAssistantSource).not.toHaveBeenCalled();
  });
  it('reopens the same home and attaches a call only on a deliberate call action', async () => {
@@ -141,7 +126,6 @@ describe('Assistant home', () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }));
   await waitFor(() => expect(mocks.openSession).toHaveBeenCalledWith(home.id, home));
   expect(get(assistantState)?.home_session_id).toBe(home.id);
-  expect(screen.getByText(/each worker keeps its own persistent conversation/)).toBeTruthy();
  });
  it('only offers sources from the backend catalog and lets an unavailable opted-in source be revoked', async () => {
   configured(); mocks.getAssistantSources.mockResolvedValue([source, { ...source, id: 'revoked', connector_id: 'revoked', name: 'Revoked connection', available: false, enabled: true }]);
@@ -192,8 +176,8 @@ describe('Assistant home', () => {
  it('does not erase a setup draft when background state changes', async () => {
   configured(); render(AssistantHome);
   await fireEvent.click(await screen.findByRole('button', { name: 'Edit assistant' }));
-  expect((screen.getByRole('combobox', { name: 'Assistant agent' }) as HTMLSelectElement).value).toBe('guide');
   const name = screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement;
+  expect(name.value).toBe('Guide');
   await fireEvent.input(name, { target: { value: 'Editing' } });
   assistantState.update(value => value && { ...value, status: 'ready', research_sources: 1 });
   expect(name.value).toBe('Editing');
@@ -206,24 +190,16 @@ describe('Assistant home', () => {
   expect(screen.queryByRole('alert')).toBeNull();
  });
  it('keeps save errors visible with the editable draft intact', async () => {
-  mocks.configureAssistant.mockRejectedValue({ detail: 'Agent is unavailable' }); render(AssistantHome); await choose();
+  mocks.configureAssistant.mockRejectedValue({ detail: 'Assistant is unavailable' }); render(AssistantHome);
+  await fireEvent.input(await screen.findByRole('textbox', { name: 'Assistant name' }), { target: { value: 'Draft' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
-  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Agent is unavailable'));
-  expect((screen.getByRole('combobox', { name: 'Assistant agent' }) as HTMLSelectElement).value).toBe('guide');
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Assistant is unavailable'));
+  expect((screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement).value).toBe('Draft');
  });
- it('does not send presentation mutations for a built-in agent', async () => {
-  render(AssistantHome); await useMine();
-  await fireEvent.change(await screen.findByRole('combobox', { name: 'Assistant agent' }), { target: { value: 'builtin' } });
-  expect((screen.getByRole('textbox', { name: 'Assistant name' }) as HTMLInputElement).disabled).toBe(true);
-  await fireEvent.click(screen.getByRole('button', { name: 'Create assistant' }));
-  const patch = mocks.configureAssistant.mock.calls[0][0];
-  expect(patch.agent_id).toBe('builtin'); expect(patch).not.toHaveProperty('assistant_name'); expect(patch).not.toHaveProperty('avatar_id');
- });
- it('preselects the real agent when entered through its normal editor', async () => {
+ it('ignores an agent id passed in by older entry points', async () => {
   configured(); render(AssistantHome, { requestedAgentId: 'guide' });
-  const selection = await screen.findByRole('combobox', { name: 'Assistant agent' });
-  expect((selection as HTMLSelectElement).value).toBe('guide');
-  expect(get(assistantState)?.agent_id).toBe('guide');
+  expect(await screen.findByRole('button', { name: 'Open conversation' })).toBeTruthy();
+  expect(screen.queryByRole('combobox')).toBeNull();
  });
 });
 describe('Assistant home call gate', () => {

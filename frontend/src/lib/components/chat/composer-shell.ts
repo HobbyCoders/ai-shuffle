@@ -110,6 +110,10 @@ export interface ComposerSheetProps {
 	fastEnabled?: boolean;
 	onToggleFast?: () => void;
 	showCodeControls?: boolean;
+	/** Agent, workspace, branch and runner selectors (off in the assistant's home). */
+	showSetup?: boolean;
+	/** Effort and fast mode (off in the assistant's home). */
+	showEffort?: boolean;
 	permissionOptions: ComposerControlOption[];
 	permissionValue: string | null;
 	/** The session write is pending; keep the saved choice visible until it succeeds. */
